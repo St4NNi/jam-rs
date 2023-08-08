@@ -6,8 +6,8 @@ use std::fmt::{self, Display, Formatter};
 pub struct CompareResult {
     pub from_name: String,
     pub to_name: String,
-    pub num_kmers: usize,
     pub num_common: usize,
+    pub num_kmers: usize,
 }
 
 impl Display for CompareResult {
@@ -17,8 +17,8 @@ impl Display for CompareResult {
             "{}\t{}\t{}\t{}\t{}",
             self.from_name,
             self.to_name,
-            self.num_kmers,
             self.num_common,
+            self.num_kmers,
             self.num_common as f64 / self.num_kmers as f64 * 100.0
         )
     }

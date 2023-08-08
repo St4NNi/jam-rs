@@ -1,7 +1,10 @@
 use crate::sketcher;
 use anyhow::Result;
 use needletail::parse_fastx_file;
-use std::{fs, io::BufReader};
+use std::{
+    fs::{self, File},
+    io::BufReader,
+};
 
 pub struct FileHandler {}
 
@@ -47,10 +50,27 @@ impl FileHandler {
 
         let mut reader = BufReader::new(std::fs::File::open(input)?);
 
-        while let Ok(result) = bincode::deserialize_from(&mut reader) {
+        while let Ok(result) =
+            bincode::deserialize_from::<&mut BufReader<File>, sketcher::Sketch>(&mut reader)
+        {
             vec.push(result);
         }
 
         Ok(vec)
+    }
+
+    pub fn concat(&self, inputs: Vec<&str>, output: &str) -> Result<()> {
+        let o_file = std::fs::File::create(output)?;
+        let mut bufwriter = std::io::BufWriter::new(o_file);
+
+        for input in inputs {
+            let mut reader = BufReader::new(std::fs::File::open(input)?);
+            while let Ok(result) =
+                bincode::deserialize_from::<&mut BufReader<File>, sketcher::Sketch>(&mut reader)
+            {
+                bincode::serialize_into(&mut bufwriter, &result)?;
+            }
+        }
+        Ok(())
     }
 }
