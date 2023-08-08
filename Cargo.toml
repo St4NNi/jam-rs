@@ -1,0 +1,13 @@
+[package]
+name = "jam-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Just another minhash (Jam) implementation in Rust"
+
+[dependencies]
+anyhow = "1.0.72"
+bincode = "1.3.3"
+flate2 = "1.0.26"
+needletail = "0.5.1"
+serde = { version = "1.0.183", features = ["derive"] }
+xxhash-rust = { version = "0.8.5", features = ["xxh3"]}
