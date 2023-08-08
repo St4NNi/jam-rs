@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::hash::BuildHasherDefault;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Sketch {
+    pub name: String,
     kmer_budget: usize,
     pub hashes: HashSet<u64, BuildHasherDefault<NoHashHasher>>,
     pub lowest_hash: u64,
@@ -35,14 +36,18 @@ pub struct Sketcher {
 }
 
 impl Sketcher {
-    pub fn new(kmer_length: u8, budget: u64) -> Self {
+    pub fn new(kmer_length: u8, budget: u64, name: String) -> Self {
         Sketcher {
             kmer_length,
             current_sketch: Sketch {
                 kmer_budget: budget as usize,
-                hashes: HashSet::default(),
+                hashes: HashSet::with_capacity_and_hasher(
+                    budget as usize,
+                    BuildHasherDefault::default(),
+                ),
                 lowest_hash: u64::MAX,
                 max_kmers: 0,
+                name,
             },
             num_kmers: 0,
         }
@@ -50,6 +55,8 @@ impl Sketcher {
 }
 
 impl Sketcher {
+    // This is more or less derived from the `process` method in `finch-rs`:
+    // https://github.com/onecodex/finch-rs/blob/master/lib/src/sketch_schemes/mash.rs
     pub fn process<'seq, 'a, 'inner>(&'a mut self, seq: &'seq dyn Sequence<'inner>)
     where
         'a: 'seq,

@@ -1,9 +1,7 @@
-mod compare;
-mod file_io;
-mod hasher;
-mod sketcher;
+use jam_rs::{compare, file_io};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let filename = "test.fasta.gz";
     let reader = file_io::FileHandler {};
     reader
@@ -11,12 +9,12 @@ fn main() {
         .unwrap();
 
     let start = std::time::Instant::now();
-    let sketch1 = reader.read_sketch("output.sketch").unwrap();
-    let sketch2 = reader.read_sketch("output.sketch").unwrap();
+    let sketch1 = reader.read_sketches("output.sketch").unwrap();
+    let sketch2 = reader.read_sketches("output.sketch").unwrap();
 
-    let mut comparator = compare::Comparator::new(sketch1, sketch2);
+    let mut comparator = compare::MultiComp::new(sketch1, sketch2);
     comparator.compare();
-    println!("{:?}", comparator.finalize());
+    println!("{}", comparator.finalize().first().unwrap());
     let elapsed = start.elapsed().as_millis();
     println!("Processed in {:?} seconds", elapsed as f64 / 1000.0);
 }

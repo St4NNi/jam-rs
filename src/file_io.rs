@@ -1,10 +1,7 @@
 use crate::sketcher;
 use anyhow::Result;
 use needletail::parse_fastx_file;
-use std::{
-    fs::{self, File},
-    io::{Read, Write},
-};
+use std::{fs, io::BufReader};
 
 pub struct FileHandler {}
 
@@ -23,7 +20,7 @@ impl FileHandler {
         }
         let start = std::time::Instant::now();
         let kmer_num = (x as f64 * scale as f64) as u64;
-        let mut sketcher = sketcher::Sketcher::new(kmer_length, kmer_num);
+        let mut sketcher = sketcher::Sketcher::new(kmer_length, kmer_num, input.to_string());
         let mut reader = parse_fastx_file(input)?;
         let mut counter = 0;
         while let Some(record) = reader.next() {
@@ -31,8 +28,10 @@ impl FileHandler {
             sketcher.process(&seqrec);
             counter += 1;
         }
-        let mut o_file = File::create(output)?;
-        o_file.write_all(&bincode::serialize(&sketcher.finalize())?)?;
+        let o_file = std::fs::File::create(output)?;
+        let bufwriter = std::io::BufWriter::new(o_file);
+
+        bincode::serialize_into(bufwriter, &sketcher.finalize())?;
         let elapsed = start.elapsed().as_millis();
         println!(
             "Processed {} with {} records, in {:?} seconds",
@@ -43,10 +42,15 @@ impl FileHandler {
         Ok(())
     }
 
-    pub fn read_sketch(&self, input: &str) -> Result<sketcher::Sketch> {
-        let mut i_file = File::open(input)?;
-        let mut buffer = Vec::new();
-        i_file.read_to_end(&mut buffer)?;
-        Ok(bincode::deserialize(&buffer)?)
+    pub fn read_sketches(&self, input: &str) -> Result<Vec<sketcher::Sketch>> {
+        let mut vec: Vec<sketcher::Sketch> = vec![];
+
+        let mut reader = BufReader::new(std::fs::File::open(input)?);
+
+        while let Ok(result) = bincode::deserialize_from(&mut reader) {
+            vec.push(result);
+        }
+
+        Ok(vec)
     }
 }
