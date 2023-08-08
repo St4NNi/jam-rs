@@ -19,7 +19,7 @@ impl FileHandler {
         let mut x = fs::metadata(input)?.len();
         if input.ends_with(".gz") {
             // Approximate the size of the uncompressed file
-            x = x * 3;
+            x *= 3;
         }
         let start = std::time::Instant::now();
         let kmer_num = (x as f64 * scale as f64) as u64;
