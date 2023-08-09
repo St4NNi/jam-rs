@@ -16,10 +16,6 @@ use std::{
 pub struct FileHandler {}
 
 impl FileHandler {
-    pub fn new() -> Self {
-        FileHandler {}
-    }
-
     pub fn sketch_files(
         input: Vec<PathBuf>,
         output: PathBuf,
@@ -91,7 +87,7 @@ impl FileHandler {
         Ok(())
     }
 
-    pub fn read_sketches(&self, input: &str) -> Result<Vec<sketcher::Sketch>> {
+    pub fn read_sketches(input: &PathBuf) -> Result<Vec<sketcher::Sketch>> {
         let mut vec: Vec<sketcher::Sketch> = vec![];
 
         let mut reader = BufReader::new(std::fs::File::open(input)?);
@@ -105,7 +101,7 @@ impl FileHandler {
         Ok(vec)
     }
 
-    pub fn concat(&self, inputs: Vec<&str>, output: &str) -> Result<()> {
+    pub fn concat(inputs: Vec<&str>, output: &str) -> Result<()> {
         let o_file = std::fs::File::create(output)?;
         let mut bufwriter = std::io::BufWriter::new(o_file);
 
@@ -120,7 +116,7 @@ impl FileHandler {
         Ok(())
     }
 
-    pub fn test_and_collect_files(&self, input: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    pub fn test_and_collect_files(input: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         let mut resulting_paths = Vec::new();
         let mut found_list: Option<PathBuf> = None;
         for path in input {
