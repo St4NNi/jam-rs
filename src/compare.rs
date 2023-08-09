@@ -30,7 +30,7 @@ impl Display for CompareResult {
                 self.num_kmers,
                 self.num_common as f64 / self.num_kmers as f64 * 100.0
             )?;
-            return Ok(());
+            Ok(())
         } else {
             write!(
                 f,
@@ -64,8 +64,7 @@ impl MultiComp {
         let kmer_size = from
             .first()
             .ok_or_else(|| anyhow!("Empty from list"))?
-            .kmer_size
-            .clone();
+            .kmer_size;
 
         Ok(MultiComp {
             from,

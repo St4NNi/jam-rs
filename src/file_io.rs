@@ -36,8 +36,8 @@ impl FileHandler {
                 .par_iter()
                 .try_for_each(|file_path| {
                     let output = output.clone();
-                    let kmer_length = kmer_length.clone();
-                    let scale = scale.clone();
+                    let kmer_length = kmer_length;
+                    let scale = scale;
                     FileHandler::sketch_file(file_path, output, kmer_length, scale)
                 })
                 .unwrap()
