@@ -2,6 +2,8 @@
 name = "jam-rs"
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/St4NNi/jam-rs"
+license = "MIT"
 description = "Just another minhash (Jam) implementation in Rust"
 
 [dependencies]
