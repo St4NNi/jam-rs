@@ -2,6 +2,8 @@ use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
 use needletail::parse_fastx_file;
+use rayon::prelude::IntoParallelRefIterator;
+use rayon::prelude::ParallelIterator;
 use std::io::Write;
 use std::ops::DerefMut;
 use std::sync::Arc;
@@ -30,7 +32,7 @@ impl FileHandler {
 
         pool.install(|| {
             input
-                .iter()
+                .par_iter()
                 .try_for_each(|file_path| {
                     let output = output.clone();
                     let kmer_length = kmer_length.clone();

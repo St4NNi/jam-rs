@@ -1,6 +1,12 @@
 use crate::sketcher;
+use anyhow::Result;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use std::fmt::{self, Display, Formatter};
+use std::{
+    fmt::{self, Display, Formatter},
+    ops::DerefMut,
+    sync::Mutex,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CompareResult {
@@ -28,25 +34,43 @@ pub struct MultiComp {
     from: Vec<sketcher::Sketch>,
     to: Vec<sketcher::Sketch>,
     results: Vec<CompareResult>,
+    threads: usize,
 }
 
 impl MultiComp {
-    pub fn new(from: Vec<sketcher::Sketch>, to: Vec<sketcher::Sketch>) -> Self {
+    pub fn new(from: Vec<sketcher::Sketch>, to: Vec<sketcher::Sketch>, threads: usize) -> Self {
         MultiComp {
             from,
             to,
             results: Vec::new(),
+            threads,
         }
     }
 
-    pub fn compare(&mut self) {
-        for origin in &self.from {
-            for target in &self.to {
-                let mut comparator = Comparator::new(origin, target);
-                comparator.compare();
-                self.results.push(comparator.finalize());
-            }
-        }
+    pub fn compare(&mut self) -> Result<()> {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.threads)
+            .build()?;
+
+        let results = Mutex::new(Vec::new());
+
+        pool.install(|| {
+            self.from.par_iter().try_for_each(|origin| {
+                self.to.par_iter().try_for_each(|target| {
+                    let mut comparator = Comparator::new(origin, target);
+                    comparator.compare();
+                    results
+                        .lock()
+                        .unwrap()
+                        .deref_mut()
+                        .push(comparator.finalize());
+                    Ok::<(), anyhow::Error>(())
+                })
+            })
+        })?;
+
+        self.results = results.into_inner().unwrap();
+        Ok(())
     }
 
     pub fn finalize(self) -> Vec<CompareResult> {
