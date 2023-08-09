@@ -65,30 +65,52 @@ enum Commands {
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: Option<PathBuf>,
+        /// Cut-off value for similarity
+        #[arg(short, long, default_value = "0.0")]
+        cutoff: f64,
     },
 }
 
 fn main() {
     let args = Cli::parse();
 
-    match &args.command {
-        cmd @ Commands::Sketch {
+    match args.command {
+        Commands::Sketch {
             input,
             output,
             kmer_size,
             scale,
         } => {
             let mut cmd = Cli::command();
-            cmd.error(ErrorKind::ArgumentConflict, "Unknown file type")
-                .exit();
+
+            let files = jam_rs::file_io::FileHandler::test_and_collect_files(vec![input]);
+            let fs = match files {
+                Ok(f) => f,
+                Err(e) => {
+                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            };
+            match jam_rs::file_io::FileHandler::sketch_files(
+                fs,
+                output,
+                kmer_size,
+                scale,
+                args.threads.unwrap(),
+            ) {
+                Ok(_) => {}
+                Err(e) => {
+                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            }
         }
-        cmd @ Commands::Merge { inputs, output } => {
+        Commands::Merge { inputs, output } => {
             dbg!(inputs, output);
         }
-        cmd @ Commands::Compare {
+        Commands::Compare {
             input,
             database,
             output,
+            cutoff,
         } => todo!(),
     }
 }

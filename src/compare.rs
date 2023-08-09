@@ -15,19 +15,33 @@ pub struct CompareResult {
     pub to_name: String,
     pub num_common: usize,
     pub num_kmers: usize,
+    pub reverse: bool,
 }
 
 impl Display for CompareResult {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}\t{}\t{}\t{}\t{}",
-            self.from_name,
-            self.to_name,
-            self.num_common,
-            self.num_kmers,
-            self.num_common as f64 / self.num_kmers as f64 * 100.0
-        )
+        if self.reverse {
+            write!(
+                f,
+                "{}\t{}\t{}\t{}\t{}",
+                self.to_name,
+                self.from_name,
+                self.num_common,
+                self.num_kmers,
+                self.num_common as f64 / self.num_kmers as f64 * 100.0
+            )?;
+            return Ok(());
+        } else {
+            write!(
+                f,
+                "{}\t{}\t{}\t{}\t{}",
+                self.from_name,
+                self.to_name,
+                self.num_common,
+                self.num_kmers,
+                self.num_common as f64 / self.num_kmers as f64 * 100.0
+            )
+        }
     }
 }
 
@@ -37,6 +51,7 @@ pub struct MultiComp {
     results: Vec<CompareResult>,
     threads: usize,
     kmer_size: u8,
+    cutoff: f64,
 }
 
 impl MultiComp {
@@ -44,6 +59,7 @@ impl MultiComp {
         from: Vec<sketcher::Sketch>,
         to: Vec<sketcher::Sketch>,
         threads: usize,
+        cutoff: f64,
     ) -> Result<Self> {
         let kmer_size = from
             .first()
@@ -57,6 +73,7 @@ impl MultiComp {
             results: Vec::new(),
             threads,
             kmer_size,
+            cutoff,
         })
     }
 
@@ -95,6 +112,9 @@ impl MultiComp {
 
     pub fn finalize(self) -> Vec<CompareResult> {
         self.results
+            .into_iter()
+            .filter(|e| e.num_common as f64 / e.num_kmers as f64 * 100.0 > self.cutoff)
+            .collect()
     }
 }
 
@@ -103,20 +123,22 @@ pub struct Comparator<'a> {
     smaller: &'a sketcher::Sketch,
     num_kmers: usize,
     num_common: usize,
+    reverse: bool,
 }
 
 impl<'a> Comparator<'a> {
     pub fn new(sketch_a: &'a sketcher::Sketch, sketch_b: &'a sketcher::Sketch) -> Self {
-        let (larger, smaller) = if sketch_a.hashes.len() > sketch_b.hashes.len() {
-            (sketch_a, sketch_b)
+        let (larger, smaller, reverse) = if sketch_a.hashes.len() > sketch_b.hashes.len() {
+            (sketch_a, sketch_b, false)
         } else {
-            (sketch_b, sketch_a)
+            (sketch_b, sketch_a, true)
         };
         Comparator {
             larger,
             smaller,
             num_kmers: 0,
             num_common: 0,
+            reverse,
         }
     }
 
@@ -139,6 +161,7 @@ impl<'a> Comparator<'a> {
             to_name: self.smaller.name.clone(),
             num_kmers: self.num_kmers,
             num_common: self.num_common,
+            reverse: self.reverse,
         }
     }
 
