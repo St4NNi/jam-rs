@@ -16,6 +16,7 @@ pub struct CompareResult {
     pub num_common: usize,
     pub num_kmers: usize,
     pub reverse: bool,
+    pub estimated_containment: f64,
 }
 
 impl Display for CompareResult {
@@ -23,23 +24,25 @@ impl Display for CompareResult {
         if self.reverse {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 self.to_name,
                 self.from_name,
                 self.num_common,
                 self.num_kmers,
-                self.num_common as f64 / self.num_kmers as f64 * 100.0
+                self.num_common as f64 / self.num_kmers as f64 * 100.0, // Percent
+                self.estimated_containment
             )?;
             Ok(())
         } else {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}",
                 self.from_name,
                 self.to_name,
                 self.num_common,
                 self.num_kmers,
-                self.num_common as f64 / self.num_kmers as f64 * 100.0
+                self.num_common as f64 / self.num_kmers as f64 * 100.0,
+                self.estimated_containment
             )
         }
     }
@@ -152,12 +155,24 @@ impl<'a> Comparator<'a> {
     }
 
     pub fn finalize(self) -> CompareResult {
+        // Eg 0.1
+        let larger_fraction = self.larger.num_kmers as f64 / self.larger.max_kmers as f64;
+        // Eg 1.0
+        let smaller_fraction = self.smaller.num_kmers as f64 / self.smaller.max_kmers as f64;
+        // How much smaller is the smaller sketch
+        let fraction = self.smaller.max_kmers as f64 / self.larger.max_kmers as f64;
+        let estimated_containment = self.num_common as f64 * 100.0 / larger_fraction
+            * smaller_fraction
+            * fraction
+            * self.larger.max_kmers as f64;
+
         CompareResult {
             from_name: self.larger.name.clone(),
             to_name: self.smaller.name.clone(),
             num_kmers: self.num_kmers,
             num_common: self.num_common,
             reverse: self.reverse,
+            estimated_containment,
         }
     }
 
