@@ -83,7 +83,7 @@ fn main() {
         } => {
             let mut cmd = Cli::command();
 
-            let files = jam_rs::file_io::FileHandler::test_and_collect_files(vec![input]);
+            let files = jam_rs::file_io::FileHandler::test_and_collect_files(vec![input], true);
             let fs = match files {
                 Ok(f) => f,
                 Err(e) => {
@@ -119,7 +119,7 @@ fn main() {
         } => {
             let mut cmd = Cli::command();
             let database_files =
-                jam_rs::file_io::FileHandler::test_and_collect_files(vec![database]);
+                jam_rs::file_io::FileHandler::test_and_collect_files(vec![database], false);
             let fs = match database_files {
                 Ok(f) => f,
                 Err(e) => {
@@ -139,7 +139,8 @@ fn main() {
                 }
             }
 
-            let input_files = jam_rs::file_io::FileHandler::test_and_collect_files(vec![input]);
+            let input_files =
+                jam_rs::file_io::FileHandler::test_and_collect_files(vec![input], false);
             let fs_input = match input_files {
                 Ok(f) => f,
                 Err(e) => {

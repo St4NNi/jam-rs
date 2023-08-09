@@ -119,7 +119,7 @@ impl FileHandler {
         Ok(())
     }
 
-    pub fn test_and_collect_files(input: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    pub fn test_and_collect_files(input: Vec<PathBuf>, check_ext: bool) -> Result<Vec<PathBuf>> {
         let mut resulting_paths = Vec::new();
         let mut found_list: Option<PathBuf> = None;
         for path in input {
@@ -163,7 +163,7 @@ impl FileHandler {
 
             if path.is_file() {
                 if let Some(ext) = path.extension() {
-                    if test_extension(ext) {
+                    if test_extension(ext) || !check_ext {
                         resulting_paths.push(path);
                     } else if ext == "list" {
                         if resulting_paths.is_empty() {
@@ -192,6 +192,7 @@ impl FileHandler {
                     && test_extension(as_path_buf.extension().ok_or_else(|| {
                         anyhow::anyhow!("File {:?} does not have an extension", as_path_buf)
                     })?)
+                    || !check_ext
                 {
                     resulting_paths.push(as_path_buf);
                 }
