@@ -51,10 +51,10 @@ enum Commands {
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
     },
-    /// Compare a raw file or sketch against one or more sketches as database
+    /// Calculate distance of a (small) sketch against one or more sketches as database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
-    Compare {
+    Dist {
         /// Input sketch or raw file
         #[arg(short, long)]
         input: PathBuf,
@@ -111,7 +111,7 @@ fn main() {
                 }
             }
         }
-        Commands::Compare {
+        Commands::Dist {
             input,
             database,
             output,

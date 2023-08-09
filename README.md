@@ -58,15 +58,15 @@ Options:
   -h, --help                   Print help
 ```
 
-#### Compare
+#### Dist
 
-Compare one or more inputs vs. a large set of database sketches. Optionally specify a minimum cutoff in percent of matching kmers. Output is optional if not specified the result will be printed to stdout.
+Calculate the distance for one or more inputs vs. a large set of database sketches. Optionally specify a minimum cutoff in percent of matching kmers. Output is optional if not specified the result will be printed to stdout.
 
 ```console
-$ jam compare
-Compare a raw file or sketch against one or more sketches as database Requires all sketches to have the same kmer size
+$ jam dist
+Calculate distance of a (small) sketch against one or more sketches as database. Requires all sketches to have the same kmer size
 
-Usage: jam compare [OPTIONS] --input <INPUT> --database <DATABASE>
+Usage: jam dist [OPTIONS] --input <INPUT> --database <DATABASE>
 
 Options:
   -i, --input <INPUT>        Input sketch or raw file
