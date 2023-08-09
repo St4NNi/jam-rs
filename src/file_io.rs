@@ -212,12 +212,5 @@ impl FileHandler {
 }
 
 pub fn test_extension(ext: &OsStr) -> bool {
-    ext == "fasta"
-        || ext == "fa"
-        || ext == "fastq"
-        || ext == "fq"
-        || ext == "fasta"
-        || ext == "fa.gz"
-        || ext == "fastq.gz"
-        || ext == "fq.gz"
+    !(ext != "fasta" && ext != "fa" && ext != "fastq" && ext != "fq" && ext != "gz")
 }

@@ -22,7 +22,7 @@ impl From<WipSketch> for Sketch {
         Sketch {
             name: wip.name,
             hashes: wip.hashes.into_iter().collect(),
-            num_kmers: num_kmers,
+            num_kmers,
             max_kmers: 0,
             kmer_size: wip.kmer_size,
         }
