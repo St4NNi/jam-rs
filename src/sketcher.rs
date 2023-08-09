@@ -23,7 +23,7 @@ impl Sketch {
         let hash = xxhash_rust::xxh3::xxh3_64(kmer);
         let add = match self.heap.peek() {
             Some(largest) => hash < *largest,
-            None => false,
+            None => true,
         };
         if add {
             if self.hashes.insert(hash) {
