@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -17,16 +17,18 @@ struct Cli {
     threads: Option<usize>,
 }
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Subcommand, Clone)]
 enum Commands {
     /// Sketches one or more files and writes the result to a file
     #[command(arg_required_else_help = true)]
     Sketch {
         /// Input file, directory or file with list of files to be hashed
         #[arg(short, long, required = true)]
+        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         input: PathBuf,
         /// Output file
         #[arg(short, long, required = true)]
+        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
         /// The kmer size to use all sketches must have the same kmer size
         #[arg(short, long, default_value = "21")]
@@ -39,9 +41,11 @@ enum Commands {
     #[command(arg_required_else_help = true)]
     Merge {
         /// One or more input sketches
+        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         inputs: Vec<PathBuf>,
         /// Output file
         #[arg(short, long, required = true)]
+        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
     },
     /// Compare a raw file or sketch against one or more sketches as database
@@ -56,6 +60,7 @@ enum Commands {
         database: PathBuf,
         /// Output to file instead of stdout
         #[arg(short, long)]
+        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: Option<PathBuf>,
     },
 }
@@ -63,17 +68,24 @@ enum Commands {
 fn main() {
     let args = Cli::parse();
 
-    match args.command {
-        Commands::Sketch {
+    match &args.command {
+        cmd @ Commands::Sketch {
             input,
             output,
             kmer_size,
             scale,
-        } => todo!(),
-        Commands::Merge { inputs, output } => {
+        } => {
+            let mut cmd = Cli::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Can only modify one version field",
+            )
+            .exit();
+        }
+        cmd @ Commands::Merge { inputs, output } => {
             dbg!(inputs, output);
         }
-        Commands::Compare {
+        cmd @ Commands::Compare {
             input,
             database,
             output,
