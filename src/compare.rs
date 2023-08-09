@@ -160,11 +160,13 @@ impl<'a> Comparator<'a> {
         // Eg 1.0
         let smaller_fraction = self.smaller.num_kmers as f64 / self.smaller.max_kmers as f64;
         // How much smaller is the smaller sketch
-        let fraction = self.smaller.max_kmers as f64 / self.larger.max_kmers as f64;
-        let estimated_containment = self.num_common as f64 * 100.0 / larger_fraction
-            * smaller_fraction
-            * fraction
-            * self.larger.max_kmers as f64;
+        let fraction = if larger_fraction < smaller_fraction {
+            smaller_fraction / larger_fraction
+        } else {
+            larger_fraction / smaller_fraction
+        };
+        let estimated_containment =
+            self.num_common as f64 / self.num_kmers as f64 * fraction * 100.0;
 
         CompareResult {
             from_name: self.larger.name.clone(),
