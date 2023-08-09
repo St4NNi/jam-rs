@@ -41,7 +41,6 @@ impl Sketch {
 pub struct Sketcher {
     kmer_length: u8,
     current_sketch: Sketch,
-    num_kmers: usize,
 }
 
 impl Sketcher {
@@ -60,7 +59,6 @@ impl Sketcher {
                 num_kmers: 0,
                 max_kmers: 0,
             },
-            num_kmers: 0,
         }
     }
 }
@@ -76,15 +74,15 @@ impl Sketcher {
         let rc = seq.reverse_complement();
         for (_, kmer, _) in seq.normalize(false).canonical_kmers(self.kmer_length, &rc) {
             self.current_sketch.push(kmer);
-            self.num_kmers += 1;
+            self.current_sketch.max_kmers += 1;
         }
     }
 
     pub fn finalize(self) -> Sketch {
         let mut sketch: Sketch = self.current_sketch.into();
-        sketch.max_kmers = self.num_kmers;
         sketch.heap.clear();
         sketch.heap.shrink_to_fit();
+        sketch.num_kmers = sketch.hashes.len();
         sketch
     }
 }
