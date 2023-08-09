@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[command(version = "0.1.0")]
 #[command(
     about = "Just another minhasher, obviously blazingly fast",
-    long_about = "This is an heavily optimized minhash implementation that focuses less on accuracy and more on quick scans of large datasets."
+    long_about = "A heavily optimized minhash implementation that focuses less on accuracy and more on quick scans of large datasets."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -19,7 +19,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand, Clone)]
 enum Commands {
-    /// Sketches one or more files and writes the result to a file
+    /// Sketches one or more files and writes the result to an output file
     #[command(arg_required_else_help = true)]
     Sketch {
         /// Input file, directory or file with list of files to be hashed

@@ -13,4 +13,4 @@ clap = { version = "4.3.21", features = ["derive"] }
 flate2 = "1.0.26"
 needletail = "0.5.1"
 serde = { version = "1.0.183", features = ["derive"] }
-xxhash-rust = { version = "0.8.5", features = ["xxh3"]}
+xxhash-rust = { version = "0.8.6", features = ["xxh3"]}
