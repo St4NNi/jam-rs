@@ -6,19 +6,16 @@
 ___
 # jam-rs
 
-Just another minhash (jam) implementation. A high performance and lossy minhash variant that can be used to screen extremely large datasets in a very short timeframe.
-
+Just another minhash (jam) implementation. A high performance minhash variant to screen extremely large (metagenomic) datasets in a very short timeframe.
 Implements parts of the ScaledMinHash / FracMinHash algorithm described in [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027).
 
-Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) that focus
-on accurately predicting Jaccard similarities, this implementation focuses on raw speed to get a quick (yet lossy) overview. This can be used to screen terabytes of data in just a few seconds / minutes.
+Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version focuses on estimating containment of small sequences in a large set. This can be used to screen terabytes of data in just a few seconds / minutes.
 
 ### Comparison
 
 - xxhash3 instead of murmurhash
-- No jaccard similarity
+- No jaccard similarity since this is meaningless when comparing small embedd
 - Quick estimation of hash fractions from file-size
-
 
 ### Usage
 
@@ -43,7 +40,7 @@ Options:
 
 #### Sketching
 
-The easierst way to sketch files is to use the `jam sketch` command. This accepts one or more input files (fastx / fastx.gz) or a `.list` file with a full list of input files. And sketches all inputs to a specific outpuf sketch file.
+The easiest way to sketch files is to use the `jam sketch` command. This accepts one or more input files (fastx / fastx.gz) or a `.list` file with a full list of input files. And sketches all inputs to a specific outpuf sketch file.
 
 ```console
 $ jam sketch
