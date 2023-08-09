@@ -1,6 +1,11 @@
 use crate::sketcher;
+use anyhow::anyhow;
 use anyhow::Result;
 use needletail::parse_fastx_file;
+use std::io::Write;
+use std::ops::DerefMut;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -11,10 +16,40 @@ use std::{
 pub struct FileHandler {}
 
 impl FileHandler {
+    pub fn new() -> Self {
+        FileHandler {}
+    }
+
+    pub fn sketch_files(
+        input: Vec<PathBuf>,
+        output: PathBuf,
+        kmer_length: u8,
+        scale: f32,
+        threads: usize,
+    ) -> Result<()> {
+        let output = Arc::new(Mutex::new(File::create(output)?));
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()?;
+
+        pool.install(|| {
+            input
+                .iter()
+                .try_for_each(|file_path| {
+                    let output = output.clone();
+                    let kmer_length = kmer_length.clone();
+                    let scale = scale.clone();
+                    FileHandler::sketch_file(file_path, output, kmer_length, scale)
+                })
+                .unwrap()
+        });
+
+        Ok(())
+    }
+
     pub fn sketch_file(
-        &self,
-        input: &str,
-        output: &str,
+        input: &PathBuf,
+        output: Arc<Mutex<File>>,
         kmer_length: u8,
         scale: f32,
     ) -> Result<()> {
@@ -25,7 +60,14 @@ impl FileHandler {
         }
         let start = std::time::Instant::now();
         let kmer_num = (x as f64 * scale as f64) as u64;
-        let mut sketcher = sketcher::Sketcher::new(kmer_length, kmer_num, input.to_string());
+        let mut sketcher = sketcher::Sketcher::new(
+            kmer_length,
+            kmer_num,
+            input
+                .to_str()
+                .ok_or_else(|| anyhow!("Unknown path"))?
+                .to_string(),
+        );
         let mut reader = parse_fastx_file(input)?;
         let mut counter = 0;
         while let Some(record) = reader.next() {
@@ -33,17 +75,19 @@ impl FileHandler {
             sketcher.process(&seqrec);
             counter += 1;
         }
-        let o_file = std::fs::File::create(output)?;
-        let bufwriter = std::io::BufWriter::new(o_file);
 
-        bincode::serialize_into(bufwriter, &sketcher.finalize())?;
+        let output = output.clone();
+        let mut o_file = output.lock().unwrap();
+        let mut bufwriter = std::io::BufWriter::new(o_file.deref_mut());
+        bincode::serialize_into(&mut bufwriter, &sketcher.finalize())?;
         let elapsed = start.elapsed().as_millis();
         println!(
-            "Processed {} with {} records, in {:?} seconds",
+            "Processed {:?} with {} records, in {:?} seconds",
             input,
             counter,
             elapsed as f64 / 1000.0,
         );
+        bufwriter.flush()?;
         Ok(())
     }
 
