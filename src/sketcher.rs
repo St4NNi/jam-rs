@@ -1,14 +1,12 @@
-use crate::hasher::NoHashHasher;
 use needletail::Sequence;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::hash::BuildHasherDefault;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Sketch {
     pub name: String,
     kmer_budget: usize,
-    pub hashes: HashSet<u64, BuildHasherDefault<NoHashHasher>>,
+    pub hashes: BTreeSet<u64>,
     pub lowest_hash: u64,
     pub max_kmers: usize,
     pub kmer_size: u8,
@@ -20,12 +18,10 @@ impl Sketch {
         if self.kmer_budget > 0 {
             self.kmer_budget -= 1;
             self.hashes.insert(hash);
-            if hash < self.lowest_hash {
-                self.lowest_hash = hash;
-            }
         } else if hash < self.lowest_hash {
             self.hashes.insert(hash);
             self.lowest_hash = hash;
+            self.hashes.pop_last();
         }
     }
 }
@@ -42,10 +38,7 @@ impl Sketcher {
             kmer_length,
             current_sketch: Sketch {
                 kmer_budget: budget as usize,
-                hashes: HashSet::with_capacity_and_hasher(
-                    budget as usize,
-                    BuildHasherDefault::default(),
-                ),
+                hashes: BTreeSet::new(),
                 lowest_hash: u64::MAX,
                 max_kmers: 0,
                 name,
