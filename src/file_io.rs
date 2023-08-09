@@ -1,3 +1,4 @@
+use crate::compare::CompareResult;
 use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
@@ -103,7 +104,7 @@ impl FileHandler {
         Ok(vec)
     }
 
-    pub fn concat(inputs: Vec<&str>, output: &str) -> Result<()> {
+    pub fn concat(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {
         let o_file = std::fs::File::create(output)?;
         let mut bufwriter = std::io::BufWriter::new(o_file);
 
@@ -197,6 +198,15 @@ impl FileHandler {
             }
         }
         Ok(resulting_paths)
+    }
+
+    pub fn write_result(result: &Vec<CompareResult>, output: PathBuf) -> Result<()> {
+        let o_file = std::fs::File::create(output)?;
+        let mut bufwriter = std::io::BufWriter::new(o_file);
+        for r in result {
+            writeln!(bufwriter, "{}", r)?;
+        }
+        Ok(())
     }
 }
 

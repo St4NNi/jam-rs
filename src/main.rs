@@ -37,7 +37,7 @@ enum Commands {
         #[arg(short, long, default_value = "21")]
         kmer_size: u8,
         /// The estimated scaling factor to apply
-        #[arg(short, long, default_value = "0.01")]
+        #[arg(short, long, default_value = "0.001")]
         scale: f32,
     },
     /// Merge multiple input sketches into a single sketch
@@ -104,13 +104,89 @@ fn main() {
             }
         }
         Commands::Merge { inputs, output } => {
-            dbg!(inputs, output);
+            match jam_rs::file_io::FileHandler::concat(inputs, output) {
+                Ok(_) => {}
+                Err(e) => {
+                    Cli::command().error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            }
         }
         Commands::Compare {
             input,
             database,
             output,
             cutoff,
-        } => todo!(),
+        } => {
+            let mut cmd = Cli::command();
+            let database_files =
+                jam_rs::file_io::FileHandler::test_and_collect_files(vec![database]);
+            let fs = match database_files {
+                Ok(f) => f,
+                Err(e) => {
+                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            };
+
+            let mut db_sketches = Vec::new();
+            for db_path in fs {
+                match jam_rs::file_io::FileHandler::read_sketches(&db_path) {
+                    Ok(r) => {
+                        db_sketches.extend(r);
+                    }
+                    Err(e) => {
+                        cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                    }
+                }
+            }
+
+            let input_files = jam_rs::file_io::FileHandler::test_and_collect_files(vec![input]);
+            let fs_input = match input_files {
+                Ok(f) => f,
+                Err(e) => {
+                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            };
+
+            let mut input_sketch = Vec::new();
+            for db_path in fs_input {
+                match jam_rs::file_io::FileHandler::read_sketches(&db_path) {
+                    Ok(r) => {
+                        input_sketch.extend(r);
+                    }
+                    Err(e) => {
+                        cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                    }
+                }
+            }
+
+            match jam_rs::compare::MultiComp::new(
+                input_sketch,
+                db_sketches,
+                args.threads.unwrap(),
+                cutoff,
+            ) {
+                Ok(mut mc) => {
+                    if let Err(e) = mc.compare() {
+                        cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                    }
+                    let result = mc.finalize();
+                    match output {
+                        Some(o) => {
+                            if let Err(e) = jam_rs::file_io::FileHandler::write_result(&result, o) {
+                                cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                            }
+                        }
+                        None => {
+                            for result in result {
+                                println!("{}", result);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            }
+        }
     }
 }
