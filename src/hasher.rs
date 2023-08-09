@@ -1,8 +1,8 @@
 use std::hash::Hasher;
 
+/// Taken from finch-rs: https://github.com/onecodex/finch-rs/blob/master/lib/src/sketch_schemes/hashing.rs
 /// If we're using a `HashMap` where the keys themselves are hashes, it's
 /// a little silly to re-hash them. That's where the `NoHashHasher` comes in.
-/// Taken from finch-rs: https://github.com/onecodex/finch-rs/blob/master/lib/src/sketch_schemes/hashing.rs
 #[derive(Default)]
 pub struct NoHashHasher(u64);
 

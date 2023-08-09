@@ -13,8 +13,11 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
     /// Number of threads to use
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, default_value = "1")]
     threads: Option<usize>,
+    /// Overwrite output files
+    #[arg(short, long, global = true, default_value = "false")]
+    force: bool,
 }
 
 #[derive(Debug, Subcommand, Clone)]
@@ -30,11 +33,11 @@ enum Commands {
         #[arg(short, long, required = true)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
-        /// The kmer size to use all sketches must have the same kmer size
+        /// kmer size all sketches to be compared must have the same size
         #[arg(short, long, default_value = "21")]
         kmer_size: u8,
         /// The estimated scaling factor to apply
-        #[arg(short, long, default_value = "0.1")]
+        #[arg(short, long, default_value = "0.01")]
         scale: f32,
     },
     /// Merge multiple input sketches into a single sketch
@@ -76,11 +79,8 @@ fn main() {
             scale,
         } => {
             let mut cmd = Cli::command();
-            cmd.error(
-                ErrorKind::ArgumentConflict,
-                "Can only modify one version field",
-            )
-            .exit();
+            cmd.error(ErrorKind::ArgumentConflict, "Unknown file type")
+                .exit();
         }
         cmd @ Commands::Merge { inputs, output } => {
             dbg!(inputs, output);

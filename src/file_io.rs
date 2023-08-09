@@ -2,8 +2,10 @@ use crate::sketcher;
 use anyhow::Result;
 use needletail::parse_fastx_file;
 use std::{
+    ffi::OsStr,
     fs::{self, File},
-    io::BufReader,
+    io::{BufRead, BufReader},
+    path::PathBuf,
 };
 
 pub struct FileHandler {}
@@ -73,4 +75,96 @@ impl FileHandler {
         }
         Ok(())
     }
+
+    pub fn test_and_collect_files(&self, input: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        let mut resulting_paths = Vec::new();
+        let mut found_list: Option<PathBuf> = None;
+        for path in input {
+            if !path.exists() {
+                return Err(anyhow::anyhow!("File {:?} does not exist", path));
+            }
+            if path.is_dir() {
+                for p in path.read_dir()? {
+                    let p = p?;
+                    if p.path().is_file() {
+                        if let Some(ext) = p.path().extension() {
+                            if test_extension(ext) {
+                                resulting_paths.push(p.path());
+                            } else if ext == "list" {
+                                if resulting_paths.is_empty() {
+                                    found_list = Some(p.path());
+                                    break;
+                                } else {
+                                    return Err(anyhow::anyhow!(
+                                        "Found multiple list files in {:?}",
+                                        path
+                                    ));
+                                }
+                            } else {
+                                return Err(anyhow::anyhow!(
+                                    "File with {:?} invalid extension",
+                                    path
+                                ));
+                            }
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "File {:?} does not have an extension",
+                                p.path()
+                            ));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("File {:?} is not a file", p.path()));
+                    }
+                }
+            }
+
+            if path.is_file() {
+                if let Some(ext) = path.extension() {
+                    if test_extension(ext) {
+                        resulting_paths.push(path);
+                    } else if ext == "list" {
+                        if resulting_paths.is_empty() {
+                            found_list = Some(path);
+                            break;
+                        } else {
+                            return Err(anyhow::anyhow!("Found multiple list files in {:?}", path));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!("File with {:?} invalid extension", path));
+                    }
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "File {:?} does not have an extension",
+                        path
+                    ));
+                }
+            }
+        }
+
+        if let Some(list) = found_list {
+            let reader = BufReader::new(std::fs::File::open(list)?);
+            for line in reader.lines() {
+                let as_path_buf = PathBuf::from(line?);
+                if !as_path_buf.exists()
+                    && test_extension(as_path_buf.extension().ok_or_else(|| {
+                        anyhow::anyhow!("File {:?} does not have an extension", as_path_buf)
+                    })?)
+                {
+                    resulting_paths.push(as_path_buf);
+                }
+            }
+        }
+        Ok(resulting_paths)
+    }
+}
+
+pub fn test_extension(ext: &OsStr) -> bool {
+    ext == "fasta"
+        || ext == "fa"
+        || ext == "fastq"
+        || ext == "fq"
+        || ext == "fasta"
+        || ext == "fa.gz"
+        || ext == "fastq.gz"
+        || ext == "fq.gz"
 }
