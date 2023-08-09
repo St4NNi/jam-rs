@@ -11,6 +11,7 @@ pub struct Sketch {
     pub hashes: HashSet<u64, BuildHasherDefault<NoHashHasher>>,
     pub lowest_hash: u64,
     pub max_kmers: usize,
+    pub kmer_size: u8,
 }
 
 impl Sketch {
@@ -48,6 +49,7 @@ impl Sketcher {
                 lowest_hash: u64::MAX,
                 max_kmers: 0,
                 name,
+                kmer_size: kmer_length,
             },
             num_kmers: 0,
         }

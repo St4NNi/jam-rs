@@ -1,4 +1,5 @@
 use crate::sketcher;
+use anyhow::anyhow;
 use anyhow::Result;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
@@ -35,16 +36,28 @@ pub struct MultiComp {
     to: Vec<sketcher::Sketch>,
     results: Vec<CompareResult>,
     threads: usize,
+    kmer_size: u8,
 }
 
 impl MultiComp {
-    pub fn new(from: Vec<sketcher::Sketch>, to: Vec<sketcher::Sketch>, threads: usize) -> Self {
-        MultiComp {
+    pub fn new(
+        from: Vec<sketcher::Sketch>,
+        to: Vec<sketcher::Sketch>,
+        threads: usize,
+    ) -> Result<Self> {
+        let kmer_size = from
+            .first()
+            .ok_or_else(|| anyhow!("Empty from list"))?
+            .kmer_size
+            .clone();
+
+        Ok(MultiComp {
             from,
             to,
             results: Vec::new(),
             threads,
-        }
+            kmer_size,
+        })
     }
 
     pub fn compare(&mut self) -> Result<()> {
@@ -57,6 +70,13 @@ impl MultiComp {
         pool.install(|| {
             self.from.par_iter().try_for_each(|origin| {
                 self.to.par_iter().try_for_each(|target| {
+                    if target.kmer_size != self.kmer_size || origin.kmer_size != self.kmer_size {
+                        return Err(anyhow!(
+                            "Kmer sizes do not match expected: {} got: {}",
+                            self.kmer_size,
+                            origin.kmer_size
+                        ));
+                    }
                     let mut comparator = Comparator::new(origin, target);
                     comparator.compare();
                     results
