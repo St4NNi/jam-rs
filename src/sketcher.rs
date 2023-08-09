@@ -1,34 +1,65 @@
 use needletail::Sequence;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{
+    collections::{BinaryHeap, HashSet},
+    hash::BuildHasherDefault,
+};
+
+use crate::hasher::NoHashHasher;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Sketch {
     pub name: String,
-    kmer_budget: usize,
-    pub hashes: BTreeSet<u64>,
-    pub lowest_hash: u64,
+    pub hashes: HashSet<u64, BuildHasherDefault<NoHashHasher>>,
+    pub num_kmers: usize,
     pub max_kmers: usize,
     pub kmer_size: u8,
 }
 
-impl Sketch {
+impl From<WipSketch> for Sketch {
+    fn from(wip: WipSketch) -> Self {
+        let num_kmers = wip.hashes.len();
+        Sketch {
+            name: wip.name,
+            hashes: wip.hashes.into_iter().collect(),
+            num_kmers: num_kmers,
+            max_kmers: 0,
+            kmer_size: wip.kmer_size,
+        }
+    }
+}
+
+pub struct WipSketch {
+    kmer_budget: usize,
+    hashes: BinaryHeap<u64>,
+    name: String,
+    kmer_size: u8,
+}
+
+impl WipSketch {
     fn push(&mut self, kmer: &[u8]) {
         let hash = xxhash_rust::xxh3::xxh3_64(kmer);
-        if self.kmer_budget > 0 {
-            self.kmer_budget -= 1;
-            self.hashes.insert(hash);
-        } else if hash < self.lowest_hash {
-            self.hashes.insert(hash);
-            self.lowest_hash = hash;
-            self.hashes.pop_last();
+        match self.hashes.peek() {
+            Some(largest) => {
+                if hash < *largest {
+                    self.hashes.push(hash);
+                    self.kmer_budget -= 1;
+                    if self.kmer_budget == 0 {
+                        self.hashes.pop();
+                    }
+                }
+            }
+            None => {
+                self.hashes.push(hash);
+                self.kmer_budget -= 1;
+            }
         }
     }
 }
 
 pub struct Sketcher {
     kmer_length: u8,
-    current_sketch: Sketch,
+    current_sketch: WipSketch,
     num_kmers: usize,
 }
 
@@ -36,11 +67,9 @@ impl Sketcher {
     pub fn new(kmer_length: u8, budget: u64, name: String) -> Self {
         Sketcher {
             kmer_length,
-            current_sketch: Sketch {
+            current_sketch: WipSketch {
                 kmer_budget: budget as usize,
-                hashes: BTreeSet::new(),
-                lowest_hash: u64::MAX,
-                max_kmers: 0,
+                hashes: BinaryHeap::with_capacity(budget as usize),
                 name,
                 kmer_size: kmer_length,
             },
@@ -65,7 +94,7 @@ impl Sketcher {
     }
 
     pub fn finalize(self) -> Sketch {
-        let mut sketch = self.current_sketch;
+        let mut sketch: Sketch = self.current_sketch.into();
         sketch.max_kmers = self.num_kmers;
         sketch
     }
