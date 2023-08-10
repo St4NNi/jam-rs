@@ -101,5 +101,15 @@ Options:
   -h, --help               Print help
 ```
 
+### License
+
+This project is licensed under the MIT license. See the [LICENSE](LICENSE) file for more info.
 
 
+### Disclaimer
+
+jam-rs is still in early active development and not ready for production use. Use at your own risk. Once a stable version is released additional information and installation guidelines will be added.
+
+### Credits
+
+This tool is heavily inspired by [finch-rs](https://github.com/onecodex/finch-rs), licensed under the MIT license. So if you need a more traditional minhash implementation, that is compatible with sourmash or mash check it out.
