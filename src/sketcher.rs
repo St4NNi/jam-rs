@@ -1,3 +1,4 @@
+use crate::hasher::NoHashHasher;
 use bytemuck::cast;
 use needletail::Sequence;
 use serde::{Deserialize, Serialize};
@@ -5,8 +6,6 @@ use std::{
     collections::{BinaryHeap, HashSet},
     hash::BuildHasherDefault,
 };
-
-use crate::hasher::NoHashHasher;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Sketch {

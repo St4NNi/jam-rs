@@ -188,7 +188,7 @@ impl FileHandler {
             let reader = BufReader::new(std::fs::File::open(list)?);
             for line in reader.lines() {
                 let as_path_buf = PathBuf::from(line?);
-                if !as_path_buf.exists()
+                if as_path_buf.exists()
                     && test_extension(as_path_buf.extension().ok_or_else(|| {
                         anyhow::anyhow!("File {:?} does not have an extension", as_path_buf)
                     })?)
