@@ -15,3 +15,4 @@ needletail = "0.5.1"
 rayon = "1.7.0"
 serde = { version = "1.0.183", features = ["derive"] }
 xxhash-rust = { version = "0.8.6", features = ["xxh3"]}
+bytemuck = "1.13.1"

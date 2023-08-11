@@ -1,3 +1,4 @@
+use bytemuck::cast;
 use needletail::Sequence;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -74,7 +75,7 @@ impl Sketcher {
         let seq = seq.normalize(true);
 
         for (_, kmer, _) in seq.bit_kmers(self.kmer_length, true) {
-            self.current_sketch.push(kmer);
+            self.current_sketch.push(&cast::<u64, [u8; 4]>(kmer.0));
             self.current_sketch.max_kmers += 1;
         }
     }
