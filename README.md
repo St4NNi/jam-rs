@@ -1,21 +1,29 @@
 [![Rust](https://img.shields.io/badge/built_with-Rust-dca282.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](https://github.com/St4NNi/jam-rs/blob/main/LICENSE)
-![CI](https://github.com/St4NNi/jam-rs/actions/workflows/push.yaml/badge.svg)
 [![Codecov](https://codecov.io/github/St4NNi/jam-rs/coverage.svg?branch=main)](https://codecov.io/gh/St4NNi/jam-rs)
 [![Dependency status](https://deps.rs/repo/github/St4NNi/jam-rs/status.svg)](https://deps.rs/repo/github/St4NNi/jam-rs)
 ___
+
 # jam-rs
 
 Just another minhash (jam) implementation. A high performance minhash variant to screen extremely large (metagenomic) datasets in a very short timeframe.
 Implements parts of the ScaledMinHash / FracMinHash algorithm described in [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027).
 
-Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version focuses on estimating containment of small sequences in a large set. This can be used to screen terabytes of data in just a few seconds / minutes.
+Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version tries to specialise more on estimating containment of small sequences in large sets. This is intended to be used to screen terabytes of data in just a few seconds / minutes.
 
 ### Comparison
 
-- xxhash3 instead of murmurhash
-- No jaccard similarity since this is meaningless when comparing small embedd
-- Quick estimation of hash fractions from file-size
+- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer > 31) instead of murmurhash3
+- No jaccard similarity since this is meaningless when comparing small embeded sequences against large sets
+
+### Scaling methods
+
+Multiple different scaling methods:
+  - FracMinHash (`fscale`): Restricts the hash-space to a maximum of `scale` * `u64::MAX`
+  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `scale`
+  - MinMaxAbsoluteScaling (`nscale`): Use a minimum or maximum number of hashes per sequence record
+
+If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together and the minimum number of hashes (per seq record) will be guaranteed. 
 
 ### Usage
 
@@ -28,7 +36,7 @@ Usage: jam [OPTIONS] <COMMAND>
 Commands:
   sketch   Sketches one or more files and writes the result to an output file
   merge    Merge multiple input sketches into a single sketch
-  compare  Compare a raw file or sketch against one or more sketches as database Requires all sketches to have the same kmer size
+  dist     Calculate distance of a (small) sketch against one or more sketches as database
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -105,11 +113,10 @@ Options:
 
 This project is licensed under the MIT license. See the [LICENSE](LICENSE) file for more info.
 
-
 ### Disclaimer
 
 jam-rs is still in early active development and not ready for production use. Use at your own risk. Once a stable version is released additional information and installation guidelines will be added.
 
 ### Credits
 
-This tool is heavily inspired by [finch-rs](https://github.com/onecodex/finch-rs), licensed under the MIT license. So if you need a more traditional minhash implementation, that is compatible with sourmash or mash check it out.
+This tool is heavily inspired by [finch-rs](https://github.com/onecodex/finch-rs)/[License](https://github.com/onecodex/finch-rs/blob/master/LICENSE.txt) and [sourmash](https://github.com/sourmash-bio/sourmash)/[License](https://github.com/sourmash-bio/sourmash/blob/latest/LICENSE). Check them out if you need a more mature ecosystem with well tested hash functions and more features.

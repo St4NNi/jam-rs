@@ -71,8 +71,9 @@ impl Sketcher {
         'a: 'seq,
         'seq: 'inner,
     {
-        let rc = seq.reverse_complement();
-        for (_, kmer, _) in seq.normalize(false).canonical_kmers(self.kmer_length, &rc) {
+        let seq = seq.normalize(true);
+
+        for (_, kmer, _) in seq.bit_kmers(self.kmer_length, true) {
             self.current_sketch.push(kmer);
             self.current_sketch.max_kmers += 1;
         }
