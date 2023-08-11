@@ -13,8 +13,9 @@ Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers
 
 ### Comparison
 
-- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer > 31) instead of murmurhash3
+- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 31) instead of [murmurhash3](https://github.com/mhallin/murmurhash3-rs)
 - No jaccard similarity since this is meaningless when comparing small embeded sequences against large sets
+- (coming soon) optimisations for specificity and sensitivity (and speed) specifically for search of small sequences in assembled metagenomes
 
 ### Scaling methods
 
@@ -23,7 +24,7 @@ Multiple different scaling methods:
   - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `scale`
   - MinMaxAbsoluteScaling (`nscale`): Use a minimum or maximum number of hashes per sequence record
 
-If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together and the minimum number of hashes (per seq record) will be guaranteed. 
+If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together the minimum number of hashes (per sequence record) will be guaranteed. `FracMinHash` and `KmerCountScaling` produce similar results, the first is mainly provided for sourmash compatibility.
 
 ### Usage
 
