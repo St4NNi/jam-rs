@@ -47,7 +47,7 @@ fn ks(samples: &[u64]) -> f64 {
 }
 
 fn print_ks(hash: &str, d: f64) {
-    println!("{:10} {: <10.4}", hash, d);
+    println!("{:10} {: <10.10}", hash, d);
 }
 
 #[inline]

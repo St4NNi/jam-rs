@@ -1,6 +1,6 @@
 //! A list of hash functions to compare
-const KEY1: u64 = 0x4528_21e6_38d0_1377 ^ 0x4;
-const KEY2: u64 = 0xbe54_66cf_34e9_0c6c ^ 0x2;
+const KEY1: u64 = 0x4528_21e6_38d0_1377 ^ 0xa409_3822_299f_31d0;
+const KEY2: u64 = 0xbe54_66cf_34e9_0c6c ^ 0x082e_fa98_ec4e_6c89;
 
 // Standard xxhash function for all sizes
 #[inline]
