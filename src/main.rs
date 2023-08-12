@@ -1,4 +1,4 @@
-use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand};
+use clap::{error::ErrorKind, CommandFactory, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -20,6 +20,12 @@ struct Cli {
     force: bool,
 }
 
+#[derive(ValueEnum, Debug, Clone)]
+pub enum OutputFormats {
+    Bin,
+    Sourmash,
+}
+
 #[derive(Debug, Subcommand, Clone)]
 enum Commands {
     /// Sketches one or more files and writes the result to an output file
@@ -34,11 +40,23 @@ enum Commands {
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
         /// kmer size all sketches to be compared must have the same size
-        #[arg(short, long, default_value = "21")]
+        #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
-        /// The estimated scaling factor to apply
-        #[arg(short, long, default_value = "0.001")]
-        scale: f32,
+        /// Scale the hash spaces to a minimum fraction of the maximum hash value
+        #[arg(long, default_value = "0")]
+        fscale: u64,
+        /// Scale the hash spaces to a minimum fraction of all k-mers
+        #[arg(long, default_value = "1000")]
+        kscale: u64,
+        /// Minimum number of k-mers (per record) to be hashed
+        #[arg(long, default_value = "0")]
+        nmin: u64,
+        /// Maximum number of k-mers (per record) to be hashed
+        #[arg(long, default_value = "0")]
+        nmax: u64,
+        /// Change to other output formats
+        #[arg(long, default_value = "bin")]
+        format: OutputFormats,
     },
     /// Merge multiple input sketches into a single sketch
     #[command(arg_required_else_help = true)]
@@ -79,7 +97,11 @@ fn main() {
             input,
             output,
             kmer_size,
-            scale,
+            fscale: _,
+            kscale: _,
+            nmin: _,
+            nmax: _,
+            format: _,
         } => {
             let mut cmd = Cli::command();
 
@@ -94,7 +116,7 @@ fn main() {
                 fs,
                 output,
                 kmer_size,
-                scale,
+                0.0, // FIXME: new_scales
                 args.threads.unwrap(),
             ) {
                 Ok(_) => {}

@@ -20,9 +20,9 @@ Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers
 ### Scaling methods
 
 Multiple different scaling methods:
-  - FracMinHash (`fscale`): Restricts the hash-space to a maximum of `scale` * `u64::MAX`
-  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `scale`
-  - MinMaxAbsoluteScaling (`nscale`): Use a minimum or maximum number of hashes per sequence record
+  - FracMinHash (`fscale`): Restricts the hash-space to a (lower) maximum fraction of `u64::MAX` / `fscale`
+  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `kscale`
+  - MinMaxAbsoluteScaling (`nscale`): Restricts the minimum or maximum number of hashes per sequence record
 
 If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together the minimum number of hashes (per sequence record) will be guaranteed. `FracMinHash` and `KmerCountScaling` produce similar results, the first is mainly provided for sourmash compatibility.
 
@@ -35,10 +35,10 @@ Just another minhasher, obviously blazingly fast
 Usage: jam [OPTIONS] <COMMAND>
 
 Commands:
-  sketch   Sketches one or more files and writes the result to an output file
-  merge    Merge multiple input sketches into a single sketch
-  dist     Calculate distance of a (small) sketch against one or more sketches as database
-  help     Print this message or the help of the given subcommand(s)
+  sketch  Sketches one or more files and writes the result to an output file
+  merge   Merge multiple input sketches into a single sketch
+  dist    Calculate distance of a (small) sketch against one or more sketches as database. Requires all sketches to have the same kmer size
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -t, --threads <THREADS>  Number of threads to use [default: 1]
