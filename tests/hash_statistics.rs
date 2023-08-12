@@ -61,7 +61,7 @@ pub fn murmur3_new(kmer: &[u8]) -> u64 {
 }
 
 #[test]
-fn run_sample() {
+fn run_ks() {
     let samples = (100_000_000_000..100_000_100_000u64).collect::<Vec<_>>();
 
     let samples_bytes = samples
@@ -87,4 +87,50 @@ fn run_sample() {
         "murmur3_new",
         ks(&do_hashes_bytes(murmur3_new, &samples_bytes)),
     );
+}
+
+#[test]
+fn bit_distribution() {
+    let samples = (100_000_000_000..100_010_000_000u64).collect::<Vec<_>>();
+
+    let samples_bytes = samples
+        .iter()
+        .map(|x| x.to_be_bytes().to_vec())
+        .collect::<Vec<_>>();
+
+    let mut xxhash3_bits = [0u64; 64];
+    let mut ahash_bits = [0u64; 64];
+    let mut murmur3_old_bits = [0u64; 64];
+    let mut murmur3_new_bits = [0u64; 64];
+
+    for x in 0..samples.len() {
+        let xx = jam_rs::hash_functions::xxhash3(samples_bytes[x].as_slice());
+        unrolled_64bits(xx, &mut xxhash3_bits);
+        let ah = jam_rs::hash_functions::ahash(samples[x]);
+        unrolled_64bits(ah, &mut ahash_bits);
+        let mo = murmur3_old(samples_bytes[x].as_slice());
+        unrolled_64bits(mo, &mut murmur3_old_bits);
+        let mn = murmur3_new(samples_bytes[x].as_slice());
+        unrolled_64bits(mn, &mut murmur3_new_bits);
+    }
+
+    println!("bit|xxhash3|ahash|murmur3_old|murmur3_new");
+    for x in 0..64 {
+        println!(
+            "{}|{}|{}|{}|{}",
+            x,
+            xxhash3_bits[x] as f64 / 10_000_000f64,
+            ahash_bits[x] as f64 / 10_000_000f64,
+            murmur3_old_bits[x] as f64 / 10_000_000f64,
+            murmur3_new_bits[x] as f64 / 10_000_000f64
+        );
+    }
+}
+
+fn unrolled_64bits(num: u64, nums: &mut [u64; 64]) {
+    for i in 0..64 {
+        if num & (1u64 << i) != 0 {
+            nums[i] += 1;
+        }
+    }
 }
