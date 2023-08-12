@@ -23,6 +23,7 @@ struct Cli {
 #[derive(ValueEnum, Debug, Clone)]
 pub enum OutputFormats {
     Bin,
+    // Sourmash compatible json
     Sourmash,
 }
 
@@ -31,14 +32,13 @@ enum Commands {
     /// Sketches one or more files and writes the result to an output file
     #[command(arg_required_else_help = true)]
     Sketch {
-        /// Input file, directory or file with list of files to be hashed
-        #[arg(short, long, required = true)]
+        /// Input file(s), one directory or one file with list of files to be hashed
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
-        input: PathBuf,
+        input: Vec<PathBuf>,
         /// Output file
-        #[arg(short, long, required = true)]
+        #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
-        output: PathBuf,
+        output: Option<PathBuf>,
         /// kmer size all sketches to be compared must have the same size
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
@@ -49,14 +49,17 @@ enum Commands {
         #[arg(long, default_value = "1000")]
         kscale: u64,
         /// Minimum number of k-mers (per record) to be hashed
-        #[arg(long, default_value = "0")]
-        nmin: u64,
+        #[arg(long)]
+        nmin: Option<u64>,
         /// Maximum number of k-mers (per record) to be hashed
-        #[arg(long, default_value = "0")]
-        nmax: u64,
+        #[arg(long)]
+        nmax: Option<u64>,
         /// Change to other output formats
         #[arg(long, default_value = "bin")]
         format: OutputFormats,
+        /// Create a separate sketch for each sequence record
+        #[arg(long)]
+        singleton: bool,
     },
     /// Merge multiple input sketches into a single sketch
     #[command(arg_required_else_help = true)]
@@ -102,10 +105,11 @@ fn main() {
             nmin: _,
             nmax: _,
             format: _,
+            singleton: _,
         } => {
             let mut cmd = Cli::command();
 
-            let files = jam_rs::file_io::FileHandler::test_and_collect_files(vec![input], true);
+            let files = jam_rs::file_io::FileHandler::test_and_collect_files(input, true);
             let fs = match files {
                 Ok(f) => f,
                 Err(e) => {
@@ -114,7 +118,7 @@ fn main() {
             };
             match jam_rs::file_io::FileHandler::sketch_files(
                 fs,
-                output,
+                output.unwrap(), // FIXME: No output file
                 kmer_size,
                 0.0, // FIXME: new_scales
                 args.threads.unwrap(),

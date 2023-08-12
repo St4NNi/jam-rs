@@ -55,15 +55,22 @@ The easiest way to sketch files is to use the `jam sketch` command. This accepts
 $ jam sketch
 Sketches one or more files and writes the result to an output file
 
-Usage: jam sketch [OPTIONS] --input <INPUT> --output <OUTPUT>
+Usage: jam sketch [OPTIONS] [INPUT]...
+
+Arguments:
+  [INPUT]...  Input file(s), one directory or one file with list of files to be hashed
 
 Options:
-  -i, --input <INPUT>          Input file, directory or file with list of files to be hashed
   -o, --output <OUTPUT>        Output file
   -k, --kmer-size <KMER_SIZE>  kmer size all sketches to be compared must have the same size [default: 21]
-  -s, --scale <SCALE>          The estimated scaling factor to apply [default: 0.001]
+      --fscale <FSCALE>        Scale the hash spaces to a minimum fraction of the maximum hash value [default: 0]
+      --kscale <KSCALE>        Scale the hash spaces to a minimum fraction of all k-mers [default: 1000]
   -t, --threads <THREADS>      Number of threads to use [default: 1]
   -f, --force                  Overwrite output files
+      --nmin <NMIN>            Minimum number of k-mers (per record) to be hashed
+      --nmax <NMAX>            Maximum number of k-mers (per record) to be hashed
+      --format <FORMAT>        Change to other output formats [default: bin] [possible values: bin, sourmash]
+      --singleton              Create a separate sketch for each sequence record
   -h, --help                   Print help
 ```
 
