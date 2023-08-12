@@ -1,0 +1,9 @@
+name: test_build_push
+on: push
+jobs:
+  build: # This does not build the whole proto files for production, it tests if rust / tonic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --all-features

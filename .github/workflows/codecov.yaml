@@ -1,0 +1,28 @@
+on:
+  push:
+    branches: [main]
+  pull_request:
+name: coverage
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: arduino/setup-protoc@v1
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - uses: actions/checkout@v2
+        with:
+          submodules: recursive
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --all-features --no-fail-fast -- --include-ignored
+        env:
+          CARGO_INCREMENTAL: '0'
+          RUSTFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests'
+          RUSTDOCFLAGS: '-Zprofile -Ccodegen-units=1 -Cinline-threshold=0 -Clink-dead-code -Coverflow-checks=off -Cpanic=abort -Zpanic_abort_tests'
+      - uses: actions-rs/grcov@v0.1.5
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v3
