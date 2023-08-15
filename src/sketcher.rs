@@ -104,21 +104,43 @@ pub struct Sketcher<'a> {
     completed_sketches: Vec<Sketch>,
     singleton: bool,
     stats: bool,
-    large_function: Option<&'a dyn Fn(&[u8]) -> u64>,
-    small_function: Option<&'a dyn Fn(u64) -> u64>,
+    function: Function<'a>,
+}
+
+pub enum Function<'a> {
+    Large(&'a dyn Fn(&[u8]) -> u64),
+    Small(&'a dyn Fn(u64) -> u64),
+}
+
+impl Function<'_> {
+    pub fn get_large(&self) -> Option<&dyn Fn(&[u8]) -> u64> {
+        match self {
+            Function::Large(f) => Some(f),
+            _ => None,
+        }
+    }
+    pub fn get_small(&self) -> Option<&dyn Fn(u64) -> u64> {
+        match self {
+            Function::Small(f) => Some(f),
+            _ => None,
+        }
+    }
 }
 
 impl<'a> Sketcher<'_> {
     pub fn new(
         kmer_length: u8,
-        budget: u64,
         name: String,
         singleton: bool,
-        max_hash: Option<u64>,
         stats: bool,
-        large_function: Option<&'a dyn Fn(&[u8]) -> u64>,
-        small_function: Option<&'a dyn Fn(u64) -> u64>,
+        budget: Option<u64>,
+        max_hash: Option<u64>,
+        min_seq_hash: Option<u64>,
+        max_seq_hash: Option<u64>,
+        function: Function,
     ) -> Self {
+        let budget = budget.unwrap_or(u64::MAX);
+
         Sketcher {
             kmer_length,
             helper: SketchHelper::new(budget, max_hash),
@@ -134,8 +156,7 @@ impl<'a> Sketcher<'_> {
             },
             singleton,
             completed_sketches: Vec::with_capacity(budget as usize),
-            large_function,
-            small_function,
+            function,
             stats,
         }
     }
@@ -149,17 +170,16 @@ impl Sketcher<'_> {
         'a: 'seq,
         'seq: 'inner,
     {
-        let func = self.small_function.unwrap();
-
         let stats = if self.stats {
             Some(Stats::from_seq(seq.sequence()))
         } else {
             None
         };
+        let func_small = self.function.get_small().unwrap();
         let seq = seq.normalize(true);
 
         for (_, kmer, _) in seq.bit_kmers(self.kmer_length, true) {
-            self.helper.push(func(kmer.0), stats.clone());
+            self.helper.push(func_small(kmer.0), stats.clone());
         }
     }
 
@@ -171,7 +191,7 @@ impl Sketcher<'_> {
         'a: 'seq,
         'seq: 'inner,
     {
-        let func_large = self.large_function.unwrap();
+        let func_large = self.function.get_large().unwrap();
         let stats = if self.stats {
             Some(Stats::from_seq(seq.sequence()))
         } else {

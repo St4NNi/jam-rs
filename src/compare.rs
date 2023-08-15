@@ -146,9 +146,9 @@ impl<'a> Comparator<'a> {
 
     #[inline]
     pub fn compare(&mut self) {
-        for hash in &self.smaller.hashes {
+        for (hash, _) in &self.smaller.hashes {
             self.num_kmers += 1;
-            if self.larger.hashes.contains(hash) {
+            if self.larger.hashes.contains_key(hash) {
                 self.num_common += 1;
             }
         }
