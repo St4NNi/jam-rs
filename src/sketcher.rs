@@ -135,8 +135,8 @@ impl<'a> Sketcher<'_> {
         stats: bool,
         budget: Option<u64>,
         max_hash: Option<u64>,
-        min_seq_hash: Option<u64>,
-        max_seq_hash: Option<u64>,
+        nmin: Option<u64>,
+        nmax: Option<u64>,
         function: Function,
     ) -> Self {
         let budget = budget.unwrap_or(u64::MAX);

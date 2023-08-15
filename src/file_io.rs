@@ -71,7 +71,7 @@ impl FileHandler {
         let mut counter = 0;
         while let Some(record) = reader.next() {
             let seqrec = record?;
-            sketcher.process(&seqrec);
+            sketcher.process_small(&seqrec);
             counter += 1;
         }
 
