@@ -207,16 +207,18 @@ impl Sketcher<'_> {
         } else {
             let func_large = self.function.get_large().unwrap();
             self.helper.initialize_record(stats);
+            let name = seq.id();
+            let seq = seq.normalize(false);
             let rc = seq.reverse_complement();
-            for (_, kmer, _) in seq.normalize(false).canonical_kmers(self.kmer_length, &rc) {
+            for (_, kmer, _) in seq.canonical_kmers(self.kmer_length, &rc) {
                 self.helper.push(func_large(kmer));
             }
             self.helper.next_record();
             if self.singleton {
-                self.completed_sketches.push(self.helper.into_sketch(
-                    String::from_utf8_lossy(seq.id()).to_string(),
-                    self.kmer_length,
-                ));
+                self.completed_sketches.push(
+                    self.helper
+                        .into_sketch(String::from_utf8_lossy(name).to_string(), self.kmer_length),
+                );
             }
         }
     }
