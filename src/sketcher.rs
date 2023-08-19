@@ -15,9 +15,10 @@ use std::{
 struct SketchHelper {
     pub kmer_budget: u64,
     pub max_hash: u64,
-    counter: u64,
-    seq_counter: u64,
-    pub nmax: u64,
+    global_counter: u64,
+    kmer_seq_counter: u64,
+    pub nmax: Option<u64>,
+    pub last_max_hash: u64,
     pub global_heap: BinaryHeap<u64>,
     pub local_heap: Option<(u64, BinaryHeap<u64>)>,
     pub hashes: HashMap<u64, Option<Stats>, BuildHasherDefault<NoHashHasher>>,
@@ -34,14 +35,15 @@ impl SketchHelper {
 
         SketchHelper {
             kmer_budget,
-            nmax: nmax.unwrap_or_else(|| u64::MAX),
-            counter: 0,
-            seq_counter: 0,
+            nmax,
+            global_counter: 0,
+            kmer_seq_counter: 0,
             max_hash: max_hash,
-            global_heap: BinaryHeap::with_capacity(1_000_000 as usize),
+            last_max_hash: 0,
+            global_heap: BinaryHeap::with_capacity(10_000_000 as usize),
             local_heap,
             hashes: HashMap::with_capacity_and_hasher(
-                1_000_000,
+                10_000_000,
                 BuildHasherDefault::<NoHashHasher>::default(),
             ),
             current_stat: None,
@@ -54,21 +56,40 @@ impl SketchHelper {
 
     pub fn push(&mut self, hash: u64) {
         // Increase the local sequence counter
-        self.seq_counter += 1;
+        self.kmer_seq_counter += 1;
 
-        // Check if the hash is smaller than the global max hash cutoff
         if hash < self.max_hash {
-            if self.global_heap.len() < self.nmax as usize
-                || self.global_heap.len() < self.kmer_budget as usize
-            {
-                self.global_heap.push(hash);
-                self.hashes.insert(hash, self.current_stat.clone());
-            } else {
-                let mut max = self.global_heap.peek_mut().unwrap();
-                if hash < *max {
-                    *max = hash;
+            if let Some(nmax) = self.nmax {
+                if self.kmer_seq_counter <= nmax
+                    && self.global_heap.len() < self.kmer_budget as usize
+                {
+                    self.global_heap.push(hash);
                     self.hashes.insert(hash, self.current_stat.clone());
-                    self.hashes.remove(&max);
+                    if self.last_max_hash < hash {
+                        self.last_max_hash = hash;
+                    }
+                } else {
+                    let mut max = self.global_heap.peek_mut().unwrap();
+                    if hash < *max {
+                        *max = hash;
+                        // Remove the "last max item" -> Make sure that only nmax items from this record are in the hashmap
+                        self.hashes.remove(&self.last_max_hash);
+                        self.last_max_hash = hash;
+                        self.hashes.insert(hash, self.current_stat.clone());
+                        self.hashes.remove(&max);
+                    }
+                }
+            } else {
+                if self.global_heap.len() < self.kmer_budget as usize {
+                    self.global_heap.push(hash);
+                    self.hashes.insert(hash, self.current_stat.clone());
+                } else {
+                    let mut max = self.global_heap.peek_mut().unwrap();
+                    if hash < *max {
+                        *max = hash;
+                        self.hashes.insert(hash, self.current_stat.clone());
+                        self.hashes.remove(&max);
+                    }
                 }
             }
         }
@@ -87,22 +108,29 @@ impl SketchHelper {
     }
 
     pub fn next_record(&mut self) {
-        self.counter += self.seq_counter;
+        self.global_counter += self.kmer_seq_counter;
         if let Some((_, local_heap)) = &mut self.local_heap {
             self.hashes
                 .extend(local_heap.drain().map(|x| (x, self.current_stat.clone())));
         }
-        self.seq_counter = 0;
+        self.last_max_hash = 0;
+        self.kmer_seq_counter = 0;
     }
 
     pub fn reset(&mut self) {
         self.global_heap.clear();
         self.hashes.clear();
-        self.counter = 0;
+        self.last_max_hash = 0;
+        self.kmer_seq_counter = 0;
     }
 
     pub fn into_sketch(&mut self, name: String, kmer_size: u8) -> Sketch {
-        let mut sketch = Sketch::new(name, self.hashes.len(), self.counter as usize, kmer_size);
+        let mut sketch = Sketch::new(
+            name,
+            self.hashes.len(),
+            self.global_counter as usize,
+            kmer_size,
+        );
         sketch.hashes = self.hashes.drain().collect();
         self.reset();
         sketch

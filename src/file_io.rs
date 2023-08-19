@@ -154,6 +154,11 @@ impl FileHandler {
             OutputFormats::Bin => {
                 while let Ok(sig) = signature_recv.recv() {
                     bincode::serialize_into(&mut bufwriter, &sig)?;
+                    println!(
+                        "Wrote signature: {:?} with {:?} hashes;",
+                        sig.file_name,
+                        sig.sketches.first().unwrap().hashes.len()
+                    );
                 }
             }
             OutputFormats::Sourmash => {
