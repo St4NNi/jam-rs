@@ -55,7 +55,7 @@ impl Function<'_> {
         };
 
         match algo {
-            HashAlgorithms::AHash => Function::Small(&ahash),
+            HashAlgorithms::Ahash => Function::Small(&ahash),
             HashAlgorithms::Murmur3 => Function::Large(&murmur3),
             HashAlgorithms::Xxhash => Function::Large(&xxhash3),
             HashAlgorithms::Default => default,

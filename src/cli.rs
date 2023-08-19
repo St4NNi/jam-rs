@@ -31,7 +31,7 @@ pub enum OutputFormats {
 #[derive(ValueEnum, Debug, Clone, Deserialize, Serialize)]
 pub enum HashAlgorithms {
     Default, // AHash < 32 | Xxhash >= 32
-    AHash,
+    Ahash,
     Xxhash,
     Murmur3,
 }

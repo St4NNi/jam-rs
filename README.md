@@ -70,7 +70,7 @@ Options:
       --nmin <NMIN>            Minimum number of k-mers (per record) to be hashed
       --nmax <NMAX>            Maximum number of k-mers (per record) to be hashed
       --format <FORMAT>        Change to other output formats [default: bin] [possible values: bin, sourmash]
-      --algorithm <ALGORITHM>  Change the hashing algorithm [default: default] [possible values: default, a-hash, xxhash, murmur3]
+      --algorithm <ALGORITHM>  Change the hashing algorithm [default: default] [possible values: default, ahash, xxhash, murmur3]
       --singleton              Create a separate sketch for each sequence record
   -h, --help                   Print help
 ```

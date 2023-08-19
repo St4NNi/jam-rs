@@ -60,7 +60,7 @@ impl Sketch {
             num_kmers,
             kmer_size,
             hashes: HashMap::with_capacity_and_hasher(
-                max_kmers,
+                1_000_000,
                 BuildHasherDefault::<NoHashHasher>::default(),
             ),
         }

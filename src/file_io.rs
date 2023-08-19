@@ -73,6 +73,9 @@ impl FileHandler {
                         }
                     })
                 });
+
+                drop(send);
+
                 Ok(handler
                     .join()
                     .map_err(|_| anyhow!("Unable to join threads"))??)

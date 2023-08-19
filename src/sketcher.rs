@@ -41,7 +41,7 @@ impl SketchHelper {
             global_heap: BinaryHeap::with_capacity(1_000_000 as usize),
             local_heap,
             hashes: HashMap::with_capacity_and_hasher(
-                kmer_budget as usize,
+                1_000_000,
                 BuildHasherDefault::<NoHashHasher>::default(),
             ),
             current_stat: None,
