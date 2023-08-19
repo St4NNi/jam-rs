@@ -158,12 +158,10 @@ impl FileHandler {
         match output_format {
             OutputFormats::Bin => {
                 while let Ok(sig) = signature_recv.recv() {
-                    bincode::serialize_into(&mut bufwriter, &sig)?;
-                    println!(
-                        "Wrote signature: {:?} with {:?} hashes;",
-                        sig.file_name,
-                        sig.sketches.first().unwrap().hashes.len()
-                    );
+                    let name = sig.file_name.clone();
+                    let len = sig.sketches.first().unwrap().hashes.len();
+                    bincode::serialize_into(&mut bufwriter, &vec![sig])?;
+                    println!("Wrote signature: {:?} with {:?} hashes;", name, len,);
                 }
             }
             OutputFormats::Sourmash => {
@@ -179,7 +177,7 @@ impl FileHandler {
 
     pub fn read_signatures(input: &PathBuf) -> Result<Vec<Signature>> {
         let read_to_bytes = std::fs::read(input)?;
-        Ok(bincode::deserialize(&read_to_bytes)?)
+        Ok(bincode::deserialize_from(read_to_bytes.as_slice()).unwrap())
     }
 
     pub fn concat(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {

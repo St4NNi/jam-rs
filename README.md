@@ -13,7 +13,7 @@ Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers
 
 ### Comparison
 
-- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 31) instead of [murmurhash3](https://github.com/mhallin/murmurhash3-rs)
+- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 32) instead of [murmurhash3](https://github.com/mhallin/murmurhash3-rs)
 - No jaccard similarity since this is meaningless when comparing small embeded sequences against large sets
 - (coming soon) optimisations for specificity and sensitivity (and speed) specifically for search of small sequences in assembled metagenomes
 
