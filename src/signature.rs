@@ -28,3 +28,15 @@ impl Into<SourmashSignature> for Signature {
             .build()
     }
 }
+
+impl Signature {
+    pub fn collapse(&mut self) -> Sketch {
+        let mut sketch = Sketch::new(self.file_name.to_string(), 0, 0, self.kmer_size);
+        for old_sketch in self.sketches.drain(..) {
+            sketch.hashes.extend(old_sketch.hashes);
+            sketch.num_kmers += old_sketch.num_kmers;
+            sketch.max_kmers += old_sketch.max_kmers;
+        }
+        sketch
+    }
+}

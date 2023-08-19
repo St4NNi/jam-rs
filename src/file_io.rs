@@ -177,18 +177,9 @@ impl FileHandler {
         Ok(())
     }
 
-    pub fn read_sketches(input: &PathBuf) -> Result<Vec<Sketch>> {
-        let mut vec: Vec<Sketch> = vec![];
-
-        let mut reader = BufReader::new(std::fs::File::open(input)?);
-
-        while let Ok(result) =
-            bincode::deserialize_from::<&mut BufReader<File>, Sketch>(&mut reader)
-        {
-            vec.push(result);
-        }
-
-        Ok(vec)
+    pub fn read_signatures(input: &PathBuf) -> Result<Vec<Signature>> {
+        let read_to_bytes = std::fs::read(input)?;
+        Ok(bincode::deserialize(&read_to_bytes)?)
     }
 
     pub fn concat(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {

@@ -40,7 +40,7 @@ fn main() {
 
             let mut db_sketches = Vec::new();
             for db_path in fs {
-                match jam_rs::file_io::FileHandler::read_sketches(&db_path) {
+                match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
                     Ok(r) => {
                         db_sketches.extend(r);
                     }
@@ -61,7 +61,7 @@ fn main() {
 
             let mut input_sketch = Vec::new();
             for db_path in fs_input {
-                match jam_rs::file_io::FileHandler::read_sketches(&db_path) {
+                match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
                     Ok(r) => {
                         input_sketch.extend(r);
                     }

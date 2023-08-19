@@ -1,3 +1,4 @@
+use crate::signature::Signature;
 use crate::sketch::Sketch;
 use anyhow::anyhow;
 use anyhow::Result;
@@ -58,15 +59,20 @@ pub struct MultiComp {
 }
 
 impl MultiComp {
-    pub fn new(from: Vec<Sketch>, to: Vec<Sketch>, threads: usize, cutoff: f64) -> Result<Self> {
+    pub fn new(
+        mut from: Vec<Signature>,
+        mut to: Vec<Signature>,
+        threads: usize,
+        cutoff: f64,
+    ) -> Result<Self> {
         let kmer_size = from
             .first()
             .ok_or_else(|| anyhow!("Empty from list"))?
             .kmer_size;
 
         Ok(MultiComp {
-            from,
-            to,
+            from: from.iter_mut().map(|e| e.collapse()).collect(),
+            to: to.iter_mut().map(|e| e.collapse()).collect(),
             results: Vec::new(),
             threads,
             kmer_size,
