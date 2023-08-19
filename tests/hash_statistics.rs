@@ -90,7 +90,7 @@ fn run_ks() {
 }
 
 #[test]
-fn bit_distribution() {
+fn test_bit_distribution() {
     let samples = (100_000_000_000..100_010_000_000u64).collect::<Vec<_>>();
 
     let samples_bytes = samples
