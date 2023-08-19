@@ -7,9 +7,9 @@ license = "MIT"
 description = "Just another minhash (Jam) implementation in Rust"
 
 [dependencies]
-anyhow = "1.0.72"
+anyhow = "1.0.75"
 bincode = "1.3.3"
-flate2 = "1.0.26"
+flate2 = "1.0.27"
 needletail = "0.5.1"
 rayon = "1.7.0"
 xxhash-rust = { version = "0.8.6", features = ["xxh3"]}
