@@ -21,7 +21,7 @@ Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers
 
 Multiple different scaling methods:
   - FracMinHash (`fscale`): Restricts the hash-space to a (lower) maximum fraction of `u64::MAX` / `fscale`
-  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `kscale`
+  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `kscale` -> 10 means 1/10th of all k-mers will be stored
   - MinMaxAbsoluteScaling (`nscale`): Restricts the minimum or maximum number of hashes per sequence record
 
 If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together the minimum number of hashes (per sequence record) will be guaranteed. `FracMinHash` and `KmerCountScaling` produce similar results, the first is mainly provided for sourmash compatibility.
@@ -37,7 +37,7 @@ Usage: jam [OPTIONS] <COMMAND>
 Commands:
   sketch  Sketches one or more files and writes the result to an output file
   merge   Merge multiple input sketches into a single sketch
-  dist    Calculate distance of a (small) sketch against one or more sketches as database. Requires all sketches to have the same kmer size
+  dist    Estimate distance of a (small) sketch against a subset of one or more sketches as database. Requires all sketches to have the same kmer size
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -53,7 +53,7 @@ The easiest way to sketch files is to use the `jam sketch` command. This accepts
 
 ```console
 $ jam sketch
-Sketches one or more files and writes the result to an output file
+Sketch one or more files and write result to output file (or stdout)
 
 Usage: jam sketch [OPTIONS] [INPUT]...
 
@@ -63,13 +63,14 @@ Arguments:
 Options:
   -o, --output <OUTPUT>        Output file
   -k, --kmer-size <KMER_SIZE>  kmer size all sketches to be compared must have the same size [default: 21]
-      --fscale <FSCALE>        Scale the hash spaces to a minimum fraction of the maximum hash value [default: 0]
-      --kscale <KSCALE>        Scale the hash spaces to a minimum fraction of all k-mers [default: 1000]
+      --fscale <FSCALE>        Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+      --kscale <KSCALE>        Scale the hash space to a minimum fraction of all k-mers (SizeMinHash)
   -t, --threads <THREADS>      Number of threads to use [default: 1]
   -f, --force                  Overwrite output files
       --nmin <NMIN>            Minimum number of k-mers (per record) to be hashed
       --nmax <NMAX>            Maximum number of k-mers (per record) to be hashed
       --format <FORMAT>        Change to other output formats [default: bin] [possible values: bin, sourmash]
+      --algorithm <ALGORITHM>  Change the hashing algorithm [default: default] [possible values: default, a-hash, xxhash, murmur3]
       --singleton              Create a separate sketch for each sequence record
   -h, --help                   Print help
 ```

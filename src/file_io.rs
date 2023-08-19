@@ -84,8 +84,8 @@ impl FileHandler {
     pub fn sketch_file(
         input: &PathBuf,
         kmer_length: u8,
-        fscale: u64,
-        kscale: u64,
+        fscale: Option<u64>,
+        kscale: Option<u64>,
         nmin: Option<u64>,
         nmax: Option<u64>,
         singleton: bool,
@@ -99,8 +99,16 @@ impl FileHandler {
             x *= 3;
         }
         let start = std::time::Instant::now();
-        let kscale = (x as f64 / kscale as f64) as u64;
-        let max_hash = (u64::MAX as f64 / fscale as f64) as u64;
+        let kscale = if let Some(kscale) = kscale {
+            (x as f64 / kscale as f64) as u64
+        } else {
+            u64::MAX
+        };
+        let max_hash = if let Some(fscale) = fscale {
+            (u64::MAX as f64 / fscale as f64) as u64
+        } else {
+            u64::MAX
+        };
         let mut sketcher = sketcher::Sketcher::new(
             kmer_length,
             input

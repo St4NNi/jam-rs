@@ -38,7 +38,7 @@ pub enum HashAlgorithms {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
-    /// Sketches one or more files and writes the result to an output file
+    /// Sketch one or more files and write result to output file (or stdout)
     #[command(arg_required_else_help = true)]
     Sketch {
         /// Input file(s), one directory or one file with list of files to be hashed
@@ -51,12 +51,12 @@ pub enum Commands {
         /// kmer size all sketches to be compared must have the same size
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
-        /// Scale the hash spaces to a minimum fraction of the maximum hash value
-        #[arg(long, default_value = "0")]
-        fscale: u64,
-        /// Scale the hash spaces to a minimum fraction of all k-mers
-        #[arg(long, default_value = "1000")]
-        kscale: u64,
+        /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+        #[arg(long)]
+        fscale: Option<u64>,
+        /// Scale the hash space to a minimum fraction of all k-mers (SizeMinHash)
+        #[arg(long)]
+        kscale: Option<u64>,
         /// Minimum number of k-mers (per record) to be hashed
         #[arg(long)]
         nmin: Option<u64>,
@@ -84,7 +84,7 @@ pub enum Commands {
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
     },
-    /// Calculate distance of a (small) sketch against one or more sketches as database.
+    /// Estimate distance of a (small) sketch against a subset of one or more sketches as database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
     Dist {
