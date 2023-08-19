@@ -194,17 +194,17 @@ impl Sketcher<'_> {
     }
 
     pub fn finish(self) -> Signature {
+        let max_hash = self.helper.max_hash;
         let file_name = self.name.to_string();
         let algorithm = self.algorithm.clone();
         let kmer_size = self.kmer_length;
         let mut sketches = self.completed_sketches;
         let mut helper = self.helper;
         sketches.push(helper.into_sketch(self.name, self.kmer_length));
-        let num_sketches = sketches.len();
         Signature {
             file_name,
             sketches,
-            num_sketches,
+            max_hash,
             algorithm,
             kmer_size,
         }

@@ -67,11 +67,12 @@ impl Sketch {
     }
 }
 
-impl Into<SourmashSketch> for Sketch {
-    fn into(self) -> SourmashSketch {
+impl Sketch {
+    pub fn into_sourmash(self, max_hash: u64) -> SourmashSketch {
         let mut sketch = KmerMinHash::builder()
             .ksize(self.kmer_size as u32)
             .num(self.hashes.len() as u32)
+            .max_hash(max_hash)
             .build();
 
         for hash in self.hashes.keys() {

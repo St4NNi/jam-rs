@@ -6,9 +6,9 @@ use sourmash::signature::Signature as SourmashSignature;
 pub struct Signature {
     pub file_name: String,
     pub sketches: Vec<Sketch>,
-    pub num_sketches: usize,
     pub algorithm: HashAlgorithms,
     pub kmer_size: u8,
+    pub max_hash: u64,
 }
 
 impl Into<SourmashSignature> for Signature {
@@ -22,7 +22,7 @@ impl Into<SourmashSignature> for Signature {
             .signatures(
                 self.sketches
                     .into_iter()
-                    .map(|sketch| sketch.into())
+                    .map(|sketch| sketch.into_sourmash(self.max_hash))
                     .collect(),
             )
             .build()
