@@ -1,7 +1,10 @@
 use crate::hasher::NoHashHasher;
 use serde::{Deserialize, Serialize};
 use sourmash::sketch::{minhash::KmerMinHash, Sketch as SourmashSketch};
-use std::{collections::HashMap, hash::BuildHasherDefault};
+use std::{
+    collections::{BTreeSet, HashMap},
+    hash::BuildHasherDefault,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(transparent)]
@@ -69,15 +72,18 @@ impl Sketch {
 
 impl Sketch {
     pub fn into_sourmash(self, max_hash: u64) -> SourmashSketch {
-        let mut sketch = KmerMinHash::builder()
+        let sketch = KmerMinHash::builder()
             .ksize(self.kmer_size as u32)
             .num(self.hashes.len() as u32)
             .max_hash(max_hash)
+            .mins(
+                self.hashes
+                    .into_keys()
+                    .collect::<BTreeSet<u64>>()
+                    .into_iter()
+                    .collect::<Vec<u64>>(),
+            )
             .build();
-
-        for hash in self.hashes.keys() {
-            sketch.add_hash(*hash);
-        }
 
         SourmashSketch::MinHash(sketch)
     }
