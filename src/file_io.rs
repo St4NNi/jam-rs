@@ -11,6 +11,7 @@ use anyhow::Result;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
+use sourmash::signature::Signature as SourmashSignature;
 use std::io::Write;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
@@ -97,9 +98,13 @@ impl FileHandler {
         algorithm: HashAlgorithms,
     ) -> Result<Signature> {
         let mut x = fs::metadata(input)?.len();
-        if input.ends_with(".gz") {
-            // Approximate the size of the uncompressed file
-            x *= 3;
+        if let Some(ext) = input.extension() {
+            if let Some(ext_str) = ext.to_str() {
+                if ext_str == "gz" {
+                    // Approximate the size of uncompressed file
+                    x *= 3;
+                }
+            }
         }
         let start = std::time::Instant::now();
         let kscale = if let Some(kscale) = kscale {
@@ -163,7 +168,8 @@ impl FileHandler {
             }
             OutputFormats::Sourmash => {
                 while let Ok(sig) = signature_recv.recv() {
-                    serde_json::to_writer(&mut bufwriter, &vec![sig])?;
+                    let sourmash_sig: SourmashSignature = sig.into();
+                    serde_json::to_writer(&mut bufwriter, &vec![sourmash_sig])?;
                 }
             }
         }
