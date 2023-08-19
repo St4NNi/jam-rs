@@ -1,5 +1,4 @@
 use crate::sketch::Sketch;
-use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};

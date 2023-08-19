@@ -6,7 +6,6 @@ use crate::{
     sketch::{Sketch, Stats},
 };
 use needletail::{parser::SequenceRecord, Sequence};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BinaryHeap, HashMap},
     hash::BuildHasherDefault,
@@ -89,7 +88,7 @@ impl SketchHelper {
 
     pub fn next_record(&mut self) {
         self.counter += self.seq_counter;
-        if let Some((nmin, local_heap)) = &mut self.local_heap {
+        if let Some((_, local_heap)) = &mut self.local_heap {
             self.hashes
                 .extend(local_heap.drain().map(|x| (x, self.current_stat.clone())));
         }
@@ -181,9 +180,7 @@ impl Sketcher<'_> {
             let func_large = self.function.get_large().unwrap();
             self.helper.initialize_record(stats);
             let rc = seq.reverse_complement();
-            for (_, kmer, is_rev_complement) in
-                seq.normalize(false).canonical_kmers(self.kmer_length, &rc)
-            {
+            for (_, kmer, _) in seq.normalize(false).canonical_kmers(self.kmer_length, &rc) {
                 self.helper.push(func_large(kmer));
             }
             self.helper.next_record();

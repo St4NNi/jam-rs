@@ -12,11 +12,8 @@ use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
 use std::io::Write;
-use std::ops::DerefMut;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::thread;
 use std::{
     ffi::OsStr,
@@ -140,6 +137,21 @@ impl FileHandler {
         output_format: OutputFormats,
         signature_recv: Receiver<Signature>,
     ) -> Result<()> {
+        let mut bufwriter = std::io::BufWriter::new(output);
+
+        match output_format {
+            OutputFormats::Bin => {
+                while let Ok(sig) = signature_recv.recv() {
+                    bincode::serialize_into(&mut bufwriter, &sig)?;
+                }
+            }
+            OutputFormats::Sourmash => {
+                while let Ok(sig) = signature_recv.recv() {
+                    serde_json::to_writer(&mut bufwriter, &vec![sig])?;
+                }
+            }
+        }
+
         Ok(())
     }
 
