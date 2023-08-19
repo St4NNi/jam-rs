@@ -1,4 +1,4 @@
-use crate::hasher::NoHashHasher;
+use crate::{hash_functions::Function, hasher::NoHashHasher};
 use needletail::{parser::SequenceRecord, Sequence};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -84,12 +84,7 @@ struct SketchHelper {
 }
 
 impl SketchHelper {
-    pub fn new(
-        kmer_budget: u64,
-        max_hash: Option<u64>,
-        nmin: Option<u64>,
-        nmax: Option<u64>,
-    ) -> Self {
+    pub fn new(kmer_budget: u64, max_hash: u64, nmin: Option<u64>, nmax: Option<u64>) -> Self {
         let local_heap = if let Some(nmin) = nmin {
             Some((nmin, BinaryHeap::with_capacity((nmin * 2) as usize)))
         } else {
@@ -101,7 +96,7 @@ impl SketchHelper {
             nmax: nmax.unwrap_or_else(|| u64::MAX),
             counter: 0,
             seq_counter: 0,
-            max_hash: max_hash.unwrap_or_else(|| u64::MAX),
+            max_hash: max_hash,
             global_heap: BinaryHeap::with_capacity(1_000_000 as usize),
             local_heap,
             hashes: HashMap::with_capacity_and_hasher(
@@ -174,6 +169,7 @@ impl SketchHelper {
 }
 
 pub struct Sketcher<'a> {
+    name: String,
     kmer_length: u8,
     helper: SketchHelper,
     completed_sketches: Vec<Sketch>,
@@ -182,41 +178,20 @@ pub struct Sketcher<'a> {
     function: Function<'a>,
 }
 
-pub enum Function<'a> {
-    Large(&'a dyn Fn(&[u8]) -> u64),
-    Small(&'a dyn Fn(u64) -> u64),
-}
-
-impl Function<'_> {
-    pub fn get_large(&self) -> Option<&dyn Fn(&[u8]) -> u64> {
-        match self {
-            Function::Large(f) => Some(f),
-            _ => None,
-        }
-    }
-    pub fn get_small(&self) -> Option<&dyn Fn(u64) -> u64> {
-        match self {
-            Function::Small(f) => Some(f),
-            _ => None,
-        }
-    }
-}
-
-impl<'a> Sketcher<'_> {
+impl<'a> Sketcher<'a> {
     pub fn new(
         kmer_length: u8,
         name: String,
         singleton: bool,
         stats: bool,
-        budget: Option<u64>,
-        max_hash: Option<u64>,
+        budget: u64,
+        max_hash: u64,
         nmin: Option<u64>,
         nmax: Option<u64>,
-        function: Function,
+        function: Function<'a>,
     ) -> Self {
-        let budget = budget.unwrap_or(u64::MAX);
-
         Sketcher {
+            name,
             kmer_length,
             helper: SketchHelper::new(budget, max_hash, nmin, nmax),
             singleton,
@@ -288,7 +263,10 @@ impl Sketcher<'_> {
         }
     }
 
-    pub fn finalize(self) -> Sketch {
-        todo!()
+    pub fn finalize(self) -> Vec<Sketch> {
+        let mut sketches = self.completed_sketches;
+        let mut helper = self.helper;
+        sketches.push(helper.into_sketch(self.name, self.kmer_length));
+        sketches
     }
 }

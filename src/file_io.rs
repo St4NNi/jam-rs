@@ -1,4 +1,6 @@
+use crate::cli::Commands;
 use crate::compare::CompareResult;
+use crate::hash_functions::Function;
 use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
@@ -19,38 +21,65 @@ use std::{
 pub struct FileHandler {}
 
 impl FileHandler {
-    pub fn sketch_files(
-        input: Vec<PathBuf>,
-        output: PathBuf,
-        kmer_length: u8,
-        scale: f32,
-        threads: usize,
-    ) -> Result<()> {
-        let output = Arc::new(Mutex::new(File::create(output)?));
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()?;
+    pub fn sketch_files(command: Commands, threads: Option<usize>) -> Result<()> {
+        match command.to_owned() {
+            Commands::Sketch {
+                input,
+                output,
+                kmer_size,
+                fscale,
+                kscale,
+                nmin,
+                nmax,
+                algorithm,
+                format,
+                singleton,
+            } => {
+                let files = FileHandler::test_and_collect_files(input, true)?;
+                let output = Arc::new(Mutex::new(File::create(output.unwrap())?)); //TODO: stdout support
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads.unwrap_or_default())
+                    .build()?;
 
-        pool.install(|| {
-            input
-                .par_iter()
-                .try_for_each(|file_path| {
-                    let output = output.clone();
-                    let kmer_length = kmer_length;
-                    let scale = scale;
-                    FileHandler::sketch_file(file_path, output, kmer_length, scale)
-                })
-                .unwrap()
-        });
+                let function = Function::from_alg(algorithm, kmer_size);
 
-        Ok(())
+                pool.install(|| {
+                    files
+                        .par_iter()
+                        .try_for_each(|file_path| {
+                            let output = output.clone();
+                            FileHandler::sketch_file(
+                                file_path,
+                                output,
+                                kmer_size,
+                                fscale,
+                                kscale,
+                                nmin,
+                                nmax,
+                                singleton,
+                                false,
+                                function.clone(),
+                            )
+                        })
+                        .unwrap()
+                });
+                Ok(())
+            }
+            _ => Err(anyhow!("Wrong command")),
+        }
     }
 
     pub fn sketch_file(
         input: &PathBuf,
         output: Arc<Mutex<File>>,
         kmer_length: u8,
-        scale: f32,
+        fscale: u64,
+        kscale: u64,
+        nmin: Option<u64>,
+        nmax: Option<u64>,
+        singleton: bool,
+        stats: bool,
+        function: Function,
     ) -> Result<()> {
         let mut x = fs::metadata(input)?.len();
         if input.ends_with(".gz") {
@@ -58,20 +87,27 @@ impl FileHandler {
             x *= 3;
         }
         let start = std::time::Instant::now();
-        let kmer_num = (x as f64 * scale as f64) as u64;
+        let kscale = (x as f64 / kscale as f64) as u64;
+        let max_hash = (u64::MAX as f64 / fscale as f64) as u64;
         let mut sketcher = sketcher::Sketcher::new(
             kmer_length,
-            kmer_num,
             input
                 .to_str()
                 .ok_or_else(|| anyhow!("Unknown path"))?
                 .to_string(),
+            singleton,
+            stats,
+            kscale,
+            max_hash,
+            nmin,
+            nmax,
+            function,
         );
         let mut reader = parse_fastx_file(input)?;
         let mut counter = 0;
+
         while let Some(record) = reader.next() {
-            let seqrec = record?;
-            sketcher.process_small(&seqrec);
+            sketcher.process_small(&record?);
             counter += 1;
         }
 
