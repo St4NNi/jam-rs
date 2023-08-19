@@ -1,5 +1,5 @@
 use crate::hasher::NoHashHasher;
-use needletail::Sequence;
+use needletail::{parser::SequenceRecord, Sequence};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BinaryHeap, HashMap},
@@ -46,61 +46,136 @@ impl PartialOrd for Stats {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Sketch {
     pub name: String, // Name of file or sequence
-    pub hashes: HashMap<u64, Stats, BuildHasherDefault<NoHashHasher>>, // Hashes with stats
+    pub hashes: HashMap<u64, Option<Stats>, BuildHasherDefault<NoHashHasher>>, // Hashes with stats
     pub num_kmers: usize, // Number of kmers (collected)
     pub max_kmers: usize, // Max number of kmers (budget)
     pub kmer_size: u8, // Kmer size
+}
+
+impl Sketch {
+    pub fn new(name: String, num_kmers: usize, max_kmers: usize, kmer_size: u8) -> Self {
+        Sketch {
+            name,
+            max_kmers,
+            num_kmers,
+            kmer_size,
+            hashes: HashMap::with_capacity_and_hasher(
+                max_kmers,
+                BuildHasherDefault::<NoHashHasher>::default(),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
 struct SketchHelper {
     pub kmer_budget: u64,
     pub max_hash: u64,
-    pub binary_heap: BinaryHeap<u64>,
-    pub hashes: HashMap<u64, Stats, BuildHasherDefault<NoHashHasher>>,
+    counter: u64,
+    seq_counter: u64,
+    pub nmax: u64,
+    pub global_heap: BinaryHeap<u64>,
+    pub local_heap: Option<(u64, BinaryHeap<u64>)>,
+    pub hashes: HashMap<u64, Option<Stats>, BuildHasherDefault<NoHashHasher>>,
+    current_stat: Option<Stats>,
 }
 
 impl SketchHelper {
-    pub fn new(kmer_budget: u64, max_hash: Option<u64>) -> Self {
+    pub fn new(
+        kmer_budget: u64,
+        max_hash: Option<u64>,
+        nmin: Option<u64>,
+        nmax: Option<u64>,
+    ) -> Self {
+        let local_heap = if let Some(nmin) = nmin {
+            Some((nmin, BinaryHeap::with_capacity((nmin * 2) as usize)))
+        } else {
+            None
+        };
+
         SketchHelper {
             kmer_budget,
-            max_hash: max_hash.unwrap_or(u64::MAX),
-            binary_heap: BinaryHeap::with_capacity(kmer_budget as usize),
+            nmax: nmax.unwrap_or_else(|| u64::MAX),
+            counter: 0,
+            seq_counter: 0,
+            max_hash: max_hash.unwrap_or_else(|| u64::MAX),
+            global_heap: BinaryHeap::with_capacity(1_000_000 as usize),
+            local_heap,
             hashes: HashMap::with_capacity_and_hasher(
                 kmer_budget as usize,
                 BuildHasherDefault::<NoHashHasher>::default(),
             ),
+            current_stat: None,
         }
     }
 
-    pub fn push(&mut self, hash: u64, stats: Option<Stats>) {
+    pub fn initialize_record(&mut self, stats: Option<Stats>) {
+        self.current_stat = stats;
+    }
+
+    pub fn push(&mut self, hash: u64) {
+        // Increase the local sequence counter
+        self.seq_counter += 1;
+
+        // Check if the hash is smaller than the global max hash cutoff
         if hash < self.max_hash {
-            if self.binary_heap.len() < self.kmer_budget as usize {
-                self.binary_heap.push(hash);
-                if let Some(stats) = stats {
-                    self.hashes.insert(hash, stats);
-                }
+            if self.global_heap.len() < self.nmax as usize
+                || self.global_heap.len() < self.kmer_budget as usize
+            {
+                self.global_heap.push(hash);
+                self.hashes.insert(hash, self.current_stat.clone());
             } else {
-                let mut max = self.binary_heap.peek_mut().unwrap();
+                let mut max = self.global_heap.peek_mut().unwrap();
                 if hash < *max {
                     *max = hash;
-                    if let Some(stats) = stats {
-                        self.hashes.insert(hash, stats);
-                    }
+                    self.hashes.insert(hash, self.current_stat.clone());
                     self.hashes.remove(&max);
                 }
             }
         }
+
+        // If there is a local_heap
+        if let Some((nmin, local_heap)) = &mut self.local_heap {
+            if local_heap.len() < *nmin as usize {
+                local_heap.push(hash);
+            } else {
+                let mut max = local_heap.peek_mut().unwrap();
+                if hash < *max {
+                    *max = hash;
+                }
+            }
+        }
+    }
+
+    pub fn next_record(&mut self) {
+        self.counter += self.seq_counter;
+        if let Some((nmin, local_heap)) = &mut self.local_heap {
+            self.hashes
+                .extend(local_heap.drain().map(|x| (x, self.current_stat.clone())));
+        }
+        self.seq_counter = 0;
+    }
+
+    pub fn reset(&mut self) {
+        self.global_heap.clear();
+        self.hashes.clear();
+        self.counter = 0;
+    }
+
+    pub fn into_sketch(&mut self, name: String, kmer_size: u8) -> Sketch {
+        let mut sketch = Sketch::new(name, self.hashes.len(), self.counter as usize, kmer_size);
+        sketch.hashes = self.hashes.drain().collect();
+        self.reset();
+        sketch
     }
 }
 
 pub struct Sketcher<'a> {
     kmer_length: u8,
     helper: SketchHelper,
-    current_sketch: Sketch,
     completed_sketches: Vec<Sketch>,
     singleton: bool,
     stats: bool,
@@ -143,19 +218,9 @@ impl<'a> Sketcher<'_> {
 
         Sketcher {
             kmer_length,
-            helper: SketchHelper::new(budget, max_hash),
-            current_sketch: Sketch {
-                hashes: HashMap::with_capacity_and_hasher(
-                    budget as usize,
-                    BuildHasherDefault::<NoHashHasher>::default(),
-                ),
-                name,
-                kmer_size: kmer_length,
-                num_kmers: 0,
-                max_kmers: 0,
-            },
+            helper: SketchHelper::new(budget, max_hash, nmin, nmax),
             singleton,
-            completed_sketches: Vec::with_capacity(budget as usize),
+            completed_sketches: Vec::new(),
             function,
             stats,
         }
@@ -165,7 +230,7 @@ impl<'a> Sketcher<'_> {
 impl Sketcher<'_> {
     // This is more or less derived from the `process` method in `finch-rs`:
     // https://github.com/onecodex/finch-rs/blob/master/lib/src/sketch_schemes/mash.rs
-    pub fn process_small<'seq, 'a, 'inner>(&'a mut self, seq: &'seq dyn Sequence<'inner>)
+    pub fn process_small<'seq, 'a, 'inner>(&'a mut self, seq: &'seq SequenceRecord<'inner>)
     where
         'a: 'seq,
         'seq: 'inner,
@@ -176,17 +241,27 @@ impl Sketcher<'_> {
             None
         };
         let func_small = self.function.get_small().unwrap();
-        let seq = seq.normalize(true);
+        let seq_normalized = seq.normalize(true);
+        self.helper.initialize_record(stats);
 
-        for (_, kmer, _) in seq.bit_kmers(self.kmer_length, true) {
-            self.helper.push(func_small(kmer.0), stats.clone());
+        for (_, kmer, _) in seq_normalized.bit_kmers(self.kmer_length, true) {
+            self.helper.push(func_small(kmer.0));
+        }
+
+        self.helper.next_record();
+
+        if self.singleton {
+            self.completed_sketches.push(self.helper.into_sketch(
+                String::from_utf8_lossy(seq.id()).to_string(),
+                self.kmer_length,
+            ));
         }
     }
 
     // This is more or less derived from the `process` method in `finch-rs`:
     // https://github.com/onecodex/finch-rs/blob/master/lib/src/sketch_schemes/mash.rs
     /// To process larger kmers > 31 bases
-    pub fn process_large<'seq, 'a, 'inner>(&'a mut self, seq: &'seq dyn Sequence<'inner>)
+    pub fn process_large<'seq, 'a, 'inner>(&'a mut self, seq: &'seq SequenceRecord<'inner>)
     where
         'a: 'seq,
         'seq: 'inner,
@@ -197,11 +272,19 @@ impl Sketcher<'_> {
         } else {
             None
         };
+        self.helper.initialize_record(stats);
         let rc = seq.reverse_complement();
         for (_, kmer, is_rev_complement) in
             seq.normalize(false).canonical_kmers(self.kmer_length, &rc)
         {
-            self.helper.push(func_large(kmer), stats.clone());
+            self.helper.push(func_large(kmer));
+        }
+        self.helper.next_record();
+        if self.singleton {
+            self.completed_sketches.push(self.helper.into_sketch(
+                String::from_utf8_lossy(seq.id()).to_string(),
+                self.kmer_length,
+            ));
         }
     }
 
