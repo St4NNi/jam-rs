@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -27,7 +28,7 @@ pub enum OutputFormats {
     Sourmash,
 }
 
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, Deserialize, Serialize)]
 pub enum HashAlgorithms {
     Default, // AHash < 32 | Xxhash >= 32
     AHash,

@@ -56,7 +56,6 @@ fn main() {
                 Ok(f) => f,
                 Err(e) => {
                     cmd.error(ErrorKind::ArgumentConflict, e).exit();
-                    return;
                 }
             };
 
