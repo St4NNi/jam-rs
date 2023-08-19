@@ -11,6 +11,12 @@ pub fn xxhash3(kmer: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(kmer)
 }
 
+// Standard xxhash function for all sizes
+#[inline]
+pub fn xxhash3_u64(kmer: u64) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(&kmer.to_be_bytes())
+}
+
 // Specialized hash function for kmers < 32
 // Simplified version of ahash-fallback from the ahash crate
 #[inline]
@@ -24,6 +30,11 @@ pub fn ahash(kmer: u64) -> u64 {
 #[inline]
 pub fn murmur3(kmer: &[u8]) -> u64 {
     fastmurmur3::murmur3_x64_128(kmer, 42) as u64
+}
+
+#[inline]
+pub fn murmur3_u64(kmer: u64) -> u64 {
+    fastmurmur3::murmur3_x64_128(&kmer.to_be_bytes(), 42) as u64
 }
 
 /// Stores a function pointer to a hash function
@@ -48,17 +59,19 @@ impl Function<'_> {
     }
 
     pub fn from_alg(algo: HashAlgorithms, kmer_size: u8) -> Self {
-        let default = if kmer_size < 32 {
-            Function::Small(&ahash)
+        if kmer_size < 32 {
+            match algo {
+                HashAlgorithms::Ahash => Function::Small(&ahash),
+                HashAlgorithms::Murmur3 => Function::Small(&murmur3_u64),
+                HashAlgorithms::Xxhash => Function::Small(&xxhash3_u64),
+                HashAlgorithms::Default => Function::Small(&ahash),
+            }
         } else {
-            Function::Large(&xxhash3)
-        };
-
-        match algo {
-            HashAlgorithms::Ahash => Function::Small(&ahash),
-            HashAlgorithms::Murmur3 => Function::Large(&murmur3),
-            HashAlgorithms::Xxhash => Function::Large(&xxhash3),
-            HashAlgorithms::Default => default,
+            match algo {
+                HashAlgorithms::Murmur3 => Function::Large(&murmur3),
+                HashAlgorithms::Xxhash | HashAlgorithms::Default => Function::Large(&xxhash3),
+                _ => panic!("Hash function not supported for kmer size > 32"),
+            }
         }
     }
 }
