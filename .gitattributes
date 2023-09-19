@@ -1,0 +1,3 @@
+*.fa -linguist-detectable
+*.fasta -linguist-detectable
+*.sig -linguist-detectable
