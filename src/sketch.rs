@@ -46,7 +46,7 @@ impl PartialOrd for Stats {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct Sketch {
     pub name: String, // Name of file or sequence
     pub hashes: HashMap<u64, Option<Stats>, BuildHasherDefault<NoHashHasher>>, // Hashes with stats

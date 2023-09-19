@@ -75,3 +75,13 @@ impl Function<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_xxhash3() {
+        assert_eq!(xxhash3(b"AAAAAAAAAAA"), 0x92994E9987384EE2);
+    }
+}

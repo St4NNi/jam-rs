@@ -125,6 +125,7 @@ impl SketchHelper {
     }
 
     pub fn into_sketch(&mut self, name: String, kmer_size: u8) -> Sketch {
+        self.global_counter += self.kmer_seq_counter;
         let mut sketch = Sketch::new(
             name,
             self.hashes.len(),
@@ -226,5 +227,29 @@ impl Sketcher<'_> {
             algorithm,
             kmer_size,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sketch_helper() {
+        let mut helper = SketchHelper::new(1, 100, None, None);
+        helper.initialize_record(Some(Stats::new(0, 0)));
+        helper.push(1);
+        helper.push(2);
+        helper.push(3);
+        assert_eq!(
+            helper.into_sketch("sketch".to_string(), 1),
+            Sketch {
+                name: "sketch".to_string(),
+                hashes: HashMap::from_iter(vec![(1, Some(Stats::new(0, 0)))]),
+                num_kmers: 1,
+                max_kmers: 3,
+                kmer_size: 1
+            }
+        );
     }
 }
