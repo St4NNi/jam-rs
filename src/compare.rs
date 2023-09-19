@@ -1,4 +1,5 @@
-use crate::sketcher;
+use crate::signature::Signature;
+use crate::sketch::Sketch;
 use anyhow::anyhow;
 use anyhow::Result;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
@@ -49,8 +50,8 @@ impl Display for CompareResult {
 }
 
 pub struct MultiComp {
-    from: Vec<sketcher::Sketch>,
-    to: Vec<sketcher::Sketch>,
+    from: Vec<Sketch>,
+    to: Vec<Sketch>,
     results: Vec<CompareResult>,
     threads: usize,
     kmer_size: u8,
@@ -59,8 +60,8 @@ pub struct MultiComp {
 
 impl MultiComp {
     pub fn new(
-        from: Vec<sketcher::Sketch>,
-        to: Vec<sketcher::Sketch>,
+        mut from: Vec<Signature>,
+        mut to: Vec<Signature>,
         threads: usize,
         cutoff: f64,
     ) -> Result<Self> {
@@ -70,8 +71,8 @@ impl MultiComp {
             .kmer_size;
 
         Ok(MultiComp {
-            from,
-            to,
+            from: from.iter_mut().map(|e| e.collapse()).collect(),
+            to: to.iter_mut().map(|e| e.collapse()).collect(),
             results: Vec::new(),
             threads,
             kmer_size,
@@ -121,15 +122,15 @@ impl MultiComp {
 }
 
 pub struct Comparator<'a> {
-    larger: &'a sketcher::Sketch,
-    smaller: &'a sketcher::Sketch,
+    larger: &'a Sketch,
+    smaller: &'a Sketch,
     num_kmers: usize,
     num_common: usize,
     reverse: bool,
 }
 
 impl<'a> Comparator<'a> {
-    pub fn new(sketch_a: &'a sketcher::Sketch, sketch_b: &'a sketcher::Sketch) -> Self {
+    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch) -> Self {
         let (larger, smaller, reverse) = if sketch_a.hashes.len() > sketch_b.hashes.len() {
             (sketch_a, sketch_b, false)
         } else {
@@ -146,9 +147,9 @@ impl<'a> Comparator<'a> {
 
     #[inline]
     pub fn compare(&mut self) {
-        for hash in &self.smaller.hashes {
+        for (hash, _) in &self.smaller.hashes {
             self.num_kmers += 1;
-            if self.larger.hashes.contains(hash) {
+            if self.larger.hashes.contains_key(hash) {
                 self.num_common += 1;
             }
         }

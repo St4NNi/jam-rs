@@ -9,20 +9,20 @@ ___
 Just another minhash (jam) implementation. A high performance minhash variant to screen extremely large (metagenomic) datasets in a very short timeframe.
 Implements parts of the ScaledMinHash / FracMinHash algorithm described in [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027).
 
-Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version tries to specialise more on estimating containment of small sequences in large sets. This is intended to be used to screen terabytes of data in just a few seconds / minutes.
+Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version tries to specialise more on estimating the containment of small sequences in large sets. This is intended to be used to screen terabytes of data in just a few seconds / minutes.
 
 ### Comparison
 
-- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 31) instead of [murmurhash3](https://github.com/mhallin/murmurhash3-rs)
+- [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 32) instead of [murmurhash3](https://github.com/mhallin/murmurhash3-rs)
 - No jaccard similarity since this is meaningless when comparing small embeded sequences against large sets
 - (coming soon) optimisations for specificity and sensitivity (and speed) specifically for search of small sequences in assembled metagenomes
 
 ### Scaling methods
 
 Multiple different scaling methods:
-  - FracMinHash (`fscale`): Restricts the hash-space to a maximum of `scale` * `u64::MAX`
-  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `scale`
-  - MinMaxAbsoluteScaling (`nscale`): Use a minimum or maximum number of hashes per sequence record
+  - FracMinHash (`fscale`): Restricts the hash-space to a (lower) maximum fraction of `u64::MAX` / `fscale`
+  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `kscale` -> 10 means 1/10th of all k-mers will be stored
+  - MinMaxAbsoluteScaling (`nscale`): Restricts the minimum or maximum number of hashes per sequence record
 
 If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together the minimum number of hashes (per sequence record) will be guaranteed. `FracMinHash` and `KmerCountScaling` produce similar results, the first is mainly provided for sourmash compatibility.
 
@@ -35,10 +35,10 @@ Just another minhasher, obviously blazingly fast
 Usage: jam [OPTIONS] <COMMAND>
 
 Commands:
-  sketch   Sketches one or more files and writes the result to an output file
-  merge    Merge multiple input sketches into a single sketch
-  dist     Calculate distance of a (small) sketch against one or more sketches as database
-  help     Print this message or the help of the given subcommand(s)
+  sketch  Sketches one or more files and writes the result to an output file
+  merge   Merge multiple input sketches into a single sketch
+  dist    Estimate distance of a (small) sketch against a subset of one or more sketches as database. Requires all sketches to have the same kmer size
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
   -t, --threads <THREADS>  Number of threads to use [default: 1]
@@ -53,17 +53,25 @@ The easiest way to sketch files is to use the `jam sketch` command. This accepts
 
 ```console
 $ jam sketch
-Sketches one or more files and writes the result to an output file
+Sketch one or more files and write result to output file (or stdout)
 
-Usage: jam sketch [OPTIONS] --input <INPUT> --output <OUTPUT>
+Usage: jam sketch [OPTIONS] [INPUT]...
+
+Arguments:
+  [INPUT]...  Input file(s), one directory or one file with list of files to be hashed
 
 Options:
-  -i, --input <INPUT>          Input file, directory or file with list of files to be hashed
   -o, --output <OUTPUT>        Output file
   -k, --kmer-size <KMER_SIZE>  kmer size all sketches to be compared must have the same size [default: 21]
-  -s, --scale <SCALE>          The estimated scaling factor to apply [default: 0.001]
+      --fscale <FSCALE>        Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+      --kscale <KSCALE>        Scale the hash space to a minimum fraction of all k-mers (SizeMinHash)
   -t, --threads <THREADS>      Number of threads to use [default: 1]
   -f, --force                  Overwrite output files
+      --nmin <NMIN>            Minimum number of k-mers (per record) to be hashed
+      --nmax <NMAX>            Maximum number of k-mers (per record) to be hashed
+      --format <FORMAT>        Change to other output formats [default: bin] [possible values: bin, sourmash]
+      --algorithm <ALGORITHM>  Change the hashing algorithm [default: default] [possible values: default, ahash, xxhash, murmur3]
+      --singleton              Create a separate sketch for each sequence record
   -h, --help                   Print help
 ```
 

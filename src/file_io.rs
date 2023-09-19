@@ -1,14 +1,21 @@
+use crate::cli::Commands;
+use crate::cli::HashAlgorithms;
+use crate::cli::OutputFormats;
 use crate::compare::CompareResult;
+use crate::hash_functions::Function;
+use crate::signature::Signature;
+use crate::sketch::Sketch;
 use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
+use sourmash::signature::Signature as SourmashSignature;
 use std::io::Write;
-use std::ops::DerefMut;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::thread;
 use std::{
     ffi::OsStr,
     fs::{self, File},
@@ -19,66 +26,118 @@ use std::{
 pub struct FileHandler {}
 
 impl FileHandler {
-    pub fn sketch_files(
-        input: Vec<PathBuf>,
-        output: PathBuf,
-        kmer_length: u8,
-        scale: f32,
-        threads: usize,
-    ) -> Result<()> {
-        let output = Arc::new(Mutex::new(File::create(output)?));
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()?;
+    pub fn sketch_files(command: Commands, threads: Option<usize>) -> Result<()> {
+        match command.to_owned() {
+            Commands::Sketch {
+                input,
+                output,
+                kmer_size,
+                fscale,
+                kscale,
+                nmin,
+                nmax,
+                algorithm,
+                format,
+                singleton,
+            } => {
+                let files = FileHandler::test_and_collect_files(input, true)?;
+                let output = File::create(output.unwrap())?;
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads.unwrap_or_default())
+                    .build()?;
 
-        pool.install(|| {
-            input
-                .par_iter()
-                .try_for_each(|file_path| {
-                    let output = output.clone();
-                    let kmer_length = kmer_length;
-                    let scale = scale;
-                    FileHandler::sketch_file(file_path, output, kmer_length, scale)
-                })
-                .unwrap()
-        });
+                let function = Function::from_alg(algorithm.clone(), kmer_size);
 
-        Ok(())
+                let (send, recv) = mpsc::channel();
+
+                let handler = thread::spawn(|| {
+                    FileHandler::write_output(output, format, recv)
+                    // thread code
+                });
+
+                let _ = pool.install(|| {
+                    files.par_iter().try_for_each(|file_path| {
+                        match FileHandler::sketch_file(
+                            file_path,
+                            kmer_size,
+                            fscale,
+                            kscale,
+                            nmin,
+                            nmax,
+                            singleton,
+                            false,
+                            function.clone(),
+                            algorithm.clone(),
+                        ) {
+                            Ok(sig) => send.send(sig).map_err(|_| anyhow!("Error while sending")),
+                            Err(_) => Err(anyhow!("Error while sketching file {:?}", file_path)),
+                        }
+                    })
+                });
+
+                drop(send);
+
+                Ok(handler
+                    .join()
+                    .map_err(|_| anyhow!("Unable to join threads"))??)
+            }
+            _ => Err(anyhow!("Wrong command")),
+        }
     }
 
     pub fn sketch_file(
         input: &PathBuf,
-        output: Arc<Mutex<File>>,
         kmer_length: u8,
-        scale: f32,
-    ) -> Result<()> {
+        fscale: Option<u64>,
+        kscale: Option<u64>,
+        nmin: Option<u64>,
+        nmax: Option<u64>,
+        singleton: bool,
+        stats: bool,
+        function: Function,
+        algorithm: HashAlgorithms,
+    ) -> Result<Signature> {
         let mut x = fs::metadata(input)?.len();
-        if input.ends_with(".gz") {
-            // Approximate the size of the uncompressed file
-            x *= 3;
+        if let Some(ext) = input.extension() {
+            if let Some(ext_str) = ext.to_str() {
+                if ext_str == "gz" {
+                    // Approximate the size of uncompressed file
+                    x *= 3;
+                }
+            }
         }
         let start = std::time::Instant::now();
-        let kmer_num = (x as f64 * scale as f64) as u64;
+        let kscale = if let Some(kscale) = kscale {
+            (x as f64 / kscale as f64) as u64
+        } else {
+            u64::MAX
+        };
+        let max_hash = if let Some(fscale) = fscale {
+            (u64::MAX as f64 / fscale as f64) as u64
+        } else {
+            u64::MAX
+        };
         let mut sketcher = sketcher::Sketcher::new(
             kmer_length,
-            kmer_num,
             input
                 .to_str()
                 .ok_or_else(|| anyhow!("Unknown path"))?
                 .to_string(),
+            singleton,
+            stats,
+            kscale,
+            max_hash,
+            nmin,
+            nmax,
+            function,
+            algorithm,
         );
         let mut reader = parse_fastx_file(input)?;
         let mut counter = 0;
         while let Some(record) = reader.next() {
-            let seqrec = record?;
-            sketcher.process(&seqrec);
+            sketcher.process(&record?);
             counter += 1;
         }
-
-        let output = output.clone();
-        let mut o_file = output.lock().unwrap();
-        let mut bufwriter = std::io::BufWriter::new(o_file.deref_mut());
-        bincode::serialize_into(&mut bufwriter, &sketcher.finalize())?;
         let elapsed = start.elapsed().as_millis();
         println!(
             "Processed {:?} with {} records, in {:?} seconds",
@@ -86,22 +145,39 @@ impl FileHandler {
             counter,
             elapsed as f64 / 1000.0,
         );
-        bufwriter.flush()?;
+        Ok(sketcher.finish())
+    }
+
+    pub fn write_output(
+        output: File,
+        output_format: OutputFormats,
+        signature_recv: Receiver<Signature>,
+    ) -> Result<()> {
+        let mut bufwriter = std::io::BufWriter::new(output);
+
+        match output_format {
+            OutputFormats::Bin => {
+                while let Ok(sig) = signature_recv.recv() {
+                    let name = sig.file_name.clone();
+                    let len = sig.sketches.first().unwrap().hashes.len();
+                    bincode::serialize_into(&mut bufwriter, &vec![sig])?;
+                    println!("Wrote signature: {:?} with {:?} hashes;", name, len,);
+                }
+            }
+            OutputFormats::Sourmash => {
+                while let Ok(sig) = signature_recv.recv() {
+                    let sourmash_sig: SourmashSignature = sig.into();
+                    serde_json::to_writer(&mut bufwriter, &vec![sourmash_sig])?;
+                }
+            }
+        }
+
         Ok(())
     }
 
-    pub fn read_sketches(input: &PathBuf) -> Result<Vec<sketcher::Sketch>> {
-        let mut vec: Vec<sketcher::Sketch> = vec![];
-
-        let mut reader = BufReader::new(std::fs::File::open(input)?);
-
-        while let Ok(result) =
-            bincode::deserialize_from::<&mut BufReader<File>, sketcher::Sketch>(&mut reader)
-        {
-            vec.push(result);
-        }
-
-        Ok(vec)
+    pub fn read_signatures(input: &PathBuf) -> Result<Vec<Signature>> {
+        let read_to_bytes = std::fs::read(input)?;
+        Ok(bincode::deserialize_from(read_to_bytes.as_slice()).unwrap())
     }
 
     pub fn concat(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {
@@ -111,7 +187,7 @@ impl FileHandler {
         for input in inputs {
             let mut reader = BufReader::new(std::fs::File::open(input)?);
             while let Ok(result) =
-                bincode::deserialize_from::<&mut BufReader<File>, sketcher::Sketch>(&mut reader)
+                bincode::deserialize_from::<&mut BufReader<File>, Sketch>(&mut reader)
             {
                 bincode::serialize_into(&mut bufwriter, &result)?;
             }
