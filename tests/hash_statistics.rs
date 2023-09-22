@@ -47,6 +47,7 @@ fn ks(samples: &[u64]) -> f64 {
 }
 
 fn print_ks(hash: &str, d: f64) {
+    assert!(d < 0.005); // 0.5% confidence interval that the distribution is not uniform.
     println!("{:10} {: <10.10}", hash, d);
 }
 
@@ -116,13 +117,21 @@ fn test_bit_distribution() {
 
     println!("bit|xxhash3|ahash|murmur3_old|murmur3_new");
     for x in 0..64 {
+        let xxhash_bit = xxhash3_bits[x] as f64 / 10_000_000f64;
+        let ahash_bit = ahash_bits[x] as f64 / 10_000_000f64;
+        let murmur3_old_bit = murmur3_old_bits[x] as f64 / 10_000_000f64;
+        let murmur3_new_bit = murmur3_new_bits[x] as f64 / 10_000_000f64;
+        assert!(xxhash_bit > 0.49);
+        assert!(xxhash_bit < 0.51);
+        assert!(ahash_bit > 0.49);
+        assert!(ahash_bit < 0.51);
+        assert!(murmur3_old_bit > 0.49);
+        assert!(murmur3_old_bit < 0.51);
+        assert!(murmur3_new_bit > 0.49);
+        assert!(murmur3_new_bit < 0.51);
         println!(
             "{}|{}|{}|{}|{}",
-            x,
-            xxhash3_bits[x] as f64 / 10_000_000f64,
-            ahash_bits[x] as f64 / 10_000_000f64,
-            murmur3_old_bits[x] as f64 / 10_000_000f64,
-            murmur3_new_bits[x] as f64 / 10_000_000f64
+            x, xxhash_bit, ahash_bit, murmur3_old_bit, murmur3_new_bit
         );
     }
 }
