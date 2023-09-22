@@ -1,6 +1,6 @@
 use std::path::{self, PathBuf};
 
-use jam_rs::file_io::FileHandler;
+use jam_rs::{compare::MultiComp, file_io::FileHandler};
 use sourmash::sketch::Sketch;
 
 fn get_hashes_sketch(sketch: &Sketch) -> Vec<u64> {
@@ -54,3 +54,9 @@ fn test_file_sketching() {
         get_hashes_sketch(&expected_sketch)
     );
 }
+
+// #[test]
+// fn test_multi_comp() {
+
+//     let comp = MultiComp::new
+// }
