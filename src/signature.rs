@@ -1,6 +1,11 @@
-use crate::{cli::HashAlgorithms, sketch::Sketch};
+use crate::{
+    cli::HashAlgorithms,
+    hasher::NoHashHasher,
+    sketch::{Sketch, Stats},
+};
 use serde::{Deserialize, Serialize};
-use sourmash::signature::Signature as SourmashSignature;
+use sourmash::signature::{Signature as SourmashSignature, SigsTrait};
+use std::hash::BuildHasherDefault;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Signature {
@@ -26,6 +31,96 @@ impl Into<SourmashSignature> for Signature {
                     .collect(),
             )
             .build()
+    }
+}
+
+impl From<SourmashSignature> for Signature {
+    fn from(sourmash_signature: SourmashSignature) -> Self {
+        let mut sketches = Vec::new();
+        let mut max_hash = None;
+        let mut kmer_size = None;
+        for sketch in sourmash_signature.sketches() {
+            match sketch {
+                sourmash::sketch::Sketch::MinHash(mash) => {
+                    if let Some(max_hash) = max_hash {
+                        if max_hash != mash.max_hash() {
+                            panic!("Max hash of sketches is not equal");
+                        }
+                    } else {
+                        max_hash = Some(mash.max_hash());
+                    }
+
+                    if let Some(kmer_size) = kmer_size {
+                        if kmer_size != mash.ksize() as u8 {
+                            panic!("Kmer size of sketches is not equal");
+                        }
+                    } else {
+                        kmer_size = Some(mash.ksize() as u8);
+                    }
+
+                    let mut sketch = Sketch::new(
+                        sourmash_signature.filename(),
+                        mash.mins().len(),
+                        mash.max_hash() as usize,
+                        mash.ksize() as u8,
+                    );
+                    sketch.hashes = mash
+                        .mins()
+                        .iter()
+                        .map(|x| (*x, None))
+                        .collect::<std::collections::HashMap<
+                            u64,
+                            Option<Stats>,
+                            BuildHasherDefault<NoHashHasher>,
+                        >>();
+                    sketches.push(sketch);
+                }
+                sourmash::sketch::Sketch::LargeMinHash(mash) => {
+                    if let Some(max_hash) = max_hash {
+                        if max_hash != mash.max_hash() {
+                            panic!("Max hash of sketches is not equal");
+                        }
+                    } else {
+                        max_hash = Some(mash.max_hash());
+                    }
+
+                    if let Some(kmer_size) = kmer_size {
+                        if kmer_size != mash.ksize() as u8 {
+                            panic!("Kmer size of sketches is not equal");
+                        }
+                    } else {
+                        kmer_size = Some(mash.ksize() as u8);
+                    }
+
+                    let mut sketch = Sketch::new(
+                        sourmash_signature.filename(),
+                        mash.mins().len(),
+                        mash.max_hash() as usize,
+                        mash.ksize() as u8,
+                    );
+                    sketch.hashes = mash
+                        .mins()
+                        .iter()
+                        .map(|x| (*x, None))
+                        .collect::<std::collections::HashMap<
+                            u64,
+                            Option<Stats>,
+                            BuildHasherDefault<NoHashHasher>,
+                        >>();
+                    sketches.push(sketch);
+                }
+                sourmash::sketch::Sketch::HyperLogLog(_) => {
+                    unimplemented!("HyperLogLog sketches are not supported")
+                }
+            }
+        }
+        Signature {
+            file_name: sourmash_signature.filename(),
+            sketches,
+            algorithm: HashAlgorithms::Murmur3,
+            kmer_size: kmer_size.expect("No sketch with kmer_size found"),
+            max_hash: max_hash.expect("No sketch with max hash found"),
+        }
     }
 }
 
