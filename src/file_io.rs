@@ -290,3 +290,19 @@ impl FileHandler {
 pub fn test_extension(ext: &OsStr) -> bool {
     !(ext != "fasta" && ext != "fa" && ext != "fastq" && ext != "fq" && ext != "gz")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_test_extension() {
+        assert!(test_extension(OsStr::new("fasta")));
+        assert!(test_extension(OsStr::new("fa")));
+        assert!(test_extension(OsStr::new("fastq")));
+        assert!(test_extension(OsStr::new("fq")));
+        assert!(test_extension(OsStr::new("gz")));
+        assert!(!test_extension(OsStr::new("txt")));
+        assert!(!test_extension(OsStr::new("list")));
+    }
+}
