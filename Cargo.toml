@@ -9,9 +9,9 @@ description = "Just another minhash (Jam) implementation in Rust"
 [dependencies]
 anyhow = "1.0.75"
 bincode = "1.3.3"
-flate2 = "1.0.27"
+flate2 = "1.0.28"
 needletail = "0.5.1"
-rayon = "1.7.0"
+rayon = "1.8.0"
 xxhash-rust = { version = "0.8.7", features = ["xxh3"]}
 bytemuck = "1.14.0"
 serde = { version = "1", features = ["derive"] }
