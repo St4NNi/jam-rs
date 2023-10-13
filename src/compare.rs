@@ -92,7 +92,7 @@ impl MultiComp {
                 self.to.par_iter().try_for_each(|target| {
                     if target.kmer_size != self.kmer_size || origin.kmer_size != self.kmer_size {
                         return Err(anyhow!(
-                            "Kmer sizes do not match expected: {} got: {}",
+                            "Kmer sizes do not match, expected: {}, got: {}",
                             self.kmer_size,
                             origin.kmer_size
                         ));
