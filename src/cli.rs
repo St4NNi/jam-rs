@@ -101,5 +101,8 @@ pub enum Commands {
         /// Cut-off value for similarity
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
+        /// Use the Stats params for restrict results
+        #[arg(long)]
+        stats: bool,
     },
 }

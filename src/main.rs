@@ -27,6 +27,7 @@ fn main() {
             database,
             output,
             cutoff,
+            stats,
         } => {
             let mut cmd = Cli::command();
             let database_files =
@@ -76,6 +77,7 @@ fn main() {
                 db_sketches,
                 args.threads.unwrap(),
                 cutoff,
+                stats,
             ) {
                 Ok(mut mc) => {
                     if let Err(e) = mc.compare() {

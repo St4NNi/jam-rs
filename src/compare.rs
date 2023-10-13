@@ -56,6 +56,7 @@ pub struct MultiComp {
     threads: usize,
     kmer_size: u8,
     cutoff: f64,
+    stats: bool,
 }
 
 impl MultiComp {
@@ -64,6 +65,7 @@ impl MultiComp {
         mut to: Vec<Signature>,
         threads: usize,
         cutoff: f64,
+        stats: bool,
     ) -> Result<Self> {
         let kmer_size = from
             .first()
@@ -77,6 +79,7 @@ impl MultiComp {
             threads,
             kmer_size,
             cutoff,
+            stats,
         })
     }
 
