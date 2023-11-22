@@ -15,7 +15,7 @@ Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers
 A pre-release is published via [crates.io](https://crates.io/) to install it use (you need to have `cargo` and the `rust-toolchain` installed, the easiest way is via [rustup.rs](https://rustup.rs/)):
 
 ```bash
-cargo install jam-rs
+cargo install jam-rs@0.1.0-beta.2
 ```
 
 If you want the bleeding edge development release you can install it via git:
