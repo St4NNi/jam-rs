@@ -28,6 +28,8 @@ fn main() {
             output,
             cutoff,
             stats,
+            gc_lower,
+            gc_upper,
         } => {
             let mut cmd = Cli::command();
             let database_files =
@@ -60,6 +62,11 @@ fn main() {
                 }
             };
 
+            let gc_bounds = match (gc_lower, gc_upper) {
+                (Some(l), Some(u)) => Some((l, u)),
+                _ => None,
+            };
+
             let mut input_sketch = Vec::new();
             for db_path in fs_input {
                 match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
@@ -78,6 +85,7 @@ fn main() {
                 args.threads.unwrap(),
                 cutoff,
                 stats,
+                gc_bounds,
             ) {
                 Ok(mut mc) => {
                     if let Err(e) = mc.compare() {

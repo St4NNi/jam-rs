@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "0.1.0")]
+#[command(version = "0.1.0-beta.1")]
 #[command(
     about = "Just another minhasher, obviously blazingly fast",
     long_about = "A heavily optimized minhash implementation that focuses less on accuracy and more on quick scans of large datasets."
@@ -104,5 +104,11 @@ pub enum Commands {
         /// Use the Stats params for restricting results
         #[arg(long)]
         stats: bool,
+        /// Use GC stats with an upper bound of x% and a lower bound of y%
+        #[arg(long)]
+        gc_lower: Option<u8>,
+        /// Use GC stats with an upper bound of x% and a lower bound of y%
+        #[arg(long)]
+        gc_upper: Option<u8>,
     },
 }

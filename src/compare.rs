@@ -58,6 +58,7 @@ pub struct MultiComp {
     kmer_size: u8,
     cutoff: f64,
     use_stats: bool,
+    gc_bounds: Option<(u8, u8)>,
 }
 
 impl MultiComp {
@@ -67,6 +68,7 @@ impl MultiComp {
         threads: usize,
         cutoff: f64,
         use_stats: bool,
+        gc_bounds: Option<(u8, u8)> 
     ) -> Result<Self> {
         let kmer_size = from
             .first()
@@ -81,6 +83,7 @@ impl MultiComp {
             kmer_size,
             cutoff,
             use_stats,
+            gc_bounds,
         })
     }
 
@@ -101,7 +104,7 @@ impl MultiComp {
                             origin.kmer_size
                         ));
                     }
-                    let mut comparator = Comparator::new(origin, target, self.use_stats);
+                    let mut comparator = Comparator::new(origin, target, self.use_stats, self.gc_bounds);
                     comparator.compare()?;
                     results
                         .lock()
@@ -133,10 +136,11 @@ pub struct Comparator<'a> {
     num_skipped: usize,
     reverse: bool,
     use_stats: bool,
+    gc_bounds: Option<(u8, u8)>,
 }
 
 impl<'a> Comparator<'a> {
-    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch, use_stats: bool) -> Self {
+    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch, use_stats: bool, gc_bounds: Option<(u8, u8)>) -> Self {
         let (larger, smaller, reverse) = if sketch_a.hashes.len() > sketch_b.hashes.len() {
             // DATABASE, INPUT -> Reverse = false
             (sketch_a, sketch_b, false)
@@ -152,6 +156,7 @@ impl<'a> Comparator<'a> {
             num_skipped: 0,
             reverse,
             use_stats,
+            gc_bounds,
         }
     }
 
@@ -168,11 +173,11 @@ impl<'a> Comparator<'a> {
                 if let Some(stats) = self.larger.hashes.get(hash) {
                     let larger_stats = stats.as_ref().ok_or_else(|| anyhow!("Missing stats"))?;
                     if self.reverse {
-                        if !larger_stats.compare(smaller_stats, 10, 10) {
+                        if !larger_stats.compare(smaller_stats, self.gc_bounds) {
                             self.num_skipped += 1;
                         }
                     } else {
-                        if !smaller_stats.compare(larger_stats, 10, 10) {
+                        if !smaller_stats.compare(larger_stats, self.gc_bounds) {
                             self.num_skipped += 1;
                         }
                     }
@@ -252,7 +257,7 @@ mod tests {
             kmer_size: 21,
         };
 
-        let mut comp = super::Comparator::new(&sketch_a, &sketch_b, false);
+        let mut comp = super::Comparator::new(&sketch_a, &sketch_b, false, None);
         comp.compare().unwrap();
         let result = comp.finalize();
         assert_eq!(result.num_kmers, 3);

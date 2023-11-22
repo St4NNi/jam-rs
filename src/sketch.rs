@@ -44,22 +44,24 @@ impl Stats {
     }
 
     #[inline(always)]
-    pub fn compare(&self, other: &Self, gc_upper_range: u8, gc_lower_range: u8) -> bool {
+    pub fn compare(&self, other: &Self, gc_bounds: Option<(u8, u8)>) -> bool {
         // Expect that gc_upper_range and gc_lower_range are smaller than 100
-        assert!(gc_lower_range < 100);
-        assert!(gc_upper_range < 100);
-        // If size class of self is larger than other
-        if self.0 .0 >= other.0 .0 {
-            // Example: Self = 55, other = 50, gc_upper_range = 5, gc_lower_range = 5
-            // Self + 5 >= other
-            // Self - 5 >= other --> possible hit
-            if self.0 .1 + gc_upper_range >= other.0 .1 && self.0 .1 - gc_lower_range <= other.0 .1
-            {
-                // Other is within range of self -> it is a subset
-                return true;
+        if let Some((gc_lower_range, gc_upper_range)) = gc_bounds {
+            // If size class of self is larger than other
+            if self.0 .0 >= other.0 .0 {
+                // Example: Self = 55, other = 50, gc_upper_range = 5, gc_lower_range = 5
+                // Self + 5 >= other
+                // Self - 5 >= other --> possible hit
+                if self.0 .1 + gc_upper_range >= other.0 .1 && self.0 .1 - gc_lower_range <= other.0 .1
+                {
+                    // Other is within range of self -> it is a subset
+                    return true;
+                }
             }
+        }else{
+            return self.0 .0 >= other.0 .0
         }
-        return false;
+        false
     }
 }
 
@@ -123,16 +125,16 @@ mod tests {
 
         let stata = Stats::new(2, 50);
         let statb = Stats::new(2, 50);
-        assert!(stata.compare(&statb, 5, 5));
+        assert!(stata.compare(&statb, Some((5, 5))));
 
         let stata = Stats::new(2, 20);
         let statb = Stats::new(4, 50);
         // Should be false because size class of statb is larger than stata
         // and gc class of statb is not within range of stata
-        assert!(!stata.compare(&statb, 5, 5));
+        assert!(!stata.compare(&statb, Some((5, 5))));
         // Should fail only because of size class
-        assert!(!stata.compare(&statb, 30, 5));
+        assert!(!stata.compare(&statb, Some((30, 5))));
         // Should succeed because of size class and gc class
-        assert!(statb.compare(&stata, 30, 30));
+        assert!(statb.compare(&stata, Some((30, 30))));
     }
 }
