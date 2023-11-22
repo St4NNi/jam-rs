@@ -84,4 +84,42 @@ mod tests {
     fn test_xxhash3() {
         assert_eq!(xxhash3(b"AAAAAAAAAAA"), 0x92994E9987384EE2);
     }
+
+    #[test]
+    fn test_ahash() {
+        assert_eq!(ahash(0xAAAAAAAAAAAAAAA), 6369629604220809163);
+    }
+
+    #[test]
+    fn test_murmur3() {
+        assert_eq!(murmur3(b"AAAAAAAAAAA"), 7773142420371383521);
+    }
+
+    #[test]
+    fn test_xxhash3_u64() {
+        assert_eq!(xxhash3_u64(0xAAAAAAAAAAAAAAA), 5855080426738543665);
+    }
+
+    #[test]
+    fn test_murmur3_u64() {
+        assert_eq!(murmur3_u64(0xAAAAAAAAAAAAAAA), 442865051503200633);
+    }
+
+    #[test]
+    fn function_test() {
+        let f = Function::from_alg(HashAlgorithms::Ahash, 21);
+        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 6369629604220809163);
+        let f = Function::from_alg(HashAlgorithms::Murmur3, 21);
+        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 442865051503200633);
+        let f = Function::from_alg(HashAlgorithms::Xxhash, 21);
+        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 5855080426738543665);
+        let f = Function::from_alg(HashAlgorithms::Default, 21);
+        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 6369629604220809163);
+        let f = Function::from_alg(HashAlgorithms::Murmur3, 32);
+        assert_eq!(f.get_large().unwrap()(b"AAAAAAAAAAA"), 7773142420371383521);
+        let f = Function::from_alg(HashAlgorithms::Xxhash, 32);
+        assert_eq!(f.get_large().unwrap()(b"AAAAAAAAAAA"), 10563560822279786210);
+        let f = Function::from_alg(HashAlgorithms::Default, 32);
+        assert_eq!(f.get_large().unwrap()(b"AAAAAAAAAAA"), 10563560822279786210);
+    }
 }
