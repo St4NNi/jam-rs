@@ -1,11 +1,24 @@
 [package]
 name = "jam-rs"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 edition = "2021"
 repository = "https://github.com/St4NNi/jam-rs"
 license = "MIT"
+authors = ["Sebastian Beyvers <sebastian.beyvers@cb.jlug.de>"]
 description = "Just another (genomic) minhash (Jam) implementation in Rust"
+keywords = ["minhash", "metagenomics", "bioinformatics", "containment", "jaccard"]
+categories = ["command-line-utilities", "science", "algorithms"]
 exclude=["/tests"]
+readme = "README.md"
+
+
+[[bin]]
+name = "jam"
+path = "src/main.rs"
+
+[lib]
+name = "jam_rs"
+path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.75"
