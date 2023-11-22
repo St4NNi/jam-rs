@@ -183,20 +183,18 @@ impl<'a> Comparator<'a> {
                     if self.reverse {
                         if !larger_stats.compare(smaller_stats, self.gc_bounds) {
                             self.num_skipped += 1;
-                        }else{
+                        } else {
                             self.num_common += 1;
                         }
+                    } else if !smaller_stats.compare(larger_stats, self.gc_bounds) {
+                        self.num_skipped += 1;
                     } else {
-                        if !smaller_stats.compare(larger_stats, self.gc_bounds) {
-                            self.num_skipped += 1;
-                        }else{
-                            self.num_common += 1;
-                        }
+                        self.num_common += 1;
                     }
                 };
             }
         } else {
-            for (hash, _) in &self.smaller.hashes {
+            for hash in self.smaller.hashes.keys() {
                 self.num_kmers += 1;
                 if self.larger.hashes.contains_key(hash) {
                     self.num_common += 1;
@@ -247,10 +245,7 @@ impl<'a> Comparator<'a> {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{
-        compare::CompareResult,
-        signature::Signature, sketch::Stats,
-    };
+    use crate::{compare::CompareResult, signature::Signature, sketch::Stats};
 
     use super::MultiComp;
 
@@ -362,6 +357,9 @@ mod tests {
         };
         assert_eq!(res[0], expected);
 
-        assert_eq!(res[0].to_string(), "test\ttest2\t2\t4\t50\t50\t2".to_string());
+        assert_eq!(
+            res[0].to_string(),
+            "test\ttest2\t2\t4\t50\t50\t2".to_string()
+        );
     }
 }

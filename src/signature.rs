@@ -16,18 +16,18 @@ pub struct Signature {
     pub max_hash: u64,
 }
 
-impl Into<SourmashSignature> for Signature {
-    fn into(self) -> SourmashSignature {
+impl From<Signature> for SourmashSignature {
+    fn from(val: Signature) -> Self {
         SourmashSignature::builder()
-            .hash_function(format!("{:?}", self.algorithm))
-            .filename(Some(self.file_name))
+            .hash_function(format!("{:?}", val.algorithm))
+            .filename(Some(val.file_name))
             .email("".to_string())
             .license("CC0".to_string())
             .name(None)
             .signatures(
-                self.sketches
+                val.sketches
                     .into_iter()
-                    .map(|sketch| sketch.into_sourmash(self.max_hash))
+                    .map(|sketch| sketch.into_sourmash(val.max_hash))
                     .collect(),
             )
             .build()

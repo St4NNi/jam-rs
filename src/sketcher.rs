@@ -27,20 +27,16 @@ struct SketchHelper {
 
 impl SketchHelper {
     pub fn new(kmer_budget: u64, max_hash: u64, nmin: Option<u64>, nmax: Option<u64>) -> Self {
-        let local_heap = if let Some(nmin) = nmin {
-            Some((nmin, BinaryHeap::with_capacity((nmin * 2) as usize)))
-        } else {
-            None
-        };
+        let local_heap = nmin.map(|nmin| (nmin, BinaryHeap::with_capacity((nmin * 2) as usize)));
 
         SketchHelper {
             kmer_budget,
             nmax,
             global_counter: 0,
             kmer_seq_counter: 0,
-            max_hash: max_hash,
+            max_hash,
             last_max_hash: 0,
-            global_heap: BinaryHeap::with_capacity(10_000_000 as usize),
+            global_heap: BinaryHeap::with_capacity(10_000_000_usize),
             local_heap,
             hashes: HashMap::with_capacity_and_hasher(
                 10_000_000,
@@ -79,17 +75,15 @@ impl SketchHelper {
                         self.hashes.remove(&max);
                     }
                 }
+            } else if self.global_heap.len() < self.kmer_budget as usize {
+                self.global_heap.push(hash);
+                self.hashes.insert(hash, self.current_stat.clone());
             } else {
-                if self.global_heap.len() < self.kmer_budget as usize {
-                    self.global_heap.push(hash);
+                let mut max = self.global_heap.peek_mut().unwrap();
+                if hash < *max {
+                    *max = hash;
                     self.hashes.insert(hash, self.current_stat.clone());
-                } else {
-                    let mut max = self.global_heap.peek_mut().unwrap();
-                    if hash < *max {
-                        *max = hash;
-                        self.hashes.insert(hash, self.current_stat.clone());
-                        self.hashes.remove(&max);
-                    }
+                    self.hashes.remove(&max);
                 }
             }
         }

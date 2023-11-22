@@ -23,7 +23,7 @@ pub fn xxhash3_u64(kmer: u64) -> u64 {
 pub fn ahash(kmer: u64) -> u64 {
     let temp = (kmer ^ KEY1) as u128 * 6364136223846793005_u128;
     let temp2 = ((temp & 0xffff_ffff_ffff_ffff) as u64) ^ ((temp >> 64) as u64); // XOR the lower 64 bits with the upper 64 bits.
-    return temp2.rotate_left(KEY2);
+    temp2.rotate_left(KEY2)
 }
 
 // Faster version of murmur3 with equivalent output
@@ -108,13 +108,25 @@ mod tests {
     #[test]
     fn function_test() {
         let f = Function::from_alg(HashAlgorithms::Ahash, 21);
-        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 6369629604220809163);
+        assert_eq!(
+            f.get_small().unwrap()(0xAAAAAAAAAAAAAAA),
+            6369629604220809163
+        );
         let f = Function::from_alg(HashAlgorithms::Murmur3, 21);
-        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 442865051503200633);
+        assert_eq!(
+            f.get_small().unwrap()(0xAAAAAAAAAAAAAAA),
+            442865051503200633
+        );
         let f = Function::from_alg(HashAlgorithms::Xxhash, 21);
-        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 5855080426738543665);
+        assert_eq!(
+            f.get_small().unwrap()(0xAAAAAAAAAAAAAAA),
+            5855080426738543665
+        );
         let f = Function::from_alg(HashAlgorithms::Default, 21);
-        assert_eq!(f.get_small().unwrap()(0xAAAAAAAAAAAAAAA), 6369629604220809163);
+        assert_eq!(
+            f.get_small().unwrap()(0xAAAAAAAAAAAAAAA),
+            6369629604220809163
+        );
         let f = Function::from_alg(HashAlgorithms::Murmur3, 32);
         assert_eq!(f.get_large().unwrap()(b"AAAAAAAAAAA"), 7773142420371383521);
         let f = Function::from_alg(HashAlgorithms::Xxhash, 32);
