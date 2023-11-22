@@ -26,25 +26,27 @@ impl Display for CompareResult {
         if self.reverse {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 self.to_name,
                 self.from_name,
                 self.num_common,
                 self.num_kmers,
                 self.num_common as f64 / self.num_kmers as f64 * 100.0, // Percent
                 self.estimated_containment
+                self.option_num_skipped.unwrap_or(0)
             )?;
             Ok(())
         } else {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                 self.from_name,
                 self.to_name,
                 self.num_common,
                 self.num_kmers,
                 self.num_common as f64 / self.num_kmers as f64 * 100.0,
-                self.estimated_containment
+                self.estimated_containment,
+                self.option_num_skipped.unwrap_or(0)
             )
         }
     }
