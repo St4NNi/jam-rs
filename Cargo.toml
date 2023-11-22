@@ -5,6 +5,7 @@ edition = "2021"
 repository = "https://github.com/St4NNi/jam-rs"
 license = "MIT"
 description = "Just another (genomic) minhash (Jam) implementation in Rust"
+exclude=["/tests"]
 
 [dependencies]
 anyhow = "1.0.75"
