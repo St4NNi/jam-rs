@@ -52,14 +52,15 @@ impl Stats {
                 // Example: Self = 55, other = 50, gc_upper_range = 5, gc_lower_range = 5
                 // Self + 5 >= other
                 // Self - 5 >= other --> possible hit
-                if self.0 .1 + gc_upper_range >= other.0 .1 && self.0 .1 - gc_lower_range <= other.0 .1
+                if self.0 .1 + gc_upper_range >= other.0 .1
+                    && self.0 .1 - gc_lower_range <= other.0 .1
                 {
                     // Other is within range of self -> it is a subset
                     return true;
                 }
             }
-        }else{
-            return self.0 .0 >= other.0 .0
+        } else {
+            return self.0 .0 >= other.0 .0;
         }
         false
     }

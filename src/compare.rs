@@ -10,7 +10,7 @@ use std::{
     sync::Mutex,
 };
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct CompareResult {
     pub from_name: String,
     pub to_name: String,
@@ -70,7 +70,7 @@ impl MultiComp {
         threads: usize,
         cutoff: f64,
         use_stats: bool,
-        gc_bounds: Option<(u8, u8)> 
+        gc_bounds: Option<(u8, u8)>,
     ) -> Result<Self> {
         let kmer_size = from
             .first()
@@ -106,7 +106,8 @@ impl MultiComp {
                             origin.kmer_size
                         ));
                     }
-                    let mut comparator = Comparator::new(origin, target, self.use_stats, self.gc_bounds);
+                    let mut comparator =
+                        Comparator::new(origin, target, self.use_stats, self.gc_bounds);
                     comparator.compare()?;
                     results
                         .lock()
@@ -142,8 +143,13 @@ pub struct Comparator<'a> {
 }
 
 impl<'a> Comparator<'a> {
-    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch, use_stats: bool, gc_bounds: Option<(u8, u8)>) -> Self {
-        let (larger, smaller, reverse) = if sketch_a.hashes.len() > sketch_b.hashes.len() {
+    pub fn new(
+        sketch_a: &'a Sketch,
+        sketch_b: &'a Sketch,
+        use_stats: bool,
+        gc_bounds: Option<(u8, u8)>,
+    ) -> Self {
+        let (larger, smaller, reverse) = if sketch_a.hashes.len() >= sketch_b.hashes.len() {
             // DATABASE, INPUT -> Reverse = false
             (sketch_a, sketch_b, false)
         } else {
@@ -177,13 +183,16 @@ impl<'a> Comparator<'a> {
                     if self.reverse {
                         if !larger_stats.compare(smaller_stats, self.gc_bounds) {
                             self.num_skipped += 1;
+                        }else{
+                            self.num_common += 1;
                         }
                     } else {
                         if !smaller_stats.compare(larger_stats, self.gc_bounds) {
                             self.num_skipped += 1;
+                        }else{
+                            self.num_common += 1;
                         }
                     }
-                    self.num_common += 1;
                 };
             }
         } else {
@@ -238,6 +247,13 @@ impl<'a> Comparator<'a> {
 mod tests {
     use std::collections::HashMap;
 
+    use crate::{
+        compare::CompareResult,
+        signature::Signature, sketch::Stats,
+    };
+
+    use super::MultiComp;
+
     #[test]
     fn test_comp_without_stats() {
         let mut hashmap = HashMap::default();
@@ -266,5 +282,86 @@ mod tests {
         assert_eq!(result.num_common, 2);
         assert_eq!(result.estimated_containment, 66.66666666666666);
         assert_eq!(result.option_num_skipped, None);
+
+        let constructed_result = CompareResult {
+            from_name: "a".to_string(),
+            to_name: "b".to_string(),
+            num_kmers: 3,
+            num_common: 2,
+            option_num_skipped: None,
+            reverse: false,
+            estimated_containment: 66.66666666666666,
+        };
+        assert_eq!(result, constructed_result);
+    }
+
+    #[test]
+    fn test_multi_comp() {
+        let mut hashmap = HashMap::default();
+        hashmap.extend([
+            (1, Some(Stats::new(3, 20))),
+            (2, Some(Stats::new(3, 20))),
+            (3, Some(Stats::new(3, 20))),
+            (4, Some(Stats::new(3, 20))),
+        ]);
+        let sketch_a = crate::sketch::Sketch {
+            name: "a".to_string(),
+            hashes: hashmap,
+            num_kmers: 4,
+            max_kmers: 10,
+            kmer_size: 21,
+        };
+        let mut hashmap = HashMap::default();
+        hashmap.extend([
+            (1, Some(Stats::new(5, 20))),
+            (2, Some(Stats::new(3, 20))),
+            (3, Some(Stats::new(2, 30))),
+            (4, Some(Stats::new(2, 60))),
+        ]);
+        let sketch_b = crate::sketch::Sketch {
+            name: "b".to_string(),
+            hashes: hashmap,
+            num_kmers: 4,
+            max_kmers: 10,
+            kmer_size: 21,
+        };
+        let mut comp = MultiComp::new(
+            vec![Signature {
+                file_name: "test".to_string(),
+                sketches: vec![sketch_a],
+                algorithm: crate::cli::HashAlgorithms::Ahash,
+                kmer_size: 21,
+                max_hash: u64::MAX,
+            }],
+            vec![Signature {
+                file_name: "test2".to_string(),
+                sketches: vec![sketch_b],
+                algorithm: crate::cli::HashAlgorithms::Ahash,
+                kmer_size: 21,
+                max_hash: u64::MAX,
+            }],
+            1,
+            0.0,
+            true,
+            Some((10, 10)),
+        )
+        .unwrap();
+
+        comp.compare().unwrap();
+        let res = comp.finalize();
+
+        assert_eq!(res.len(), 1);
+        let expected = CompareResult {
+            from_name: "test".to_string(),
+            to_name: "test2".to_string(),
+            num_kmers: 4,
+            num_common: 2,
+            option_num_skipped: Some(2),
+            reverse: false,
+            estimated_containment: 50.0,
+        };
+        assert_eq!(res[0], expected);
+
+        assert_eq!(res[0].to_string(), "test\ttest2\t2\t4\t50\t50\t2".to_string());
     }
 }
