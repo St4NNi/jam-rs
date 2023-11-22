@@ -32,7 +32,7 @@ impl Display for CompareResult {
                 self.num_common,
                 self.num_kmers,
                 self.num_common as f64 / self.num_kmers as f64 * 100.0, // Percent
-                self.estimated_containment
+                self.estimated_containment,
                 self.option_num_skipped.unwrap_or(0)
             )?;
             Ok(())
