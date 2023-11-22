@@ -160,7 +160,7 @@ impl<'a> Comparator<'a> {
     // This comparison is always in relation to the query sketch
     // If reverse is true, the query sketch is the larger sketch
     #[inline]
-    pub fn compare(&mut self) -> Result<()>{
+    pub fn compare(&mut self) -> Result<()> {
         if self.use_stats {
             for (hash, stats) in &self.smaller.hashes {
                 let smaller_stats = stats.as_ref().ok_or_else(|| anyhow!("Missing stats"))?;
@@ -171,7 +171,7 @@ impl<'a> Comparator<'a> {
                         if !larger_stats.compare(smaller_stats, 10, 10) {
                             self.num_skipped += 1;
                         }
-                    }else{
+                    } else {
                         if !smaller_stats.compare(larger_stats, 10, 10) {
                             self.num_skipped += 1;
                         }
@@ -179,7 +179,7 @@ impl<'a> Comparator<'a> {
                     self.num_common += 1;
                 };
             }
-        }else{
+        } else {
             for (hash, _) in &self.smaller.hashes {
                 self.num_kmers += 1;
                 if self.larger.hashes.contains_key(hash) {
@@ -224,5 +224,40 @@ impl<'a> Comparator<'a> {
         self.num_kmers = 0;
         self.num_common = 0;
         self.num_skipped = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    #[test]
+    fn test_comp_without_stats() {
+        let mut hashmap = HashMap::default();
+        hashmap.extend([(1, None), (2, None), (3, None)]);
+        let sketch_a = crate::sketch::Sketch {
+            name: "a".to_string(),
+            hashes: hashmap,
+            num_kmers: 3,
+            max_kmers: 10,
+            kmer_size: 21,
+        };
+        let mut hashmap2 = HashMap::default();
+        hashmap2.extend([(1, None), (2, None), (4, None)]);
+        let sketch_b = crate::sketch::Sketch {
+            name: "b".to_string(),
+            hashes: hashmap2,
+            num_kmers: 3,
+            max_kmers: 10,
+            kmer_size: 21,
+        };
+
+        let mut comp = super::Comparator::new(&sketch_a, &sketch_b, false);
+        comp.compare().unwrap();
+        let result = comp.finalize();
+        assert_eq!(result.num_kmers, 3);
+        assert_eq!(result.num_common, 2);
+        assert_eq!(result.estimated_containment, 66.66666666666666);
+        assert_eq!(result.option_num_skipped, None);
     }
 }
