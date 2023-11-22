@@ -93,7 +93,7 @@ pub enum Commands {
         input: PathBuf,
         /// Database sketch(es)
         #[arg(short, long)]
-        database: PathBuf,
+        database: Vec<PathBuf>,
         /// Output to file instead of stdout
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
@@ -101,7 +101,7 @@ pub enum Commands {
         /// Cut-off value for similarity
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
-        /// Use the Stats params for restrict results
+        /// Use the Stats params for restricting results
         #[arg(long)]
         stats: bool,
     },

@@ -28,6 +28,8 @@ impl Stats {
         ))
     }
 
+    // 255 size classes a 2000 bp
+    // 0 - 512.000 bp classes
     pub fn get_size_class(size: usize) -> u8 {
         if size > 2000 * u8::MAX as usize {
             return u8::MAX;
@@ -37,6 +39,25 @@ impl Stats {
 
     pub fn get_gc_class(gc_size: usize, size: usize) -> u8 {
         (gc_size * 256 / size * 256) as u8
+    }
+
+    #[inline(always)]
+    pub fn compare(&self, other: &Self, gc_upper_range: u8, gc_lower_range: u8) -> bool {
+        // Expect that gc_upper_range and gc_lower_range are smaller than u8::MAX / 2
+        // GC ranges have a size of 100/256 ~ 0.39%
+        assert!(gc_lower_range < u8::MAX / 2);
+        assert!(gc_upper_range < u8::MAX / 2);
+        // If size class of self is larger than other
+        if self.0.1 > other.0.1 {
+            // Example: Self = 55, other = 50, gc_upper_range = 5, gc_lower_range = 5
+            // Self + 5 >= other
+            // Self - 5 >= other --> possible hit
+            if self.0.0 + gc_upper_range >= other.0.0 && self.0.0 - gc_lower_range <= other.0.0 {
+                // Other is within range of self -> it is a subset
+                return true;
+            }
+        }
+        return false;
     }
 }
 

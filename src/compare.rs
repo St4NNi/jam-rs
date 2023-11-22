@@ -16,6 +16,7 @@ pub struct CompareResult {
     pub to_name: String,
     pub num_common: usize,
     pub num_kmers: usize,
+    pub option_num_skipped: Option<usize>,
     pub reverse: bool,
     pub estimated_containment: f64,
 }
@@ -56,7 +57,7 @@ pub struct MultiComp {
     threads: usize,
     kmer_size: u8,
     cutoff: f64,
-    stats: bool,
+    use_stats: bool,
 }
 
 impl MultiComp {
@@ -65,7 +66,7 @@ impl MultiComp {
         mut to: Vec<Signature>,
         threads: usize,
         cutoff: f64,
-        stats: bool,
+        use_stats: bool,
     ) -> Result<Self> {
         let kmer_size = from
             .first()
@@ -79,7 +80,7 @@ impl MultiComp {
             threads,
             kmer_size,
             cutoff,
-            stats,
+            use_stats,
         })
     }
 
@@ -100,8 +101,8 @@ impl MultiComp {
                             origin.kmer_size
                         ));
                     }
-                    let mut comparator = Comparator::new(origin, target);
-                    comparator.compare();
+                    let mut comparator = Comparator::new(origin, target, self.use_stats);
+                    comparator.compare()?;
                     results
                         .lock()
                         .unwrap()
@@ -129,14 +130,18 @@ pub struct Comparator<'a> {
     smaller: &'a Sketch,
     num_kmers: usize,
     num_common: usize,
+    num_skipped: usize,
     reverse: bool,
+    use_stats: bool,
 }
 
 impl<'a> Comparator<'a> {
-    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch) -> Self {
+    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch, use_stats: bool) -> Self {
         let (larger, smaller, reverse) = if sketch_a.hashes.len() > sketch_b.hashes.len() {
+            // DATABASE, INPUT -> Reverse = false
             (sketch_a, sketch_b, false)
         } else {
+            // INPUT, DATABASE -> Reverse = true
             (sketch_b, sketch_a, true)
         };
         Comparator {
@@ -144,18 +149,45 @@ impl<'a> Comparator<'a> {
             smaller,
             num_kmers: 0,
             num_common: 0,
+            num_skipped: 0,
             reverse,
+            use_stats,
         }
     }
 
+    // Stats handling:
+    // GC & Size for the original contig are stored in the Stats struct
+    // This comparison is always in relation to the query sketch
+    // If reverse is true, the query sketch is the larger sketch
     #[inline]
-    pub fn compare(&mut self) {
-        for (hash, _) in &self.smaller.hashes {
-            self.num_kmers += 1;
-            if self.larger.hashes.contains_key(hash) {
-                self.num_common += 1;
+    pub fn compare(&mut self) -> Result<()>{
+        if self.use_stats {
+            for (hash, stats) in &self.smaller.hashes {
+                let smaller_stats = stats.as_ref().ok_or_else(|| anyhow!("Missing stats"))?;
+                self.num_kmers += 1;
+                if let Some(stats) = self.larger.hashes.get(hash) {
+                    let larger_stats = stats.as_ref().ok_or_else(|| anyhow!("Missing stats"))?;
+                    if self.reverse {
+                        if !larger_stats.compare(smaller_stats, 10, 10) {
+                            self.num_skipped += 1;
+                        }
+                    }else{
+                        if !smaller_stats.compare(larger_stats, 10, 10) {
+                            self.num_skipped += 1;
+                        }
+                    }
+                    self.num_common += 1;
+                };
+            }
+        }else{
+            for (hash, _) in &self.smaller.hashes {
+                self.num_kmers += 1;
+                if self.larger.hashes.contains_key(hash) {
+                    self.num_common += 1;
+                };
             }
         }
+        Ok(())
     }
 
     pub fn finalize(self) -> CompareResult {
@@ -177,6 +209,11 @@ impl<'a> Comparator<'a> {
             to_name: self.smaller.name.clone(),
             num_kmers: self.num_kmers,
             num_common: self.num_common,
+            option_num_skipped: if self.use_stats {
+                Some(self.num_skipped)
+            } else {
+                None
+            },
             reverse: self.reverse,
             estimated_containment,
         }
@@ -186,5 +223,6 @@ impl<'a> Comparator<'a> {
     pub fn reset(&mut self) {
         self.num_kmers = 0;
         self.num_common = 0;
+        self.num_skipped = 0;
     }
 }

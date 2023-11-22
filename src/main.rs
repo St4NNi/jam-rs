@@ -31,7 +31,7 @@ fn main() {
         } => {
             let mut cmd = Cli::command();
             let database_files =
-                jam_rs::file_io::FileHandler::test_and_collect_files(vec![database], false);
+                jam_rs::file_io::FileHandler::test_and_collect_files(database, false);
             let fs = match database_files {
                 Ok(f) => f,
                 Err(e) => {
