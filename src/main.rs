@@ -64,7 +64,14 @@ fn main() {
 
             let gc_bounds = match (gc_lower, gc_upper) {
                 (Some(l), Some(u)) => Some((l, u)),
-                _ => None,
+                (None, None) => None,
+                _ => {
+                    cmd.error(
+                        ErrorKind::ArgumentConflict,
+                        "Both gc_lower and gc_upper must be set",
+                    )
+                    .exit();
+                }
             };
 
             let mut input_sketch = Vec::new();

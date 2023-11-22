@@ -7,8 +7,8 @@ use std::path::PathBuf;
 #[command(bin_name = "jam")]
 #[command(version = "0.1.0-beta.1")]
 #[command(
-    about = "Just another minhasher, obviously blazingly fast",
-    long_about = "A heavily optimized minhash implementation that focuses less on accuracy and more on quick scans of large datasets."
+    about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
+    long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -38,7 +38,7 @@ pub enum HashAlgorithms {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
-    /// Sketch one or more files and write result to output file (or stdout)
+    /// Sketch one or more files and write the result to an output file (or stdout)
     #[command(arg_required_else_help = true)]
     Sketch {
         /// Input file(s), one directory or one file with list of files to be hashed
@@ -48,7 +48,7 @@ pub enum Commands {
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: Option<PathBuf>,
-        /// kmer size all sketches to be compared must have the same size
+        /// kmer size, all sketches must have the same size to be compared
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
         /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
@@ -57,10 +57,10 @@ pub enum Commands {
         /// Scale the hash space to a minimum fraction of all k-mers (SizeMinHash)
         #[arg(long)]
         kscale: Option<u64>,
-        /// Minimum number of k-mers (per record) to be hashed
+        /// Minimum number of k-mers (per record) to be hashed, bottom cut-off
         #[arg(long)]
         nmin: Option<u64>,
-        /// Maximum number of k-mers (per record) to be hashed
+        /// Maximum number of k-mers (per record) to be hashed, top cut-off
         #[arg(long)]
         nmax: Option<u64>,
         /// Change to other output formats
@@ -84,7 +84,7 @@ pub enum Commands {
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
     },
-    /// Estimate distance of a (small) sketch against a subset of one or more sketches as database.
+    /// Estimate containment of a (small) sketch against a subset of one or more sketches as database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
     Dist {
@@ -104,10 +104,10 @@ pub enum Commands {
         /// Use the Stats params for restricting results
         #[arg(long)]
         stats: bool,
-        /// Use GC stats with an upper bound of x% and a lower bound of y%
+        /// Use GC stats with an upper bound of x% (gc_lower and gc_upper must be set)
         #[arg(long)]
         gc_lower: Option<u8>,
-        /// Use GC stats with an upper bound of x% and a lower bound of y%
+        /// Use GC stats with an lower bound of y% (gc_lower and gc_upper must be set)
         #[arg(long)]
         gc_upper: Option<u8>,
     },
