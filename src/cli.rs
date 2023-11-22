@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "0.1.0")]
+#[command(version = "0.1.0-beta.1")]
 #[command(
     about = "Just another minhasher, obviously blazingly fast",
     long_about = "A heavily optimized minhash implementation that focuses less on accuracy and more on quick scans of large datasets."
@@ -93,7 +93,7 @@ pub enum Commands {
         input: PathBuf,
         /// Database sketch(es)
         #[arg(short, long)]
-        database: PathBuf,
+        database: Vec<PathBuf>,
         /// Output to file instead of stdout
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
@@ -101,5 +101,14 @@ pub enum Commands {
         /// Cut-off value for similarity
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
+        /// Use the Stats params for restricting results
+        #[arg(long)]
+        stats: bool,
+        /// Use GC stats with an upper bound of x% and a lower bound of y%
+        #[arg(long)]
+        gc_lower: Option<u8>,
+        /// Use GC stats with an upper bound of x% and a lower bound of y%
+        #[arg(long)]
+        gc_upper: Option<u8>,
     },
 }

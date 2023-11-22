@@ -28,6 +28,8 @@ impl Stats {
         ))
     }
 
+    // 255 size classes a 2000 bp
+    // 0 - 512.000 bp classes
     pub fn get_size_class(size: usize) -> u8 {
         if size > 2000 * u8::MAX as usize {
             return u8::MAX;
@@ -35,8 +37,32 @@ impl Stats {
         (size / 2000) as u8
     }
 
+    // GC class are 100 classes from 0 - 100%
     pub fn get_gc_class(gc_size: usize, size: usize) -> u8 {
-        (gc_size * 256 / size * 256) as u8
+        let result = (gc_size * 100 / size * 100) / 100;
+        result as u8
+    }
+
+    #[inline(always)]
+    pub fn compare(&self, other: &Self, gc_bounds: Option<(u8, u8)>) -> bool {
+        // Expect that gc_upper_range and gc_lower_range are smaller than 100
+        if let Some((gc_lower_range, gc_upper_range)) = gc_bounds {
+            // If size class of self is larger than other
+            if self.0 .0 >= other.0 .0 {
+                // Example: Self = 55, other = 50, gc_upper_range = 5, gc_lower_range = 5
+                // Self + 5 >= other
+                // Self - 5 >= other --> possible hit
+                if self.0 .1 + gc_upper_range >= other.0 .1
+                    && self.0 .1 - gc_lower_range <= other.0 .1
+                {
+                    // Other is within range of self -> it is a subset
+                    return true;
+                }
+            }
+        } else {
+            return self.0 .0 >= other.0 .0;
+        }
+        false
     }
 }
 
@@ -86,5 +112,30 @@ impl Sketch {
             .build();
 
         SourmashSketch::MinHash(sketch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Stats;
+
+    #[test]
+    fn test_stats() {
+        let stat = Stats::from_seq(b"ATGC");
+        assert_eq!(stat, Stats::new(0, 50));
+
+        let stata = Stats::new(2, 50);
+        let statb = Stats::new(2, 50);
+        assert!(stata.compare(&statb, Some((5, 5))));
+
+        let stata = Stats::new(2, 20);
+        let statb = Stats::new(4, 50);
+        // Should be false because size class of statb is larger than stata
+        // and gc class of statb is not within range of stata
+        assert!(!stata.compare(&statb, Some((5, 5))));
+        // Should fail only because of size class
+        assert!(!stata.compare(&statb, Some((30, 5))));
+        // Should succeed because of size class and gc class
+        assert!(statb.compare(&stata, Some((30, 30))));
     }
 }

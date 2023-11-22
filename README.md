@@ -11,6 +11,20 @@ Implements parts of the ScaledMinHash / FracMinHash algorithm described in [sour
 
 Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version tries to specialise more on estimating the containment of small sequences in large sets. This is intended to be used to screen terabytes of data in just a few seconds / minutes.
 
+### Installation
+
+A pre-release is published via [crates.io](https://crates.io/) to install it use (you need to have `cargo` and the `rust-toolchain` installed, the easiest way is via [rustup.rs](https://rustup.rs/)):
+
+```bash
+cargo install jam-rs
+```
+
+If you want the bleeding edge development release you can install via git:
+
+```bash
+cargo install --git https://github.com/St4NNi/jam-rs
+```
+
 ### Comparison
 
 - [xxhash3](https://github.com/DoumanAsh/xxhash-rust) or [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 32) instead of [murmurhash3](https://github.com/mhallin/murmurhash3-rs)

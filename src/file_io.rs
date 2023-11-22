@@ -12,6 +12,7 @@ use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
 use sourmash::signature::Signature as SourmashSignature;
+use std::io;
 use std::io::Write;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
@@ -41,7 +42,6 @@ impl FileHandler {
                 singleton,
             } => {
                 let files = FileHandler::test_and_collect_files(input, true)?;
-                let output = File::create(output.unwrap())?;
                 let pool = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads.unwrap_or_default())
                     .build()?;
@@ -50,6 +50,7 @@ impl FileHandler {
 
                 let (send, recv) = mpsc::channel();
 
+                let is_stdout = output.is_none();
                 let handler = thread::spawn(|| {
                     FileHandler::write_output(output, format, recv)
                     // thread code
@@ -68,6 +69,7 @@ impl FileHandler {
                             false,
                             function.clone(),
                             algorithm.clone(),
+                            is_stdout,
                         ) {
                             Ok(sig) => send.send(sig).map_err(|_| anyhow!("Error while sending")),
                             Err(_) => Err(anyhow!("Error while sketching file {:?}", file_path)),
@@ -96,6 +98,7 @@ impl FileHandler {
         stats: bool,
         function: Function,
         algorithm: HashAlgorithms,
+        stdout: bool,
     ) -> Result<Signature> {
         let mut x = fs::metadata(input)?.len();
         if let Some(ext) = input.extension() {
@@ -139,35 +142,43 @@ impl FileHandler {
             counter += 1;
         }
         let elapsed = start.elapsed().as_millis();
-        println!(
-            "Processed {:?} with {} records, in {:?} seconds",
-            input,
-            counter,
-            elapsed as f64 / 1000.0,
-        );
+        if !stdout {
+            println!(
+                "Processed {:?} with {} records, in {:?} seconds",
+                input,
+                counter,
+                elapsed as f64 / 1000.0,
+            );
+        }
         Ok(sketcher.finish())
     }
 
     pub fn write_output(
-        output: File,
+        output: Option<PathBuf>,
         output_format: OutputFormats,
         signature_recv: Receiver<Signature>,
     ) -> Result<()> {
-        let mut bufwriter = std::io::BufWriter::new(output);
+        let stdout = output.is_none();
+        let mut output: Box<dyn Write> = match output {
+            Some(o) => Box::new(std::io::BufWriter::new(File::create(o)?)),
+            None => Box::new(std::io::BufWriter::new(io::stdout())),
+        };
 
         match output_format {
             OutputFormats::Bin => {
                 while let Ok(sig) = signature_recv.recv() {
                     let name = sig.file_name.clone();
                     let len = sig.sketches.first().unwrap().hashes.len();
-                    bincode::serialize_into(&mut bufwriter, &vec![sig])?;
-                    println!("Wrote signature: {:?} with {:?} hashes;", name, len,);
+                    bincode::serialize_into(&mut output, &vec![sig])?;
+                    if !stdout {
+                        println!("Wrote signature: {:?} with {:?} hashes.", name, len);
+                    }
                 }
             }
             OutputFormats::Sourmash => {
                 while let Ok(sig) = signature_recv.recv() {
                     let sourmash_sig: SourmashSignature = sig.into();
-                    serde_json::to_writer(&mut bufwriter, &vec![sourmash_sig])?;
+                    serde_json::to_writer(&mut output, &vec![sourmash_sig])?;
                 }
             }
         }
