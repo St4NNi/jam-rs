@@ -40,6 +40,7 @@ impl FileHandler {
                 algorithm,
                 format,
                 singleton,
+                stats,
             } => {
                 let files = FileHandler::test_and_collect_files(input, true)?;
                 let pool = rayon::ThreadPoolBuilder::new()
@@ -66,7 +67,7 @@ impl FileHandler {
                             nmin,
                             nmax,
                             singleton,
-                            false,
+                            stats,
                             function.clone(),
                             algorithm.clone(),
                             is_stdout,

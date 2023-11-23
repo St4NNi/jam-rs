@@ -85,6 +85,7 @@ Options:
       --format <FORMAT>        Change to other output formats [default: bin] [possible values: bin, sourmash]
       --algorithm <ALGORITHM>  Change the hashing algorithm [default: default] [possible values: default, ahash, xxhash, murmur3]
       --singleton              Create a separate sketch for each sequence record
+  -s, --stats                  Keep extra stats for each sequence record
   -h, --help                   Print help
 ```
 

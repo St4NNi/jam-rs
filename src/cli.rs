@@ -72,6 +72,9 @@ pub enum Commands {
         /// Create a separate sketch for each sequence record
         #[arg(long)]
         singleton: bool,
+        /// Keep extra stats for each sequence record
+        #[arg(short, long)]
+        stats: bool,
     },
     /// Merge multiple input sketches into a single sketch
     #[command(arg_required_else_help = true)]
