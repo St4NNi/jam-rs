@@ -140,6 +140,10 @@ This project is licensed under the MIT license. See the [LICENSE](LICENSE) file 
 
 jam-rs is still in active development and not ready for production use. Use at your own risk.
 
+### Feedback & Contributions
+
+If you have any ideas, suggestions, or issues, please don't hesitate to open an issue and/or PR. Contributions to this project are always welcome ! We appreciate your help in making this project better 
+
 ### Credits
 
 This tool is heavily inspired by [finch-rs](https://github.com/onecodex/finch-rs)/[License](https://github.com/onecodex/finch-rs/blob/master/LICENSE.txt) and [sourmash](https://github.com/sourmash-bio/sourmash)/[License](https://github.com/sourmash-bio/sourmash/blob/latest/LICENSE). Check them out if you need a more mature ecosystem with well tested hash functions and more features.
