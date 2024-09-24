@@ -27,15 +27,14 @@ cargo install --git https://github.com/St4NNi/jam-rs
 ### Comparison
 
 - Multiple algorithms: [xxhash3](https://github.com/DoumanAsh/xxhash-rust), [ahash-fallback](https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm) (for kmer < 32) and legacy [murmurhash3](https://github.com/mhallin/murmurhash3-rs)
-- No jaccard similarity since this is meaningless when comparing small embeded sequences against large sets
 - Additional filter and sketching options to increase for specificity and sensitivity for small sequences in collections of large assembled metagenomes
+- Sketch to a memory mapped database including additional metadata
 
 ### Scaling methods
 
 Multiple different scaling methods:
   - FracMinHash (`fscale`): Restricts the hash-space to a (lower) maximum fraction of `u64::MAX` / `fscale`
-  - KmerCountScaling (`kscale`): Restrict the overall maximum number of hashes to a factor of `kscale` -> 10 means 1/10th of all k-mers will be stored
-  - MinMaxAbsoluteScaling (`nscale`): Restricts the minimum or maximum number of hashes per sequence record
+  - Bias scaling, introduce a bias towards smaller sequences, this increases the Database size but ensures that smaller sequences are better covered
 
 If `KmerCountScaling` and `MinMaxAbsoluteScaling` are used together the minimum number of hashes (per sequence record) will be guaranteed. `FracMinHash` and `KmerCountScaling` produce similar results, the first is mainly provided for sourmash compatibility.
 
@@ -77,7 +76,6 @@ Options:
   -o, --output <OUTPUT>        Output file
   -k, --kmer-size <KMER_SIZE>  kmer size, all sketches must have the same size to be compared [default: 21]
       --fscale <FSCALE>        Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
-      --kscale <KSCALE>        Scale the hash space to a minimum fraction of all k-mers (SizeMinHash)
   -t, --threads <THREADS>      Number of threads to use [default: 1]
   -f, --force                  Overwrite output files
       --nmin <NMIN>            Minimum number of k-mers (per record) to be hashed, bottom cut-off
