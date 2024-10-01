@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "0.1.0-beta.1")]
+#[command(version = "0.2.0")]
 #[command(
     about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
     long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
@@ -23,7 +23,10 @@ pub struct Cli {
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum OutputFormats {
+    // Binary format (for small sketches)
     Bin,
+    // Lmdb format, memory mapped database for very large sketches
+    Lmdb,
     // Sourmash compatible json
     Sourmash,
 }
@@ -54,9 +57,6 @@ pub enum Commands {
         /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
         #[arg(long)]
         fscale: Option<u64>,
-        /// Scale the hash space to a minimum fraction of all k-mers (SizeMinHash)
-        #[arg(long)]
-        kscale: Option<u64>,
         /// Minimum number of k-mers (per record) to be hashed, bottom cut-off
         #[arg(long)]
         nmin: Option<u64>,
@@ -69,12 +69,10 @@ pub enum Commands {
         /// Change the hashing algorithm
         #[arg(long, default_value = "default")]
         algorithm: HashAlgorithms,
-        /// Create a separate sketch for each sequence record
+        /// Create a separate sketch for each sequence record 
+        /// Will increase the size of the output file if lmdb is used
         #[arg(long)]
         singleton: bool,
-        /// Keep extra stats for each sequence record
-        #[arg(short, long)]
-        stats: bool,
     },
     /// Merge multiple input sketches into a single sketch
     #[command(arg_required_else_help = true)]

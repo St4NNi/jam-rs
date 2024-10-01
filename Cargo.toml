@@ -23,7 +23,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.89"
 bincode = "1.3.3"
-flate2 = "1.0.33"
+flate2 = "1.0.34"
 needletail = "0.5.1"
 rayon = "1.10.0"
 xxhash-rust = { version = "0.8.12", features = ["xxh3"]}
@@ -31,7 +31,7 @@ bytemuck = "1.18.0"
 serde = { version = "1.0.210", features = ["derive"] }
 clap = { version = "4.5.18", features = ["derive"] }
 fastmurmur3 = {version = "0.2.0"} 
-sourmash = "0.15.1"
+sourmash = "0.15.2"
 serde_json = "1.0.128"
 
 [dev-dependencies]
