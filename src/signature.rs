@@ -4,7 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use sourmash::signature::{Signature as SourmashSignature, SigsTrait};
-use std::collections::BinaryHeap;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Signature {
@@ -65,7 +65,7 @@ impl From<SourmashSignature> for Signature {
                     sketch.hashes = mash
                         .mins()
                         .into_iter()
-                        .collect::<BinaryHeap<u64>>();
+                        .collect::<BTreeSet<u64>>();
                     sketches.push(sketch);
                 }
                 sourmash::sketch::Sketch::LargeMinHash(mash) => {
@@ -93,7 +93,7 @@ impl From<SourmashSignature> for Signature {
                     sketch.hashes = mash
                         .mins()
                         .into_iter()
-                        .collect::<BinaryHeap<u64>>();
+                        .collect::<BTreeSet<u64>>();
                     sketches.push(sketch);
                 }
                 sourmash::sketch::Sketch::HyperLogLog(_) => {

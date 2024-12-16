@@ -6,7 +6,7 @@ use crate::{
 };
 use needletail::{parser::SequenceRecord, Sequence};
 use std::{
-    collections::BinaryHeap, fs::File
+    collections::BTreeSet, fs::File
 };
 
 pub enum Storage {
@@ -20,7 +20,7 @@ struct SketchHelper {
     hit_counter: u64,
     kmer_seq_counter: u64,
     pub nmax: u64,
-    pub heap: BinaryHeap<u64>,
+    pub btree: BTreeSet<u64>,
 }
 
 impl SketchHelper {
@@ -30,7 +30,7 @@ impl SketchHelper {
             hit_counter: 0,
             kmer_seq_counter: 0,
             max_hash,
-            heap: BinaryHeap::new(),
+            btree: BTreeSet::new(),
         }
     }
 
@@ -39,9 +39,9 @@ impl SketchHelper {
         self.kmer_seq_counter += 1;
         if hash < self.max_hash {
             self.hit_counter += 1;
-            self.heap.push(hash);
-            if self.heap.len() > self.nmax as usize {
-                self.heap.pop();
+            self.btree.insert(hash);
+            if self.btree.len() > self.nmax as usize {
+                self.btree.pop_last();
             }
         }
     }
@@ -55,10 +55,11 @@ impl SketchHelper {
     pub fn into_sketch(&mut self, name: String, kmer_size: u8) -> Sketch {
         let mut sketch = Sketch::new(
             name,
-            self.heap.len(),
+            self.btree.len(),
             kmer_size,
         );
-        sketch.hashes = self.heap.drain().collect();
+        let old_map = std::mem::replace(&mut self.btree, BTreeSet::new());
+        sketch.hashes = old_map.into_iter().collect();
         self.reset();
         sketch
     }

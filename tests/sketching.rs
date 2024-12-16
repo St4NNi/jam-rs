@@ -47,10 +47,11 @@ fn test_file_sketching_basic() {
     .pop()
     .unwrap();
 
-    assert_eq!(
-        get_hashes_sketch(&created_sketch),
-        get_hashes_sketch(&expected_sketch)
-    );
+
+    for (created, expected) in get_hashes_sketch(&created_sketch).into_iter().zip(get_hashes_sketch(&expected_sketch).into_iter()) {
+        println!("{} == {}", created, expected);
+        assert_eq!(created, expected);
+    }
 }
 
 // #[test]

@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
+use std::cmp::max;
 use std::{
     fmt::{self, Display, Formatter},
     ops::DerefMut,
@@ -160,6 +161,8 @@ impl<'a> Comparator<'a> {
     #[inline]
     pub fn compare(&mut self) -> Result<()> {
 
+        self.num_kmers = max(self.larger.num_kmers, self.smaller.num_kmers);
+
         let mut larger = self.larger.hashes.iter();
         let mut smaller = self.smaller.hashes.iter();
 
@@ -169,23 +172,21 @@ impl<'a> Comparator<'a> {
         loop {
             match (larger_item, smaller_item) {
                 (Some(l), Some(s)) => {
-                    self.num_kmers += 1;
                     if l == s {
                         self.num_common += 1;
                         smaller_item = smaller.next();
                         larger_item = larger.next();
-                    } else if l > s {
+                    } else if l < s {
                         smaller_item = smaller.next();
                     } else {
                         larger_item = larger.next();
                     }
                 }
                 (Some(_), None) => {
-                    self.num_kmers += 1;
+                    larger_item = larger.next();
                 }
                 (None, Some(_)) => {
-                    self.num_kmers += 1;
-                    self.num_skipped += 1;
+                    smaller_item = smaller.next();
                 }
                 (None, None) => break,
             }
@@ -229,12 +230,13 @@ impl<'a> Comparator<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BinaryHeap;
+    use std::collections::BTreeSet;
+
     use crate::compare::CompareResult;
-    
+
     #[test]
     fn test_comp_without_stats() {
-        let mut bheap1 = BinaryHeap::default();
+        let mut bheap1 = BTreeSet::default();
         bheap1.extend([1, 2, 3]);
         let sketch_a = crate::sketch::Sketch {
             name: "a".to_string(),
@@ -242,7 +244,7 @@ mod tests {
             num_kmers: 3,
             kmer_size: 21,
         };
-        let mut bheap2 = BinaryHeap::default();
+        let mut bheap2 = BTreeSet::default();
         bheap2.extend([1, 2, 4]);
         let sketch_b = crate::sketch::Sketch {
             name: "b".to_string(),

@@ -141,10 +141,14 @@ impl FileHandler {
         match output_format {
             OutputFormats::Sourmash => {
                 output.write_all(b"[\n")?;
+                let mut first = true;
                 while let Ok(sig) = signature_recv.recv() {
                     let sourmash_sig: SourmashSignature = sig.into();
+                    if !first {
+                        output.write_all(b",\n")?;
+                        first = false;
+                    }
                     serde_json::to_writer(&mut output, &sourmash_sig)?;
-                    output.write_all(b",\n")?;
                 }
                 output.write_all(b"]")?;
             }

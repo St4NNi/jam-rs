@@ -1,12 +1,12 @@
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sourmash::sketch::{minhash::KmerMinHash, Sketch as SourmashSketch};
-use std::collections::BinaryHeap;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Sketch {
     pub name: String, // Name of file or sequence
-    pub hashes: BinaryHeap<u64>, // Hashes with stats
+    pub hashes: BTreeSet<u64>, // Hashes with stats
     pub num_kmers: usize, // Number of kmers (collected)
     pub kmer_size: u8, // Kmer size
 }
@@ -17,7 +17,7 @@ impl Sketch {
             name,
             num_kmers,
             kmer_size,
-            hashes: BinaryHeap::new(),
+            hashes: BTreeSet::new(),
         }
     }
 }
