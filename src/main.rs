@@ -14,22 +14,19 @@ fn main() {
                 }
             }
         }
-        Commands::Merge { inputs, output } => {
-            match jam_rs::file_io::FileHandler::concat(inputs, output) {
-                Ok(_) => {}
-                Err(e) => {
-                    Cli::command().error(ErrorKind::ArgumentConflict, e).exit();
-                }
-            }
-        }
+        // Commands::Merge { inputs, output } => {
+        //     match jam_rs::file_io::FileHandler::concat(inputs, output) {
+        //         Ok(_) => {}
+        //         Err(e) => {
+        //             Cli::command().error(ErrorKind::ArgumentConflict, e).exit();
+        //         }
+        //     }
+        // }
         Commands::Dist {
             input,
             database,
             output,
             cutoff,
-            stats,
-            gc_lower,
-            gc_upper,
         } => {
             let mut cmd = Cli::command();
             let database_files =
@@ -62,18 +59,6 @@ fn main() {
                 }
             };
 
-            let gc_bounds = match (gc_lower, gc_upper) {
-                (Some(l), Some(u)) => Some((l, u)),
-                (None, None) => None,
-                _ => {
-                    cmd.error(
-                        ErrorKind::ArgumentConflict,
-                        "Both gc_lower and gc_upper must be set",
-                    )
-                    .exit();
-                }
-            };
-
             let mut input_sketch = Vec::new();
             for db_path in fs_input {
                 match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
@@ -91,8 +76,6 @@ fn main() {
                 db_sketches,
                 args.threads.unwrap(),
                 cutoff,
-                stats,
-                gc_bounds,
             ) {
                 Ok(mut mc) => {
                     if let Err(e) = mc.compare() {

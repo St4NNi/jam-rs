@@ -97,14 +97,5 @@ pub enum Commands {
         /// Cut-off value for similarity
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
-        /// Use the Stats params for restricting results
-        #[arg(long)]
-        stats: bool,
-        /// Use GC stats with an upper bound of x% (gc_lower and gc_upper must be set)
-        #[arg(long)]
-        gc_lower: Option<u8>,
-        /// Use GC stats with an lower bound of y% (gc_lower and gc_upper must be set)
-        #[arg(long)]
-        gc_upper: Option<u8>,
     },
 }
