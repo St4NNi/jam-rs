@@ -3,14 +3,23 @@ use crate::cli::HashAlgorithms;
 use crate::cli::OutputFormats;
 use crate::compare::CompareResult;
 use crate::hash_functions::Function;
+use crate::heed_codec::CboRoaringBitmapCodec;
 use crate::signature::Signature;
 use crate::sketch::Sketch;
 use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
+use byteorder::BigEndian;
+use heed::types::SerdeBincode;
+use heed::types::Str;
+use heed::types::U32;
+use heed::types::U64;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
+use roaring::RoaringBitmap;
+use serde::Deserialize;
+use serde::Serialize;
 use sourmash::signature::Signature as SourmashSignature;
 use std::io;
 use std::io::Write;
@@ -25,6 +34,13 @@ use std::{
 };
 
 pub struct FileHandler {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShortSketchInfo {
+    pub file_name: String,
+    pub num_hashes: usize,
+    pub kmer_size: u8,
+}
 
 impl FileHandler {
     pub fn sketch_files(command: Commands, threads: Option<usize>) -> Result<()> {
@@ -49,9 +65,7 @@ impl FileHandler {
                 let (send, recv) = mpsc::channel();
 
                 let is_stdout = output.is_none();
-                let handler = thread::spawn(|| {
-                    FileHandler::write_output(output, format, recv)
-                });
+                let handler = thread::spawn(|| FileHandler::write_output(output, format, recv));
 
                 let _ = pool.install(|| {
                     files.par_iter().try_for_each(|file_path| {
@@ -133,13 +147,13 @@ impl FileHandler {
         signature_recv: Receiver<Signature>,
     ) -> Result<()> {
         let stdout = output.is_none();
-        let mut output: Box<dyn Write> = match output {
-            Some(o) => Box::new(std::io::BufWriter::new(File::create(o)?)),
-            None => Box::new(std::io::BufWriter::new(io::stdout())),
-        };
 
         match output_format {
             OutputFormats::Sourmash => {
+                let mut output: Box<dyn Write> = match output {
+                    Some(o) => Box::new(std::io::BufWriter::new(File::create(o)?)),
+                    None => Box::new(std::io::BufWriter::new(io::stdout())),
+                };
                 output.write_all(b"[\n")?;
                 let mut first = true;
                 while let Ok(sig) = signature_recv.recv() {
@@ -156,7 +170,58 @@ impl FileHandler {
                 if stdout {
                     return Err(anyhow!("Output format lmdb is not supported for stdout"));
                 }
-                todo!()
+                let Some(output) = output else {
+                    return Err(anyhow!("Output folder is required for lmdb"));
+                };
+                if !output.is_dir() {
+                    return Err(anyhow!(
+                        "Output folder {:?} does not exist or is no directory",
+                        output
+                    ));
+                }
+
+                let heed_env = unsafe {
+                    heed::EnvOpenOptions::new()
+                        .map_size(10 * 1024 * 1024 * 1024)
+                        .max_dbs(2)
+                        .open(output)?
+                };
+                {
+                    let mut write_txn = heed_env.write_txn()?;
+
+                    let sigs_db = heed_env
+                        .create_database::<U32<BigEndian>, SerdeBincode<ShortSketchInfo>>(
+                            &mut write_txn,
+                            Some("sigs"),
+                        )?;
+                    let hashes = heed_env
+                        .create_database::<U64<BigEndian>, CboRoaringBitmapCodec>(
+                            &mut write_txn,
+                            Some("hashes"),
+                        )?;
+                    let mut counter: u32 = 0;
+                    while let Ok(sig) = signature_recv.recv() {
+                        for sketch in sig.sketches {
+                            sigs_db.put(
+                                &mut write_txn,
+                                &counter,
+                                &ShortSketchInfo {
+                                    file_name: sketch.name,
+                                    num_hashes: sketch.num_kmers,
+                                    kmer_size: sig.kmer_size,
+                                },
+                            )?;
+                            for hash in sketch.hashes {
+                                let mut maybe_bitmap = hashes.get(&write_txn, &hash)?;
+                                let bitmap = maybe_bitmap.get_or_insert(RoaringBitmap::new());
+                                bitmap.insert(counter);
+                                hashes.put(&mut write_txn, &hash, &bitmap)?;
+                            }
+                            counter += 1;
+                        }
+                    }
+                }
+                heed_env.prepare_for_closing().wait();
             }
         }
 
@@ -197,7 +262,7 @@ impl FileHandler {
                         if let Some(ext) = p.path().extension() {
                             if test_extension(ext) {
                                 resulting_paths.push(p.path());
-                            }else{
+                            } else {
                                 println!("Skipping file with invalid extension: {:?}", p.path());
                             }
                         } else {

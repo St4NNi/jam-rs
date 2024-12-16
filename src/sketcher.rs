@@ -1,18 +1,6 @@
-use crate::{
-    cli::HashAlgorithms,
-    hash_functions::Function,
-    signature::Signature,
-    sketch::Sketch,
-};
+use crate::{cli::HashAlgorithms, hash_functions::Function, signature::Signature, sketch::Sketch};
 use needletail::{parser::SequenceRecord, Sequence};
-use std::{
-    collections::BTreeSet, fs::File
-};
-
-pub enum Storage {
-    Sourmash(File),
-    Lmdb(heed::Env),
-}
+use std::collections::BTreeSet;
 
 #[derive(Debug, Default)]
 struct SketchHelper {
@@ -53,11 +41,7 @@ impl SketchHelper {
     }
 
     pub fn into_sketch(&mut self, name: String, kmer_size: u8) -> Sketch {
-        let mut sketch = Sketch::new(
-            name,
-            self.btree.len(),
-            kmer_size,
-        );
+        let mut sketch = Sketch::new(name, self.btree.len(), kmer_size);
         let old_map = std::mem::replace(&mut self.btree, BTreeSet::new());
         sketch.hashes = old_map.into_iter().collect();
         self.reset();
@@ -72,7 +56,7 @@ pub struct Sketcher<'a> {
     completed_sketches: Vec<Sketch>,
     singleton: bool,
     function: Function<'a>,
-    algorithm: HashAlgorithms,    
+    algorithm: HashAlgorithms,
 }
 
 impl<'a> Sketcher<'a> {

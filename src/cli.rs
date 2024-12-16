@@ -64,7 +64,7 @@ pub enum Commands {
         /// Change the hashing algorithm
         #[arg(long, default_value = "default")]
         algorithm: HashAlgorithms,
-        /// Create a separate sketch for each sequence record 
+        /// Create a separate sketch for each sequence record
         /// Will increase the size of the output file if lmdb is used
         #[arg(long)]
         singleton: bool,

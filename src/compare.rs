@@ -1,10 +1,19 @@
+use crate::file_io::ShortSketchInfo;
+use crate::heed_codec::CboRoaringBitmapCodec;
 use crate::signature::Signature;
 use crate::sketch::Sketch;
 use anyhow::anyhow;
 use anyhow::Result;
+use byteorder::BigEndian;
+use heed::types::SerdeBincode;
+use heed::types::U32;
+use heed::types::U64;
+use heed::EnvFlags;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::{
     fmt::{self, Display, Formatter},
     ops::DerefMut,
@@ -98,8 +107,7 @@ impl MultiComp {
                             origin.kmer_size
                         ));
                     }
-                    let mut comparator =
-                        Comparator::new(origin, target);
+                    let mut comparator = Comparator::new(origin, target);
                     comparator.compare()?;
                     results
                         .lock()
@@ -133,10 +141,7 @@ pub struct Comparator<'a> {
 }
 
 impl<'a> Comparator<'a> {
-    pub fn new(
-        sketch_a: &'a Sketch,
-        sketch_b: &'a Sketch,
-    ) -> Self {
+    pub fn new(sketch_a: &'a Sketch, sketch_b: &'a Sketch) -> Self {
         let (larger, smaller, reverse) = if sketch_a.hashes.len() >= sketch_b.hashes.len() {
             // DATABASE, INPUT -> Reverse = false
             (sketch_a, sketch_b, false)
@@ -160,7 +165,6 @@ impl<'a> Comparator<'a> {
     // If reverse is true, the query sketch is the larger sketch
     #[inline]
     pub fn compare(&mut self) -> Result<()> {
-
         self.num_kmers = max(self.larger.num_kmers, self.smaller.num_kmers);
 
         let mut larger = self.larger.hashes.iter();
@@ -192,7 +196,6 @@ impl<'a> Comparator<'a> {
             }
         }
 
-        
         Ok(())
     }
 
@@ -225,6 +228,75 @@ impl<'a> Comparator<'a> {
         self.num_kmers = 0;
         self.num_common = 0;
         self.num_skipped = 0;
+    }
+}
+
+pub struct LmdbComparator {
+    pub sketch: Sketch,
+    pub lmdb_env: heed::Env,
+}
+
+impl LmdbComparator {
+    pub fn new(sketch: Sketch, lmdb_env: PathBuf) -> Self {
+        let lmdb_env = unsafe {
+            heed::EnvOpenOptions::new()
+                .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK)
+                .map_size(10 * 1024 * 1024 * 1024)
+                .max_dbs(2)
+                .open(lmdb_env)
+                .unwrap()
+        };
+
+        LmdbComparator { sketch, lmdb_env }
+    }
+
+    pub fn compare(&self) -> Result<Vec<CompareResult>> {
+        let mut txn = self.lmdb_env.read_txn()?;
+
+        let sigs_db = self
+            .lmdb_env
+            .open_database::<U32<BigEndian>, SerdeBincode<ShortSketchInfo>>(&txn, Some("sigs"))?
+            .ok_or_else(|| anyhow!("Database not found"))?;
+        let hashes = self
+            .lmdb_env
+            .open_database::<U64<BigEndian>, CboRoaringBitmapCodec>(&txn, Some("hashes"))?
+            .ok_or_else(|| anyhow!("Database not found"))?;
+
+        let mut result_map = HashMap::new();
+        let mut infos = HashMap::new();
+
+        for sig in sigs_db.iter(&txn)? {
+            let (key, value) = sig?;
+            result_map.insert(key, 0u64);
+            infos.insert(key, value);
+        }
+
+        for hash in self.sketch.hashes.iter() {
+            if let Some(found) = hashes.get(&txn, hash)? {
+                for key in found {
+                    if let Some(count) = result_map.get_mut(&key) {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+
+        Ok(infos
+            .into_iter()
+            .map(|(k, v)| {
+                let num_kmers = v.num_hashes;
+                let num_common = result_map.get(&k).unwrap_or(&0);
+                let estimated_containment = *num_common as f64 / num_kmers as f64 * 100.0;
+                CompareResult {
+                    from_name: self.sketch.name.clone(),
+                    to_name: v.file_name,
+                    num_kmers,
+                    num_common: *num_common as usize,
+                    reverse: false,
+                    estimated_containment,
+                }
+            })
+            .collect())
     }
 }
 

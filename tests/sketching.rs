@@ -47,11 +47,32 @@ fn test_file_sketching_basic() {
     .pop()
     .unwrap();
 
-
-    for (created, expected) in get_hashes_sketch(&created_sketch).into_iter().zip(get_hashes_sketch(&expected_sketch).into_iter()) {
+    for (created, expected) in get_hashes_sketch(&created_sketch)
+        .into_iter()
+        .zip(get_hashes_sketch(&expected_sketch).into_iter())
+    {
         println!("{} == {}", created, expected);
         assert_eq!(created, expected);
     }
+}
+
+#[test]
+fn test_file_sketching_lmdb() {
+    let input_file = "tests/testfiles/test.small.fa";
+    FileHandler::sketch_files(
+        jam_rs::cli::Commands::Sketch {
+            input: vec![PathBuf::from(input_file)],
+            output: Some(PathBuf::from("testout")),
+            kmer_size: 33,
+            fscale: None,
+            nmax: None,
+            format: jam_rs::cli::OutputFormats::Lmdb,
+            algorithm: jam_rs::cli::HashAlgorithms::Murmur3,
+            singleton: false,
+        },
+        None,
+    )
+    .unwrap();
 }
 
 // #[test]

@@ -850,6 +850,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytemuck",
+ "byteorder",
  "clap",
  "criterion",
  "fastmurmur3",
@@ -859,6 +860,7 @@ dependencies = [
  "murmurhash3",
  "needletail",
  "rayon",
+ "roaring",
  "serde",
  "serde_json",
  "sourmash",
@@ -1435,9 +1437,9 @@ checksum = "c08c74e62047bb2de4ff487b251e4a92e24f48745648451635cec7d591162d9f"
 
 [[package]]
 name = "roaring"
-version = "0.10.6"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f4b84ba6e838ceb47b41de5194a60244fac43d9fe03b71dbe8c5a201081d6d1"
+checksum = "41589aba99537475bf697f2118357cad1c31590c5a1b9f6d9fc4ad6d07503661"
 dependencies = [
  "bytemuck",
  "byteorder",

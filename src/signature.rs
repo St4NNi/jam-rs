@@ -1,7 +1,4 @@
-use crate::{
-    cli::HashAlgorithms,
-    sketch::Sketch,
-};
+use crate::{cli::HashAlgorithms, sketch::Sketch};
 use serde::{Deserialize, Serialize};
 use sourmash::signature::{Signature as SourmashSignature, SigsTrait};
 use std::collections::BTreeSet;
@@ -62,10 +59,7 @@ impl From<SourmashSignature> for Signature {
                         mash.mins().len(),
                         mash.ksize() as u8,
                     );
-                    sketch.hashes = mash
-                        .mins()
-                        .into_iter()
-                        .collect::<BTreeSet<u64>>();
+                    sketch.hashes = mash.mins().into_iter().collect::<BTreeSet<u64>>();
                     sketches.push(sketch);
                 }
                 sourmash::sketch::Sketch::LargeMinHash(mash) => {
@@ -90,10 +84,7 @@ impl From<SourmashSignature> for Signature {
                         mash.mins().len(),
                         mash.ksize() as u8,
                     );
-                    sketch.hashes = mash
-                        .mins()
-                        .into_iter()
-                        .collect::<BTreeSet<u64>>();
+                    sketch.hashes = mash.mins().into_iter().collect::<BTreeSet<u64>>();
                     sketches.push(sketch);
                 }
                 sourmash::sketch::Sketch::HyperLogLog(_) => {

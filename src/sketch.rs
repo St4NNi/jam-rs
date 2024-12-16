@@ -5,10 +5,10 @@ use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Sketch {
-    pub name: String, // Name of file or sequence
+    pub name: String,          // Name of file or sequence
     pub hashes: BTreeSet<u64>, // Hashes with stats
-    pub num_kmers: usize, // Number of kmers (collected)
-    pub kmer_size: u8, // Kmer size
+    pub num_kmers: usize,      // Number of kmers (collected)
+    pub kmer_size: u8,         // Kmer size
 }
 
 impl Sketch {
@@ -28,11 +28,7 @@ impl Sketch {
             .ksize(self.kmer_size as u32)
             .num(self.hashes.len() as u32)
             .max_hash(max_hash)
-            .mins(
-                self.hashes
-                    .into_iter().sorted()
-                    .collect::<Vec<u64>>(),
-            )
+            .mins(self.hashes.into_iter().sorted().collect::<Vec<u64>>())
             .build();
         SourmashSketch::MinHash(sketch)
     }
