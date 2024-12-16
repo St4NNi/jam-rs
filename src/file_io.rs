@@ -19,7 +19,7 @@ use std::sync::mpsc::Receiver;
 use std::thread;
 use std::{
     ffi::OsStr,
-    fs::{self, File},
+    fs::File,
     io::{BufRead, BufReader},
     path::PathBuf,
 };
@@ -34,13 +34,10 @@ impl FileHandler {
                 output,
                 kmer_size,
                 fscale,
-                kscale,
-                nmin,
                 nmax,
                 algorithm,
                 format,
                 singleton,
-                stats,
             } => {
                 let files = FileHandler::test_and_collect_files(input, true)?;
                 let pool = rayon::ThreadPoolBuilder::new()
@@ -54,7 +51,6 @@ impl FileHandler {
                 let is_stdout = output.is_none();
                 let handler = thread::spawn(|| {
                     FileHandler::write_output(output, format, recv)
-                    // thread code
                 });
 
                 let _ = pool.install(|| {
@@ -63,11 +59,8 @@ impl FileHandler {
                             file_path,
                             kmer_size,
                             fscale,
-                            kscale,
-                            nmin,
                             nmax,
                             singleton,
-                            stats,
                             function.clone(),
                             algorithm.clone(),
                             is_stdout,
@@ -92,30 +85,13 @@ impl FileHandler {
         input: &PathBuf,
         kmer_length: u8,
         fscale: Option<u64>,
-        kscale: Option<u64>,
-        nmin: Option<u64>,
         nmax: Option<u64>,
         singleton: bool,
-        stats: bool,
         function: Function,
         algorithm: HashAlgorithms,
         stdout: bool,
     ) -> Result<Signature> {
-        let mut x = fs::metadata(input)?.len();
-        if let Some(ext) = input.extension() {
-            if let Some(ext_str) = ext.to_str() {
-                if ext_str == "gz" {
-                    // Approximate the size of uncompressed file
-                    x *= 3;
-                }
-            }
-        }
         let start = std::time::Instant::now();
-        let kscale = if let Some(kscale) = kscale {
-            (x as f64 / kscale as f64) as u64
-        } else {
-            u64::MAX
-        };
         let max_hash = if let Some(fscale) = fscale {
             (u64::MAX as f64 / fscale as f64) as u64
         } else {
@@ -128,10 +104,7 @@ impl FileHandler {
                 .ok_or_else(|| anyhow!("Unknown path"))?
                 .to_string(),
             singleton,
-            stats,
-            kscale,
             max_hash,
-            nmin,
             nmax,
             function,
             algorithm,
@@ -166,21 +139,20 @@ impl FileHandler {
         };
 
         match output_format {
-            OutputFormats::Bin => {
-                while let Ok(sig) = signature_recv.recv() {
-                    let name = sig.file_name.clone();
-                    let len = sig.sketches.first().unwrap().hashes.len();
-                    bincode::serialize_into(&mut output, &vec![sig])?;
-                    if !stdout {
-                        println!("Wrote signature: {:?} with {:?} hashes.", name, len);
-                    }
-                }
-            }
             OutputFormats::Sourmash => {
+                output.write_all(b"[\n")?;
                 while let Ok(sig) = signature_recv.recv() {
                     let sourmash_sig: SourmashSignature = sig.into();
-                    serde_json::to_writer(&mut output, &vec![sourmash_sig])?;
+                    serde_json::to_writer(&mut output, &sourmash_sig)?;
+                    output.write_all(b",\n")?;
                 }
+                output.write_all(b"]")?;
+            }
+            OutputFormats::Lmdb => {
+                if stdout {
+                    return Err(anyhow!("Output format lmdb is not supported for stdout"));
+                }
+                todo!()
             }
         }
 
@@ -221,30 +193,14 @@ impl FileHandler {
                         if let Some(ext) = p.path().extension() {
                             if test_extension(ext) {
                                 resulting_paths.push(p.path());
-                            } else if ext == "list" {
-                                if resulting_paths.is_empty() {
-                                    found_list = Some(p.path());
-                                    break;
-                                } else {
-                                    return Err(anyhow::anyhow!(
-                                        "Found multiple list files in {:?}",
-                                        path
-                                    ));
-                                }
-                            } else {
-                                return Err(anyhow::anyhow!(
-                                    "File with {:?} invalid extension",
-                                    path
-                                ));
+                            }else{
+                                println!("Skipping file with invalid extension: {:?}", p.path());
                             }
                         } else {
-                            return Err(anyhow::anyhow!(
-                                "File {:?} does not have an extension",
-                                p.path()
-                            ));
+                            println!("Skipping file without extension: {:?}", p.path());
                         }
                     } else {
-                        return Err(anyhow::anyhow!("File {:?} is not a file", p.path()));
+                        println!("Skipping directory: {:?}", p.path());
                     }
                 }
             }

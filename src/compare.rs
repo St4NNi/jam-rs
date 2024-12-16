@@ -175,11 +175,9 @@ impl<'a> Comparator<'a> {
     #[inline]
     pub fn compare(&mut self) -> Result<()> {
         if self.use_stats {
-            for (hash, stats) in &self.smaller.hashes {
-                let smaller_stats = stats.as_ref().ok_or_else(|| anyhow!("Missing stats"))?;
+            for hash in &self.smaller.hashes {
                 self.num_kmers += 1;
-                if let Some(stats) = self.larger.hashes.get(hash) {
-                    let larger_stats = stats.as_ref().ok_or_else(|| anyhow!("Missing stats"))?;
+                if self.larger.hashes.contains(hash) {
                     if self.reverse {
                         if !larger_stats.compare(smaller_stats, self.gc_bounds) {
                             self.num_skipped += 1;

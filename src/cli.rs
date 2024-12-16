@@ -23,9 +23,7 @@ pub struct Cli {
 
 #[derive(ValueEnum, Debug, Clone)]
 pub enum OutputFormats {
-    // Binary format (for small sketches)
-    Bin,
-    // Lmdb format, memory mapped database for very large sketches
+    // Lmdb format, memory mapped database
     Lmdb,
     // Sourmash compatible json
     Sourmash,
@@ -57,14 +55,11 @@ pub enum Commands {
         /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
         #[arg(long)]
         fscale: Option<u64>,
-        /// Minimum number of k-mers (per record) to be hashed, bottom cut-off
-        #[arg(long)]
-        nmin: Option<u64>,
         /// Maximum number of k-mers (per record) to be hashed, top cut-off
         #[arg(long)]
         nmax: Option<u64>,
         /// Change to other output formats
-        #[arg(long, default_value = "bin")]
+        #[arg(long, default_value = "lmdb")]
         format: OutputFormats,
         /// Change the hashing algorithm
         #[arg(long, default_value = "default")]
@@ -75,16 +70,16 @@ pub enum Commands {
         singleton: bool,
     },
     /// Merge multiple input sketches into a single sketch
-    #[command(arg_required_else_help = true)]
-    Merge {
-        /// One or more input sketches
-        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
-        inputs: Vec<PathBuf>,
-        /// Output file
-        #[arg(short, long, required = true)]
-        #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
-        output: PathBuf,
-    },
+    // #[command(arg_required_else_help = true)]
+    // Merge {
+    //     /// One or more input sketches
+    //     #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
+    //     inputs: Vec<PathBuf>,
+    //     /// Output file
+    //     #[arg(short, long, required = true)]
+    //     #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
+    //     output: PathBuf,
+    // },
     /// Estimate containment of a (small) sketch against a subset of one or more sketches as database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
@@ -92,7 +87,7 @@ pub enum Commands {
         /// Input sketch or raw file
         #[arg(short, long)]
         input: PathBuf,
-        /// Database sketch(es)
+        /// Database sketch(es), 1 lmdb file or multiple sourmash json files
         #[arg(short, long)]
         database: Vec<PathBuf>,
         /// Output to file instead of stdout
