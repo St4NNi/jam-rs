@@ -1,7 +1,7 @@
 use crate::file_io::ShortSketchInfo;
-use crate::heed_codec::CboRoaringBitmapCodec;
 use crate::signature::Signature;
 use crate::sketch::Sketch;
+use crate::varintencoding::VarIntEncoder;
 use anyhow::anyhow;
 use anyhow::Result;
 use byteorder::BigEndian;
@@ -243,7 +243,7 @@ impl LmdbComparator {
     pub fn new(signatures: Vec<Signature>, lmdb_env: PathBuf, threads: usize, cutoff: f64) -> Self {
         let lmdb_env = unsafe {
             heed::EnvOpenOptions::new()
-                .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK)
+                .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
                 .map_size(10 * 1024 * 1024 * 1024)
                 .max_dbs(2)
                 .open(lmdb_env)
@@ -268,7 +268,7 @@ impl LmdbComparator {
         let sigs_db = self
             .lmdb_env
             .open_database::<U32<BigEndian>, SerdeBincode<ShortSketchInfo>>(&txn, Some("sigs"))?
-            .ok_or_else(|| anyhow!("Database not found"))?;
+            .ok_or_else(|| anyhow!("Database sigs not found"))?;
 
         let infos = RwLock::new(HashMap::new());
 
@@ -286,11 +286,11 @@ impl LmdbComparator {
 
                     let hashes = self
                         .lmdb_env
-                        .open_database::<U64<BigEndian>, CboRoaringBitmapCodec>(
+                        .open_database::<U64<BigEndian>, VarIntEncoder>(
                             &txn,
                             Some("hashes"),
                         )?
-                        .ok_or_else(|| anyhow!("Database not found"))?;
+                        .ok_or_else(|| anyhow!("Database hashes not found"))?;
                     let mut result_map = HashMap::new();
 
                     for hash in target.hashes.iter() {

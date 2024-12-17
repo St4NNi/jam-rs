@@ -3,10 +3,10 @@ use crate::cli::HashAlgorithms;
 use crate::cli::OutputFormats;
 use crate::compare::CompareResult;
 use crate::hash_functions::Function;
-use crate::heed_codec::CboRoaringBitmapCodec;
 use crate::signature::Signature;
 use crate::sketch::Sketch;
 use crate::sketcher;
+use crate::varintencoding::VarIntEncoder;
 use anyhow::anyhow;
 use anyhow::Result;
 use byteorder::BigEndian;
@@ -16,10 +16,11 @@ use heed::types::U64;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
-use roaring::RoaringBitmap;
 use serde::Deserialize;
 use serde::Serialize;
 use sourmash::signature::Signature as SourmashSignature;
+use std::fs;
+use std::fs::remove_file;
 use std::io;
 use std::io::Write;
 use std::path;
@@ -184,7 +185,7 @@ impl FileHandler {
                     heed::EnvOpenOptions::new()
                         .map_size(10 * 1024 * 1024 * 1024)
                         .max_dbs(2)
-                        .open(output)?
+                        .open(output.clone())?
                 };
                 {
                     let mut write_txn = heed_env.write_txn()?;
@@ -195,13 +196,14 @@ impl FileHandler {
                             Some("sigs"),
                         )?;
                     let hashes = heed_env
-                        .create_database::<U64<BigEndian>, CboRoaringBitmapCodec>(
+                        .create_database::<U64<BigEndian>, VarIntEncoder>(
                             &mut write_txn,
                             Some("hashes"),
                         )?;
                     let mut counter: u32 = 0;
                     while let Ok(sig) = signature_recv.recv() {
                         for sketch in sig.sketches {
+                            println!("Writing sketch {:?}", sketch.name);
                             sigs_db.put(
                                 &mut write_txn,
                                 &counter,
@@ -213,15 +215,46 @@ impl FileHandler {
                             )?;
                             for hash in sketch.hashes {
                                 let mut maybe_bitmap = hashes.get(&write_txn, &hash)?;
-                                let bitmap = maybe_bitmap.get_or_insert(RoaringBitmap::new());
-                                bitmap.insert(counter);
+                                let bitmap = maybe_bitmap.get_or_insert(Vec::new());
+                                bitmap.push(counter);
                                 hashes.put(&mut write_txn, &hash, &bitmap)?;
                             }
                             counter += 1;
                         }
                     }
+
+                    write_txn.commit()?;
                 }
+
                 heed_env.prepare_for_closing().wait();
+
+                let heed_env = unsafe {
+                    heed::EnvOpenOptions::new()
+                        .map_size(10 * 1024 * 1024 * 1024)
+                        .max_dbs(2)
+                        .open(output.clone())?
+                };
+
+                let canonical_path = fs::canonicalize(format!("{}/", output.to_string_lossy()))?;
+                println!("Compacting database to {:?}/compact.mdb", canonical_path.to_string_lossy());
+                heed_env
+                    .copy_to_file(
+                        format!("{}/compact.mdb", canonical_path.to_string_lossy()),
+                        heed::CompactionOption::Enabled,
+                    )
+                    .map_err(|e| {
+                        println!("Error in copy file: {e}");
+                        e
+                    })?;
+
+                remove_file(format!("{}/data.mdb", output.to_string_lossy())).map_err(|e| {
+                    println!("Error deleting data.mdb: {e}");
+                    e
+                })?;
+                remove_file(format!("{}/lock.mdb", output.to_string_lossy())).map_err(|e| {
+                    println!("Error deleting lock.mdb: {e}");
+                    e
+                })?;
             }
         }
 

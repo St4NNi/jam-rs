@@ -1,6 +1,9 @@
 use jam_rs::file_io::FileHandler;
 use sourmash::sketch::Sketch;
-use std::{fs, path::{self, PathBuf}};
+use std::{
+    fs,
+    path::{self, PathBuf},
+};
 
 fn get_hashes_sketch(sketch: &Sketch) -> Vec<u64> {
     if let Sketch::MinHash(minhash) = sketch {

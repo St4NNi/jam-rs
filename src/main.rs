@@ -1,5 +1,8 @@
 use clap::{error::ErrorKind, CommandFactory, Parser};
-use jam_rs::{cli::{Cli, Commands}, hash_functions::ahash};
+use jam_rs::{
+    cli::{Cli, Commands},
+    hash_functions::ahash,
+};
 
 fn main() {
     let args = jam_rs::cli::Cli::parse();
@@ -65,13 +68,9 @@ fn main() {
             if database.len() == 1 {
                 let mut lmdb = false;
                 if let Some(first) = database.first() {
-                    if first.is_dir() {
-                        for entry in std::fs::read_dir(first).unwrap() {
-                            let entry = entry.unwrap();
-                            if entry.path().extension() == Some("mdb".as_ref()) {
-                                lmdb = true;
-                                break;
-                            }
+                    if first.is_file() {
+                        if first.extension() == Some("mdb".as_ref()) {
+                            lmdb = true;
                         }
                     }
                     if lmdb {
