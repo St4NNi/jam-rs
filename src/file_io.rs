@@ -22,6 +22,7 @@ use serde::Serialize;
 use sourmash::signature::Signature as SourmashSignature;
 use std::io;
 use std::io::Write;
+use std::path;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::thread;
@@ -228,8 +229,12 @@ impl FileHandler {
     }
 
     pub fn read_signatures(input: &PathBuf) -> Result<Vec<Signature>> {
-        let read_to_bytes = std::fs::read(input)?;
-        Ok(bincode::deserialize_from(read_to_bytes.as_slice()).unwrap())
+        Ok(
+            sourmash::signature::Signature::from_path(path::Path::new(input))?
+                .into_iter()
+                .map(Signature::from)
+                .collect(),
+        )
     }
 
     pub fn concat(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {

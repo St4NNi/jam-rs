@@ -1,6 +1,6 @@
 use jam_rs::file_io::FileHandler;
 use sourmash::sketch::Sketch;
-use std::path::{self, PathBuf};
+use std::{fs, path::{self, PathBuf}};
 
 fn get_hashes_sketch(sketch: &Sketch) -> Vec<u64> {
     if let Sketch::MinHash(minhash) = sketch {
@@ -59,6 +59,7 @@ fn test_file_sketching_basic() {
 #[test]
 fn test_file_sketching_lmdb() {
     let input_file = "tests/testfiles/test.small.fa";
+    fs::create_dir("testout").unwrap();
     FileHandler::sketch_files(
         jam_rs::cli::Commands::Sketch {
             input: vec![PathBuf::from(input_file)],

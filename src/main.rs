@@ -1,5 +1,5 @@
 use clap::{error::ErrorKind, CommandFactory, Parser};
-use jam_rs::cli::{Cli, Commands};
+use jam_rs::{cli::{Cli, Commands}, hash_functions::ahash};
 
 fn main() {
     let args = jam_rs::cli::Cli::parse();
@@ -40,10 +40,21 @@ fn main() {
             };
 
             let mut input_sketch = Vec::new();
+            eprintln!("Reading input sketches");
             for db_path in fs_input {
-                match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
+                // TODO: Remove hardcoded kmer sizes / settings / parse from db
+                match jam_rs::file_io::FileHandler::sketch_file(
+                    &db_path,
+                    21,
+                    None,
+                    None,
+                    false,
+                    jam_rs::hash_functions::Function::Small(&ahash),
+                    jam_rs::cli::HashAlgorithms::Ahash,
+                    false,
+                ) {
                     Ok(r) => {
-                        input_sketch.extend(r);
+                        input_sketch.push(r);
                     }
                     Err(e) => {
                         cmd.error(ErrorKind::ArgumentConflict, e).exit();
@@ -80,7 +91,9 @@ fn main() {
 
                         match output {
                             Some(o) => {
-                                if let Err(e) = jam_rs::file_io::FileHandler::write_result(&result, o) {
+                                if let Err(e) =
+                                    jam_rs::file_io::FileHandler::write_result(&result, o)
+                                {
                                     cmd.error(ErrorKind::ArgumentConflict, e).exit();
                                 }
                             }
