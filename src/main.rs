@@ -29,26 +29,6 @@ fn main() {
             cutoff,
         } => {
             let mut cmd = Cli::command();
-            let database_files =
-                jam_rs::file_io::FileHandler::test_and_collect_files(database, false);
-            let fs = match database_files {
-                Ok(f) => f,
-                Err(e) => {
-                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
-                }
-            };
-
-            let mut db_sketches = Vec::new();
-            for db_path in fs {
-                match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
-                    Ok(r) => {
-                        db_sketches.extend(r);
-                    }
-                    Err(e) => {
-                        cmd.error(ErrorKind::ArgumentConflict, e).exit();
-                    }
-                }
-            }
 
             let input_files =
                 jam_rs::file_io::FileHandler::test_and_collect_files(vec![input], false);
@@ -64,6 +44,71 @@ fn main() {
                 match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
                     Ok(r) => {
                         input_sketch.extend(r);
+                    }
+                    Err(e) => {
+                        cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                    }
+                }
+            }
+
+            if database.len() == 1 {
+                let mut lmdb = false;
+                if let Some(first) = database.first() {
+                    if first.is_dir() {
+                        for entry in std::fs::read_dir(first).unwrap() {
+                            let entry = entry.unwrap();
+                            if entry.path().extension() == Some("mdb".as_ref()) {
+                                lmdb = true;
+                                break;
+                            }
+                        }
+                    }
+                    if lmdb {
+                        let lmdb_comparator = jam_rs::compare::LmdbComparator::new(
+                            input_sketch,
+                            first.clone(),
+                            args.threads.unwrap_or(1),
+                            cutoff,
+                        );
+
+                        let result = match lmdb_comparator.compare() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                            }
+                        };
+
+                        match output {
+                            Some(o) => {
+                                if let Err(e) = jam_rs::file_io::FileHandler::write_result(&result, o) {
+                                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                                }
+                            }
+                            None => {
+                                for result in result {
+                                    println!("{}", result);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+            };
+
+            let database_files =
+                jam_rs::file_io::FileHandler::test_and_collect_files(database, false);
+            let fs = match database_files {
+                Ok(f) => f,
+                Err(e) => {
+                    cmd.error(ErrorKind::ArgumentConflict, e).exit();
+                }
+            };
+
+            let mut db_sketches = Vec::new();
+            for db_path in fs {
+                match jam_rs::file_io::FileHandler::read_signatures(&db_path) {
+                    Ok(r) => {
+                        db_sketches.extend(r);
                     }
                     Err(e) => {
                         cmd.error(ErrorKind::ArgumentConflict, e).exit();

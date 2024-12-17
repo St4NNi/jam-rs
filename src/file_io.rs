@@ -11,7 +11,6 @@ use anyhow::anyhow;
 use anyhow::Result;
 use byteorder::BigEndian;
 use heed::types::SerdeBincode;
-use heed::types::Str;
 use heed::types::U32;
 use heed::types::U64;
 use needletail::parse_fastx_file;
