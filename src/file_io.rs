@@ -6,13 +6,17 @@ use crate::hash_functions::Function;
 use crate::signature::Signature;
 use crate::sketch::Sketch;
 use crate::sketcher;
-use crate::varintencoding::VarIntEncoder;
 use anyhow::anyhow;
 use anyhow::Result;
 use byteorder::BigEndian;
 use heed::types::SerdeBincode;
 use heed::types::U32;
 use heed::types::U64;
+use heed::DatabaseFlags;
+use heed::EnvFlags;
+use heed::Error;
+use heed::MdbError;
+use heed::PutFlags;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
@@ -185,6 +189,7 @@ impl FileHandler {
                     heed::EnvOpenOptions::new()
                         .map_size(10 * 1024 * 1024 * 1024)
                         .max_dbs(2)
+                        .flags(EnvFlags::WRITE_MAP | EnvFlags::MAP_ASYNC)
                         .open(output.clone())?
                 };
                 {
@@ -196,10 +201,12 @@ impl FileHandler {
                             Some("sigs"),
                         )?;
                     let hashes = heed_env
-                        .create_database::<U64<BigEndian>, VarIntEncoder>(
-                            &mut write_txn,
-                            Some("hashes"),
-                        )?;
+                        .database_options()
+                        .types::<U64<BigEndian>, U32<BigEndian>>()
+                        .name("hashes")
+                        .flags(DatabaseFlags::DUP_SORT)
+                        .create(&mut write_txn)?;
+
                     let mut counter: u32 = 0;
                     while let Ok(sig) = signature_recv.recv() {
                         for sketch in sig.sketches {
@@ -214,13 +221,22 @@ impl FileHandler {
                                 },
                             )?;
                             for hash in sketch.hashes {
-                                let mut maybe_bitmap = hashes.get(&write_txn, &hash)?;
-                                let bitmap = maybe_bitmap.get_or_insert(Vec::new());
-                                bitmap.push(counter);
-                                hashes.put(&mut write_txn, &hash, &bitmap)?;
+                                let err = hashes.put_with_flags(
+                                    &mut write_txn,
+                                    PutFlags::NO_DUP_DATA,
+                                    &hash,
+                                    &counter,
+                                );
+                                if matches!(err, Err(Error::Mdb(MdbError::KeyExist))) {
+                                    continue;
+                                } else {
+                                    err?;
+                                }
                             }
                             counter += 1;
                         }
+                        write_txn.commit()?;
+                        write_txn = heed_env.write_txn()?;
                     }
 
                     write_txn.commit()?;
@@ -236,7 +252,10 @@ impl FileHandler {
                 };
 
                 let canonical_path = fs::canonicalize(format!("{}/", output.to_string_lossy()))?;
-                println!("Compacting database to {:?}/compact.mdb", canonical_path.to_string_lossy());
+                println!(
+                    "Compacting database to {:?}/compact.mdb",
+                    canonical_path.to_string_lossy()
+                );
                 heed_env
                     .copy_to_file(
                         format!("{}/compact.mdb", canonical_path.to_string_lossy()),

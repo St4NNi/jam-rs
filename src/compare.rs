@@ -8,6 +8,7 @@ use byteorder::BigEndian;
 use heed::types::SerdeBincode;
 use heed::types::U32;
 use heed::types::U64;
+use heed::DatabaseFlags;
 use heed::EnvFlags;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
@@ -286,20 +287,23 @@ impl LmdbComparator {
 
                     let hashes = self
                         .lmdb_env
-                        .open_database::<U64<BigEndian>, VarIntEncoder>(
-                            &txn,
-                            Some("hashes"),
-                        )?
+                        .database_options()
+                        .types::<U64<BigEndian>, U32<BigEndian>>()
+                        .name("hashes")
+                        .flags(DatabaseFlags::DUP_SORT)
+                        .open(&txn)?
                         .ok_or_else(|| anyhow!("Database hashes not found"))?;
                     let mut result_map = HashMap::new();
 
                     for hash in target.hashes.iter() {
-                        if let Some(found) = hashes.get(&txn, hash)? {
-                            for key in found {
-                                let entry = result_map.entry(key).or_insert(0);
+
+                        if let Some(key) = hashes.get_duplicates(&txn, hash)? {
+                            for item in key {
+                                let (_, sketch) = item?;
+                                let entry = result_map.entry(sketch).or_insert(0);
                                 *entry += 1u64;
                             }
-                        }
+                        };
                     }
 
                     let mut final_results = vec![];
