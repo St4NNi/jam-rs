@@ -1,7 +1,6 @@
 use crate::file_io::ShortSketchInfo;
 use crate::signature::Signature;
 use crate::sketch::Sketch;
-use crate::varintencoding::VarIntEncoder;
 use anyhow::anyhow;
 use anyhow::Result;
 use byteorder::BigEndian;
@@ -10,11 +9,14 @@ use heed::types::U32;
 use heed::types::U64;
 use heed::DatabaseFlags;
 use heed::EnvFlags;
+use indicatif::ParallelProgressIterator;
+use indicatif::ProgressBar;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::{
     fmt::{self, Display, Formatter},
@@ -37,24 +39,22 @@ impl Display for CompareResult {
         if self.reverse {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}",
                 self.to_name,
                 self.from_name,
                 self.num_common,
                 self.num_kmers,
-                self.num_common as f64 / self.num_kmers as f64 * 100.0, // Percent
                 self.estimated_containment,
             )?;
             Ok(())
         } else {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{}",
                 self.from_name,
                 self.to_name,
                 self.num_common,
                 self.num_kmers,
-                self.num_common as f64 / self.num_kmers as f64 * 100.0,
                 self.estimated_containment,
             )
         }
@@ -238,10 +238,13 @@ pub struct LmdbComparator {
     pub lmdb_env: heed::Env,
     pub threads: usize,
     pub cutoff: f64,
+    pub infos: Arc<RwLock<HashMap<u32, ShortSketchInfo>>>,
+    pub kmer_size: u8,
+    pub fscale: Option<u64>,
 }
 
 impl LmdbComparator {
-    pub fn new(signatures: Vec<Signature>, lmdb_env: PathBuf, threads: usize, cutoff: f64) -> Self {
+    pub fn new(lmdb_env: PathBuf, threads: usize, cutoff: f64) -> Result<Self> {
         let lmdb_env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
@@ -251,12 +254,52 @@ impl LmdbComparator {
                 .unwrap()
         };
 
-        LmdbComparator {
-            signatures,
+        let txn = lmdb_env.read_txn()?;
+
+        let sigs_db = lmdb_env
+            .open_database::<U32<BigEndian>, SerdeBincode<ShortSketchInfo>>(&txn, Some("sigs"))?
+            .ok_or_else(|| anyhow!("Database sigs not found"))?;
+
+        let infos = RwLock::new(HashMap::new());
+
+        let mut kmer_size = None;
+        let mut fscale = None;
+        for sig in sigs_db.iter(&txn)? {
+            let (key, value) = sig?;
+            if let Some(kmer_size) = kmer_size {
+                if kmer_size != value.kmer_size {
+                    return Err(anyhow!("Kmer sizes do not match"));
+                }
+            } else {
+                kmer_size = Some(value.kmer_size);
+            }
+
+            if fscale.is_some() {
+                if fscale != value.fscale {
+                    return Err(anyhow!("Fscale sizes do not match"));
+                }
+            } else {
+                fscale = value.fscale;
+            }
+
+            infos.write().expect("poisoned lock").insert(key, value);
+        }
+
+        txn.commit()?;
+
+        Ok(LmdbComparator {
+            signatures: vec![],
             lmdb_env,
             threads,
             cutoff,
-        }
+            infos: Arc::new(infos),
+            kmer_size: kmer_size.unwrap(),
+            fscale,
+        })
+    }
+
+    pub fn set_signatures(&mut self, signatures: Vec<Signature>) {
+        self.signatures = signatures;
     }
 
     pub fn compare(&self) -> Result<Vec<CompareResult>> {
@@ -264,74 +307,75 @@ impl LmdbComparator {
             .num_threads(self.threads)
             .build()?;
 
-        let txn = self.lmdb_env.read_txn()?;
-
-        let sigs_db = self
-            .lmdb_env
-            .open_database::<U32<BigEndian>, SerdeBincode<ShortSketchInfo>>(&txn, Some("sigs"))?
-            .ok_or_else(|| anyhow!("Database sigs not found"))?;
-
-        let infos = RwLock::new(HashMap::new());
-
-        for sig in sigs_db.iter(&txn)? {
-            let (key, value) = sig?;
-            infos.write().expect("poisoned lock").insert(key, value);
-        }
-
         let results = Mutex::new(Vec::new());
 
+        let pb = ProgressBar::new(self.signatures.len() as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?
+                .progress_chars("##-"),
+        );
+        let infos = self.infos.clone();
+
         pool.install(|| {
-            self.signatures.par_iter().try_for_each(|origin| {
-                origin.sketches.par_iter().try_for_each(|target| {
-                    let txn = self.lmdb_env.read_txn()?;
+            self.signatures
+                .par_iter()
+                .progress_with(pb)
+                .try_for_each(|origin| {
+                    origin.sketches.par_iter().try_for_each(|target| {
+                        let txn = self.lmdb_env.read_txn()?;
 
-                    let hashes = self
-                        .lmdb_env
-                        .database_options()
-                        .types::<U64<BigEndian>, U32<BigEndian>>()
-                        .name("hashes")
-                        .flags(DatabaseFlags::DUP_SORT)
-                        .open(&txn)?
-                        .ok_or_else(|| anyhow!("Database hashes not found"))?;
-                    let mut result_map = HashMap::new();
+                        let hashes = self
+                            .lmdb_env
+                            .database_options()
+                            .types::<U64<BigEndian>, U32<BigEndian>>()
+                            .name("hashes")
+                            .flags(DatabaseFlags::DUP_SORT)
+                            .open(&txn)?
+                            .ok_or_else(|| anyhow!("Database hashes not found"))?;
+                        let mut result_map = HashMap::new();
 
-                    for hash in target.hashes.iter() {
+                        for hash in target.hashes.iter() {
+                            if let Some(key) = hashes.get_duplicates(&txn, hash)? {
+                                for item in key {
+                                    let (_, sketch) = item?;
+                                    let entry = result_map.entry(sketch).or_insert(0);
+                                    *entry += 1u64;
+                                }
+                            };
+                        }
 
-                        if let Some(key) = hashes.get_duplicates(&txn, hash)? {
-                            for item in key {
-                                let (_, sketch) = item?;
-                                let entry = result_map.entry(sketch).or_insert(0);
-                                *entry += 1u64;
-                            }
-                        };
-                    }
+                        let mut final_results = vec![];
+                        for (idx, num_common) in result_map {
+                            let read_infos = infos.read().expect("poisoned lock");
+                            let infos = read_infos.get(&idx).expect("Key not found");
+                            let num_kmers = if target.hashes.len() < infos.num_hashes {
+                                target.hashes.len()
+                            } else {
+                                infos.num_hashes
+                            };
+                            let estimated_containment =
+                                num_common as f64 / num_kmers as f64 * 100.0;
+                            final_results.push(CompareResult {
+                                from_name: target.name.clone(),
+                                to_name: infos.file_name.clone(),
+                                num_kmers,
+                                num_common: num_common as usize,
+                                reverse: false,
+                                estimated_containment,
+                            })
+                        }
 
-                    let mut final_results = vec![];
-                    for (idx, num_common) in result_map {
-                        let read_infos = infos.read().expect("poisoned lock");
-                        let infos = read_infos.get(&idx).expect("Key not found");
-                        let num_kmers = infos.num_hashes;
-                        let estimated_containment = num_common as f64 / num_kmers as f64 * 100.0;
-                        final_results.push(CompareResult {
-                            from_name: target.name.clone(),
-                            to_name: infos.file_name.clone(),
-                            num_kmers,
-                            num_common: num_common as usize,
-                            reverse: false,
-                            estimated_containment,
-                        })
-                    }
+                        results
+                            .lock()
+                            .unwrap()
+                            .extend(final_results.into_iter().filter(|e| {
+                                e.num_common as f64 / e.num_kmers as f64 * 100.0 > self.cutoff
+                            }));
 
-                    results
-                        .lock()
-                        .unwrap()
-                        .extend(final_results.into_iter().filter(|e| {
-                            e.num_common as f64 / e.num_kmers as f64 * 100.0 > self.cutoff
-                        }));
-
-                    Ok::<(), anyhow::Error>(())
+                        Ok::<(), anyhow::Error>(())
+                    })
                 })
-            })
         })?;
         Ok(results.into_inner().expect("poisoned lock"))
     }

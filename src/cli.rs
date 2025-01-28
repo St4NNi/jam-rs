@@ -98,4 +98,14 @@ pub enum Commands {
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
     },
+
+    #[command(arg_required_else_help = true)]
+    Stats {
+        /// Input lmdb database
+        #[arg(short, long)]
+        input: PathBuf,
+        // Short
+        #[arg(short, long)]
+        short: bool,
+    },
 }

@@ -17,6 +17,8 @@ use heed::EnvFlags;
 use heed::Error;
 use heed::MdbError;
 use heed::PutFlags;
+use indicatif::ParallelProgressIterator;
+use indicatif::ProgressBar;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
@@ -45,6 +47,7 @@ pub struct ShortSketchInfo {
     pub file_name: String,
     pub num_hashes: usize,
     pub kmer_size: u8,
+    pub fscale: Option<u64>,
 }
 
 impl FileHandler {
@@ -67,27 +70,43 @@ impl FileHandler {
 
                 let function = Function::from_alg(algorithm.clone(), kmer_size);
 
-                let (send, recv) = mpsc::channel();
+                let (send, recv) = mpsc::sync_channel(10);
 
                 let is_stdout = output.is_none();
-                let handler = thread::spawn(|| FileHandler::write_output(output, format, recv));
+                let handler =
+                    thread::spawn(move || FileHandler::write_output(fscale, output, format, recv));
 
+                let pb = ProgressBar::new(files.len() as u64);
+                pb.set_style(
+                    indicatif::ProgressStyle::default_bar()
+                        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?
+                        .progress_chars("##-"),
+                );
+                let pb_clone = pb.clone();
                 let _ = pool.install(|| {
-                    files.par_iter().try_for_each(|file_path| {
-                        match FileHandler::sketch_file(
-                            file_path,
-                            kmer_size,
-                            fscale,
-                            nmax,
-                            singleton,
-                            function.clone(),
-                            algorithm.clone(),
-                            is_stdout,
-                        ) {
-                            Ok(sig) => send.send(sig).map_err(|_| anyhow!("Error while sending")),
-                            Err(_) => Err(anyhow!("Error while sketching file {:?}", file_path)),
-                        }
-                    })
+                    files
+                        .par_iter()
+                        .progress_with(pb)
+                        .try_for_each(|file_path| {
+                            pb_clone.set_message(format!("{:?}", file_path.clone()));
+                            match FileHandler::sketch_file(
+                                file_path,
+                                kmer_size,
+                                fscale,
+                                nmax,
+                                singleton,
+                                function.clone(),
+                                algorithm.clone(),
+                                is_stdout,
+                            ) {
+                                Ok(sig) => {
+                                    send.send(sig).map_err(|_| anyhow!("Error while sending"))
+                                }
+                                Err(_) => {
+                                    Err(anyhow!("Error while sketching file {:?}", file_path))
+                                }
+                            }
+                        })
                 });
 
                 drop(send);
@@ -108,9 +127,9 @@ impl FileHandler {
         singleton: bool,
         function: Function,
         algorithm: HashAlgorithms,
-        stdout: bool,
+        _stdout: bool,
     ) -> Result<Signature> {
-        let start = std::time::Instant::now();
+        //let start = std::time::Instant::now();
         let max_hash = if let Some(fscale) = fscale {
             (u64::MAX as f64 / fscale as f64) as u64
         } else {
@@ -129,24 +148,24 @@ impl FileHandler {
             algorithm,
         );
         let mut reader = parse_fastx_file(input)?;
-        let mut counter = 0;
+        //let mut counter = 0;
         while let Some(record) = reader.next() {
             sketcher.process(&record?);
-            counter += 1;
         }
-        let elapsed = start.elapsed().as_millis();
-        if !stdout {
-            println!(
-                "Processed {:?} with {} records, in {:?} seconds",
-                input,
-                counter,
-                elapsed as f64 / 1000.0,
-            );
-        }
+        //let elapsed = start.elapsed().as_millis();
+        // if !stdout {
+        //     println!(
+        //         "Processed {:?} with {} records, in {:?} seconds",
+        //         input,
+        //         counter,
+        //         elapsed as f64 / 1000.0,
+        //     );
+        // }
         Ok(sketcher.finish())
     }
 
     pub fn write_output(
+        fscale: Option<u64>,
         output: Option<PathBuf>,
         output_format: OutputFormats,
         signature_recv: Receiver<Signature>,
@@ -187,7 +206,7 @@ impl FileHandler {
 
                 let heed_env = unsafe {
                     heed::EnvOpenOptions::new()
-                        .map_size(10 * 1024 * 1024 * 1024)
+                        .map_size(10 * 1024 * 1024 * 1024 * 1024)
                         .max_dbs(2)
                         .flags(EnvFlags::WRITE_MAP | EnvFlags::MAP_ASYNC)
                         .open(output.clone())?
@@ -210,7 +229,7 @@ impl FileHandler {
                     let mut counter: u32 = 0;
                     while let Ok(sig) = signature_recv.recv() {
                         for sketch in sig.sketches {
-                            println!("Writing sketch {:?}", sketch.name);
+                            //println!("Writing sketch {:?}", sketch.name);
                             sigs_db.put(
                                 &mut write_txn,
                                 &counter,
@@ -218,6 +237,7 @@ impl FileHandler {
                                     file_name: sketch.name,
                                     num_hashes: sketch.num_kmers,
                                     kmer_size: sig.kmer_size,
+                                    fscale,
                                 },
                             )?;
                             for hash in sketch.hashes {
@@ -246,7 +266,7 @@ impl FileHandler {
 
                 let heed_env = unsafe {
                     heed::EnvOpenOptions::new()
-                        .map_size(10 * 1024 * 1024 * 1024)
+                        .map_size(10 * 1024 * 1024 * 1024 * 1024)
                         .max_dbs(2)
                         .open(output.clone())?
                 };

@@ -3,6 +3,7 @@ pub mod compare;
 pub mod file_io;
 pub mod hash_functions;
 mod hasher;
+pub mod heed;
 //mod heed_codec;
 pub mod signature;
 mod sketch;
