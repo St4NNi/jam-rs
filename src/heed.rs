@@ -16,12 +16,22 @@ pub struct HeedHandler {
 
 impl HeedHandler {
     pub fn new_ro(path: PathBuf) -> anyhow::Result<Self> {
-        let heed_env = unsafe {
-            heed::EnvOpenOptions::new()
-                .map_size(10 * 1024 * 1024 * 1024 * 1024)
-                .max_dbs(2)
-                .flags(EnvFlags::READ_ONLY)
-                .open(path.clone())?
+        let heed_env = if path.is_dir() {
+            unsafe {
+                heed::EnvOpenOptions::new()
+                    .map_size(10 * 1024 * 1024 * 1024 * 1024)
+                    .max_dbs(2)
+                    .flags(EnvFlags::READ_ONLY)
+                    .open(path.clone())?
+            }
+        } else {
+            unsafe {
+                heed::EnvOpenOptions::new()
+                    .map_size(10 * 1024 * 1024 * 1024 * 1024)
+                    .max_dbs(2)
+                    .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
+                    .open(path.clone())?
+            }
         };
 
         let rtxn = heed_env.read_txn()?;
@@ -36,7 +46,7 @@ impl HeedHandler {
             .flags(DatabaseFlags::DUP_SORT)
             .open(&rtxn)?
             .ok_or_else(|| anyhow::anyhow!("Unable to open signatures database"))?;
-        drop(rtxn);
+        rtxn.commit()?;
         Ok(HeedHandler {
             heed_env,
             signatures: sigs_db,
@@ -46,9 +56,9 @@ impl HeedHandler {
 
     pub fn summarize_stats(&self) -> anyhow::Result<()> {
         let rtxn = self.heed_env.read_txn()?;
-        let num_of_sigs= self.signatures.iter(&rtxn)?.count();
+        let num_of_sigs = self.signatures.len(&rtxn)?;
         println!("Number of signatures: {}", num_of_sigs);
-        let num_of_hashes = self.hashes.iter(&rtxn)?.move_through_duplicate_values().count();
+        let num_of_hashes = self.hashes.len(&rtxn)?;
         println!("Number of hashes: {}", num_of_hashes);
         Ok(())
     }
@@ -57,7 +67,10 @@ impl HeedHandler {
         let rtxn = self.heed_env.read_txn()?;
         for (_, value) in self.signatures.iter(&rtxn)?.enumerate() {
             let (_, value) = value?;
-            println!("{},{:?},{},{}", value.file_name, value.fscale, value.kmer_size, value.num_hashes);
+            println!(
+                "{},{:?},{},{}",
+                value.file_name, value.fscale, value.kmer_size, value.num_hashes
+            );
         }
         Ok(())
     }
