@@ -14,9 +14,8 @@ use heed::types::U32;
 use heed::types::U64;
 use heed::DatabaseFlags;
 use heed::EnvFlags;
-use heed::Error;
-use heed::MdbError;
 use heed::PutFlags;
+use indicatif::MultiProgress;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
 use needletail::parse_fastx_file;
@@ -73,16 +72,20 @@ impl FileHandler {
 
                 let (send, recv) = mpsc::sync_channel(10);
 
+                let multi_bar = MultiProgress::new();
+                let multi_bar_clone = multi_bar.clone();
+
                 let is_stdout = output.is_none();
-                let handler =
-                    thread::spawn(move || FileHandler::write_output(fscale, output, format, recv));
+                let handler = thread::spawn(move || {
+                    FileHandler::write_output(fscale, output, format, recv, multi_bar_clone)
+                });
 
                 let pb = ProgressBar::new(files.len() as u64);
-                pb.set_style(
-                    indicatif::ProgressStyle::default_bar()
-                        .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?
-                        .progress_chars("##-"),
-                );
+                let pb = multi_bar.add(pb);
+                pb.set_style(indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                        .unwrap()
+                        .progress_chars("#>-"));
                 let pb_clone = pb.clone();
                 let _ = pool.install(|| {
                     files
@@ -170,6 +173,7 @@ impl FileHandler {
         output: Option<PathBuf>,
         output_format: OutputFormats,
         signature_recv: Receiver<Signature>,
+        multibar: MultiProgress,
     ) -> Result<()> {
         let stdout = output.is_none();
 
@@ -249,17 +253,22 @@ impl FileHandler {
                         write_txn.commit()?;
                         write_txn = heed_env.write_txn()?;
                     }
-                    println!("Signatures finished, writing hashes");
+                    let _ = multibar.println("Signatures finished, writing hashes");
 
-                    let bar = ProgressBar::new(hashes.len() as u64);
+                    let bar = multibar.add(ProgressBar::new(hashes.len() as u64));
                     bar.set_style(indicatif::ProgressStyle::default_bar()
                         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
                         .unwrap()
                         .progress_chars("#>-"));
-                
+
                     for (hash, sigs) in hashes {
                         for sig in sigs {
-                            hashes_db.put_with_flags(&mut write_txn, PutFlags::APPEND_DUP,&hash, &sig)?;
+                            hashes_db.put_with_flags(
+                                &mut write_txn,
+                                PutFlags::APPEND_DUP,
+                                &hash,
+                                &sig,
+                            )?;
                         }
                         bar.inc(1);
                     }
