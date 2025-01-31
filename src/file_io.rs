@@ -25,6 +25,7 @@ use rayon::prelude::ParallelIterator;
 use serde::Deserialize;
 use serde::Serialize;
 use sourmash::signature::Signature as SourmashSignature;
+use std::collections::BTreeMap;
 use std::fs;
 use std::fs::remove_file;
 use std::io;
@@ -219,7 +220,7 @@ impl FileHandler {
                             &mut write_txn,
                             Some("sigs"),
                         )?;
-                    let hashes = heed_env
+                    let hashes_db = heed_env
                         .database_options()
                         .types::<U64<BigEndian>, U32<BigEndian>>()
                         .name("hashes")
@@ -227,9 +228,9 @@ impl FileHandler {
                         .create(&mut write_txn)?;
 
                     let mut counter: u32 = 0;
+                    let mut hashes = BTreeMap::new();
                     while let Ok(sig) = signature_recv.recv() {
                         for sketch in sig.sketches {
-                            //println!("Writing sketch {:?}", sketch.name);
                             sigs_db.put(
                                 &mut write_txn,
                                 &counter,
@@ -241,24 +242,27 @@ impl FileHandler {
                                 },
                             )?;
                             for hash in sketch.hashes {
-                                let err = hashes.put_with_flags(
-                                    &mut write_txn,
-                                    PutFlags::NO_DUP_DATA,
-                                    &hash,
-                                    &counter,
-                                );
-                                if matches!(err, Err(Error::Mdb(MdbError::KeyExist))) {
-                                    continue;
-                                } else {
-                                    err?;
-                                }
+                                hashes.entry(hash).or_insert_with(Vec::new).push(counter);
                             }
                             counter += 1;
                         }
                         write_txn.commit()?;
                         write_txn = heed_env.write_txn()?;
                     }
+                    println!("Signatures finished, writing hashes");
 
+                    let bar = ProgressBar::new(hashes.len() as u64);
+                    bar.set_style(indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                        .unwrap()
+                        .progress_chars("#>-"));
+                
+                    for (hash, sigs) in hashes {
+                        for sig in sigs {
+                            hashes_db.put_with_flags(&mut write_txn, PutFlags::APPEND_DUP,&hash, &sig)?;
+                        }
+                        bar.inc(1);
+                    }
                     write_txn.commit()?;
                 }
 
