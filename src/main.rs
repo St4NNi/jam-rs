@@ -94,12 +94,14 @@ fn main() {
 
                         lmdb_comparator.set_signatures(input_sketch);
 
-                        let result = match lmdb_comparator.compare() {
+                        let mut result = match lmdb_comparator.compare() {
                             Ok(r) => r,
                             Err(e) => {
                                 cmd.error(ErrorKind::ArgumentConflict, e).exit();
                             }
                         };
+
+                        result.sort_by(|a, b| b.estimated_containment.total_cmp(&a.estimated_containment));
 
                         match output {
                             Some(o) => {
