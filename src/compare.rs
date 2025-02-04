@@ -11,6 +11,7 @@ use heed::DatabaseFlags;
 use heed::EnvFlags;
 use indicatif::ParallelProgressIterator;
 use indicatif::ProgressBar;
+use indicatif::ProgressDrawTarget;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
@@ -39,7 +40,7 @@ impl Display for CompareResult {
         if self.reverse {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{:.2}",
                 self.to_name,
                 self.from_name,
                 self.num_common,
@@ -50,7 +51,7 @@ impl Display for CompareResult {
         } else {
             write!(
                 f,
-                "{}\t{}\t{}\t{}\t{}",
+                "{}\t{}\t{}\t{}\t{:.2}",
                 self.from_name,
                 self.to_name,
                 self.num_common,
@@ -241,10 +242,11 @@ pub struct LmdbComparator {
     pub infos: Arc<RwLock<HashMap<u32, ShortSketchInfo>>>,
     pub kmer_size: u8,
     pub fscale: Option<u64>,
+    pub silent: bool,
 }
 
 impl LmdbComparator {
-    pub fn new(lmdb_env: PathBuf, threads: usize, cutoff: f64) -> Result<Self> {
+    pub fn new(lmdb_env: PathBuf, threads: usize, cutoff: f64, silent: bool) -> Result<Self> {
         let lmdb_env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
@@ -295,6 +297,7 @@ impl LmdbComparator {
             infos: Arc::new(infos),
             kmer_size: kmer_size.unwrap(),
             fscale,
+            silent,
         })
     }
 
@@ -309,12 +312,15 @@ impl LmdbComparator {
 
         let results = Mutex::new(Vec::new());
 
-        let pb = ProgressBar::new(self.signatures.len() as u64);
-        pb.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?
-                .progress_chars("##-"),
-        );
+            let pb = ProgressBar::new(self.signatures.len() as u64);
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?
+                    .progress_chars("##-"),
+            );
+        if self.silent {
+            pb.set_draw_target(ProgressDrawTarget::hidden())
+        }
         let infos = self.infos.clone();
 
         pool.install(|| {

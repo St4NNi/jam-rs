@@ -19,6 +19,11 @@ pub struct Cli {
     /// Overwrite output files
     #[arg(short, long, global = true, default_value = "false")]
     pub force: bool,
+
+    /// Silent mode, no (additional) output to stdout
+    /// Only errors and output files will be printed
+    #[arg(short, long, global = true, default_value = "false")]
+    pub silent: bool,
 }
 
 #[derive(ValueEnum, Debug, Clone)]

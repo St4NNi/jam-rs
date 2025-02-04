@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{error::ErrorKind, CommandFactory, Parser};
 use indicatif::ProgressIterator;
 use jam_rs::{
@@ -57,12 +59,19 @@ fn main() {
                             first.clone(),
                             args.threads.unwrap_or(1),
                             cutoff,
+                            args.silent
                         )
                         .unwrap();
 
                         let mut input_sketch = Vec::new();
 
-                        for db_path in fs_input.into_iter().progress() {
+                        let iterator:Box<dyn Iterator<Item = PathBuf>> = if args.silent {
+                            Box::new(fs_input.into_iter())
+                        } else {
+                            Box::new(fs_input.into_iter().progress())
+                        };
+
+                        for db_path in iterator {
                             // TODO: Remove hardcoded kmer sizes / settings / parse from db
                             match jam_rs::file_io::FileHandler::sketch_file(
                                 &db_path,
