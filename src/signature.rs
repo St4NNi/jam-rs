@@ -1,11 +1,7 @@
-use crate::{
-    cli::HashAlgorithms,
-    hasher::NoHashHasher,
-    sketch::{Sketch, Stats},
-};
+use crate::{cli::HashAlgorithms, sketch::Sketch};
 use serde::{Deserialize, Serialize};
 use sourmash::signature::{Signature as SourmashSignature, SigsTrait};
-use std::hash::BuildHasherDefault;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Signature {
@@ -61,18 +57,9 @@ impl From<SourmashSignature> for Signature {
                     let mut sketch = Sketch::new(
                         sourmash_signature.filename(),
                         mash.mins().len(),
-                        mash.max_hash() as usize,
                         mash.ksize() as u8,
                     );
-                    sketch.hashes = mash
-                        .mins()
-                        .iter()
-                        .map(|x| (*x, None))
-                        .collect::<std::collections::HashMap<
-                            u64,
-                            Option<Stats>,
-                            BuildHasherDefault<NoHashHasher>,
-                        >>();
+                    sketch.hashes = mash.mins().into_iter().collect::<BTreeSet<u64>>();
                     sketches.push(sketch);
                 }
                 sourmash::sketch::Sketch::LargeMinHash(mash) => {
@@ -95,18 +82,9 @@ impl From<SourmashSignature> for Signature {
                     let mut sketch = Sketch::new(
                         sourmash_signature.filename(),
                         mash.mins().len(),
-                        mash.max_hash() as usize,
                         mash.ksize() as u8,
                     );
-                    sketch.hashes = mash
-                        .mins()
-                        .iter()
-                        .map(|x| (*x, None))
-                        .collect::<std::collections::HashMap<
-                            u64,
-                            Option<Stats>,
-                            BuildHasherDefault<NoHashHasher>,
-                        >>();
+                    sketch.hashes = mash.mins().into_iter().collect::<BTreeSet<u64>>();
                     sketches.push(sketch);
                 }
                 sourmash::sketch::Sketch::HyperLogLog(_) => {
@@ -126,11 +104,10 @@ impl From<SourmashSignature> for Signature {
 
 impl Signature {
     pub fn collapse(&mut self) -> Sketch {
-        let mut sketch = Sketch::new(self.file_name.to_string(), 0, 0, self.kmer_size);
+        let mut sketch = Sketch::new(self.file_name.to_string(), 0, self.kmer_size);
         for old_sketch in self.sketches.drain(..) {
             sketch.hashes.extend(old_sketch.hashes);
             sketch.num_kmers += old_sketch.num_kmers;
-            sketch.max_kmers += old_sketch.max_kmers;
         }
         sketch
     }

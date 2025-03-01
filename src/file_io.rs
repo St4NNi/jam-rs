@@ -8,23 +8,47 @@ use crate::sketch::Sketch;
 use crate::sketcher;
 use anyhow::anyhow;
 use anyhow::Result;
+use byteorder::BigEndian;
+use heed::types::SerdeBincode;
+use heed::types::U32;
+use heed::types::U64;
+use heed::DatabaseFlags;
+use heed::EnvFlags;
+use heed::PutFlags;
+use indicatif::MultiProgress;
+use indicatif::ParallelProgressIterator;
+use indicatif::ProgressBar;
 use needletail::parse_fastx_file;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::prelude::ParallelIterator;
+use serde::Deserialize;
+use serde::Serialize;
 use sourmash::signature::Signature as SourmashSignature;
+use std::collections::BTreeMap;
+use std::fs;
+use std::fs::remove_file;
 use std::io;
 use std::io::Write;
+use std::path;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::thread;
 use std::{
     ffi::OsStr,
-    fs::{self, File},
+    fs::File,
     io::{BufRead, BufReader},
     path::PathBuf,
 };
 
 pub struct FileHandler {}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ShortSketchInfo {
+    pub file_name: String,
+    pub num_hashes: usize,
+    pub kmer_size: u8,
+    pub fscale: Option<u64>,
+}
 
 impl FileHandler {
     pub fn sketch_files(command: Commands, threads: Option<usize>) -> Result<()> {
@@ -34,13 +58,10 @@ impl FileHandler {
                 output,
                 kmer_size,
                 fscale,
-                kscale,
-                nmin,
                 nmax,
                 algorithm,
                 format,
                 singleton,
-                stats,
             } => {
                 let files = FileHandler::test_and_collect_files(input, true)?;
                 let pool = rayon::ThreadPoolBuilder::new()
@@ -49,33 +70,47 @@ impl FileHandler {
 
                 let function = Function::from_alg(algorithm.clone(), kmer_size);
 
-                let (send, recv) = mpsc::channel();
+                let (send, recv) = mpsc::sync_channel(10);
+
+                let multi_bar = MultiProgress::new();
+                let multi_bar_clone = multi_bar.clone();
 
                 let is_stdout = output.is_none();
-                let handler = thread::spawn(|| {
-                    FileHandler::write_output(output, format, recv)
-                    // thread code
+                let handler = thread::spawn(move || {
+                    FileHandler::write_output(fscale, output, format, recv, multi_bar_clone)
                 });
 
+                let pb = ProgressBar::new(files.len() as u64);
+                let pb = multi_bar.add(pb);
+                pb.set_style(indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                        .unwrap()
+                        .progress_chars("#>-"));
+                let pb_clone = pb.clone();
                 let _ = pool.install(|| {
-                    files.par_iter().try_for_each(|file_path| {
-                        match FileHandler::sketch_file(
-                            file_path,
-                            kmer_size,
-                            fscale,
-                            kscale,
-                            nmin,
-                            nmax,
-                            singleton,
-                            stats,
-                            function.clone(),
-                            algorithm.clone(),
-                            is_stdout,
-                        ) {
-                            Ok(sig) => send.send(sig).map_err(|_| anyhow!("Error while sending")),
-                            Err(_) => Err(anyhow!("Error while sketching file {:?}", file_path)),
-                        }
-                    })
+                    files
+                        .par_iter()
+                        .progress_with(pb)
+                        .try_for_each(|file_path| {
+                            pb_clone.set_message(format!("{:?}", file_path.clone()));
+                            match FileHandler::sketch_file(
+                                file_path,
+                                kmer_size,
+                                fscale,
+                                nmax,
+                                singleton,
+                                function.clone(),
+                                algorithm.clone(),
+                                is_stdout,
+                            ) {
+                                Ok(sig) => {
+                                    send.send(sig).map_err(|_| anyhow!("Error while sending"))
+                                }
+                                Err(_) => {
+                                    Err(anyhow!("Error while sketching file {:?}", file_path))
+                                }
+                            }
+                        })
                 });
 
                 drop(send);
@@ -92,30 +127,13 @@ impl FileHandler {
         input: &PathBuf,
         kmer_length: u8,
         fscale: Option<u64>,
-        kscale: Option<u64>,
-        nmin: Option<u64>,
         nmax: Option<u64>,
         singleton: bool,
-        stats: bool,
         function: Function,
         algorithm: HashAlgorithms,
-        stdout: bool,
+        _stdout: bool,
     ) -> Result<Signature> {
-        let mut x = fs::metadata(input)?.len();
-        if let Some(ext) = input.extension() {
-            if let Some(ext_str) = ext.to_str() {
-                if ext_str == "gz" {
-                    // Approximate the size of uncompressed file
-                    x *= 3;
-                }
-            }
-        }
-        let start = std::time::Instant::now();
-        let kscale = if let Some(kscale) = kscale {
-            (x as f64 / kscale as f64) as u64
-        } else {
-            u64::MAX
-        };
+        //let start = std::time::Instant::now();
         let max_hash = if let Some(fscale) = fscale {
             (u64::MAX as f64 / fscale as f64) as u64
         } else {
@@ -128,59 +146,167 @@ impl FileHandler {
                 .ok_or_else(|| anyhow!("Unknown path"))?
                 .to_string(),
             singleton,
-            stats,
-            kscale,
             max_hash,
-            nmin,
             nmax,
             function,
             algorithm,
         );
         let mut reader = parse_fastx_file(input)?;
-        let mut counter = 0;
+        //let mut counter = 0;
         while let Some(record) = reader.next() {
             sketcher.process(&record?);
-            counter += 1;
         }
-        let elapsed = start.elapsed().as_millis();
-        if !stdout {
-            println!(
-                "Processed {:?} with {} records, in {:?} seconds",
-                input,
-                counter,
-                elapsed as f64 / 1000.0,
-            );
-        }
+        //let elapsed = start.elapsed().as_millis();
+        // if !stdout {
+        //     println!(
+        //         "Processed {:?} with {} records, in {:?} seconds",
+        //         input,
+        //         counter,
+        //         elapsed as f64 / 1000.0,
+        //     );
+        // }
         Ok(sketcher.finish())
     }
 
     pub fn write_output(
+        fscale: Option<u64>,
         output: Option<PathBuf>,
         output_format: OutputFormats,
         signature_recv: Receiver<Signature>,
+        multibar: MultiProgress,
     ) -> Result<()> {
         let stdout = output.is_none();
-        let mut output: Box<dyn Write> = match output {
-            Some(o) => Box::new(std::io::BufWriter::new(File::create(o)?)),
-            None => Box::new(std::io::BufWriter::new(io::stdout())),
-        };
 
         match output_format {
-            OutputFormats::Bin => {
-                while let Ok(sig) = signature_recv.recv() {
-                    let name = sig.file_name.clone();
-                    let len = sig.sketches.first().unwrap().hashes.len();
-                    bincode::serialize_into(&mut output, &vec![sig])?;
-                    if !stdout {
-                        println!("Wrote signature: {:?} with {:?} hashes.", name, len);
-                    }
-                }
-            }
             OutputFormats::Sourmash => {
+                let mut output: Box<dyn Write> = match output {
+                    Some(o) => Box::new(std::io::BufWriter::new(File::create(o)?)),
+                    None => Box::new(std::io::BufWriter::new(io::stdout())),
+                };
+                output.write_all(b"[\n")?;
+                let mut first = true;
                 while let Ok(sig) = signature_recv.recv() {
                     let sourmash_sig: SourmashSignature = sig.into();
-                    serde_json::to_writer(&mut output, &vec![sourmash_sig])?;
+                    if !first {
+                        output.write_all(b",\n")?;
+                        first = false;
+                    }
+                    serde_json::to_writer(&mut output, &sourmash_sig)?;
                 }
+                output.write_all(b"]")?;
+            }
+            OutputFormats::Lmdb => {
+                if stdout {
+                    return Err(anyhow!("Output format lmdb is not supported for stdout"));
+                }
+                let Some(output) = output else {
+                    return Err(anyhow!("Output folder is required for lmdb"));
+                };
+                if !output.is_dir() {
+                    return Err(anyhow!(
+                        "Output folder {:?} does not exist or is no directory",
+                        output
+                    ));
+                }
+
+                let heed_env = unsafe {
+                    heed::EnvOpenOptions::new()
+                        .map_size(10 * 1024 * 1024 * 1024 * 1024)
+                        .max_dbs(2)
+                        .flags(EnvFlags::WRITE_MAP | EnvFlags::MAP_ASYNC)
+                        .open(output.clone())?
+                };
+                {
+                    let mut write_txn = heed_env.write_txn()?;
+
+                    let sigs_db = heed_env
+                        .create_database::<U32<BigEndian>, SerdeBincode<ShortSketchInfo>>(
+                            &mut write_txn,
+                            Some("sigs"),
+                        )?;
+                    let hashes_db = heed_env
+                        .database_options()
+                        .types::<U64<BigEndian>, U32<BigEndian>>()
+                        .name("hashes")
+                        .flags(DatabaseFlags::DUP_SORT)
+                        .create(&mut write_txn)?;
+
+                    let mut counter: u32 = 0;
+                    let mut hashes = BTreeMap::new();
+                    while let Ok(sig) = signature_recv.recv() {
+                        for sketch in sig.sketches {
+                            sigs_db.put(
+                                &mut write_txn,
+                                &counter,
+                                &ShortSketchInfo {
+                                    file_name: sketch.name,
+                                    num_hashes: sketch.num_kmers,
+                                    kmer_size: sig.kmer_size,
+                                    fscale,
+                                },
+                            )?;
+                            for hash in sketch.hashes {
+                                hashes.entry(hash).or_insert_with(Vec::new).push(counter);
+                            }
+                            counter += 1;
+                        }
+                        write_txn.commit()?;
+                        write_txn = heed_env.write_txn()?;
+                    }
+                    let _ = multibar.println("Signatures finished, writing hashes");
+
+                    let bar = multibar.add(ProgressBar::new(hashes.len() as u64));
+                    bar.set_style(indicatif::ProgressStyle::default_bar()
+                        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+                        .unwrap()
+                        .progress_chars("#>-"));
+
+                    for (hash, sigs) in hashes {
+                        for sig in sigs {
+                            hashes_db.put_with_flags(
+                                &mut write_txn,
+                                PutFlags::APPEND_DUP,
+                                &hash,
+                                &sig,
+                            )?;
+                        }
+                        bar.inc(1);
+                    }
+                    write_txn.commit()?;
+                }
+
+                heed_env.prepare_for_closing().wait();
+
+                let heed_env = unsafe {
+                    heed::EnvOpenOptions::new()
+                        .map_size(10 * 1024 * 1024 * 1024 * 1024)
+                        .max_dbs(2)
+                        .open(output.clone())?
+                };
+
+                let canonical_path = fs::canonicalize(format!("{}/", output.to_string_lossy()))?;
+                println!(
+                    "Compacting database to {:?}/compact.mdb",
+                    canonical_path.to_string_lossy()
+                );
+                heed_env
+                    .copy_to_file(
+                        format!("{}/compact.mdb", canonical_path.to_string_lossy()),
+                        heed::CompactionOption::Enabled,
+                    )
+                    .map_err(|e| {
+                        println!("Error in copy file: {e}");
+                        e
+                    })?;
+
+                remove_file(format!("{}/data.mdb", output.to_string_lossy())).map_err(|e| {
+                    println!("Error deleting data.mdb: {e}");
+                    e
+                })?;
+                remove_file(format!("{}/lock.mdb", output.to_string_lossy())).map_err(|e| {
+                    println!("Error deleting lock.mdb: {e}");
+                    e
+                })?;
             }
         }
 
@@ -188,8 +314,12 @@ impl FileHandler {
     }
 
     pub fn read_signatures(input: &PathBuf) -> Result<Vec<Signature>> {
-        let read_to_bytes = std::fs::read(input)?;
-        Ok(bincode::deserialize_from(read_to_bytes.as_slice()).unwrap())
+        Ok(
+            sourmash::signature::Signature::from_path(path::Path::new(input))?
+                .into_iter()
+                .map(Signature::from)
+                .collect(),
+        )
     }
 
     pub fn concat(inputs: Vec<PathBuf>, output: PathBuf) -> Result<()> {
@@ -221,30 +351,14 @@ impl FileHandler {
                         if let Some(ext) = p.path().extension() {
                             if test_extension(ext) {
                                 resulting_paths.push(p.path());
-                            } else if ext == "list" {
-                                if resulting_paths.is_empty() {
-                                    found_list = Some(p.path());
-                                    break;
-                                } else {
-                                    return Err(anyhow::anyhow!(
-                                        "Found multiple list files in {:?}",
-                                        path
-                                    ));
-                                }
                             } else {
-                                return Err(anyhow::anyhow!(
-                                    "File with {:?} invalid extension",
-                                    path
-                                ));
+                                println!("Skipping file with invalid extension: {:?}", p.path());
                             }
                         } else {
-                            return Err(anyhow::anyhow!(
-                                "File {:?} does not have an extension",
-                                p.path()
-                            ));
+                            println!("Skipping file without extension: {:?}", p.path());
                         }
                     } else {
-                        return Err(anyhow::anyhow!("File {:?} is not a file", p.path()));
+                        println!("Skipping directory: {:?}", p.path());
                     }
                 }
             }

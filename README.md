@@ -8,7 +8,7 @@
 Just another minhash (jam) implementation. A high performance minhash variant to screen extremely large (metagenomic) datasets in a very short timeframe.
 Implements parts of the ScaledMinHash / FracMinHash algorithm described in [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027).
 
-Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version tries to focus on estimating the containment of small sequences in large sets by (optionally) introducing an intentional bias towards smaller sequences. This is intended to be used to screen terabytes of data in just a few seconds / minutes.
+Unlike traditional implementations like [sourmash](https://joss.theoj.org/papers/10.21105/joss.00027) or [mash](https://doi.org/10.1186/s13059-016-0997-x) this version tries to focus on estimating the containment of small sequences in large sets by (optionally) introducing an intentional bias towards smaller sequences and enforcing a certain frequence. This is intended to be used to screen terabytes of data in just a few seconds / minutes.
 
 ### Installation
 
