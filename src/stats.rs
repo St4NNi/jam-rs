@@ -25,12 +25,12 @@ impl DatabaseStats {
 
         if !self.gc_distribution.is_empty() {
             let avg_gc = self.calculate_average_gc();
-            println!("  Average GC content: {:.1}%", avg_gc);
+            println!("  Average GC content: {avg_gc:.1}%");
         }
 
         if !self.length_distribution.is_empty() {
             let avg_length = self.calculate_average_length();
-            println!("  Average sequence length: {:.0} bp", avg_length);
+            println!("  Average sequence length: {avg_length:.0} bp");
         }
     }
 
@@ -44,7 +44,7 @@ impl DatabaseStats {
 
         for (category, count) in gc_entries.iter().take(10) {
             let gc_range = self.gc_category_to_range(**category);
-            println!("  {}: {} hashes", gc_range, count);
+            println!("  {gc_range}: {count} hashes");
         }
 
         if gc_entries.len() > 10 {
@@ -57,7 +57,7 @@ impl DatabaseStats {
 
         for (category, count) in length_entries.iter().take(10) {
             let length_range = self.length_category_to_range(**category);
-            println!("  {}: {} hashes", length_range, count);
+            println!("  {length_range}: {count} hashes");
         }
 
         if length_entries.len() > 10 {
@@ -128,7 +128,7 @@ impl DatabaseStats {
                 let start = 70 + (category - 46) * 5;
                 format!("{:.0}-{:.0}%", start, start + 5)
             }
-            _ => format!("Unknown ({})", category),
+            _ => format!("Unknown ({category})"),
         }
     }
 
@@ -155,7 +155,7 @@ impl DatabaseStats {
                 )
             }
             70 => "> 10 MB".to_string(),
-            _ => format!("Unknown ({})", category),
+            _ => format!("Unknown ({category})"),
         }
     }
 
@@ -190,7 +190,7 @@ impl StatsCalculator {
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .open(database_path)
-                .with_context(|| format!("Failed to open database: {:?}", database_path))?
+                .with_context(|| format!("Failed to open database: {database_path:?}"))?
         };
 
         let rtxn = env.read_txn()?;

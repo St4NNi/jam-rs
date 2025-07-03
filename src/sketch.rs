@@ -108,7 +108,7 @@ impl Sketcher {
         metadata_env: &Env,
     ) -> Result<()> {
         let mut reader = parse_fastx_file(file_path)
-            .with_context(|| format!("Failed to open file: {:?}", file_path))?;
+            .with_context(|| format!("Failed to open file: {file_path:?}"))?;
 
         let mut sequence_count = 0;
         let mut total_length = 0;
@@ -206,10 +206,10 @@ impl Sketcher {
             let hash = ahash(kmer.0);
 
             // Apply FracMinHash filter if specified
-            if let Some(fscale) = self.config.fscale {
-                if hash >= fscale {
-                    continue;
-                }
+            if let Some(fscale) = self.config.fscale
+                && hash >= fscale
+            {
+                continue;
             }
 
             collector.add_hash(hash, metadata);
@@ -239,10 +239,10 @@ impl Sketcher {
             let hash = ahash(kmer.0);
 
             // Apply FracMinHash filter if specified
-            if let Some(fscale) = self.config.fscale {
-                if hash >= fscale {
-                    continue;
-                }
+            if let Some(fscale) = self.config.fscale
+                && hash >= fscale
+            {
+                continue;
             }
 
             hash_sender.send((hash, metadata.pack()))?;
@@ -309,7 +309,7 @@ impl Sketcher {
         let metadata = FileMetadata {
             filename: file_path.to_string_lossy().to_string(),
             file_size: std::fs::metadata(file_path)?.len(),
-            sequence_name: format!("{} sequences", sequence_count),
+            sequence_name: format!("{sequence_count} sequences"),
             sequence_length: total_length,
             total_sequences: sequence_count,
         };

@@ -210,7 +210,7 @@ impl DistanceCalculator {
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .open(sketch_path)
-                .with_context(|| format!("Failed to open sketch database: {:?}", sketch_path))?
+                .with_context(|| format!("Failed to open sketch database: {sketch_path:?}"))?
         };
 
         let rtxn = env.read_txn()?;
@@ -255,10 +255,7 @@ impl DistanceCalculator {
                 format!("unknown_{}", metadata.file_index)
             };
 
-            sketches
-                .entry(name)
-                .or_insert_with(HashSet::new)
-                .insert(hash);
+            sketches.entry(name).or_default().insert(hash);
         }
 
         Ok(sketches)
@@ -332,7 +329,7 @@ impl DistanceCalculator {
         results: &[DistanceResult],
     ) -> Result<()> {
         let json = serde_json::to_string_pretty(results)?;
-        write!(writer, "{}", json)?;
+        write!(writer, "{json}")?;
         Ok(())
     }
 

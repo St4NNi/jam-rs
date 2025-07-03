@@ -99,15 +99,15 @@ fn handle_sketch_command(
     if !silent {
         println!("Starting sketching process...");
         println!("  Input files: {}", input_paths.len());
-        println!("  K-mer size: {}", kmer_size);
-        println!("  Threads: {}", threads);
+        println!("  K-mer size: {kmer_size}");
+        println!("  Threads: {threads}");
 
         if let Some(scale) = fscale {
-            println!("  FracMinHash scale: {}", scale);
+            println!("  FracMinHash scale: {scale}");
         }
 
         if let Some(max_hashes) = nmax {
-            println!("  Max hashes per sequence: {}", max_hashes);
+            println!("  Max hashes per sequence: {max_hashes}");
         }
 
         if singleton {
@@ -131,7 +131,7 @@ fn handle_sketch_command(
 
     if !silent {
         println!("Sketching completed successfully!");
-        println!("Output written to: {:?}", output_path);
+        println!("Output written to: {output_path:?}");
 
         // Print quick stats
         if let Ok(stats) = stats::StatsCalculator::calculate_stats(&output_path, false) {
@@ -152,7 +152,7 @@ fn handle_distance_command(
     silent: bool,
 ) -> Result<()> {
     // Validate cutoff
-    if cutoff < 0.0 || cutoff > 1.0 {
+    if !(0.0..=1.0).contains(&cutoff) {
         return Err(anyhow::anyhow!(
             "Cutoff must be between 0.0 and 1.0, got {}",
             cutoff
@@ -176,12 +176,12 @@ fn handle_distance_command(
 
     if !silent {
         println!("Starting distance calculation...");
-        println!("  Input: {:?}", input_path);
-        println!("  Database: {:?}", database_path);
-        println!("  Cutoff: {}", cutoff);
+        println!("  Input: {input_path:?}");
+        println!("  Database: {database_path:?}");
+        println!("  Cutoff: {cutoff}");
 
         if let Some(ref output) = output_path {
-            println!("  Output: {:?}", output);
+            println!("  Output: {output:?}");
         } else {
             println!("  Output: stdout");
         }
@@ -240,7 +240,7 @@ fn handle_stats_command(input_path: PathBuf, short: bool, silent: bool) -> Resul
 
     if !silent && !short {
         println!("Calculating database statistics...");
-        println!("Database: {:?}", input_path);
+        println!("Database: {input_path:?}");
         println!();
     }
 

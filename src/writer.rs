@@ -85,18 +85,18 @@ impl MergeIterator {
     }
 
     fn reload_if_needed(&mut self, file_idx: usize) {
-        if self.taken[file_idx] >= self.batch_size {
-            if let Some(ref mut reader) = self.readers[file_idx] {
-                let loaded = Self::load_batch(reader, &mut self.heap, file_idx, self.batch_size);
+        if self.taken[file_idx] >= self.batch_size
+            && let Some(ref mut reader) = self.readers[file_idx]
+        {
+            let loaded = Self::load_batch(reader, &mut self.heap, file_idx, self.batch_size);
 
-                if loaded == 0 {
-                    // File is exhausted, remove reader
-                    self.readers[file_idx] = None;
-                }
-
-                // Reset taken counter
-                self.taken[file_idx] = 0;
+            if loaded == 0 {
+                // File is exhausted, remove reader
+                self.readers[file_idx] = None;
             }
+
+            // Reset taken counter
+            self.taken[file_idx] = 0;
         }
     }
 }
