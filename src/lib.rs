@@ -9,3 +9,4 @@ pub mod signature;
 mod sketch;
 pub mod sketcher;
 mod varintencoding;
+mod writer;
