@@ -355,8 +355,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = sketch_files(&[input_file], output_file.clone(), config);
-        assert!(result.is_ok());
+        sketch_files(&[input_file], output_file.clone(), config).unwrap();
         assert!(output_file.exists());
     }
 }

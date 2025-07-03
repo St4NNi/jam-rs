@@ -291,8 +291,8 @@ mod tests {
         };
 
         assert_eq!(stats.length_category_to_range(0), "< 1 kB");
-        assert_eq!(stats.length_category_to_range(1), "1.0-11.0 kB");
-        assert_eq!(stats.length_category_to_range(25), "240.0-250.0 kB");
+        assert_eq!(stats.length_category_to_range(1), "1-11 kB");
+        assert_eq!(stats.length_category_to_range(25), "241-251 kB");
         assert_eq!(stats.length_category_to_range(70), "> 10 MB");
     }
 }

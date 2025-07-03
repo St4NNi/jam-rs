@@ -181,12 +181,19 @@ impl LMDBWriter {
         // Create LMDB environment
         let env = unsafe {
             heed::EnvOpenOptions::new()
+                .flags(
+                    heed::EnvFlags::NO_SUB_DIR
+                        | heed::EnvFlags::MAP_ASYNC
+                        | heed::EnvFlags::NO_SYNC,
+                )
+                .max_dbs(2)
                 .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
                 .open(&self.lmdb_path)?
         };
 
         let mut write_txn = env.write_txn()?;
         let db = env.create_database(&mut write_txn, Some("HASHES"))?;
+        write_txn.commit()?;
 
         if self.chunk_files.is_empty() {
             // Everything fits in memory - write current chunk directly
@@ -195,6 +202,8 @@ impl LMDBWriter {
             // Need to merge temp files with current chunk
             self.merge_all_to_lmdb(&env, &db)?;
         }
+
+        env.prepare_for_closing();
 
         Ok(())
     }
@@ -309,6 +318,8 @@ mod tests {
         for (hash, metadata) in test_data {
             sender.send((hash, metadata)).unwrap();
         }
+
+        println!("Sent items");
 
         drop(sender); // Close channel
 
