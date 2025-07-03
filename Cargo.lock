@@ -393,6 +393,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fastmurmur3"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d7e9bc68be4cdabbb8938140b01a8b5bc1191937f2c7e7ecc2fcebbe2d749df"
+
+[[package]]
 name = "fastrand"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -658,6 +664,7 @@ dependencies = [
  "clap",
  "criterion",
  "crossbeam-channel",
+ "fastmurmur3",
  "heed",
  "indicatif",
  "integer-encoding",
@@ -666,7 +673,9 @@ dependencies = [
  "needletail",
  "rayon",
  "serde",
+ "serde_json",
  "tempfile",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -1491,6 +1500,12 @@ name = "writeable"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea2f10b9bb0928dfb1b42b65e1f9e36f7f54dbdf08457afefb38afcdec4fa2bb"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"
