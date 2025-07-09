@@ -122,7 +122,7 @@ impl Iterator for MergeIterator {
 // Main LMDBWriter implementation
 pub struct LMDBWriter {
     memory_budget: usize,
-    lmdb_path: PathBuf,
+    env: Env,
     receiver: Receiver<(u64, u64)>,
     current_chunk: BinaryHeap<Reverse<(u64, u64)>>,
     current_memory_usage: usize,
@@ -131,10 +131,10 @@ pub struct LMDBWriter {
 }
 
 impl LMDBWriter {
-    pub fn new(memory_budget: usize, lmdb_path: PathBuf, receiver: Receiver<(u64, u64)>) -> Self {
+    pub fn new(memory_budget: usize, env: Env, receiver: Receiver<(u64, u64)>) -> Self {
         Self {
             memory_budget,
-            lmdb_path,
+            env,
             receiver,
             current_chunk: BinaryHeap::new(),
             current_memory_usage: 0,
@@ -179,41 +179,26 @@ impl LMDBWriter {
 
     fn finalize_to_lmdb(mut self) -> Result<()> {
         // Create LMDB environment
-        let env = unsafe {
-            heed::EnvOpenOptions::new()
-                .flags(
-                    heed::EnvFlags::NO_SUB_DIR
-                        | heed::EnvFlags::MAP_ASYNC
-                        | heed::EnvFlags::NO_SYNC,
-                )
-                .max_dbs(2)
-                .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
-                .open(&self.lmdb_path)?
-        };
-
-        let mut write_txn = env.write_txn()?;
-        let db = env.create_database(&mut write_txn, Some("HASHES"))?;
+        let mut write_txn = self.env.write_txn()?;
+        let db = self.env.create_database(&mut write_txn, Some("HASHES"))?;
         write_txn.commit()?;
 
         if self.chunk_files.is_empty() {
             // Everything fits in memory - write current chunk directly
-            self.write_current_chunk_to_lmdb(&env, &db)?;
+            self.write_current_chunk_to_lmdb(&db)?;
         } else {
             // Need to merge temp files with current chunk
-            self.merge_all_to_lmdb(&env, &db)?;
+            self.merge_all_to_lmdb(&db)?;
         }
-
-        env.prepare_for_closing();
 
         Ok(())
     }
 
     fn write_current_chunk_to_lmdb(
         &mut self,
-        env: &Env,
         db: &Database<U64<BigEndian>, U64<BigEndian>>,
     ) -> Result<()> {
-        let mut wtxn = env.write_txn()?;
+        let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
 
         // Write current chunk in sorted order
@@ -224,7 +209,7 @@ impl LMDBWriter {
             // Commit in batches for performance
             if batch_count >= 100000 {
                 wtxn.commit()?;
-                wtxn = env.write_txn()?;
+                wtxn = self.env.write_txn()?;
                 batch_count = 0;
             }
         }
@@ -233,11 +218,7 @@ impl LMDBWriter {
         Ok(())
     }
 
-    fn merge_all_to_lmdb(
-        &mut self,
-        env: &Env,
-        db: &Database<U64<BigEndian>, U64<BigEndian>>,
-    ) -> Result<()> {
+    fn merge_all_to_lmdb(&mut self, db: &Database<U64<BigEndian>, U64<BigEndian>>) -> Result<()> {
         // If current chunk has data, write it to a temp file first
         if !self.current_chunk.is_empty() {
             self.flush_chunk_to_tempfile()?;
@@ -257,7 +238,7 @@ impl LMDBWriter {
         let iterator = MergeIterator::new(file_paths, memory_limit_gb);
 
         // Write merged data to LMDB
-        let mut wtxn = env.write_txn()?;
+        let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
 
         for (hash, metadata) in iterator {
@@ -267,7 +248,7 @@ impl LMDBWriter {
             // Commit in batches for performance
             if batch_count >= 10000 {
                 wtxn.commit()?;
-                wtxn = env.write_txn()?;
+                wtxn = self.env.write_txn()?;
                 batch_count = 0;
             }
         }
@@ -280,7 +261,7 @@ impl LMDBWriter {
 // Usage example
 pub fn create_lmdb_writer(
     memory_budget_gb: f64,
-    lmdb_path: PathBuf,
+    env: Env,
     channel_capacity: usize,
 ) -> (
     crossbeam_channel::Sender<(u64, u64)>,
@@ -289,7 +270,7 @@ pub fn create_lmdb_writer(
     let memory_budget = (memory_budget_gb * 1024.0 * 1024.0 * 1024.0) as usize;
     let (sender, receiver) = crossbeam_channel::bounded(channel_capacity);
 
-    let writer = LMDBWriter::new(memory_budget, lmdb_path, receiver);
+    let writer = LMDBWriter::new(memory_budget, env, receiver);
 
     let handle = std::thread::spawn(move || writer.run());
 
@@ -301,15 +282,31 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn create_env(path: PathBuf) -> Env {
+        unsafe {
+            heed::EnvOpenOptions::new()
+                .flags(
+                    heed::EnvFlags::NO_SUB_DIR
+                        | heed::EnvFlags::MAP_ASYNC
+                        | heed::EnvFlags::NO_SYNC,
+                )
+                .max_dbs(2)
+                .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
+                .open(&path)
+                .unwrap()
+        }
+    }
+
     #[test]
     fn test_lmdb_writer_memory_only() {
         let temp_dir = tempdir().unwrap();
         let lmdb_path = temp_dir.path().join("test.lmdb");
 
+        let env = create_env(lmdb_path.clone());
+
         let (sender, handle) = create_lmdb_writer(
             1.0, // 1GB memory budget
-            lmdb_path.clone(),
-            1000, // channel capacity
+            env, 1000, // channel capacity
         );
 
         // Send test data
@@ -335,10 +332,11 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let lmdb_path = temp_dir.path().join("test.lmdb");
 
+        let env = create_env(lmdb_path.clone());
+
         let (sender, handle) = create_lmdb_writer(
             0.001, // Very small memory budget to force temp files
-            lmdb_path.clone(),
-            1000,
+            env, 1000,
         );
 
         // Send enough data to exceed memory budget

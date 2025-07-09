@@ -44,30 +44,26 @@ pub struct Sketcher {
     config: SketchConfig,
     output_path: PathBuf,
     file_index_counter: Arc<AtomicU32>,
-    metadata_db_path: PathBuf,
 }
 
 impl Sketcher {
     pub fn new(config: SketchConfig, output_path: PathBuf) -> Self {
-        let metadata_db_path = output_path.with_extension("metadata.lmdb");
-
         Self {
             config,
             output_path,
             file_index_counter: Arc::new(AtomicU32::new(0)),
-            metadata_db_path,
         }
     }
 
     /// Main entry point for sketching files
     pub fn sketch_files(&self, input_paths: &[PathBuf]) -> Result<()> {
         // Initialize metadata database
-        let metadata_env = self.setup_metadata_database()?;
+        let env = self.setup_env()?;
 
         // Create LMDB writer for hashes
         let (hash_sender, writer_handle) = create_lmdb_writer(
             self.config.memory_budget_gb,
-            self.output_path.clone(),
+            env.clone(),
             10000, // Channel capacity
         );
 
@@ -81,7 +77,7 @@ impl Sketcher {
         let results: Result<Vec<_>> = pool.install(|| {
             input_paths
                 .par_iter()
-                .map(|path| self.process_file(path, &hash_sender, &metadata_env))
+                .map(|path| self.process_file(path, &hash_sender, &env))
                 .collect()
         });
 
@@ -95,6 +91,8 @@ impl Sketcher {
 
         // Check for any processing errors
         results?;
+
+        env.prepare_for_closing();
 
         println!("Sketching completed successfully!");
         Ok(())
@@ -252,15 +250,18 @@ impl Sketcher {
     }
 
     /// Setup metadata database
-    fn setup_metadata_database(&self) -> Result<Env> {
-        std::fs::create_dir_all(self.metadata_db_path.parent().unwrap())?;
-
+    fn setup_env(&self) -> Result<Env> {
         let env = unsafe {
             heed::EnvOpenOptions::new()
-                .map_size(1024 * 1024 * 1024) // 1GB for metadata
-                .open(&self.metadata_db_path)?
+                .flags(
+                    heed::EnvFlags::NO_SUB_DIR
+                        | heed::EnvFlags::MAP_ASYNC
+                        | heed::EnvFlags::NO_SYNC,
+                )
+                .max_dbs(2)
+                .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
+                .open(&self.output_path)?
         };
-
         Ok(env)
     }
 
@@ -336,18 +337,16 @@ pub fn sketch_files(
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempfile::tempdir;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_sketch_simple_sequence() {
-        let temp_dir = tempdir().unwrap();
-        let input_file = temp_dir.path().join("test.fasta");
-        let output_file = temp_dir.path().join("test.lmdb");
+        let mut input_file = NamedTempFile::new().unwrap();
+        let output_file = NamedTempFile::new().unwrap().into_temp_path().to_path_buf();
 
         // Create a simple FASTA file
-        let mut file = std::fs::File::create(&input_file).unwrap();
-        writeln!(file, ">test_seq").unwrap();
-        writeln!(file, "ATCGATCGATCGATCGATCGATCGATCGATCG").unwrap();
+        writeln!(input_file, ">test_seq").unwrap();
+        writeln!(input_file, "ATCGATCGATCGATCGATCGATCGATCGATCG").unwrap();
 
         let config = SketchConfig {
             kmer_size: 10,
@@ -355,7 +354,12 @@ mod tests {
             ..Default::default()
         };
 
-        sketch_files(&[input_file], output_file.clone(), config).unwrap();
+        sketch_files(
+            &[input_file.into_temp_path().to_path_buf()],
+            output_file.clone(),
+            config,
+        )
+        .unwrap();
         assert!(output_file.exists());
     }
 }
