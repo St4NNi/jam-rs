@@ -47,36 +47,19 @@ pub struct FileMetadata {
     pub sequence_name: String,
     pub sequence_length: usize,
     pub total_sequences: usize,
+    pub total_hashes: usize,
 }
 
-/// Categorize GC percentage with focus on bacterial range (30-70%)
+/// Categorize GC percentage using 0.01% precision
+/// Uses categories 0-10000 (0.00% to 100.00%) within u16 range
 pub fn categorize_gc_percent(gc_percent: f64) -> u16 {
     let gc = gc_percent.clamp(0.0, 100.0);
-
-    match gc {
-        // Below 30%: 5% steps (categories 0-5)
-        gc if gc < 30.0 => (gc / 5.0) as u16,
-        // 30-70%: 1% steps (categories 6-45)
-        gc if gc <= 70.0 => 6 + ((gc - 30.0) as u16),
-        // Above 70%: 5% steps (categories 46-51)
-        gc => 46 + (((gc - 70.0) / 5.0) as u16).min(5),
-    }
+    (gc * 100.0).round() as u16
 }
 
-/// Categorize sequence length with focus on bacterial range (1kB-500kB)
+/// Categorize sequence length with 200bp per category
 pub fn categorize_length(length: usize) -> u16 {
-    match length {
-        // Below 1kB: single category
-        len if len < 1_000 => 0,
-        // 1kB-500kB: 10kB steps (categories 1-50)
-        len if len <= 500_000 => 1 + ((len - 1_000) / 10_000) as u16,
-        // 500kB-1MB: 50kB steps (categories 51-60)
-        len if len <= 1_000_000 => 51 + ((len - 500_000) / 50_000) as u16,
-        // 1MB-10MB: 1MB steps (categories 61-69)
-        len if len <= 10_000_000 => 61 + ((len - 1_000_000) / 1_000_000) as u16,
-        // Above 10MB: single category
-        _ => 70,
-    }
+    (length / 200).try_into().unwrap_or(u16::MAX)
 }
 
 /// Shannon entropy calculation for k-mers
@@ -174,18 +157,18 @@ mod tests {
 
     #[test]
     fn test_gc_categorization() {
-        assert_eq!(categorize_gc_percent(25.0), 5); // Below 30%
-        assert_eq!(categorize_gc_percent(35.0), 11); // 30-70% range
-        assert_eq!(categorize_gc_percent(50.0), 26); // Mid range
-        assert_eq!(categorize_gc_percent(75.0), 47); // Above 70%
+        assert_eq!(categorize_gc_percent(25.0), 2500); // Below 30%
+        assert_eq!(categorize_gc_percent(35.0), 3500); // 30-70% range
+        assert_eq!(categorize_gc_percent(50.0), 5000); // Mid range
+        assert_eq!(categorize_gc_percent(75.0), 7500); // Above 70%
     }
 
     #[test]
     fn test_length_categorization() {
-        assert_eq!(categorize_length(500), 0); // Below 1kB
-        assert_eq!(categorize_length(11_000), 2); // 1kB-500kB range
-        assert_eq!(categorize_length(250_000), 25); // Mid range
-        assert_eq!(categorize_length(15_000_000), 70); // Above 10MB
+        assert_eq!(categorize_length(500), 2); // Below 1kB
+        assert_eq!(categorize_length(11_000), 11000 / 200); // 1kB-500kB range
+        assert_eq!(categorize_length(250_000), (250000usize / 200) as u16); // Mid range
+        assert_eq!(categorize_length(15_000_000), u16::MAX); // Above 10MB -> Overflow u16*200
     }
 
     #[test]

@@ -110,16 +110,21 @@ impl Sketcher {
 
         let mut sequence_count = 0;
         let mut total_length = 0;
+        let mut total_hashes = 0;
+
+        let mut file_index = self.file_index_counter.fetch_add(1, Ordering::SeqCst);
 
         while let Some(record) = reader.next() {
             let record = record.context("Failed to parse sequence record")?;
 
+            total_hashes += self.process_sequence(&record, file_index, hash_sender)?;
+            let sequence_length = record.seq().len();
+            total_length += sequence_length;
+
             if self.config.singleton {
                 // Each sequence gets its own file index
-                let file_index = self.file_index_counter.fetch_add(1, Ordering::SeqCst);
                 let sequence_length = record.seq().len();
                 total_length += sequence_length;
-
                 // Store metadata for this sequence
                 self.store_sequence_metadata(
                     metadata_env,
@@ -128,11 +133,10 @@ impl Sketcher {
                     &record,
                     sequence_length,
                     1, // Only one sequence per "file" in singleton mode
+                    total_hashes,
                 )?;
-
-                // Process this sequence
-                self.process_sequence(&record, file_index, hash_sender)?;
-                sequence_count += 1;
+                file_index = self.file_index_counter.fetch_add(1, Ordering::SeqCst);
+                total_hashes = 0; // Reset for next sequence
             } else {
                 total_length += record.seq().len();
                 sequence_count += 1;
@@ -140,9 +144,6 @@ impl Sketcher {
         }
 
         if !self.config.singleton && sequence_count > 0 {
-            // All sequences in this file share one file index
-            let file_index = self.file_index_counter.fetch_add(1, Ordering::SeqCst);
-
             // Store combined metadata for entire file
             self.store_file_metadata(
                 metadata_env,
@@ -150,14 +151,8 @@ impl Sketcher {
                 file_path,
                 sequence_count,
                 total_length,
+                total_hashes,
             )?;
-
-            // Re-process file for hashing (we need the file_index)
-            let mut reader = parse_fastx_file(file_path)?;
-            while let Some(record) = reader.next() {
-                let record = record?;
-                self.process_sequence(&record, file_index, hash_sender)?;
-            }
         }
 
         Ok(())
@@ -169,7 +164,7 @@ impl Sketcher {
         record: &SequenceRecord,
         file_index: u32,
         hash_sender: &Sender<(u64, u64)>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let sequence = record.normalize(false);
         let seq_len = sequence.len();
         let gc_content = calculate_gc_content(sequence.as_ref());
@@ -191,8 +186,10 @@ impl Sketcher {
         metadata: HashMetadata,
         nmax: usize,
         hash_sender: &Sender<(u64, u64)>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         let mut collector = TopNHashCollector::new(nmax);
+
+        let mut total_hashes = 0usize;
 
         // Collect all valid hashes
         for (_, kmer, _) in sequence.bit_kmers(self.config.kmer_size, true) {
@@ -209,16 +206,16 @@ impl Sketcher {
             {
                 continue;
             }
-
             collector.add_hash(hash, metadata);
         }
 
         // Send the smallest nmax hashes
         for (hash, metadata) in collector.into_sorted_vec() {
+            total_hashes += 1;
             hash_sender.send((hash, metadata.pack()))?;
         }
 
-        Ok(())
+        Ok(total_hashes)
     }
 
     /// Process sequence without nmax limit (direct sending)
@@ -227,7 +224,8 @@ impl Sketcher {
         sequence: Cow<'a, [u8]>,
         metadata: HashMetadata,
         hash_sender: &Sender<(u64, u64)>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        let mut total_hashes = 0;
         for (_, kmer, _) in sequence.bit_kmers(self.config.kmer_size, true) {
             // Apply entropy filter
             if !passes_entropy_filter(kmer.0, self.config.kmer_size, self.config.min_entropy) {
@@ -242,11 +240,11 @@ impl Sketcher {
             {
                 continue;
             }
-
+            total_hashes += 1;
             hash_sender.send((hash, metadata.pack()))?;
         }
 
-        Ok(())
+        Ok(total_hashes)
     }
 
     /// Setup metadata database
@@ -274,6 +272,7 @@ impl Sketcher {
         record: &SequenceRecord,
         sequence_length: usize,
         total_sequences: usize,
+        total_hashes: usize,
     ) -> Result<()> {
         let mut wtxn = env.write_txn()?;
         let db: Database<U32<BigEndian>, Bytes> =
@@ -285,6 +284,7 @@ impl Sketcher {
             sequence_name: String::from_utf8_lossy(record.id()).to_string(),
             sequence_length,
             total_sequences,
+            total_hashes,
         };
 
         let metadata_json = serde_json::to_string(&metadata)?;
@@ -302,6 +302,7 @@ impl Sketcher {
         file_path: &Path,
         sequence_count: usize,
         total_length: usize,
+        total_hashes: usize,
     ) -> Result<()> {
         let mut wtxn = env.write_txn()?;
         let db: Database<U32<BigEndian>, Bytes> =
@@ -313,6 +314,7 @@ impl Sketcher {
             sequence_name: format!("{sequence_count} sequences"),
             sequence_length: total_length,
             total_sequences: sequence_count,
+            total_hashes,
         };
 
         let metadata_json = serde_json::to_string(&metadata)?;

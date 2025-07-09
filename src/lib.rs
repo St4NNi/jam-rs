@@ -9,10 +9,12 @@ pub mod writer;
 use anyhow::Result;
 use clap::Parser;
 use cli::{Cli, Commands};
-use distance::{DistanceConfig, OutputFormat, calculate_file_vs_database};
+use distance::{DistanceConfig, OutputFormat};
 use sketch::{SketchConfig, sketch_files};
 use stats::StatsCalculator;
 use std::path::{Path, PathBuf};
+
+use crate::distance::calculate_distances_streaming;
 
 /// Main application entry point
 pub fn run() -> Result<()> {
@@ -191,6 +193,7 @@ fn handle_distance_command(
 
     let distance_config = DistanceConfig {
         cutoff,
+        length_category_mode: distance::LengthCategoryMode::QueryAndBelow,
         output_format: OutputFormat::Tsv,
     };
 
@@ -205,7 +208,7 @@ fn handle_distance_command(
         memory_budget_gb: 1.0,
     };
 
-    let results = calculate_file_vs_database(
+    let results = calculate_distances_streaming(
         &input_path,
         &database_path,
         output_path.as_deref(),
