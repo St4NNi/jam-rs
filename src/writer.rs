@@ -258,15 +258,17 @@ impl LMDBWriter {
     }
 }
 
+pub type SenderWithHandle = (
+    crossbeam_channel::Sender<(u64, u64)>,
+    std::thread::JoinHandle<Result<(), anyhow::Error>>,
+);
+
 // Usage example
 pub fn create_lmdb_writer(
     memory_budget_gb: f64,
     env: Env,
     channel_capacity: usize,
-) -> (
-    crossbeam_channel::Sender<(u64, u64)>,
-    std::thread::JoinHandle<Result<(), anyhow::Error>>,
-) {
+) -> SenderWithHandle {
     let memory_budget = (memory_budget_gb * 1024.0 * 1024.0 * 1024.0) as usize;
     let (sender, receiver) = crossbeam_channel::bounded(channel_capacity);
 

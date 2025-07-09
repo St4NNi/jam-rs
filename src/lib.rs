@@ -12,7 +12,7 @@ use cli::{Cli, Commands};
 use distance::{DistanceConfig, OutputFormat, calculate_file_vs_database};
 use sketch::{SketchConfig, sketch_files};
 use stats::StatsCalculator;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Main application entry point
 pub fn run() -> Result<()> {
@@ -62,6 +62,8 @@ pub fn run() -> Result<()> {
 }
 
 /// Handle the sketch command
+/// This is the main input for sketching where it is ok to have many arguments.
+#[allow(clippy::too_many_arguments)]
 fn handle_sketch_command(
     input_paths: Vec<PathBuf>,
     output_path: PathBuf,
@@ -294,7 +296,7 @@ pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 /// Check if a file is a sequence file based on extension
-fn is_sequence_file(path: &PathBuf) -> bool {
+fn is_sequence_file(path: &Path) -> bool {
     if let Some(extension) = path.extension() {
         let ext = extension.to_string_lossy().to_lowercase();
         matches!(
