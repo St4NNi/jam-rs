@@ -2,7 +2,7 @@ use anyhow::Result;
 use byteorder::BigEndian;
 use crossbeam_channel::Receiver;
 use heed::types::U64;
-use heed::{Database, Env, PutFlags};
+use heed::{Database, DatabaseFlags, Env, IntegerComparator, PutFlags};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -180,7 +180,15 @@ impl LMDBWriter {
     fn finalize_to_lmdb(mut self) -> Result<()> {
         // Create LMDB environment
         let mut write_txn = self.env.write_txn()?;
-        let db = self.env.create_database(&mut write_txn, Some("HASHES"))?;
+        let db = self
+            .env
+            .database_options()
+            .types::<U64<BigEndian>, U64<BigEndian>>()
+            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED)
+            .name("HASHES")
+            .key_comparator::<IntegerComparator>()
+            .create(&mut write_txn)?;
+
         write_txn.commit()?;
 
         if self.chunk_files.is_empty() {
@@ -196,14 +204,14 @@ impl LMDBWriter {
 
     fn write_current_chunk_to_lmdb(
         &mut self,
-        db: &Database<U64<BigEndian>, U64<BigEndian>>,
+        db: &Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator>,
     ) -> Result<()> {
         let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
 
         // Write current chunk in sorted order
         while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
-            db.put_with_flags(&mut wtxn, PutFlags::APPEND, &hash, &metadata)?;
+            db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
             batch_count += 1;
 
             // Commit in batches for performance
@@ -218,7 +226,10 @@ impl LMDBWriter {
         Ok(())
     }
 
-    fn merge_all_to_lmdb(&mut self, db: &Database<U64<BigEndian>, U64<BigEndian>>) -> Result<()> {
+    fn merge_all_to_lmdb(
+        &mut self,
+        db: &Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator>,
+    ) -> Result<()> {
         // If current chunk has data, write it to a temp file first
         if !self.current_chunk.is_empty() {
             self.flush_chunk_to_tempfile()?;
@@ -242,7 +253,7 @@ impl LMDBWriter {
         let mut batch_count = 0;
 
         for (hash, metadata) in iterator {
-            db.put_with_flags(&mut wtxn, PutFlags::APPEND, &hash, &metadata)?;
+            db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
             batch_count += 1;
 
             // Commit in batches for performance

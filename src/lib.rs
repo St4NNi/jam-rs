@@ -121,7 +121,11 @@ fn handle_sketch_command(
         }
     }
 
-    let fscale = u64::MAX / fscale.unwrap_or(1);
+    let fscale = if let Some(fscale) = fscale {
+        (u64::MAX as f64 / fscale as f64) as u64
+    } else {
+        u64::MAX
+    };
     let nmax = nmax.unwrap_or(u64::MAX);
 
     let config = SketchConfig {

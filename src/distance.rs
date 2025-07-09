@@ -1,10 +1,10 @@
 use crate::core_utils::{self, *};
 use crate::hash_functions::ahash;
 use crate::sketch::SketchConfig;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use byteorder::BigEndian;
 use heed::types::{Bytes, U32, U64};
-use heed::{Database, EnvFlags};
+use heed::{Database, DatabaseFlags, EnvFlags, IntegerComparator};
 use needletail::Sequence;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -79,7 +79,7 @@ impl StreamingDistanceCalculator {
         // Open database read-only
         let database_env = unsafe {
             heed::EnvOpenOptions::new()
-                .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
+                .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
                 .map_size(10 * 1024 * 1024 * 1024 * 1024)
                 .max_dbs(3)
                 .open(database_path)
@@ -166,9 +166,15 @@ impl StreamingDistanceCalculator {
         };
 
         let query_rtxn = query_env.read_txn()?;
-        let query_hash_db: Database<U64<BigEndian>, U64<BigEndian>> = query_env
-            .open_database(&query_rtxn, Some("HASHES"))?
-            .context("Query hash database not found")?;
+        let query_hash_db: Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator> = query_env
+            .database_options()
+            .types::<U64<BigEndian>, U64<BigEndian>>()
+            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED)
+            .name("HASHES")
+            .key_comparator::<IntegerComparator>()
+            .open(&query_rtxn)
+            .context("Query hash database not found")?
+            .ok_or_else(|| anyhow!("Database hashes not found"))?;
 
         let query_metadata_db: Database<U32<BigEndian>, Bytes> = query_env
             .open_database(&query_rtxn, Some("METADATA"))?
@@ -264,15 +270,12 @@ impl StreamingDistanceCalculator {
             // Stream through kmers using the provided logic
             let sequence_bytes = sequence.as_bytes();
             for (_, kmer, _) in sequence_bytes.bit_kmers(self.sketch_config.kmer_size, true) {
-                println!("Processing kmer: {}", kmer.0);
-
                 // Apply entropy filter
                 if !passes_entropy_filter(
                     kmer.0,
                     self.sketch_config.kmer_size,
                     self.sketch_config.min_entropy,
                 ) {
-                    println!("Skipping kmer due to entropy filter: {}", kmer.0);
                     continue;
                 }
 
@@ -288,7 +291,7 @@ impl StreamingDistanceCalculator {
                 // Look up this hash in the database using get_duplicates
                 if let Some(duplicates) = self.hash_db.get_duplicates(&db_rtxn, &hash)? {
                     for item in duplicates {
-                        println!("Processing hash: {}", hash);
+                        println!("Processing hash: {} / result {:?}", hash, &item);
                         let (_, target_packed_metadata) = item?;
                         let target_metadata = HashMetadata::unpack(target_packed_metadata);
 

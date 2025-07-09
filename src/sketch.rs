@@ -173,7 +173,7 @@ impl Sketcher {
         let metadata = HashMetadata::new(file_index, gc_content, seq_len);
 
         // Determine if we need to use a heap for nmax
-        if self.config.nmax == u64::MAX {
+        if self.config.nmax != u64::MAX {
             self.process_sequence_with_nmax(
                 sequence,
                 metadata,
@@ -242,6 +242,7 @@ impl Sketcher {
             if hash > self.config.fscale {
                 continue;
             }
+
             total_hashes += 1;
             hash_sender.send((hash, metadata.pack()))?;
         }
