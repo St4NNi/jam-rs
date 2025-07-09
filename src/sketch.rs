@@ -8,17 +8,18 @@ use heed::types::{Bytes, U32};
 use heed::{Database, Env};
 use needletail::{Sequence, parse_fastx_file, parser::SequenceRecord};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// Configuration for sketching
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SketchConfig {
     pub kmer_size: u8,
-    pub fscale: Option<u64>,
-    pub nmax: Option<u64>,
+    pub fscale: u64,
+    pub nmax: u64,
     pub singleton: bool,
     pub min_entropy: f64,
     pub threads: usize,
@@ -29,8 +30,8 @@ impl Default for SketchConfig {
     fn default() -> Self {
         Self {
             kmer_size: 21,
-            fscale: None,
-            nmax: None,
+            fscale: u64::MAX,
+            nmax: u64::MAX,
             singleton: false,
             min_entropy: 1.5, // Default entropy threshold
             threads: 1,
@@ -58,7 +59,7 @@ impl Sketcher {
     /// Main entry point for sketching files
     pub fn sketch_files(&self, input_paths: &[PathBuf]) -> Result<()> {
         // Initialize metadata database
-        let env = self.setup_env()?;
+        let env = self.setup_env(self.config.clone())?;
 
         // Create LMDB writer for hashes
         let (hash_sender, writer_handle) = create_lmdb_writer(
@@ -172,8 +173,13 @@ impl Sketcher {
         let metadata = HashMetadata::new(file_index, gc_content, seq_len);
 
         // Determine if we need to use a heap for nmax
-        if let Some(nmax) = self.config.nmax {
-            self.process_sequence_with_nmax(sequence, metadata, nmax as usize, hash_sender)
+        if self.config.nmax == u64::MAX {
+            self.process_sequence_with_nmax(
+                sequence,
+                metadata,
+                self.config.nmax as usize,
+                hash_sender,
+            )
         } else {
             self.process_sequence_direct(sequence, metadata, hash_sender)
         }
@@ -201,9 +207,7 @@ impl Sketcher {
             let hash = ahash(kmer.0);
 
             // Apply FracMinHash filter if specified
-            if let Some(fscale) = self.config.fscale
-                && hash >= fscale
-            {
+            if hash > self.config.fscale {
                 continue;
             }
             collector.add_hash(hash, metadata);
@@ -235,9 +239,7 @@ impl Sketcher {
             let hash = ahash(kmer.0);
 
             // Apply FracMinHash filter if specified
-            if let Some(fscale) = self.config.fscale
-                && hash >= fscale
-            {
+            if hash > self.config.fscale {
                 continue;
             }
             total_hashes += 1;
@@ -248,7 +250,7 @@ impl Sketcher {
     }
 
     /// Setup metadata database
-    fn setup_env(&self) -> Result<Env> {
+    fn setup_env(&self, config: SketchConfig) -> Result<Env> {
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(
@@ -256,10 +258,18 @@ impl Sketcher {
                         | heed::EnvFlags::MAP_ASYNC
                         | heed::EnvFlags::NO_SYNC,
                 )
-                .max_dbs(2)
-                .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
+                .max_dbs(3)
+                .map_size(10 * 1024 * 1024 * 1024 * 1024) // 10TB map size
                 .open(&self.output_path)?
         };
+
+        // Create config database
+        let mut wtxn = env.write_txn()?;
+        let config_db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, Some("CONFIG"))?;
+        let config_json = serde_json::to_string(&config)?;
+        config_db.put(&mut wtxn, b"config", config_json.as_bytes())?;
+        wtxn.commit()?;
+
         Ok(env)
     }
 

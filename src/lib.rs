@@ -121,6 +121,9 @@ fn handle_sketch_command(
         }
     }
 
+    let fscale = u64::MAX / fscale.unwrap_or(1);
+    let nmax = nmax.unwrap_or(u64::MAX);
+
     let config = SketchConfig {
         kmer_size,
         fscale,
@@ -198,15 +201,7 @@ fn handle_distance_command(
     };
 
     // Default sketch config for on-the-fly sketching if needed
-    let sketch_config = SketchConfig {
-        kmer_size: 21, // Should ideally match database k-mer size
-        fscale: None,
-        nmax: None,
-        singleton: true,
-        min_entropy: 1.5,
-        threads: 1,
-        memory_budget_gb: 1.0,
-    };
+    let sketch_config = SketchConfig::default();
 
     let results = calculate_distances_streaming(
         &input_path,

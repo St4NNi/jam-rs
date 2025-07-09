@@ -80,8 +80,8 @@ impl StreamingDistanceCalculator {
         let database_env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
-                .map_size(10 * 1024 * 1024 * 1024)
-                .max_dbs(2)
+                .map_size(10 * 1024 * 1024 * 1024 * 1024)
+                .max_dbs(3)
                 .open(database_path)
                 .with_context(|| format!("Failed to open database: {database_path:?}"))?
         };
@@ -94,6 +94,18 @@ impl StreamingDistanceCalculator {
         let metadata_db: Database<U32<BigEndian>, Bytes> = database_env
             .open_database(&rtxn, Some("METADATA"))?
             .context("Metadata database not found")?;
+
+        let config_db: Database<Bytes, Bytes> = database_env
+            .open_database(&rtxn, Some("CONFIG"))?
+            .context("Configuration database not found")?;
+
+        let sketch_config = config_db
+            .get(&rtxn, b"config")?
+            .map(|bytes| serde_json::from_slice::<SketchConfig>(bytes))
+            .transpose()
+            .context("Failed to read configuration from database")?
+            .unwrap_or(sketch_config);
+
         rtxn.commit()?;
 
         Ok(Self {
@@ -149,7 +161,7 @@ impl StreamingDistanceCalculator {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
                 .map_size(10 * 1024 * 1024 * 1024)
-                .max_dbs(2)
+                .max_dbs(3)
                 .open(query_path)?
         };
 
@@ -252,21 +264,22 @@ impl StreamingDistanceCalculator {
             // Stream through kmers using the provided logic
             let sequence_bytes = sequence.as_bytes();
             for (_, kmer, _) in sequence_bytes.bit_kmers(self.sketch_config.kmer_size, true) {
+                println!("Processing kmer: {}", kmer.0);
+
                 // Apply entropy filter
                 if !passes_entropy_filter(
                     kmer.0,
                     self.sketch_config.kmer_size,
                     self.sketch_config.min_entropy,
                 ) {
+                    println!("Skipping kmer due to entropy filter: {}", kmer.0);
                     continue;
                 }
 
                 let hash = ahash(kmer.0);
 
                 // Apply FracMinHash filter if specified
-                if let Some(fscale) = self.sketch_config.fscale
-                    && hash >= fscale
-                {
+                if hash > self.sketch_config.fscale {
                     continue;
                 }
 
@@ -275,6 +288,7 @@ impl StreamingDistanceCalculator {
                 // Look up this hash in the database using get_duplicates
                 if let Some(duplicates) = self.hash_db.get_duplicates(&db_rtxn, &hash)? {
                     for item in duplicates {
+                        println!("Processing hash: {}", hash);
                         let (_, target_packed_metadata) = item?;
                         let target_metadata = HashMetadata::unpack(target_packed_metadata);
 
@@ -429,13 +443,6 @@ impl StreamingDistanceCalculator {
         query_metadata: &HashMetadata,
         target_metadata: &HashMetadata,
     ) -> bool {
-        // GC category: ±0.5% tolerance
-        let gc_diff =
-            (query_metadata.gc_category as i32 - target_metadata.gc_category as i32).abs();
-        if gc_diff > 50 {
-            return false;
-        }
-
         // Length category: configurable logic
         match self.config.length_category_mode {
             LengthCategoryMode::QueryAndBelow => {

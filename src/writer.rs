@@ -203,7 +203,7 @@ impl LMDBWriter {
 
         // Write current chunk in sorted order
         while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
-            db.put(&mut wtxn, &hash, &metadata)?;
+            db.put_with_flags(&mut wtxn, PutFlags::APPEND, &hash, &metadata)?;
             batch_count += 1;
 
             // Commit in batches for performance
@@ -292,7 +292,7 @@ mod tests {
                         | heed::EnvFlags::MAP_ASYNC
                         | heed::EnvFlags::NO_SYNC,
                 )
-                .max_dbs(2)
+                .max_dbs(3)
                 .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
                 .open(&path)
                 .unwrap()
