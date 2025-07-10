@@ -12,7 +12,10 @@ use cli::{Cli, Commands};
 use distance::{DistanceConfig, OutputFormat};
 use sketch::{SketchConfig, sketch_files};
 use stats::StatsCalculator;
-use std::path::{Path, PathBuf};
+use std::{
+    fs::remove_file,
+    path::{Path, PathBuf},
+};
 
 use crate::distance::calculate_distances_streaming;
 
@@ -81,19 +84,28 @@ fn handle_sketch_command(
     silent: bool,
     min_entropy: f64,
 ) -> Result<()> {
-    // Ensure output has .lmdb extension
-    let output_path = if output_path.extension().is_none() {
-        output_path.with_extension("lmdb")
-    } else {
-        output_path
-    };
-
     // Check if output file exists and force flag
-    if output_path.exists() && !force {
-        return Err(anyhow::anyhow!(
-            "Output file {:?} already exists. Use --force to overwrite.",
-            output_path
-        ));
+    if output_path.exists() {
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Output file {:?} already exists. Use --force to overwrite.",
+                output_path
+            ));
+        }
+        if !silent {
+            println!(
+                "Warning: Overwriting existing output file: {:?}",
+                output_path
+            );
+        }
+        if !output_path.is_file() {
+            return Err(anyhow::anyhow!(
+                "Output path must be a file, not a directory: {:?}",
+                output_path
+            ));
+        }
+
+        remove_file(&output_path)?;
     }
 
     // Validate k-mer size

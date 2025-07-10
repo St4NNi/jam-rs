@@ -93,9 +93,14 @@ impl Sketcher {
         // Check for any processing errors
         results?;
 
+        let lockfile = env.path().join("-lock");
+
         env.prepare_for_closing();
 
-        println!("Sketching completed successfully!");
+        // Delete lock file if it exists
+        if lockfile.exists() {
+            std::fs::remove_file(lockfile)?;
+        }
         Ok(())
     }
 
