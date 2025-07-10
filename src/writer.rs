@@ -2,7 +2,7 @@ use anyhow::Result;
 use byteorder::BigEndian;
 use crossbeam_channel::Receiver;
 use heed::types::U64;
-use heed::{Database, DatabaseFlags, Env, IntegerComparator, PutFlags};
+use heed::{Database, DatabaseFlags, Env, IntegerComparator, MdbError, PutFlags};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
@@ -210,7 +210,14 @@ impl LMDBWriter {
         let mut batch_count = 0;
 
         // Write current chunk in sorted order
+        let mut prev = (0u64, 0u64);
         while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
+            if prev.0 == hash && prev.1 == metadata {
+                // Skip duplicates
+                continue;
+            }
+            prev = (hash, metadata);
+
             db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
             batch_count += 1;
 
@@ -252,7 +259,13 @@ impl LMDBWriter {
         let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
 
+        let mut prev = (0u64, 0u64);
         for (hash, metadata) in iterator {
+            if prev.0 == hash && prev.1 == metadata {
+                // Skip duplicates
+                continue;
+            }
+            prev = (hash, metadata);
             db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
             batch_count += 1;
 
