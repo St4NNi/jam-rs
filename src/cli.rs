@@ -46,6 +46,10 @@ pub enum Commands {
         /// Maximum number of k-mers (per record) to be hashed, top cut-off
         #[arg(long)]
         nmax: Option<u64>,
+        /// Complexity cut-off, only hash sequences with complexity above this value
+        /// This is created via shannon entropy
+        #[arg(long, default_value = "0.0")]
+        complexity: f64,
         /// Create a separate sketch for each sequence record
         /// Will increase the size of the output file
         #[arg(long)]
@@ -69,6 +73,9 @@ pub enum Commands {
         /// Cut-off value for similarity/containment
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
+        /// Singleton mode, process each query sequence separately
+        #[arg(short, long, default_value = "false")]
+        singleton: bool,
     },
 
     /// Display statistics about an LMDB database

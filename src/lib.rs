@@ -34,6 +34,7 @@ pub fn run() -> Result<()> {
             kmer_size,
             fscale,
             nmax,
+            complexity,
             singleton,
         } => {
             // Expand input paths to handle directories and lists
@@ -49,6 +50,7 @@ pub fn run() -> Result<()> {
                 cli.threads.unwrap_or(1),
                 cli.force,
                 cli.silent,
+                complexity,
             )
         }
 
@@ -57,7 +59,8 @@ pub fn run() -> Result<()> {
             database,
             output,
             cutoff,
-        } => handle_distance_command(input, database, output, cutoff, cli.silent),
+            singleton,
+        } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent),
 
         Commands::Stats { input, short } => handle_stats_command(input, short, cli.silent),
     }
@@ -76,6 +79,7 @@ fn handle_sketch_command(
     threads: usize,
     force: bool,
     silent: bool,
+    min_entropy: f64,
 ) -> Result<()> {
     // Ensure output has .lmdb extension
     let output_path = if output_path.extension().is_none() {
@@ -133,7 +137,7 @@ fn handle_sketch_command(
         fscale,
         nmax,
         singleton,
-        min_entropy: 1.5, // Could be made configurable
+        min_entropy, // Could be made configurable
         threads,
         memory_budget_gb: 2.0, // Could be made configurable
     };
@@ -160,6 +164,7 @@ fn handle_distance_command(
     database_path: PathBuf,
     output_path: Option<PathBuf>,
     cutoff: f64,
+    singleton: bool,
     silent: bool,
 ) -> Result<()> {
     // Validate cutoff
@@ -204,15 +209,12 @@ fn handle_distance_command(
         output_format: OutputFormat::Tsv,
     };
 
-    // Default sketch config for on-the-fly sketching if needed
-    let sketch_config = SketchConfig::default();
-
     let results = calculate_distances_streaming(
         &input_path,
         &database_path,
         output_path.as_deref(),
         distance_config,
-        sketch_config,
+        singleton,
     )?;
 
     if !silent {

@@ -71,11 +71,7 @@ pub struct StreamingDistanceCalculator {
 }
 
 impl StreamingDistanceCalculator {
-    pub fn new(
-        config: DistanceConfig,
-        sketch_config: SketchConfig,
-        database_path: &Path,
-    ) -> Result<Self> {
+    pub fn new(config: DistanceConfig, singleton: bool, database_path: &Path) -> Result<Self> {
         // Open database read-only
         let database_env = unsafe {
             heed::EnvOpenOptions::new()
@@ -99,12 +95,16 @@ impl StreamingDistanceCalculator {
             .open_database(&rtxn, Some("CONFIG"))?
             .context("Configuration database not found")?;
 
-        let sketch_config = config_db
+        let mut sketch_config = config_db
             .get(&rtxn, b"config")?
             .map(|bytes| serde_json::from_slice::<SketchConfig>(bytes))
             .transpose()
             .context("Failed to read configuration from database")?
-            .unwrap_or(sketch_config);
+            .unwrap_or(SketchConfig::default());
+
+        if singleton {
+            sketch_config.singleton = true;
+        }
 
         rtxn.commit()?;
 
@@ -260,10 +260,9 @@ impl StreamingDistanceCalculator {
 
         let db_rtxn = self.database_env.read_txn()?;
 
+        let mut target_counters: HashMap<u32, TargetCounters> = HashMap::new();
+        let mut query_hash_count = 0;
         for (seq_name, sequence) in sequences {
-            let mut query_hash_count = 0;
-            let mut target_counters: HashMap<u32, TargetCounters> = HashMap::new();
-
             // Calculate query metadata
             let query_metadata = self.calculate_sequence_metadata(&sequence, &seq_name)?;
 
@@ -291,7 +290,6 @@ impl StreamingDistanceCalculator {
                 // Look up this hash in the database using get_duplicates
                 if let Some(duplicates) = self.hash_db.get_duplicates(&db_rtxn, &hash)? {
                     for item in duplicates {
-                        println!("Processing hash: {} / result {:?}", hash, &item);
                         let (_, target_packed_metadata) = item?;
                         let target_metadata = HashMetadata::unpack(target_packed_metadata);
 
@@ -311,24 +309,47 @@ impl StreamingDistanceCalculator {
                 }
             }
 
-            // Calculate results for this query sequence
-            for (target_file_index, target_counter) in target_counters {
-                let target_name =
-                    self.get_sequence_name(&db_rtxn, &self.metadata_db, target_file_index)?;
-                let target_total_hashes =
-                    self.get_target_total_hashes(&db_rtxn, target_file_index)?;
+            if self.sketch_config.singleton {
+                // Calculate results for this query sequence
+                for (target_file_index, target_counter) in target_counters.drain() {
+                    let target_name =
+                        self.get_sequence_name(&db_rtxn, &self.metadata_db, target_file_index)?;
+                    let target_total_hashes =
+                        self.get_target_total_hashes(&db_rtxn, target_file_index)?;
 
-                let result = self.calculate_distance_from_counters(
-                    &seq_name,
-                    query_hash_count,
-                    &target_counter,
-                    target_total_hashes,
-                    &target_name,
-                );
+                    let result = self.calculate_distance_from_counters(
+                        &seq_name,
+                        query_hash_count,
+                        &target_counter,
+                        target_total_hashes,
+                        &target_name,
+                    );
 
-                if self.passes_cutoff(&result) {
-                    results.push(result);
+                    query_hash_count = 0; // Reset for next sequence
+
+                    if self.passes_cutoff(&result) {
+                        results.push(result);
+                    }
                 }
+            }
+        }
+
+        // Calculate results for this query sequence
+        for (target_file_index, target_counter) in target_counters.drain() {
+            let target_name =
+                self.get_sequence_name(&db_rtxn, &self.metadata_db, target_file_index)?;
+            let target_total_hashes = self.get_target_total_hashes(&db_rtxn, target_file_index)?;
+
+            let result = self.calculate_distance_from_counters(
+                &input_path.display().to_string(),
+                query_hash_count,
+                &target_counter,
+                target_total_hashes,
+                &target_name,
+            );
+
+            if self.passes_cutoff(&result) {
+                results.push(result);
             }
         }
 
@@ -620,9 +641,9 @@ pub fn calculate_distances_streaming(
     database_path: &Path,
     output_path: Option<&Path>,
     config: DistanceConfig,
-    sketch_config: SketchConfig,
+    singleton: bool,
 ) -> Result<Vec<DistanceResult>> {
-    let calculator = StreamingDistanceCalculator::new(config, sketch_config, database_path)?;
+    let calculator = StreamingDistanceCalculator::new(config, singleton, database_path)?;
     calculator.calculate_distances_streaming(query_path, output_path)
 }
 
