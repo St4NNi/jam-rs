@@ -2,7 +2,7 @@ use anyhow::Result;
 use byteorder::BigEndian;
 use crossbeam_channel::Receiver;
 use heed::types::U64;
-use heed::{Database, DatabaseFlags, Env, IntegerComparator, MdbError, PutFlags};
+use heed::{Database, DatabaseFlags, Env, IntegerComparator, PutFlags};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
