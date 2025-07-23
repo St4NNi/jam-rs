@@ -48,7 +48,7 @@ fn ks(samples: &[u64]) -> f64 {
 
 fn print_ks(hash: &str, d: f64) {
     assert!(d < 0.005); // 0.5% confidence interval that the distribution is not uniform.
-    println!("{:10} {: <10.10}", hash, d);
+    println!("{hash:10} {d: <10.10}");
 }
 
 #[inline]
@@ -132,8 +132,7 @@ fn test_bit_distribution() {
         assert!(murmur3_new_bit > 0.49);
         assert!(murmur3_new_bit < 0.51);
         println!(
-            "{}|{}|{}|{}|{}",
-            x, xxhash_bit, ahash_bit, murmur3_old_bit, murmur3_new_bit
+            "{x}|{xxhash_bit}|{ahash_bit}|{murmur3_old_bit}|{murmur3_new_bit}"
         );
     }
 }

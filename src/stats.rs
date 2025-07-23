@@ -74,7 +74,7 @@ impl StatsCalculator {
             .context("Metadata database not found")?;
 
         let mut stats = DatabaseStats {
-            total_hashes: hash_db.len(&rtxn)? as u64,
+            total_hashes: hash_db.len(&rtxn)?,
             unique_files: 0,
             gc_distribution: HashMap::new(),
             length_distribution: HashMap::new(),

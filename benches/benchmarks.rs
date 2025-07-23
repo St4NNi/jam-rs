@@ -22,16 +22,16 @@ fn criterion_benchmark(c: &mut Criterion) {
     group.measurement_time(Duration::from_millis(100));
 
     for x in u64::MAX - 20..u64::MAX {
-        group.bench_with_input(format!("xxhash_{}", x), &x, |b, &x| {
+        group.bench_with_input(format!("xxhash_{x}"), &x, |b, &x| {
             b.iter(|| xxhash3(&x.to_be_bytes()));
         });
-        group.bench_with_input(format!("ahash_{}", x), &x, |b, &x| {
+        group.bench_with_input(format!("ahash_{x}"), &x, |b, &x| {
             b.iter(|| jam_rs::hash_functions::ahash(x));
         });
-        group.bench_with_input(format!("murmur3_old_{}", x), &x, |b, &x| {
+        group.bench_with_input(format!("murmur3_old_{x}"), &x, |b, &x| {
             b.iter(|| murmur3_old(&x.to_be_bytes()));
         });
-        group.bench_with_input(format!("murmur3_new_{}", x), &x, |b, &x| {
+        group.bench_with_input(format!("murmur3_new_{x}"), &x, |b, &x| {
             b.iter(|| murmur3_new(&x.to_be_bytes()));
         });
     }

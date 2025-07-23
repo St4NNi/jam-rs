@@ -72,7 +72,7 @@ pub fn run() -> Result<()> {
 /// Handle the sketch command
 /// This is the main input for sketching where it is ok to have many arguments.
 #[allow(clippy::too_many_arguments)]
-fn handle_sketch_command(
+pub fn handle_sketch_command(
     input_paths: Vec<PathBuf>,
     output_path: PathBuf,
     kmer_size: u8,
@@ -93,10 +93,7 @@ fn handle_sketch_command(
             ));
         }
         if !silent {
-            println!(
-                "Warning: Overwriting existing output file: {:?}",
-                output_path
-            );
+            println!("Warning: Overwriting existing output file: {output_path:?}");
         }
         if !output_path.is_file() {
             return Err(anyhow::anyhow!(
@@ -171,7 +168,7 @@ fn handle_sketch_command(
 }
 
 /// Handle the distance command  
-fn handle_distance_command(
+pub fn handle_distance_command(
     input_path: PathBuf,
     database_path: PathBuf,
     output_path: Option<PathBuf>,
@@ -248,7 +245,7 @@ fn handle_distance_command(
 }
 
 /// Handle the stats command
-fn handle_stats_command(input_path: PathBuf, short: bool, silent: bool) -> Result<()> {
+pub fn handle_stats_command(input_path: PathBuf, short: bool, silent: bool) -> Result<()> {
     if !input_path.exists() {
         return Err(anyhow::anyhow!(
             "Input path does not exist: {:?}",
@@ -312,14 +309,22 @@ pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 /// Check if a file is a sequence file based on extension
-fn is_sequence_file(path: &Path) -> bool {
-    if let Some(extension) = path.extension() {
-        let ext = extension.to_string_lossy().to_lowercase();
-        matches!(
+pub fn is_sequence_file(path: &Path) -> bool {
+    if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
+        // Check for .gz and compound extensions
+        if ext == "gz" {
+            if let Some(stem_ext) = path.file_stem().and_then(|s| Path::new(s).extension()) {
+                let stem_ext = stem_ext.to_string_lossy().to_lowercase();
+                return matches!(
+                    stem_ext.as_str(),
+                    "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq"
+                );
+            }
+        }
+        return matches!(
             ext.as_str(),
-            "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq" | "fastq.gz" | "fq.gz" | "fa.gz"
-        )
-    } else {
-        false
+            "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq"
+        );
     }
+    false
 }

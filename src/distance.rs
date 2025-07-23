@@ -97,7 +97,7 @@ impl StreamingDistanceCalculator {
 
         let mut sketch_config = config_db
             .get(&rtxn, b"config")?
-            .map(|bytes| serde_json::from_slice::<SketchConfig>(bytes))
+            .map(serde_json::from_slice::<SketchConfig>)
             .transpose()
             .context("Failed to read configuration from database")?
             .unwrap_or(SketchConfig::default());
@@ -207,7 +207,7 @@ impl StreamingDistanceCalculator {
                     // Get or create target counter
                     let target_counter = target_counters
                         .entry(target_metadata.file_index)
-                        .or_insert_with(|| TargetCounters::default());
+                        .or_insert_with(TargetCounters::default);
 
                     // Count total match
                     target_counter.total_matches += 1;
@@ -296,7 +296,7 @@ impl StreamingDistanceCalculator {
                         // Get or create target counter
                         let target_counter = target_counters
                             .entry(target_metadata.file_index)
-                            .or_insert_with(|| TargetCounters::default());
+                            .or_default();
 
                         // Count total match
                         target_counter.total_matches += 1;
@@ -491,9 +491,9 @@ impl StreamingDistanceCalculator {
         if let Some(metadata_json) = metadata_db.get(txn, &file_index)? {
             let file_metadata: FileMetadata =
                 serde_json::from_slice(metadata_json).unwrap_or_else(|_| FileMetadata {
-                    filename: format!("unknown_{}", file_index),
+                    filename: format!("unknown_{file_index}"),
                     file_size: 0,
-                    sequence_name: format!("seq_{}", file_index),
+                    sequence_name: format!("seq_{file_index}"),
                     sequence_length: 0,
                     total_sequences: 1,
                     total_hashes: 0,
@@ -505,7 +505,7 @@ impl StreamingDistanceCalculator {
                 file_metadata.filename
             })
         } else {
-            Ok(format!("unknown_{}", file_index))
+            Ok(format!("unknown_{file_index}"))
         }
     }
 
@@ -657,8 +657,8 @@ mod tests {
     fn create_test_fasta_file(sequences: &[(&str, &str)]) -> Result<NamedTempFile> {
         let mut file = NamedTempFile::new()?;
         for (name, seq) in sequences {
-            writeln!(file, ">{}", name)?;
-            writeln!(file, "{}", seq)?;
+            writeln!(file, ">{name}")?;
+            writeln!(file, "{seq}")?;
         }
         file.flush()?;
         Ok(file)
@@ -868,10 +868,10 @@ mod tests {
 
             fn calculate_length_category(&self, length: usize) -> u16 {
                 let log_length = (length as f64).log10();
-                let category = ((log_length - 3.0) / (5.7 - 3.0) * 255.0)
+                
+                ((log_length - 3.0) / (5.7 - 3.0) * 255.0)
                     .max(0.0)
-                    .min(255.0) as u16;
-                category
+                    .min(255.0) as u16
             }
         }
 
