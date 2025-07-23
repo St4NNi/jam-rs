@@ -48,7 +48,7 @@ fn ks(samples: &[u64]) -> f64 {
 
 fn print_ks(hash: &str, d: f64) {
     assert!(d < 0.005); // 0.5% confidence interval that the distribution is not uniform.
-    println!("{:10} {: <10.10}", hash, d);
+    println!("{hash:10} {d: <10.10}");
 }
 
 #[inline]
@@ -61,6 +61,11 @@ pub fn murmur3_new(kmer: &[u8]) -> u64 {
     fastmurmur3::murmur3_x64_128(kmer, 42) as u64
 }
 
+#[inline]
+pub fn xxhash3(kmer: &[u8]) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(kmer)
+}
+
 #[test]
 fn run_ks() {
     let samples = (100_000_000_000..100_000_100_000u64).collect::<Vec<_>>();
@@ -71,10 +76,7 @@ fn run_ks() {
         .collect::<Vec<_>>();
     print_ks(
         "xxhash3",
-        ks(&do_hashes_bytes(
-            jam_rs::hash_functions::xxhash3,
-            samples_bytes.as_slice(),
-        )),
+        ks(&do_hashes_bytes(xxhash3, samples_bytes.as_slice())),
     );
     print_ks(
         "ahash",
@@ -105,7 +107,7 @@ fn test_bit_distribution() {
     let mut murmur3_new_bits = [0u64; 64];
 
     for x in 0..samples.len() {
-        let xx = jam_rs::hash_functions::xxhash3(samples_bytes[x].as_slice());
+        let xx = xxhash3(samples_bytes[x].as_slice());
         unrolled_64bits(xx, &mut xxhash3_bits);
         let ah = jam_rs::hash_functions::ahash(samples[x]);
         unrolled_64bits(ah, &mut ahash_bits);
@@ -130,8 +132,7 @@ fn test_bit_distribution() {
         assert!(murmur3_new_bit > 0.49);
         assert!(murmur3_new_bit < 0.51);
         println!(
-            "{}|{}|{}|{}|{}",
-            x, xxhash_bit, ahash_bit, murmur3_old_bit, murmur3_new_bit
+            "{x}|{xxhash_bit}|{ahash_bit}|{murmur3_old_bit}|{murmur3_new_bit}"
         );
     }
 }
