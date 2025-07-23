@@ -2,7 +2,6 @@
 // See
 // - https://www.itl.nist.gov/div898/handbook/eda/section3/eda35g.htm
 // - https://onlinecourses.science.psu.edu/stat414/node/322/
-
 /// Hash a sequence of values, returning the hashes sorted.
 #[inline]
 fn do_hashes_bytes(fcn: fn(&[u8]) -> u64, data: &[Vec<u8>]) -> Vec<u64> {
@@ -66,9 +65,12 @@ pub fn xxhash3(kmer: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(kmer)
 }
 
+const RANGE: std::ops::Range<u64> = 100_000_000_000..100_010_000_000u64;
+const RANGE_LEN: usize = RANGE.end as usize - RANGE.start as usize;
+
 #[test]
 fn run_ks() {
-    let samples = (100_000_000_000..100_000_100_000u64).collect::<Vec<_>>();
+    let samples = RANGE.collect::<Vec<_>>();
 
     let samples_bytes = samples
         .iter()
@@ -94,7 +96,7 @@ fn run_ks() {
 
 #[test]
 fn test_bit_distribution() {
-    let samples = (100_000_000_000..100_010_000_000u64).collect::<Vec<_>>();
+    let samples = RANGE.collect::<Vec<_>>();
 
     let samples_bytes = samples
         .iter()
@@ -117,12 +119,40 @@ fn test_bit_distribution() {
         unrolled_64bits(mn, &mut murmur3_new_bits);
     }
 
+    let mut max_deviation_xxhash = 0i128;
+    let mut max_deviation_ahash = 0i128;
+    let mut max_deviation_murmur3_old = 0i128;
+    let mut max_deviation_murmur3_new = 0i128;
+    for x in 0..64 {
+        max_deviation_xxhash = (xxhash3_bits[x] as i128 - RANGE_LEN as i128)
+            .abs()
+            .max(max_deviation_xxhash);
+        max_deviation_ahash = (ahash_bits[x] as i128 - RANGE_LEN as i128)
+            .abs()
+            .max(max_deviation_ahash);
+        max_deviation_murmur3_old = (murmur3_old_bits[x] as i128 - RANGE_LEN as i128)
+            .abs()
+            .max(max_deviation_murmur3_old);
+        max_deviation_murmur3_new = (murmur3_new_bits[x] as i128 - RANGE_LEN as i128)
+            .abs()
+            .max(max_deviation_murmur3_new);
+    }
+
+    let max_deviation_xxhash = max_deviation_xxhash - (RANGE_LEN as i128 / 2);
+    let max_deviation_ahash = max_deviation_ahash - (RANGE_LEN as i128 / 2);
+    let max_deviation_murmur3_old = max_deviation_murmur3_old - (RANGE_LEN as i128 / 2);
+    let max_deviation_murmur3_new = max_deviation_murmur3_new - (RANGE_LEN as i128 / 2);
+
+    println!(
+        "Max deviation from 50%: xxhash3: {max_deviation_xxhash}, ahash: {max_deviation_ahash}, murmur3_old: {max_deviation_murmur3_old}, murmur3_new: {max_deviation_murmur3_new}"
+    );
+
     println!("bit|xxhash3|ahash|murmur3_old|murmur3_new");
     for x in 0..64 {
-        let xxhash_bit = xxhash3_bits[x] as f64 / 10_000_000f64;
-        let ahash_bit = ahash_bits[x] as f64 / 10_000_000f64;
-        let murmur3_old_bit = murmur3_old_bits[x] as f64 / 10_000_000f64;
-        let murmur3_new_bit = murmur3_new_bits[x] as f64 / 10_000_000f64;
+        let xxhash_bit = xxhash3_bits[x] as f64 / RANGE_LEN as f64;
+        let ahash_bit = ahash_bits[x] as f64 / RANGE_LEN as f64;
+        let murmur3_old_bit = murmur3_old_bits[x] as f64 / RANGE_LEN as f64;
+        let murmur3_new_bit = murmur3_new_bits[x] as f64 / RANGE_LEN as f64;
         assert!(xxhash_bit > 0.49);
         assert!(xxhash_bit < 0.51);
         assert!(ahash_bit > 0.49);
@@ -131,9 +161,7 @@ fn test_bit_distribution() {
         assert!(murmur3_old_bit < 0.51);
         assert!(murmur3_new_bit > 0.49);
         assert!(murmur3_new_bit < 0.51);
-        println!(
-            "{x}|{xxhash_bit}|{ahash_bit}|{murmur3_old_bit}|{murmur3_new_bit}"
-        );
+        println!("{x}|{xxhash_bit}|{ahash_bit}|{murmur3_old_bit}|{murmur3_new_bit}");
     }
 }
 
