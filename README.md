@@ -8,7 +8,7 @@
 
 Just another minhash (jam) implementation. A high-performance minhashing tool for genomic sequence similarity analysis, specifically optimized for plasmids and other small genomic elements.
 
-Implements FracMinHash algorithm for rapid similarity comparisons with enhanced metadata tracking including GC content and sequence length categories tuned for typical plasmid ranges.
+Implements the FracMinHash algorithm for rapid similarity comparisons with enhanced metadata tracking including GC content and sequence length categories tuned for typical plasmid ranges.
 
 ### Installation
 
@@ -38,6 +38,7 @@ cargo install --git https://github.com/St4NNi/jam-rs
 Multiple scaling methods for different use cases:
 - **FracMinHash** (`--fscale`): Restricts hash-space to a fraction of `u64::MAX` / `fscale`
 - **Max hashes** (`--nmax`): Limits maximum number of hashes per sequence (memory control)
+- **Complexity filtering** (`--complexity`): Only hash sequences with Shannon entropy above threshold (default: 0.0)
 - **Singleton mode** (`--singleton`): Creates separate sketch per sequence record
 
 ### Usage
@@ -50,14 +51,14 @@ Usage: jam [OPTIONS] <COMMAND>
 
 Commands:
   sketch  Sketch one or more files and write the result to an output file
-  dist    Estimate containment of sequences against a database
-  stats   Display statistics about a sketch database
+  dist    Estimate containment of a (small) sketch against a subset of one or more sketches as database. Requires all sketches to have the same kmer size
+  stats   Display statistics about an LMDB database
   help    Print this message or the help of the given subcommand(s)
 
 Options:
   -t, --threads <THREADS>  Number of threads to use [default: 1]
   -f, --force              Overwrite output files
-  -s, --silent             Silent mode, no output to stdout
+  -s, --silent             Silent mode, no (additional) output to stdout Only errors and output files will be printed
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -70,35 +71,36 @@ Create sketches from FASTA/FASTQ files. Supports single files, multiple files, o
 $ jam sketch --help
 Sketch one or more files and write the result to an output file
 
-Usage: jam sketch [OPTIONS] <INPUT>... --output <OUTPUT>
+Usage: jam sketch [OPTIONS] --output <OUTPUT> [INPUT]...
 
 Arguments:
-  <INPUT>...  Input file(s), directories, or file with list of files to be hashed
+  [INPUT]...  Input file(s), directories, or file with list of files to be hashed
 
 Options:
-  -o, --output <OUTPUT>        Output file (.lmdb will be appended if not present)
-  -k, --kmer-size <KMER_SIZE>  K-mer size, all sketches must have the same size to be compared and below 32 [default: 21]
-      --fscale <FSCALE>        Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
-      --nmax <NMAX>            Maximum number of k-mers (per record) to be hashed, top cut-off
-      --singleton              Create a separate sketch for each sequence record
-  -t, --threads <THREADS>      Number of threads to use [default: 1]
-  -f, --force                  Overwrite output files
-  -h, --help                   Print help
+  -o, --output <OUTPUT>          Output file (.lmdb will be appended if not present)
+  -k, --kmer-size <KMER_SIZE>    K-mer size, all sketches must have the same size to be compared and below 32 [default: 21]
+      --fscale <FSCALE>          Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+      --nmax <NMAX>              Maximum number of k-mers (per record) to be hashed, top cut-off
+      --complexity <COMPLEXITY>  Complexity cut-off, only hash sequences with complexity above this value This is created via shannon entropy [default: 0.0]
+      --singleton                Create a separate sketch for each sequence record Will increase the size of the output file
+  -t, --threads <THREADS>        Number of threads to use [default: 1]
+  -f, --force                    Overwrite output files
+  -h, --help                     Print help
 ```
 
 Examples:
 ```bash
 # Basic plasmid sketching
-jam sketch -i plasmid.fasta -o sketch.lmdb
+jam sketch plasmid.fasta -o sketch.lmdb
 
 # Multiple plasmid files with custom k-mer size
-jam sketch -i plasmids/ -o plasmid_db.lmdb -k 21 -t 8
+jam sketch plasmids/ -o plasmid_db.lmdb -k 21 -t 8
 
-# Large collections with memory limits
-jam sketch -i large_collection/ -o database.lmdb --nmax 10000 --fscale 1000000
+# Large collections with memory limits and complexity filtering
+jam sketch large_collection/ -o database.lmdb --nmax 10000 --fscale 1000000 --complexity 1.5
 
 # Separate sketch per plasmid sequence
-jam sketch -i multi_plasmids.fasta -o sketches.lmdb --singleton
+jam sketch multi_plasmids.fasta -o sketches.lmdb --singleton
 ```
 
 #### Distance Calculation
@@ -107,7 +109,7 @@ Compare sequences against a sketch database. Supports both raw sequence files an
 
 ```console
 $ jam dist --help
-Estimate containment of a (small) sketch against a subset of one or more sketches as database
+Estimate containment of a (small) sketch against a subset of one or more sketches as database. Requires all sketches to have the same kmer size
 
 Usage: jam dist [OPTIONS] --input <INPUT> --database <DATABASE>
 
@@ -116,6 +118,9 @@ Options:
   -d, --database <DATABASE>  Database sketch (.lmdb file)
   -o, --output <OUTPUT>      Output to file instead of stdout
   -c, --cutoff <CUTOFF>      Cut-off value for similarity/containment [default: 0.0]
+      --singleton            Singleton mode, process each query sequence separately
+  -t, --threads <THREADS>    Number of threads to use [default: 1]
+  -f, --force                Overwrite output files
   -h, --help                 Print help
 ```
 
@@ -126,6 +131,9 @@ jam dist -i query_plasmid.fasta -d plasmid_db.lmdb -c 0.1 -o results.tsv
 
 # Sketch-to-sketch comparison
 jam dist -i query.lmdb -d plasmid_db.lmdb -c 0.05
+
+# Process each sequence separately with singleton mode
+jam dist -i multi_query.fasta -d plasmid_db.lmdb --singleton -c 0.1
 ```
 
 #### Statistics
@@ -139,9 +147,11 @@ Display statistics about an LMDB database
 Usage: jam stats [OPTIONS] --input <INPUT>
 
 Options:
-  -i, --input <INPUT>  Input LMDB database
-  -s, --short          Short summary only
-  -h, --help           Print help
+  -i, --input <INPUT>      Input LMDB database
+  -s, --short              Short summary only
+  -t, --threads <THREADS>  Number of threads to use [default: 1]
+  -f, --force              Overwrite output files
+  -h, --help               Print help
 ```
 
 Examples:
