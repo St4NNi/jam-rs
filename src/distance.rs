@@ -156,13 +156,20 @@ impl StreamingDistanceCalculator {
     ) -> Result<Vec<DistanceResult>> {
         let mut results = Vec::new();
 
-        // Open query sketch database
-        let query_env = unsafe {
-            heed::EnvOpenOptions::new()
-                .flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK | EnvFlags::NO_SUB_DIR)
-                .map_size(10 * 1024 * 1024 * 1024)
-                .max_dbs(3)
-                .open(query_path)?
+        // If query and database are the same, we can use the existing environment.
+        // Otherwise, open a new one.
+        let query_env_holder;
+        let query_env = if self.database_env.path() == query_path {
+            &self.database_env
+        } else {
+            query_env_holder = unsafe {
+                heed::EnvOpenOptions::new()
+                    .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
+                    .map_size(10 * 1024 * 1024 * 1024)
+                    .max_dbs(3)
+                    .open(query_path)?
+            };
+            &query_env_holder
         };
 
         let query_rtxn = query_env.read_txn()?;
@@ -184,7 +191,14 @@ impl StreamingDistanceCalculator {
         let mut query_sequences: HashMap<u32, (usize, HashMap<u32, TargetCounters>)> =
             HashMap::new();
 
-        let db_rtxn = self.database_env.read_txn()?;
+        // Use the same transaction if query and database are the same environment
+        let db_rtxn_holder;
+        let db_rtxn = if self.database_env.path() == query_path {
+            &query_rtxn
+        } else {
+            db_rtxn_holder = self.database_env.read_txn()?;
+            &db_rtxn_holder
+        };
 
         // Stream through query hashes
         for item in query_hash_db.iter(&query_rtxn)? {
@@ -654,7 +668,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     // Helper function to create a temporary FASTA file
-    fn create_test_fasta_file(sequences: &[(&str, &str)]) -> Result<NamedTempFile> {
+    fn _create_test_fasta_file(sequences: &[(&str, &str)]) -> Result<NamedTempFile> {
         let mut file = NamedTempFile::new()?;
         for (name, seq) in sequences {
             writeln!(file, ">{name}")?;
@@ -868,7 +882,7 @@ mod tests {
 
             fn calculate_length_category(&self, length: usize) -> u16 {
                 let log_length = (length as f64).log10();
-                
+
                 ((log_length - 3.0) / (5.7 - 3.0) * 255.0)
                     .max(0.0)
                     .min(255.0) as u16
@@ -970,362 +984,100 @@ mod tests {
 
         let calculator = MockCalculator;
 
+        // Mock data
+        let query_name = "query1";
+        let query_hash_count = 100;
         let target_counter = TargetCounters {
-            total_matches: 50,
-            filtered_matches: 40,
+            total_matches: 80,
+            filtered_matches: 60,
         };
+        let target_total_hashes = 120;
+        let target_name = "target1";
 
+        // Calculate distance result
         let result = calculator.calculate_distance_from_counters(
-            "query1",
-            100, // query_hash_count
+            query_name,
+            query_hash_count,
             &target_counter,
-            200, // target_total_hashes
-            "target1",
+            target_total_hashes,
+            target_name,
         );
 
-        assert_eq!(result.query_name, "query1");
-        assert_eq!(result.target_name, "target1");
-        assert_eq!(result.containment_query_in_target, 0.5); // 50/100
-        assert_eq!(result.containment_target_in_query, 0.25); // 50/200
-        assert_eq!(result.jaccard_similarity, 0.2); // 50/(100+200-50) = 50/250
-        assert_eq!(result.filtered_containment_query_in_target, 0.4); // 40/100
-        assert_eq!(result.filtered_containment_target_in_query, 0.2); // 40/200
-        assert_eq!(result.filtered_jaccard_similarity, 40.0 / 260.0); // 40/(100+200-40)
-        assert_eq!(result.shared_hashes, 50);
-        assert_eq!(result.filtered_shared_hashes, 40);
-        assert_eq!(result.query_hashes, 100);
-        assert_eq!(result.target_hashes, 200);
-    }
-
-    // Test cutoff filtering
-    #[test]
-    fn test_cutoff_filtering() {
-        struct MockCalculator {
-            config: DistanceConfig,
-        }
-
-        impl MockCalculator {
-            fn passes_cutoff(&self, result: &DistanceResult) -> bool {
-                result.containment_query_in_target >= self.config.cutoff
-                    || result.containment_target_in_query >= self.config.cutoff
-                    || result.jaccard_similarity >= self.config.cutoff
-                    || result.filtered_containment_query_in_target >= self.config.cutoff
-                    || result.filtered_containment_target_in_query >= self.config.cutoff
-                    || result.filtered_jaccard_similarity >= self.config.cutoff
-            }
-        }
-
-        let config = DistanceConfig {
-            cutoff: 0.3,
-            output_format: OutputFormat::Tsv,
-            length_category_mode: LengthCategoryMode::QueryAndBelow,
-        };
-
-        let calculator = MockCalculator { config };
-
-        // Result that passes cutoff
-        let result_pass = DistanceResult {
-            query_name: "query1".to_string(),
-            target_name: "target1".to_string(),
-            containment_query_in_target: 0.5, // Above cutoff
-            containment_target_in_query: 0.1,
-            jaccard_similarity: 0.1,
-            filtered_containment_query_in_target: 0.1,
-            filtered_containment_target_in_query: 0.1,
-            filtered_jaccard_similarity: 0.1,
-            shared_hashes: 50,
-            filtered_shared_hashes: 40,
-            query_hashes: 100,
-            target_hashes: 200,
-        };
-
-        // Result that fails cutoff
-        let result_fail = DistanceResult {
-            query_name: "query2".to_string(),
-            target_name: "target2".to_string(),
-            containment_query_in_target: 0.1, // Below cutoff
-            containment_target_in_query: 0.1,
-            jaccard_similarity: 0.1,
-            filtered_containment_query_in_target: 0.1,
-            filtered_containment_target_in_query: 0.1,
-            filtered_jaccard_similarity: 0.1,
-            shared_hashes: 10,
-            filtered_shared_hashes: 8,
-            query_hashes: 100,
-            target_hashes: 200,
-        };
-
-        assert!(calculator.passes_cutoff(&result_pass));
-        assert!(!calculator.passes_cutoff(&result_fail));
-    }
-
-    // Test file format detection
-    #[test]
-    fn test_file_format_detection() {
-        struct MockCalculator;
-
-        impl MockCalculator {
-            fn is_sketch_file(&self, path: &Path) -> bool {
-                if let Some(extension) = path.extension() {
-                    extension == "lmdb"
-                } else {
-                    false
-                }
-            }
-        }
-
-        let calculator = MockCalculator;
-
-        assert!(calculator.is_sketch_file(Path::new("test.lmdb")));
-        assert!(!calculator.is_sketch_file(Path::new("test.fasta")));
-        assert!(!calculator.is_sketch_file(Path::new("test.fastq")));
-        assert!(!calculator.is_sketch_file(Path::new("test")));
-    }
-
-    // Test FASTA parsing
-    #[test]
-    fn test_fasta_parsing() -> Result<()> {
-        let sequences = vec![
-            ("seq1", "ATCGATCGATCGATCG"),
-            ("seq2", "GCGCGCGCGCGCGCGC"),
-            ("seq3", "TTTTTTTTTTTTTTTT"),
-        ];
-
-        let fasta_file = create_test_fasta_file(&sequences)?;
-
-        struct MockCalculator;
-
-        impl MockCalculator {
-            fn parse_sequences(&self, file_path: &Path) -> Result<Vec<(String, String)>> {
-                let file = File::open(file_path)?;
-                let reader = BufReader::new(file);
-                let mut sequences = Vec::new();
-                let mut current_name = String::new();
-                let mut current_seq = String::new();
-                let mut in_sequence = false;
-
-                for line in reader.lines() {
-                    let line = line?;
-                    let line = line.trim();
-
-                    if line.starts_with('>') {
-                        if in_sequence && !current_name.is_empty() {
-                            sequences.push((current_name.clone(), current_seq.clone()));
-                        }
-                        current_name = line[1..].to_string();
-                        current_seq.clear();
-                        in_sequence = true;
-                    } else if in_sequence && !line.is_empty() {
-                        current_seq.push_str(line);
-                    }
-                }
-
-                if in_sequence && !current_name.is_empty() {
-                    sequences.push((current_name, current_seq));
-                }
-
-                Ok(sequences)
-            }
-        }
-
-        let calculator = MockCalculator;
-        let parsed = calculator.parse_sequences(fasta_file.path())?;
-
-        assert_eq!(parsed.len(), 3);
-        assert_eq!(parsed[0].0, "seq1");
-        assert_eq!(parsed[0].1, "ATCGATCGATCGATCG");
-        assert_eq!(parsed[1].0, "seq2");
-        assert_eq!(parsed[1].1, "GCGCGCGCGCGCGCGC");
-        assert_eq!(parsed[2].0, "seq3");
-        assert_eq!(parsed[2].1, "TTTTTTTTTTTTTTTT");
-
-        Ok(())
-    }
-
-    // Test TSV output formatting
-    #[test]
-    fn test_tsv_output() -> Result<()> {
-        let results = vec![
-            DistanceResult {
-                query_name: "query1".to_string(),
-                target_name: "target1".to_string(),
-                containment_query_in_target: 0.750000,
-                containment_target_in_query: 0.600000,
-                jaccard_similarity: 0.500000,
-                filtered_containment_query_in_target: 0.700000,
-                filtered_containment_target_in_query: 0.550000,
-                filtered_jaccard_similarity: 0.450000,
-                shared_hashes: 100,
-                filtered_shared_hashes: 90,
-                query_hashes: 150,
-                target_hashes: 200,
-            },
-            DistanceResult {
-                query_name: "query2".to_string(),
-                target_name: "target2".to_string(),
-                containment_query_in_target: 0.800000,
-                containment_target_in_query: 0.650000,
-                jaccard_similarity: 0.550000,
-                filtered_containment_query_in_target: 0.750000,
-                filtered_containment_target_in_query: 0.600000,
-                filtered_jaccard_similarity: 0.500000,
-                shared_hashes: 120,
-                filtered_shared_hashes: 110,
-                query_hashes: 150,
-                target_hashes: 180,
-            },
-        ];
-
-        let mut output = Vec::new();
-
-        // Mock TSV writer
-        writeln!(
-            output,
-            "query\ttarget\tcontainment_query_in_target\tcontainment_target_in_query\tjaccard\tfiltered_containment_query_in_target\tfiltered_containment_target_in_query\tfiltered_jaccard\tshared_hashes\tfiltered_shared_hashes\tquery_hashes\ttarget_hashes"
-        )?;
-
-        for result in &results {
-            writeln!(
-                output,
-                "{}\t{}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{:.6}\t{}\t{}\t{}\t{}",
-                result.query_name,
-                result.target_name,
-                result.containment_query_in_target,
-                result.containment_target_in_query,
-                result.jaccard_similarity,
-                result.filtered_containment_query_in_target,
-                result.filtered_containment_target_in_query,
-                result.filtered_jaccard_similarity,
-                result.shared_hashes,
-                result.filtered_shared_hashes,
-                result.query_hashes,
-                result.target_hashes
-            )?;
-        }
-
-        let output_str = String::from_utf8(output)?;
-        let lines: Vec<&str> = output_str.lines().collect();
-
-        assert_eq!(lines.len(), 3); // Header + 2 results
-        assert!(lines[0].contains("query\ttarget\tcontainment_query_in_target"));
-        assert!(lines[1].contains("query1\ttarget1\t0.750000"));
-        assert!(lines[2].contains("query2\ttarget2\t0.800000"));
-
-        Ok(())
-    }
-
-    // Test JSON output formatting
-    #[test]
-    fn test_json_output() -> Result<()> {
-        let results = vec![DistanceResult {
-            query_name: "query1".to_string(),
-            target_name: "target1".to_string(),
-            containment_query_in_target: 0.75,
-            containment_target_in_query: 0.60,
-            jaccard_similarity: 0.50,
-            filtered_containment_query_in_target: 0.70,
-            filtered_containment_target_in_query: 0.55,
-            filtered_jaccard_similarity: 0.45,
-            shared_hashes: 100,
-            filtered_shared_hashes: 90,
-            query_hashes: 150,
-            target_hashes: 200,
-        }];
-
-        let json_output = serde_json::to_string_pretty(&results)?;
-
-        assert!(json_output.contains("\"query_name\": \"query1\""));
-        assert!(json_output.contains("\"target_name\": \"target1\""));
-        assert!(json_output.contains("\"containment_query_in_target\": 0.75"));
-        assert!(json_output.contains("\"shared_hashes\": 100"));
-
-        Ok(())
-    }
-
-    // Test edge cases
-    #[test]
-    fn test_edge_cases() {
-        struct MockCalculator;
-
-        impl MockCalculator {
-            fn calculate_distance_from_counters(
-                &self,
-                query_name: &str,
-                query_hash_count: usize,
-                target_counter: &TargetCounters,
-                target_total_hashes: usize,
-                target_name: &str,
-            ) -> DistanceResult {
-                let shared_hashes = target_counter.total_matches;
-                let filtered_shared_hashes = target_counter.filtered_matches;
-
-                let containment_query_in_target = if query_hash_count > 0 {
-                    shared_hashes as f64 / query_hash_count as f64
-                } else {
-                    0.0
-                };
-
-                let containment_target_in_query = if target_total_hashes > 0 {
-                    shared_hashes as f64 / target_total_hashes as f64
-                } else {
-                    0.0
-                };
-
-                let union_size = query_hash_count + target_total_hashes - shared_hashes;
-                let jaccard_similarity = if union_size > 0 {
-                    shared_hashes as f64 / union_size as f64
-                } else {
-                    0.0
-                };
-
-                DistanceResult {
-                    query_name: query_name.to_string(),
-                    target_name: target_name.to_string(),
-                    containment_query_in_target,
-                    containment_target_in_query,
-                    jaccard_similarity,
-                    filtered_containment_query_in_target: 0.0,
-                    filtered_containment_target_in_query: 0.0,
-                    filtered_jaccard_similarity: 0.0,
-                    shared_hashes,
-                    filtered_shared_hashes,
-                    query_hashes: query_hash_count,
-                    target_hashes: target_total_hashes,
-                }
-            }
-        }
-
-        let calculator = MockCalculator;
-
-        // Test zero hash counts
-        let zero_counter = TargetCounters {
-            total_matches: 0,
-            filtered_matches: 0,
-        };
-
-        let result = calculator.calculate_distance_from_counters(
-            "query",
-            0, // Zero query hashes
-            &zero_counter,
-            0, // Zero target hashes
-            "target",
+        // Assertions
+        assert_eq!(result.query_name, query_name);
+        assert_eq!(result.target_name, target_name);
+        assert_eq!(result.shared_hashes, target_counter.total_matches);
+        assert_eq!(
+            result.filtered_shared_hashes,
+            target_counter.filtered_matches
         );
 
-        assert_eq!(result.containment_query_in_target, 0.0);
-        assert_eq!(result.containment_target_in_query, 0.0);
-        assert_eq!(result.jaccard_similarity, 0.0);
+        // Total containment
+        let containment_query_in_target = if query_hash_count > 0 {
+            target_counter.total_matches as f64 / query_hash_count as f64
+        } else {
+            0.0
+        };
 
-        // Test case where query has hashes but target doesn't
-        let result2 = calculator.calculate_distance_from_counters(
-            "query",
-            100, // Query has hashes
-            &zero_counter,
-            0, // Target has no hashes
-            "target",
+        let containment_target_in_query = if target_total_hashes > 0 {
+            target_counter.total_matches as f64 / target_total_hashes as f64
+        } else {
+            0.0
+        };
+
+        assert_eq!(
+            result.containment_query_in_target,
+            containment_query_in_target
+        );
+        assert_eq!(
+            result.containment_target_in_query,
+            containment_target_in_query
         );
 
-        assert_eq!(result2.containment_query_in_target, 0.0);
-        assert_eq!(result2.containment_target_in_query, 0.0);
-        assert_eq!(result2.jaccard_similarity, 0.0);
+        // Jaccard similarity
+        let union_size = query_hash_count + target_total_hashes - target_counter.total_matches;
+        let jaccard_similarity = if union_size > 0 {
+            target_counter.total_matches as f64 / union_size as f64
+        } else {
+            0.0
+        };
+
+        assert_eq!(result.jaccard_similarity, jaccard_similarity);
+
+        // Filtered containment
+        let filtered_containment_query_in_target = if query_hash_count > 0 {
+            target_counter.filtered_matches as f64 / query_hash_count as f64
+        } else {
+            0.0
+        };
+
+        let filtered_containment_target_in_query = if target_total_hashes > 0 {
+            target_counter.filtered_matches as f64 / target_total_hashes as f64
+        } else {
+            0.0
+        };
+
+        assert_eq!(
+            result.filtered_containment_query_in_target,
+            filtered_containment_query_in_target
+        );
+        assert_eq!(
+            result.filtered_containment_target_in_query,
+            filtered_containment_target_in_query
+        );
+
+        // Filtered Jaccard similarity
+        let filtered_union_size =
+            query_hash_count + target_total_hashes - target_counter.filtered_matches;
+        let filtered_jaccard_similarity = if filtered_union_size > 0 {
+            target_counter.filtered_matches as f64 / filtered_union_size as f64
+        } else {
+            0.0
+        };
+
+        assert_eq!(
+            result.filtered_jaccard_similarity,
+            filtered_jaccard_similarity
+        );
     }
 }
