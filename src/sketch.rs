@@ -215,20 +215,21 @@ impl Sketcher {
                 sub_pb.inc(1);
             }
 
-            total_hashes += self.process_sequence(&record, file_index, hash_sender)?;
-            let sequence_length = record.seq().len();
-            total_length += sequence_length;
+            let id = String::from_utf8_lossy(record.id()).to_string();
+            let (hashes, seq_len) = self.process_sequence(record, file_index, hash_sender)?;
+            total_length += seq_len;
+            total_hashes += hashes;
 
             if self.config.singleton {
                 // Each sequence gets its own file index
-                let sequence_length = record.seq().len();
+                let sequence_length = seq_len;
                 total_length += sequence_length;
                 // Store metadata for this sequence
                 self.store_sequence_metadata(
                     metadata_env,
                     file_index,
                     file_path,
-                    &record,
+                    &id,
                     sequence_length,
                     1, // Only one sequence per "file" in singleton mode
                     total_hashes,
@@ -236,7 +237,6 @@ impl Sketcher {
                 file_index = self.file_index_counter.fetch_add(1, Ordering::SeqCst);
                 total_hashes = 0; // Reset for next sequence
             } else {
-                total_length += record.seq().len();
                 sequence_count += 1;
             }
         }
@@ -264,10 +264,10 @@ impl Sketcher {
     /// Process a single sequence record
     fn process_sequence(
         &self,
-        record: &SequenceRecord,
+        record: SequenceRecord,
         file_index: u32,
         hash_sender: &Sender<(u64, u64)>,
-    ) -> Result<usize> {
+    ) -> Result<(usize, usize)> {
         let sequence = record.normalize(false);
         let seq_len = sequence.len();
         let gc_content = calculate_gc_content(sequence.as_ref());
@@ -282,8 +282,10 @@ impl Sketcher {
                 self.config.nmax as usize,
                 hash_sender,
             )
+            .map(|count| (count, seq_len))
         } else {
             self.process_sequence_direct(sequence, metadata, hash_sender)
+                .map(|count| (count, seq_len))
         }
     }
 
@@ -385,7 +387,7 @@ impl Sketcher {
         env: &Env,
         file_index: u32,
         file_path: &Path,
-        record: &SequenceRecord,
+        id: &str,
         sequence_length: usize,
         total_sequences: usize,
         total_hashes: usize,
@@ -397,7 +399,7 @@ impl Sketcher {
         let metadata = FileMetadata {
             filename: file_path.to_string_lossy().to_string(),
             file_size: std::fs::metadata(file_path)?.len(),
-            sequence_name: String::from_utf8_lossy(record.id()).to_string(),
+            sequence_name: id.to_string(),
             sequence_length,
             total_sequences,
             total_hashes,

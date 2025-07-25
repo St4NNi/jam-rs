@@ -56,10 +56,9 @@ impl DatabaseStats {
 
         for (i, metadata) in self.file_metadata.iter().take(5).enumerate() {
             eprintln!(
-                "  {}. {}/{} ({} bp, {} sequences)",
+                "  {}. {} ({} bp, {} sequences)",
                 i + 1,
                 metadata.filename,
-                metadata.sequence_name,
                 metadata.sequence_length,
                 metadata.total_sequences
             );
