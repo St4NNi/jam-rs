@@ -311,8 +311,8 @@ impl Sketcher {
             heed::EnvOpenOptions::new()
                 .flags(
                     heed::EnvFlags::NO_SUB_DIR
-                        | heed::EnvFlags::MAP_ASYNC
-                        | heed::EnvFlags::NO_SYNC,
+                        | heed::EnvFlags::WRITE_MAP
+                        | heed::EnvFlags::MAP_ASYNC,
                 )
                 .max_dbs(3)
                 .map_size(10 * 1024 * 1024 * 1024 * 1024) // 10TB map size
