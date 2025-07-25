@@ -6,7 +6,7 @@ use byteorder::BigEndian;
 use crossbeam_channel::Sender;
 use heed::types::{Bytes, U32};
 use heed::{Database, Env};
-use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ParallelProgressIterator, ProgressBar, ProgressStyle};
 use needletail::{Sequence, parse_fastx_file, parser::SequenceRecord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 /// Configuration for sketching
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,11 +64,43 @@ impl Sketcher {
 
     /// Main entry point for sketching files
     pub fn sketch_files(&self, input_paths: &[PathBuf]) -> Result<()> {
+        // Start timing the overall sketching process
+        let start_time = Instant::now();
+
         // Initialize metadata database
         if !self.silent {
             eprintln!("Setting up LMDB environment...");
         }
         let env = self.setup_env(self.config.clone())?;
+
+        // Create progress tracking system only if not silent
+        let (multi_progress, main_progress_bar, sub_progress_bar) = if !self.silent {
+            let multi = MultiProgress::new();
+
+            // Main progress bar for overall file progress
+            let main_pb = multi.add(ProgressBar::new(input_paths.len() as u64));
+            main_pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▉▊▋▌▍▎▏  ")
+            );
+            main_pb.set_message("Starting...");
+
+            // Sub-progress bar for current file progress (spinner style)
+            let sub_pb = multi.add(ProgressBar::new_spinner());
+            sub_pb.set_style(
+                ProgressStyle::default_spinner()
+                    .template("  └─ {spinner:.green} {pos} sequences processed")
+                    .unwrap()
+                    .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
+            );
+            sub_pb.enable_steady_tick(std::time::Duration::from_millis(120));
+
+            (Some(multi), Some(main_pb), Some(sub_pb))
+        } else {
+            (None, None, None)
+        };
 
         let (hash_sender, writer_handle) = create_lmdb_writer(
             self.config.memory_budget_gb,
@@ -75,6 +108,7 @@ impl Sketcher {
             10000, // Channel capacity
             self.config.temp_dir.clone(),
             self.silent,
+            multi_progress,
         );
 
         // Set up rayon thread pool
@@ -83,33 +117,18 @@ impl Sketcher {
             .build()
             .context("Failed to create thread pool")?;
 
-        // Create progress bar only if not silent
-        let progress_bar = if !self.silent {
-            let pb = ProgressBar::new(input_paths.len() as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({percent}%) {msg}")
-                    .unwrap()
-                    .progress_chars("█▉▊▋▌▍▎▏  ")
-            );
-            pb.set_message("Starting...");
-            Some(pb)
-        } else {
-            None
-        };
-
         // Process files in parallel
         let results: Result<Vec<_>> = pool.install(|| {
             let iter = input_paths.par_iter();
-            let iter = if let Some(ref pb) = progress_bar {
+            let iter = if let Some(ref pb) = main_progress_bar {
                 iter.progress_with(pb.clone())
             } else {
                 iter.progress_with(ProgressBar::hidden())
             };
 
             iter.map(|path| {
-                let result = self.process_file(path, &hash_sender, &env);
-                if let Some(ref pb) = progress_bar {
+                let result = self.process_file(path, &hash_sender, &env, sub_progress_bar.as_ref());
+                if let Some(ref pb) = main_progress_bar {
                     if let Err(ref e) = result {
                         pb.set_message(format!("Error in {}: {}", path.display(), e));
                     } else {
@@ -124,16 +143,16 @@ impl Sketcher {
             .collect()
         });
 
-        if let Some(pb) = progress_bar {
+        if let Some(pb) = main_progress_bar {
             pb.finish_with_message("File processing complete");
+        }
+        if let Some(pb) = sub_progress_bar {
+            pb.finish_and_clear();
         }
 
         // Close sender to signal completion
         drop(hash_sender);
 
-        if !self.silent {
-            eprintln!("Finalizing database...");
-        }
         // Wait for writer to complete
         writer_handle
             .join()
@@ -149,6 +168,14 @@ impl Sketcher {
         // Delete lock file if it exists
         if lockfile.exists() {
             std::fs::remove_file(lockfile)?;
+        } else {
+            eprintln!("No lock file found at {}", lockfile.display());
+        }
+
+        // Display total runtime
+        let elapsed = start_time.elapsed();
+        if !self.silent {
+            eprintln!("Sketching completed in {:.2}s", elapsed.as_secs_f64());
         }
 
         Ok(())
@@ -160,6 +187,7 @@ impl Sketcher {
         file_path: &Path,
         hash_sender: &Sender<(u64, u64)>,
         metadata_env: &Env,
+        sub_progress_bar: Option<&ProgressBar>,
     ) -> Result<()> {
         let mut reader = parse_fastx_file(file_path)
             .with_context(|| format!("Failed to open file: {file_path:?}"))?;
@@ -170,8 +198,15 @@ impl Sketcher {
 
         let mut file_index = self.file_index_counter.fetch_add(1, Ordering::SeqCst);
 
+        let mut sequence_counter = 0u64;
         while let Some(record) = reader.next() {
             let record = record.context("Failed to parse sequence record")?;
+            sequence_counter += 1;
+
+            // Update sub-progress bar with current sequence info
+            if let Some(sub_pb) = sub_progress_bar {
+                sub_pb.inc(1);
+            }
 
             total_hashes += self.process_sequence(&record, file_index, hash_sender)?;
             let sequence_length = record.seq().len();
@@ -197,6 +232,11 @@ impl Sketcher {
                 total_length += record.seq().len();
                 sequence_count += 1;
             }
+        }
+
+        // Finalize sub-progress bar for this file
+        if let Some(sub_pb) = sub_progress_bar {
+            sub_pb.set_message(format!("Completed {} sequences", sequence_counter));
         }
 
         if !self.config.singleton && sequence_count > 0 {

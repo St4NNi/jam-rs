@@ -1,12 +1,13 @@
 use anyhow::Result;
-use byteorder::BigEndian;
+use byteorder::{BigEndian, ReadBytesExt};
 use crossbeam_channel::Receiver;
 use heed::types::U64;
 use heed::{Database, DatabaseFlags, Env, IntegerComparator, PutFlags};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -59,26 +60,21 @@ impl MergeIterator {
         file_idx: usize,
         max_count: usize,
     ) -> usize {
-        let mut buffer = [0u8; 16]; // 2 * u64 = 16 bytes
         let mut loaded = 0;
 
         for _ in 0..max_count {
-            match reader.read_exact(&mut buffer) {
-                Ok(()) => {
-                    let first = u64::from_be_bytes([
-                        buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5],
-                        buffer[6], buffer[7],
-                    ]);
-                    let second = u64::from_be_bytes([
-                        buffer[8], buffer[9], buffer[10], buffer[11], buffer[12], buffer[13],
-                        buffer[14], buffer[15],
-                    ]);
-
-                    heap.push(Reverse((first, second, file_idx)));
-                    loaded += 1;
+            let first = match reader.read_u64::<BigEndian>() {
+                Ok(val) => val,
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                    break;
                 }
-                Err(_) => break, // End of file or read error
-            }
+                Err(e) => panic!("Failed to read first u64: {}", e),
+            };
+            let second = reader
+                .read_u64::<BigEndian>()
+                .expect("Failed to read second u64");
+            heap.push(Reverse((first, second, file_idx)));
+            loaded += 1;
         }
 
         loaded
@@ -130,6 +126,7 @@ pub struct LMDBWriter {
     total_entries: u64,
     temp_dir: Option<PathBuf>,
     silent: bool,
+    bar: Option<indicatif::MultiProgress>,
 }
 
 impl LMDBWriter {
@@ -139,6 +136,7 @@ impl LMDBWriter {
         receiver: Receiver<(u64, u64)>,
         temp_dir: Option<PathBuf>,
         silent: bool,
+        bar: Option<indicatif::MultiProgress>,
     ) -> Self {
         Self {
             memory_budget,
@@ -150,6 +148,7 @@ impl LMDBWriter {
             total_entries: 0,
             temp_dir,
             silent,
+            bar,
         }
     }
 
@@ -215,12 +214,26 @@ impl LMDBWriter {
 
         write_txn.commit()?;
 
+        let option_bar = if let Some(ref bar) = self.bar {
+            let sub_bar = ProgressBar::new(self.total_entries as u64);
+            sub_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} kmers processed ({percent}%)")
+                    .unwrap()
+                    .progress_chars("█▉▊▋▌▍▎▏  ")
+            );
+
+            Some(bar.add(sub_bar))
+        } else {
+            None
+        };
+
         if self.chunk_files.is_empty() {
             // Everything fits in memory - write current chunk directly
-            self.write_current_chunk_to_lmdb(&db)?;
+            self.write_current_chunk_to_lmdb(&db, option_bar)?;
         } else {
             // Need to merge temp files with current chunk
-            self.merge_all_to_lmdb(&db)?;
+            self.merge_all_to_lmdb(&db, option_bar)?;
         }
 
         Ok(())
@@ -229,6 +242,7 @@ impl LMDBWriter {
     fn write_current_chunk_to_lmdb(
         &mut self,
         db: &Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator>,
+        option_bar: Option<ProgressBar>,
     ) -> Result<()> {
         let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
@@ -236,6 +250,10 @@ impl LMDBWriter {
         // Write current chunk in sorted order
         let mut prev = (0u64, 0u64);
         while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
+            if let Some(ref bar) = option_bar {
+                bar.inc(1);
+            }
+
             if prev.0 == hash && prev.1 == metadata {
                 // Skip duplicates
                 continue;
@@ -254,12 +272,18 @@ impl LMDBWriter {
         }
 
         wtxn.commit()?;
+
+        if let Some(ref bar) = option_bar {
+            bar.finish_with_message("Data merged successfully");
+        }
+
         Ok(())
     }
 
     fn merge_all_to_lmdb(
         &mut self,
         db: &Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator>,
+        option_bar: Option<ProgressBar>,
     ) -> Result<()> {
         // If current chunk has data, write it to a temp file first
         if !self.current_chunk.is_empty() {
@@ -299,6 +323,9 @@ impl LMDBWriter {
 
         let mut prev = (0u64, 0u64);
         for (hash, metadata) in iterator {
+            if let Some(ref bar) = option_bar {
+                bar.inc(1);
+            }
             if prev.0 == hash && prev.1 == metadata {
                 // Skip duplicates
                 duplicates_skipped += 1;
@@ -315,6 +342,10 @@ impl LMDBWriter {
                 wtxn = self.env.write_txn()?;
                 batch_count = 0;
             }
+        }
+
+        if let Some(ref bar) = option_bar {
+            bar.finish_with_message("Data merged successfully");
         }
 
         wtxn.commit()?;
@@ -349,11 +380,12 @@ pub fn create_lmdb_writer(
     channel_capacity: usize,
     temp_dir: Option<PathBuf>,
     silent: bool,
+    bar: Option<indicatif::MultiProgress>,
 ) -> SenderWithHandle {
     let memory_budget = (memory_budget_gb * 1024.0 * 1024.0 * 1024.0) as usize;
     let (sender, receiver) = crossbeam_channel::bounded(channel_capacity);
 
-    let writer = LMDBWriter::new(memory_budget, env, receiver, temp_dir, silent);
+    let writer = LMDBWriter::new(memory_budget, env, receiver, temp_dir, silent, bar);
 
     let handle = std::thread::spawn(move || writer.run());
 
@@ -392,6 +424,7 @@ mod tests {
             env, 1000, // channel capacity
             None, // Use default temp directory
             true, // Silent mode for tests
+            None, // No progress bar in tests
         );
 
         // Send test data
@@ -421,6 +454,7 @@ mod tests {
             0.001, // Very small memory budget to force temp files
             env, 1000, None, // Use default temp directory
             true, // Silent mode for tests
+            None, // No progress bar in tests
         );
 
         // Send enough data to exceed memory budget
