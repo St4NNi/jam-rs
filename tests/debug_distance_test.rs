@@ -24,11 +24,10 @@ TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
         nmax: 1000,
         singleton: false,
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     let distance_config = DistanceConfig {
         cutoff: 0.0,

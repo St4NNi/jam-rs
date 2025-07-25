@@ -19,19 +19,19 @@ pub struct DatabaseStats {
 impl DatabaseStats {
     /// Display short summary statistics
     pub fn print_short(&self) {
-        println!("Database Statistics:");
-        println!("  Total hashes: {}", self.total_hashes);
-        println!("  Unique files/sequences: {}", self.unique_files);
+        eprintln!("Database Statistics:");
+        eprintln!("Total hashes: {}", self.total_hashes);
+        eprintln!("Unique files/sequences: {}", self.unique_files);
     }
 
     /// Display detailed statistics
     pub fn print_detailed(&self) {
         self.print_short();
 
-        println!("\nFile/Sequence Information:");
+        eprintln!("\nFile/Sequence Information:");
         for (i, metadata) in self.file_metadata.iter().take(5).enumerate() {
-            println!(
-                "  {}: {} ({} bp, {} sequences)",
+            eprintln!(
+                "  {}. {} ({} bp, {} sequences)",
                 i + 1,
                 metadata.sequence_name,
                 metadata.sequence_length,
@@ -40,7 +40,7 @@ impl DatabaseStats {
         }
 
         if self.file_metadata.len() > 5 {
-            println!(
+            eprintln!(
                 "  ... and {} more files/sequences",
                 self.file_metadata.len() - 5
             );

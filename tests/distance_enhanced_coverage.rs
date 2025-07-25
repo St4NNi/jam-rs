@@ -29,11 +29,10 @@ TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
         nmax: 1000,
         singleton: false,
         min_entropy: 0.0, // Very low entropy to accept any k-mer
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test JSON output with very permissive settings
     let distance_config = DistanceConfig {
@@ -79,11 +78,10 @@ fn test_streaming_coverage_edge_cases() -> Result<()> {
         nmax: 1000,
         singleton: false,
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test with different length categories
     let configs = vec![
@@ -129,11 +127,10 @@ fn test_output_file_handling() -> Result<()> {
         nmax: 1000,
         singleton: false,
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test TSV output
     let tsv_config = DistanceConfig {
@@ -181,11 +178,10 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
         nmax: 1000,
         singleton: true, // Test singleton mode in sketching
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test with singleton mode in distance calculation
     let distance_config = DistanceConfig {
@@ -217,11 +213,10 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
         nmax: 1000,
         singleton: false,
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test with different cutoff values to exercise filtering logic
     let cutoffs = vec![0.0, 0.1, 0.5, 0.9, 1.0];

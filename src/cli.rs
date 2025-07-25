@@ -54,6 +54,9 @@ pub enum Commands {
         /// Will increase the size of the output file
         #[arg(long)]
         singleton: bool,
+        /// Custom temporary directory for intermediate files during sorting
+        #[arg(long)]
+        temp_dir: Option<PathBuf>,
     },
 
     /// Estimate containment of a (small) sketch against a subset of one or more sketches as database.

@@ -6,6 +6,7 @@ use byteorder::BigEndian;
 use crossbeam_channel::Sender;
 use heed::types::{Bytes, U32};
 use heed::{Database, Env};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use needletail::{Sequence, parse_fastx_file, parser::SequenceRecord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -24,6 +25,7 @@ pub struct SketchConfig {
     pub min_entropy: f64,
     pub threads: usize,
     pub memory_budget_gb: f64,
+    pub temp_dir: Option<PathBuf>,
 }
 
 impl Default for SketchConfig {
@@ -36,6 +38,7 @@ impl Default for SketchConfig {
             min_entropy: 1.5, // Default entropy threshold
             threads: 1,
             memory_budget_gb: 1.0,
+            temp_dir: None,
         }
     }
 }
@@ -45,27 +48,33 @@ pub struct Sketcher {
     config: SketchConfig,
     output_path: PathBuf,
     file_index_counter: Arc<AtomicU32>,
+    silent: bool,
 }
 
 impl Sketcher {
-    pub fn new(config: SketchConfig, output_path: PathBuf) -> Self {
+    pub fn new(config: SketchConfig, output_path: PathBuf, silent: bool) -> Self {
         Self {
             config,
             output_path,
             file_index_counter: Arc::new(AtomicU32::new(0)),
+            silent,
         }
     }
 
     /// Main entry point for sketching files
     pub fn sketch_files(&self, input_paths: &[PathBuf]) -> Result<()> {
         // Initialize metadata database
+        if !self.silent {
+            eprintln!("Setting up LMDB environment...");
+        }
         let env = self.setup_env(self.config.clone())?;
 
-        // Create LMDB writer for hashes
         let (hash_sender, writer_handle) = create_lmdb_writer(
             self.config.memory_budget_gb,
             env.clone(),
             10000, // Channel capacity
+            self.config.temp_dir.clone(),
+            self.silent,
         );
 
         // Set up rayon thread pool
@@ -74,17 +83,57 @@ impl Sketcher {
             .build()
             .context("Failed to create thread pool")?;
 
+        // Create progress bar only if not silent
+        let progress_bar = if !self.silent {
+            let pb = ProgressBar::new(input_paths.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({percent}%) {msg}")
+                    .unwrap()
+                    .progress_chars("█▉▊▋▌▍▎▏  ")
+            );
+            pb.set_message("Starting...");
+            Some(pb)
+        } else {
+            None
+        };
+
         // Process files in parallel
         let results: Result<Vec<_>> = pool.install(|| {
-            input_paths
-                .par_iter()
-                .map(|path| self.process_file(path, &hash_sender, &env))
-                .collect()
+            let iter = input_paths.par_iter();
+            let iter = if let Some(ref pb) = progress_bar {
+                iter.progress_with(pb.clone())
+            } else {
+                iter.progress_with(ProgressBar::hidden())
+            };
+
+            iter.map(|path| {
+                let result = self.process_file(path, &hash_sender, &env);
+                if let Some(ref pb) = progress_bar {
+                    if let Err(ref e) = result {
+                        pb.set_message(format!("Error in {}: {}", path.display(), e));
+                    } else {
+                        pb.set_message(format!(
+                            "Completed {}",
+                            path.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                    }
+                }
+                result
+            })
+            .collect()
         });
+
+        if let Some(pb) = progress_bar {
+            pb.finish_with_message("File processing complete");
+        }
 
         // Close sender to signal completion
         drop(hash_sender);
 
+        if !self.silent {
+            eprintln!("Finalizing database...");
+        }
         // Wait for writer to complete
         writer_handle
             .join()
@@ -101,6 +150,7 @@ impl Sketcher {
         if lockfile.exists() {
             std::fs::remove_file(lockfile)?;
         }
+
         Ok(())
     }
 
@@ -346,8 +396,9 @@ pub fn sketch_files(
     input_paths: &[PathBuf],
     output_path: PathBuf,
     config: SketchConfig,
+    silent: bool,
 ) -> Result<()> {
-    let sketcher = Sketcher::new(config, output_path);
+    let sketcher = Sketcher::new(config, output_path, silent);
     sketcher.sketch_files(input_paths)
 }
 
@@ -376,6 +427,7 @@ mod tests {
             &[input_file.into_temp_path().to_path_buf()],
             output_file.clone(),
             config,
+            false, // Not silent for tests
         )
         .unwrap();
         assert!(output_file.exists());

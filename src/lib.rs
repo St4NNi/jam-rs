@@ -39,6 +39,7 @@ pub fn run() -> Result<()> {
             nmax,
             complexity,
             singleton,
+            temp_dir,
         } => {
             // Expand input paths to handle directories and lists
             let expanded_inputs = expand_input_paths(&input)?;
@@ -54,6 +55,7 @@ pub fn run() -> Result<()> {
                 cli.force,
                 cli.silent,
                 complexity,
+                temp_dir,
             )
         }
 
@@ -83,7 +85,24 @@ pub fn handle_sketch_command(
     force: bool,
     silent: bool,
     min_entropy: f64,
+    temp_dir: Option<PathBuf>,
 ) -> Result<()> {
+    // Validate temp directory if provided
+    if let Some(ref temp_dir) = temp_dir {
+        if !temp_dir.exists() {
+            return Err(anyhow::anyhow!(
+                "Temp directory does not exist: {:?}",
+                temp_dir
+            ));
+        }
+        if !temp_dir.is_dir() {
+            return Err(anyhow::anyhow!(
+                "Temp directory path is not a directory: {:?}",
+                temp_dir
+            ));
+        }
+    }
+
     // Check if output file exists and force flag
     if output_path.exists() {
         if !force {
@@ -93,7 +112,10 @@ pub fn handle_sketch_command(
             ));
         }
         if !silent {
-            println!("Warning: Overwriting existing output file: {output_path:?}");
+            eprintln!(
+                "Warning: Overwriting existing output file: {}",
+                output_path.display()
+            );
         }
         if !output_path.is_file() {
             return Err(anyhow::anyhow!(
@@ -114,24 +136,30 @@ pub fn handle_sketch_command(
     }
 
     if !silent {
-        println!("Starting sketching process...");
-        println!("  Input files: {}", input_paths.len());
-        println!("  K-mer size: {kmer_size}");
-        println!("  Threads: {threads}");
+        let mut settings = format!(
+            "jam: {} files, k={}, threads={}, memory={:.1}GB, entropy={}",
+            input_paths.len(),
+            kmer_size,
+            threads,
+            2.0,
+            min_entropy
+        );
 
         if let Some(scale) = fscale {
-            println!("  FracMinHash scale: {scale}");
+            settings.push_str(&format!(", scale={}", scale));
         }
 
         if let Some(max_hashes) = nmax {
-            println!("  Max hashes per sequence: {max_hashes}");
+            settings.push_str(&format!(", nmax={}", max_hashes));
         }
 
         if singleton {
-            println!("  Mode: Singleton (separate sketch per sequence)");
+            settings.push_str(", mode=singleton");
         } else {
-            println!("  Mode: Combined (one sketch per file)");
+            settings.push_str(", mode=combined");
         }
+
+        eprintln!("{}", settings);
     }
 
     let fscale = if let Some(fscale) = fscale {
@@ -149,19 +177,23 @@ pub fn handle_sketch_command(
         min_entropy, // Could be made configurable
         threads,
         memory_budget_gb: 2.0, // Could be made configurable
+        temp_dir,
     };
 
-    sketch_files(&input_paths, output_path.clone(), config)?;
+    sketch_files(&input_paths, output_path.clone(), config, silent)?;
 
     if !silent {
-        println!("Sketching completed successfully!");
-        println!("Output written to: {output_path:?}");
+        let mut completion_msg = format!("Completed: {}", output_path.display());
 
-        // Print quick stats
+        // Add quick stats on the same line
         if let Ok(stats) = stats::StatsCalculator::calculate_stats(&output_path, false) {
-            println!("  Total hashes: {}", stats.total_hashes);
-            println!("  Files/sequences processed: {}", stats.unique_files);
+            completion_msg.push_str(&format!(
+                " ({} hashes, {} files/sequences)",
+                stats.total_hashes, stats.unique_files
+            ));
         }
+
+        eprintln!("{}", completion_msg);
     }
 
     Ok(())
@@ -200,16 +232,19 @@ pub fn handle_distance_command(
     }
 
     if !silent {
-        println!("Starting distance calculation...");
-        println!("  Input: {input_path:?}");
-        println!("  Database: {database_path:?}");
-        println!("  Cutoff: {cutoff}");
-
-        if let Some(ref output) = output_path {
-            println!("  Output: {output:?}");
+        let output_desc = if let Some(ref output) = output_path {
+            output.display().to_string()
         } else {
-            println!("  Output: stdout");
-        }
+            "stdout".to_string()
+        };
+
+        eprintln!(
+            "Distance calculation: {} vs {} (cutoff={}) -> {}",
+            input_path.display(),
+            database_path.display(),
+            cutoff,
+            output_desc
+        );
     }
 
     let distance_config = DistanceConfig {

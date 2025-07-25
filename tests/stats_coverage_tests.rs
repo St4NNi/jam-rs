@@ -29,9 +29,10 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"#;
         min_entropy: 0.0,
         threads: 1,
         memory_budget_gb: 1.0,
+        temp_dir: None,
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test calculate_stats with detailed=false
     let stats = StatsCalculator::calculate_stats(&sketch_path, false)?;
@@ -67,16 +68,13 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
 
     let sketch_path = temp_dir.path().join("print_stats.lmdb");
     let config = SketchConfig {
-        kmer_size: 8,     // Lower kmer size for short/repetitive seqs
-        fscale: u64::MAX, // No FracMinHash filtering
-        nmax: u64::MAX,   // No nmax filtering
-        singleton: true,  // FIX: ensure per-sequence stats
+        kmer_size: 8,    // Lower kmer size for short/repetitive seqs
+        singleton: true, // FIX: ensure per-sequence stats
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     let stats = StatsCalculator::calculate_stats(&sketch_path, false)?;
 
@@ -101,16 +99,13 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
 
     let sketch_path = temp_dir.path().join("func_stats.lmdb");
     let config = SketchConfig {
-        kmer_size: 8,     // Lower kmer size for short/repetitive seqs
-        fscale: u64::MAX, // No FracMinHash filtering
-        nmax: u64::MAX,   // No nmax filtering
-        singleton: true,  // FIX: ensure per-sequence stats
+        kmer_size: 8,    // Lower kmer size for short/repetitive seqs
+        singleton: true, // FIX: ensure per-sequence stats
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test print_stats with short=true
     let result = StatsCalculator::print_stats(&sketch_path, true);
@@ -169,16 +164,13 @@ fn test_stats_with_multiple_files() -> Result<()> {
 
     let sketch_path = temp_dir.path().join("multi_stats.lmdb");
     let config = SketchConfig {
-        kmer_size: 8,     // Lower kmer size for short/repetitive seqs
-        fscale: u64::MAX, // No FracMinHash filtering
-        nmax: u64::MAX,   // No nmax filtering
-        singleton: true,  // FIX: ensure per-sequence stats
+        kmer_size: 8,    // Lower kmer size for short/repetitive seqs
+        singleton: true, // FIX: ensure per-sequence stats
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     let stats = StatsCalculator::calculate_stats(&sketch_path, true)?;
 
@@ -235,16 +227,13 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
 
     let sketch_path = temp_dir.path().join("gc_test.lmdb");
     let config = SketchConfig {
-        kmer_size: 8,     // Lower kmer size for short/repetitive seqs
-        fscale: u64::MAX, // No FracMinHash filtering
-        nmax: u64::MAX,   // No nmax filtering
-        singleton: true,  // FIX: ensure per-sequence stats
+        kmer_size: 8,    // Lower kmer size for short/repetitive seqs
+        singleton: true, // FIX: ensure per-sequence stats
         min_entropy: 0.0,
-        threads: 1,
-        memory_budget_gb: 1.0,
+        ..SketchConfig::default()
     };
 
-    sketch_files(&[fasta_path], sketch_path.clone(), config)?;
+    sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     let stats = StatsCalculator::calculate_stats(&sketch_path, true)?;
 

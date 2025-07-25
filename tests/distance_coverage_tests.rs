@@ -83,11 +83,10 @@ impl DistanceTestEnvironment {
                     nmax: 1000,
                     singleton: false,
                     min_entropy: 0.0, // Use very permissive entropy filter
-                    threads: 1,
-                    memory_budget_gb: 1.0,
+                    ..SketchConfig::default()
                 };
 
-                sketch_files(&[fasta_path], db_path.clone(), config)?;
+                sketch_files(&[fasta_path], db_path.clone(), config, false)?;
 
                 // Force all handles to be dropped and wait
                 std::thread::sleep(std::time::Duration::from_millis(500));

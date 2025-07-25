@@ -128,10 +128,18 @@ pub struct LMDBWriter {
     current_memory_usage: usize,
     chunk_files: Vec<NamedTempFile>,
     total_entries: u64,
+    temp_dir: Option<PathBuf>,
+    silent: bool,
 }
 
 impl LMDBWriter {
-    pub fn new(memory_budget: usize, env: Env, receiver: Receiver<(u64, u64)>) -> Self {
+    pub fn new(
+        memory_budget: usize,
+        env: Env,
+        receiver: Receiver<(u64, u64)>,
+        temp_dir: Option<PathBuf>,
+        silent: bool,
+    ) -> Self {
         Self {
             memory_budget,
             env,
@@ -140,6 +148,8 @@ impl LMDBWriter {
             current_memory_usage: 0,
             chunk_files: Vec::new(),
             total_entries: 0,
+            temp_dir,
+            silent,
         }
     }
 
@@ -161,7 +171,21 @@ impl LMDBWriter {
     }
 
     fn flush_chunk_to_tempfile(&mut self) -> Result<()> {
-        let temp_file = NamedTempFile::new()?;
+        let temp_file = if let Some(ref temp_dir) = self.temp_dir {
+            NamedTempFile::new_in(temp_dir)?
+        } else {
+            NamedTempFile::new()?
+        };
+
+        if !self.silent {
+            eprintln!(
+                "Creating temporary sort file: {} ({} entries, {:.1} MB)",
+                temp_file.path().display(),
+                self.current_chunk.len(),
+                self.current_memory_usage as f64 / (1024.0 * 1024.0)
+            );
+        }
+
         let mut writer = BufWriter::new(temp_file);
 
         // Write entries in sorted order (BinaryHeap with Reverse gives us min-heap)
@@ -242,6 +266,18 @@ impl LMDBWriter {
             self.flush_chunk_to_tempfile()?;
         }
 
+        let num_temp_files = self.chunk_files.len();
+        if num_temp_files > 0 {
+            if !self.silent {
+                eprintln!(
+                    "Merging {} temporary files into LMDB database...",
+                    num_temp_files
+                );
+            }
+        } else if !self.silent {
+            eprintln!("Writing hash data directly to LMDB (no temporary files needed)...");
+        }
+
         // Collect all temp file paths
         let file_paths: Vec<PathBuf> = self
             .chunk_files
@@ -258,16 +294,20 @@ impl LMDBWriter {
         // Write merged data to LMDB
         let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
+        let mut total_written = 0u64;
+        let mut duplicates_skipped = 0u64;
 
         let mut prev = (0u64, 0u64);
         for (hash, metadata) in iterator {
             if prev.0 == hash && prev.1 == metadata {
                 // Skip duplicates
+                duplicates_skipped += 1;
                 continue;
             }
             prev = (hash, metadata);
             db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
             batch_count += 1;
+            total_written += 1;
 
             // Commit in batches for performance
             if batch_count >= 10000 {
@@ -278,6 +318,21 @@ impl LMDBWriter {
         }
 
         wtxn.commit()?;
+
+        if !self.silent {
+            if num_temp_files > 0 {
+                eprintln!(
+                    "Merge complete! {} unique hashes written, {} duplicates skipped",
+                    total_written, duplicates_skipped
+                );
+            } else {
+                eprintln!(
+                    "Direct write complete! {} unique hashes written",
+                    total_written
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -292,11 +347,13 @@ pub fn create_lmdb_writer(
     memory_budget_gb: f64,
     env: Env,
     channel_capacity: usize,
+    temp_dir: Option<PathBuf>,
+    silent: bool,
 ) -> SenderWithHandle {
     let memory_budget = (memory_budget_gb * 1024.0 * 1024.0 * 1024.0) as usize;
     let (sender, receiver) = crossbeam_channel::bounded(channel_capacity);
 
-    let writer = LMDBWriter::new(memory_budget, env, receiver);
+    let writer = LMDBWriter::new(memory_budget, env, receiver, temp_dir, silent);
 
     let handle = std::thread::spawn(move || writer.run());
 
@@ -333,6 +390,8 @@ mod tests {
         let (sender, handle) = create_lmdb_writer(
             1.0, // 1GB memory budget
             env, 1000, // channel capacity
+            None, // Use default temp directory
+            true, // Silent mode for tests
         );
 
         // Send test data
@@ -341,8 +400,6 @@ mod tests {
         for (hash, metadata) in test_data {
             sender.send((hash, metadata)).unwrap();
         }
-
-        println!("Sent items");
 
         drop(sender); // Close channel
 
@@ -362,7 +419,8 @@ mod tests {
 
         let (sender, handle) = create_lmdb_writer(
             0.001, // Very small memory budget to force temp files
-            env, 1000,
+            env, 1000, None, // Use default temp directory
+            true, // Silent mode for tests
         );
 
         // Send enough data to exceed memory budget

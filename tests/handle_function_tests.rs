@@ -51,6 +51,7 @@ fn test_handle_sketch_command_basic() -> Result<()> {
         false, // force
         true,  // silent
         1.5,   // min_entropy
+        None,  // temp_dir
     );
 
     assert!(result.is_ok());
@@ -79,6 +80,7 @@ fn test_handle_sketch_command_with_fscale() -> Result<()> {
         true, // force=true
         true, // silent
         1.5,
+        None,
     );
 
     assert!(result.is_ok());
@@ -105,6 +107,7 @@ fn test_handle_sketch_command_with_nmax() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_ok());
@@ -130,6 +133,7 @@ fn test_handle_sketch_command_singleton_mode() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_ok());
@@ -156,6 +160,7 @@ fn test_handle_sketch_command_multiple_threads() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_ok());
@@ -183,6 +188,7 @@ fn test_handle_sketch_command_invalid_kmer_size() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_err());
@@ -205,6 +211,7 @@ fn test_handle_sketch_command_invalid_kmer_size() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_err());
@@ -240,6 +247,7 @@ fn test_handle_sketch_command_existing_output_no_force() -> Result<()> {
         false, // force = false
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_err());
@@ -269,6 +277,7 @@ fn test_handle_sketch_command_existing_output_with_force() -> Result<()> {
         true, // force = true
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_ok());
@@ -295,6 +304,7 @@ fn test_handle_sketch_command_output_to_directory() -> Result<()> {
         true, // force = true
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_err());
@@ -328,6 +338,7 @@ fn test_handle_sketch_command_multiple_input_files() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     );
 
     assert!(result.is_ok());
@@ -355,6 +366,7 @@ fn test_handle_distance_command_basic() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     )?;
 
     let result = handle_distance_command(
@@ -390,6 +402,7 @@ fn test_handle_distance_command_with_output_file() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     )?;
 
     let result = handle_distance_command(
@@ -508,6 +521,7 @@ fn test_handle_distance_command_singleton_mode() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     )?;
 
     let result = handle_distance_command(
@@ -547,6 +561,7 @@ fn test_handle_stats_command_basic() -> Result<()> {
         true, // force
         true, // silent
         1.5,
+        None,
     )?;
 
     let result = handle_stats_command(database_file, false, true);
@@ -577,6 +592,7 @@ fn test_handle_stats_command_short_format() -> Result<()> {
         true, // force
         true, // silent
         1.5,
+        None,
     )?;
 
     let result = handle_stats_command(database_file, true, true); // short = true
@@ -691,6 +707,7 @@ fn test_handle_sketch_command_all_parameters() -> Result<()> {
         false,      // force
         false,      // silent = false (test non-silent mode)
         2.0,        // higher min_entropy
+        None,       // temp_dir
     );
 
     assert!(result.is_ok());
@@ -717,6 +734,7 @@ fn test_handle_distance_command_edge_cutoffs() -> Result<()> {
         false,
         true,
         1.5,
+        None,
     )?;
 
     // Test cutoff = 0.0 (minimum)
