@@ -6,7 +6,7 @@ use byteorder::BigEndian;
 use crossbeam_channel::Sender;
 use heed::types::{Bytes, U32};
 use heed::{Database, Env};
-use indicatif::{MultiProgress, ParallelProgressIterator, ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use needletail::{Sequence, parse_fastx_file, parser::SequenceRecord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -120,11 +120,6 @@ impl Sketcher {
         // Process files in parallel
         let results: Result<Vec<_>> = pool.install(|| {
             let iter = input_paths.par_iter();
-            let iter = if let Some(ref pb) = main_progress_bar {
-                iter.progress_with(pb.clone())
-            } else {
-                iter.progress_with(ProgressBar::hidden())
-            };
 
             iter.map(|path| {
                 let result = self.process_file(path, &hash_sender, &env, sub_progress_bar.as_ref());
@@ -132,6 +127,7 @@ impl Sketcher {
                     if let Err(ref e) = result {
                         pb.set_message(format!("Error in {}: {}", path.display(), e));
                     } else {
+                        pb.inc(1);
                         pb.set_message(format!(
                             "Completed {}",
                             path.file_name().unwrap_or_default().to_string_lossy()
@@ -161,13 +157,22 @@ impl Sketcher {
         // Check for any processing errors
         results?;
 
-        let lockfile = env.path().join("-lock");
+        let env_path = env.path().to_path_buf();
+        let filename = env.path().file_name().unwrap_or_default();
+        let mut lockfile = env.path().to_path_buf();
+        lockfile.set_file_name(format!("{}-lock", filename.to_string_lossy()));
 
-        env.prepare_for_closing();
+        let filename_compact = format!("{}-compact", filename.to_string_lossy());
+
+        env.copy_to_path(filename_compact, heed::CompactionOption::Enabled)
+            .unwrap();
+
+        env.prepare_for_closing().wait();
 
         // Delete lock file if it exists
         if lockfile.exists() {
             std::fs::remove_file(lockfile)?;
+            std::fs::remove_file(env_path)?;
         } else {
             eprintln!("No lock file found at {}", lockfile.display());
         }
