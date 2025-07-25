@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
+use tempfile::TempDir;
 
 /// Configuration for sketching
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +63,21 @@ impl Sketcher {
         }
     }
 
+    pub fn setup_tempdir(&self) -> Result<TempDir> {
+        let tempdir = if let Some(temp_dir) = &self.config.temp_dir {
+            tempfile::Builder::new()
+                .prefix("temp_sketch_jam_")
+                .tempdir_in(temp_dir)
+                .context("Failed to create temporary directory")?
+        } else {
+            tempfile::Builder::new()
+                .prefix("temp_sketch_jam_")
+                .tempdir()
+                .context("Failed to create temporary directory")?
+        };
+        Ok(tempdir)
+    }
+
     /// Main entry point for sketching files
     pub fn sketch_files(&self, input_paths: &[PathBuf]) -> Result<()> {
         // Start timing the overall sketching process
@@ -71,7 +87,8 @@ impl Sketcher {
         if !self.silent {
             eprintln!("Setting up LMDB environment...");
         }
-        let env = self.setup_env(self.config.clone())?;
+        let tempdir = self.setup_tempdir()?;
+        let env = self.setup_env(&tempdir)?;
 
         // Create progress tracking system only if not silent
         let (multi_progress, main_progress_bar, sub_progress_bar) = if !self.silent {
@@ -157,25 +174,10 @@ impl Sketcher {
         // Check for any processing errors
         results?;
 
-        let env_path = env.path().to_path_buf();
-        let filename = env.path().file_name().unwrap_or_default();
-        let mut lockfile = env.path().to_path_buf();
-        lockfile.set_file_name(format!("{}-lock", filename.to_string_lossy()));
-
-        let filename_compact = format!("{}-compact", filename.to_string_lossy());
-
-        env.copy_to_path(filename_compact, heed::CompactionOption::Enabled)
+        env.copy_to_path(&self.output_path, heed::CompactionOption::Enabled)
             .unwrap();
 
         env.prepare_for_closing().wait();
-
-        // Delete lock file if it exists
-        if lockfile.exists() {
-            std::fs::remove_file(lockfile)?;
-            std::fs::remove_file(env_path)?;
-        } else {
-            eprintln!("No lock file found at {}", lockfile.display());
-        }
 
         // Display total runtime
         let elapsed = start_time.elapsed();
@@ -351,7 +353,10 @@ impl Sketcher {
     }
 
     /// Setup metadata database
-    fn setup_env(&self, config: SketchConfig) -> Result<Env> {
+    fn setup_env(&self, tempdir: &TempDir) -> Result<Env> {
+        let mut path = tempdir.path().to_path_buf();
+        path.push("sketch.lmdb");
+
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(
@@ -361,13 +366,13 @@ impl Sketcher {
                 )
                 .max_dbs(3)
                 .map_size(10 * 1024 * 1024 * 1024 * 1024) // 10TB map size
-                .open(&self.output_path)?
+                .open(path)?
         };
 
         // Create config database
         let mut wtxn = env.write_txn()?;
         let config_db: Database<Bytes, Bytes> = env.create_database(&mut wtxn, Some("CONFIG"))?;
-        let config_json = serde_json::to_string(&config)?;
+        let config_json = serde_json::to_string(&self.config)?;
         config_db.put(&mut wtxn, b"config", config_json.as_bytes())?;
         wtxn.commit()?;
 

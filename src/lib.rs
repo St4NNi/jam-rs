@@ -67,7 +67,9 @@ pub fn run() -> Result<()> {
             singleton,
         } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent),
 
-        Commands::Stats { input, short } => handle_stats_command(input, short, cli.silent),
+        Commands::Stats { input, short, full } => {
+            handle_stats_command(input, short, full, cli.silent)
+        }
     }
 }
 
@@ -186,7 +188,7 @@ pub fn handle_sketch_command(
         let mut completion_msg = format!("Completed: {}", output_path.display());
 
         // Add quick stats on the same line
-        if let Ok(stats) = stats::StatsCalculator::calculate_stats(&output_path, false) {
+        if let Ok(stats) = stats::StatsCalculator::calculate_stats(&output_path) {
             completion_msg.push_str(&format!(
                 " ({} hashes, {} files/sequences)",
                 stats.total_hashes, stats.unique_files
@@ -280,7 +282,12 @@ pub fn handle_distance_command(
 }
 
 /// Handle the stats command
-pub fn handle_stats_command(input_path: PathBuf, short: bool, silent: bool) -> Result<()> {
+pub fn handle_stats_command(
+    input_path: PathBuf,
+    short: bool,
+    full: bool,
+    silent: bool,
+) -> Result<()> {
     if !input_path.exists() {
         return Err(anyhow::anyhow!(
             "Input path does not exist: {:?}",
@@ -294,7 +301,7 @@ pub fn handle_stats_command(input_path: PathBuf, short: bool, silent: bool) -> R
         println!();
     }
 
-    StatsCalculator::print_stats(&input_path, short)?;
+    StatsCalculator::print_stats(&input_path, short, full)?;
 
     Ok(())
 }

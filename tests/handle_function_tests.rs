@@ -564,7 +564,7 @@ fn test_handle_stats_command_basic() -> Result<()> {
         None,
     )?;
 
-    let result = handle_stats_command(database_file, false, true);
+    let result = handle_stats_command(database_file, false, false, true);
     assert!(result.is_ok());
 
     Ok(())
@@ -595,7 +595,7 @@ fn test_handle_stats_command_short_format() -> Result<()> {
         None,
     )?;
 
-    let result = handle_stats_command(database_file, true, true); // short = true
+    let result = handle_stats_command(database_file, true, false, true); // short = true
     assert!(result.is_ok());
 
     Ok(())
@@ -606,7 +606,7 @@ fn test_handle_stats_command_nonexistent_input() -> Result<()> {
     let env = HandleTestEnvironment::new()?;
     let nonexistent_db = env.temp_path().join("nonexistent.lmdb");
 
-    let result = handle_stats_command(nonexistent_db, false, true);
+    let result = handle_stats_command(nonexistent_db, false, false, true);
 
     assert!(result.is_err());
     assert!(

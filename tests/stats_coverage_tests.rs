@@ -35,14 +35,14 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"#;
     sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test calculate_stats with detailed=false
-    let stats = StatsCalculator::calculate_stats(&sketch_path, false)?;
+    let stats = StatsCalculator::calculate_stats(&sketch_path)?;
 
     assert!(stats.total_hashes > 0, "Should have calculated some hashes");
     assert!(stats.unique_files > 0, "Should have at least one file");
     assert!(!stats.file_metadata.is_empty(), "Should have file metadata");
 
     // Test calculate_stats with detailed=true
-    let detailed_stats = StatsCalculator::calculate_stats(&sketch_path, true)?;
+    let detailed_stats = StatsCalculator::calculate_stats(&sketch_path)?;
 
     assert_eq!(
         stats.total_hashes, detailed_stats.total_hashes,
@@ -76,7 +76,7 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
 
     sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
-    let stats = StatsCalculator::calculate_stats(&sketch_path, false)?;
+    let stats = StatsCalculator::calculate_stats(&sketch_path)?;
 
     // Test print_short method (this just prints to stdout, so we check it doesn't panic)
     stats.print_short();
@@ -108,11 +108,11 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
     sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
     // Test print_stats with short=true
-    let result = StatsCalculator::print_stats(&sketch_path, true);
+    let result = StatsCalculator::print_stats(&sketch_path, true, false);
     assert!(result.is_ok(), "print_stats with short=true should succeed");
 
     // Test print_stats with short=false (detailed)
-    let result = StatsCalculator::print_stats(&sketch_path, false);
+    let result = StatsCalculator::print_stats(&sketch_path, false, false);
     assert!(
         result.is_ok(),
         "print_stats with short=false should succeed"
@@ -172,7 +172,7 @@ fn test_stats_with_multiple_files() -> Result<()> {
 
     sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
-    let stats = StatsCalculator::calculate_stats(&sketch_path, true)?;
+    let stats = StatsCalculator::calculate_stats(&sketch_path)?;
 
     assert_eq!(
         stats.unique_files as usize,
@@ -201,10 +201,10 @@ fn test_stats_error_handling() -> Result<()> {
     let nonexistent_path = temp_dir.path().join("does_not_exist.lmdb");
 
     // Test with non-existent database
-    let result = StatsCalculator::calculate_stats(&nonexistent_path, false);
+    let result = StatsCalculator::calculate_stats(&nonexistent_path);
     assert!(result.is_err(), "Should fail with non-existent database");
 
-    let result = StatsCalculator::print_stats(&nonexistent_path, true);
+    let result = StatsCalculator::print_stats(&nonexistent_path, true, false);
     assert!(result.is_err(), "Should fail with non-existent database");
 
     Ok(())
@@ -235,7 +235,7 @@ ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"#;
 
     sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;
 
-    let stats = StatsCalculator::calculate_stats(&sketch_path, true)?;
+    let stats = StatsCalculator::calculate_stats(&sketch_path)?;
 
     // The distributions might be empty or have values depending on the implementation
     // We just verify the function runs without error and the stats structure is valid

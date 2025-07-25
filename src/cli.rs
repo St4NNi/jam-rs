@@ -90,5 +90,8 @@ pub enum Commands {
         /// Short summary only
         #[arg(short, long)]
         short: bool,
+        /// Include the full entry statistics
+        #[arg(short, long)]
+        full: bool,
     },
 }
