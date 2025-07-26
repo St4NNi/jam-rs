@@ -7,6 +7,7 @@ use crossbeam_channel::Sender;
 use heed::types::{Bytes, U32};
 use heed::{Database, Env};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use needletail::errors::ParseErrorKind;
 use needletail::{Sequence, parse_fastx_file, parser::SequenceRecord};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -196,8 +197,24 @@ impl Sketcher {
         metadata_env: &Env,
         sub_progress_bar: Option<&ProgressBar>,
     ) -> Result<()> {
-        let mut reader = parse_fastx_file(file_path)
-            .with_context(|| format!("Failed to open file: {file_path:?}"))?;
+        let mut reader = match parse_fastx_file(file_path) {
+            Ok(reader) => reader,
+            Err(e) if e.kind == ParseErrorKind::EmptyFile => {
+                eprintln!("Empty file detected: {}, skipping", file_path.display());
+                // Finalize sub-progress bar for this file
+                if let Some(sub_pb) = sub_progress_bar {
+                    sub_pb.set_message(format!("Skipped empty file: {}", file_path.display()));
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("Error parsing file {}: {}", file_path.display(), e);
+                return Err(anyhow::anyhow!(
+                    "Failed to parse file: {}",
+                    file_path.display()
+                ));
+            }
+        };
 
         let mut sequence_count = 0;
         let mut total_length = 0;
