@@ -48,6 +48,7 @@ fn test_handle_sketch_command_basic() -> Result<()> {
         None,  // nmax
         false, // singleton
         1,     // threads
+        2,     // memory
         false, // force
         true,  // silent
         1.5,   // min_entropy
@@ -77,6 +78,7 @@ fn test_handle_sketch_command_with_fscale() -> Result<()> {
         None,
         false,
         1,
+        2,    // memory
         true, // force=true
         true, // silent
         1.5,
@@ -104,6 +106,7 @@ fn test_handle_sketch_command_with_nmax() -> Result<()> {
         Some(50), // nmax
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -130,6 +133,7 @@ fn test_handle_sketch_command_singleton_mode() -> Result<()> {
         None,
         true, // singleton
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -157,6 +161,7 @@ fn test_handle_sketch_command_multiple_threads() -> Result<()> {
         None,
         false,
         4, // threads
+        2, // memory
         false,
         true,
         1.5,
@@ -185,6 +190,7 @@ fn test_handle_sketch_command_invalid_kmer_size() -> Result<()> {
         None,
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -208,6 +214,7 @@ fn test_handle_sketch_command_invalid_kmer_size() -> Result<()> {
         None,
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -244,6 +251,7 @@ fn test_handle_sketch_command_existing_output_no_force() -> Result<()> {
         None,
         false,
         1,
+        2,     // memory
         false, // force = false
         true,
         1.5,
@@ -274,6 +282,7 @@ fn test_handle_sketch_command_existing_output_with_force() -> Result<()> {
         None,
         false,
         1,
+        2,    // memory
         true, // force = true
         true,
         1.5,
@@ -301,6 +310,7 @@ fn test_handle_sketch_command_output_to_directory() -> Result<()> {
         None,
         false,
         1,
+        2,    // memory
         true, // force = true
         true,
         1.5,
@@ -335,6 +345,7 @@ fn test_handle_sketch_command_multiple_input_files() -> Result<()> {
         None,
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -363,6 +374,7 @@ fn test_handle_distance_command_basic() -> Result<()> {
         None,
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -399,6 +411,7 @@ fn test_handle_distance_command_with_output_file() -> Result<()> {
         None,
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -518,6 +531,7 @@ fn test_handle_distance_command_singleton_mode() -> Result<()> {
         None,
         true, // singleton
         1,
+        2, // memory
         false,
         true,
         1.5,
@@ -558,6 +572,7 @@ fn test_handle_stats_command_basic() -> Result<()> {
         Some(100),  // Small nmax
         false,
         1,
+        2,    // memory
         true, // force
         true, // silent
         1.5,
@@ -589,6 +604,7 @@ fn test_handle_stats_command_short_format() -> Result<()> {
         Some(100),  // Small nmax
         false,
         1,
+        2,    // memory
         true, // force
         true, // silent
         1.5,
@@ -704,6 +720,7 @@ fn test_handle_sketch_command_all_parameters() -> Result<()> {
         Some(100),  // nmax
         true,       // singleton
         2,          // threads
+        2,          // memory
         false,      // force
         false,      // silent = false (test non-silent mode)
         2.0,        // higher min_entropy
@@ -731,6 +748,7 @@ fn test_handle_distance_command_edge_cutoffs() -> Result<()> {
         None,
         false,
         1,
+        2, // memory
         false,
         true,
         1.5,

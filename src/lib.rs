@@ -52,6 +52,7 @@ pub fn run() -> Result<()> {
                 nmax,
                 singleton,
                 cli.threads.unwrap_or(1),
+                cli.memory.unwrap_or(2),
                 cli.force,
                 cli.silent,
                 complexity,
@@ -84,6 +85,7 @@ pub fn handle_sketch_command(
     nmax: Option<u64>,
     singleton: bool,
     threads: usize,
+    memory: usize,
     force: bool,
     silent: bool,
     min_entropy: f64,
@@ -139,11 +141,11 @@ pub fn handle_sketch_command(
 
     if !silent {
         let mut settings = format!(
-            "jam: {} files, k={}, threads={}, memory={:.1}GB, entropy={}",
+            "jam: {} files, k={}, threads={}, memory={}GB, entropy={}",
             input_paths.len(),
             kmer_size,
             threads,
-            2.0,
+            memory,
             min_entropy
         );
 
@@ -178,7 +180,7 @@ pub fn handle_sketch_command(
         singleton,
         min_entropy, // Could be made configurable
         threads,
-        memory_budget_gb: 2.0, // Could be made configurable
+        memory_budget_gb: memory as f64, // Could be made configurable
         temp_dir,
     };
 

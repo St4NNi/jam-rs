@@ -23,6 +23,9 @@ pub struct Cli {
     /// Only errors and output files will be printed
     #[arg(short, long, global = true, default_value = "false")]
     pub silent: bool,
+    /// Maximum memory usage in bytes in GB
+    #[arg(short, long, global = true, default_value = "2")]
+    pub memory: Option<usize>,
 }
 
 #[derive(Debug, Subcommand, Clone)]
