@@ -8,3 +8,5 @@
 .github/copilot-instructions.md
 /testout
 /out
+/tools/target
+/tools/Cargo.lock

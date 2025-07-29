@@ -55,9 +55,7 @@ pub fn xxhash3(kmer: u64) -> u64 {
     xxhash_rust::xxh3::xxh3_64(&kmer.to_be_bytes())
 }
 
-#[test]
-#[ignore]
-fn write_avalanche_csvs() {
+fn main() {
     write_avalanche_csv("jamhash", jam_rs::hash_functions::jamhash);
     write_avalanche_csv("murmur3", murmur3_u64);
     write_avalanche_csv("xxhash3", xxhash3);

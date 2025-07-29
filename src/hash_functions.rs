@@ -1,6 +1,7 @@
 //! Constants chosen by testing different digits of pi;
-const KEY1: u64 = 0xe12119c4114f22a7; // = 0x4528_21e6_38d0_1377 ^ 0xa409_3822_299f_31d0;
-const KEY2: u128 = 0xd1310ba698dfb5ac;
+const KEY1: u64 = 0x4327DE7F11A64EB7; // 0xd1310ba698dfb5ac ^ 0x9216d5d98979fb1b;
+const KEY2: u64 = 0xe12119c4114f22a7;
+//const KEY2: u128 = 0x4327DE7F11A64EB7; // 0xd1310ba698dfb5ac ^ 0x9216d5d98979fb1b;
 const PRNG_CONSTANT: u128 = 6364136223846793005_u128; // Well known constant from Donald Knuth's MMIX PRNG.
 const MASK: u128 = 0xffff_ffff_ffff_ffff; // Mask for the lower 64 bits of a u128.
 
@@ -11,8 +12,20 @@ const MASK: u128 = 0xffff_ffff_ffff_ffff; // Mask for the lower 64 bits of a u12
 pub fn jamhash(kmer: u64) -> u64 {
     let temp = ((kmer ^ KEY1) as u128).wrapping_mul(PRNG_CONSTANT); // XOR the input with a constant, then multiply by the PRNG constant.
     let temp2 = ((temp & MASK) as u64) ^ ((temp >> 64) as u64); // XOR the lower 64 bits with the upper 64 bits.
-    let temp3 = (temp2 as u128).wrapping_mul(KEY2);
-    ((temp3 & MASK) as u64) ^ ((temp3 >> 64) as u64)
+    let temp3 = ((temp2 ^ KEY2) as u128).wrapping_mul(PRNG_CONSTANT); // Second round to fully mix the bits
+    ((temp3 & MASK) as u64) ^ ((temp3 >> 64) as u64) // XOR the lower 64 bits with the upper 64 bits again.
+}
+
+#[inline]
+pub fn double_fold(input: u64, const_1: u64, const_2: u64) -> u64 {
+    let first = fold_multiply(input, const_1);
+    fold_multiply(first, const_2)
+}
+
+#[inline]
+fn fold_multiply(input: u64, const_1: u64) -> u64 {
+    let temp = ((input) as u128).wrapping_mul(const_1 as u128);
+    ((temp & MASK) as u64) ^ ((temp >> 64) as u64)
 }
 
 #[cfg(test)]

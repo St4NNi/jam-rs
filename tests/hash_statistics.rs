@@ -1,3 +1,4 @@
+use rand::{Rng, rng};
 use roaring::RoaringTreemap;
 
 // kolmogorov-smirnov from: https://github.com/tmmcguire/hashers/blob/master/examples/kolmogorov-smirnov.rs
@@ -67,7 +68,7 @@ pub fn xxhash3(kmer: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(kmer)
 }
 
-const RANGE: std::ops::Range<u64> = 0..1_000_000_000u64;
+const RANGE: std::ops::Range<u64> = 0..100_000_000u64;
 const RANGE_LEN: usize = RANGE.end as usize - RANGE.start as usize;
 
 // Skip
@@ -93,6 +94,33 @@ fn run_collision_analysis() {
         if !hll_xxhash.insert(xx) {
             panic!("XXHash3 hash collision detected for value: {x}");
         };
+    }
+}
+
+#[test]
+#[ignore]
+fn find_constants() {
+    let mut rng = rng();
+    let samples = (0..1_000_000).collect::<Vec<_>>();
+
+    let mut results = vec![0u64; samples.len()];
+
+    // 04feab043089c9a1, 4c6102befcb61250, 430a4fbd481e7756, f640d38a7b661335
+    let mut smallest_ks = std::f64::MAX;
+    loop {
+        let const1 = rng.random::<u64>();
+        let const2 = rng.random::<u64>();
+
+        for x in 0..samples.len() {
+            results[x] = jam_rs::hash_functions::double_fold(samples[x], const1, const2);
+        }
+
+        results.sort();
+        let result = ks(&results);
+        if result < smallest_ks {
+            smallest_ks = result;
+            println!("New best constants: {const1:016x}, {const2:016x}, with KS={smallest_ks}");
+        }
     }
 }
 
