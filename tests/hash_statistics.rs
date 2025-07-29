@@ -109,7 +109,7 @@ fn run_ks() {
         ks(&do_hashes_bytes(xxhash3, samples_bytes.as_slice())),
     );
     print_ks(
-        "ahash",
+        "jamhash",
         ks(&do_hashes_u64(jam_rs::hash_functions::jamhash, &samples)),
     );
     print_ks(

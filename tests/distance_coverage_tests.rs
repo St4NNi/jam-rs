@@ -17,7 +17,7 @@ struct DistanceTestEnvironment {
 impl DistanceTestEnvironment {
     fn new(test_name: &str) -> Result<Self> {
         let temp_dir = tempfile::Builder::new()
-            .prefix(&format!("jam-rs-test-{}", test_name))
+            .prefix(&format!("jam-rs-test-{}-", test_name))
             .tempdir()?;
         Ok(Self { temp_dir })
     }
@@ -85,6 +85,8 @@ impl DistanceTestEnvironment {
                     min_entropy: 0.0, // Use very permissive entropy filter
                     ..SketchConfig::default()
                 };
+
+                println!("Creating sketch database at {:?}", db_path);
 
                 sketch_files(&[fasta_path], db_path.clone(), config, false)?;
 
