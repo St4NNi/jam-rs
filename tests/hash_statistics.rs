@@ -1,3 +1,5 @@
+use roaring::RoaringTreemap;
+
 // kolmogorov-smirnov from: https://github.com/tmmcguire/hashers/blob/master/examples/kolmogorov-smirnov.rs
 // See
 // - https://www.itl.nist.gov/div898/handbook/eda/section3/eda35g.htm
@@ -65,8 +67,34 @@ pub fn xxhash3(kmer: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(kmer)
 }
 
-const RANGE: std::ops::Range<u64> = 100_000_000_000..100_010_000_000u64;
+const RANGE: std::ops::Range<u64> = 0..1_000_000_000u64;
 const RANGE_LEN: usize = RANGE.end as usize - RANGE.start as usize;
+
+// Skip
+#[test]
+#[ignore]
+fn run_collision_analysis() {
+    let mut hll_custom = RoaringTreemap::new();
+    let mut hll_murmur3 = RoaringTreemap::new();
+    let mut hll_xxhash = RoaringTreemap::new();
+
+    let full_range = 0..4_398_046_511_104u64; // 2^42, the range of u64s.
+
+    for x in full_range.take(1_000_000) {
+        let xx = xxhash3(&x.to_be_bytes());
+        let mo = murmur3_new(&x.to_be_bytes());
+        let ah = jam_rs::hash_functions::ahash(x);
+        if !hll_custom.insert(ah) {
+            panic!("Custom hash collision detected for value: {x}");
+        };
+        if !hll_murmur3.insert(mo) {
+            panic!("Murmur3 hash collision detected for value: {x}");
+        };
+        if !hll_xxhash.insert(xx) {
+            panic!("XXHash3 hash collision detected for value: {x}");
+        };
+    }
+}
 
 #[test]
 fn run_ks() {
@@ -96,26 +124,19 @@ fn run_ks() {
 
 #[test]
 fn test_bit_distribution() {
-    let samples = RANGE.collect::<Vec<_>>();
-
-    let samples_bytes = samples
-        .iter()
-        .map(|x| x.to_be_bytes().to_vec())
-        .collect::<Vec<_>>();
-
     let mut xxhash3_bits = [0u64; 64];
     let mut ahash_bits = [0u64; 64];
     let mut murmur3_old_bits = [0u64; 64];
     let mut murmur3_new_bits = [0u64; 64];
 
-    for x in 0..samples.len() {
-        let xx = xxhash3(samples_bytes[x].as_slice());
+    for x in RANGE {
+        let xx = xxhash3(x.to_be_bytes().as_slice());
         unrolled_64bits(xx, &mut xxhash3_bits);
-        let ah = jam_rs::hash_functions::ahash(samples[x]);
+        let ah = jam_rs::hash_functions::ahash(x);
         unrolled_64bits(ah, &mut ahash_bits);
-        let mo = murmur3_old(samples_bytes[x].as_slice());
+        let mo = murmur3_old(x.to_be_bytes().as_slice());
         unrolled_64bits(mo, &mut murmur3_old_bits);
-        let mn = murmur3_new(samples_bytes[x].as_slice());
+        let mn = murmur3_new(x.to_be_bytes().as_slice());
         unrolled_64bits(mn, &mut murmur3_new_bits);
     }
 

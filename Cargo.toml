@@ -46,6 +46,7 @@ criterion = { version = "0.6.0", features = ["html_reports"] }
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+roaring = "0.11.2"
 
 [[bench]]
 name = "benchmarks"
