@@ -1,5 +1,5 @@
 use crate::core_utils::*;
-use crate::hash_functions::ahash;
+use crate::hash_functions::jamhash;
 use crate::writer::create_lmdb_writer;
 use anyhow::{Context, Result};
 use byteorder::BigEndian;
@@ -325,7 +325,7 @@ impl Sketcher {
                 continue;
             }
 
-            let hash = ahash(kmer.0);
+            let hash = jamhash(kmer.0);
 
             // Apply FracMinHash filter if specified
             if hash > self.config.fscale {
@@ -357,7 +357,7 @@ impl Sketcher {
                 continue;
             }
 
-            let hash = ahash(kmer.0);
+            let hash = jamhash(kmer.0);
 
             // Apply FracMinHash filter if specified
             if hash > self.config.fscale {

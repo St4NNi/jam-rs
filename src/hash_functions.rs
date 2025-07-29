@@ -4,10 +4,10 @@ const ROTATE_LEFT_BY: u32 = 37; //(0xbe54_66cf_34e9_0c6c ^ 0x082e_fa98_ec4e_6c89
 const PRNG_CONSTANT: u128 = 6364136223846793005_u128; // Well known constant from Donald Knuth's MMIX PRNG.
 const MASK: u128 = 0xffff_ffff_ffff_ffff; // Mask for the lower 64 bits of a u128.
 
-// Specialized hash function for kmers < 32
-// Simplified version of ahash-fallback from the ahash crate
+// Specialized hash function for bitkmers < 32 and a constant u64 input
+// Inspired by the ahash fallback algorithm. https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm
 #[inline]
-pub const fn ahash(kmer: u64) -> u64 {
+pub const fn jamhash(kmer: u64) -> u64 {
     let temp = (kmer ^ KEY1) as u128 * PRNG_CONSTANT;
     let temp2 = ((temp & MASK) as u64) ^ ((temp >> 64) as u64); // XOR the lower 64 bits with the upper 64 bits.
     temp2.rotate_left(ROTATE_LEFT_BY)
@@ -18,7 +18,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ahash() {
-        assert_eq!(ahash(0xAAAAAAAAAAAAAAA), 6369629604220809163);
+    fn test_jamhash() {
+        assert_eq!(jamhash(0xAAAAAAAAAAAAAAA), 6369629604220809163);
     }
 }

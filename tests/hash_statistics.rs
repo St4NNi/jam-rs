@@ -83,7 +83,7 @@ fn run_collision_analysis() {
     for x in full_range.take(1_000_000) {
         let xx = xxhash3(&x.to_be_bytes());
         let mo = murmur3_new(&x.to_be_bytes());
-        let ah = jam_rs::hash_functions::ahash(x);
+        let ah = jam_rs::hash_functions::jamhash(x);
         if !hll_custom.insert(ah) {
             panic!("Custom hash collision detected for value: {x}");
         };
@@ -110,7 +110,7 @@ fn run_ks() {
     );
     print_ks(
         "ahash",
-        ks(&do_hashes_u64(jam_rs::hash_functions::ahash, &samples)),
+        ks(&do_hashes_u64(jam_rs::hash_functions::jamhash, &samples)),
     );
     print_ks(
         "murmur3_old",
@@ -125,15 +125,15 @@ fn run_ks() {
 #[test]
 fn test_bit_distribution() {
     let mut xxhash3_bits = [0u64; 64];
-    let mut ahash_bits = [0u64; 64];
+    let mut jamhash_bits = [0u64; 64];
     let mut murmur3_old_bits = [0u64; 64];
     let mut murmur3_new_bits = [0u64; 64];
 
     for x in RANGE {
         let xx = xxhash3(x.to_be_bytes().as_slice());
         unrolled_64bits(xx, &mut xxhash3_bits);
-        let ah = jam_rs::hash_functions::ahash(x);
-        unrolled_64bits(ah, &mut ahash_bits);
+        let ah = jam_rs::hash_functions::jamhash(x);
+        unrolled_64bits(ah, &mut jamhash_bits);
         let mo = murmur3_old(x.to_be_bytes().as_slice());
         unrolled_64bits(mo, &mut murmur3_old_bits);
         let mn = murmur3_new(x.to_be_bytes().as_slice());
@@ -141,16 +141,16 @@ fn test_bit_distribution() {
     }
 
     let mut max_deviation_xxhash = 0i128;
-    let mut max_deviation_ahash = 0i128;
+    let mut max_deviation_jamhash = 0i128;
     let mut max_deviation_murmur3_old = 0i128;
     let mut max_deviation_murmur3_new = 0i128;
     for x in 0..64 {
         max_deviation_xxhash = (xxhash3_bits[x] as i128 - RANGE_LEN as i128)
             .abs()
             .max(max_deviation_xxhash);
-        max_deviation_ahash = (ahash_bits[x] as i128 - RANGE_LEN as i128)
+        max_deviation_jamhash = (jamhash_bits[x] as i128 - RANGE_LEN as i128)
             .abs()
-            .max(max_deviation_ahash);
+            .max(max_deviation_jamhash);
         max_deviation_murmur3_old = (murmur3_old_bits[x] as i128 - RANGE_LEN as i128)
             .abs()
             .max(max_deviation_murmur3_old);
@@ -160,29 +160,29 @@ fn test_bit_distribution() {
     }
 
     let max_deviation_xxhash = max_deviation_xxhash - (RANGE_LEN as i128 / 2);
-    let max_deviation_ahash = max_deviation_ahash - (RANGE_LEN as i128 / 2);
+    let max_deviation_jamhash = max_deviation_jamhash - (RANGE_LEN as i128 / 2);
     let max_deviation_murmur3_old = max_deviation_murmur3_old - (RANGE_LEN as i128 / 2);
     let max_deviation_murmur3_new = max_deviation_murmur3_new - (RANGE_LEN as i128 / 2);
 
     println!(
-        "Max deviation from 50%: xxhash3: {max_deviation_xxhash}, ahash: {max_deviation_ahash}, murmur3_old: {max_deviation_murmur3_old}, murmur3_new: {max_deviation_murmur3_new}"
+        "Max deviation from 50%: xxhash3: {max_deviation_xxhash}, jamhash: {max_deviation_jamhash}, murmur3_old: {max_deviation_murmur3_old}, murmur3_new: {max_deviation_murmur3_new}"
     );
 
-    println!("bit|xxhash3|ahash|murmur3_old|murmur3_new");
+    println!("bit|xxhash3|jamhash|murmur3_old|murmur3_new");
     for x in 0..64 {
         let xxhash_bit = xxhash3_bits[x] as f64 / RANGE_LEN as f64;
-        let ahash_bit = ahash_bits[x] as f64 / RANGE_LEN as f64;
+        let jamhash_bit = jamhash_bits[x] as f64 / RANGE_LEN as f64;
         let murmur3_old_bit = murmur3_old_bits[x] as f64 / RANGE_LEN as f64;
         let murmur3_new_bit = murmur3_new_bits[x] as f64 / RANGE_LEN as f64;
         assert!(xxhash_bit > 0.49);
         assert!(xxhash_bit < 0.51);
-        assert!(ahash_bit > 0.49);
-        assert!(ahash_bit < 0.51);
+        assert!(jamhash_bit > 0.49);
+        assert!(jamhash_bit < 0.51);
         assert!(murmur3_old_bit > 0.49);
         assert!(murmur3_old_bit < 0.51);
         assert!(murmur3_new_bit > 0.49);
         assert!(murmur3_new_bit < 0.51);
-        println!("{x}|{xxhash_bit}|{ahash_bit}|{murmur3_old_bit}|{murmur3_new_bit}");
+        println!("{x}|{xxhash_bit}|{jamhash_bit}|{murmur3_old_bit}|{murmur3_new_bit}");
     }
 }
 

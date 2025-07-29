@@ -1,5 +1,5 @@
 use crate::core_utils::{self, *};
-use crate::hash_functions::ahash;
+use crate::hash_functions::jamhash;
 use crate::sketch::SketchConfig;
 use anyhow::{Context, Result, anyhow};
 use byteorder::BigEndian;
@@ -292,7 +292,7 @@ impl StreamingDistanceCalculator {
                     continue;
                 }
 
-                let hash = ahash(kmer.0);
+                let hash = jamhash(kmer.0);
 
                 // Apply FracMinHash filter if specified
                 if hash > self.sketch_config.fscale {
