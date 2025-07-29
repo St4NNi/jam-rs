@@ -10,26 +10,25 @@ const MASK: u128 = 0xffff_ffff_ffff_ffff; // Mask for the lower 64 bits of a u12
 // and foldhash: https://github.com/orlp/foldhash
 #[inline]
 pub fn jamhash(kmer: u64) -> u64 {
-    let temp = ((kmer ^ KEY1) as u128).wrapping_mul(PRNG_CONSTANT); // XOR the input with a constant, then multiply by the PRNG constant.
-    let temp2 = ((temp & MASK) as u64) ^ ((temp >> 64) as u64); // XOR the lower 64 bits with the upper 64 bits.
-    let temp3 = ((temp2 ^ KEY2) as u128).wrapping_mul(PRNG_CONSTANT); // Second round to fully mix the bits
-    ((temp3 & MASK) as u64) ^ ((temp3 >> 64) as u64) // XOR the lower 64 bits with the upper 64 bits again.
+    double_fold(kmer, 0x00000000002d2998u64, 0x9790f2a36a8520c4u64)
 }
 
 #[inline]
 pub fn double_fold(input: u64, const_1: u64, const_2: u64) -> u64 {
-    let first = fold_multiply(input, const_1);
-    fold_multiply(first, const_2)
+    let first = fold_multiply(input, ((input as u128) << 64) ^ const_1 as u128);
+    fold_multiply(first, const_2 as u128)
 }
 
 #[inline]
-fn fold_multiply(input: u64, const_1: u64) -> u64 {
-    let temp = ((input) as u128).wrapping_mul(const_1 as u128);
+fn fold_multiply(input: u64, const_1: u128) -> u64 {
+    let temp = ((input) as u128).wrapping_mul(const_1);
     ((temp & MASK) as u64) ^ ((temp >> 64) as u64)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::u64;
+
     use super::*;
 
     #[test]

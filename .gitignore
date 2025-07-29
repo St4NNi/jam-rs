@@ -7,6 +7,6 @@
 /test.*
 .github/copilot-instructions.md
 /testout
-/out
+/tools/out
 /tools/target
 /tools/Cargo.lock

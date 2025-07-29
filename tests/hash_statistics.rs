@@ -98,33 +98,6 @@ fn run_collision_analysis() {
 }
 
 #[test]
-#[ignore]
-fn find_constants() {
-    let mut rng = rng();
-    let samples = (0..1_000_000).collect::<Vec<_>>();
-
-    let mut results = vec![0u64; samples.len()];
-
-    // 04feab043089c9a1, 4c6102befcb61250, 430a4fbd481e7756, f640d38a7b661335
-    let mut smallest_ks = std::f64::MAX;
-    loop {
-        let const1 = rng.random::<u64>();
-        let const2 = rng.random::<u64>();
-
-        for x in 0..samples.len() {
-            results[x] = jam_rs::hash_functions::double_fold(samples[x], const1, const2);
-        }
-
-        results.sort();
-        let result = ks(&results);
-        if result < smallest_ks {
-            smallest_ks = result;
-            println!("New best constants: {const1:016x}, {const2:016x}, with KS={smallest_ks}");
-        }
-    }
-}
-
-#[test]
 fn run_ks() {
     let samples = RANGE.collect::<Vec<_>>();
 
