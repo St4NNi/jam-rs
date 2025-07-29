@@ -1,41 +1,52 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::time::Duration;
+use std::{hint::black_box, time::Duration};
 
 #[inline]
-pub fn murmur3_old(kmer: &[u8]) -> u64 {
-    murmurhash3::murmurhash3_x64_128(kmer, 42).0
+pub fn murmur3_old(value: u64) -> u64 {
+    murmurhash3::murmurhash3_x64_128(&value.to_le_bytes(), 42).0
 }
 
 #[inline]
-pub fn murmur3_new(kmer: &[u8]) -> u64 {
-    fastmurmur3::murmur3_x64_128(kmer, 42) as u64
+pub fn murmur3_new(value: u64) -> u64 {
+    fastmurmur3::murmur3_x64_128(&value.to_le_bytes(), 42) as u64
 }
 
 #[inline]
-pub fn xxhash3(kmer: &[u8]) -> u64 {
-    xxhash_rust::xxh3::xxh3_64(kmer)
+pub fn xxhash3(value: u64) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(&value.to_le_bytes())
 }
 
-fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("Hashes");
-    group.warm_up_time(Duration::from_millis(100));
-    group.measurement_time(Duration::from_millis(100));
+#[inline]
+pub fn jamhash(value: u64) -> u64 {
+    jam_rs::hash_functions::jamhash(value)
+}
 
-    for x in u64::MAX - 20..u64::MAX {
-        group.bench_with_input(format!("xxhash_{x}"), &x, |b, &x| {
-            b.iter(|| xxhash3(&x.to_be_bytes()));
-        });
-        group.bench_with_input(format!("jamhash_{x}"), &x, |b, &x| {
-            b.iter(|| jam_rs::hash_functions::jamhash(x));
-        });
-        group.bench_with_input(format!("murmur3_old_{x}"), &x, |b, &x| {
-            b.iter(|| murmur3_old(&x.to_be_bytes()));
-        });
-        group.bench_with_input(format!("murmur3_new_{x}"), &x, |b, &x| {
-            b.iter(|| murmur3_new(&x.to_be_bytes()));
-        });
-    }
+fn bench_hash_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("single_hash");
+    group.warm_up_time(Duration::from_millis(500));
+    group.measurement_time(Duration::from_secs(2));
+
+    // Pre-generate enough values for the benchmark
+    let mut values = (0..100000u64).into_iter().cycle();
+
+    group.bench_function("xxhash3", |b| {
+        b.iter(|| xxhash3(black_box(values.next().unwrap())))
+    });
+
+    group.bench_function("murmur3_old", |b| {
+        b.iter(|| murmur3_old(black_box(values.next().unwrap())))
+    });
+
+    group.bench_function("murmur3_new", |b| {
+        b.iter(|| murmur3_new(black_box(values.next().unwrap())))
+    });
+
+    group.bench_function("jamhash", |b| {
+        b.iter(|| jamhash(black_box(values.next().unwrap())))
+    });
+
     group.finish();
 }
-criterion_group!(benches, criterion_benchmark);
+
+criterion_group!(benches, bench_hash_functions);
 criterion_main!(benches);
