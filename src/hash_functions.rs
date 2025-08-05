@@ -14,7 +14,6 @@ const KEY2: u64 = 0x0d3dfe88bc0e6058;
 #[inline]
 pub fn jamhash(kmer: u64) -> u64 {
     double_fold(kmer, KEY1, KEY2)
-    double_fold(kmer, KEY1, KEY2)
 }
 
 #[inline(always)]
