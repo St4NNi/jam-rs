@@ -39,41 +39,41 @@ fn ks(samples: &[u64]) -> f64 {
     ks
 }
 
-fn compute_u64_avalanche(const1: u64, const2: u64) -> u64 {
+fn compute_u64_avalanche(const1: u64, const2: u64) -> (f64, f64) {
     let mut rng = rng();
-    let mut max_deviation = 0u64;
+
     let mut bit_flips = vec![0; 64 * 64];
-    for _ in 0..1000 {
-        bit_flips.fill(0);
-        for _ in 0..1000 {
-            let base_val: u64 = rng.random();
-            let base_hash = double_fold(base_val, const1, const2);
-            for flip_pos in 0..64 {
-                let delta_val = base_val ^ (1 << flip_pos);
-                let delta_hash = double_fold(delta_val, const1, const2);
-                for test_pos in 0..64 {
-                    let flipped = ((base_hash ^ delta_hash) >> test_pos) & 1;
-                    bit_flips[test_pos * 64 + flip_pos] += flipped as usize;
-                }
+    for _ in 0..10000 {
+        let base_val: u64 = rng.random();
+        let base_hash = double_fold(base_val, const1, const2);
+        for flip_pos in 0..64 {
+            let delta_val = base_val ^ (1 << flip_pos);
+            let delta_hash = double_fold(delta_val, const1, const2);
+            for test_pos in 0..64 {
+                let flipped = ((base_hash ^ delta_hash) >> test_pos) & 1;
+                bit_flips[test_pos * 64 + flip_pos] += flipped as usize;
             }
         }
-
-        max_deviation = max(
-            max_deviation,
-            bit_flips
-                .iter()
-                .map(|e| (*e as i64 - 500 as i64).abs() as u64)
-                .max()
-                .unwrap(),
-        );
     }
 
-    max_deviation
+    let avg_bit_flips: f64 = bit_flips.iter().sum::<usize>() as f64 / bit_flips.len() as f64;
+
+    let variance = bit_flips
+        .iter()
+        .map(|x| {
+            let diff = *x as f64 - avg_bit_flips as f64;
+            diff * diff
+        })
+        .sum::<f64>()
+        / bit_flips.len() as f64;
+
+    let stddev = variance.sqrt();
+
+    (avg_bit_flips, stddev)
 }
 
 fn main() {
-    let max_deviation = Arc::new(AtomicU64::new(73));
-    let max_cos_deviation = Arc::new(AtomicU64::new(11957));
+    let stddev = Arc::new(AtomicU64::new(f64::MAX.to_bits()));
     // 73,84df80c4543a99d6,cee7141973217dd0
 
     let num_threads = std::thread::available_parallelism()
@@ -81,44 +81,46 @@ fn main() {
         .unwrap_or(4);
 
     let mut threads = vec![];
-    for _ in 0..num_threads {
-        let max_deviation = max_deviation.clone();
-        let consecutive_deviation = max_cos_deviation.clone();
-        threads.push(std::thread::spawn(move || {
-            find_best_constants(max_deviation, consecutive_deviation)
-        }));
+    for _ in 0..(num_threads - 1) {
+        let stddev = stddev.clone();
+        threads.push(std::thread::spawn(move || find_best_constants(stddev)));
     }
     for thread in threads {
         thread.join().expect("Thread panicked");
     }
 }
 
-fn find_best_constants(max_deviation: Arc<AtomicU64>, consecutive_deviation: Arc<AtomicU64>) {
+fn find_best_constants(stddev: Arc<AtomicU64>) {
     let mut rng = rng();
     loop {
         let const1 = rng.random::<u64>();
         let const2 = rng.random::<u64>();
+        // if !has_half_bits(const1) || !has_half_bits(const2) {
+        //     continue; // Skip if the constants do not have exactly 32 bits set.
+        // }
+        let (avg_bit_flips, stddev_value) = compute_u64_avalanche(const1, const2);
 
-        let new_deviation = compute_u64_avalanche(const1, const2);
+        let new_deviation = (avg_bit_flips - 500.0).abs();
 
-        if new_deviation <= max_deviation.load(Ordering::Relaxed) {
-            // Test consecutive deviation
+        let old_min_deviation = f64::from_bits(stddev.load(Ordering::Relaxed));
 
-            let new_deviation = test_max_deformity(const1, const2);
-            let old_deviation = consecutive_deviation.load(Ordering::Relaxed);
-
-            if new_deviation < old_deviation {
-                consecutive_deviation.store(new_deviation, Ordering::Relaxed);
-            } else {
-                // If the new deviation is worse than the old one, skip this iteration.
-                continue;
-            }
-
-            println!("{new_deviation},{new_deviation},{const1:016x},{const2:016x}");
-            max_deviation.store(new_deviation, Ordering::Relaxed);
+        if stddev_value <= old_min_deviation {
+            stddev.store(stddev_value.to_bits(), Ordering::Relaxed);
+            println!("{new_deviation},{stddev_value},{const1:016x},{const2:016x}");
         }
     }
 }
+
+fn has_half_bits(num: u64) -> bool {
+    let mut count = 0;
+    for i in 0..64 {
+        if num & (1u64 << i) != 0 {
+            count += 1;
+        }
+    }
+    count == 32
+}
+
 // fn main() {
 //     let samples = (0..1_000_000).collect::<Vec<_>>();
 
@@ -217,30 +219,30 @@ fn find_best_constants(max_deviation: Arc<AtomicU64>, consecutive_deviation: Arc
 //     }
 // }
 
-fn unrolled_64bits(num: u64, nums: &mut [u64; 64]) {
-    for i in 0..64 {
-        if num & (1u64 << i) != 0 {
-            nums[i] += 1;
-        }
-    }
-}
+// fn unrolled_64bits(num: u64, nums: &mut [u64; 64]) {
+//     for i in 0..64 {
+//         if num & (1u64 << i) != 0 {
+//             nums[i] += 1;
+//         }
+//     }
+// }
 
-const RANGE: std::ops::Range<u64> = 0..100_000_000u64;
-const RANGE_LEN: u64 = RANGE.end - RANGE.start;
+// const RANGE: std::ops::Range<u64> = 0..100_000_000u64;
+// const RANGE_LEN: u64 = RANGE.end - RANGE.start;
 
-fn test_max_deformity(const1: u64, const2: u64) -> u64 {
-    let mut jamhash_bits = [0u64; 64];
+// fn test_max_deformity(const1: u64, const2: u64) -> u64 {
+//     let mut jamhash_bits = [0u64; 64];
 
-    for x in RANGE {
-        let ah = jam_rs::hash_functions::double_fold(x, const1, const2);
-        unrolled_64bits(ah, &mut jamhash_bits);
-    }
+//     for x in RANGE {
+//         let ah = jam_rs::hash_functions::double_fold(x, const1, const2);
+//         unrolled_64bits(ah, &mut jamhash_bits);
+//     }
 
-    let mut max_deviation_jamhash = 0u64;
-    for x in 0..64 {
-        max_deviation_jamhash = ((jamhash_bits[x] as i128 - (RANGE_LEN / 2) as i128).abs() as u64)
-            .max(max_deviation_jamhash);
-    }
+//     let mut max_deviation_jamhash = 0u64;
+//     for x in 0..64 {
+//         max_deviation_jamhash = ((jamhash_bits[x] as i128 - (RANGE_LEN / 2) as i128).abs() as u64)
+//             .max(max_deviation_jamhash);
+//     }
 
-    max_deviation_jamhash
-}
+//     max_deviation_jamhash
+// }

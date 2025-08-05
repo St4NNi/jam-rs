@@ -22,6 +22,14 @@ name = "distribut"
 path = "distribut.rs"
 
 
+[[bin]]
+name = "compare"
+path = "compare.rs"
+
+[[bin]]
+name = "allthekmers"
+path = "allthekmers.rs"
+
 [dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
 murmurhash3 = { version = "0.0.5" }
