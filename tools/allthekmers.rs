@@ -59,20 +59,18 @@ fn get_chunk_iter(total: u64, chunks: u64, idx: u64) -> std::ops::Range<u64> {
     start..(start + size)
 }
 
-fn do_hash(kmer: u64, hashes: &mut Vec<u64>, jam: &mut Vec<u64>, murmur: &mut Vec<u64>) {
+fn do_hash(kmer: u64, jam: &mut Vec<u64>) {
     jam.push(jam_rs::hash_functions::jamhash(kmer));
-    murmur.push(fastmurmur3::murmur3_x64_128(&kmer.to_be_bytes(), 42) as u64);
-    hashes.push(xxhash_rust::xxh3::xxh3_64(&kmer.to_be_bytes()));
 }
 
-fn write(name: &str, chunk: u64, path: PathBuf, values: Vec<u64>) {
+fn write(name: &str, chunk: u64, path: PathBuf, mut values: Vec<u64>) {
     let file_path = path.join(format!("{name}_{chunk}.bin"));
     let mut file = BufWriter::with_capacity(
-        1024 * 1024 * 10, // 10 MB buffer
+        1024 * 1024 * 512, // 512 MB buffer
         std::fs::File::create(file_path).expect("Failed to create file"),
     );
 
-    for value in values {
+    for value in values.drain(..) {
         file.write(&value.to_le_bytes())
             .expect("Failed to write kmer");
     }
@@ -90,9 +88,7 @@ pub fn main() {
     let mut kc = 0u64;
     let mut skipped_rc = 0u64;
 
-    let mut kmer_list: Vec<u64> = Vec::new();
     let mut jam_hashes: Vec<u64> = Vec::new();
-    let mut murmur_hashes: Vec<u64> = Vec::new();
 
     let range = get_chunk_iter(TOTAL, CHUNKS, chunk);
     let range_start = range.start;
@@ -104,11 +100,11 @@ pub fn main() {
 
         if kmer < rc_kmer {
             kc += 1;
-            do_hash(rc_kmer, &mut kmer_list, &mut jam_hashes, &mut murmur_hashes);
+            do_hash(rc_kmer, &mut jam_hashes);
         } else {
             if rc_kmer >= range_start && rc_kmer < range_end {
                 rc += 1;
-                do_hash(rc_kmer, &mut kmer_list, &mut jam_hashes, &mut murmur_hashes);
+                do_hash(rc_kmer, &mut jam_hashes);
             } else {
                 skipped_rc += 1;
             }
@@ -124,9 +120,7 @@ pub fn main() {
     }
 
     // Write the results to a file
-    write("kmers", chunk, path.clone(), kmer_list);
     write("jam_hashes", chunk, path.clone(), jam_hashes);
-    write("murmur_hashes", chunk, path.clone(), murmur_hashes);
 
     println!("Range: {range_start}..{range_end}");
     println!("Kmers: {kc}");

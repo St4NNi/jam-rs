@@ -1,19 +1,18 @@
-//! Constants chosen by brute force search
-
-// 3befcb2fd02479dc,7791702d6babacb3
-// e0c090e45026fcb8,0d3dfe88bc0e6058
-const KEY1: u64 = 0xe0c090e45026fcb8;
-const KEY2: u64 = 0x0d3dfe88bc0e6058;
-//const KEY2: u128 = 0x4327DE7F11A64EB7; // 0xd1310ba698dfb5ac ^ 0x9216d5d98979fb1b;
-//const PRNG_CONSTANT: u128 = 6364136223846793005_u128; // Well known constant from Donald Knuth's MMIX PRNG.
-//const MASK: u128 = 0xffff_ffff_ffff_ffff; // Mask for the lower 64 bits of a u128.
+//! Constants chosen by testing different digits of pi;
+//! see tools/piconstants.py
+const CONST1: u64 = 0xe8ddc98368c78e76; // 621
+const CONST2: u64 = 0x9de2168e9de8b1d1; // 632
+const CONST3: u64 = 0x160ffe7183376388; // 770
 
 // Specialized hash function for bitkmers < 32 and a constant u64 input
 // Inspired by the ahash fallback algorithm. https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm
 // and foldhash: https://github.com/orlp/foldhash
 #[inline]
 pub fn jamhash(kmer: u64) -> u64 {
-    double_fold(kmer, KEY1, KEY2)
+    let kmer_const1 = kmer ^ CONST1;
+    let kmer_const2 = kmer_const1 ^ CONST2;
+    let fold1 = fold_multiply(kmer_const1, kmer_const2);
+    fold_multiply(fold1, CONST3)
 }
 
 #[inline(always)]
