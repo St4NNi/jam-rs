@@ -37,6 +37,10 @@ path = "allthekmers.rs"
 name = "findconstants"
 path = "findconstants.rs"
 
+[[bin]]
+name = "duplicates"
+path = "duplicates.rs"
+
 [dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
 murmurhash3 = { version = "0.0.5" }
@@ -53,6 +57,7 @@ kanal = "0.1.1"
 num-bigint = "0.4.6"
 num-rational = "0.4.2"
 num-traits = "0.2.19"
+foldhash = "0.1.5"
 
 [profile.release]
 opt-level = 3
