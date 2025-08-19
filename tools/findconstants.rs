@@ -7,8 +7,9 @@ fn hamming_distance(x: u64, y: u64) -> u32 {
     (x ^ y).count_ones()
 }
 
-fn triplet_distance(a: u64, b: u64, c: u64) -> u32 {
-    hamming_distance(a, b) + hamming_distance(b, c) + hamming_distance(a, c)
+// Check if both first bit (MSB) and last bit (LSB) are set
+fn has_first_and_last_bit_set(value: u64) -> bool {
+    (value & 0x8000000000000001) == 0x8000000000000001
 }
 
 // High-precision pi - 3 using Machin's formula for better accuracy
@@ -55,13 +56,13 @@ fn generate_constants(range_size: usize) -> Vec<u64> {
 
     // Calculate π - 3 with high precision
     let start_calc = Instant::now();
-    let a = calculate_pi_minus_3(10000); // 1000 decimal digits should be plenty
+    let a = calculate_pi_minus_3(10000); // 10000 decimal digits should be plenty
     println!(
         "Calculated π - 3 in {:.2}s",
         start_calc.elapsed().as_secs_f64()
     );
 
-    let mut constants = Vec::with_capacity(range_size - 1);
+    let mut all_constants = Vec::with_capacity(range_size - 1);
 
     for i in 1..range_size {
         // Calculate 2^(64*i) as BigInt
@@ -82,55 +83,62 @@ fn generate_constants(range_size: usize) -> Vec<u64> {
             reduced.to_u64().unwrap_or(0)
         });
 
-        constants.push(b);
+        all_constants.push(b);
 
         if i % 100 == 0 {
             println!("Generated {} constants...", i);
         }
     }
 
-    constants
+    // Filter constants to only include those with first and last bits set
+    let filtered_constants: Vec<u64> = all_constants
+        .into_iter()
+        .filter(|&value| has_first_and_last_bit_set(value))
+        .collect();
+
+    println!(
+        "Filtered to {} constants with first and last bits set",
+        filtered_constants.len()
+    );
+
+    filtered_constants
 }
 
-fn find_best_triplet_exhaustive(
-    constants: &[u64],
-) -> (u32, (usize, usize, usize), (u64, u64, u64)) {
+fn find_best_pair_exhaustive(constants: &[u64]) -> (u32, (usize, usize), (u64, u64)) {
     let n = constants.len();
-    let total_triplets = (n * (n - 1) * (n - 2)) / 6;
-    println!("Searching {} triplets exhaustively...", total_triplets);
+    let total_pairs = (n * (n - 1)) / 2;
+    println!("Searching {} pairs exhaustively...", total_pairs);
 
     let mut max_distance = 0u32;
-    let mut best_indices = (0, 0, 0);
-    let mut best_values = (0u64, 0u64, 0u64);
+    let mut best_indices = (0, 0);
+    let mut best_values = (0u64, 0u64);
     let mut processed = 0usize;
 
     let start_time = Instant::now();
 
     for i in 0..n {
         for j in (i + 1)..n {
-            for k in (j + 1)..n {
-                let distance = triplet_distance(constants[i], constants[j], constants[k]);
+            let distance = hamming_distance(constants[i], constants[j]);
 
-                if distance > max_distance {
-                    max_distance = distance;
-                    best_indices = (i, j, k);
-                    best_values = (constants[i], constants[j], constants[k]);
-                }
+            if distance > max_distance {
+                max_distance = distance;
+                best_indices = (i, j);
+                best_values = (constants[i], constants[j]);
+            }
 
-                processed += 1;
-                if processed % 100_000 == 0 {
-                    let elapsed = start_time.elapsed().as_secs_f64();
-                    let rate = processed as f64 / elapsed;
-                    let eta = (total_triplets - processed) as f64 / rate;
-                    println!(
-                        "Processed {:>10} triplets ({:>6.2}%) | Best: {} | Rate: {:>8.0}/sec | ETA: {:>6.1}s",
-                        processed,
-                        100.0 * processed as f64 / total_triplets as f64,
-                        max_distance,
-                        rate,
-                        eta
-                    );
-                }
+            processed += 1;
+            if processed % 50_000 == 0 {
+                let elapsed = start_time.elapsed().as_secs_f64();
+                let rate = processed as f64 / elapsed;
+                let eta = (total_pairs - processed) as f64 / rate;
+                println!(
+                    "Processed {:>10} pairs ({:>6.2}%) | Best: {} | Rate: {:>8.0}/sec | ETA: {:>6.1}s",
+                    processed,
+                    100.0 * processed as f64 / total_pairs as f64,
+                    max_distance,
+                    rate,
+                    eta
+                );
             }
         }
     }
@@ -138,43 +146,36 @@ fn find_best_triplet_exhaustive(
     (max_distance, best_indices, best_values)
 }
 
-fn find_best_triplet_sampled(
+fn find_best_pair_sampled(
     constants: &[u64],
     sample_size: usize,
-) -> (u32, (usize, usize, usize), (u64, u64, u64)) {
+) -> (u32, (usize, usize), (u64, u64)) {
     use rand::prelude::*;
 
-    println!("Sampling {} random triplets...", sample_size);
+    println!("Sampling {} random pairs...", sample_size);
 
     let mut rng = rand::rng();
     let mut max_distance = 0u32;
-    let mut best_indices = (0, 0, 0);
-    let mut best_values = (0u64, 0u64, 0u64);
+    let mut best_indices = (0, 0);
+    let mut best_values = (0u64, 0u64);
 
     let start_time = Instant::now();
 
     for i in 0..sample_size {
-        // Generate three unique random indices efficiently
+        // Generate two unique random indices efficiently
         let n = constants.len();
         let idx1 = rng.random_range(0..n);
         let mut idx2 = rng.random_range(0..n - 1);
         if idx2 >= idx1 {
             idx2 += 1;
         }
-        let mut idx3 = rng.random_range(0..n - 2);
-        if idx3 >= idx1.min(idx2) {
-            idx3 += 1;
-        }
-        if idx3 >= idx1.max(idx2) {
-            idx3 += 1;
-        }
 
-        let distance = triplet_distance(constants[idx1], constants[idx2], constants[idx3]);
+        let distance = hamming_distance(constants[idx1], constants[idx2]);
 
         if distance > max_distance {
             max_distance = distance;
-            best_indices = (idx1, idx2, idx3);
-            best_values = (constants[idx1], constants[idx2], constants[idx3]);
+            best_indices = (idx1, idx2);
+            best_values = (constants[idx1], constants[idx2]);
         }
 
         if i % 10_000 == 0 && i > 0 {
@@ -192,73 +193,88 @@ fn find_best_triplet_sampled(
 }
 
 fn main() {
-    println!("Pure Rust High-Performance Bit Difference Triplet Finder\n");
+    println!("Pure Rust High-Performance Bit Difference Pair Finder");
+    println!("Finding pairs with first and last bits set\n");
 
     // Configuration
     let range_size = 10000; // Change this: 100, 200, 500, 1000
     let sample_size: Option<usize> = None; // Some(100_000) for sampling, None for exhaustive
 
-    // Generate constants
+    // Generate constants (filtered for first and last bit requirements)
     let start_time = Instant::now();
     let constants = generate_constants(range_size);
     println!(
-        "Generated {} constants in {:.2}s\n",
+        "Generated {} valid constants in {:.2}s\n",
         constants.len(),
         start_time.elapsed().as_secs_f64()
     );
 
-    // Calculate total possible triplets
+    if constants.len() < 2 {
+        println!("Error: Need at least 2 constants with first and last bits set!");
+        return;
+    }
+
+    // Calculate total possible pairs
     let n = constants.len();
-    let total_triplets = (n * (n - 1) * (n - 2)) / 6;
-    println!("Total possible triplets: {}", total_triplets);
-    // Find best triplet
+    let total_pairs = (n * (n - 1)) / 2;
+    println!("Total possible pairs: {}", total_pairs);
+
+    // Find best pair
     let search_start = Instant::now();
     let (max_distance, best_indices, best_values) = match sample_size {
-        Some(samples) if samples < total_triplets => find_best_triplet_sampled(&constants, samples),
-        _ => find_best_triplet_exhaustive(&constants),
+        Some(samples) if samples < total_pairs => find_best_pair_sampled(&constants, samples),
+        _ => find_best_pair_exhaustive(&constants),
     };
 
     let search_time = search_start.elapsed().as_secs_f64();
     println!("\nSearch completed in {:.2}s\n", search_time);
 
     // Display results
-    println!("BEST TRIPLET FOUND:");
+    println!("BEST PAIR FOUND:");
     println!("Indices: {:?}", best_indices);
     println!("Values:");
-    let indices = [best_indices.0, best_indices.1, best_indices.2];
-    let values = [best_values.0, best_values.1, best_values.2];
+    let indices = [best_indices.0, best_indices.1];
+    let values = [best_values.0, best_values.1];
     for (&idx, &val) in indices.iter().zip(values.iter()) {
         println!("  constants[{}] = 0x{:016x}", idx, val);
     }
 
-    println!("\nPairwise Hamming distances:");
-    let d01 = hamming_distance(best_values.0, best_values.1);
-    let d12 = hamming_distance(best_values.1, best_values.2);
-    let d02 = hamming_distance(best_values.0, best_values.2);
-
-    println!("  {} ↔ {}: {} bits", best_indices.0, best_indices.1, d01);
-    println!("  {} ↔ {}: {} bits", best_indices.1, best_indices.2, d12);
-    println!("  {} ↔ {}: {} bits", best_indices.0, best_indices.2, d02);
-    println!("Total distance: {} bits", max_distance);
+    println!("\nHamming distance: {} bits", max_distance);
 
     println!("\nBit patterns:");
-    let indices = [best_indices.0, best_indices.1, best_indices.2];
-    let values = [best_values.0, best_values.1, best_values.2];
+    let indices = [best_indices.0, best_indices.1];
+    let values = [best_values.0, best_values.1];
     for (&idx, &val) in indices.iter().zip(values.iter()) {
         println!("constants[{}]: {:064b}", idx, val);
     }
 
+    // Verify bit requirements
+    println!("\nBit requirement verification:");
+    for (&idx, &val) in indices.iter().zip(values.iter()) {
+        let first_bit = (val >> 63) & 1;
+        let last_bit = val & 1;
+        println!(
+            "constants[{}]: first_bit={}, last_bit={} ✓",
+            idx, first_bit, last_bit
+        );
+    }
+
     println!("\nStatistics:");
-    println!("Maximum possible distance per pair: 64 bits");
-    println!("Maximum possible triplet distance: 192 bits");
+    println!("Maximum possible distance: 64 bits");
     println!(
         "Achieved distance: {} bits ({:.1}% of maximum)",
         max_distance,
-        max_distance as f64 / 192.0 * 100.0
+        max_distance as f64 / 64.0 * 100.0
     );
 
-    // Verification: Print first few constants for comparison with Python
-    println!("\nFirst 5 constants (hex) for verification:");
+    // Show XOR pattern
+    let xor_result = best_values.0 ^ best_values.1;
+    println!("\nXOR result: 0x{:016x}", xor_result);
+    println!("XOR pattern: {:064b}", xor_result);
+    println!("Set bits in XOR: {}", xor_result.count_ones());
+
+    // Verification: Print first few valid constants
+    println!("\nFirst 5 valid constants (hex) for verification:");
     for (i, &val) in constants.iter().take(5).enumerate() {
         println!("  constants[{}] = 0x{:016x}", i, val);
     }

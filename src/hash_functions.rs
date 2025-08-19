@@ -1,21 +1,18 @@
 //! Constants chosen by testing different digits of pi;
 //! see tools/piconstants.py
-const CONST1: u64 = 0xb8e1afed6a267e96; // 621
-const CONST2: u64 = 0x082efa98ec4e6c89; // 632
-const CONST5: u64 = 0xAAAAAAAAAAAAAAAA;
-const CONST6: u64 = 0x5555555555555555; // 796
+const CONST1: u64 = 0xb8e1afed6a267e96; //0xe03c32e4b2e5bf49; // 354 // 0xb8e1afed6a267e96; // 621
+const CONST2: u64 = 0x082efa98ec4e6c89; //0x9fd3d17b415b70b7; // 1018 // 0x082efa98ec4e6c89; // 632
 
 // Specialized hash function for bitkmers < 32 and a constant u64 input
 // Inspired by the ahash fallback algorithm. https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm
 // and foldhash: https://github.com/orlp/foldhash
 #[inline]
 pub fn jamhash(kmer: u64) -> u64 {
-    let kmer_const1 = kmer ^ CONST5;
-    let kmer_const2 = kmer ^ CONST6;
-    let fold1 = fold_multiply(kmer_const1, kmer_const2);
-    let fold1_const = fold1 ^ CONST1;
-    let fold1_const2 = fold1_const ^ CONST2;
-    fold_multiply(fold1_const, fold1_const2)
+    let part1 = kmer.rotate_left(16);
+    let part2 = kmer.rotate_left(48);
+    let fold1 = fold_multiply(part1, CONST1);
+    let fold2 = fold_multiply(part2, CONST2);
+    fold_multiply(fold1, fold2)
 }
 
 #[inline(always)]
