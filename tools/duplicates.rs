@@ -68,11 +68,17 @@ pub fn murmur3_u64(kmer: u64) -> u64 {
     fastmurmur3::murmur3_x64_128(&kmer.to_be_bytes(), 42) as u64
 }
 
-pub fn foldhash(kmer: u64) -> u64 {
-    let mut hasher = foldhash::quality::FixedState::with_seed(42).build_hasher();
-    hasher.write_u64(kmer);
-    hasher.finish()
-}
+// pub fn foldhash(kmer: u64) -> u64 {
+//     let mut hasher = foldhash::quality::FixedState::with_seed(42).build_hasher();
+//     hasher.write_u64(kmer);
+//     hasher.finish()
+// }
+
+// pub fn rapidhash(kmer: u64) -> u64 {
+//     let mut hasher = rapidhash::quality::RapidHasher::new(42);
+//     hasher.write_u64(kmer);
+//     hasher.finish()
+// }
 
 pub fn main() {
     let kmer_len = 21;
@@ -129,6 +135,7 @@ pub fn main() {
                     //batch.push(murmur3_u64(canonical));
                     batch.push(jam_rs::hash_functions::jamhash(canonical));
                     //batch.push(foldhash(canonical));
+                    //batch.push(rapidhash(canonical));
 
                     // Send batch when it's full
                     if batch.len() >= BATCH_SIZE {

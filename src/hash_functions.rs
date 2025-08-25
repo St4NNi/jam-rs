@@ -1,7 +1,7 @@
 //! Constants chosen by testing different digits of pi;
 //! see tools/piconstants.py
-const CONST1: u64 = 0xb8e1afed6a267e96; //0xe03c32e4b2e5bf49; // 354 // 0xb8e1afed6a267e96; // 621
-const CONST2: u64 = 0x082efa98ec4e6c89; //0x9fd3d17b415b70b7; // 1018 // 0x082efa98ec4e6c89; // 632
+const CONST1: u64 = 0xb8e1afed6a267e96;
+const CONST2: u64 = 0x082efa98ec4e6c89;
 
 // Specialized hash function for bitkmers < 32 and a constant u64 input
 // Inspired by the ahash fallback algorithm. https://github.com/tkaitchuck/aHash/wiki/AHash-fallback-algorithm
