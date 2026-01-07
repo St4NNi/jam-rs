@@ -1,6 +1,6 @@
 [package]
 name = "jam-rs"
-version = "1.0.0"
+version = "0.9.9"
 edition = "2024"
 repository = "https://github.com/St4NNi/jam-rs"
 license = "MIT"
