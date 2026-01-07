@@ -8,8 +8,9 @@ fn compute_u64_avalanche<F: Fn(u64) -> u64>(
 ) -> Vec<f64> {
     let mut rng = rng();
     let mut worst_bias = vec![0.5f64; 64 * 64];
+    let mut bit_flips = vec![0; 64 * 64];
     for _ in 0..num_hashers {
-        let mut bit_flips = vec![0; 64 * 64];
+        bit_flips.fill(0);
         for _ in 0..iters_per_hasher {
             let base_val: u64 = rng.random();
             let base_hash = hash_fn(base_val);
@@ -56,7 +57,7 @@ pub fn xxhash3(kmer: u64) -> u64 {
 }
 
 fn main() {
-    write_avalanche_csv("jamhash", jam_rs::hash_functions::jamhash);
+    write_avalanche_csv("jamhash", jamhash::jamhash_u64);
     write_avalanche_csv("murmur3", murmur3_u64);
     write_avalanche_csv("xxhash3", xxhash3);
 }

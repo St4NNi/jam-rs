@@ -19,11 +19,9 @@ pub struct MergeIterator {
 }
 
 impl MergeIterator {
-    pub fn new<P: AsRef<Path>>(file_paths: Vec<P>, memory_limit_gb: f64) -> Self {
+    pub fn new<P: AsRef<Path>>(file_paths: Vec<P>, memory_limit_gb: f64) -> Result<Self> {
         let num_files = file_paths.len();
 
-        // Calculate batch size: memory_limit / (num_files * 2 * 24 bytes per heap entry)
-        // Each heap entry is approximately 24 bytes (2*u64 + usize)
         let memory_limit_bytes = (memory_limit_gb * 1024.0 * 1024.0 * 1024.0) as usize;
         let batch_size = std::cmp::max(1000, memory_limit_bytes / (num_files * 2 * 24));
 
@@ -31,27 +29,26 @@ impl MergeIterator {
         let mut heap = BinaryHeap::new();
         let taken = vec![0; num_files];
 
-        // Initialize readers and load initial batches
         for (file_idx, path) in file_paths.into_iter().enumerate() {
-            let file = File::open(path).expect("Failed to open file");
+            let file = File::open(path.as_ref())
+                .map_err(|e| anyhow::anyhow!("Failed to open temp file {:?}: {}", path.as_ref(), e))?;
             let mut reader = BufReader::new(file);
 
-            // Load initial 2 * batch_size entries (or all if file is smaller)
-            let loaded = Self::load_batch(&mut reader, &mut heap, file_idx, 2 * batch_size);
+            let loaded = Self::load_batch(&mut reader, &mut heap, file_idx, 2 * batch_size)?;
 
             if loaded > 0 {
                 readers.push(Some(reader));
             } else {
-                readers.push(None); // Empty file
+                readers.push(None);
             }
         }
 
-        MergeIterator {
+        Ok(MergeIterator {
             heap,
             taken,
             readers,
             batch_size,
-        }
+        })
     }
 
     fn load_batch(
@@ -59,56 +56,52 @@ impl MergeIterator {
         heap: &mut BinaryHeap<Reverse<(u64, u64, usize)>>,
         file_idx: usize,
         max_count: usize,
-    ) -> usize {
+    ) -> Result<usize> {
         let mut loaded = 0;
 
         for _ in 0..max_count {
             let first = match reader.read_u64::<BigEndian>() {
                 Ok(val) => val,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    break;
-                }
-                Err(e) => panic!("Failed to read first u64: {}", e),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(anyhow::anyhow!("Failed to read hash from temp file {}: {}", file_idx, e)),
             };
-            let second = reader
-                .read_u64::<BigEndian>()
-                .expect("Failed to read second u64");
+            let second = reader.read_u64::<BigEndian>()
+                .map_err(|e| anyhow::anyhow!("Failed to read metadata from temp file {}: {}", file_idx, e))?;
             heap.push(Reverse((first, second, file_idx)));
             loaded += 1;
         }
 
-        loaded
+        Ok(loaded)
     }
 
-    fn reload_if_needed(&mut self, file_idx: usize) {
+    fn reload_if_needed(&mut self, file_idx: usize) -> Result<()> {
         if self.taken[file_idx] >= self.batch_size
             && let Some(ref mut reader) = self.readers[file_idx]
         {
-            let loaded = Self::load_batch(reader, &mut self.heap, file_idx, self.batch_size);
+            let loaded = Self::load_batch(reader, &mut self.heap, file_idx, self.batch_size)?;
 
             if loaded == 0 {
-                // File is exhausted, remove reader
                 self.readers[file_idx] = None;
             }
 
-            // Reset taken counter
             self.taken[file_idx] = 0;
         }
+        Ok(())
     }
 }
 
 impl Iterator for MergeIterator {
-    type Item = (u64, u64);
+    type Item = Result<(u64, u64)>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(Reverse((first, second, file_idx))) = self.heap.pop() {
-            // Increment taken counter for this file
             self.taken[file_idx] += 1;
 
-            // Check if we need to reload from this file
-            self.reload_if_needed(file_idx);
+            if let Err(e) = self.reload_if_needed(file_idx) {
+                return Some(Err(e));
+            }
 
-            Some((first, second))
+            Some(Ok((first, second)))
         } else {
             None
         }
@@ -215,7 +208,7 @@ impl LMDBWriter {
         write_txn.commit()?;
 
         let option_bar = if let Some(ref bar) = self.bar {
-            let sub_bar = ProgressBar::new(self.total_entries as u64);
+            let sub_bar = ProgressBar::new(self.total_entries);
             sub_bar.set_style(
                 ProgressStyle::default_bar()
                     .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} kmers processed ({percent}%)")
@@ -312,22 +305,20 @@ impl LMDBWriter {
         // Calculate memory limit for MergeIterator (convert from bytes to GB)
         let memory_limit_gb = (self.memory_budget as f64) / (1024.0 * 1024.0 * 1024.0);
 
-        // Create iterator to merge all files
-        let iterator = MergeIterator::new(file_paths, memory_limit_gb);
+        let iterator = MergeIterator::new(file_paths, memory_limit_gb)?;
 
-        // Write merged data to LMDB
         let mut wtxn = self.env.write_txn()?;
         let mut batch_count = 0;
         let mut total_written = 0u64;
         let mut duplicates_skipped = 0u64;
 
         let mut prev = (0u64, 0u64);
-        for (hash, metadata) in iterator {
+        for result in iterator {
+            let (hash, metadata) = result?;
             if let Some(ref bar) = option_bar {
                 bar.inc(1);
             }
             if prev.0 == hash && prev.1 == metadata {
-                // Skip duplicates
                 duplicates_skipped += 1;
                 continue;
             }
@@ -336,7 +327,6 @@ impl LMDBWriter {
             batch_count += 1;
             total_written += 1;
 
-            // Commit in batches for performance
             if batch_count >= 10000 {
                 wtxn.commit()?;
                 wtxn = self.env.write_txn()?;
@@ -398,6 +388,7 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_env(path: PathBuf) -> Env {
+        // SAFETY: heed requires unsafe for mmap; we control file access
         unsafe {
             heed::EnvOpenOptions::new()
                 .flags(

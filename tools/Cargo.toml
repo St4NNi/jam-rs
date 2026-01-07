@@ -13,15 +13,51 @@ path = "avalanche.rs"
 name = "constants"
 path = "constants.rs"
 
+[[bin]]
+name = "dedup"
+path = "dedup.rs"
+
+[[bin]]
+name = "distribut"
+path = "distribut.rs"
+
+[[bin]]
+name = "constantsv2"
+path = "constantsv2.rs"
+
+[[bin]]
+name = "compare"
+path = "compare.rs"
+
+[[bin]]
+name = "allthekmers"
+path = "allthekmers.rs"
+
+[[bin]]
+name = "findconstants"
+path = "findconstants.rs"
+
+[[bin]]
+name = "duplicates"
+path = "duplicates.rs"
+
 [dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
+jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 roaring = "0.11.2"
 rand = "0.9.2"
 jam-rs = { path = "../" }
-arc-swap = "1.7.1"
+rayon = "1.11.0"
+clap = { version = "4.5.45", features = ["derive"] }
+byteorder = "1.4.3"
+crossbeam-channel = "0.5.15"
+kanal = "0.1.1"
+num-bigint = "0.4.6"
+num-rational = "0.4.2"
+num-traits = "0.2.19"
 
 [profile.release]
 opt-level = 3

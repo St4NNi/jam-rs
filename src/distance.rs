@@ -1,6 +1,6 @@
 use crate::core_utils::{self, *};
-use crate::hash_functions::jamhash;
 use crate::sketch::SketchConfig;
+use jamhash::jamhash_u64;
 use anyhow::{Context, Result, anyhow};
 use byteorder::BigEndian;
 use heed::types::{Bytes, U32, U64};
@@ -72,7 +72,7 @@ pub struct StreamingDistanceCalculator {
 
 impl StreamingDistanceCalculator {
     pub fn new(config: DistanceConfig, singleton: bool, database_path: &Path) -> Result<Self> {
-        // Open database read-only
+        // SAFETY: heed requires unsafe for mmap; we control file access
         let database_env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
@@ -162,6 +162,7 @@ impl StreamingDistanceCalculator {
         let query_env = if self.database_env.path() == query_path {
             &self.database_env
         } else {
+            // SAFETY: heed requires unsafe for mmap; we control file access
             query_env_holder = unsafe {
                 heed::EnvOpenOptions::new()
                     .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
@@ -213,7 +214,7 @@ impl StreamingDistanceCalculator {
             *query_hash_count += 1;
 
             // Look up this hash in the database using get_duplicates
-            if let Some(duplicates) = self.hash_db.get_duplicates(&db_rtxn, &query_hash)? {
+            if let Some(duplicates) = self.hash_db.get_duplicates(db_rtxn, &query_hash)? {
                 for item in duplicates {
                     let (_, target_packed_metadata) = item?;
                     let target_metadata = HashMetadata::unpack(target_packed_metadata);
@@ -241,9 +242,9 @@ impl StreamingDistanceCalculator {
 
             for (target_file_index, target_counter) in target_counters {
                 let target_name =
-                    self.get_sequence_name(&db_rtxn, &self.metadata_db, target_file_index)?;
+                    self.get_sequence_name(db_rtxn, &self.metadata_db, target_file_index)?;
                 let target_total_hashes =
-                    self.get_target_total_hashes(&db_rtxn, target_file_index)?;
+                    self.get_target_total_hashes(db_rtxn, target_file_index)?;
 
                 let result = self.calculate_distance_from_counters(
                     &query_name,
@@ -292,7 +293,7 @@ impl StreamingDistanceCalculator {
                     continue;
                 }
 
-                let hash = jamhash(kmer.0);
+                let hash = jamhash_u64(kmer.0);
 
                 // Apply FracMinHash filter if specified
                 if hash > self.sketch_config.fscale {
@@ -503,15 +504,20 @@ impl StreamingDistanceCalculator {
         file_index: u32,
     ) -> Result<String> {
         if let Some(metadata_json) = metadata_db.get(txn, &file_index)? {
-            let file_metadata: FileMetadata =
-                serde_json::from_slice(metadata_json).unwrap_or_else(|_| FileMetadata {
-                    filename: format!("unknown_{file_index}"),
-                    file_size: 0,
-                    sequence_name: format!("seq_{file_index}"),
-                    sequence_length: 0,
-                    total_sequences: 1,
-                    total_hashes: 0,
-                });
+            let file_metadata: FileMetadata = match serde_json::from_slice(metadata_json) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse metadata for index {}: {}", file_index, e);
+                    FileMetadata {
+                        filename: format!("unknown_{file_index}"),
+                        file_size: 0,
+                        sequence_name: format!("seq_{file_index}"),
+                        sequence_length: 0,
+                        total_sequences: 1,
+                        total_hashes: 0,
+                    }
+                }
+            };
 
             Ok(if file_metadata.total_sequences == 1 {
                 file_metadata.sequence_name
@@ -536,20 +542,20 @@ impl StreamingDistanceCalculator {
             let line = line?;
             let line = line.trim();
 
-            if line.starts_with('>') {
+            if let Some(header) = line.strip_prefix('>') {
                 // FASTA header
                 if in_sequence && !current_name.is_empty() {
                     sequences.push((current_name.clone(), current_seq.clone()));
                 }
-                current_name = line[1..].to_string();
+                current_name = header.to_string();
                 current_seq.clear();
                 in_sequence = true;
-            } else if line.starts_with('@') {
+            } else if let Some(header) = line.strip_prefix('@') {
                 // FASTQ header
                 if in_sequence && !current_name.is_empty() {
                     sequences.push((current_name.clone(), current_seq.clone()));
                 }
-                current_name = line[1..].to_string();
+                current_name = header.to_string();
                 current_seq.clear();
                 in_sequence = true;
             } else if line.starts_with('+') {

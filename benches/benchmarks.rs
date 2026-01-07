@@ -18,7 +18,7 @@ pub fn xxhash3(value: u64) -> u64 {
 
 #[inline]
 pub fn jamhash(value: u64) -> u64 {
-    jam_rs::hash_functions::jamhash(value)
+    jamhash::jamhash_u64(value)
 }
 
 fn bench_hash_functions(c: &mut Criterion) {

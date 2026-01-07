@@ -1,4 +1,3 @@
-use rand::{Rng, rng};
 use roaring::RoaringTreemap;
 
 // kolmogorov-smirnov from: https://github.com/tmmcguire/hashers/blob/master/examples/kolmogorov-smirnov.rs
@@ -84,7 +83,7 @@ fn run_collision_analysis() {
     for x in full_range.take(1_000_000) {
         let xx = xxhash3(&x.to_be_bytes());
         let mo = murmur3_new(&x.to_be_bytes());
-        let ah = jam_rs::hash_functions::jamhash(x);
+        let ah = jamhash::jamhash_u64(x);
         if !hll_custom.insert(ah) {
             panic!("Custom hash collision detected for value: {x}");
         };
@@ -94,33 +93,6 @@ fn run_collision_analysis() {
         if !hll_xxhash.insert(xx) {
             panic!("XXHash3 hash collision detected for value: {x}");
         };
-    }
-}
-
-#[test]
-#[ignore]
-fn find_constants() {
-    let mut rng = rng();
-    let samples = (0..1_000_000).collect::<Vec<_>>();
-
-    let mut results = vec![0u64; samples.len()];
-
-    // 04feab043089c9a1, 4c6102befcb61250, 430a4fbd481e7756, f640d38a7b661335
-    let mut smallest_ks = std::f64::MAX;
-    loop {
-        let const1 = rng.random::<u64>();
-        let const2 = rng.random::<u64>();
-
-        for x in 0..samples.len() {
-            results[x] = jam_rs::hash_functions::double_fold(samples[x], const1, const2);
-        }
-
-        results.sort();
-        let result = ks(&results);
-        if result < smallest_ks {
-            smallest_ks = result;
-            println!("New best constants: {const1:016x}, {const2:016x}, with KS={smallest_ks}");
-        }
     }
 }
 
@@ -138,7 +110,7 @@ fn run_ks() {
     );
     print_ks(
         "jamhash",
-        ks(&do_hashes_u64(jam_rs::hash_functions::jamhash, &samples)),
+        ks(&do_hashes_u64(jamhash::jamhash_u64, &samples)),
     );
     print_ks(
         "murmur3_old",
@@ -160,7 +132,7 @@ fn test_bit_distribution() {
     for x in RANGE {
         let xx = xxhash3(x.to_be_bytes().as_slice());
         unrolled_64bits(xx, &mut xxhash3_bits);
-        let ah = jam_rs::hash_functions::jamhash(x);
+        let ah = jamhash::jamhash_u64(x);
         unrolled_64bits(ah, &mut jamhash_bits);
         let mo = murmur3_old(x.to_be_bytes().as_slice());
         unrolled_64bits(mo, &mut murmur3_old_bits);
