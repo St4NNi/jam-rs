@@ -72,7 +72,7 @@ pub struct StreamingDistanceCalculator {
 
 impl StreamingDistanceCalculator {
     pub fn new(config: DistanceConfig, singleton: bool, database_path: &Path) -> Result<Self> {
-        // Open database read-only
+        // SAFETY: heed requires unsafe for mmap; we control file access
         let database_env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
@@ -162,6 +162,7 @@ impl StreamingDistanceCalculator {
         let query_env = if self.database_env.path() == query_path {
             &self.database_env
         } else {
+            // SAFETY: heed requires unsafe for mmap; we control file access
             query_env_holder = unsafe {
                 heed::EnvOpenOptions::new()
                     .flags(EnvFlags::READ_ONLY | EnvFlags::NO_SUB_DIR)
@@ -503,15 +504,20 @@ impl StreamingDistanceCalculator {
         file_index: u32,
     ) -> Result<String> {
         if let Some(metadata_json) = metadata_db.get(txn, &file_index)? {
-            let file_metadata: FileMetadata =
-                serde_json::from_slice(metadata_json).unwrap_or_else(|_| FileMetadata {
-                    filename: format!("unknown_{file_index}"),
-                    file_size: 0,
-                    sequence_name: format!("seq_{file_index}"),
-                    sequence_length: 0,
-                    total_sequences: 1,
-                    total_hashes: 0,
-                });
+            let file_metadata: FileMetadata = match serde_json::from_slice(metadata_json) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse metadata for index {}: {}", file_index, e);
+                    FileMetadata {
+                        filename: format!("unknown_{file_index}"),
+                        file_size: 0,
+                        sequence_name: format!("seq_{file_index}"),
+                        sequence_length: 0,
+                        total_sequences: 1,
+                        total_hashes: 0,
+                    }
+                }
+            };
 
             Ok(if file_metadata.total_sequences == 1 {
                 file_metadata.sequence_name

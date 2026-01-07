@@ -79,7 +79,7 @@ pub struct StatsCalculator;
 impl StatsCalculator {
     /// Calculate statistics for an LMDB database
     pub fn calculate_stats(database_path: &Path) -> Result<DatabaseStats> {
-        // Open hash database
+        // SAFETY: heed requires unsafe for mmap; we control file access
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(EnvFlags::NO_SUB_DIR | EnvFlags::READ_ONLY)

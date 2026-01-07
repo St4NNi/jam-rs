@@ -376,6 +376,7 @@ impl Sketcher {
         let mut path = tempdir.path().to_path_buf();
         path.push("sketch.lmdb");
 
+        // SAFETY: heed requires unsafe for mmap; we control file access
         let env = unsafe {
             heed::EnvOpenOptions::new()
                 .flags(
@@ -384,7 +385,7 @@ impl Sketcher {
                         | heed::EnvFlags::MAP_ASYNC,
                 )
                 .max_dbs(3)
-                .map_size(10 * 1024 * 1024 * 1024 * 1024) // 10TB map size
+                .map_size(10 * 1024 * 1024 * 1024 * 1024)
                 .open(path)?
         };
 
