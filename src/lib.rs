@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod core_utils;
+pub mod db;
 pub mod distance;
 pub mod sketch;
 pub mod stats;
