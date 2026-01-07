@@ -33,7 +33,8 @@ impl MergeIterator {
 
         // Initialize readers and load initial batches
         for (file_idx, path) in file_paths.into_iter().enumerate() {
-            let file = File::open(path).expect("Failed to open file");
+            let file = File::open(path.as_ref())
+                .unwrap_or_else(|e| panic!("Failed to open temp file {:?}: {}", path.as_ref(), e));
             let mut reader = BufReader::new(file);
 
             // Load initial 2 * batch_size entries (or all if file is smaller)
@@ -68,11 +69,11 @@ impl MergeIterator {
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     break;
                 }
-                Err(e) => panic!("Failed to read first u64: {}", e),
+                Err(e) => panic!("Failed to read hash from temp file (file {}): {}", file_idx, e),
             };
             let second = reader
                 .read_u64::<BigEndian>()
-                .expect("Failed to read second u64");
+                .unwrap_or_else(|e| panic!("Failed to read metadata from temp file (file {}): {}", file_idx, e));
             heap.push(Reverse((first, second, file_idx)));
             loaded += 1;
         }
@@ -215,7 +216,7 @@ impl LMDBWriter {
         write_txn.commit()?;
 
         let option_bar = if let Some(ref bar) = self.bar {
-            let sub_bar = ProgressBar::new(self.total_entries as u64);
+            let sub_bar = ProgressBar::new(self.total_entries);
             sub_bar.set_style(
                 ProgressStyle::default_bar()
                     .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} kmers processed ({percent}%)")

@@ -1,10 +1,12 @@
 pub mod cli;
 pub mod core_utils;
 pub mod distance;
-pub mod hash_functions;
 pub mod sketch;
 pub mod stats;
 pub mod writer;
+
+// Re-export jamhash for backwards compatibility
+pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
 use clap::Parser;
@@ -356,14 +358,14 @@ pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 pub fn is_sequence_file(path: &Path) -> bool {
     if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
         // Check for .gz and compound extensions
-        if ext == "gz" {
-            if let Some(stem_ext) = path.file_stem().and_then(|s| Path::new(s).extension()) {
-                let stem_ext = stem_ext.to_string_lossy().to_lowercase();
-                return matches!(
-                    stem_ext.as_str(),
-                    "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq"
-                );
-            }
+        if ext == "gz"
+            && let Some(stem_ext) = path.file_stem().and_then(|s| Path::new(s).extension())
+        {
+            let stem_ext = stem_ext.to_string_lossy().to_lowercase();
+            return matches!(
+                stem_ext.as_str(),
+                "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq"
+            );
         }
         return matches!(
             ext.as_str(),

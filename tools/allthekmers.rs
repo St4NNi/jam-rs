@@ -60,7 +60,7 @@ fn get_chunk_iter(total: u64, chunks: u64, idx: u64) -> std::ops::Range<u64> {
 }
 
 fn do_hash(kmer: u64, jam: &mut Vec<u64>) {
-    jam.push(jam_rs::hash_functions::jamhash(kmer));
+    jam.push(jamhash::jamhash_u64(kmer));
 }
 
 fn write(name: &str, chunk: u64, path: PathBuf, mut values: Vec<u64>) {

@@ -1,14 +1,5 @@
-use std::{
-    cmp::max,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    u64,
-};
 
-//use arc_swap::{ArcSwap, ArcSwapAny};
-use jam_rs::hash_functions::{double_fold, jamhash};
+use jamhash::jamhash_u64;
 use rand::{Rng, rng};
 
 // a429664bff768316, c6d35be8d0acb457
@@ -37,10 +28,10 @@ fn compute_u64_avalanche() {
     for iter in 0..1000 {
         for _ in 0..10000 {
             let base_val: u64 = rng.random();
-            let jam_hash = jamhash(base_val);
+            let jam_hash = jamhash_u64(base_val);
             for flip_pos in 0..64 {
                 let delta_val = base_val ^ (1 << flip_pos);
-                let delta_hash = jamhash(delta_val);
+                let delta_hash = jamhash_u64(delta_val);
                 for test_pos in 0..64 {
                     let flipped = ((jam_hash ^ delta_hash) >> test_pos) & 1;
                     bit_flips_jam[test_pos * 64 + flip_pos] += flipped as usize;

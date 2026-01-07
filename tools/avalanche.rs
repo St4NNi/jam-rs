@@ -57,7 +57,7 @@ pub fn xxhash3(kmer: u64) -> u64 {
 }
 
 fn main() {
-    write_avalanche_csv("jamhash", jam_rs::hash_functions::jamhash);
+    write_avalanche_csv("jamhash", jamhash::jamhash_u64);
     write_avalanche_csv("murmur3", murmur3_u64);
     write_avalanche_csv("xxhash3", xxhash3);
 }

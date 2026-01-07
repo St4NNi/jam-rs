@@ -1,4 +1,3 @@
-use rand::{Rng, rng};
 use roaring::RoaringTreemap;
 
 // kolmogorov-smirnov from: https://github.com/tmmcguire/hashers/blob/master/examples/kolmogorov-smirnov.rs
@@ -84,7 +83,7 @@ fn run_collision_analysis() {
     for x in full_range.take(1_000_000) {
         let xx = xxhash3(&x.to_be_bytes());
         let mo = murmur3_new(&x.to_be_bytes());
-        let ah = jam_rs::hash_functions::jamhash(x);
+        let ah = jamhash::jamhash_u64(x);
         if !hll_custom.insert(ah) {
             panic!("Custom hash collision detected for value: {x}");
         };
@@ -111,7 +110,7 @@ fn run_ks() {
     );
     print_ks(
         "jamhash",
-        ks(&do_hashes_u64(jam_rs::hash_functions::jamhash, &samples)),
+        ks(&do_hashes_u64(jamhash::jamhash_u64, &samples)),
     );
     print_ks(
         "murmur3_old",
@@ -133,7 +132,7 @@ fn test_bit_distribution() {
     for x in RANGE {
         let xx = xxhash3(x.to_be_bytes().as_slice());
         unrolled_64bits(xx, &mut xxhash3_bits);
-        let ah = jam_rs::hash_functions::jamhash(x);
+        let ah = jamhash::jamhash_u64(x);
         unrolled_64bits(ah, &mut jamhash_bits);
         let mo = murmur3_old(x.to_be_bytes().as_slice());
         unrolled_64bits(mo, &mut murmur3_old_bits);

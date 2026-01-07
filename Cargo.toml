@@ -28,6 +28,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.98"
+jamhash = "0.1.2"
 needletail = "0.6.3"
 rayon = "1.10.0"
 serde = { version = "1.0.219", features = ["derive"] }
@@ -43,6 +44,7 @@ serde_json = "1.0.142"
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
+jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

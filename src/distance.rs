@@ -1,6 +1,6 @@
 use crate::core_utils::{self, *};
-use crate::hash_functions::jamhash;
 use crate::sketch::SketchConfig;
+use jamhash::jamhash_u64;
 use anyhow::{Context, Result, anyhow};
 use byteorder::BigEndian;
 use heed::types::{Bytes, U32, U64};
@@ -213,7 +213,7 @@ impl StreamingDistanceCalculator {
             *query_hash_count += 1;
 
             // Look up this hash in the database using get_duplicates
-            if let Some(duplicates) = self.hash_db.get_duplicates(&db_rtxn, &query_hash)? {
+            if let Some(duplicates) = self.hash_db.get_duplicates(db_rtxn, &query_hash)? {
                 for item in duplicates {
                     let (_, target_packed_metadata) = item?;
                     let target_metadata = HashMetadata::unpack(target_packed_metadata);
@@ -241,9 +241,9 @@ impl StreamingDistanceCalculator {
 
             for (target_file_index, target_counter) in target_counters {
                 let target_name =
-                    self.get_sequence_name(&db_rtxn, &self.metadata_db, target_file_index)?;
+                    self.get_sequence_name(db_rtxn, &self.metadata_db, target_file_index)?;
                 let target_total_hashes =
-                    self.get_target_total_hashes(&db_rtxn, target_file_index)?;
+                    self.get_target_total_hashes(db_rtxn, target_file_index)?;
 
                 let result = self.calculate_distance_from_counters(
                     &query_name,
@@ -292,7 +292,7 @@ impl StreamingDistanceCalculator {
                     continue;
                 }
 
-                let hash = jamhash(kmer.0);
+                let hash = jamhash_u64(kmer.0);
 
                 // Apply FracMinHash filter if specified
                 if hash > self.sketch_config.fscale {
@@ -536,20 +536,20 @@ impl StreamingDistanceCalculator {
             let line = line?;
             let line = line.trim();
 
-            if line.starts_with('>') {
+            if let Some(header) = line.strip_prefix('>') {
                 // FASTA header
                 if in_sequence && !current_name.is_empty() {
                     sequences.push((current_name.clone(), current_seq.clone()));
                 }
-                current_name = line[1..].to_string();
+                current_name = header.to_string();
                 current_seq.clear();
                 in_sequence = true;
-            } else if line.starts_with('@') {
+            } else if let Some(header) = line.strip_prefix('@') {
                 // FASTQ header
                 if in_sequence && !current_name.is_empty() {
                     sequences.push((current_name.clone(), current_seq.clone()));
                 }
-                current_name = line[1..].to_string();
+                current_name = header.to_string();
                 current_seq.clear();
                 in_sequence = true;
             } else if line.starts_with('+') {

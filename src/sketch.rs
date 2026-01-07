@@ -1,6 +1,6 @@
 use crate::core_utils::*;
-use crate::hash_functions::jamhash;
 use crate::writer::create_lmdb_writer;
+use jamhash::jamhash_u64;
 use anyhow::{Context, Result};
 use byteorder::BigEndian;
 use crossbeam_channel::Sender;
@@ -176,7 +176,7 @@ impl Sketcher {
         results?;
 
         env.copy_to_path(&self.output_path, heed::CompactionOption::Enabled)
-            .unwrap();
+            .context("Failed to write output database")?;
 
         env.prepare_for_closing().wait();
 
@@ -325,7 +325,7 @@ impl Sketcher {
                 continue;
             }
 
-            let hash = jamhash(kmer.0);
+            let hash = jamhash_u64(kmer.0);
 
             // Apply FracMinHash filter if specified
             if hash > self.config.fscale {
@@ -357,7 +357,7 @@ impl Sketcher {
                 continue;
             }
 
-            let hash = jamhash(kmer.0);
+            let hash = jamhash_u64(kmer.0);
 
             // Apply FracMinHash filter if specified
             if hash > self.config.fscale {
@@ -399,6 +399,7 @@ impl Sketcher {
     }
 
     /// Store metadata for a single sequence (singleton mode)
+    #[allow(clippy::too_many_arguments)]
     fn store_sequence_metadata(
         &self,
         env: &Env,

@@ -43,6 +43,7 @@ path = "duplicates.rs"
 
 [dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
+jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }

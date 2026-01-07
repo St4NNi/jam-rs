@@ -1,7 +1,6 @@
 use std::sync::mpsc;
 use std::thread;
 
-use std::hash::{BuildHasher, Hasher};
 
 /// Reverse complement a `BitKmer` (reverses the sequence and swaps A<>T and G<>C)
 pub fn reverse_complement(sequence: u64, len: u8) -> u64 {
@@ -133,7 +132,7 @@ pub fn main() {
                     let canonical = kmer.min(rc_kmer);
 
                     //batch.push(murmur3_u64(canonical));
-                    batch.push(jam_rs::hash_functions::jamhash(canonical));
+                    batch.push(jamhash::jamhash_u64(canonical));
                     //batch.push(foldhash(canonical));
                     //batch.push(rapidhash(canonical));
 

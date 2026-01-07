@@ -1,4 +1,4 @@
-use jam_rs::hash_functions::jamhash;
+use jamhash::jamhash_u64;
 
 #[inline]
 pub fn murmur3_u64(kmer: u64) -> u64 {
@@ -9,7 +9,7 @@ fn main() {
     let mut vec = Vec::with_capacity(34359738368 / 8);
 
     for x in 0..(34359738368u64 / 8) {
-        let hash = jamhash(x); //jamhash(x);
+        let hash = jamhash_u64(x);
         if x % 100_000_000 == 0 {
             println!("Processing: {} / {}", x, 34359738368u64 / 8);
         }
