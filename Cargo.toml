@@ -27,30 +27,30 @@ name = "jam_rs"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0.98"
+anyhow = "1.0.100"
 jamhash = "0.1.2"
 needletail = "0.6.3"
-rayon = "1.10.0"
-serde = { version = "1.0.219", features = ["derive"] }
-clap = { version = "4.5.42", features = ["derive"] }
+rayon = "1.11.0"
+serde = { version = "1.0.228", features = ["derive"] }
+clap = { version = "4.5.54", features = ["derive"] }
 itertools = "0.14.0"
-heed = "0.22.0"
+heed = "0.22.1-nested-rtxns-6"
 byteorder = "1.5.0"
-integer-encoding = "4.0.2"
-indicatif = { version = "0.18.0", features = ["rayon"] }
-tempfile = "3.20.0"
+integer-encoding = "4.1.0"
+indicatif = { version = "0.18.3", features = ["rayon"] }
+tempfile = "3.24.0"
 crossbeam-channel = "0.5.15"
-serde_json = "1.0.142"
+serde_json = "1.0.149"
 
 [dev-dependencies]
-criterion = { version = "0.7.0", features = ["html_reports"] }
+criterion = { version = "0.8.1", features = ["html_reports"] }
 jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-roaring = "0.11.2"
+roaring = "0.11.3"
 rand = "0.9.2"
-foldhash = "0.1.5"
+foldhash = "0.2.0"
 
 [[bench]]
 name = "benchmarks"
