@@ -2,9 +2,12 @@ pub mod cli;
 pub mod core_utils;
 pub mod db;
 pub mod distance;
+pub mod io;
 pub mod sketch;
 pub mod stats;
 pub mod writer;
+
+pub use io::{expand_input_paths, is_sequence_file};
 
 // Re-export jamhash for backwards compatibility
 pub use jamhash::jamhash_u64;
@@ -15,10 +18,7 @@ use cli::{Cli, Commands};
 use distance::{DistanceConfig, OutputFormat};
 use sketch::{SketchConfig, sketch_files};
 use stats::StatsCalculator;
-use std::{
-    fs::remove_file,
-    path::{Path, PathBuf},
-};
+use std::{fs::remove_file, path::PathBuf};
 
 use crate::distance::calculate_distances_streaming;
 
@@ -311,67 +311,3 @@ pub fn handle_stats_command(
     Ok(())
 }
 
-/// Expand input paths to handle directories and file lists
-pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
-    let mut expanded_paths = Vec::new();
-
-    for path in input_paths {
-        if path.is_dir() {
-            // Add all FASTA/FASTQ files in directory
-            for entry in std::fs::read_dir(path)? {
-                let entry = entry?;
-                let file_path = entry.path();
-
-                if is_sequence_file(&file_path) {
-                    expanded_paths.push(file_path);
-                }
-            }
-        } else if path.is_file() {
-            // Check if it's a list file or sequence file
-            if is_sequence_file(path) {
-                expanded_paths.push(path.clone());
-            } else {
-                // Assume it's a list of files
-                let content = std::fs::read_to_string(path)?;
-                for line in content.lines() {
-                    let file_path = PathBuf::from(line.trim());
-                    if file_path.exists() && is_sequence_file(&file_path) {
-                        expanded_paths.push(file_path);
-                    }
-                }
-            }
-        }
-    }
-
-    if expanded_paths.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No valid sequence files found in input paths"
-        ));
-    }
-
-    // Sort for consistent processing order
-    expanded_paths.sort();
-
-    Ok(expanded_paths)
-}
-
-/// Check if a file is a sequence file based on extension
-pub fn is_sequence_file(path: &Path) -> bool {
-    if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
-        // Check for .gz and compound extensions
-        if ext == "gz"
-            && let Some(stem_ext) = path.file_stem().and_then(|s| Path::new(s).extension())
-        {
-            let stem_ext = stem_ext.to_string_lossy().to_lowercase();
-            return matches!(
-                stem_ext.as_str(),
-                "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq"
-            );
-        }
-        return matches!(
-            ext.as_str(),
-            "fasta" | "fa" | "fas" | "fna" | "fastq" | "fq"
-        );
-    }
-    false
-}
