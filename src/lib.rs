@@ -1,5 +1,5 @@
 pub mod cli;
-pub mod core_utils;
+pub mod core;
 pub mod db;
 pub mod distance;
 pub mod io;
@@ -7,6 +7,7 @@ pub mod sketch;
 pub mod stats;
 pub mod writer;
 
+pub use core as core_utils; // backwards compatibility alias
 pub use io::{expand_input_paths, is_sequence_file};
 
 // Re-export jamhash for backwards compatibility
