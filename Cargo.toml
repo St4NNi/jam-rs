@@ -42,6 +42,9 @@ tempfile = "3.24.0"
 crossbeam-channel = "0.5.15"
 serde_json = "1.0.149"
 
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
+
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
 jamhash = "0.1.2"

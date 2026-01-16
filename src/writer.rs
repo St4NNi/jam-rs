@@ -178,7 +178,7 @@ impl LMDBWriter {
             );
         }
 
-        let mut writer = BufWriter::new(temp_file);
+        let mut writer = BufWriter::with_capacity(50 * 1024 * 1024, temp_file); // 50 MiB buffer
 
         // Write entries in sorted order (BinaryHeap with Reverse gives us min-heap)
         while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
