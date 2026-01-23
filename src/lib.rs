@@ -4,6 +4,7 @@ pub mod core_utils;
 pub mod db;
 pub mod distance;
 pub mod io;
+pub mod format;
 pub mod sketch;
 pub mod stats;
 pub mod writer;
