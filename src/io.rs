@@ -107,6 +107,12 @@ impl EntryWriter {
         Ok(())
     }
 
+    pub fn write_batch(&mut self, entries: &[Entry]) -> io::Result<()> {
+        self.writer.write_all(bytemuck::cast_slice(entries))?;
+        self.count += entries.len() as u64;
+        Ok(())
+    }
+
     pub fn count(&self) -> u64 {
         self.count
     }

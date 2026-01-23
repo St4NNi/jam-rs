@@ -2,9 +2,8 @@ use anyhow::Result;
 use std::{fs::remove_file, path::PathBuf};
 
 use crate::bias::BiasTable;
-use crate::distance::{calculate_distances_streaming, DistanceConfig, LengthCategoryMode, OutputFormat};
-use crate::sketch::{sketch_files, SketchConfig};
-use crate::stats::StatsCalculator;
+use crate::sketch::{self, SketchConfig};
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_sketch_command(
@@ -83,87 +82,43 @@ pub fn handle_sketch_command(
         None
     };
 
-    let fscale = fscale.map(|f| (u64::MAX as f64 / f as f64) as u64).unwrap_or(u64::MAX);
-    let nmax = nmax.unwrap_or(u64::MAX);
-
     let config = SketchConfig {
         kmer_size,
-        fscale,
-        nmax,
+        fscale: fscale.unwrap_or(1000),
+        num_threads: threads,
+        memory,
         singleton,
         min_entropy,
-        threads,
-        memory_budget_gb: memory as f64,
-        temp_dir,
-        bias_table,
+        temp_dir_base: temp_dir,
+        bias_table: bias_table.map(Arc::new),
+        ..Default::default()
     };
 
-    sketch_files(&input_paths, output_path.clone(), config, silent)?;
+    let result = sketch::run(&input_paths, &config)?;
 
     if !silent {
-        let mut completion_msg = format!("Completed: {}", output_path.display());
-        if let Ok(stats) = StatsCalculator::calculate_stats(&output_path) {
-            completion_msg.push_str(&format!(" ({} hashes, {} files/sequences)", stats.total_hashes, stats.unique_files));
-        }
-        eprintln!("{}", completion_msg);
+        let total: u64 = result.bucket_entry_counts.iter().sum();
+        eprintln!(
+            "Completed: {} ({} entries, {} samples)",
+            output_path.display(),
+            total,
+            result.sample_count
+        );
     }
 
     Ok(())
 }
 
 pub fn handle_distance_command(
-    input_path: PathBuf,
-    database_path: PathBuf,
-    output_path: Option<PathBuf>,
-    cutoff: f64,
-    singleton: bool,
-    silent: bool,
-    bias_table_path: Option<PathBuf>,
+    _input_path: PathBuf,
+    _database_path: PathBuf,
+    _output_path: Option<PathBuf>,
+    _cutoff: f64,
+    _singleton: bool,
+    _silent: bool,
+    _bias_table_path: Option<PathBuf>,
 ) -> Result<()> {
-    if !(0.0..=1.0).contains(&cutoff) {
-        return Err(anyhow::anyhow!("Cutoff must be between 0.0 and 1.0, got {}", cutoff));
-    }
-
-    if !input_path.exists() {
-        return Err(anyhow::anyhow!("Input path does not exist: {:?}", input_path));
-    }
-
-    if !database_path.exists() {
-        return Err(anyhow::anyhow!("Database path does not exist: {:?}", database_path));
-    }
-
-    let bias_table = if let Some(ref path) = bias_table_path {
-        if !path.exists() {
-            return Err(anyhow::anyhow!("Bias table file does not exist: {:?}", path));
-        }
-        Some(BiasTable::load(path)?)
-    } else {
-        None
-    };
-
-    if !silent {
-        let output_desc = output_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "stdout".to_string());
-        eprintln!("Distance calculation: {} vs {} (cutoff={}) -> {}", input_path.display(), database_path.display(), cutoff, output_desc);
-    }
-
-    let distance_config = DistanceConfig {
-        cutoff,
-        length_category_mode: LengthCategoryMode::QueryAndBelow,
-        output_format: OutputFormat::Tsv,
-    };
-
-    let results = calculate_distances_streaming(&input_path, &database_path, output_path.as_deref(), distance_config, singleton, bias_table)?;
-
-    if !silent {
-        println!("Distance calculation completed!");
-        println!("Found {} matches above cutoff threshold", results.len());
-        if !results.is_empty() {
-            let best_match = &results[0];
-            println!("Best match: {} (containment: {:.3}, Jaccard: {:.3})", best_match.target_name, best_match.containment_query_in_target, best_match.jaccard_similarity);
-        }
-    }
-
-    Ok(())
+    unimplemented!("distance command pending storage rework")
 }
 
 pub fn handle_bias_command(
@@ -211,17 +166,11 @@ pub fn handle_bias_command(
     Ok(())
 }
 
-pub fn handle_stats_command(input_path: PathBuf, short: bool, full: bool, silent: bool) -> Result<()> {
-    if !input_path.exists() {
-        return Err(anyhow::anyhow!("Input path does not exist: {:?}", input_path));
-    }
-
-    if !silent && !short {
-        println!("Calculating database statistics...");
-        println!("Database: {input_path:?}");
-        println!();
-    }
-
-    StatsCalculator::print_stats(&input_path, short, full)?;
-    Ok(())
+pub fn handle_stats_command(
+    _input_path: PathBuf,
+    _short: bool,
+    _full: bool,
+    _silent: bool,
+) -> Result<()> {
+    unimplemented!("stats command pending storage rework")
 }

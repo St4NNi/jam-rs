@@ -1,13 +1,9 @@
 pub mod bias;
 pub mod cli;
 pub mod core_utils;
-pub mod db;
-pub mod distance;
 pub mod io;
 pub mod format;
 pub mod sketch;
-pub mod stats;
-pub mod writer;
 pub use io::{expand_input_paths, is_sequence_file};
 pub use cli::handlers::{handle_sketch_command, handle_distance_command, handle_stats_command, handle_bias_command};
 pub use jamhash::jamhash_u64;
