@@ -1,3 +1,4 @@
+use crate::bias::BiasTable;
 use crate::core_utils::*;
 use crate::writer::create_lmdb_writer;
 use jamhash::jamhash_u64;
@@ -29,6 +30,8 @@ pub struct SketchConfig {
     pub threads: usize,
     pub memory_budget_gb: f64,
     pub temp_dir: Option<PathBuf>,
+    #[serde(skip)]
+    pub bias_table: Option<BiasTable>,
 }
 
 impl Default for SketchConfig {
@@ -38,10 +41,11 @@ impl Default for SketchConfig {
             fscale: u64::MAX,
             nmax: u64::MAX,
             singleton: false,
-            min_entropy: 1.5, // Default entropy threshold
+            min_entropy: 1.5,
             threads: 1,
             memory_budget_gb: 1.0,
             temp_dir: None,
+            bias_table: None,
         }
     }
 }
@@ -327,8 +331,12 @@ impl Sketcher {
 
             let hash = jamhash_u64(kmer.0);
 
-            // Apply FracMinHash filter if specified
             if hash > self.config.fscale {
+                continue;
+            }
+            if let Some(ref bias) = self.config.bias_table
+                && !bias.passes_filter(kmer.0, self.config.kmer_size)
+            {
                 continue;
             }
             collector.add_hash(hash, metadata);
@@ -359,8 +367,12 @@ impl Sketcher {
 
             let hash = jamhash_u64(kmer.0);
 
-            // Apply FracMinHash filter if specified
             if hash > self.config.fscale {
+                continue;
+            }
+            if let Some(ref bias) = self.config.bias_table
+                && !bias.passes_filter(kmer.0, self.config.kmer_size)
+            {
                 continue;
             }
 

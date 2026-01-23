@@ -60,6 +60,9 @@ pub enum Commands {
         /// Custom temporary directory for intermediate files during sorting
         #[arg(long)]
         temp_dir: Option<PathBuf>,
+        /// Path to a bias table file (.bias) for compositional filtering
+        #[arg(long)]
+        bias_table: Option<PathBuf>,
     },
 
     /// Estimate containment of a (small) sketch against a subset of one or more sketches as database.
@@ -82,6 +85,27 @@ pub enum Commands {
         /// Singleton mode, process each query sequence separately
         #[arg(short, long, default_value = "false")]
         singleton: bool,
+        /// Path to a bias table file (.bias) for compositional filtering of queries
+        #[arg(long)]
+        bias_table: Option<PathBuf>,
+    },
+
+    /// Build a bias table from positive/negative reference sequences
+    #[command(arg_required_else_help = true)]
+    Bias {
+        /// Positive reference sequences (FASTA) - k-mers enriched here will be preferred
+        #[arg(short, long)]
+        positive: PathBuf,
+        /// Negative reference sequences (FASTA) - background/unwanted sequences
+        #[arg(short, long)]
+        negative: PathBuf,
+        /// Output bias table file (.bias)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Score threshold (0.0-1.0). Higher = stricter filtering.
+        /// 0.5 = neutral, 0.7 = keep hexamers 70%+ likely from positive set
+        #[arg(long, default_value = "0.5")]
+        threshold: f32,
     },
 
     /// Display statistics about an LMDB database

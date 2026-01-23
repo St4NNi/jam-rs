@@ -295,8 +295,12 @@ impl StreamingDistanceCalculator {
 
                 let hash = jamhash_u64(kmer.0);
 
-                // Apply FracMinHash filter if specified
                 if hash > self.sketch_config.fscale {
+                    continue;
+                }
+                if let Some(ref bias) = self.sketch_config.bias_table
+                    && !bias.passes_filter(kmer.0, self.sketch_config.kmer_size)
+                {
                     continue;
                 }
 
@@ -662,8 +666,10 @@ pub fn calculate_distances_streaming(
     output_path: Option<&Path>,
     config: DistanceConfig,
     singleton: bool,
+    bias_table: Option<crate::bias::BiasTable>,
 ) -> Result<Vec<DistanceResult>> {
-    let calculator = StreamingDistanceCalculator::new(config, singleton, database_path)?;
+    let mut calculator = StreamingDistanceCalculator::new(config, singleton, database_path)?;
+    calculator.sketch_config.bias_table = bias_table;
     calculator.calculate_distances_streaming(query_path, output_path)
 }
 

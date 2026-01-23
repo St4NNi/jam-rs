@@ -146,7 +146,7 @@ fn test_calculate_sketch_vs_database_streaming() -> Result<()> {
         length_category_mode: LengthCategoryMode::QueryAndBelow,
     };
 
-    let results = calculate_distances_streaming(&query_db, &target_db, None, config, false)?;
+    let results = calculate_distances_streaming(&query_db, &target_db, None, config, false, None)?;
 
     // Test specific streaming functionality by checking that the result structure is correct
     for result in &results {
@@ -194,7 +194,7 @@ fn test_write_json_results() -> Result<()> {
 
     let output_file = env.temp_path().join("output.json");
     let _results =
-        calculate_distances_streaming(&query_db, &target_db, Some(&output_file), config, false)?;
+        calculate_distances_streaming(&query_db, &target_db, Some(&output_file), config, false, None)?;
 
     // Verify JSON format was written (even if empty due to test environment)
     assert!(output_file.exists(), "Output file should be created");
@@ -303,7 +303,7 @@ fn test_distance_edge_cases() -> Result<()> {
     };
 
     // This should work now with separate databases
-    let result = calculate_distances_streaming(&query_db, &target_db, None, config, false);
+    let result = calculate_distances_streaming(&query_db, &target_db, None, config, false, None);
     assert!(
         result.is_ok(),
         "Should handle separate databases gracefully"
@@ -341,7 +341,7 @@ fn test_length_category_modes() -> Result<()> {
     };
 
     let _results_below =
-        calculate_distances_streaming(&query_db, &target_db, None, config_below, false)?;
+        calculate_distances_streaming(&query_db, &target_db, None, config_below, false, None)?;
 
     // Test Range mode
     let config_range = DistanceConfig {
@@ -351,7 +351,7 @@ fn test_length_category_modes() -> Result<()> {
     };
 
     let _results_range =
-        calculate_distances_streaming(&query_db, &target_db, None, config_range, false)?;
+        calculate_distances_streaming(&query_db, &target_db, None, config_range, false, None)?;
 
     // Both modes should execute successfully (testing the code paths)
     // Results may vary due to test environment constraints
@@ -385,7 +385,7 @@ fn test_output_formats() -> Result<()> {
 
     let tsv_file = env.temp_path().join("output.tsv");
     let _results =
-        calculate_distances_streaming(&query_db, &target_db, Some(&tsv_file), config_tsv, false)?;
+        calculate_distances_streaming(&query_db, &target_db, Some(&tsv_file), config_tsv, false, None)?;
 
     // Verify TSV file was created
     assert!(tsv_file.exists(), "TSV file should be created");
@@ -399,7 +399,7 @@ fn test_output_formats() -> Result<()> {
 
     let json_file = env.temp_path().join("output.json");
     let _results =
-        calculate_distances_streaming(&query_db, &target_db, Some(&json_file), config_json, false)?;
+        calculate_distances_streaming(&query_db, &target_db, Some(&json_file), config_json, false, None)?;
 
     // Verify JSON file was created
     assert!(json_file.exists(), "JSON file should be created");
@@ -430,7 +430,7 @@ fn test_distance_result_serialization() -> Result<()> {
         length_category_mode: LengthCategoryMode::QueryAndBelow,
     };
 
-    let results = calculate_distances_streaming(&query_db, &target_db, None, config, false)?;
+    let results = calculate_distances_streaming(&query_db, &target_db, None, config, false, None)?;
 
     // Test serialization functionality regardless of whether we get results
     if let Some(result) = results.first() {
@@ -491,11 +491,11 @@ fn test_singleton_mode() -> Result<()> {
 
     // Test with singleton mode enabled
     let _results_singleton =
-        calculate_distances_streaming(&query_db, &target_db, None, config.clone(), true)?;
+        calculate_distances_streaming(&query_db, &target_db, None, config.clone(), true, None)?;
 
     // Test with singleton mode disabled
     let _results_normal =
-        calculate_distances_streaming(&query_db, &target_db, None, config, false)?;
+        calculate_distances_streaming(&query_db, &target_db, None, config, false, None)?;
 
     // Both should work and execute successfully (testing code paths)
 

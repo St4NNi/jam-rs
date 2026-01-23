@@ -30,6 +30,7 @@ AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"#;
         threads: 1,
         memory_budget_gb: 1.0,
         temp_dir: None,
+        bias_table: None,
     };
 
     sketch_files(&[fasta_path], sketch_path.clone(), config, false)?;

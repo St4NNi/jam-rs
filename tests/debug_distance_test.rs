@@ -36,7 +36,7 @@ TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
     };
 
     let _results =
-        calculate_distances_streaming(&sketch_path, &sketch_path, None, distance_config, false)?;
+        calculate_distances_streaming(&sketch_path, &sketch_path, None, distance_config, false, None)?;
 
     // Test passed if we reach this point without panicking
 

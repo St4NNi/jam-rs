@@ -1,3 +1,4 @@
+pub mod bias;
 pub mod cli;
 pub mod core_utils;
 pub mod db;
@@ -7,7 +8,7 @@ pub mod sketch;
 pub mod stats;
 pub mod writer;
 pub use io::{expand_input_paths, is_sequence_file};
-pub use cli::handlers::{handle_sketch_command, handle_distance_command, handle_stats_command};
+pub use cli::handlers::{handle_sketch_command, handle_distance_command, handle_stats_command, handle_bias_command};
 pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
@@ -33,6 +34,7 @@ pub fn run() -> Result<()> {
             complexity,
             singleton,
             temp_dir,
+            bias_table,
         } => {
             let expanded_inputs = expand_input_paths(&input)?;
             handle_sketch_command(
@@ -48,8 +50,16 @@ pub fn run() -> Result<()> {
                 cli.silent,
                 complexity,
                 temp_dir,
+                bias_table,
             )
         }
+
+        Commands::Bias {
+            positive,
+            negative,
+            output,
+            threshold,
+        } => handle_bias_command(positive, negative, output, threshold, cli.force, cli.silent),
 
         Commands::Dist {
             input,
@@ -57,7 +67,8 @@ pub fn run() -> Result<()> {
             output,
             cutoff,
             singleton,
-        } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent),
+            bias_table,
+        } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent, bias_table),
 
         Commands::Stats { input, short, full } => {
             handle_stats_command(input, short, full, cli.silent)
