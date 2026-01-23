@@ -1,3 +1,6 @@
+#[cfg(not(target_endian = "little"))]
+compile_error!("JAM format requires a little-endian platform");
+
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: [u8; 4] = *b"JAM\0";
