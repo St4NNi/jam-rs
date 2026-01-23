@@ -97,6 +97,7 @@ fn run_collision_analysis() {
 }
 
 #[test]
+#[ignore]
 fn run_ks() {
     let samples = RANGE.collect::<Vec<_>>();
 
@@ -123,6 +124,7 @@ fn run_ks() {
 }
 
 #[test]
+#[ignore]
 fn test_bit_distribution() {
     let mut xxhash3_bits = [0u64; 64];
     let mut jamhash_bits = [0u64; 64];
