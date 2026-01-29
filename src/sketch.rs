@@ -4,14 +4,16 @@ use crate::format::{BUCKET_COUNT, ENTRY_SIZE, Entry, bucket_id};
 use crate::io::EntryWriter;
 use crossfire::mpsc;
 use crossfire::{MTx, Rx};
+use indicatif::{ProgressBar, ProgressStyle};
 use jamhash::jamhash_u64;
 use memmap2::Mmap;
 use needletail::{Sequence, parse_fastx_reader};
+use rayon::prelude::*;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -20,6 +22,9 @@ const MIN_MEMORY_GB: usize = 4;
 const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_millis(1);
 const MIN_SPLIT_SIZE: usize = 1024 * 1024;
 const MAX_CONCURRENT_MMAPS: usize = 256;
+// Optimal channel capacity based on benchmarks - prevents cache thrashing while
+// maintaining good throughput. Higher values cause memory pressure and worse parallelism.
+const OPTIMAL_CHANNEL_CAPACITY: usize = 512 * 1024; // 512K entries per channel
 
 type Sender = MTx<mpsc::Array<Entry>>;
 type Receiver = Rx<mpsc::Array<Entry>>;
@@ -35,6 +40,7 @@ pub struct SketchConfig {
     pub singleton: bool,
     pub bias_table: Option<Arc<BiasTable>>,
     pub send_timeout: Duration,
+    pub show_progress: bool,
 }
 
 impl Default for SketchConfig {
@@ -49,6 +55,7 @@ impl Default for SketchConfig {
             singleton: false,
             bias_table: None,
             send_timeout: DEFAULT_SEND_TIMEOUT,
+            show_progress: false,
         }
     }
 }
@@ -271,9 +278,10 @@ fn scan_fastq_boundaries(data: &[u8]) -> Vec<usize> {
 fn setup_channels(
     num_threads: usize,
     memory_gb: usize,
+    input_size_bytes: u64,
     temp_path: &Path,
 ) -> Result<(Vec<Sender>, Vec<Vec<BucketWriter>>), SketchError> {
-    let capacity = compute_channel_capacity(memory_gb);
+    let capacity = compute_channel_capacity(memory_gb, input_size_bytes);
 
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..BUCKET_COUNT)
         .map(|_| mpsc::bounded_blocking(capacity))
@@ -310,11 +318,27 @@ fn setup_channels(
     Ok((senders, bucket_writers))
 }
 
-fn compute_channel_capacity(memory_gb: usize) -> usize {
+/// Compute optimal channel capacity based on memory budget and input size.
+///
+/// The capacity is automatically tuned to balance memory usage and performance:
+/// - Accounts for input file mmap overhead
+/// - Accounts for write buffer overhead (256 buckets × 8MB = 2GB)
+/// - Caps at OPTIMAL_CHANNEL_CAPACITY to prevent cache thrashing
+fn compute_channel_capacity(memory_gb: usize, input_size_bytes: u64) -> usize {
     let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
     let writer_memory = BUCKET_COUNT as u64 * WRITE_BUFFER_SIZE as u64;
-    let channel_memory = memory_bytes.saturating_sub(writer_memory);
-    (channel_memory / (BUCKET_COUNT as u64 * ENTRY_SIZE as u64)).max(1024) as usize
+
+    // Available memory after accounting for input files and write buffers
+    let available = memory_bytes
+        .saturating_sub(input_size_bytes)
+        .saturating_sub(writer_memory);
+
+    // Calculate capacity from available memory
+    let computed = (available / (BUCKET_COUNT as u64 * ENTRY_SIZE as u64)) as usize;
+
+    // Clamp to reasonable bounds - too high causes cache thrashing,
+    // too low causes excessive blocking
+    computed.clamp(1024, OPTIMAL_CHANNEL_CAPACITY)
 }
 
 /// Scan file for record boundaries suitable for parallel processing.
@@ -367,20 +391,72 @@ fn distribute_work_units(
     }
 }
 
+/// Result of building work units, includes total input size for memory planning.
+struct WorkUnitResult {
+    thread_work: Vec<Vec<WorkUnit>>,
+    total_input_bytes: u64,
+}
+
 fn build_work_units(
     input_files: &[PathBuf],
     num_threads: usize,
     singleton: bool,
+    memory_gb: usize,
     sample_counter: &AtomicU32,
-) -> Result<Vec<Vec<WorkUnit>>, SketchError> {
+    show_progress: bool,
+) -> Result<WorkUnitResult, SketchError> {
     let mut thread_work: Vec<Vec<WorkUnit>> = (0..num_threads).map(|_| Vec::new()).collect();
     let next_sample = || (!singleton).then(|| sample_counter.fetch_add(1, Ordering::SeqCst));
 
-    // For many files, skip mmap and distribute directly
-    if input_files.len() > MAX_CONCURRENT_MMAPS {
-        for path in input_files {
-            validate_file_header(path)?;
+    // Calculate total input size first
+    let total_input_bytes: u64 = input_files
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum();
+
+    let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
+
+    // Skip mmap if: too many files OR total input exceeds memory limit
+    // When input > memory, sequential reading avoids swapping
+    let skip_mmap = input_files.len() > MAX_CONCURRENT_MMAPS || total_input_bytes > memory_bytes;
+
+    if skip_mmap {
+        // Parallel header validation with progress
+        let validation_pb = if show_progress {
+            let pb = ProgressBar::new(input_files.len() as u64);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files validated")
+                    .unwrap()
+                    .progress_chars("#>-"),
+            );
+            Some(pb)
+        } else {
+            None
+        };
+
+        // Validate headers in parallel using rayon
+        let validation_results: Vec<Result<(), SketchError>> = input_files
+            .par_iter()
+            .map(|path| {
+                let result = validate_file_header(path).map(|_| ());
+                if let Some(ref pb) = validation_pb {
+                    pb.inc(1);
+                }
+                result
+            })
+            .collect();
+
+        if let Some(pb) = validation_pb {
+            pb.finish_with_message("validation complete");
         }
+
+        // Check for any validation errors
+        for result in validation_results {
+            result?;
+        }
+
         for (i, path) in input_files.iter().enumerate() {
             thread_work[i % num_threads].push(WorkUnit {
                 mmap: None,
@@ -390,7 +466,10 @@ fn build_work_units(
                 source_path: Arc::new(path.clone()),
             });
         }
-        return Ok(thread_work);
+        return Ok(WorkUnitResult {
+            thread_work,
+            total_input_bytes: 0, // Not using mmap, so no mmap memory overhead
+        });
     }
 
     // Mmap files and categorize
@@ -435,7 +514,10 @@ fn build_work_units(
         });
     }
 
-    Ok(thread_work)
+    Ok(WorkUnitResult {
+        thread_work,
+        total_input_bytes,
+    })
 }
 
 pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResult, SketchError> {
@@ -455,17 +537,52 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
     };
 
     let frac_max = u64::MAX / config.fscale;
-    let sample_counter = AtomicU32::new(0);
+    let sample_counter = Arc::new(AtomicU32::new(0));
     let num_threads = config.num_threads.max(1);
 
-    let thread_work =
-        build_work_units(input_files, num_threads, config.singleton, &sample_counter)?;
-    let (senders, resources) = setup_channels(num_threads, config.memory, temp_dir.path())?;
+    let WorkUnitResult {
+        thread_work,
+        total_input_bytes,
+    } = build_work_units(
+        input_files,
+        num_threads,
+        config.singleton,
+        config.memory,
+        &sample_counter,
+        config.show_progress,
+    )?;
+    let (senders, resources) = setup_channels(
+        num_threads,
+        config.memory,
+        total_input_bytes,
+        temp_dir.path(),
+    )?;
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
 
+    // Count total files to process
+    let total_files: u64 = thread_work.iter().map(|w| w.len() as u64).sum();
+    let files_processed = Arc::new(AtomicU64::new(0));
+
+    // Set up progress bar if enabled
+    let progress_bar = if config.show_progress {
+        let pb = ProgressBar::new(total_files);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({msg})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        pb.enable_steady_tick(Duration::from_millis(100));
+        Some(pb)
+    } else {
+        None
+    };
+
     rayon::scope(|s| {
         let sample_counter = &sample_counter;
+        let files_processed = &files_processed;
+        let progress_bar = &progress_bar;
         for (work, res) in thread_work.into_iter().zip(resources) {
             let thread_senders = senders.to_vec();
             let result_tx = result_tx.clone();
@@ -478,6 +595,8 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
                     config,
                     sample_counter,
                     frac_max,
+                    files_processed,
+                    progress_bar,
                 );
                 let _ = result_tx.send(result);
             });
@@ -485,6 +604,12 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         drop(senders);
         drop(result_tx);
     });
+
+    // Finish progress bar
+    if let Some(pb) = progress_bar {
+        let final_samples = sample_counter.load(Ordering::SeqCst);
+        pb.finish_with_message(format!("{} samples", final_samples));
+    }
 
     let mut bucket_entry_counts = [0u64; BUCKET_COUNT];
     for result in result_rx {
@@ -508,6 +633,8 @@ fn process_thread_work(
     config: &SketchConfig,
     sample_counter: &AtomicU32,
     frac_max: u64,
+    files_processed: &AtomicU64,
+    progress_bar: &Option<ProgressBar>,
 ) -> Result<Vec<(usize, u64)>, SketchError> {
     let ctx = SketchContext {
         senders: &senders,
@@ -534,6 +661,14 @@ fn process_thread_work(
             &ctx,
             &mut bucket_writers,
         )?;
+
+        // Update progress after each file is processed
+        let processed = files_processed.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(pb) = progress_bar {
+            pb.set_position(processed);
+            let samples = sample_counter.load(Ordering::Relaxed);
+            pb.set_message(format!("{} samples", samples));
+        }
     }
 
     drop(senders);
@@ -775,14 +910,20 @@ mod tests {
 
     #[test]
     fn test_channel_capacity_calculation() {
-        let cap_4gb = compute_channel_capacity(4);
-        assert!(cap_4gb > 100_000);
-        assert!(compute_channel_capacity(8) > cap_4gb);
-        // Lower memory values should produce smaller capacities (no clamping)
-        let cap_1gb = compute_channel_capacity(1);
-        assert!(cap_1gb < cap_4gb);
-        // Zero memory should still produce minimum 1024 capacity
-        assert_eq!(compute_channel_capacity(0), 1024);
+        // With no input overhead, capacity is capped at OPTIMAL_CHANNEL_CAPACITY
+        let cap_4gb = compute_channel_capacity(4, 0);
+        assert_eq!(cap_4gb, OPTIMAL_CHANNEL_CAPACITY);
+
+        // With large input overhead eating into budget, capacity decreases
+        let cap_4gb_with_input = compute_channel_capacity(4, 3 * 1024 * 1024 * 1024);
+        assert!(cap_4gb_with_input < cap_4gb);
+
+        // When input exceeds memory, capacity is minimum
+        let cap_exceeded = compute_channel_capacity(4, 10 * 1024 * 1024 * 1024);
+        assert_eq!(cap_exceeded, 1024);
+
+        // Zero memory should produce minimum capacity
+        assert_eq!(compute_channel_capacity(0, 0), 1024);
     }
 
     #[test]

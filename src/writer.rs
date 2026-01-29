@@ -75,6 +75,7 @@ pub struct BuildConfig {
     pub min_entropy: f64,
     pub singleton: bool,
     pub bias_table: Option<Arc<BiasTable>>,
+    pub show_progress: bool,
 }
 
 impl Default for BuildConfig {
@@ -88,6 +89,7 @@ impl Default for BuildConfig {
             min_entropy: 0.0,
             singleton: false,
             bias_table: None,
+            show_progress: false,
         }
     }
 }
@@ -118,6 +120,7 @@ pub fn build(input_files: &[PathBuf], output_path: &Path, config: &BuildConfig) 
         singleton: config.singleton,
         bias_table: config.bias_table.clone(),
         send_timeout: Duration::from_millis(1),
+        show_progress: config.show_progress,
     };
 
     let sketch_result = crate::sketch::run(input_files, &sketch_config)?;

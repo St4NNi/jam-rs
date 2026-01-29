@@ -37,13 +37,14 @@ needletail = { version = "0.6.3", features = [
 ] }
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
-clap = { version = "4.5.55", features = ["derive"] }
+clap = { version = "4.5.56", features = ["derive"] }
 tempfile = "3.24.0"
 crossfire = "3.0.2"
 bytemuck = { version = "1", features = ["derive"] }
 memmap2 = "0.9"
 xorf = { version = "0.12", features = ["serde"] }
 thiserror = "2"
+indicatif = "0.18.3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"

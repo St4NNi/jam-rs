@@ -116,6 +116,7 @@ pub fn handle_sketch_command(
         min_entropy,
         temp_dir_base: temp_dir,
         bias_table: bias_table.map(Arc::new),
+        show_progress: !silent,
     };
 
     let stats = build(&input_paths, &output_path, &config)?;
