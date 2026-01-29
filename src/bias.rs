@@ -6,6 +6,9 @@ const HEXAMER_COUNT: usize = 4096; // 4^6
 const BIAS_MAGIC: &[u8; 4] = b"BIAS";
 const BIAS_VERSION: u32 = 1;
 
+/// Serialized size: magic(4) + version(4) + threshold(4) + scores(4096 * 4) = 16,396 bytes
+pub const BIAS_TABLE_SERIALIZED_SIZE: usize = 4 + 4 + 4 + (HEXAMER_COUNT * 4);
+
 #[derive(Debug, Clone)]
 pub struct BiasTable {
     /// Pre-adjusted hexamer scores (raw_score - threshold).
@@ -124,6 +127,56 @@ impl BiasTable {
         Ok(Self { scores, threshold })
     }
 
+    /// Serialize the bias table to bytes for embedding in JAM files.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(BIAS_TABLE_SERIALIZED_SIZE);
+        out.extend_from_slice(BIAS_MAGIC);
+        out.extend_from_slice(&BIAS_VERSION.to_le_bytes());
+        out.extend_from_slice(&self.threshold.to_le_bytes());
+        for score in &self.scores {
+            out.extend_from_slice(&score.to_le_bytes());
+        }
+        out
+    }
+
+    /// Deserialize a bias table from a byte slice (e.g., from mmap).
+    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+        if data.len() < BIAS_TABLE_SERIALIZED_SIZE {
+            return Err(anyhow::anyhow!(
+                "Bias table data too small: {} bytes (expected {})",
+                data.len(),
+                BIAS_TABLE_SERIALIZED_SIZE
+            ));
+        }
+
+        let magic: [u8; 4] = data[0..4].try_into().unwrap();
+        if &magic != BIAS_MAGIC {
+            return Err(anyhow::anyhow!(
+                "Invalid bias table magic bytes: {:?}",
+                magic
+            ));
+        }
+
+        let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
+        if version != BIAS_VERSION {
+            return Err(anyhow::anyhow!(
+                "Unsupported bias table version {} (expected {})",
+                version,
+                BIAS_VERSION
+            ));
+        }
+
+        let threshold = f32::from_le_bytes(data[8..12].try_into().unwrap());
+
+        let mut scores = [0.0f32; HEXAMER_COUNT];
+        for (i, score) in scores.iter_mut().enumerate() {
+            let offset = 12 + i * 4;
+            *score = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        }
+
+        Ok(Self { scores, threshold })
+    }
+
     pub fn print_stats(&self) {
         let mut positive_count = 0usize;
         let mut negative_count = 0usize;
@@ -150,6 +203,12 @@ impl BiasTable {
             HEXAMER_COUNT,
             negative_count as f64 / HEXAMER_COUNT as f64 * 100.0
         );
+    }
+}
+
+impl PartialEq for BiasTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.threshold == other.threshold && self.scores == other.scores
     }
 }
 
@@ -215,6 +274,33 @@ mod tests {
         let loaded = BiasTable::load(output.path()).unwrap();
         assert_eq!(table.threshold, loaded.threshold);
         assert_eq!(table.scores, loaded.scores);
+    }
+
+    #[test]
+    fn test_to_bytes_from_bytes_roundtrip() {
+        let pos = create_fasta(&["ATCGATCGATCGATCGATCGATCG"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let table = BiasTable::build(pos.path(), neg.path(), 0.6).unwrap();
+        let bytes = table.to_bytes();
+
+        assert_eq!(bytes.len(), BIAS_TABLE_SERIALIZED_SIZE);
+
+        let loaded = BiasTable::from_bytes(&bytes).unwrap();
+        assert_eq!(table, loaded);
+    }
+
+    #[test]
+    fn test_partial_eq() {
+        let pos = create_fasta(&["ATCGATCGATCGATCGATCGATCG"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let table1 = BiasTable::build(pos.path(), neg.path(), 0.6).unwrap();
+        let table2 = BiasTable::build(pos.path(), neg.path(), 0.6).unwrap();
+        let table3 = BiasTable::build(pos.path(), neg.path(), 0.7).unwrap();
+
+        assert_eq!(table1, table2);
+        assert_ne!(table1, table3);
     }
 
     #[test]
