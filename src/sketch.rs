@@ -29,7 +29,7 @@ pub struct SketchConfig {
     pub kmer_size: u8,
     pub fscale: u64,
     pub num_threads: usize,
-    pub memory: usize, // GB
+    pub memory: usize,
     pub temp_dir_base: Option<PathBuf>,
     pub min_entropy: f64,
     pub singleton: bool,
@@ -56,7 +56,7 @@ impl Default for SketchConfig {
 pub struct SketchResult {
     pub sample_count: u32,
     pub bucket_entry_counts: [u64; BUCKET_COUNT],
-    pub threshold: u64,
+    pub frac_max: u64,
     pub temp_dir: TempDir,
 }
 
@@ -70,6 +70,9 @@ pub enum SketchError {
 
     #[error("Channel send error")]
     Channel,
+
+    #[error("Invalid configuration: {0}")]
+    Config(String),
 }
 
 struct WorkUnit {
@@ -77,7 +80,40 @@ struct WorkUnit {
     start: usize,
     end: usize,
     sample_id: Option<u32>,
-    source_path: PathBuf,
+    source_path: Arc<PathBuf>,
+}
+
+struct BucketWriter {
+    receiver: Receiver,
+    writer: EntryWriter,
+    bucket_id: usize,
+}
+
+impl BucketWriter {
+    fn drain(&mut self) -> io::Result<()> {
+        while let Ok(entry) = self.receiver.try_recv() {
+            self.writer.write(&entry)?;
+        }
+        Ok(())
+    }
+
+    fn drain_until_disconnected(&mut self, timeout: Duration) -> io::Result<bool> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(entry) => {
+                self.writer.write(&entry)?;
+                Ok(true)
+            }
+            Err(crossfire::RecvTimeoutError::Timeout) => Ok(true),
+            Err(crossfire::RecvTimeoutError::Disconnected) => Ok(false),
+        }
+    }
+}
+
+struct SketchContext<'a> {
+    senders: &'a [Sender],
+    config: &'a SketchConfig,
+    sample_counter: &'a AtomicU32,
+    frac_max: u64,
 }
 
 struct MmapSliceReader {
@@ -112,48 +148,223 @@ impl io::Read for MmapSliceReader {
     }
 }
 
-// https://github.com/onecodex/needletail/blob/master/src/parser/mod.rs
+/// Distributes `total` items across `parts` as evenly as possible.
+/// First `total % parts` get one extra item.
+fn distribute_evenly(total: usize, parts: usize) -> impl Iterator<Item = usize> {
+    let per_part = total / parts;
+    let remainder = total % parts;
+    (0..parts).map(move |i| {
+        if i < remainder {
+            per_part + 1
+        } else {
+            per_part
+        }
+    })
+}
+
 const GZ_MAGIC: [u8; 2] = [0x1F, 0x8B];
 const BZ_MAGIC: [u8; 2] = [0x42, 0x5A];
 const XZ_MAGIC: [u8; 2] = [0xFD, 0x37];
 const ZST_MAGIC: [u8; 2] = [0x28, 0xB5];
 
 #[inline]
-fn is_compressed_magic(magic: [u8; 2]) -> bool {
+fn is_compressed(magic: [u8; 2]) -> bool {
     matches!(magic, GZ_MAGIC | BZ_MAGIC | XZ_MAGIC | ZST_MAGIC)
 }
 
-fn scan_fasta_boundaries(data: &[u8]) -> Vec<usize> {
-    let mut boundaries = vec![0];
-    for i in 0..data.len() - 1 {
-        if data[i] == b'\n' && data[i + 1] == b'>' {
-            boundaries.push(i + 1);
-        }
+fn validate_format(magic: [u8; 2], path: &Path) -> Result<(), SketchError> {
+    if !is_compressed(magic) && !matches!(magic[0], b'>' | b'@') {
+        return Err(SketchError::Parse {
+            path: path.to_path_buf(),
+            message: format!(
+                "unrecognized format (bytes: [{:#04X}, {:#04X}])",
+                magic[0], magic[1]
+            ),
+        });
     }
-    boundaries
+    Ok(())
+}
+
+/// Validate file header (size and format). Returns magic bytes on success.
+fn validate_file_header(path: &Path) -> Result<[u8; 2], SketchError> {
+    let mut file = File::open(path)?;
+    let mut magic = [0u8; 2];
+    use std::io::Read;
+    let bytes_read = file.read(&mut magic)?;
+    if bytes_read < 2 {
+        return Err(SketchError::Parse {
+            path: path.to_path_buf(),
+            message: format!("file too small ({bytes_read} bytes) to be valid FASTA/FASTQ"),
+        });
+    }
+    validate_format(magic, path)?;
+    Ok(magic)
+}
+
+/// Validate mmap header (size and format). Returns magic bytes on success.
+fn validate_mmap_header(mmap: &Mmap, path: &Path) -> Result<[u8; 2], SketchError> {
+    if mmap.len() < 2 {
+        return Err(SketchError::Parse {
+            path: path.to_path_buf(),
+            message: format!(
+                "file too small ({} bytes) to be valid FASTA/FASTQ",
+                mmap.len()
+            ),
+        });
+    }
+    let magic = [mmap[0], mmap[1]];
+    validate_format(magic, path)?;
+    Ok(magic)
+}
+
+fn scan_fasta_boundaries(data: &[u8]) -> Vec<usize> {
+    let mut bounds = vec![0]; // First record starts at byte 0
+    bounds.extend(
+        data.windows(2)
+            .enumerate()
+            .filter_map(|(i, w)| (w == b"\n>").then_some(i + 1)),
+    );
+    bounds
+}
+
+/// Check if a byte is a valid IUPAC nucleotide code (DNA or RNA).
+/// Includes: A, C, G, T, U (RNA), N, and ambiguity codes R, Y, S, W, K, M, B, D, H, V.
+#[inline]
+fn is_iupac_nucleotide(b: u8) -> bool {
+    matches!(
+        b | 0x20, // ASCII case fold to lowercase
+        b'a' | b'c' | b'g' | b't' | b'u' | b'n'
+            | b'r' | b'y' | b's' | b'w' | b'k' | b'm'
+            | b'b' | b'd' | b'h' | b'v'
+    )
 }
 
 fn scan_fastq_boundaries(data: &[u8]) -> Vec<usize> {
-    let mut boundaries = vec![0];
-    let mut line_in_record = 0;
-    for (pos, &byte) in data.iter().enumerate() {
-        if byte == b'\n' {
-            line_in_record += 1;
-            if line_in_record == 4 {
-                if pos + 1 < data.len() {
-                    boundaries.push(pos + 1);
+    let mut bounds = vec![0];
+    let mut i = 0;
+
+    while i + 1 < data.len() {
+        if data[i] == b'\n' && data[i + 1] == b'@' {
+            // Find end of this potential header line
+            let header_start = i + 1;
+            let header_end = data[header_start..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| header_start + p)
+                .unwrap_or(data.len());
+
+            // Header must have content (not just "@\n")
+            if header_end > header_start + 1 {
+                // Check if next line looks like sequence
+                let seq_start = header_end + 1;
+                if seq_start < data.len() && is_iupac_nucleotide(data[seq_start]) {
+                    bounds.push(header_start);
                 }
-                line_in_record = 0;
             }
         }
+        i += 1;
     }
-    boundaries
+
+    bounds
 }
 
-struct RecordPosition {
-    mmap: Arc<Mmap>,
-    offset: usize,
-    path: PathBuf,
+fn setup_channels(
+    num_threads: usize,
+    memory_gb: usize,
+    temp_path: &Path,
+) -> Result<(Vec<Sender>, Vec<Vec<BucketWriter>>), SketchError> {
+    let capacity = compute_channel_capacity(memory_gb);
+
+    let (senders, receivers): (Vec<_>, Vec<_>) = (0..BUCKET_COUNT)
+        .map(|_| mpsc::bounded_blocking(capacity))
+        .unzip();
+
+    // Cap bucket-owning threads to BUCKET_COUNT to ensure each thread gets ≥1 bucket
+    let bucket_threads = num_threads.min(BUCKET_COUNT);
+    let chunk_sizes = distribute_evenly(BUCKET_COUNT, bucket_threads);
+
+    let mut rx_iter = receivers.into_iter().enumerate();
+    let mut bucket_writers: Vec<Vec<BucketWriter>> = chunk_sizes
+        .map(|count| {
+            rx_iter
+                .by_ref()
+                .take(count)
+                .map(|(bucket_id, receiver)| {
+                    let writer = EntryWriter::new(
+                        temp_path.join(format!("bucket_{bucket_id:03}.bin")),
+                        WRITE_BUFFER_SIZE,
+                    )?;
+                    Ok(BucketWriter {
+                        receiver,
+                        writer,
+                        bucket_id,
+                    })
+                })
+                .collect::<Result<Vec<_>, std::io::Error>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Threads beyond BUCKET_COUNT get empty writer lists (they process work but don't own buckets)
+    bucket_writers.resize_with(num_threads, Vec::new);
+
+    Ok((senders, bucket_writers))
+}
+
+fn compute_channel_capacity(memory_gb: usize) -> usize {
+    let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
+    let writer_memory = BUCKET_COUNT as u64 * WRITE_BUFFER_SIZE as u64;
+    let channel_memory = memory_bytes.saturating_sub(writer_memory);
+    (channel_memory / (BUCKET_COUNT as u64 * ENTRY_SIZE as u64)).max(1024) as usize
+}
+
+/// Scan file for record boundaries suitable for parallel processing.
+fn scan_boundaries(mmap: &Mmap, magic: [u8; 2]) -> Vec<usize> {
+    if mmap.len() < MIN_SPLIT_SIZE {
+        return vec![0];
+    }
+    match magic[0] {
+        b'>' => scan_fasta_boundaries(mmap),
+        _ => scan_fastq_boundaries(mmap),
+    }
+}
+
+/// Distribute work units across threads, assigning sample IDs by path content.
+fn distribute_work_units(
+    positions: Vec<(Arc<Mmap>, Arc<PathBuf>, usize, usize)>,
+    num_threads: usize,
+    singleton: bool,
+    sample_counter: &AtomicU32,
+    thread_work: &mut [Vec<WorkUnit>],
+) {
+    if positions.is_empty() {
+        return;
+    }
+
+    // Use path content as key, not pointer identity
+    let mut file_sample_ids: std::collections::HashMap<PathBuf, u32> =
+        std::collections::HashMap::new();
+
+    let chunk_sizes: Vec<_> = distribute_evenly(positions.len(), num_threads).collect();
+    let mut offset = 0;
+
+    for (t, &count) in chunk_sizes.iter().enumerate() {
+        for (mmap, path, start_byte, end_byte) in &positions[offset..offset + count] {
+            let sample_id = (!singleton).then(|| {
+                *file_sample_ids
+                    .entry((**path).clone())
+                    .or_insert_with(|| sample_counter.fetch_add(1, Ordering::SeqCst))
+            });
+
+            thread_work[t].push(WorkUnit {
+                mmap: Some(Arc::clone(mmap)),
+                start: *start_byte,
+                end: *end_byte,
+                sample_id,
+                source_path: Arc::clone(path),
+            });
+        }
+        offset += count;
+    }
 }
 
 fn build_work_units(
@@ -162,158 +373,64 @@ fn build_work_units(
     singleton: bool,
     sample_counter: &AtomicU32,
 ) -> Result<Vec<Vec<WorkUnit>>, SketchError> {
-    // Too many files: skip mmapping, distribute round-robin for direct reading
+    let mut thread_work: Vec<Vec<WorkUnit>> = (0..num_threads).map(|_| Vec::new()).collect();
+    let next_sample = || (!singleton).then(|| sample_counter.fetch_add(1, Ordering::SeqCst));
+
+    // For many files, skip mmap and distribute directly
     if input_files.len() > MAX_CONCURRENT_MMAPS {
-        let mut thread_work: Vec<Vec<WorkUnit>> = (0..num_threads).map(|_| Vec::new()).collect();
+        for path in input_files {
+            validate_file_header(path)?;
+        }
         for (i, path) in input_files.iter().enumerate() {
-            let t = i % num_threads;
-            let sample_id = if !singleton {
-                Some(sample_counter.fetch_add(1, Ordering::SeqCst))
-            } else {
-                None
-            };
-            thread_work[t].push(WorkUnit {
+            thread_work[i % num_threads].push(WorkUnit {
                 mmap: None,
                 start: 0,
                 end: 0,
-                sample_id,
-                source_path: path.clone(),
+                sample_id: next_sample(),
+                source_path: Arc::new(path.clone()),
             });
         }
         return Ok(thread_work);
     }
 
-    let mut record_positions: Vec<RecordPosition> = Vec::new();
-    let mut splittable: Vec<(Arc<Mmap>, PathBuf, Vec<usize>)> = Vec::new();
-    let mut whole_file: Vec<(Arc<Mmap>, PathBuf)> = Vec::new();
+    // Mmap files and categorize
+    let mut flat_positions: Vec<(Arc<Mmap>, Arc<PathBuf>, usize, usize)> = Vec::new();
+    let mut compressed_files: Vec<(Arc<Mmap>, Arc<PathBuf>)> = Vec::new();
 
     for path in input_files {
         let file = File::open(path)?;
         let mmap = Arc::new(unsafe { Mmap::map(&file)? });
+        let path = Arc::new(path.clone());
+        let magic = validate_mmap_header(&mmap, &path)?;
 
-        if mmap.len() < 2 {
+        if is_compressed(magic) {
+            compressed_files.push((mmap, path));
             continue;
         }
 
-        let magic = [mmap[0], mmap[1]];
-
-        if is_compressed_magic(magic) {
-            whole_file.push((mmap, path.clone()));
-            continue;
-        }
-
-        if !matches!(magic[0], b'>' | b'@') {
-            return Err(SketchError::Parse {
-                path: path.clone(),
-                message: format!(
-                    "unrecognized file format (first bytes: [{:#04X}, {:#04X}])",
-                    magic[0], magic[1]
-                ),
-            });
-        }
-
-        let is_fasta = magic[0] == b'>';
-        let boundaries = if mmap.len() < MIN_SPLIT_SIZE {
-            vec![0]
-        } else if is_fasta {
-            scan_fasta_boundaries(&mmap)
-        } else {
-            scan_fastq_boundaries(&mmap)
-        };
-
-        if boundaries.is_empty() {
-            continue;
-        }
-        splittable.push((mmap, path.clone(), boundaries));
-    }
-
-    for (mmap, path, boundaries) in &splittable {
-        for &offset in boundaries {
-            record_positions.push(RecordPosition {
-                mmap: Arc::clone(mmap),
-                offset,
-                path: path.clone(),
-            });
+        let boundaries = scan_boundaries(&mmap, magic);
+        for (i, &start) in boundaries.iter().enumerate() {
+            let end = boundaries.get(i + 1).copied().unwrap_or(mmap.len());
+            flat_positions.push((Arc::clone(&mmap), Arc::clone(&path), start, end));
         }
     }
 
-    let mut thread_work: Vec<Vec<WorkUnit>> = (0..num_threads).map(|_| Vec::new()).collect();
+    distribute_work_units(
+        flat_positions,
+        num_threads,
+        singleton,
+        sample_counter,
+        &mut thread_work,
+    );
 
-    if !record_positions.is_empty() {
-        let records_per_thread = record_positions.len() / num_threads;
-        let extra = record_positions.len() % num_threads;
-
-        let mut rec_idx = 0;
-        for t in 0..num_threads {
-            let count = records_per_thread + if t < extra { 1 } else { 0 };
-            if count == 0 {
-                continue;
-            }
-
-            let end_idx = rec_idx + count;
-            let mut chunk_start = rec_idx;
-
-            while chunk_start < end_idx {
-                let chunk_mmap = &record_positions[chunk_start].mmap;
-                let chunk_path = &record_positions[chunk_start].path;
-
-                let mut chunk_end = chunk_start + 1;
-                while chunk_end < end_idx
-                    && Arc::ptr_eq(&record_positions[chunk_end].mmap, chunk_mmap)
-                {
-                    chunk_end += 1;
-                }
-
-                let start_byte = record_positions[chunk_start].offset;
-                let end_byte = if chunk_end < record_positions.len()
-                    && Arc::ptr_eq(&record_positions[chunk_end].mmap, chunk_mmap)
-                {
-                    record_positions[chunk_end].offset
-                } else {
-                    chunk_mmap.len()
-                };
-
-                thread_work[t].push(WorkUnit {
-                    mmap: Some(Arc::clone(chunk_mmap)),
-                    start: start_byte,
-                    end: end_byte,
-                    sample_id: None,
-                    source_path: chunk_path.clone(),
-                });
-
-                chunk_start = chunk_end;
-            }
-            rec_idx = end_idx;
-        }
-    }
-
-    if !singleton {
-        let mut file_ids: std::collections::HashMap<PathBuf, u32> =
-            std::collections::HashMap::new();
-        for thread_units in &mut thread_work {
-            for unit in thread_units.iter_mut() {
-                let id = *file_ids
-                    .entry(unit.source_path.clone())
-                    .or_insert_with(|| sample_counter.fetch_add(1, Ordering::SeqCst));
-                unit.sample_id = Some(id);
-            }
-        }
-    }
-
-    // Compressed files: round-robin, needletail handles decompression
-    for (i, (mmap, path)) in whole_file.into_iter().enumerate() {
-        let t = i % num_threads;
-        let sample_id = if !singleton {
-            Some(sample_counter.fetch_add(1, Ordering::SeqCst))
-        } else {
-            None
-        };
+    // Compressed files can't be split, distribute round-robin
+    for (i, (mmap, path)) in compressed_files.into_iter().enumerate() {
         let end = mmap.len();
-        thread_work[t].push(WorkUnit {
+        thread_work[i % num_threads].push(WorkUnit {
             mmap: Some(mmap),
             start: 0,
             end,
-            sample_id,
+            sample_id: next_sample(),
             source_path: path,
         });
     }
@@ -321,194 +438,138 @@ fn build_work_units(
     Ok(thread_work)
 }
 
-fn compute_channel_capacity(memory_gb: usize) -> usize {
-    let memory_gb = memory_gb.max(MIN_MEMORY_GB);
-    let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
-    let writer_memory = 256u64 * WRITE_BUFFER_SIZE as u64;
-    let channel_memory = memory_bytes.saturating_sub(writer_memory);
-    let capacity = channel_memory / (BUCKET_COUNT as u64 * ENTRY_SIZE as u64);
-    capacity.max(1024) as usize
-}
-
 pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResult, SketchError> {
+    if config.fscale == 0 {
+        return Err(SketchError::Config("fscale must be non-zero".to_string()));
+    }
+    if config.kmer_size == 0 || config.kmer_size > 31 {
+        return Err(SketchError::Config(format!(
+            "kmer_size must be between 1 and 31, got {}",
+            config.kmer_size
+        )));
+    }
+
     let temp_dir = match &config.temp_dir_base {
         Some(base) => tempfile::Builder::new().prefix("jam_").tempdir_in(base)?,
         None => tempfile::Builder::new().prefix("jam_").tempdir()?,
     };
 
-    let threshold = u64::MAX / config.fscale;
+    let frac_max = u64::MAX / config.fscale;
     let sample_counter = AtomicU32::new(0);
     let num_threads = config.num_threads.max(1);
 
     let thread_work =
         build_work_units(input_files, num_threads, config.singleton, &sample_counter)?;
+    let (senders, resources) = setup_channels(num_threads, config.memory, temp_dir.path())?;
 
-    let channel_capacity = compute_channel_capacity(config.memory);
-    let mut senders: Vec<Sender> = Vec::with_capacity(BUCKET_COUNT);
-    let mut receivers: Vec<Receiver> = Vec::with_capacity(BUCKET_COUNT);
-    for _ in 0..BUCKET_COUNT {
-        let (tx, rx) = mpsc::bounded_blocking(channel_capacity);
-        senders.push(tx);
-        receivers.push(rx);
-    }
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
 
-    let temp_path = temp_dir.path().to_path_buf();
-    let receivers_per_thread = BUCKET_COUNT / num_threads;
-    let extra_receivers = BUCKET_COUNT % num_threads;
+    rayon::scope(|s| {
+        let sample_counter = &sample_counter;
+        for (work, res) in thread_work.into_iter().zip(resources) {
+            let thread_senders = senders.to_vec();
+            let result_tx = result_tx.clone();
 
-    let mut receiver_groups: Vec<Vec<Receiver>> = Vec::with_capacity(num_threads);
-    let mut writer_groups: Vec<Vec<EntryWriter>> = Vec::with_capacity(num_threads);
-    let mut bucket_id_groups: Vec<Vec<usize>> = Vec::with_capacity(num_threads);
-
-    let mut rx_iter = receivers.into_iter().enumerate();
-    for t in 0..num_threads {
-        let count = receivers_per_thread + if t < extra_receivers { 1 } else { 0 };
-        let mut thread_receivers = Vec::with_capacity(count);
-        let mut thread_writers = Vec::with_capacity(count);
-        let mut thread_bucket_ids = Vec::with_capacity(count);
-
-        for _ in 0..count {
-            let (bucket_idx, rx) = rx_iter.next().unwrap();
-            thread_receivers.push(rx);
-            let path = temp_path.join(format!("bucket_{bucket_idx:03}.bin"));
-            thread_writers.push(EntryWriter::new(&path, WRITE_BUFFER_SIZE)?);
-            thread_bucket_ids.push(bucket_idx);
+            s.spawn(move |_| {
+                let result = process_thread_work(
+                    work,
+                    thread_senders,
+                    res,
+                    config,
+                    sample_counter,
+                    frac_max,
+                );
+                let _ = result_tx.send(result);
+            });
         }
-        receiver_groups.push(thread_receivers);
-        writer_groups.push(thread_writers);
-        bucket_id_groups.push(thread_bucket_ids);
-    }
-
-    let thread_results: std::sync::Mutex<Vec<Result<Vec<(usize, u64)>, SketchError>>> =
-        std::sync::Mutex::new(Vec::with_capacity(num_threads));
-
-    {
-        let mut thread_work = thread_work;
-        let mut receiver_groups = receiver_groups;
-        let mut writer_groups = writer_groups;
-        let mut bucket_id_groups = bucket_id_groups;
-
-        let sample_counter_ref = &sample_counter;
-        let thread_results_ref = &thread_results;
-
-        rayon::scope(|s| {
-            for (((work, receivers), writers), bucket_ids) in thread_work
-                .drain(..)
-                .zip(receiver_groups.drain(..))
-                .zip(writer_groups.drain(..))
-                .zip(bucket_id_groups.drain(..))
-            {
-                let thread_senders: Vec<Sender> = senders.iter().map(|s| s.clone()).collect();
-
-                s.spawn(move |_| {
-                    let result = thread_work_fn(
-                        work,
-                        thread_senders,
-                        receivers,
-                        writers,
-                        bucket_ids,
-                        config,
-                        sample_counter_ref,
-                        threshold,
-                    );
-                    thread_results_ref.lock().unwrap().push(result);
-                });
-            }
-
-            drop(senders);
-        });
-    }
+        drop(senders);
+        drop(result_tx);
+    });
 
     let mut bucket_entry_counts = [0u64; BUCKET_COUNT];
-    for result in thread_results.into_inner().unwrap() {
+    for result in result_rx {
         for (bucket_idx, count) in result? {
             bucket_entry_counts[bucket_idx] = count;
         }
     }
 
-    let sample_count = sample_counter.load(Ordering::SeqCst);
-
     Ok(SketchResult {
-        sample_count,
+        sample_count: sample_counter.load(Ordering::SeqCst),
         bucket_entry_counts,
-        threshold,
+        frac_max,
         temp_dir,
     })
 }
 
-fn thread_work_fn(
+fn process_thread_work(
     work_units: Vec<WorkUnit>,
     senders: Vec<Sender>,
-    receivers: Vec<Receiver>,
-    mut writers: Vec<EntryWriter>,
-    bucket_ids: Vec<usize>,
+    mut bucket_writers: Vec<BucketWriter>,
     config: &SketchConfig,
     sample_counter: &AtomicU32,
-    threshold: u64,
+    frac_max: u64,
 ) -> Result<Vec<(usize, u64)>, SketchError> {
-    let send_timeout = config.send_timeout;
+    let ctx = SketchContext {
+        senders: &senders,
+        config,
+        sample_counter,
+        frac_max,
+    };
 
     for unit in &work_units {
-        let fastx = match &unit.mmap {
-            Some(mmap) => {
-                let reader = MmapSliceReader::new(Arc::clone(mmap), unit.start, unit.end);
-                parse_fastx_reader(reader)
-            }
-            None => {
-                let file = File::open(&unit.source_path)?;
-                let reader = io::BufReader::new(file);
-                parse_fastx_reader(reader)
-            }
+        let reader: Box<dyn io::Read + Send> = match &unit.mmap {
+            Some(mmap) => Box::new(MmapSliceReader::new(Arc::clone(mmap), unit.start, unit.end)),
+            None => Box::new(io::BufReader::new(File::open(&*unit.source_path)?)),
         };
 
-        let mut fastx_reader = fastx.map_err(|e| SketchError::Parse {
-            path: unit.source_path.clone(),
+        let mut fastx = parse_fastx_reader(reader).map_err(|e| SketchError::Parse {
+            path: (*unit.source_path).clone(),
             message: e.to_string(),
         })?;
 
         sketch_records(
-            fastx_reader.as_mut(),
+            fastx.as_mut(),
             unit.sample_id,
             &unit.source_path,
-            &senders,
-            &receivers,
-            &mut writers,
-            config,
-            sample_counter,
-            threshold,
-            send_timeout,
+            &ctx,
+            &mut bucket_writers,
         )?;
     }
 
     drop(senders);
-    drain_until_disconnected(&receivers, &mut writers);
 
-    for writer in &mut writers {
-        writer.flush()?;
+    const DRAIN_TIMEOUT: Duration = Duration::from_millis(1);
+    loop {
+        let mut any_pending = false;
+        for bw in bucket_writers.iter_mut() {
+            if bw.drain_until_disconnected(DRAIN_TIMEOUT)? {
+                any_pending = true;
+            }
+        }
+        if !any_pending {
+            break;
+        }
     }
 
-    Ok(bucket_ids
-        .into_iter()
-        .zip(writers.iter())
-        .map(|(id, w)| (id, w.count()))
-        .collect())
+    bucket_writers
+        .iter_mut()
+        .map(|bw| {
+            bw.writer.flush()?;
+            Ok((bw.bucket_id, bw.writer.count()))
+        })
+        .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn sketch_records(
     reader: &mut dyn needletail::FastxReader,
     file_sample_id: Option<u32>,
     source_path: &Path,
-    senders: &[Sender],
-    receivers: &[Receiver],
-    writers: &mut [EntryWriter],
-    config: &SketchConfig,
-    sample_counter: &AtomicU32,
-    threshold: u64,
-    send_timeout: Duration,
+    ctx: &SketchContext,
+    bucket_writers: &mut [BucketWriter],
 ) -> Result<(), SketchError> {
-    let k = config.kmer_size;
-    let min_entropy = config.min_entropy;
+    let k = ctx.config.kmer_size;
+    let min_entropy = ctx.config.min_entropy;
+    let timeout = ctx.config.send_timeout;
 
     while let Some(record) = reader.next() {
         let record = record.map_err(|e| SketchError::Parse {
@@ -516,10 +577,8 @@ fn sketch_records(
             message: e.to_string(),
         })?;
 
-        let sample_id = match file_sample_id {
-            Some(id) => id,
-            None => sample_counter.fetch_add(1, Ordering::SeqCst),
-        };
+        let sample_id =
+            file_sample_id.unwrap_or_else(|| ctx.sample_counter.fetch_add(1, Ordering::SeqCst));
 
         let sequence = record.normalize(false);
         if sequence.len() < k as usize {
@@ -529,7 +588,7 @@ fn sketch_records(
         for (_, kmer, _) in sequence.bit_kmers(k, true) {
             let hash = jamhash_u64(kmer.0);
 
-            if hash >= threshold {
+            if hash >= ctx.frac_max {
                 continue;
             }
 
@@ -537,64 +596,60 @@ fn sketch_records(
                 continue;
             }
 
-            if let Some(ref bias) = config.bias_table {
-                if !bias.passes_filter(kmer.0, k) {
-                    continue;
-                }
+            if ctx
+                .config
+                .bias_table
+                .as_ref()
+                .is_some_and(|b| !b.passes_filter(kmer.0, k))
+            {
+                continue;
             }
 
             let entry = Entry::new(hash, sample_id);
             let bucket = bucket_id(hash);
 
-            match senders[bucket].send_timeout(entry, send_timeout) {
-                Ok(()) => {}
-                Err(crossfire::SendTimeoutError::Timeout(entry)) => {
-                    drain_own_receivers(receivers, writers);
-                    let _ = senders[bucket].send(entry);
-                }
-                Err(crossfire::SendTimeoutError::Disconnected(_)) => {
-                    break;
+            if let Err(crossfire::SendTimeoutError::Timeout(mut entry)) =
+                ctx.senders[bucket].send_timeout(entry, timeout)
+            {
+                // Drain local buckets and retry with exponential backoff.
+                // The target bucket may be owned by another thread, so we also sleep
+                // to give that thread time to drain. Local drain + sleep together
+                // provide best throughput under backpressure.
+                const MAX_RETRIES: u32 = 10;
+
+                for retry in 0..MAX_RETRIES {
+                    // Drain our local buckets first
+                    for bw in bucket_writers.iter_mut() {
+                        bw.drain()?;
+                    }
+
+                    // Sleep to give other threads time to drain their buckets
+                    // (yield alone is insufficient under heavy load)
+                    let backoff_sleep = Duration::from_micros(100 << retry.min(4));
+                    std::thread::sleep(backoff_sleep);
+
+                    let backoff_timeout = timeout.saturating_mul(1 << retry.min(4));
+                    match ctx.senders[bucket].send_timeout(entry, backoff_timeout) {
+                        Ok(()) => break,
+                        Err(crossfire::SendTimeoutError::Timeout(e)) => {
+                            entry = e;
+                            if retry == MAX_RETRIES - 1 {
+                                // Final attempt: blocking send as last resort
+                                if ctx.senders[bucket].send(entry).is_err() {
+                                    return Err(SketchError::Channel);
+                                }
+                            }
+                        }
+                        Err(crossfire::SendTimeoutError::Disconnected(_)) => {
+                            return Err(SketchError::Channel);
+                        }
+                    }
                 }
             }
         }
     }
 
     Ok(())
-}
-
-fn drain_own_receivers(receivers: &[Receiver], writers: &mut [EntryWriter]) {
-    for (rx, writer) in receivers.iter().zip(writers.iter_mut()) {
-        while let Ok(entry) = rx.try_recv() {
-            let _ = writer.write(&entry);
-        }
-    }
-}
-
-fn drain_until_disconnected(receivers: &[Receiver], writers: &mut [EntryWriter]) {
-    loop {
-        let mut all_disconnected = true;
-        for (rx, writer) in receivers.iter().zip(writers.iter_mut()) {
-            loop {
-                match rx.try_recv() {
-                    Ok(entry) => {
-                        let _ = writer.write(&entry);
-                        all_disconnected = false;
-                    }
-                    Err(crossfire::TryRecvError::Empty) => {
-                        all_disconnected = false;
-                        break;
-                    }
-                    Err(crossfire::TryRecvError::Disconnected) => {
-                        break;
-                    }
-                }
-            }
-        }
-        if all_disconnected {
-            break;
-        }
-        std::thread::sleep(Duration::from_micros(100));
-    }
 }
 
 #[cfg(test)]
@@ -615,19 +670,17 @@ mod tests {
     #[test]
     fn test_sketch_basic() {
         let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
-
         let config = SketchConfig {
             kmer_size: 11,
             fscale: 1,
             num_threads: 2,
+            memory: 1,
             ..Default::default()
         };
 
         let result = run(&[input.path().to_path_buf()], &config).unwrap();
         assert_eq!(result.sample_count, 1);
-
-        let total: u64 = result.bucket_entry_counts.iter().sum();
-        assert!(total > 0);
+        assert!(result.bucket_entry_counts.iter().sum::<u64>() > 0);
     }
 
     #[test]
@@ -636,12 +689,12 @@ mod tests {
             ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
             ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
         ]);
-
         let config = SketchConfig {
             kmer_size: 11,
             fscale: 1,
             singleton: true,
             num_threads: 2,
+            memory: 1,
             ..Default::default()
         };
 
@@ -653,34 +706,42 @@ mod tests {
     fn test_sketch_fracmin_filters() {
         let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        let config_all = SketchConfig {
-            kmer_size: 11,
-            fscale: 1,
-            ..Default::default()
-        };
-        let result_all = run(&[input.path().to_path_buf()], &config_all).unwrap();
+        let result_all = run(
+            &[input.path().to_path_buf()],
+            &SketchConfig {
+                kmer_size: 11,
+                fscale: 1,
+                memory: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
-        let config_low = SketchConfig {
-            kmer_size: 11,
-            fscale: 100,
-            ..Default::default()
-        };
-        let result_low = run(&[input.path().to_path_buf()], &config_low).unwrap();
+        let result_filtered = run(
+            &[input.path().to_path_buf()],
+            &SketchConfig {
+                kmer_size: 11,
+                fscale: 100,
+                memory: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let total_all: u64 = result_all.bucket_entry_counts.iter().sum();
-        let total_low: u64 = result_low.bucket_entry_counts.iter().sum();
-        assert!(total_low < total_all);
+        let total_filtered: u64 = result_filtered.bucket_entry_counts.iter().sum();
+        assert!(total_filtered < total_all);
     }
 
     #[test]
     fn test_sketch_multiple_files() {
         let input1 = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
         let input2 = make_fasta(&[("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")]);
-
         let config = SketchConfig {
             kmer_size: 11,
             fscale: 1,
             num_threads: 2,
+            memory: 1,
             ..Default::default()
         };
 
@@ -690,9 +751,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.sample_count, 2);
-
-        let total: u64 = result.bucket_entry_counts.iter().sum();
-        assert!(total > 0);
+        assert!(result.bucket_entry_counts.iter().sum::<u64>() > 0);
     }
 
     #[test]
@@ -701,7 +760,6 @@ mod tests {
             "seq1",
             "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG",
         )]);
-
         let config = SketchConfig {
             kmer_size: 11,
             fscale: 1,
@@ -712,61 +770,181 @@ mod tests {
         };
 
         let result = run(&[input.path().to_path_buf()], &config).unwrap();
-        let total: u64 = result.bucket_entry_counts.iter().sum();
-        assert!(total > 0);
+        assert!(result.bucket_entry_counts.iter().sum::<u64>() > 0);
     }
 
     #[test]
     fn test_channel_capacity_calculation() {
-        let cap = compute_channel_capacity(4);
-        assert!(cap > 100_000);
-
-        let cap8 = compute_channel_capacity(8);
-        assert!(cap8 > cap);
-
-        let cap_low = compute_channel_capacity(1);
-        assert_eq!(cap_low, cap);
+        let cap_4gb = compute_channel_capacity(4);
+        assert!(cap_4gb > 100_000);
+        assert!(compute_channel_capacity(8) > cap_4gb);
+        // Lower memory values should produce smaller capacities (no clamping)
+        let cap_1gb = compute_channel_capacity(1);
+        assert!(cap_1gb < cap_4gb);
+        // Zero memory should still produce minimum 1024 capacity
+        assert_eq!(compute_channel_capacity(0), 1024);
     }
 
     #[test]
     fn test_scan_fasta_boundaries() {
         let data = b">seq1\nATCG\n>seq2\nGCTA\n>seq3\nAAAA\n";
-        let bounds = scan_fasta_boundaries(data);
-        assert_eq!(bounds, vec![0, 11, 22]);
+        assert_eq!(scan_fasta_boundaries(data), vec![0, 11, 22]);
     }
 
     #[test]
     fn test_scan_fastq_boundaries() {
         let data = b"@read1\nATCG\n+\nIIII\n@read2\nGCTA\n+\nIIII\n";
+        assert_eq!(scan_fastq_boundaries(data), vec![0, 19]);
+    }
+
+    #[test]
+    fn test_scan_fastq_boundaries_wrapped() {
+        // Multi-line sequence (wrapped at 4 chars) - should still find correct boundary
+        let data = b"@read1\nATCG\nGCTA\n+\nIIII\nJJJJ\n@read2\nAAAA\n+\nKKKK\n";
+        let bounds = scan_fastq_boundaries(data);
+        assert_eq!(bounds[0], 0);
+        // Second record starts at @read2 (position 29)
+        assert!(bounds.contains(&29));
+    }
+
+    #[test]
+    fn test_scan_fastq_boundaries_at_in_quality() {
+        // @ in quality string should NOT be detected as record boundary
+        let data = b"@read1\nATCG\n+\n@@@I\n@read2\nGCTA\n+\nIIII\n";
+        let bounds = scan_fastq_boundaries(data);
+        // Should have boundary at 0 and at @read2 (position 19), NOT at the @ in quality
+        assert_eq!(bounds, vec![0, 19]);
+    }
+
+    #[test]
+    fn test_scan_fastq_boundaries_at_followed_by_at_skipped() {
+        // @ followed by @ is skipped (conservative: not detected as boundary)
+        // This avoids false positives when quality contains @@ patterns
+        let data = b"@read1\nATCG\n+\nIIII\n@@ambiguous\n";
+        // Only the first record boundary is detected
+        assert_eq!(scan_fastq_boundaries(data), vec![0]);
+    }
+
+    #[test]
+    fn test_scan_fastq_boundaries_iupac_codes() {
+        // Test that IUPAC ambiguity codes (R, Y, etc.) are recognized as sequence starts
+        let data = b"@read1\nRYSW\n+\nIIII\n@read2\nKMBD\n+\nIIII\n";
         let bounds = scan_fastq_boundaries(data);
         assert_eq!(bounds, vec![0, 19]);
     }
 
     #[test]
-    fn test_is_compressed_magic() {
-        assert!(is_compressed_magic([0x1F, 0x8B]));
-        assert!(is_compressed_magic([0x42, 0x5A]));
-        assert!(is_compressed_magic([0xFD, 0x37]));
-        assert!(is_compressed_magic([0x28, 0xB5]));
-        assert!(!is_compressed_magic([b'>', b's']));
-        assert!(!is_compressed_magic([b'@', b'r']));
-        assert!(!is_compressed_magic([0x00, 0x00]));
+    fn test_is_compressed() {
+        assert!(is_compressed([0x1F, 0x8B]));
+        assert!(is_compressed([0x42, 0x5A]));
+        assert!(is_compressed([0xFD, 0x37]));
+        assert!(is_compressed([0x28, 0xB5]));
+        assert!(!is_compressed([b'>', b's']));
+        assert!(!is_compressed([b'@', b'r']));
     }
 
     #[test]
     fn test_mmap_slice_reader() {
         use std::io::Read;
-        let data = b"Hello, World!";
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.bin");
-        std::fs::write(&path, data).unwrap();
+        std::fs::write(&path, b"Hello, World!").unwrap();
 
         let file = File::open(&path).unwrap();
         let mmap = Arc::new(unsafe { Mmap::map(&file).unwrap() });
 
-        let mut reader = MmapSliceReader::new(Arc::clone(&mmap), 7, 12);
+        let mut reader = MmapSliceReader::new(mmap, 7, 12);
         let mut buf = String::new();
         reader.read_to_string(&mut buf).unwrap();
         assert_eq!(buf, "World");
+    }
+
+    #[test]
+    fn test_tiny_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Empty file
+        let empty_path = dir.path().join("empty.fa");
+        std::fs::write(&empty_path, b"").unwrap();
+
+        let config = SketchConfig::default();
+        let result = run(&[empty_path], &config);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for empty file"),
+        };
+        assert!(err.to_string().contains("too small"));
+
+        // 1-byte file
+        let tiny_path = dir.path().join("tiny.fa");
+        std::fs::write(&tiny_path, b">").unwrap();
+
+        let result = run(&[tiny_path], &config);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for 1-byte file"),
+        };
+        assert!(err.to_string().contains("too small"));
+    }
+
+    #[test]
+    fn test_fscale_zero_errors() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let config = SketchConfig {
+            fscale: 0,
+            ..Default::default()
+        };
+
+        let result = run(&[input.path().to_path_buf()], &config);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for fscale=0"),
+        };
+        assert!(err.to_string().contains("fscale must be non-zero"));
+    }
+
+    #[test]
+    fn test_kmer_size_validation() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+
+        // kmer_size = 0
+        let config = SketchConfig {
+            kmer_size: 0,
+            memory: 1,
+            ..Default::default()
+        };
+        let err = match run(&[input.path().to_path_buf()], &config) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for kmer_size=0"),
+        };
+        assert!(
+            err.to_string()
+                .contains("kmer_size must be between 1 and 31")
+        );
+
+        // kmer_size = 32 (too large - needletail overflows at k=32)
+        let config = SketchConfig {
+            kmer_size: 32,
+            memory: 1,
+            ..Default::default()
+        };
+        let err = match run(&[input.path().to_path_buf()], &config) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for kmer_size=32"),
+        };
+        assert!(
+            err.to_string()
+                .contains("kmer_size must be between 1 and 31")
+        );
+
+        // kmer_size = 31 (valid upper bound)
+        let config = SketchConfig {
+            kmer_size: 31,
+            fscale: 1,
+            memory: 1,
+            ..Default::default()
+        };
+        let result = run(&[input.path().to_path_buf()], &config);
+        assert!(result.is_ok());
     }
 }

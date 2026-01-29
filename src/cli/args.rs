@@ -1,11 +1,10 @@
-// Update to cli.rs - enhanced version with input path expansion
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "1.0.0")]
+#[command(version = "0.9.10")]
 #[command(
     about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
     long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
@@ -36,7 +35,7 @@ pub enum Commands {
         /// Input file(s), directories, or file with list of files to be hashed
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         input: Vec<PathBuf>,
-        /// Output file (.lmdb will be appended if not present)
+        /// Output file (.jam format)
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
@@ -46,9 +45,6 @@ pub enum Commands {
         /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
         #[arg(long)]
         fscale: Option<u64>,
-        /// Maximum number of k-mers (per record) to be hashed, top cut-off
-        #[arg(long)]
-        nmax: Option<u64>,
         /// Complexity cut-off, only hash sequences with complexity above this value
         /// This is created via shannon entropy
         #[arg(long, default_value = "0.0")]
@@ -65,14 +61,14 @@ pub enum Commands {
         bias_table: Option<PathBuf>,
     },
 
-    /// Estimate containment of a (small) sketch against a subset of one or more sketches as database.
+    /// Estimate containment of a query sequence against a sketch database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
     Dist {
-        /// Input sketch or raw sequence file
+        /// Input FASTA/FASTQ file to query
         #[arg(short, long)]
         input: PathBuf,
-        /// Database sketch (.lmdb file)
+        /// Database sketch (.jam file)
         #[arg(short, long)]
         database: PathBuf,
         /// Output to file instead of stdout
@@ -83,7 +79,7 @@ pub enum Commands {
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
         /// Singleton mode, process each query sequence separately
-        #[arg(short, long, default_value = "false")]
+        #[arg(long, default_value = "false")]
         singleton: bool,
         /// Path to a bias table file (.bias) for compositional filtering of queries
         #[arg(long)]
@@ -108,17 +104,17 @@ pub enum Commands {
         threshold: f32,
     },
 
-    /// Display statistics about an LMDB database
+    /// Display statistics about a JAM database
     #[command(arg_required_else_help = true)]
     Stats {
-        /// Input LMDB database
+        /// Input JAM database (.jam file)
         #[arg(short, long)]
         input: PathBuf,
         /// Short summary only
-        #[arg(short, long)]
+        #[arg(long)]
         short: bool,
         /// Include the full entry statistics
-        #[arg(short, long)]
+        #[arg(long)]
         full: bool,
     },
 }
