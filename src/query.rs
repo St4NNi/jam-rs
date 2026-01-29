@@ -97,10 +97,22 @@ impl QuerySketch {
         let threshold = db.threshold();
         let bias_table = db.bias_table();
 
-        let mut reader = parse_fastx_file(input_path).map_err(|e| QueryError::Parse {
-            path: input_path.display().to_string(),
-            message: e.to_string(),
-        })?;
+        let mut reader = match parse_fastx_file(input_path) {
+            Ok(reader) => reader,
+            Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
+                eprintln!(
+                    "Empty file detected: {}, returning empty sketch",
+                    input_path.display()
+                );
+                return Ok(Self::new());
+            }
+            Err(e) => {
+                return Err(QueryError::Parse {
+                    path: input_path.display().to_string(),
+                    message: e.to_string(),
+                });
+            }
+        };
 
         let mut buckets: [Vec<(u64, u32)>; BUCKET_COUNT] = std::array::from_fn(|_| Vec::new());
         let mut sample_names: Vec<String> = Vec::new();

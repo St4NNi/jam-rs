@@ -196,8 +196,14 @@ pub fn handle_distance_command(
 
     writeln!(writer, "query\tsample_id\thit_count\tcontainment")?;
 
-    let mut reader =
-        needletail::parse_fastx_file(&input_path).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let mut reader = match needletail::parse_fastx_file(&input_path) {
+        Ok(reader) => reader,
+        Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
+            eprintln!("Empty file detected: {}, skipping", input_path.display());
+            return Ok(());
+        }
+        Err(e) => return Err(anyhow::anyhow!("{}", e)),
+    };
 
     if singleton {
         while let Some(record) = reader.next() {

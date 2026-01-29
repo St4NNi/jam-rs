@@ -215,8 +215,15 @@ impl PartialEq for BiasTable {
 fn count_hexamers(path: &Path) -> Result<[u64; HEXAMER_COUNT]> {
     let mut counts = [0u64; HEXAMER_COUNT];
 
-    let mut reader = parse_fastx_file(path)
-        .with_context(|| format!("Failed to parse FASTA file: {}", path.display()))?;
+    let mut reader = match parse_fastx_file(path) {
+        Ok(reader) => reader,
+        Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
+            anyhow::bail!("Empty file: {}", path.display());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to parse FASTA file: {}", path.display()));
+        }
+    };
 
     while let Some(record) = reader.next() {
         let record = record.context("Failed to parse sequence record")?;

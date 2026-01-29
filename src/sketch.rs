@@ -649,10 +649,27 @@ fn process_thread_work(
             None => Box::new(io::BufReader::new(File::open(&*unit.source_path)?)),
         };
 
-        let mut fastx = parse_fastx_reader(reader).map_err(|e| SketchError::Parse {
-            path: (*unit.source_path).clone(),
-            message: e.to_string(),
-        })?;
+        let mut fastx = match parse_fastx_reader(reader) {
+            Ok(reader) => reader,
+            Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
+                eprintln!(
+                    "Empty file detected: {}, skipping",
+                    unit.source_path.display()
+                );
+                // Update progress and continue to next file
+                let processed = files_processed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(pb) = progress_bar {
+                    pb.set_position(processed);
+                }
+                continue;
+            }
+            Err(e) => {
+                return Err(SketchError::Parse {
+                    path: (*unit.source_path).clone(),
+                    message: e.to_string(),
+                });
+            }
+        };
 
         sketch_records(
             fastx.as_mut(),
