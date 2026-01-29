@@ -1,11 +1,16 @@
 pub mod bias;
 pub mod cli;
 pub mod core_utils;
-pub mod io;
 pub mod format;
+pub mod io;
+pub mod query;
+pub mod reader;
 pub mod sketch;
+pub mod writer;
+pub use cli::handlers::{
+    handle_bias_command, handle_distance_command, handle_sketch_command, handle_stats_command,
+};
 pub use io::{expand_input_paths, is_sequence_file};
-pub use cli::handlers::{handle_sketch_command, handle_distance_command, handle_stats_command, handle_bias_command};
 pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
@@ -27,7 +32,6 @@ pub fn run() -> Result<()> {
             output,
             kmer_size,
             fscale,
-            nmax,
             complexity,
             singleton,
             temp_dir,
@@ -39,7 +43,6 @@ pub fn run() -> Result<()> {
                 output,
                 kmer_size,
                 fscale,
-                nmax,
                 singleton,
                 cli.threads.unwrap_or(1),
                 cli.memory.unwrap_or(2),
@@ -65,7 +68,9 @@ pub fn run() -> Result<()> {
             cutoff,
             singleton,
             bias_table,
-        } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent, bias_table),
+        } => handle_distance_command(
+            input, database, output, cutoff, singleton, cli.silent, bias_table,
+        ),
 
         Commands::Stats { input, short, full } => {
             handle_stats_command(input, short, full, cli.silent)

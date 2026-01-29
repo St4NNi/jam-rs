@@ -40,14 +40,16 @@ pub struct Header {
     pub bucket_table_offset: u64,
     pub entries_offset: u64,
     pub filters_offset: u64,
-    pub _offset_reserved: u64, // reserved for future section offset (e.g. metadata)
+    pub bias_table_offset: u64,
 
     pub entries_size: u64,
     pub filters_size: u64,
-    pub _size_reserved: u64, // reserved for future section size
+    pub bias_table_size: u64,
 
     pub _padding: [u8; 16],
 }
+
+pub const FLAG_HAS_BIAS_TABLE: u64 = 1 << 0;
 
 const _: () = assert!(std::mem::size_of::<Header>() == 128);
 
