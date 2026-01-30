@@ -4,11 +4,11 @@ compile_error!("JAM format requires a little-endian platform");
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: [u8; 4] = *b"JAM\0";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 pub const BUCKET_COUNT: usize = 256;
 pub const BUCKET_BITS: u8 = 8;
 pub const ENTRY_SIZE: usize = 12;
-pub const HEADER_SIZE: usize = 128;
+pub const HEADER_SIZE: usize = 160;
 pub const BUCKET_META_SIZE: usize = 32;
 pub const BUCKET_TABLE_SIZE: usize = BUCKET_COUNT * BUCKET_META_SIZE;
 pub const DATA_START: usize = HEADER_SIZE + BUCKET_TABLE_SIZE;
@@ -46,12 +46,17 @@ pub struct Header {
     pub filters_size: u64,
     pub bias_table_size: u64,
 
+    pub sample_names_offset: u64,
+    pub sample_names_size: u64,
+    pub sample_sizes_offset: u64,
+    pub sample_sizes_size: u64,
+
     pub _padding: [u8; 16],
 }
 
 pub const FLAG_HAS_BIAS_TABLE: u64 = 1 << 0;
 
-const _: () = assert!(std::mem::size_of::<Header>() == 128);
+const _: () = assert!(std::mem::size_of::<Header>() == 160);
 
 impl Header {
     pub fn validate(&self) -> Result<(), FormatError> {
@@ -124,7 +129,7 @@ mod tests {
 
     #[test]
     fn test_struct_sizes() {
-        assert_eq!(std::mem::size_of::<Header>(), 128);
+        assert_eq!(std::mem::size_of::<Header>(), 160);
         assert_eq!(std::mem::size_of::<BucketMeta>(), 32);
         assert_eq!(std::mem::size_of::<Entry>(), 12);
     }
