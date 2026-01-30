@@ -1,4 +1,4 @@
-use crate::bias::{BiasTable, BIAS_TABLE_SERIALIZED_SIZE};
+use crate::bias::{BIAS_TABLE_SERIALIZED_SIZE, BiasTable};
 use crate::format::{
     BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
     FLAG_HAS_BIAS_TABLE, HEADER_SIZE, Header, MAGIC, VERSION,
@@ -35,6 +35,34 @@ pub fn serialize_filter(filter: &BinaryFuse8) -> Vec<u8> {
     out
 }
 
+/// Serialize sample names in order. Format: [len0][bytes0][len1][bytes1]...
+/// Warns if any sample name exceeds u16::MAX bytes and will be truncated.
+fn serialize_sample_names(names: &[String]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (idx, name) in names.iter().enumerate() {
+        let bytes = name.as_bytes();
+        let len = if bytes.len() > u16::MAX as usize {
+            eprintln!(
+                "Warning: Sample name at index {} is {} bytes, truncating to {} bytes",
+                idx,
+                bytes.len(),
+                u16::MAX
+            );
+            u16::MAX
+        } else {
+            bytes.len() as u16
+        };
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&bytes[..len as usize]);
+    }
+    buf
+}
+
+/// Serialize sample sizes (hash counts) as u64 array.
+fn serialize_sample_sizes(sizes: &[u64]) -> Vec<u8> {
+    bytemuck::cast_slice(sizes).to_vec()
+}
+
 #[derive(Clone)]
 pub struct CompactConfig {
     pub num_threads: usize,
@@ -51,6 +79,7 @@ struct ProcessedBucket {
     entry_count: u64,
     unique_hash_count: u64,
     filter_bytes: Vec<u8>,
+    sample_hash_counts: std::collections::HashMap<u32, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +138,11 @@ pub enum BuildError {
 /// 1. Sketches input sequences into partitioned bucket files
 /// 2. Sorts entries and builds BinaryFuse8 filters per bucket
 /// 3. Writes the final .jam file with header, bucket table, entries, and filters
-pub fn build(input_files: &[PathBuf], output_path: &Path, config: &BuildConfig) -> Result<IndexStats, BuildError> {
+pub fn build(
+    input_files: &[PathBuf],
+    output_path: &Path,
+    config: &BuildConfig,
+) -> Result<IndexStats, BuildError> {
     let sketch_config = SketchConfig {
         kmer_size: config.kmer_size,
         fscale: config.fscale,
@@ -175,6 +208,16 @@ pub fn run(
             // Sort entries (by hash, then by sample_id - Entry derives Ord)
             entries.sort_unstable();
 
+            // Deduplicate entries by (hash, sample_id) - Entry derives Eq
+            entries.dedup();
+
+            // Count unique hashes per sample from deduped entries
+            let mut sample_hash_counts: std::collections::HashMap<u32, u64> =
+                std::collections::HashMap::new();
+            for entry in &entries {
+                *sample_hash_counts.entry(entry.sample_id).or_insert(0) += 1;
+            }
+
             // Extract unique hashes for filter construction
             let unique_hashes = extract_unique_hashes(&entries);
             let unique_hash_count = unique_hashes.len() as u64;
@@ -193,7 +236,7 @@ pub fn run(
                 serialize_filter(&filter)
             };
 
-            // Write sorted entries back to temp file
+            // Write sorted (deduped) entries back to temp file
             if !entries.is_empty() {
                 write_entries(&bucket_path, &entries)?;
             }
@@ -203,11 +246,22 @@ pub fn run(
                 entry_count: entries.len() as u64,
                 unique_hash_count,
                 filter_bytes,
+                sample_hash_counts,
             })
         })
         .collect();
 
     let processed = processed?;
+
+    // Aggregate unique hash counts per sample from all buckets
+    let mut aggregated_sample_sizes: Vec<u64> = vec![0u64; sketch_result.sample_count as usize];
+    for bucket in &processed {
+        for (&sample_id, &count) in &bucket.sample_hash_counts {
+            if (sample_id as usize) < aggregated_sample_sizes.len() {
+                aggregated_sample_sizes[sample_id as usize] += count;
+            }
+        }
+    }
 
     // Stage 2: mmap write of final .jam file
     let entries_size: u64 = processed
@@ -220,8 +274,15 @@ pub fn run(
     } else {
         0
     };
-    let total_size =
-        HEADER_SIZE as u64 + BUCKET_TABLE_SIZE as u64 + entries_size + filters_size + bias_size;
+    let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names);
+    let sample_sizes_bytes = serialize_sample_sizes(&aggregated_sample_sizes);
+    let total_size = HEADER_SIZE as u64
+        + BUCKET_TABLE_SIZE as u64
+        + entries_size
+        + filters_size
+        + bias_size
+        + sample_names_bytes.len() as u64
+        + sample_sizes_bytes.len() as u64;
 
     // Allocate output file with read+write access for mmap
     let file = std::fs::OpenOptions::new()
@@ -285,6 +346,16 @@ pub fn run(
         (0, 0, 0)
     };
 
+    // Write sample names section (after bias table if present)
+    let sample_names_offset = filter_offset + bias_table_size as usize;
+    mmap[sample_names_offset..sample_names_offset + sample_names_bytes.len()]
+        .copy_from_slice(&sample_names_bytes);
+
+    // Write sample sizes section
+    let sample_sizes_offset = sample_names_offset + sample_names_bytes.len();
+    mmap[sample_sizes_offset..sample_sizes_offset + sample_sizes_bytes.len()]
+        .copy_from_slice(&sample_sizes_bytes);
+
     // Write bucket table at HEADER_SIZE offset
     let table_bytes = bytemuck::cast_slice::<BucketMeta, u8>(&bucket_metas);
     mmap[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE].copy_from_slice(table_bytes);
@@ -313,6 +384,10 @@ pub fn run(
         entries_size,
         filters_size,
         bias_table_size,
+        sample_names_offset: sample_names_offset as u64,
+        sample_names_size: sample_names_bytes.len() as u64,
+        sample_sizes_offset: sample_sizes_offset as u64,
+        sample_sizes_size: sample_sizes_bytes.len() as u64,
         _padding: [0; 16],
     };
 
@@ -539,7 +614,10 @@ mod tests {
 
         let stats = build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
 
-        assert_eq!(stats.sample_count, 2, "Singleton mode should create one sample per sequence");
+        assert_eq!(
+            stats.sample_count, 2,
+            "Singleton mode should create one sample per sequence"
+        );
     }
 
     #[test]
@@ -561,7 +639,8 @@ mod tests {
             &[input1.path().to_path_buf(), input2.path().to_path_buf()],
             &output_path,
             &config,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(stats.sample_count, 2);
         assert!(stats.total_entries > 0);

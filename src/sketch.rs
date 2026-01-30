@@ -4,6 +4,7 @@ use crate::format::{BUCKET_COUNT, ENTRY_SIZE, Entry, bucket_id};
 use crate::io::EntryWriter;
 use crossfire::mpsc;
 use crossfire::{MTx, Rx};
+use dashmap::DashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use jamhash::jamhash_u64;
 use memmap2::Mmap;
@@ -65,6 +66,7 @@ pub struct SketchResult {
     pub bucket_entry_counts: [u64; BUCKET_COUNT],
     pub frac_max: u64,
     pub temp_dir: TempDir,
+    pub sample_names: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -121,6 +123,7 @@ struct SketchContext<'a> {
     config: &'a SketchConfig,
     sample_counter: &'a AtomicU32,
     frac_max: u64,
+    sample_names: &'a DashMap<u32, String>,
 }
 
 struct MmapSliceReader {
@@ -240,9 +243,21 @@ fn scan_fasta_boundaries(data: &[u8]) -> Vec<usize> {
 fn is_iupac_nucleotide(b: u8) -> bool {
     matches!(
         b | 0x20, // ASCII case fold to lowercase
-        b'a' | b'c' | b'g' | b't' | b'u' | b'n'
-            | b'r' | b'y' | b's' | b'w' | b'k' | b'm'
-            | b'b' | b'd' | b'h' | b'v'
+        b'a' | b'c'
+            | b'g'
+            | b't'
+            | b'u'
+            | b'n'
+            | b'r'
+            | b'y'
+            | b's'
+            | b'w'
+            | b'k'
+            | b'm'
+            | b'b'
+            | b'd'
+            | b'h'
+            | b'v'
     )
 }
 
@@ -560,6 +575,9 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
 
+    // Create DashMap for sample names
+    let sample_names_map: DashMap<u32, String> = DashMap::new();
+
     // Count total files to process
     let total_files: u64 = thread_work.iter().map(|w| w.len() as u64).sum();
     let files_processed = Arc::new(AtomicU64::new(0));
@@ -583,6 +601,7 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         let sample_counter = &sample_counter;
         let files_processed = &files_processed;
         let progress_bar = &progress_bar;
+        let sample_names_map = &sample_names_map;
         for (work, res) in thread_work.into_iter().zip(resources) {
             let thread_senders = senders.to_vec();
             let result_tx = result_tx.clone();
@@ -597,6 +616,7 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
                     frac_max,
                     files_processed,
                     progress_bar,
+                    sample_names_map,
                 );
                 let _ = result_tx.send(result);
             });
@@ -618,14 +638,26 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         }
     }
 
+    // Convert DashMap to Vec in sample_id order
+    let sample_count = sample_counter.load(Ordering::SeqCst);
+    let mut sample_names: Vec<String> = vec![String::new(); sample_count as usize];
+
+    for entry in sample_names_map.iter() {
+        if (*entry.key() as usize) < sample_names.len() {
+            sample_names[*entry.key() as usize] = entry.value().clone();
+        }
+    }
+
     Ok(SketchResult {
-        sample_count: sample_counter.load(Ordering::SeqCst),
+        sample_count,
         bucket_entry_counts,
         frac_max,
         temp_dir,
+        sample_names,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_thread_work(
     work_units: Vec<WorkUnit>,
     senders: Vec<Sender>,
@@ -635,12 +667,14 @@ fn process_thread_work(
     frac_max: u64,
     files_processed: &AtomicU64,
     progress_bar: &Option<ProgressBar>,
+    sample_names_map: &DashMap<u32, String>,
 ) -> Result<Vec<(usize, u64)>, SketchError> {
     let ctx = SketchContext {
         senders: &senders,
         config,
         sample_counter,
         frac_max,
+        sample_names: sample_names_map,
     };
 
     for unit in &work_units {
@@ -731,6 +765,22 @@ fn sketch_records(
 
         let sample_id =
             file_sample_id.unwrap_or_else(|| ctx.sample_counter.fetch_add(1, Ordering::SeqCst));
+
+        // Set sample name (only once per sample_id)
+        if !ctx.sample_names.contains_key(&sample_id) {
+            let name = if file_sample_id.is_some() {
+                // Combined mode: use source_path filename WITH extension
+                source_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("sample")
+                    .to_string()
+            } else {
+                // Singleton mode: use record ID
+                String::from_utf8_lossy(record.id()).to_string()
+            };
+            ctx.sample_names.insert(sample_id, name);
+        }
 
         let sequence = record.normalize(false);
         if sequence.len() < k as usize {

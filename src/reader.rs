@@ -1,7 +1,7 @@
 use crate::bias::BiasTable;
 use crate::format::{
-    bucket_id, BucketMeta, Entry, FormatError, Header, BUCKET_COUNT, BUCKET_TABLE_SIZE,
-    ENTRY_SIZE, FLAG_HAS_BIAS_TABLE, HEADER_SIZE,
+    BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, ENTRY_SIZE, Entry, FLAG_HAS_BIAS_TABLE,
+    FormatError, HEADER_SIZE, Header, bucket_id,
 };
 use crate::writer::FILTER_DESCRIPTOR_SIZE;
 use memmap2::Mmap;
@@ -24,6 +24,9 @@ pub enum ReaderError {
 
     #[error("File too small: expected at least {expected} bytes, got {actual}")]
     FileTooSmall { expected: usize, actual: usize },
+
+    #[error("Invalid sample data: {message}")]
+    InvalidSampleData { message: String },
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +62,8 @@ pub struct JamReader {
     bucket_table: Vec<BucketMeta>,
     filters: Vec<Option<LoadedFilter>>, // None for empty buckets
     bias_table: Option<Arc<BiasTable>>,
+    sample_names: Vec<String>,
+    sample_sizes: Vec<u64>, // hash count per sample
 }
 
 impl JamReader {
@@ -69,6 +74,12 @@ impl JamReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
+
+        #[cfg(unix)]
+        {
+            use memmap2::Advice;
+            let _ = mmap.advise(Advice::Random);
+        }
 
         // Validate minimum size for header
         if mmap.len() < HEADER_SIZE {
@@ -121,15 +132,67 @@ impl JamReader {
                 });
             }
             let bias_data = &mmap[offset..offset + size];
-            let table = BiasTable::from_bytes(bias_data).map_err(|e| {
-                ReaderError::InvalidFilter {
+            let table =
+                BiasTable::from_bytes(bias_data).map_err(|e| ReaderError::InvalidFilter {
                     bucket: 0,
                     message: format!("Failed to parse embedded bias table: {}", e),
-                }
-            })?;
+                })?;
             Some(Arc::new(table))
         } else {
             None
+        };
+
+        // Load sample names if present
+        let sample_names = if header.sample_names_offset > 0 && header.sample_names_size > 0 {
+            let offset = header.sample_names_offset as usize;
+            let size = header.sample_names_size as usize;
+            if offset + size > mmap.len() {
+                return Err(ReaderError::FileTooSmall {
+                    expected: offset + size,
+                    actual: mmap.len(),
+                });
+            }
+            let names = parse_sample_names(&mmap[offset..offset + size], header.sample_count)?;
+            if names.len() != header.sample_count as usize {
+                return Err(ReaderError::InvalidSampleData {
+                    message: format!(
+                        "sample names count mismatch: got {}, expected {}",
+                        names.len(),
+                        header.sample_count
+                    ),
+                });
+            }
+            names
+        } else {
+            // Fallback for old files without sample names
+            (0..header.sample_count)
+                .map(|i| format!("sample_{}", i))
+                .collect()
+        };
+
+        // Load sample sizes if present
+        let sample_sizes = if header.sample_sizes_offset > 0 && header.sample_sizes_size > 0 {
+            let offset = header.sample_sizes_offset as usize;
+            let size = header.sample_sizes_size as usize;
+            let expected_size = header.sample_count as usize * 8;
+            if size != expected_size {
+                return Err(ReaderError::InvalidSampleData {
+                    message: format!(
+                        "sample sizes section size mismatch: got {}, expected {}",
+                        size, expected_size
+                    ),
+                });
+            }
+            if offset + size > mmap.len() {
+                return Err(ReaderError::FileTooSmall {
+                    expected: offset + size,
+                    actual: mmap.len(),
+                });
+            }
+            parse_sample_sizes(&mmap[offset..offset + size])
+        } else {
+            // Fallback: zeros for old files
+            vec![0u64; header.sample_count as usize]
         };
 
         Ok(Self {
@@ -138,6 +201,8 @@ impl JamReader {
             bucket_table,
             filters,
             bias_table,
+            sample_names,
+            sample_sizes,
         })
     }
 
@@ -163,6 +228,22 @@ impl JamReader {
     #[inline]
     pub fn has_bias_table(&self) -> bool {
         self.bias_table.is_some()
+    }
+
+    pub fn sample_names(&self) -> &[String] {
+        &self.sample_names
+    }
+
+    pub fn sample_name(&self, id: u32) -> Option<&str> {
+        self.sample_names.get(id as usize).map(|s| s.as_str())
+    }
+
+    pub fn sample_sizes(&self) -> &[u64] {
+        &self.sample_sizes
+    }
+
+    pub fn sample_size(&self, id: u32) -> Option<u64> {
+        self.sample_sizes.get(id as usize).copied()
     }
 
     /// Get statistics about this database.
@@ -250,6 +331,56 @@ impl JamReader {
             .map(|e| e.sample_id)
     }
 
+    /// Search for multiple hashes in a bucket using a single sequential scan.
+    /// Input hashes must be sorted. Returns (hash, sample_id) pairs for matches.
+    pub fn search_batch(&self, bucket_idx: usize, sorted_hashes: &[u64]) -> Vec<(u64, u32)> {
+        if sorted_hashes.is_empty() {
+            return Vec::new();
+        }
+
+        // Filter check - any hash might be present?
+        let dominated = if let Some(ref filter) = self.filters[bucket_idx] {
+            sorted_hashes.iter().any(|h| filter.contains(h))
+        } else {
+            return Vec::new();
+        };
+
+        if !dominated {
+            return Vec::new();
+        }
+
+        let entries = self.bucket_entries(bucket_idx);
+        if entries.is_empty() {
+            return Vec::new();
+        }
+
+        // Find scan range
+        let first_hash = sorted_hashes[0];
+        let last_hash = *sorted_hashes.last().unwrap();
+        let start_pos = self.interpolation_find_start(entries, first_hash);
+
+        // Merge-join scan
+        let mut results = Vec::new();
+        let mut hash_idx = 0;
+
+        for entry in &entries[start_pos..] {
+            if entry.hash > last_hash {
+                break;
+            }
+
+            // Advance to current or next hash
+            while hash_idx < sorted_hashes.len() && sorted_hashes[hash_idx] < entry.hash {
+                hash_idx += 1;
+            }
+
+            if hash_idx < sorted_hashes.len() && sorted_hashes[hash_idx] == entry.hash {
+                results.push((entry.hash, entry.sample_id));
+            }
+        }
+
+        results
+    }
+
     /// Interpolation search to find if hash exists.
     fn interpolation_search(&self, entries: &[Entry], key: u64) -> Option<usize> {
         if entries.is_empty() {
@@ -299,15 +430,66 @@ impl JamReader {
     }
 }
 
+/// Parse sample names from section data. Returns error if data is truncated.
+fn parse_sample_names(data: &[u8], count: u32) -> Result<Vec<String>, ReaderError> {
+    let mut names = Vec::with_capacity(count as usize);
+    let mut offset = 0;
+
+    for i in 0..count {
+        if offset + 2 > data.len() {
+            return Err(ReaderError::InvalidSampleData {
+                message: format!(
+                    "truncated sample names section: cannot read length for sample {}",
+                    i
+                ),
+            });
+        }
+        let len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2;
+        if offset + len > data.len() {
+            return Err(ReaderError::InvalidSampleData {
+                message: format!(
+                    "truncated sample names section: cannot read name for sample {} (need {} bytes, have {})",
+                    i,
+                    len,
+                    data.len() - offset
+                ),
+            });
+        }
+        names.push(String::from_utf8_lossy(&data[offset..offset + len]).to_string());
+        offset += len;
+    }
+
+    Ok(names)
+}
+
+/// Parse sample sizes (hash counts) from section data.
+fn parse_sample_sizes(data: &[u8]) -> Vec<u64> {
+    // Can't use bytemuck::cast_slice because data may not be 8-byte aligned
+    // (it comes after variable-length sample names section)
+    data.chunks_exact(8)
+        .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
+}
+
 /// Parse filter data from mmap into heap-owned LoadedFilter.
-fn parse_filter(mmap: &Mmap, meta: &BucketMeta, bucket_idx: usize) -> Result<LoadedFilter, ReaderError> {
+fn parse_filter(
+    mmap: &Mmap,
+    meta: &BucketMeta,
+    bucket_idx: usize,
+) -> Result<LoadedFilter, ReaderError> {
     let start = meta.filter_offset as usize;
     let end = start + meta.filter_size as usize;
 
     if end > mmap.len() {
         return Err(ReaderError::InvalidFilter {
             bucket: bucket_idx,
-            message: format!("filter extends beyond file: {}..{} > {}", start, end, mmap.len()),
+            message: format!(
+                "filter extends beyond file: {}..{} > {}",
+                start,
+                end,
+                mmap.len()
+            ),
         });
     }
 
@@ -338,11 +520,7 @@ fn parse_filter(mmap: &Mmap, meta: &BucketMeta, bucket_idx: usize) -> Result<Loa
     if data.len() < expected_size {
         return Err(ReaderError::InvalidFilter {
             bucket: bucket_idx,
-            message: format!(
-                "filter data too small: {} < {}",
-                data.len(),
-                expected_size
-            ),
+            message: format!("filter data too small: {} < {}", data.len(), expected_size),
         });
     }
 
@@ -362,7 +540,7 @@ fn parse_filter(mmap: &Mmap, meta: &BucketMeta, bucket_idx: usize) -> Result<Loa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::writer::{build, BuildConfig};
+    use crate::writer::{BuildConfig, build};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -515,7 +693,11 @@ mod tests {
         for bucket_idx in 0..BUCKET_COUNT {
             let entries = reader.bucket_entries(bucket_idx);
             for window in entries.windows(2) {
-                assert!(window[0] <= window[1], "Entries not sorted in bucket {}", bucket_idx);
+                assert!(
+                    window[0] <= window[1],
+                    "Entries not sorted in bucket {}",
+                    bucket_idx
+                );
             }
 
             // Verify all entries belong to this bucket
