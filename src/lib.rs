@@ -67,10 +67,7 @@ pub fn run() -> Result<()> {
             output,
             cutoff,
             singleton,
-            bias_table,
-        } => handle_distance_command(
-            input, database, output, cutoff, singleton, cli.silent, bias_table,
-        ),
+        } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent),
 
         Commands::Stats { input, short, full } => {
             handle_stats_command(input, short, full, cli.silent)

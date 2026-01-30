@@ -81,9 +81,6 @@ pub enum Commands {
         /// Singleton mode, process each query sequence separately
         #[arg(long, default_value = "false")]
         singleton: bool,
-        /// Path to a bias table file (.bias) for compositional filtering of queries
-        #[arg(long)]
-        bias_table: Option<PathBuf>,
     },
 
     /// Build a bias table from positive/negative reference sequences
