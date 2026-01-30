@@ -28,6 +28,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1.0.100"
+dashmap = "6.1.0"
 jamhash = "0.1.2"
 needletail = { version = "0.6.3", features = [
     "flate2",
@@ -39,7 +40,7 @@ rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 clap = { version = "4.5.56", features = ["derive"] }
 tempfile = "3.24.0"
-crossfire = "3.0.2"
+crossfire = "3.0.3"
 bytemuck = { version = "1", features = ["derive"] }
 memmap2 = "0.9"
 xorf = { version = "0.12", features = ["serde"] }
