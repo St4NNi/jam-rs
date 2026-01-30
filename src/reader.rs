@@ -56,6 +56,19 @@ impl LoadedFilter {
     }
 }
 
+/// Public wrapper for bucket filter access.
+pub struct BucketFilter<'a>(&'a LoadedFilter);
+
+impl BucketFilter<'_> {
+    /// Check if the filter might contain the given hash.
+    /// Returns true if the hash might be present (may have false positives).
+    /// Returns false if the hash is definitely not present.
+    #[inline]
+    pub fn contains(&self, hash: &u64) -> bool {
+        self.0.contains(hash)
+    }
+}
+
 pub struct JamReader {
     mmap: Mmap,
     header: Header,
@@ -74,12 +87,6 @@ impl JamReader {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
-
-        #[cfg(unix)]
-        {
-            use memmap2::Advice;
-            let _ = mmap.advise(Advice::Random);
-        }
 
         // Validate minimum size for header
         if mmap.len() < HEADER_SIZE {
@@ -278,6 +285,13 @@ impl JamReader {
         bytemuck::cast_slice(&self.mmap[start..end])
     }
 
+    /// Get the bloom filter for a specific bucket.
+    /// Returns None for empty buckets.
+    #[inline]
+    pub fn bucket_filter(&self, bucket_idx: usize) -> Option<BucketFilter<'_>> {
+        self.filters[bucket_idx].as_ref().map(BucketFilter)
+    }
+
     /// Check if a hash exists in the database (filter check + verification).
     #[inline]
     pub fn contains(&self, hash: u64) -> bool {
@@ -329,56 +343,6 @@ impl JamReader {
             .skip_while(move |e| e.hash < hash)
             .take_while(move |e| e.hash == hash)
             .map(|e| e.sample_id)
-    }
-
-    /// Search for multiple hashes in a bucket using a single sequential scan.
-    /// Input hashes must be sorted. Returns (hash, sample_id) pairs for matches.
-    pub fn search_batch(&self, bucket_idx: usize, sorted_hashes: &[u64]) -> Vec<(u64, u32)> {
-        if sorted_hashes.is_empty() {
-            return Vec::new();
-        }
-
-        // Filter check - any hash might be present?
-        let dominated = if let Some(ref filter) = self.filters[bucket_idx] {
-            sorted_hashes.iter().any(|h| filter.contains(h))
-        } else {
-            return Vec::new();
-        };
-
-        if !dominated {
-            return Vec::new();
-        }
-
-        let entries = self.bucket_entries(bucket_idx);
-        if entries.is_empty() {
-            return Vec::new();
-        }
-
-        // Find scan range
-        let first_hash = sorted_hashes[0];
-        let last_hash = *sorted_hashes.last().unwrap();
-        let start_pos = self.interpolation_find_start(entries, first_hash);
-
-        // Merge-join scan
-        let mut results = Vec::new();
-        let mut hash_idx = 0;
-
-        for entry in &entries[start_pos..] {
-            if entry.hash > last_hash {
-                break;
-            }
-
-            // Advance to current or next hash
-            while hash_idx < sorted_hashes.len() && sorted_hashes[hash_idx] < entry.hash {
-                hash_idx += 1;
-            }
-
-            if hash_idx < sorted_hashes.len() && sorted_hashes[hash_idx] == entry.hash {
-                results.push((entry.hash, entry.sample_id));
-            }
-        }
-
-        results
     }
 
     /// Interpolation search to find if hash exists.

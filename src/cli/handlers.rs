@@ -1,4 +1,5 @@
 use anyhow::Result;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 use std::{fs::remove_file, path::PathBuf};
 
@@ -159,6 +160,21 @@ pub fn handle_distance_command(
         eprintln!("Using embedded bias table from database");
     }
 
+    // Progress spinner
+    let spinner = if !silent {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .unwrap(),
+        );
+        sp.set_message("Loading query...");
+        sp.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(sp)
+    } else {
+        None
+    };
+
     // Use QuerySketch for all inputs (handles FASTA, FASTQ, and JAM)
     // Bias filtering uses the embedded bias table from the database
     let sketch = crate::query::QuerySketch::from_inputs(
@@ -169,13 +185,31 @@ pub fn handle_distance_command(
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if sketch.sample_count() == 0 {
+        if let Some(sp) = spinner {
+            sp.finish_and_clear();
+        }
         if !silent {
             eprintln!("No sequences found in input");
         }
         return Ok(());
     }
 
+    // Update spinner with query info
+    if let Some(ref sp) = spinner {
+        let db_samples = engine.reader().stats().sample_count;
+        sp.set_message(format!(
+            "Searching {} query hashes against {} db samples...",
+            sketch.total_entries(),
+            db_samples
+        ));
+    }
+
     let results = engine.query_sketch(&sketch);
+
+    // Finish spinner
+    if let Some(sp) = spinner {
+        sp.finish_and_clear();
+    }
 
     // Output
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
@@ -186,11 +220,12 @@ pub fn handle_distance_command(
 
     writeln!(
         writer,
-        "query\tdb_sample\thit_count\tquery_size\tdb_size\tcontainment\tdb_containment"
+        "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment"
     )?;
 
     for (query_idx, result) in results.iter().enumerate() {
         let query_name = &sketch.sample_names[query_idx];
+        let query_hashes = result.query_size;
 
         // Sort by containment descending
         let mut matches: Vec<_> = result
@@ -205,9 +240,11 @@ pub fn handle_distance_command(
                 .get(m.sample_id as usize)
                 .map(|s| s.as_str())
                 .unwrap_or("unknown");
-            let db_size = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
-            let db_containment = if db_size > 0 {
-                m.hit_count as f64 / db_size as f64
+            let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
+            let shared_hashes = m.hit_count;
+            let query_containment = m.containment;
+            let db_containment = if db_hashes > 0 {
+                shared_hashes as f64 / db_hashes as f64
             } else {
                 0.0
             };
@@ -217,10 +254,10 @@ pub fn handle_distance_command(
                 "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
                 query_name,
                 db_name,
-                m.hit_count,
-                result.query_size,
-                db_size,
-                m.containment,
+                shared_hashes,
+                query_hashes,
+                db_hashes,
+                query_containment,
                 db_containment
             )?;
         }

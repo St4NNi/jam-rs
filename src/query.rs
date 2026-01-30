@@ -408,6 +408,10 @@ impl QueryEngine {
     }
 
     /// Parallel query using a QuerySketch. Returns one QueryResult per query sample.
+    ///
+    /// Uses a filter + merge-join algorithm:
+    /// 1. Filter: Check bloom filter to skip hashes not in DB (fast, in-memory)
+    /// 2. Merge-join: For surviving hashes, merge-join against sorted DB entries
     pub fn query_sketch(&self, sketch: &QuerySketch) -> Vec<QueryResult> {
         use rayon::prelude::*;
 
@@ -415,54 +419,86 @@ impl QueryEngine {
             return Vec::new();
         }
 
-        // Track both hit counts and unique hashes found per query sample
+        // HitMap: (query_sample_id, db_sample_id) -> hit_count
+        // HashesFoundMap: query_sample_id -> count of unique hashes found
         type HitMap = HashMap<(u32, u32), u32>;
-        type HashesFoundMap = HashMap<u32, HashSet<u64>>;
+        type HashesFoundMap = HashMap<u32, u32>;
 
         let (merged_hits, merged_hashes_found): (HitMap, HashesFoundMap) = (0..BUCKET_COUNT)
             .into_par_iter()
             .fold(
                 || (HashMap::new(), HashMap::new()),
                 |(mut local_hits, mut local_hashes_found): (HitMap, HashesFoundMap), bucket_idx| {
-                    let bucket_entries = sketch.bucket(bucket_idx);
-                    if bucket_entries.is_empty() {
+                    let query_bucket = sketch.bucket(bucket_idx);
+                    if query_bucket.is_empty() {
                         return (local_hits, local_hashes_found);
                     }
 
-                    // Collect and sort unique hashes
-                    let mut hashes: Vec<u64> = bucket_entries.iter().map(|(h, _)| *h).collect();
-                    hashes.sort_unstable();
-                    hashes.dedup();
-
-                    // Batch search - single sequential scan
-                    let matches = self.reader.search_batch(bucket_idx, &hashes);
-
-                    // Build hash -> unique query_sample_ids lookup (dedup per hash)
-                    let mut hash_to_samples: HashMap<u64, Vec<u32>> = HashMap::new();
-                    for &(hash, query_sample_id) in bucket_entries {
-                        let entry = hash_to_samples.entry(hash).or_default();
-                        if entry.last().copied() != Some(query_sample_id) {
-                            entry.push(query_sample_id);
-                        }
+                    let db_bucket = self.reader.bucket_entries(bucket_idx);
+                    if db_bucket.is_empty() {
+                        return (local_hits, local_hashes_found);
                     }
 
-                    // Record hits and track unique hashes found
-                    for (hash, db_sample_id) in matches {
-                        if let Some(query_samples) = hash_to_samples.get(&hash) {
-                            for &query_sample_id in query_samples {
-                                // Use saturating_add to prevent overflow
-                                let count = local_hits
-                                    .entry((query_sample_id, db_sample_id))
-                                    .or_insert(0);
-                                *count = count.saturating_add(1);
+                    // Get filter for this bucket (if available)
+                    let filter = self.reader.bucket_filter(bucket_idx);
 
-                                // Track unique hashes found per query sample
-                                local_hashes_found
-                                    .entry(query_sample_id)
-                                    .or_default()
-                                    .insert(hash);
+                    let mut q_idx = 0;
+                    let mut d_idx = 0;
+
+                    while q_idx < query_bucket.len() {
+                        let q_hash = query_bucket[q_idx].0;
+
+                        // Step 1: Filter check (once per unique hash, fast in-memory)
+                        let dominated = match &filter {
+                            Some(f) => f.contains(&q_hash),
+                            None => false,
+                        };
+
+                        if !dominated {
+                            // Skip all query entries with this hash - not in DB
+                            while q_idx < query_bucket.len() && query_bucket[q_idx].0 == q_hash {
+                                q_idx += 1;
                             }
+                            continue;
                         }
+
+                        // Step 2: Advance DB pointer (merge-join style)
+                        while d_idx < db_bucket.len() && db_bucket[d_idx].hash < q_hash {
+                            d_idx += 1;
+                        }
+
+                        // Step 3: Find DB matches for this hash
+                        let db_start = d_idx;
+                        let mut db_end = d_idx;
+                        while db_end < db_bucket.len() && db_bucket[db_end].hash == q_hash {
+                            db_end += 1;
+                        }
+                        let has_matches = db_start < db_end;
+
+                        // Step 4: Process all query samples with this hash (with O(1) dedup)
+                        let mut prev_sample = u32::MAX;
+                        while q_idx < query_bucket.len() && query_bucket[q_idx].0 == q_hash {
+                            let q_sample = query_bucket[q_idx].1;
+
+                            // O(1) dedup: data is sorted by (hash, sample_id)
+                            if q_sample != prev_sample {
+                                if has_matches {
+                                    // Record hits for all DB samples with this hash
+                                    for db_entry in &db_bucket[db_start..db_end] {
+                                        *local_hits
+                                            .entry((q_sample, db_entry.sample_id))
+                                            .or_insert(0) += 1;
+                                    }
+                                    // Count unique hashes found per query sample
+                                    *local_hashes_found.entry(q_sample).or_insert(0) += 1;
+                                }
+                                prev_sample = q_sample;
+                            }
+                            q_idx += 1;
+                        }
+
+                        // Advance d_idx past this hash for next iteration
+                        d_idx = db_end;
                     }
 
                     (local_hits, local_hashes_found)
@@ -472,11 +508,10 @@ impl QueryEngine {
                 || (HashMap::new(), HashMap::new()),
                 |(mut hits_a, mut hashes_a), (hits_b, hashes_b)| {
                     for (key, count) in hits_b {
-                        let entry = hits_a.entry(key).or_insert(0);
-                        *entry = entry.saturating_add(count);
+                        *hits_a.entry(key).or_insert(0) += count;
                     }
-                    for (sample_id, hashes) in hashes_b {
-                        hashes_a.entry(sample_id).or_default().extend(hashes);
+                    for (sample_id, count) in hashes_b {
+                        *hashes_a.entry(sample_id).or_insert(0) += count;
                     }
                     (hits_a, hashes_a)
                 },
@@ -499,11 +534,10 @@ impl QueryEngine {
 
         for (query_sample_id, hits) in sample_hits.into_iter().enumerate() {
             let query_size = sketch.query_sizes[query_sample_id];
-            // hashes_found is the count of unique query hashes found in any db sample
             let hashes_found = merged_hashes_found
                 .get(&(query_sample_id as u32))
-                .map(|s| s.len())
-                .unwrap_or(0);
+                .copied()
+                .unwrap_or(0) as usize;
 
             let matches: Vec<SampleMatch> = hits
                 .into_iter()
