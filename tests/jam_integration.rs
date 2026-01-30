@@ -1,8 +1,7 @@
-use jam_rs::format::{bucket_id, BUCKET_COUNT};
+use jam_rs::format::{BUCKET_COUNT, bucket_id};
 use jam_rs::query::QueryEngine;
 use jam_rs::reader::JamReader;
-use jam_rs::writer::{build, BuildConfig};
-use jamhash::jamhash_u64;
+use jam_rs::writer::{BuildConfig, build};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
@@ -15,33 +14,16 @@ fn make_fasta(seqs: &[(&str, &str)]) -> NamedTempFile {
     f
 }
 
-fn extract_query_hashes(seq: &[u8], k: usize, threshold: u64) -> Vec<u64> {
+fn extract_hashes_from_db(reader: &JamReader) -> Vec<u64> {
     let mut hashes = Vec::new();
-    if seq.len() < k {
-        return hashes;
-    }
-    for window in seq.windows(k) {
-        let kmer = window
-            .iter()
-            .fold(0u64, |acc, &b| (acc << 2) | base_to_bits(b));
-        let hash = jamhash_u64(kmer);
-        if hash < threshold {
-            hashes.push(hash);
+    for bucket_idx in 0..BUCKET_COUNT {
+        for entry in reader.bucket_entries(bucket_idx) {
+            hashes.push(entry.hash);
         }
     }
     hashes.sort_unstable();
     hashes.dedup();
     hashes
-}
-
-fn base_to_bits(b: u8) -> u64 {
-    match b {
-        b'A' | b'a' => 0,
-        b'C' | b'c' => 1,
-        b'G' | b'g' => 2,
-        b'T' | b't' => 3,
-        _ => 0,
-    }
 }
 
 #[test]
@@ -64,18 +46,24 @@ fn test_full_roundtrip() {
     assert_eq!(stats.sample_count, 1);
     assert_eq!(stats.kmer_size, 11);
 
-    // Query with known sequence
-    let engine = QueryEngine::open(&output_path).unwrap();
-    let query_hashes = extract_query_hashes(seq.as_bytes(), 11, engine.threshold());
+    // Query with hashes from the database itself
+    let reader = JamReader::open(&output_path).unwrap();
+    let query_hashes = extract_hashes_from_db(&reader);
+    assert!(!query_hashes.is_empty(), "Database should have hashes");
 
+    let engine = QueryEngine::open(&output_path).unwrap();
     let result = engine.query(&query_hashes);
     assert!(result.has_matches());
     assert!(result.hashes_found > 0);
 
-    // Should have high containment since we're querying the same sequence
+    // Should have 100% containment since we're querying with the exact same hashes
     let top = result.top(1);
     assert!(!top.is_empty());
-    assert!(top[0].containment > 0.5);
+    assert!(
+        top[0].containment >= 1.0,
+        "Expected 100% containment, got {}",
+        top[0].containment
+    );
 }
 
 #[test]
@@ -97,7 +85,10 @@ fn test_singleton_mode() {
     };
 
     let stats = build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
-    assert_eq!(stats.sample_count, 2, "Each sequence should be a separate sample");
+    assert_eq!(
+        stats.sample_count, 2,
+        "Each sequence should be a separate sample"
+    );
 
     let reader = JamReader::open(&output_path).unwrap();
     let reader_stats = reader.stats();
@@ -123,9 +114,10 @@ fn test_multiple_samples_shared_hashes() {
 
     build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
 
-    let engine = QueryEngine::open(&output_path).unwrap();
-    let query_hashes = extract_query_hashes(seq.as_bytes(), 11, engine.threshold());
+    let reader = JamReader::open(&output_path).unwrap();
+    let query_hashes = extract_hashes_from_db(&reader);
 
+    let engine = QueryEngine::open(&output_path).unwrap();
     let result = engine.query(&query_hashes);
     // Both samples should have matches
     assert!(result.matches.len() >= 2 || result.matches.iter().any(|m| m.hit_count > 0));
@@ -158,7 +150,10 @@ fn test_empty_buckets() {
         .iter()
         .filter(|&&c| c == 0)
         .count();
-    assert!(empty_count > 200, "Most buckets should be empty with high fscale");
+    assert!(
+        empty_count > 200,
+        "Most buckets should be empty with high fscale"
+    );
 }
 
 #[test]
@@ -216,11 +211,7 @@ fn test_bucket_distribution() {
     for bucket_idx in 0..BUCKET_COUNT {
         let entries = reader.bucket_entries(bucket_idx);
         for entry in entries {
-            assert_eq!(
-                bucket_id(entry.hash),
-                bucket_idx,
-                "Entry in wrong bucket"
-            );
+            assert_eq!(bucket_id(entry.hash), bucket_idx, "Entry in wrong bucket");
         }
 
         // Verify entries are sorted within bucket

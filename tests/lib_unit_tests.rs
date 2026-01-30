@@ -51,7 +51,7 @@ fn test_expand_input_paths_single_file() -> Result<()> {
     let env = LibTestEnvironment::new()?;
     let test_file = env.create_test_fasta("test.fa", ">seq\nACGT\n")?;
 
-    let result = expand_input_paths(&[test_file.clone()])?;
+    let result = expand_input_paths(std::slice::from_ref(&test_file))?;
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0], test_file);

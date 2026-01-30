@@ -27,10 +27,18 @@ impl BiasTable {
             ));
         }
 
-        let pos_counts = count_hexamers(pos_path)
-            .with_context(|| format!("Failed to count hexamers in positive file: {}", pos_path.display()))?;
-        let neg_counts = count_hexamers(neg_path)
-            .with_context(|| format!("Failed to count hexamers in negative file: {}", neg_path.display()))?;
+        let pos_counts = count_hexamers(pos_path).with_context(|| {
+            format!(
+                "Failed to count hexamers in positive file: {}",
+                pos_path.display()
+            )
+        })?;
+        let neg_counts = count_hexamers(neg_path).with_context(|| {
+            format!(
+                "Failed to count hexamers in negative file: {}",
+                neg_path.display()
+            )
+        })?;
 
         let pos_total: u64 = pos_counts.iter().sum();
         let neg_total: u64 = neg_counts.iter().sum();
@@ -221,7 +229,8 @@ fn count_hexamers(path: &Path) -> Result<[u64; HEXAMER_COUNT]> {
             anyhow::bail!("Empty file: {}", path.display());
         }
         Err(e) => {
-            return Err(e).with_context(|| format!("Failed to parse FASTA file: {}", path.display()));
+            return Err(e)
+                .with_context(|| format!("Failed to parse FASTA file: {}", path.display()));
         }
     };
 
@@ -255,14 +264,8 @@ mod tests {
 
     #[test]
     fn test_bias_table_build() {
-        let pos = create_fasta(&[
-            "AAATATATATATATATATATATAT",
-            "TATATATATATATATATATATATA",
-        ]);
-        let neg = create_fasta(&[
-            "GCGCGCGCGCGCGCGCGCGCGCG",
-            "CGCGCGCGCGCGCGCGCGCGCGC",
-        ]);
+        let pos = create_fasta(&["AAATATATATATATATATATATAT", "TATATATATATATATATATATATA"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCG", "CGCGCGCGCGCGCGCGCGCGCGC"]);
 
         let table = BiasTable::build(pos.path(), neg.path(), 0.5).unwrap();
         assert_eq!(table.threshold, 0.5);
@@ -312,14 +315,8 @@ mod tests {
 
     #[test]
     fn test_passes_filter() {
-        let pos = create_fasta(&[
-            "AAATATATATATATATATATATAT",
-            "AATATAATATAATATAATATAATAT",
-        ]);
-        let neg = create_fasta(&[
-            "GCGCGCGCGCGCGCGCGCGCGCG",
-            "CGCGCGCGCGCGCGCGCGCGCGC",
-        ]);
+        let pos = create_fasta(&["AAATATATATATATATATATATAT", "AATATAATATAATATAATATAATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCG", "CGCGCGCGCGCGCGCGCGCGCGC"]);
 
         let table = BiasTable::build(pos.path(), neg.path(), 0.5).unwrap();
 

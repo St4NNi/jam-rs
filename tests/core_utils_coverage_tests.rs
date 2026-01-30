@@ -33,7 +33,11 @@ fn test_passes_entropy_filter() {
     assert!(passes_entropy_filter(low_complexity_kmer, kmer_length, 0.0));
 
     // High entropy threshold should filter out low-complexity k-mers
-    assert!(!passes_entropy_filter(low_complexity_kmer, kmer_length, 1.5));
+    assert!(!passes_entropy_filter(
+        low_complexity_kmer,
+        kmer_length,
+        1.5
+    ));
 }
 
 #[test]

@@ -22,7 +22,7 @@ fn do_hashes_u64(fcn: fn(u64) -> u64, data: &[u64]) -> Vec<u64> {
 /// Cumulative Distribution Function for the Uniform Distribution.
 fn cdf_uniform(x: u64) -> f64 {
     // Wish we had f128s. Gonna be issues here.
-    (x as f64) / (std::u64::MAX as f64)
+    (x as f64) / (u64::MAX as f64)
 }
 
 /// Compute the Kolmogorov-Smirnov test.
@@ -35,7 +35,7 @@ fn cdf_uniform(x: u64) -> f64 {
 fn ks(samples: &[u64]) -> f64 {
     let n = samples.len() as f64;
     let mut last_ecdf = 0.0f64;
-    let mut ks = std::f64::MIN;
+    let mut ks = f64::MIN;
     for (i, x) in samples.iter().enumerate() {
         let tcdf = (i as f64) / n;
         let next_ecdf = cdf_uniform(*x);
@@ -189,9 +189,9 @@ fn test_bit_distribution() {
 }
 
 fn unrolled_64bits(num: u64, nums: &mut [u64; 64]) {
-    for i in 0..64 {
+    for (i, count) in nums.iter_mut().enumerate() {
         if num & (1u64 << i) != 0 {
-            nums[i] += 1;
+            *count += 1;
         }
     }
 }

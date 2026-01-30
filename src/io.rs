@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::format::{Entry, ENTRY_SIZE};
+use crate::format::{ENTRY_SIZE, Entry};
 
 pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut expanded_paths = Vec::new();
@@ -147,11 +147,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.bin");
 
-        let entries = vec![
-            Entry::new(100, 1),
-            Entry::new(200, 2),
-            Entry::new(300, 3),
-        ];
+        let entries = vec![Entry::new(100, 1), Entry::new(200, 2), Entry::new(300, 3)];
 
         write_entries(&path, &entries).unwrap();
         let loaded = read_entries(&path).unwrap();
