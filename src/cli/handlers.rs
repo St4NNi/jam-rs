@@ -1,15 +1,11 @@
 use anyhow::Result;
-use needletail::Sequence;
-use std::collections::HashSet;
 use std::io::Write;
 use std::{fs::remove_file, path::PathBuf};
 
 use crate::bias::BiasTable;
-use crate::core_utils::passes_entropy_filter;
 use crate::query::QueryEngine;
 use crate::reader::JamReader;
-use crate::writer::{build, BuildConfig};
-use jamhash::jamhash_u64;
+use crate::writer::{BuildConfig, build};
 use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
@@ -141,7 +137,6 @@ pub fn handle_distance_command(
     cutoff: f64,
     singleton: bool,
     silent: bool,
-    bias_table_path: Option<PathBuf>,
 ) -> Result<()> {
     if !database_path.exists() {
         return Err(anyhow::anyhow!(
@@ -157,91 +152,77 @@ pub fn handle_distance_command(
     }
 
     let engine = QueryEngine::open(&database_path)?;
-    let threshold = engine.threshold();
-    let k = engine.kmer_size();
+    let db_names = engine.reader().sample_names();
+    let db_sizes = engine.reader().sample_sizes();
 
-    // Determine which bias table to use:
-    // 1. If --bias-table CLI arg provided, use that (with warning if different from embedded)
-    // 2. Otherwise use embedded bias table if present
-    // 3. Otherwise no bias filtering
-    let (bias_table, bias_source) = if let Some(ref path) = bias_table_path {
-        let external_bias = BiasTable::load(path)?;
-
-        // Check if embedded bias exists and differs from external
-        if let Some(ref embedded) = engine.bias_table() {
-            if embedded.as_ref() != &external_bias {
-                eprintln!(
-                    "Warning: External bias table differs from embedded bias in database. Using external."
-                );
-            }
-        }
-
-        (Some(external_bias), "external")
-    } else if let Some(embedded) = engine.bias_table() {
-        // Use Arc's inner value - clone the BiasTable
-        (Some((*embedded).clone()), "embedded")
-    } else {
-        (None, "none")
-    };
-
-    if !silent && bias_table.is_some() {
-        eprintln!("Using bias table: {}", bias_source);
+    if !silent && engine.has_bias_table() {
+        eprintln!("Using embedded bias table from database");
     }
 
+    // Use QuerySketch for all inputs (handles FASTA, FASTQ, and JAM)
+    // Bias filtering uses the embedded bias table from the database
+    let sketch = crate::query::QuerySketch::from_inputs(
+        std::slice::from_ref(&input_path),
+        engine.reader(),
+        singleton,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    if sketch.sample_count() == 0 {
+        if !silent {
+            eprintln!("No sequences found in input");
+        }
+        return Ok(());
+    }
+
+    let results = engine.query_sketch(&sketch);
+
+    // Output
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
         Box::new(std::fs::File::create(out)?)
     } else {
         Box::new(std::io::stdout())
     };
 
-    writeln!(writer, "query\tsample_id\thit_count\tcontainment")?;
+    writeln!(
+        writer,
+        "query\tdb_sample\thit_count\tquery_size\tdb_size\tcontainment\tdb_containment"
+    )?;
 
-    let mut reader = match needletail::parse_fastx_file(&input_path) {
-        Ok(reader) => reader,
-        Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
-            eprintln!("Empty file detected: {}, skipping", input_path.display());
-            return Ok(());
-        }
-        Err(e) => return Err(anyhow::anyhow!("{}", e)),
-    };
+    for (query_idx, result) in results.iter().enumerate() {
+        let query_name = &sketch.sample_names[query_idx];
 
-    if singleton {
-        while let Some(record) = reader.next() {
-            let record = record.map_err(|e| anyhow::anyhow!("{}", e))?;
-            let query_name = String::from_utf8_lossy(record.id()).to_string();
-            let hashes = extract_hashes(&record.seq(), k, threshold, 0.0, bias_table.as_ref());
+        // Sort by containment descending
+        let mut matches: Vec<_> = result
+            .matches
+            .iter()
+            .filter(|m| m.containment >= cutoff)
+            .collect();
+        matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
 
-            if hashes.is_empty() {
-                continue;
-            }
+        for m in matches {
+            let db_name = db_names
+                .get(m.sample_id as usize)
+                .map(|s| s.as_str())
+                .unwrap_or("unknown");
+            let db_size = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
+            let db_containment = if db_size > 0 {
+                m.hit_count as f64 / db_size as f64
+            } else {
+                0.0
+            };
 
-            let result = engine.query(&hashes);
-            for m in result.matches.iter().filter(|m| m.containment >= cutoff) {
-                writeln!(
-                    writer,
-                    "{}\t{}\t{}\t{:.6}",
-                    query_name, m.sample_id, m.hit_count, m.containment
-                )?;
-            }
-        }
-    } else {
-        let mut all_hashes = HashSet::new();
-        while let Some(record) = reader.next() {
-            let record = record.map_err(|e| anyhow::anyhow!("{}", e))?;
-            let hashes = extract_hashes(&record.seq(), k, threshold, 0.0, bias_table.as_ref());
-            all_hashes.extend(hashes);
-        }
-
-        let hashes: Vec<u64> = all_hashes.into_iter().collect();
-        if !hashes.is_empty() {
-            let result = engine.query(&hashes);
-            for m in result.matches.iter().filter(|m| m.containment >= cutoff) {
-                writeln!(
-                    writer,
-                    "combined\t{}\t{}\t{:.6}",
-                    m.sample_id, m.hit_count, m.containment
-                )?;
-            }
+            writeln!(
+                writer,
+                "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
+                query_name,
+                db_name,
+                m.hit_count,
+                result.query_size,
+                db_size,
+                m.containment,
+                db_containment
+            )?;
         }
     }
 
@@ -250,41 +231,6 @@ pub fn handle_distance_command(
     }
 
     Ok(())
-}
-
-fn extract_hashes(
-    sequence: &[u8],
-    k: u8,
-    threshold: u64,
-    min_entropy: f64,
-    bias_table: Option<&BiasTable>,
-) -> Vec<u64> {
-    let mut hashes = HashSet::new();
-    let norm = needletail::Sequence::normalize(sequence, false);
-
-    if norm.len() < k as usize {
-        return Vec::new();
-    }
-
-    for (_, kmer, _) in norm.bit_kmers(k, true) {
-        let hash = jamhash_u64(kmer.0);
-
-        if hash >= threshold {
-            continue;
-        }
-
-        if min_entropy > 0.0 && !passes_entropy_filter(kmer.0, k, min_entropy) {
-            continue;
-        }
-
-        if bias_table.is_some_and(|b| !b.passes_filter(kmer.0, k)) {
-            continue;
-        }
-
-        hashes.insert(hash);
-    }
-
-    hashes.into_iter().collect()
 }
 
 pub fn handle_bias_command(
@@ -370,10 +316,7 @@ pub fn handle_stats_command(
         println!();
         println!("K-mer size: {}", stats.kmer_size);
         println!("Hash threshold: {}", stats.hash_threshold);
-        println!(
-            "Sample rate: 1/{}",
-            u64::MAX / stats.hash_threshold.max(1)
-        );
+        println!("Sample rate: 1/{}", u64::MAX / stats.hash_threshold.max(1));
         println!(
             "Embedded bias table: {}",
             if stats.has_bias_table { "yes" } else { "no" }
