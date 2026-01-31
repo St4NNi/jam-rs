@@ -6,7 +6,6 @@ use needletail::{Sequence, parse_fastx_file};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Query sketch with sorted (hash, sample_id) pairs across 256 buckets.
 #[derive(Debug)]
@@ -63,7 +62,6 @@ impl QuerySketch {
         let stats = source.stats();
         let expected_sample_count = stats.sample_count as usize;
 
-        // Use sample names stored in the JAM file
         let sample_names = source.sample_names().to_vec();
         if sample_names.len() != expected_sample_count {
             return Err(QueryError::Parse {
@@ -76,11 +74,9 @@ impl QuerySketch {
             });
         }
 
-        // Use stored sample sizes directly (unique hash counts per sample)
         let stored_sizes = source.sample_sizes();
         let query_sizes: Vec<usize> = stored_sizes.iter().map(|&s| s as usize).collect();
 
-        // Load bucket entries
         let mut buckets: [Vec<(u64, u32)>; BUCKET_COUNT] = std::array::from_fn(|_| Vec::new());
         for (bucket_idx, bucket) in buckets.iter_mut().enumerate() {
             for entry in source.bucket_entries(bucket_idx) {
@@ -95,7 +91,6 @@ impl QuerySketch {
         })
     }
 
-    /// Build from FASTA/FASTQ using database parameters.
     pub fn from_fasta<P: AsRef<Path>>(
         input: P,
         db: &JamReader,
@@ -193,7 +188,6 @@ impl QuerySketch {
         })
     }
 
-    /// Build from multiple inputs (FASTA/FASTQ or .jam files).
     pub fn from_inputs(
         inputs: &[std::path::PathBuf],
         db: &JamReader,
@@ -418,202 +412,227 @@ impl QueryEngine {
         queries.par_iter().map(|q| self.query(q)).collect()
     }
 
-    /// Parallel query using a QuerySketch. Returns one QueryResult per query sample.
     pub fn query_sketch(&self, sketch: &QuerySketch) -> Vec<QueryResult> {
+        use crate::format::{ENTRY_SIZE, PAGE_SIZE};
         use rayon::prelude::*;
+        use std::sync::atomic::{AtomicU32, Ordering};
 
         let num_samples = sketch.sample_count();
         if num_samples == 0 {
             return Vec::new();
         }
 
-        // Per-sample hit maps: Vec index = query_sample_id, HashMap key = db_sample_id
-        // This avoids hashing the query_sample_id on every insert (just index into Vec)
-        type PerSampleHits = Vec<HashMap<u32, u32>>;
-        type HashesFoundVec = Vec<u32>;
-
         let threshold = self.reader.threshold();
 
-        let failed_buckets = AtomicUsize::new(0);
+        // Disable read-ahead since our access is query-driven, not sequential
+        self.reader.advise_random();
 
-        const MAX_CONCURRENT_BUCKETS: usize = 32;
-        let query_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(MAX_CONCURRENT_BUCKETS)
-            .build()
-            .expect("Failed to create query thread pool");
-
-        let (merged_hits, merged_hashes_found): (PerSampleHits, HashesFoundVec) = query_pool.install(|| {
-            (0..BUCKET_COUNT)
+        let hashes_found: Vec<AtomicU32> = (0..num_samples)
             .into_par_iter()
-            .fold(
-                || {
-                    (
-                        vec![HashMap::new(); num_samples],
-                        vec![0u32; num_samples],
-                    )
-                },
-                |(mut local_hits, mut local_hashes_found): (PerSampleHits, HashesFoundVec),
-                 bucket_idx| {
-                    let query_bucket = sketch.bucket(bucket_idx);
-                    if query_bucket.is_empty() {
-                        return (local_hits, local_hashes_found);
+            .map(|_| AtomicU32::new(0))
+            .collect();
+
+        let bucket_pairs: Vec<Vec<(u32, u32)>> = (0..BUCKET_COUNT)
+            .into_par_iter()
+            .map(|bucket_idx| {
+                let mut pairs = Vec::new();
+                let query_bucket = sketch.bucket(bucket_idx);
+                if query_bucket.is_empty() {
+                    return pairs;
+                }
+
+                let filter = match self.reader.bucket_filter(bucket_idx) {
+                    Some(f) => f,
+                    None => return pairs,
+                };
+
+                let mut survivors = Vec::with_capacity(query_bucket.len() / 10);
+                let mut prev_hash = u64::MAX;
+                let mut prev_passed = false;
+
+                for &(hash, sample_id) in query_bucket {
+                    if hash != prev_hash {
+                        prev_hash = hash;
+                        prev_passed = filter.contains(&hash);
+                    }
+                    if prev_passed {
+                        survivors.push((hash, sample_id));
+                    }
+                }
+
+                // Done with filter - release those pages
+                let (filter_start, filter_end) = self.reader.bucket_filter_byte_range(bucket_idx);
+                self.reader.release_pages(filter_start, filter_end);
+
+                if survivors.is_empty() {
+                    return pairs;
+                }
+
+                let db_bucket = self.reader.bucket_entries(bucket_idx);
+                let count = db_bucket.len();
+                if count == 0 {
+                    return pairs;
+                }
+
+                let (entry_start, _entry_end) = self.reader.bucket_entry_byte_range(bucket_idx);
+                let mut last_released_page = entry_start & !(PAGE_SIZE - 1);
+
+                let mut q_idx = 0;
+                while q_idx < survivors.len() {
+                    let q_hash = survivors[q_idx].0;
+
+                    let est = ((q_hash as u128 * count as u128) / threshold as u128) as usize;
+                    let mut d_idx = est.saturating_sub(16).min(count.saturating_sub(1));
+
+                    while d_idx > 0 && db_bucket[d_idx].hash > q_hash {
+                        d_idx -= 1;
                     }
 
-                    // Open per-bucket mmap region (will be dropped at end of this closure)
-                    let bucket_region = match self.reader.open_bucket_region(bucket_idx) {
-                        Ok(r) => r,
-                        Err(_) => {
-                            // Track failure instead of silently ignoring
-                            failed_buckets.fetch_add(1, Ordering::Relaxed);
-                            return (local_hits, local_hashes_found);
-                        }
-                    };
-
-                    if bucket_region.is_empty() {
-                        return (local_hits, local_hashes_found);
+                    while d_idx < count && db_bucket[d_idx].hash < q_hash {
+                        d_idx += 1;
                     }
 
-                    // Phase 1: Filter query hashes using bucket's bloom filter
-                    let mut survivors = Vec::with_capacity(query_bucket.len() / 10);
-                    let mut prev_hash = u64::MAX;
-                    let mut prev_passed = false;
-
-                    for &(hash, sample_id) in query_bucket {
-                        if hash != prev_hash {
-                            prev_hash = hash;
-                            prev_passed = bucket_region.filter_contains(&hash);
-                        }
-                        if prev_passed {
-                            survivors.push((hash, sample_id));
-                        }
+                    while d_idx > 0 && db_bucket[d_idx - 1].hash == q_hash {
+                        d_idx -= 1;
                     }
 
-                    if survivors.is_empty() {
-                        return (local_hits, local_hashes_found);
+                    // Progressive page release: release pages before current position
+                    let current_byte = entry_start + d_idx * ENTRY_SIZE;
+                    let current_page = current_byte & !(PAGE_SIZE - 1);
+                    if current_page > last_released_page + PAGE_SIZE {
+                        // Release pages we've passed (keep one page buffer for backtracking)
+                        self.reader.release_pages(last_released_page, current_page - PAGE_SIZE);
+                        last_released_page = current_page - PAGE_SIZE;
                     }
 
-                    // Phase 2: Lookup survivors in bucket entries
-                    let db_bucket = bucket_region.entries();
-                    let count = db_bucket.len();
-                    if count == 0 {
-                        return (local_hits, local_hashes_found);
+                    let db_start = d_idx;
+                    let mut db_end = d_idx;
+                    while db_end < count && db_bucket[db_end].hash == q_hash {
+                        db_end += 1;
                     }
+                    let has_matches = db_start < db_end;
 
-                    let mut q_idx = 0;
-                    while q_idx < survivors.len() {
-                        let q_hash = survivors[q_idx].0;
+                    let mut prev_sample = u32::MAX;
+                    while q_idx < survivors.len() && survivors[q_idx].0 == q_hash {
+                        let q_sample = survivors[q_idx].1;
 
-                        // Interpolate position: hash / threshold * count
-                        let est = ((q_hash as u128 * count as u128) / threshold as u128) as usize;
-                        let mut d_idx = est.saturating_sub(16).min(count.saturating_sub(1));
-
-                        // Backtrack if overshot
-                        while d_idx > 0 && db_bucket[d_idx].hash > q_hash {
-                            d_idx -= 1;
-                        }
-
-                        // Forward scan to exact position
-                        while d_idx < count && db_bucket[d_idx].hash < q_hash {
-                            d_idx += 1;
-                        }
-
-                        // Backtrack to find FIRST entry with this hash
-                        // (critical: interpolation may land mid-run of duplicates)
-                        while d_idx > 0 && db_bucket[d_idx - 1].hash == q_hash {
-                            d_idx -= 1;
-                        }
-
-                        // Find all DB entries with this hash
-                        let db_start = d_idx;
-                        let mut db_end = d_idx;
-                        while db_end < count && db_bucket[db_end].hash == q_hash {
-                            db_end += 1;
-                        }
-                        let has_matches = db_start < db_end;
-
-                        // Process all query samples with this hash
-                        let mut prev_sample = u32::MAX;
-                        while q_idx < survivors.len() && survivors[q_idx].0 == q_hash {
-                            let q_sample = survivors[q_idx].1;
-
-                            if q_sample != prev_sample {
-                                if has_matches {
-                                    let sample_hits = &mut local_hits[q_sample as usize];
-                                    for db_entry in &db_bucket[db_start..db_end] {
-                                        *sample_hits.entry(db_entry.sample_id).or_insert(0) += 1;
-                                    }
-                                    local_hashes_found[q_sample as usize] += 1;
+                        if q_sample != prev_sample {
+                            if has_matches {
+                                for db_entry in &db_bucket[db_start..db_end] {
+                                    pairs.push((q_sample, db_entry.sample_id));
                                 }
-                                prev_sample = q_sample;
+                                hashes_found[q_sample as usize].fetch_add(1, Ordering::Relaxed);
                             }
-                            q_idx += 1;
+                            prev_sample = q_sample;
                         }
+                        q_idx += 1;
                     }
+                }
 
-                    // bucket_region is dropped here, releasing the mmap
-                    // On Linux, madvise(MADV_DONTNEED) is called automatically by the kernel
-                    // when the mmap is unmapped
-                    (local_hits, local_hashes_found)
-                },
-            )
-            .reduce(
-                || {
-                    (
-                        vec![HashMap::new(); num_samples],
-                        vec![0u32; num_samples],
-                    )
-                },
-                |(mut hits_a, mut hashes_a), (hits_b, hashes_b)| {
-                    for (i, hits) in hits_b.into_iter().enumerate() {
-                        for (db_sample_id, count) in hits {
-                            *hits_a[i].entry(db_sample_id).or_insert(0) += count;
-                        }
-                    }
-                    for (i, count) in hashes_b.into_iter().enumerate() {
-                        hashes_a[i] += count;
-                    }
-                    (hits_a, hashes_a)
-                },
-            )
-        });
+                self.reader.release_bucket(bucket_idx);
 
-        // Warn if any buckets failed to mmap (indicates potential I/O or resource issues)
-        let num_failed = failed_buckets.load(Ordering::Relaxed);
-        if num_failed > 0 {
-            eprintln!(
-                "Warning: {} bucket(s) failed to mmap during query (results may be incomplete)",
-                num_failed
-            );
+                pairs
+            })
+            .collect();
+
+        // Calculate offsets for parallel concatenation (prefix sum)
+        let bucket_sizes: Vec<usize> = bucket_pairs.iter().map(|v| v.len()).collect();
+        let total_pairs: usize = bucket_sizes.iter().sum();
+        let mut bucket_offsets = Vec::with_capacity(BUCKET_COUNT + 1);
+        bucket_offsets.push(0usize);
+        for size in &bucket_sizes {
+            bucket_offsets.push(bucket_offsets.last().unwrap() + size);
         }
 
-        // Build QueryResults from merged data
-        merged_hits
-            .into_iter()
-            .zip(merged_hashes_found.into_iter())
+        let mut all_pairs: Vec<(u32, u32)> = vec![(0, 0); total_pairs];
+        bucket_pairs
+            .into_par_iter()
             .enumerate()
-            .map(|(query_sample_id, (hits, hashes_found))| {
-                let query_size = sketch.query_sizes[query_sample_id];
-                let matches: Vec<SampleMatch> = hits
-                    .into_iter()
-                    .map(|(db_sample_id, hit_count)| SampleMatch {
-                        sample_id: db_sample_id,
-                        hit_count,
+            .for_each(|(bucket_idx, pairs)| {
+                let start = bucket_offsets[bucket_idx];
+                // Safety: each bucket writes to non-overlapping slice
+                let dest = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        all_pairs.as_ptr().add(start) as *mut (u32, u32),
+                        pairs.len(),
+                    )
+                };
+                dest.copy_from_slice(&pairs);
+            });
+
+        let merged_hashes_found: Vec<u32> = hashes_found
+            .into_par_iter()
+            .map(|a| a.load(Ordering::Relaxed))
+            .collect();
+
+        all_pairs.par_sort_unstable();
+
+        if all_pairs.is_empty() {
+            return (0..num_samples)
+                .map(|i| QueryResult {
+                    query_size: sketch.query_sizes[i],
+                    hashes_found: merged_hashes_found[i] as usize,
+                    matches: Vec::new(),
+                    failed_bucket_count: 0,
+                })
+                .collect();
+        }
+
+        let sample_starts: Vec<usize> = (0..num_samples as u32)
+            .into_par_iter()
+            .map(|q_sample| {
+                all_pairs
+                    .partition_point(|&(qs, _)| qs < q_sample)
+            })
+            .collect();
+
+        // Process each query sample's range in parallel
+        let results: Vec<QueryResult> = (0..num_samples)
+            .into_par_iter()
+            .map(|sample_idx| {
+                let q_sample = sample_idx as u32;
+                let start = sample_starts[sample_idx];
+                let end = if sample_idx + 1 < num_samples {
+                    sample_starts[sample_idx + 1]
+                } else {
+                    all_pairs.len()
+                };
+
+                let mut matches = Vec::new();
+                let query_size = sketch.query_sizes[sample_idx];
+
+                // Count consecutive (q_sample, db_sample) pairs within this sample's range
+                let mut i = start;
+                while i < end {
+                    let (_, db_sample) = all_pairs[i];
+                    let mut count = 1u32;
+                    while i + (count as usize) < end
+                        && all_pairs[i + count as usize] == (q_sample, db_sample)
+                    {
+                        count += 1;
+                    }
+                    matches.push(SampleMatch {
+                        sample_id: db_sample,
+                        hit_count: count,
                         containment: if query_size > 0 {
-                            hit_count as f64 / query_size as f64
+                            count as f64 / query_size as f64
                         } else {
                             0.0
                         },
-                    })
-                    .collect();
+                    });
+                    i += count as usize;
+                }
 
                 QueryResult {
                     query_size,
-                    hashes_found: hashes_found as usize,
+                    hashes_found: merged_hashes_found[sample_idx] as usize,
                     matches,
-                    failed_bucket_count: num_failed,
+                    failed_bucket_count: 0,
                 }
             })
-            .collect()
+            .collect();
+
+        results
     }
 
     pub fn query_fasta<P: AsRef<Path>>(

@@ -228,7 +228,7 @@ fn validate_mmap_header(mmap: &Mmap, path: &Path) -> Result<[u8; 2], SketchError
 }
 
 fn scan_fasta_boundaries(data: &[u8]) -> Vec<usize> {
-    let mut bounds = vec![0]; // First record starts at byte 0
+    let mut bounds = vec![0];
     bounds.extend(
         data.windows(2)
             .enumerate()
@@ -437,7 +437,6 @@ fn build_work_units(
     let skip_mmap = input_files.len() > MAX_CONCURRENT_MMAPS || total_input_bytes > memory_bytes;
 
     if skip_mmap {
-        // Parallel header validation with progress
         let validation_pb = if show_progress {
             let pb = ProgressBar::new(input_files.len() as u64);
             pb.set_style(
@@ -451,7 +450,6 @@ fn build_work_units(
             None
         };
 
-        // Validate headers in parallel using rayon
         let validation_results: Vec<Result<(), SketchError>> = input_files
             .par_iter()
             .map(|path| {
@@ -467,7 +465,6 @@ fn build_work_units(
             pb.finish_with_message("validation complete");
         }
 
-        // Check for any validation errors
         for result in validation_results {
             result?;
         }
@@ -487,7 +484,6 @@ fn build_work_units(
         });
     }
 
-    // Mmap files and categorize
     let mut flat_positions: Vec<(Arc<Mmap>, Arc<PathBuf>, usize, usize)> = Vec::new();
     let mut compressed_files: Vec<(Arc<Mmap>, Arc<PathBuf>)> = Vec::new();
 
@@ -575,14 +571,11 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
 
     let (result_tx, result_rx) = std::sync::mpsc::channel();
 
-    // Create DashMap for sample names
     let sample_names_map: DashMap<u32, String> = DashMap::new();
 
-    // Count total files to process
     let total_files: u64 = thread_work.iter().map(|w| w.len() as u64).sum();
     let files_processed = Arc::new(AtomicU64::new(0));
 
-    // Set up progress bar if enabled
     let progress_bar = if config.show_progress {
         let pb = ProgressBar::new(total_files);
         pb.set_style(
@@ -625,7 +618,6 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         drop(result_tx);
     });
 
-    // Finish progress bar
     if let Some(pb) = progress_bar {
         let final_samples = sample_counter.load(Ordering::SeqCst);
         pb.finish_with_message(format!("{} samples", final_samples));
@@ -690,7 +682,6 @@ fn process_thread_work(
                     "Empty file detected: {}, skipping",
                     unit.source_path.display()
                 );
-                // Update progress and continue to next file
                 let processed = files_processed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(pb) = progress_bar {
                     pb.set_position(processed);
@@ -713,7 +704,6 @@ fn process_thread_work(
             &mut bucket_writers,
         )?;
 
-        // Update progress after each file is processed
         let processed = files_processed.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(pb) = progress_bar {
             pb.set_position(processed);
@@ -766,7 +756,6 @@ fn sketch_records(
         let sample_id =
             file_sample_id.unwrap_or_else(|| ctx.sample_counter.fetch_add(1, Ordering::SeqCst));
 
-        // Set sample name (only once per sample_id)
         if !ctx.sample_names.contains_key(&sample_id) {
             let name = if file_sample_id.is_some() {
                 // Combined mode: use source_path filename WITH extension

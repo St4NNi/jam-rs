@@ -12,7 +12,7 @@ use std::sync::Arc;
 use xorf::{BinaryFuse8Ref, Filter, FilterRef};
 
 #[cfg(unix)]
-use memmap2::Advice;
+use memmap2::{Advice, UncheckedAdvice};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReaderError {
@@ -44,23 +44,20 @@ pub struct ReaderStats {
     pub has_bias_table: bool,
 }
 
-/// Heap-owned filter data that can be used to construct BinaryFuse8Ref on demand.
+/// Zero-copy filter metadata - stores offsets into mmap instead of copying data.
 /// The descriptor is small (20 bytes) and stays hot in L1 cache.
-struct LoadedFilter {
-    descriptor: [u8; FILTER_DESCRIPTOR_SIZE],
-    fingerprints: Vec<u8>,
+/// Fingerprints are accessed directly from mmap on each contains() call.
+struct FilterMeta {
+    descriptor_offset: usize,
+    fingerprints_offset: usize,
+    fingerprints_size: usize,
 }
 
-impl LoadedFilter {
-    /// Check if the filter might contain the given hash.
-    #[inline]
-    fn contains(&self, hash: &u64) -> bool {
-        BinaryFuse8Ref::from_dma(&self.descriptor, &self.fingerprints).contains(hash)
-    }
+/// Public wrapper for bucket filter access (zero-copy from mmap).
+pub struct BucketFilter<'a> {
+    mmap: &'a [u8],
+    meta: &'a FilterMeta,
 }
-
-/// Public wrapper for bucket filter access.
-pub struct BucketFilter<'a>(&'a LoadedFilter);
 
 impl BucketFilter<'_> {
     /// Check if the filter might contain the given hash.
@@ -68,7 +65,11 @@ impl BucketFilter<'_> {
     /// Returns false if the hash is definitely not present.
     #[inline]
     pub fn contains(&self, hash: &u64) -> bool {
-        self.0.contains(hash)
+        let descriptor =
+            &self.mmap[self.meta.descriptor_offset..self.meta.descriptor_offset + FILTER_DESCRIPTOR_SIZE];
+        let fingerprints =
+            &self.mmap[self.meta.fingerprints_offset..self.meta.fingerprints_offset + self.meta.fingerprints_size];
+        BinaryFuse8Ref::from_dma(descriptor, fingerprints).contains(hash)
     }
 }
 
@@ -91,8 +92,6 @@ pub struct BucketRegion {
 }
 
 impl BucketRegion {
-    /// Check if a hash might exist in this bucket (bloom filter check).
-    /// Uses cached filter metadata to avoid re-parsing the filter header on each call.
     #[inline]
     pub fn filter_contains(&self, hash: &u64) -> bool {
         let meta = match &self.filter_meta {
@@ -107,7 +106,6 @@ impl BucketRegion {
         BinaryFuse8Ref::from_dma(descriptor, fingerprints).contains(hash)
     }
 
-    /// Get entries slice from this bucket region.
     #[inline]
     pub fn entries(&self) -> &[Entry] {
         if self.entry_count == 0 {
@@ -118,13 +116,11 @@ impl BucketRegion {
         bytemuck::cast_slice(&self.mmap[start..end])
     }
 
-    /// Number of entries in this bucket.
     #[inline]
     pub fn entry_count(&self) -> usize {
         self.entry_count
     }
 
-    /// Whether this bucket is empty (no filter, no entries).
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.filter_size == 0 && self.entry_count == 0
@@ -136,7 +132,7 @@ pub struct JamReader {
     mmap: Mmap,
     header: Header,
     bucket_table: Vec<BucketMeta>,
-    filters: Vec<Option<LoadedFilter>>, // None for empty buckets
+    filters: Vec<Option<FilterMeta>>, // None for empty buckets - zero-copy offsets into mmap
     bias_table: Option<Arc<BiasTable>>,
     sample_names: Vec<String>,
     sample_sizes: Vec<u64>, // hash count per sample
@@ -176,7 +172,7 @@ impl JamReader {
         let bucket_table: Vec<BucketMeta> =
             bytemuck::cast_slice(&mmap[HEADER_SIZE..table_end]).to_vec();
 
-        // Load all filters into heap memory
+        // Load filter metadata (zero-copy - just offsets into mmap)
         let mut filters = Vec::with_capacity(BUCKET_COUNT);
         for (i, meta) in bucket_table.iter().enumerate() {
             if meta.filter_size == 0 {
@@ -184,8 +180,8 @@ impl JamReader {
                 continue;
             }
 
-            let filter = parse_filter(&mmap, meta, i)?;
-            filters.push(Some(filter));
+            let filter_meta = parse_filter_meta(&mmap, meta, i)?;
+            filters.push(Some(filter_meta));
         }
 
         // Load embedded bias table if present
@@ -323,8 +319,6 @@ impl JamReader {
             let _ = mmap.advise(Advice::Sequential);
         }
 
-        // Parse and cache filter metadata once (avoids re-parsing on each filter_contains call)
-        // Validates descriptor size matches expected FILTER_DESCRIPTOR_SIZE to catch corrupt filters
         let filter_meta = if meta.filter_size > 0 {
             let filter_data_start = data_offset;
             let filter_data =
@@ -386,31 +380,26 @@ impl JamReader {
         })
     }
 
-    /// Get bucket metadata for calculating region bounds.
     #[inline]
     pub fn bucket_meta(&self, bucket_idx: usize) -> &BucketMeta {
         &self.bucket_table[bucket_idx]
     }
 
-    /// Get the hash threshold used for FracMinHash filtering.
     #[inline]
     pub fn threshold(&self) -> u64 {
         self.header.hash_threshold
     }
 
-    /// Get the k-mer size used when building this database.
     #[inline]
     pub fn kmer_size(&self) -> u8 {
         self.header.kmer_size
     }
 
-    /// Get the embedded bias table, if one was stored during database creation.
     #[inline]
     pub fn bias_table(&self) -> Option<Arc<BiasTable>> {
         self.bias_table.clone()
     }
 
-    /// Check if the database has an embedded bias table.
     #[inline]
     pub fn has_bias_table(&self) -> bool {
         self.bias_table.is_some()
@@ -432,7 +421,6 @@ impl JamReader {
         self.sample_sizes.get(id as usize).copied()
     }
 
-    /// Get statistics about this database.
     pub fn stats(&self) -> ReaderStats {
         let mut bucket_entry_counts = [0u64; BUCKET_COUNT];
         for (i, meta) in self.bucket_table.iter().enumerate() {
@@ -451,7 +439,6 @@ impl JamReader {
         }
     }
 
-    /// Get entries for a specific bucket as a slice.
     #[inline]
     pub fn bucket_entries(&self, bucket_idx: usize) -> &[Entry] {
         let meta = &self.bucket_table[bucket_idx];
@@ -464,20 +451,78 @@ impl JamReader {
         bytemuck::cast_slice(&self.mmap[start..end])
     }
 
-    /// Get the bloom filter for a specific bucket.
-    /// Returns None for empty buckets.
     #[inline]
-    pub fn bucket_filter(&self, bucket_idx: usize) -> Option<BucketFilter<'_>> {
-        self.filters[bucket_idx].as_ref().map(BucketFilter)
+    pub fn bucket_entry_byte_range(&self, bucket_idx: usize) -> (usize, usize) {
+        let meta = &self.bucket_table[bucket_idx];
+        let start = meta.entry_offset as usize;
+        let end = start + (meta.entry_count as usize) * ENTRY_SIZE;
+        (start, end)
     }
 
-    /// Check if a hash exists in the database (filter check + verification).
+    #[inline]
+    pub fn bucket_filter_byte_range(&self, bucket_idx: usize) -> (usize, usize) {
+        let meta = &self.bucket_table[bucket_idx];
+        let start = meta.filter_offset as usize;
+        let end = start + meta.filter_size as usize;
+        (start, end)
+    }
+
+    /// Advise kernel we're done with pages in the given byte range.
+    /// Pages are released back to the OS, reducing RSS.
+    #[cfg(unix)]
+    pub fn release_pages(&self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        // Align to page boundaries
+        let page_start = start & !(PAGE_SIZE - 1);
+        let page_end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let len = page_end.saturating_sub(page_start);
+        if len > 0 && page_end <= self.mmap.len() {
+            // Safety: DontNeed is safe - it just tells kernel pages can be discarded
+            let _ = unsafe {
+                self.mmap
+                    .unchecked_advise_range(UncheckedAdvice::DontNeed, page_start, len)
+            };
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn release_pages(&self, _start: usize, _end: usize) {
+        // No-op on non-Unix platforms
+    }
+
+    pub fn release_bucket(&self, bucket_idx: usize) {
+        let (filter_start, filter_end) = self.bucket_filter_byte_range(bucket_idx);
+        let (entry_start, entry_end) = self.bucket_entry_byte_range(bucket_idx);
+        self.release_pages(filter_start, filter_end);
+        self.release_pages(entry_start, entry_end);
+    }
+
+    /// Hint to kernel that access will be random (disables read-ahead).
+    #[cfg(unix)]
+    pub fn advise_random(&self) {
+        let _ = self.mmap.advise(Advice::Random);
+    }
+
+    #[cfg(not(unix))]
+    pub fn advise_random(&self) {
+        // No-op on non-Unix platforms
+    }
+
+    #[inline]
+    pub fn bucket_filter(&self, bucket_idx: usize) -> Option<BucketFilter<'_>> {
+        self.filters[bucket_idx].as_ref().map(|meta| BucketFilter {
+            mmap: &self.mmap,
+            meta,
+        })
+    }
+
     #[inline]
     pub fn contains(&self, hash: u64) -> bool {
         let bucket_idx = bucket_id(hash);
 
-        // Filter check first
-        if let Some(ref filter) = self.filters[bucket_idx] {
+        if let Some(filter) = self.bucket_filter(bucket_idx) {
             if !filter.contains(&hash) {
                 return false; // Definitely not present
             }
@@ -490,19 +535,13 @@ impl JamReader {
         self.interpolation_search(entries, hash).is_some()
     }
 
-    /// Search for all sample IDs containing a hash.
-    ///
-    /// Returns an iterator over sample IDs. Uses filter check + interpolation search.
     #[inline]
     pub fn search(&self, hash: u64) -> impl Iterator<Item = u32> + '_ {
         let bucket_idx = bucket_id(hash);
 
-        // Filter check first
-        let dominated = if let Some(ref filter) = self.filters[bucket_idx] {
-            filter.contains(&hash)
-        } else {
-            false
-        };
+        let dominated = self
+            .bucket_filter(bucket_idx)
+            .is_some_and(|f| f.contains(&hash));
 
         let entries = if dominated {
             self.bucket_entries(bucket_idx)
@@ -524,7 +563,6 @@ impl JamReader {
             .map(|e| e.sample_id)
     }
 
-    /// Interpolation search to find if hash exists.
     fn interpolation_search(&self, entries: &[Entry], key: u64) -> Option<usize> {
         if entries.is_empty() {
             return None;
@@ -532,7 +570,6 @@ impl JamReader {
 
         let start = self.interpolation_find_start(entries, key);
 
-        // Forward scan to find exact match
         for (i, entry) in entries[start..].iter().enumerate() {
             if entry.hash == key {
                 return Some(start + i);
@@ -615,12 +652,12 @@ fn parse_sample_sizes(data: &[u8]) -> Vec<u64> {
         .collect()
 }
 
-/// Parse filter data from mmap into heap-owned LoadedFilter.
-fn parse_filter(
+/// Parse filter metadata from mmap - zero-copy, just stores offsets.
+fn parse_filter_meta(
     mmap: &Mmap,
     meta: &BucketMeta,
     bucket_idx: usize,
-) -> Result<LoadedFilter, ReaderError> {
+) -> Result<FilterMeta, ReaderError> {
     let start = meta.filter_offset as usize;
     let end = start + meta.filter_size as usize;
 
@@ -667,16 +704,10 @@ fn parse_filter(
         });
     }
 
-    let descriptor_data = &data[8..8 + descriptor_size];
-    let fingerprints_data = &data[8 + descriptor_size..8 + descriptor_size + fingerprints_size];
-
-    // Copy to heap-owned storage
-    let mut descriptor = [0u8; FILTER_DESCRIPTOR_SIZE];
-    descriptor.copy_from_slice(descriptor_data);
-
-    Ok(LoadedFilter {
-        descriptor,
-        fingerprints: fingerprints_data.to_vec(),
+    Ok(FilterMeta {
+        descriptor_offset: start + 8,
+        fingerprints_offset: start + 8 + descriptor_size,
+        fingerprints_size,
     })
 }
 

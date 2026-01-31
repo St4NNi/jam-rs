@@ -189,8 +189,6 @@ pub fn handle_distance_command(
         sp.set_message("[2/4] Loading query...");
     }
 
-    // Use QuerySketch for all inputs (handles FASTA, FASTQ, and JAM)
-    // Bias filtering uses the embedded bias table from the database
     let phase_start = Instant::now();
     let sketch = crate::query::QuerySketch::from_inputs(
         std::slice::from_ref(&input_path),
@@ -238,6 +236,61 @@ pub fn handle_distance_command(
 
     let phase_start = Instant::now();
 
+    use rayon::prelude::*;
+
+    let formatted_chunks: Vec<String> = results
+        .par_iter()
+        .enumerate()
+        .map(|(query_idx, result)| {
+            let query_name = &sketch.sample_names[query_idx];
+            let query_hashes = result.query_size;
+
+            let mut matches: Vec<_> = result
+                .matches
+                .iter()
+                .filter(|m| m.containment >= cutoff)
+                .collect();
+
+            if matches.is_empty() {
+                return String::new();
+            }
+
+            matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
+
+            let mut chunk = String::with_capacity(matches.len() * 100);
+
+            for m in &matches {
+                let db_name = db_names
+                    .get(m.sample_id as usize)
+                    .map(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
+                let shared_hashes = m.hit_count;
+                let query_containment = m.containment;
+                let db_containment = if db_hashes > 0 {
+                    shared_hashes as f64 / db_hashes as f64
+                } else {
+                    0.0
+                };
+
+                use std::fmt::Write;
+                let _ = writeln!(
+                    chunk,
+                    "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
+                    query_name,
+                    db_name,
+                    shared_hashes,
+                    query_hashes,
+                    db_hashes,
+                    query_containment,
+                    db_containment
+                );
+            }
+
+            chunk
+        })
+        .collect();
+
     const WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
         Box::new(std::io::BufWriter::with_capacity(
@@ -256,43 +309,9 @@ pub fn handle_distance_command(
         "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment"
     )?;
 
-    for (query_idx, result) in results.iter().enumerate() {
-        let query_name = &sketch.sample_names[query_idx];
-        let query_hashes = result.query_size;
-
-        // Sort by containment descending
-        let mut matches: Vec<_> = result
-            .matches
-            .iter()
-            .filter(|m| m.containment >= cutoff)
-            .collect();
-        matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
-
-        for m in matches {
-            let db_name = db_names
-                .get(m.sample_id as usize)
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
-            let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
-            let shared_hashes = m.hit_count;
-            let query_containment = m.containment;
-            let db_containment = if db_hashes > 0 {
-                shared_hashes as f64 / db_hashes as f64
-            } else {
-                0.0
-            };
-
-            writeln!(
-                writer,
-                "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
-                query_name,
-                db_name,
-                shared_hashes,
-                query_hashes,
-                db_hashes,
-                query_containment,
-                db_containment
-            )?;
+    for chunk in &formatted_chunks {
+        if !chunk.is_empty() {
+            writer.write_all(chunk.as_bytes())?;
         }
     }
 

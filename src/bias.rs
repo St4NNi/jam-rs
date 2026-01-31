@@ -135,7 +135,6 @@ impl BiasTable {
         Ok(Self { scores, threshold })
     }
 
-    /// Serialize the bias table to bytes for embedding in JAM files.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(BIAS_TABLE_SERIALIZED_SIZE);
         out.extend_from_slice(BIAS_MAGIC);
@@ -147,7 +146,6 @@ impl BiasTable {
         out
     }
 
-    /// Deserialize a bias table from a byte slice (e.g., from mmap).
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < BIAS_TABLE_SERIALIZED_SIZE {
             return Err(anyhow::anyhow!(

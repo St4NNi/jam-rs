@@ -205,26 +205,19 @@ pub fn run(
                 Vec::new()
             };
 
-            // Sort entries (by hash, then by sample_id - Entry derives Ord)
             entries.sort_unstable();
-
-            // Deduplicate entries by (hash, sample_id) - Entry derives Eq
             entries.dedup();
 
-            // Count unique hashes per sample from deduped entries
             let mut sample_hash_counts: std::collections::HashMap<u32, u64> =
                 std::collections::HashMap::new();
             for entry in &entries {
                 *sample_hash_counts.entry(entry.sample_id).or_insert(0) += 1;
             }
 
-            // Extract unique hashes for filter construction
             let unique_hashes = extract_unique_hashes(&entries);
             let unique_hash_count = unique_hashes.len() as u64;
 
-            // Build BinaryFuse8 filter from unique hashes
             let filter_bytes = if unique_hashes.is_empty() {
-                // Empty filter for empty bucket
                 Vec::new()
             } else {
                 let filter = BinaryFuse8::try_from(&unique_hashes[..]).map_err(|e| {
@@ -236,7 +229,6 @@ pub fn run(
                 serialize_filter(&filter)
             };
 
-            // Write sorted (deduped) entries back to temp file
             if !entries.is_empty() {
                 write_entries(&bucket_path, &entries)?;
             }
@@ -290,14 +282,12 @@ pub fn run(
         }
     }
 
-    // Metadata section starts after last bucket
     let metadata_offset = current_offset;
     let total_size = metadata_offset
         + bias_size as usize
         + sample_names_bytes.len()
         + sample_sizes_bytes.len();
 
-    // Allocate output file with read+write access for mmap
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -306,10 +296,8 @@ pub fn run(
         .open(output_path)?;
     file.set_len(total_size as u64)?;
 
-    // mmap the output file (writable) - initialized to zeros
     let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
-    // Write bucket regions (filter + entries together per bucket, page-aligned)
     let mut bucket_metas = vec![BucketMeta::default(); BUCKET_COUNT];
     let mut total_unique_hashes = 0u64;
     let mut entries_size = 0u64;
@@ -320,12 +308,10 @@ pub fn run(
         let filter_size = bucket.filter_bytes.len();
         let entries_bytes_len = (bucket.entry_count as usize) * ENTRY_SIZE;
 
-        // Write filter at bucket start
         if !bucket.filter_bytes.is_empty() {
             mmap[bucket_offset..bucket_offset + filter_size].copy_from_slice(&bucket.filter_bytes);
         }
 
-        // Write entries immediately after filter
         let entry_offset = bucket_offset + filter_size;
         if bucket.entry_count > 0 {
             let bucket_path = temp_path.join(format!("bucket_{:03}.bin", bucket.bucket_id));
@@ -346,7 +332,6 @@ pub fn run(
         filters_size += filter_size as u64;
     }
 
-    // Write metadata section (bias table, sample names, sample sizes)
     let mut meta_offset = metadata_offset;
 
     let (bias_table_offset, bias_table_size, flags) = if let Some(bias) = bias_table {
@@ -368,11 +353,9 @@ pub fn run(
     mmap[sample_sizes_offset..sample_sizes_offset + sample_sizes_bytes.len()]
         .copy_from_slice(&sample_sizes_bytes);
 
-    // Write bucket table at HEADER_SIZE offset
     let table_bytes = bytemuck::cast_slice::<BucketMeta, u8>(&bucket_metas);
     mmap[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE].copy_from_slice(table_bytes);
 
-    // Compute total entries
     let total_entries: u64 = processed.iter().map(|b| b.entry_count).sum();
 
     // Build header (v3: entries_offset and filters_offset point to start of bucket regions)
@@ -403,15 +386,12 @@ pub fn run(
         _padding: [0; 16],
     };
 
-    // Write header at offset 0
     let header_bytes = bytemuck::bytes_of(&header);
     mmap[..HEADER_SIZE].copy_from_slice(header_bytes);
 
-    // Flush
     mmap.flush()?;
     drop(mmap);
 
-    // Build bucket entry counts array
     let mut bucket_entry_counts = [0u64; BUCKET_COUNT];
     for bucket in &processed {
         bucket_entry_counts[bucket.bucket_id] = bucket.entry_count;

@@ -23,6 +23,7 @@ pub fn run() -> Result<()> {
     if let Some(threads) = cli.threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
+            .stack_size(8 * 1024 * 1024) // 8MB stack per thread
             .build_global()?;
     }
 
