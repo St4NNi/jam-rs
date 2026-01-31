@@ -1,15 +1,18 @@
 use crate::bias::BiasTable;
 use crate::format::{
     BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, ENTRY_SIZE, Entry, FLAG_HAS_BIAS_TABLE,
-    FormatError, HEADER_SIZE, Header, bucket_id,
+    FormatError, HEADER_SIZE, Header, PAGE_SIZE, bucket_id,
 };
 use crate::writer::FILTER_DESCRIPTOR_SIZE;
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapOptions};
 use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use xorf::{BinaryFuse8Ref, Filter, FilterRef};
+
+#[cfg(unix)]
+use memmap2::Advice;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReaderError {
@@ -69,7 +72,67 @@ impl BucketFilter<'_> {
     }
 }
 
+/// Cached filter metadata for BucketRegion to avoid re-parsing on each contains() call.
+struct CachedFilterMeta {
+    descriptor_start: usize, // offset within mmap data
+    descriptor_size: usize,
+    fingerprints_start: usize,
+    fingerprints_size: usize,
+}
+
+/// A page-aligned mmap region for a single bucket. Owns its mmap and drops it when done.
+/// This allows memory to be released back to the OS after processing each bucket.
+pub struct BucketRegion {
+    mmap: Mmap,
+    data_offset: usize, // offset within mmap where actual data starts (for page alignment)
+    filter_size: usize,
+    entry_count: usize,
+    filter_meta: Option<CachedFilterMeta>, // cached filter metadata, parsed once at construction
+}
+
+impl BucketRegion {
+    /// Check if a hash might exist in this bucket (bloom filter check).
+    /// Uses cached filter metadata to avoid re-parsing the filter header on each call.
+    #[inline]
+    pub fn filter_contains(&self, hash: &u64) -> bool {
+        let meta = match &self.filter_meta {
+            Some(m) => m,
+            None => return false,
+        };
+
+        let descriptor =
+            &self.mmap[meta.descriptor_start..meta.descriptor_start + meta.descriptor_size];
+        let fingerprints =
+            &self.mmap[meta.fingerprints_start..meta.fingerprints_start + meta.fingerprints_size];
+        BinaryFuse8Ref::from_dma(descriptor, fingerprints).contains(hash)
+    }
+
+    /// Get entries slice from this bucket region.
+    #[inline]
+    pub fn entries(&self) -> &[Entry] {
+        if self.entry_count == 0 {
+            return &[];
+        }
+        let start = self.data_offset + self.filter_size;
+        let end = start + self.entry_count * ENTRY_SIZE;
+        bytemuck::cast_slice(&self.mmap[start..end])
+    }
+
+    /// Number of entries in this bucket.
+    #[inline]
+    pub fn entry_count(&self) -> usize {
+        self.entry_count
+    }
+
+    /// Whether this bucket is empty (no filter, no entries).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.filter_size == 0 && self.entry_count == 0
+    }
+}
+
 pub struct JamReader {
+    file: Arc<File>, // shared file handle for bucket region mmaps
     mmap: Mmap,
     header: Header,
     bucket_table: Vec<BucketMeta>,
@@ -85,8 +148,8 @@ impl JamReader {
     /// This loads the header, bucket table, and all filters into memory.
     /// Filters are copied to heap for fast access; entries remain mmap'd.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
-        let file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let file = Arc::new(File::open(path.as_ref())?);
+        let mmap = unsafe { Mmap::map(file.as_ref())? };
 
         // Validate minimum size for header
         if mmap.len() < HEADER_SIZE {
@@ -203,6 +266,7 @@ impl JamReader {
         };
 
         Ok(Self {
+            file,
             mmap,
             header,
             bucket_table,
@@ -211,6 +275,121 @@ impl JamReader {
             sample_names,
             sample_sizes,
         })
+    }
+
+    /// Open a single bucket's region as a separate mmap that can be dropped independently.
+    /// This is useful for reducing memory pressure when processing buckets in parallel.
+    /// The returned BucketRegion owns its mmap and releases it when dropped.
+    ///
+    /// Uses a shared file handle to avoid FD churn when processing many buckets in parallel.
+    /// On Linux, applies madvise hints for sequential access patterns.
+    pub fn open_bucket_region(&self, bucket_idx: usize) -> Result<BucketRegion, ReaderError> {
+        let meta = &self.bucket_table[bucket_idx];
+
+        // Empty bucket - return empty region with minimal valid mmap
+        if meta.filter_size == 0 && meta.entry_count == 0 {
+            // Create a tiny anonymous mmap just to have a valid Mmap object
+            let empty_mmap = MmapOptions::new().len(1).map_anon()?.make_read_only()?;
+            return Ok(BucketRegion {
+                mmap: empty_mmap,
+                data_offset: 0,
+                filter_size: 0,
+                entry_count: 0,
+                filter_meta: None,
+            });
+        }
+
+        // Calculate the page-aligned region to mmap
+        // In v3 format, filter and entries are contiguous starting at filter_offset
+        let region_start = meta.filter_offset as usize;
+        let data_size = meta.filter_size as usize + (meta.entry_count as usize) * ENTRY_SIZE;
+
+        // Align to page boundaries for mmap
+        let page_start = region_start & !(PAGE_SIZE - 1);
+        let data_offset = region_start - page_start;
+        let mmap_len = data_offset + data_size;
+
+        // Use shared file handle instead of opening a new one
+        let mmap = unsafe {
+            MmapOptions::new()
+                .offset(page_start as u64)
+                .len(mmap_len)
+                .map(self.file.as_ref())?
+        };
+
+        // Apply madvise hints on Unix for sequential access pattern
+        #[cfg(unix)]
+        {
+            let _ = mmap.advise(Advice::Sequential);
+        }
+
+        // Parse and cache filter metadata once (avoids re-parsing on each filter_contains call)
+        // Validates descriptor size matches expected FILTER_DESCRIPTOR_SIZE to catch corrupt filters
+        let filter_meta = if meta.filter_size > 0 {
+            let filter_data_start = data_offset;
+            let filter_data =
+                &mmap[filter_data_start..filter_data_start + meta.filter_size as usize];
+
+            if filter_data.len() >= 8 {
+                let descriptor_size =
+                    u32::from_le_bytes(filter_data[0..4].try_into().unwrap()) as usize;
+                let fingerprints_size =
+                    u32::from_le_bytes(filter_data[4..8].try_into().unwrap()) as usize;
+
+                // Validate descriptor size matches expected value (corrupt filter detection)
+                if descriptor_size != FILTER_DESCRIPTOR_SIZE {
+                    return Err(ReaderError::InvalidFilter {
+                        bucket: bucket_idx,
+                        message: format!(
+                            "unexpected descriptor size in bucket region: {} (expected {})",
+                            descriptor_size, FILTER_DESCRIPTOR_SIZE
+                        ),
+                    });
+                }
+
+                if filter_data.len() >= 8 + descriptor_size + fingerprints_size {
+                    Some(CachedFilterMeta {
+                        descriptor_start: filter_data_start + 8,
+                        descriptor_size,
+                        fingerprints_start: filter_data_start + 8 + descriptor_size,
+                        fingerprints_size,
+                    })
+                } else {
+                    return Err(ReaderError::InvalidFilter {
+                        bucket: bucket_idx,
+                        message: format!(
+                            "filter data truncated: need {} bytes, have {}",
+                            8 + descriptor_size + fingerprints_size,
+                            filter_data.len()
+                        ),
+                    });
+                }
+            } else {
+                return Err(ReaderError::InvalidFilter {
+                    bucket: bucket_idx,
+                    message: format!(
+                        "filter header too small: need 8 bytes, have {}",
+                        filter_data.len()
+                    ),
+                });
+            }
+        } else {
+            None
+        };
+
+        Ok(BucketRegion {
+            mmap,
+            data_offset,
+            filter_size: meta.filter_size as usize,
+            entry_count: meta.entry_count as usize,
+            filter_meta,
+        })
+    }
+
+    /// Get bucket metadata for calculating region bounds.
+    #[inline]
+    pub fn bucket_meta(&self, bucket_idx: usize) -> &BucketMeta {
+        &self.bucket_table[bucket_idx]
     }
 
     /// Get the hash threshold used for FracMinHash filtering.

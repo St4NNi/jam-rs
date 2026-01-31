@@ -6,6 +6,7 @@ use needletail::{Sequence, parse_fastx_file};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Query sketch with sorted (hash, sample_id) pairs across 256 buckets.
 #[derive(Debug)]
@@ -290,6 +291,9 @@ pub struct QueryResult {
     pub query_size: usize,
     pub hashes_found: usize,
     pub matches: Vec<SampleMatch>,
+    /// Number of buckets that failed to mmap during query.
+    /// If > 0, results may be incomplete (some hashes could not be searched).
+    pub failed_bucket_count: usize,
 }
 
 impl QueryResult {
@@ -309,6 +313,11 @@ impl QueryResult {
 
     pub fn has_matches(&self) -> bool {
         !self.matches.is_empty()
+    }
+
+    /// Returns true if some buckets failed during query, meaning results may be incomplete.
+    pub fn is_partial(&self) -> bool {
+        self.failed_bucket_count > 0
     }
 }
 
@@ -350,6 +359,7 @@ impl QueryEngine {
                 query_size: 0,
                 hashes_found: 0,
                 matches: Vec::new(),
+                failed_bucket_count: 0,
             };
         }
 
@@ -384,6 +394,7 @@ impl QueryEngine {
             query_size,
             hashes_found,
             matches,
+            failed_bucket_count: 0,
         }
     }
 
@@ -408,158 +419,201 @@ impl QueryEngine {
     }
 
     /// Parallel query using a QuerySketch. Returns one QueryResult per query sample.
-    ///
-    /// Uses a filter + merge-join algorithm:
-    /// 1. Filter: Check bloom filter to skip hashes not in DB (fast, in-memory)
-    /// 2. Merge-join: For surviving hashes, merge-join against sorted DB entries
     pub fn query_sketch(&self, sketch: &QuerySketch) -> Vec<QueryResult> {
         use rayon::prelude::*;
 
-        if sketch.sample_count() == 0 {
+        let num_samples = sketch.sample_count();
+        if num_samples == 0 {
             return Vec::new();
         }
 
-        // HitMap: (query_sample_id, db_sample_id) -> hit_count
-        // HashesFoundMap: query_sample_id -> count of unique hashes found
-        type HitMap = HashMap<(u32, u32), u32>;
-        type HashesFoundMap = HashMap<u32, u32>;
+        // Per-sample hit maps: Vec index = query_sample_id, HashMap key = db_sample_id
+        // This avoids hashing the query_sample_id on every insert (just index into Vec)
+        type PerSampleHits = Vec<HashMap<u32, u32>>;
+        type HashesFoundVec = Vec<u32>;
 
-        let (merged_hits, merged_hashes_found): (HitMap, HashesFoundMap) = (0..BUCKET_COUNT)
+        let threshold = self.reader.threshold();
+
+        let failed_buckets = AtomicUsize::new(0);
+
+        const MAX_CONCURRENT_BUCKETS: usize = 32;
+        let query_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(MAX_CONCURRENT_BUCKETS)
+            .build()
+            .expect("Failed to create query thread pool");
+
+        let (merged_hits, merged_hashes_found): (PerSampleHits, HashesFoundVec) = query_pool.install(|| {
+            (0..BUCKET_COUNT)
             .into_par_iter()
             .fold(
-                || (HashMap::new(), HashMap::new()),
-                |(mut local_hits, mut local_hashes_found): (HitMap, HashesFoundMap), bucket_idx| {
+                || {
+                    (
+                        vec![HashMap::new(); num_samples],
+                        vec![0u32; num_samples],
+                    )
+                },
+                |(mut local_hits, mut local_hashes_found): (PerSampleHits, HashesFoundVec),
+                 bucket_idx| {
                     let query_bucket = sketch.bucket(bucket_idx);
                     if query_bucket.is_empty() {
                         return (local_hits, local_hashes_found);
                     }
 
-                    let db_bucket = self.reader.bucket_entries(bucket_idx);
-                    if db_bucket.is_empty() {
+                    // Open per-bucket mmap region (will be dropped at end of this closure)
+                    let bucket_region = match self.reader.open_bucket_region(bucket_idx) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            // Track failure instead of silently ignoring
+                            failed_buckets.fetch_add(1, Ordering::Relaxed);
+                            return (local_hits, local_hashes_found);
+                        }
+                    };
+
+                    if bucket_region.is_empty() {
                         return (local_hits, local_hashes_found);
                     }
 
-                    // Get filter for this bucket (if available)
-                    let filter = self.reader.bucket_filter(bucket_idx);
+                    // Phase 1: Filter query hashes using bucket's bloom filter
+                    let mut survivors = Vec::with_capacity(query_bucket.len() / 10);
+                    let mut prev_hash = u64::MAX;
+                    let mut prev_passed = false;
+
+                    for &(hash, sample_id) in query_bucket {
+                        if hash != prev_hash {
+                            prev_hash = hash;
+                            prev_passed = bucket_region.filter_contains(&hash);
+                        }
+                        if prev_passed {
+                            survivors.push((hash, sample_id));
+                        }
+                    }
+
+                    if survivors.is_empty() {
+                        return (local_hits, local_hashes_found);
+                    }
+
+                    // Phase 2: Lookup survivors in bucket entries
+                    let db_bucket = bucket_region.entries();
+                    let count = db_bucket.len();
+                    if count == 0 {
+                        return (local_hits, local_hashes_found);
+                    }
 
                     let mut q_idx = 0;
-                    let mut d_idx = 0;
+                    while q_idx < survivors.len() {
+                        let q_hash = survivors[q_idx].0;
 
-                    while q_idx < query_bucket.len() {
-                        let q_hash = query_bucket[q_idx].0;
+                        // Interpolate position: hash / threshold * count
+                        let est = ((q_hash as u128 * count as u128) / threshold as u128) as usize;
+                        let mut d_idx = est.saturating_sub(16).min(count.saturating_sub(1));
 
-                        // Step 1: Filter check (once per unique hash, fast in-memory)
-                        let dominated = match &filter {
-                            Some(f) => f.contains(&q_hash),
-                            None => false,
-                        };
-
-                        if !dominated {
-                            // Skip all query entries with this hash - not in DB
-                            while q_idx < query_bucket.len() && query_bucket[q_idx].0 == q_hash {
-                                q_idx += 1;
-                            }
-                            continue;
+                        // Backtrack if overshot
+                        while d_idx > 0 && db_bucket[d_idx].hash > q_hash {
+                            d_idx -= 1;
                         }
 
-                        // Step 2: Advance DB pointer (merge-join style)
-                        while d_idx < db_bucket.len() && db_bucket[d_idx].hash < q_hash {
+                        // Forward scan to exact position
+                        while d_idx < count && db_bucket[d_idx].hash < q_hash {
                             d_idx += 1;
                         }
 
-                        // Step 3: Find DB matches for this hash
+                        // Backtrack to find FIRST entry with this hash
+                        // (critical: interpolation may land mid-run of duplicates)
+                        while d_idx > 0 && db_bucket[d_idx - 1].hash == q_hash {
+                            d_idx -= 1;
+                        }
+
+                        // Find all DB entries with this hash
                         let db_start = d_idx;
                         let mut db_end = d_idx;
-                        while db_end < db_bucket.len() && db_bucket[db_end].hash == q_hash {
+                        while db_end < count && db_bucket[db_end].hash == q_hash {
                             db_end += 1;
                         }
                         let has_matches = db_start < db_end;
 
-                        // Step 4: Process all query samples with this hash (with O(1) dedup)
+                        // Process all query samples with this hash
                         let mut prev_sample = u32::MAX;
-                        while q_idx < query_bucket.len() && query_bucket[q_idx].0 == q_hash {
-                            let q_sample = query_bucket[q_idx].1;
+                        while q_idx < survivors.len() && survivors[q_idx].0 == q_hash {
+                            let q_sample = survivors[q_idx].1;
 
-                            // O(1) dedup: data is sorted by (hash, sample_id)
                             if q_sample != prev_sample {
                                 if has_matches {
-                                    // Record hits for all DB samples with this hash
+                                    let sample_hits = &mut local_hits[q_sample as usize];
                                     for db_entry in &db_bucket[db_start..db_end] {
-                                        *local_hits
-                                            .entry((q_sample, db_entry.sample_id))
-                                            .or_insert(0) += 1;
+                                        *sample_hits.entry(db_entry.sample_id).or_insert(0) += 1;
                                     }
-                                    // Count unique hashes found per query sample
-                                    *local_hashes_found.entry(q_sample).or_insert(0) += 1;
+                                    local_hashes_found[q_sample as usize] += 1;
                                 }
                                 prev_sample = q_sample;
                             }
                             q_idx += 1;
                         }
-
-                        // Advance d_idx past this hash for next iteration
-                        d_idx = db_end;
                     }
 
+                    // bucket_region is dropped here, releasing the mmap
+                    // On Linux, madvise(MADV_DONTNEED) is called automatically by the kernel
+                    // when the mmap is unmapped
                     (local_hits, local_hashes_found)
                 },
             )
             .reduce(
-                || (HashMap::new(), HashMap::new()),
+                || {
+                    (
+                        vec![HashMap::new(); num_samples],
+                        vec![0u32; num_samples],
+                    )
+                },
                 |(mut hits_a, mut hashes_a), (hits_b, hashes_b)| {
-                    for (key, count) in hits_b {
-                        *hits_a.entry(key).or_insert(0) += count;
+                    for (i, hits) in hits_b.into_iter().enumerate() {
+                        for (db_sample_id, count) in hits {
+                            *hits_a[i].entry(db_sample_id).or_insert(0) += count;
+                        }
                     }
-                    for (sample_id, count) in hashes_b {
-                        *hashes_a.entry(sample_id).or_insert(0) += count;
+                    for (i, count) in hashes_b.into_iter().enumerate() {
+                        hashes_a[i] += count;
                     }
                     (hits_a, hashes_a)
                 },
+            )
+        });
+
+        // Warn if any buckets failed to mmap (indicates potential I/O or resource issues)
+        let num_failed = failed_buckets.load(Ordering::Relaxed);
+        if num_failed > 0 {
+            eprintln!(
+                "Warning: {} bucket(s) failed to mmap during query (results may be incomplete)",
+                num_failed
             );
+        }
 
-        // Build QueryResults from merged_hits
-        let num_samples = sketch.sample_count();
-        let mut results: Vec<QueryResult> = (0..num_samples)
-            .map(|i| QueryResult {
-                query_size: sketch.query_sizes[i],
-                hashes_found: 0,
-                matches: Vec::new(),
+        // Build QueryResults from merged data
+        merged_hits
+            .into_iter()
+            .zip(merged_hashes_found.into_iter())
+            .enumerate()
+            .map(|(query_sample_id, (hits, hashes_found))| {
+                let query_size = sketch.query_sizes[query_sample_id];
+                let matches: Vec<SampleMatch> = hits
+                    .into_iter()
+                    .map(|(db_sample_id, hit_count)| SampleMatch {
+                        sample_id: db_sample_id,
+                        hit_count,
+                        containment: if query_size > 0 {
+                            hit_count as f64 / query_size as f64
+                        } else {
+                            0.0
+                        },
+                    })
+                    .collect();
+
+                QueryResult {
+                    query_size,
+                    hashes_found: hashes_found as usize,
+                    matches,
+                    failed_bucket_count: num_failed,
+                }
             })
-            .collect();
-
-        let mut sample_hits: Vec<HashMap<u32, u32>> = vec![HashMap::new(); num_samples];
-        for ((query_sample_id, db_sample_id), hit_count) in merged_hits {
-            sample_hits[query_sample_id as usize].insert(db_sample_id, hit_count);
-        }
-
-        for (query_sample_id, hits) in sample_hits.into_iter().enumerate() {
-            let query_size = sketch.query_sizes[query_sample_id];
-            let hashes_found = merged_hashes_found
-                .get(&(query_sample_id as u32))
-                .copied()
-                .unwrap_or(0) as usize;
-
-            let matches: Vec<SampleMatch> = hits
-                .into_iter()
-                .map(|(db_sample_id, hit_count)| SampleMatch {
-                    sample_id: db_sample_id,
-                    hit_count,
-                    containment: if query_size > 0 {
-                        hit_count as f64 / query_size as f64
-                    } else {
-                        0.0
-                    },
-                })
-                .collect();
-
-            results[query_sample_id] = QueryResult {
-                query_size,
-                hashes_found,
-                matches,
-            };
-        }
-
-        results
+            .collect()
     }
 
     pub fn query_fasta<P: AsRef<Path>>(
@@ -722,6 +776,7 @@ mod tests {
                     containment: 0.8,
                 },
             ],
+            failed_bucket_count: 0,
         };
 
         let top2 = result.top(2);
@@ -733,6 +788,7 @@ mod tests {
         assert_eq!(above_threshold.len(), 2);
 
         assert!(result.has_matches());
+        assert!(!result.is_partial());
     }
 
     // QuerySketch tests

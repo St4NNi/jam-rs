@@ -4,7 +4,16 @@ compile_error!("JAM format requires a little-endian platform");
 use bytemuck::{Pod, Zeroable};
 
 pub const MAGIC: [u8; 4] = *b"JAM\0";
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+
+/// Page size for mmap alignment (4KB).
+pub const PAGE_SIZE: usize = 4096;
+
+/// Align a value up to the next page boundary.
+#[inline]
+pub const fn align_to_page(offset: usize) -> usize {
+    (offset + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
+}
 pub const BUCKET_COUNT: usize = 256;
 pub const BUCKET_BITS: u8 = 8;
 pub const ENTRY_SIZE: usize = 12;
@@ -72,6 +81,9 @@ impl Header {
         if self.entry_size != ENTRY_SIZE as u8 {
             return Err(FormatError::InvalidEntrySize(self.entry_size));
         }
+        if self.hash_threshold == 0 {
+            return Err(FormatError::InvalidHashThreshold);
+        }
         Ok(())
     }
 }
@@ -121,6 +133,9 @@ pub enum FormatError {
 
     #[error("Invalid entry size: {0}")]
     InvalidEntrySize(u8),
+
+    #[error("Invalid hash threshold: must be > 0")]
+    InvalidHashThreshold,
 }
 
 #[cfg(test)]
@@ -177,7 +192,22 @@ mod tests {
         header.version = VERSION;
         header.bucket_count = BUCKET_COUNT as u16;
         header.entry_size = ENTRY_SIZE as u8;
+        header.hash_threshold = u64::MAX; // valid non-zero threshold
         assert!(header.validate().is_ok());
+    }
+
+    #[test]
+    fn test_header_validate_zero_threshold() {
+        let mut header = Header::zeroed();
+        header.magic = MAGIC;
+        header.version = VERSION;
+        header.bucket_count = BUCKET_COUNT as u16;
+        header.entry_size = ENTRY_SIZE as u8;
+        header.hash_threshold = 0; // invalid
+        assert!(matches!(
+            header.validate(),
+            Err(FormatError::InvalidHashThreshold)
+        ));
     }
 
     #[test]
@@ -187,6 +217,7 @@ mod tests {
         header.version = VERSION;
         header.bucket_count = BUCKET_COUNT as u16;
         header.entry_size = ENTRY_SIZE as u8;
+        header.hash_threshold = u64::MAX;
         assert!(matches!(
             header.validate(),
             Err(FormatError::InvalidMagic(_))
@@ -200,6 +231,7 @@ mod tests {
         header.version = 99;
         header.bucket_count = BUCKET_COUNT as u16;
         header.entry_size = ENTRY_SIZE as u8;
+        header.hash_threshold = u64::MAX;
         assert!(matches!(
             header.validate(),
             Err(FormatError::UnsupportedVersion(99))

@@ -139,6 +139,8 @@ pub fn handle_distance_command(
     singleton: bool,
     silent: bool,
 ) -> Result<()> {
+    use std::time::Instant;
+
     if !database_path.exists() {
         return Err(anyhow::anyhow!(
             "Database file does not exist: {:?}",
@@ -152,15 +154,7 @@ pub fn handle_distance_command(
         ));
     }
 
-    let engine = QueryEngine::open(&database_path)?;
-    let db_names = engine.reader().sample_names();
-    let db_sizes = engine.reader().sample_sizes();
-
-    if !silent && engine.has_bias_table() {
-        eprintln!("Using embedded bias table from database");
-    }
-
-    // Progress spinner
+    // Immediate feedback before any loading
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
         sp.set_style(
@@ -168,15 +162,36 @@ pub fn handle_distance_command(
                 .template("{spinner:.green} [{elapsed_precise}] {msg}")
                 .unwrap(),
         );
-        sp.set_message("Loading query...");
+        sp.set_message("[1/4] Opening database...");
         sp.enable_steady_tick(std::time::Duration::from_millis(80));
         Some(sp)
     } else {
         None
     };
 
+    let phase_start = Instant::now();
+    let engine = QueryEngine::open(&database_path)?;
+    let db_stats = engine.reader().stats();
+    let db_names = engine.reader().sample_names();
+    let db_sizes = engine.reader().sample_sizes();
+
+    if let Some(ref sp) = spinner {
+        sp.println(format!(
+            "[1/4] Database opened in {:.2?}: {} samples, {} entries, {} threads",
+            phase_start.elapsed(),
+            db_stats.sample_count,
+            db_stats.entry_count,
+            rayon::current_num_threads()
+        ));
+        if engine.has_bias_table() {
+            sp.println("      Using embedded bias table from database");
+        }
+        sp.set_message("[2/4] Loading query...");
+    }
+
     // Use QuerySketch for all inputs (handles FASTA, FASTQ, and JAM)
     // Bias filtering uses the embedded bias table from the database
+    let phase_start = Instant::now();
     let sketch = crate::query::QuerySketch::from_inputs(
         std::slice::from_ref(&input_path),
         engine.reader(),
@@ -194,28 +209,46 @@ pub fn handle_distance_command(
         return Ok(());
     }
 
-    // Update spinner with query info
     if let Some(ref sp) = spinner {
-        let db_samples = engine.reader().stats().sample_count;
+        sp.println(format!(
+            "[2/4] Query loaded in {:.2?}: {} samples, {} hashes",
+            phase_start.elapsed(),
+            sketch.sample_count(),
+            sketch.total_entries()
+        ));
         sp.set_message(format!(
-            "Searching {} query hashes against {} db samples...",
-            sketch.total_entries(),
-            db_samples
+            "[3/4] Searching {} query samples against {} db samples...",
+            sketch.sample_count(),
+            db_stats.sample_count
         ));
     }
 
+    let phase_start = Instant::now();
     let results = engine.query_sketch(&sketch);
 
-    // Finish spinner
-    if let Some(sp) = spinner {
-        sp.finish_and_clear();
+    if let Some(ref sp) = spinner {
+        let total_matches: usize = results.iter().map(|r| r.matches.len()).sum();
+        sp.println(format!(
+            "[3/4] Search completed in {:.2?}: {} total matches",
+            phase_start.elapsed(),
+            total_matches
+        ));
+        sp.set_message("[4/4] Writing output...");
     }
 
-    // Output
+    let phase_start = Instant::now();
+
+    const WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
-        Box::new(std::fs::File::create(out)?)
+        Box::new(std::io::BufWriter::with_capacity(
+            WRITE_BUFFER_SIZE,
+            std::fs::File::create(out)?,
+        ))
     } else {
-        Box::new(std::io::stdout())
+        Box::new(std::io::BufWriter::with_capacity(
+            WRITE_BUFFER_SIZE,
+            std::io::stdout().lock(),
+        ))
     };
 
     writeln!(
@@ -263,8 +296,9 @@ pub fn handle_distance_command(
         }
     }
 
-    if !silent {
-        eprintln!("Query complete: {}", input_path.display());
+    if let Some(ref sp) = spinner {
+        sp.println(format!("[4/4] Output written in {:.2?}", phase_start.elapsed()));
+        sp.finish_and_clear();
     }
 
     Ok(())

@@ -264,11 +264,11 @@ pub fn run(
     }
 
     // Stage 2: mmap write of final .jam file
-    let entries_size: u64 = processed
-        .iter()
-        .map(|b| b.entry_count * ENTRY_SIZE as u64)
-        .sum();
-    let filters_size: u64 = processed.iter().map(|b| b.filter_bytes.len() as u64).sum();
+    // v3 Layout: [Header][BucketTable][pad to page][Bucket0: filter+entries][pad][Bucket1]...[Metadata]
+    // Each bucket region is page-aligned and contains filter immediately followed by entries.
+    // This allows per-bucket mmap that can be dropped after processing.
+    use crate::format::align_to_page;
+
     let bias_size: u64 = if bias_table.is_some() {
         BIAS_TABLE_SERIALIZED_SIZE as u64
     } else {
@@ -276,13 +276,26 @@ pub fn run(
     };
     let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names);
     let sample_sizes_bytes = serialize_sample_sizes(&aggregated_sample_sizes);
-    let total_size = HEADER_SIZE as u64
-        + BUCKET_TABLE_SIZE as u64
-        + entries_size
-        + filters_size
-        + bias_size
-        + sample_names_bytes.len() as u64
-        + sample_sizes_bytes.len() as u64;
+
+    // Calculate page-aligned bucket region offsets (each bucket: filter + entries together)
+    let bucket_regions_start = align_to_page(DATA_START);
+    let mut current_offset = bucket_regions_start;
+    let mut bucket_offsets = Vec::with_capacity(BUCKET_COUNT);
+
+    for bucket in &processed {
+        bucket_offsets.push(current_offset);
+        let bucket_size = bucket.filter_bytes.len() + (bucket.entry_count as usize) * ENTRY_SIZE;
+        if bucket_size > 0 {
+            current_offset = align_to_page(current_offset + bucket_size);
+        }
+    }
+
+    // Metadata section starts after last bucket
+    let metadata_offset = current_offset;
+    let total_size = metadata_offset
+        + bias_size as usize
+        + sample_names_bytes.len()
+        + sample_sizes_bytes.len();
 
     // Allocate output file with read+write access for mmap
     let file = std::fs::OpenOptions::new()
@@ -291,68 +304,67 @@ pub fn run(
         .create(true)
         .truncate(true)
         .open(output_path)?;
-    file.set_len(total_size)?;
+    file.set_len(total_size as u64)?;
 
-    // mmap the output file (writable)
+    // mmap the output file (writable) - initialized to zeros
     let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
-    // Write entries section (sequential, bucket 0..255)
-    let mut entry_offset = DATA_START;
+    // Write bucket regions (filter + entries together per bucket, page-aligned)
     let mut bucket_metas = vec![BucketMeta::default(); BUCKET_COUNT];
     let mut total_unique_hashes = 0u64;
+    let mut entries_size = 0u64;
+    let mut filters_size = 0u64;
 
     for bucket in &processed {
-        let bucket_path = temp_path.join(format!("bucket_{:03}.bin", bucket.bucket_id));
+        let bucket_offset = bucket_offsets[bucket.bucket_id];
+        let filter_size = bucket.filter_bytes.len();
+        let entries_bytes_len = (bucket.entry_count as usize) * ENTRY_SIZE;
 
+        // Write filter at bucket start
+        if !bucket.filter_bytes.is_empty() {
+            mmap[bucket_offset..bucket_offset + filter_size].copy_from_slice(&bucket.filter_bytes);
+        }
+
+        // Write entries immediately after filter
+        let entry_offset = bucket_offset + filter_size;
         if bucket.entry_count > 0 {
-            // Read sorted entries from temp file, copy directly into mmap
+            let bucket_path = temp_path.join(format!("bucket_{:03}.bin", bucket.bucket_id));
             let entries = read_entries(&bucket_path)?;
             let entry_bytes = bytemuck::cast_slice::<Entry, u8>(&entries);
             mmap[entry_offset..entry_offset + entry_bytes.len()].copy_from_slice(entry_bytes);
         }
 
         bucket_metas[bucket.bucket_id] = BucketMeta {
+            filter_offset: bucket_offset as u64,
+            filter_size: filter_size as u64,
             entry_offset: entry_offset as u64,
             entry_count: bucket.entry_count,
-            filter_offset: 0, // filled in next pass
-            filter_size: 0,   // filled in next pass
         };
 
-        entry_offset += (bucket.entry_count as usize) * ENTRY_SIZE;
         total_unique_hashes += bucket.unique_hash_count;
+        entries_size += entries_bytes_len as u64;
+        filters_size += filter_size as u64;
     }
 
-    // Write filters section (sequential, bucket 0..255)
-    let mut filter_offset = entry_offset;
-    let filters_start = filter_offset;
+    // Write metadata section (bias table, sample names, sample sizes)
+    let mut meta_offset = metadata_offset;
 
-    for bucket in &processed {
-        if !bucket.filter_bytes.is_empty() {
-            mmap[filter_offset..filter_offset + bucket.filter_bytes.len()]
-                .copy_from_slice(&bucket.filter_bytes);
-        }
-        bucket_metas[bucket.bucket_id].filter_offset = filter_offset as u64;
-        bucket_metas[bucket.bucket_id].filter_size = bucket.filter_bytes.len() as u64;
-        filter_offset += bucket.filter_bytes.len();
-    }
-
-    // Write bias table section (after filters)
     let (bias_table_offset, bias_table_size, flags) = if let Some(bias) = bias_table {
         let bias_bytes = bias.to_bytes();
-        let offset = filter_offset;
-        mmap[offset..offset + bias_bytes.len()].copy_from_slice(&bias_bytes);
+        mmap[meta_offset..meta_offset + bias_bytes.len()].copy_from_slice(&bias_bytes);
+        let offset = meta_offset;
+        meta_offset += bias_bytes.len();
         (offset as u64, bias_bytes.len() as u64, FLAG_HAS_BIAS_TABLE)
     } else {
         (0, 0, 0)
     };
 
-    // Write sample names section (after bias table if present)
-    let sample_names_offset = filter_offset + bias_table_size as usize;
+    let sample_names_offset = meta_offset;
     mmap[sample_names_offset..sample_names_offset + sample_names_bytes.len()]
         .copy_from_slice(&sample_names_bytes);
+    meta_offset += sample_names_bytes.len();
 
-    // Write sample sizes section
-    let sample_sizes_offset = sample_names_offset + sample_names_bytes.len();
+    let sample_sizes_offset = meta_offset;
     mmap[sample_sizes_offset..sample_sizes_offset + sample_sizes_bytes.len()]
         .copy_from_slice(&sample_sizes_bytes);
 
@@ -363,7 +375,7 @@ pub fn run(
     // Compute total entries
     let total_entries: u64 = processed.iter().map(|b| b.entry_count).sum();
 
-    // Build header
+    // Build header (v3: entries_offset and filters_offset point to start of bucket regions)
     let header = Header {
         magic: MAGIC,
         version: VERSION,
@@ -378,8 +390,8 @@ pub fn run(
         kmer_size,
         _param_reserved: [0; 7],
         bucket_table_offset: HEADER_SIZE as u64,
-        entries_offset: DATA_START as u64,
-        filters_offset: filters_start as u64,
+        entries_offset: bucket_regions_start as u64,
+        filters_offset: bucket_regions_start as u64,
         bias_table_offset,
         entries_size,
         filters_size,
@@ -409,7 +421,7 @@ pub fn run(
         total_entries,
         unique_hashes: total_unique_hashes,
         sample_count: sketch_result.sample_count,
-        file_size: total_size,
+        file_size: total_size as u64,
         kmer_size,
         frac_max: sketch_result.frac_max,
         bucket_entry_counts,
