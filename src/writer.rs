@@ -669,8 +669,8 @@ mod tests {
         let pos_fasta = make_fasta(&[("pos", "ATATATATATATATATATATATATATATATAT")]);
         let neg_fasta = make_fasta(&[("neg", "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC")]);
 
-        let bias_table =
-            crate::bias::BiasTable::build(pos_fasta.path(), neg_fasta.path(), 0.5).unwrap();
+        let bias_result =
+            crate::bias::BiasTable::build(pos_fasta.path(), neg_fasta.path(), 0.5, None).unwrap();
 
         // Build JAM file with bias table - use ATATAT-rich sequence that passes bias filter
         let input = make_fasta(&[("seq1", "ATATATATATATATATATATATATATATATATATAT")]);
@@ -682,7 +682,7 @@ mod tests {
             fscale: 1,
             num_threads: 1,
             memory: 1,
-            bias_table: Some(std::sync::Arc::new(bias_table.clone())),
+            bias_table: Some(std::sync::Arc::new(bias_result.table.clone())),
             ..Default::default()
         };
 
@@ -693,7 +693,7 @@ mod tests {
         assert!(reader.has_bias_table());
 
         let embedded_bias = reader.bias_table().unwrap();
-        assert_eq!(*embedded_bias, bias_table);
+        assert_eq!(*embedded_bias, bias_result.table);
     }
 
     #[test]

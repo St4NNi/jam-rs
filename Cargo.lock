@@ -541,6 +541,7 @@ dependencies = [
  "rayon",
  "roaring",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tikv-jemallocator",

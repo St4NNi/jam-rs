@@ -3,7 +3,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 use std::{fs::remove_file, path::PathBuf};
 
-use crate::bias::BiasTable;
+use crate::bias::{
+    BiasTable, CompareStats, EnrichedHexamer, RawBiasTable, idx_to_hexamer, reverse_complement_idx,
+};
 use crate::query::QueryEngine;
 use crate::reader::JamReader;
 use crate::writer::{BuildConfig, build};
@@ -323,7 +325,79 @@ pub fn handle_distance_command(
     Ok(())
 }
 
-pub fn handle_bias_command(
+pub fn handle_bias_create_command(
+    input: PathBuf,
+    output: PathBuf,
+    force: bool,
+    silent: bool,
+) -> Result<()> {
+    use std::time::Instant;
+
+    if !input.exists() {
+        return Err(anyhow::anyhow!("Input file does not exist: {:?}", input));
+    }
+    if output.exists() && !force {
+        return Err(anyhow::anyhow!(
+            "Output file {:?} already exists. Use --force to overwrite.",
+            output
+        ));
+    }
+
+    let spinner = if !silent {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .unwrap(),
+        );
+        sp.set_message("Processing input file...");
+        sp.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(sp)
+    } else {
+        None
+    };
+
+    let start = Instant::now();
+    let raw = RawBiasTable::build(&input, spinner.clone())?;
+
+    if let Some(ref sp) = spinner {
+        sp.set_message("Saving raw bias table...");
+    }
+
+    raw.save(&output)?;
+
+    if let Some(sp) = spinner {
+        sp.finish_and_clear();
+    }
+
+    if !silent {
+        eprintln!("Raw bias table created in {:.2?}", start.elapsed());
+        eprintln!(
+            "  Records: {}, Bases: {}, GC: {:.1}%",
+            raw.stats.num_records,
+            format_bp(raw.stats.total_bases),
+            raw.stats.gc_content()
+        );
+        eprintln!("  Total hexamers: {}", raw.total_hexamers());
+        eprintln!("Saved to: {}", output.display());
+    }
+
+    Ok(())
+}
+
+fn format_bp(bp: u64) -> String {
+    if bp >= 1_000_000_000 {
+        format!("{:.2} Gbp", bp as f64 / 1_000_000_000.0)
+    } else if bp >= 1_000_000 {
+        format!("{:.2} Mbp", bp as f64 / 1_000_000.0)
+    } else if bp >= 1_000 {
+        format!("{:.2} Kbp", bp as f64 / 1_000.0)
+    } else {
+        format!("{} bp", bp)
+    }
+}
+
+pub fn handle_bias_combine_command(
     positive: PathBuf,
     negative: PathBuf,
     output: PathBuf,
@@ -331,6 +405,8 @@ pub fn handle_bias_command(
     force: bool,
     silent: bool,
 ) -> Result<()> {
+    use std::time::Instant;
+
     if !positive.exists() {
         return Err(anyhow::anyhow!(
             "Positive file does not exist: {:?}",
@@ -350,25 +426,433 @@ pub fn handle_bias_command(
         ));
     }
 
+    let spinner = if !silent {
+        let sp = ProgressBar::new_spinner();
+        sp.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} [{elapsed_precise}] {msg}")
+                .unwrap(),
+        );
+        sp.set_message("Loading raw bias tables...");
+        sp.enable_steady_tick(std::time::Duration::from_millis(80));
+        Some(sp)
+    } else {
+        None
+    };
+
+    let start = Instant::now();
+
+    let pos_raw = RawBiasTable::load(&positive)?;
+    let neg_raw = RawBiasTable::load(&negative)?;
+
+    if let Some(ref sp) = spinner {
+        sp.set_message("Computing comparison statistics...");
+    }
+
+    let compare_stats = pos_raw.compare(&neg_raw, threshold);
+
+    if let Some(ref sp) = spinner {
+        sp.set_message("Combining tables...");
+    }
+
+    let combined = pos_raw.combine(&neg_raw, threshold)?;
+
+    if let Some(ref sp) = spinner {
+        sp.set_message("Saving combined bias table...");
+    }
+
+    combined.save(&output)?;
+
+    if let Some(sp) = spinner {
+        sp.finish_and_clear();
+    }
+
     if !silent {
+        eprintln!("Bias Table Comparison");
+        eprintln!("=====================");
         eprintln!(
-            "Building bias table: positive={}, negative={}, threshold={:.2}",
+            "Positive: {} ({} records, {}, {:.1}% GC)",
             positive.display(),
+            pos_raw.stats.num_records,
+            format_bp(pos_raw.stats.total_bases),
+            pos_raw.stats.gc_content()
+        );
+        eprintln!(
+            "Negative: {} ({} records, {}, {:.1}% GC)",
             negative.display(),
-            threshold
+            neg_raw.stats.num_records,
+            format_bp(neg_raw.stats.total_bases),
+            neg_raw.stats.gc_content()
+        );
+        eprintln!();
+        eprintln!("Distribution divergence:");
+        eprintln!(
+            "  KL divergence (pos||neg): {:.3} bits",
+            compare_stats.kl_divergence
+        );
+        eprintln!("  GC content difference: {:+.1}%", compare_stats.gc_diff);
+        eprintln!();
+        print_threshold_sweep(&compare_stats);
+        eprintln!();
+        print_enriched_hexamers("POSITIVE", &compare_stats.top_positive_enriched);
+        eprintln!();
+        print_enriched_hexamers("NEGATIVE", &compare_stats.top_negative_enriched);
+        eprintln!();
+        eprintln!("Combined table created:");
+        eprintln!("  Threshold: {:.2}", threshold);
+        eprintln!(
+            "  Hexamers above threshold: {} ({:.1}%)",
+            compare_stats.hexamers_favoring_positive,
+            compare_stats.hexamers_favoring_positive as f64 / 4096.0 * 100.0
+        );
+        eprintln!(
+            "  Hexamers below threshold: {} ({:.1}%)",
+            compare_stats.hexamers_favoring_negative,
+            compare_stats.hexamers_favoring_negative as f64 / 4096.0 * 100.0
+        );
+
+        if let Some(point) = compare_stats
+            .threshold_sweep
+            .iter()
+            .find(|p| (p.threshold - threshold).abs() < 0.01)
+        {
+            eprintln!();
+            eprintln!("Filtering impact at this threshold:");
+            eprintln!("  Expected positive k-mer retention: ~{:.1}%", point.pos_retain);
+            eprintln!("  Expected negative k-mer retention: ~{:.1}%", point.neg_retain);
+            eprintln!("  Selectivity ratio: {:.2}x", point.selectivity);
+        }
+
+        eprintln!();
+        eprintln!("Saved to: {}", output.display());
+        eprintln!("Built in {:.2?}", start.elapsed());
+    }
+
+    Ok(())
+}
+
+fn print_threshold_sweep(stats: &CompareStats) {
+    eprintln!("Threshold sweep (expected retention rates):");
+    eprintln!(
+        "  {:>9}   {:>10}   {:>10}   {:>11}",
+        "Threshold", "Pos Retain", "Neg Retain", "Selectivity"
+    );
+    for point in &stats.threshold_sweep {
+        eprintln!(
+            "  {:>9.2}   {:>9.1}%   {:>9.1}%   {:>10.2}x",
+            point.threshold, point.pos_retain, point.neg_retain, point.selectivity
+        );
+    }
+}
+
+fn print_enriched_hexamers(label: &str, hexamers: &[EnrichedHexamer]) {
+    eprintln!("Top 10 enriched in {}:", label);
+    eprintln!(
+        "  {:>8}   {:>8}   {:>10}   {:>8}   {:>8}   {:>6}",
+        "Hexamer", "RevComp", "P(pos|hex)", "Pos Freq", "Neg Freq", "Fold"
+    );
+    for h in hexamers {
+        let fold_str = if h.fold_change.is_infinite() {
+            "inf".to_string()
+        } else {
+            format!("{:.1}x", h.fold_change)
+        };
+        eprintln!(
+            "  {:>8}   {:>8}   {:>10.2}   {:>7.2}%   {:>7.2}%   {:>6}",
+            h.hexamer, h.rev_comp, h.p_pos_given_hex, h.pos_freq, h.neg_freq, fold_str
+        );
+    }
+}
+
+pub fn handle_bias_stats_command(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    silent: bool,
+) -> Result<()> {
+    if !input.exists() {
+        return Err(anyhow::anyhow!("Input file does not exist: {:?}", input));
+    }
+
+    let extension = input
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    match extension {
+        "braw" => handle_raw_stats(&input, output, silent),
+        "bias" => handle_combined_stats(&input, output, silent),
+        _ => Err(anyhow::anyhow!(
+            "Unknown file extension: {}. Expected .braw or .bias",
+            extension
+        )),
+    }
+}
+
+fn handle_raw_stats(input: &std::path::Path, output: Option<PathBuf>, silent: bool) -> Result<()> {
+    let raw = RawBiasTable::load(input)?;
+
+    let total_hexamers = raw.total_hexamers();
+    let non_zero = raw.non_zero_count();
+    let entropy = raw.shannon_entropy();
+    let low_count = raw.low_count_hexamers(10);
+    let top = raw.top_hexamers(10);
+
+    if let Some(output_path) = output {
+        let json = serde_json::json!({
+            "file": input.display().to_string(),
+            "type": "raw",
+            "stats": {
+                "num_records": raw.stats.num_records,
+                "total_bases": raw.stats.total_bases,
+                "gc_content": raw.stats.gc_content()
+            },
+            "hexamer_stats": {
+                "total_counted": total_hexamers,
+                "non_zero_count": non_zero,
+                "shannon_entropy": entropy,
+                "max_entropy": 12.0,
+                "low_count_hexamers": low_count
+            },
+            "top_hexamers": top.iter().map(|(hex, count, freq)| {
+                serde_json::json!({
+                    "hexamer": hex,
+                    "count": count,
+                    "frequency": freq * 100.0
+                })
+            }).collect::<Vec<_>>()
+        });
+
+        let file = std::fs::File::create(&output_path)?;
+        serde_json::to_writer_pretty(file, &json)?;
+
+        if !silent {
+            eprintln!("Statistics written to: {}", output_path.display());
+        }
+    } else if !silent {
+        eprintln!("Raw Bias Table Statistics");
+        eprintln!("=========================");
+        eprintln!("File: {}", input.display());
+        eprintln!("Records: {}", raw.stats.num_records);
+        eprintln!("Total bases: {}", format_bp(raw.stats.total_bases));
+        eprintln!("GC content: {:.1}%", raw.stats.gc_content());
+        eprintln!();
+        eprintln!("Hexamer distribution:");
+        eprintln!("  Total counted: {}", total_hexamers);
+        eprintln!("  Non-zero: {}/4096 ({:.1}%)", non_zero, non_zero as f64 / 40.96);
+        eprintln!(
+            "  Shannon entropy: {:.2} bits (max 12.0)",
+            entropy
+        );
+        eprintln!("  Low-count (<10): {} hexamers", low_count);
+        eprintln!();
+        eprintln!("Top 10 most frequent:");
+        eprintln!(
+            "  {:>8}   {:>8}   {:>12}   {:>10}",
+            "Hexamer", "RevComp", "Count", "Frequency"
+        );
+        for (hex, count, freq) in &top {
+            let hex_idx = (0..6).fold(0usize, |acc, i| {
+                let c = hex.chars().nth(i).unwrap();
+                let base = match c {
+                    'A' => 0,
+                    'C' => 1,
+                    'G' => 2,
+                    'T' => 3,
+                    _ => 0,
+                };
+                (acc << 2) | base
+            });
+            let rc = idx_to_hexamer(reverse_complement_idx(hex_idx));
+            eprintln!(
+                "  {:>8}   {:>8}   {:>12}   {:>9.2}%",
+                hex, rc, count, freq * 100.0
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_combined_stats(input: &std::path::Path, output: Option<PathBuf>, silent: bool) -> Result<()> {
+    let table = BiasTable::load(input)?;
+
+    let mut positive_count = 0usize;
+    let mut negative_count = 0usize;
+
+    for i in 0..4096 {
+        let score = table.score(i);
+        if score > 0.0 {
+            positive_count += 1;
+        } else if score < 0.0 {
+            negative_count += 1;
+        }
+    }
+
+    if let Some(output_path) = output {
+        let json = serde_json::json!({
+            "file": input.display().to_string(),
+            "type": "combined",
+            "threshold": table.threshold,
+            "hexamers_above_threshold": positive_count,
+            "hexamers_below_threshold": negative_count,
+            "above_percentage": positive_count as f64 / 4096.0 * 100.0,
+            "below_percentage": negative_count as f64 / 4096.0 * 100.0
+        });
+
+        let file = std::fs::File::create(&output_path)?;
+        serde_json::to_writer_pretty(file, &json)?;
+
+        if !silent {
+            eprintln!("Statistics written to: {}", output_path.display());
+        }
+    } else if !silent {
+        eprintln!("Combined Bias Table Statistics");
+        eprintln!("==============================");
+        eprintln!("File: {}", input.display());
+        eprintln!("Threshold: {:.2}", table.threshold);
+        eprintln!(
+            "Hexamers above threshold: {}/4096 ({:.1}%)",
+            positive_count,
+            positive_count as f64 / 4096.0 * 100.0
+        );
+        eprintln!(
+            "Hexamers below threshold: {}/4096 ({:.1}%)",
+            negative_count,
+            negative_count as f64 / 4096.0 * 100.0
         );
     }
 
-    let table = BiasTable::build(&positive, &negative, threshold)?;
+    Ok(())
+}
 
-    if !silent {
-        table.print_stats();
+pub fn handle_bias_compare_command(
+    positive: PathBuf,
+    negative: PathBuf,
+    output: Option<PathBuf>,
+    threshold: f32,
+    silent: bool,
+) -> Result<()> {
+    if !positive.exists() {
+        return Err(anyhow::anyhow!(
+            "Positive file does not exist: {:?}",
+            positive
+        ));
+    }
+    if !negative.exists() {
+        return Err(anyhow::anyhow!(
+            "Negative file does not exist: {:?}",
+            negative
+        ));
     }
 
-    table.save(&output)?;
+    let pos_raw = RawBiasTable::load(&positive)?;
+    let neg_raw = RawBiasTable::load(&negative)?;
 
-    if !silent {
-        eprintln!("Bias table saved to: {}", output.display());
+    let stats = pos_raw.compare(&neg_raw, threshold);
+
+    if let Some(output_path) = output {
+        let json = serde_json::json!({
+            "positive": {
+                "file": positive.display().to_string(),
+                "num_records": pos_raw.stats.num_records,
+                "total_bases": pos_raw.stats.total_bases,
+                "gc_content": pos_raw.stats.gc_content()
+            },
+            "negative": {
+                "file": negative.display().to_string(),
+                "num_records": neg_raw.stats.num_records,
+                "total_bases": neg_raw.stats.total_bases,
+                "gc_content": neg_raw.stats.gc_content()
+            },
+            "divergence": {
+                "kl_divergence": stats.kl_divergence,
+                "gc_difference": stats.gc_diff
+            },
+            "threshold_sweep": stats.threshold_sweep.iter().map(|p| {
+                serde_json::json!({
+                    "threshold": p.threshold,
+                    "pos_retain": p.pos_retain,
+                    "neg_retain": p.neg_retain,
+                    "selectivity": p.selectivity
+                })
+            }).collect::<Vec<_>>(),
+            "top_positive_enriched": stats.top_positive_enriched.iter().map(|h| {
+                serde_json::json!({
+                    "hexamer": h.hexamer,
+                    "rev_comp": h.rev_comp,
+                    "p_pos_given_hex": h.p_pos_given_hex,
+                    "pos_freq": h.pos_freq,
+                    "neg_freq": h.neg_freq,
+                    "fold_change": h.fold_change
+                })
+            }).collect::<Vec<_>>(),
+            "top_negative_enriched": stats.top_negative_enriched.iter().map(|h| {
+                serde_json::json!({
+                    "hexamer": h.hexamer,
+                    "rev_comp": h.rev_comp,
+                    "p_pos_given_hex": h.p_pos_given_hex,
+                    "pos_freq": h.pos_freq,
+                    "neg_freq": h.neg_freq,
+                    "fold_change": h.fold_change
+                })
+            }).collect::<Vec<_>>(),
+            "summary": {
+                "threshold": threshold,
+                "hexamers_favoring_positive": stats.hexamers_favoring_positive,
+                "hexamers_favoring_negative": stats.hexamers_favoring_negative,
+                "positive_percentage": stats.hexamers_favoring_positive as f64 / 4096.0 * 100.0,
+                "negative_percentage": stats.hexamers_favoring_negative as f64 / 4096.0 * 100.0
+            }
+        });
+
+        let file = std::fs::File::create(&output_path)?;
+        serde_json::to_writer_pretty(file, &json)?;
+
+        if !silent {
+            eprintln!("Comparison written to: {}", output_path.display());
+        }
+    } else if !silent {
+        eprintln!("Bias Table Comparison");
+        eprintln!("=====================");
+        eprintln!(
+            "Positive: {} ({} records, {}, {:.1}% GC)",
+            positive.display(),
+            pos_raw.stats.num_records,
+            format_bp(pos_raw.stats.total_bases),
+            pos_raw.stats.gc_content()
+        );
+        eprintln!(
+            "Negative: {} ({} records, {}, {:.1}% GC)",
+            negative.display(),
+            neg_raw.stats.num_records,
+            format_bp(neg_raw.stats.total_bases),
+            neg_raw.stats.gc_content()
+        );
+        eprintln!();
+        eprintln!("Distribution divergence:");
+        eprintln!(
+            "  KL divergence (pos||neg): {:.3} bits",
+            stats.kl_divergence
+        );
+        eprintln!("  GC content difference: {:+.1}%", stats.gc_diff);
+        eprintln!();
+        print_threshold_sweep(&stats);
+        eprintln!();
+        print_enriched_hexamers("POSITIVE", &stats.top_positive_enriched);
+        eprintln!();
+        print_enriched_hexamers("NEGATIVE", &stats.top_negative_enriched);
+        eprintln!();
+        eprintln!("Summary at threshold {:.2}:", threshold);
+        eprintln!(
+            "  Hexamers favoring positive: {} ({:.1}%)",
+            stats.hexamers_favoring_positive,
+            stats.hexamers_favoring_positive as f64 / 4096.0 * 100.0
+        );
+        eprintln!(
+            "  Hexamers favoring negative: {} ({:.1}%)",
+            stats.hexamers_favoring_negative,
+            stats.hexamers_favoring_negative as f64 / 4096.0 * 100.0
+        );
     }
 
     Ok(())

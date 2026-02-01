@@ -8,14 +8,16 @@ pub mod reader;
 pub mod sketch;
 pub mod writer;
 pub use cli::handlers::{
-    handle_bias_command, handle_distance_command, handle_sketch_command, handle_stats_command,
+    handle_bias_combine_command, handle_bias_compare_command, handle_bias_create_command,
+    handle_bias_stats_command, handle_distance_command, handle_sketch_command,
+    handle_stats_command,
 };
 pub use io::{expand_input_paths, is_sequence_file};
 pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{BiasCommands, Cli, Commands};
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -55,12 +57,33 @@ pub fn run() -> Result<()> {
             )
         }
 
-        Commands::Bias {
-            positive,
-            negative,
-            output,
-            threshold,
-        } => handle_bias_command(positive, negative, output, threshold, cli.force, cli.silent),
+        Commands::Bias { command } => match command {
+            BiasCommands::Create { input, output } => {
+                handle_bias_create_command(input, output, cli.force, cli.silent)
+            }
+            BiasCommands::Combine {
+                positive,
+                negative,
+                output,
+                threshold,
+            } => handle_bias_combine_command(
+                positive,
+                negative,
+                output,
+                threshold,
+                cli.force,
+                cli.silent,
+            ),
+            BiasCommands::Stats { input, output } => {
+                handle_bias_stats_command(input, output, cli.silent)
+            }
+            BiasCommands::Compare {
+                positive,
+                negative,
+                output,
+                threshold,
+            } => handle_bias_compare_command(positive, negative, output, threshold, cli.silent),
+        },
 
         Commands::Dist {
             input,

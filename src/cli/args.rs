@@ -83,22 +83,11 @@ pub enum Commands {
         singleton: bool,
     },
 
-    /// Build a bias table from positive/negative reference sequences
+    /// Build and analyze bias tables for compositional filtering
     #[command(arg_required_else_help = true)]
     Bias {
-        /// Positive reference sequences (FASTA) - k-mers enriched here will be preferred
-        #[arg(short, long)]
-        positive: PathBuf,
-        /// Negative reference sequences (FASTA) - background/unwanted sequences
-        #[arg(short, long)]
-        negative: PathBuf,
-        /// Output bias table file (.bias)
-        #[arg(short, long)]
-        output: PathBuf,
-        /// Score threshold (0.0-1.0). Higher = stricter filtering.
-        /// 0.5 = neutral, 0.7 = keep hexamers 70%+ likely from positive set
-        #[arg(long, default_value = "0.5")]
-        threshold: f32,
+        #[command(subcommand)]
+        command: BiasCommands,
     },
 
     /// Display statistics about a JAM database
@@ -113,5 +102,59 @@ pub enum Commands {
         /// Include the full entry statistics
         #[arg(long)]
         full: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum BiasCommands {
+    /// Create a raw hexamer frequency table from a FASTA file
+    #[command(arg_required_else_help = true)]
+    Create {
+        /// Input FASTA file
+        input: PathBuf,
+        /// Output raw bias table file (.braw)
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
+    /// Combine two raw tables into a final bias table
+    #[command(arg_required_else_help = true)]
+    Combine {
+        /// Positive raw bias table (.braw)
+        positive: PathBuf,
+        /// Negative raw bias table (.braw)
+        negative: PathBuf,
+        /// Output combined bias table file (.bias)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Score threshold (0.0-1.0). Higher = stricter filtering.
+        /// 0.5 = neutral, 0.7 = keep hexamers 70%+ likely from positive set
+        #[arg(long, default_value = "0.5")]
+        threshold: f32,
+    },
+
+    /// Display statistics for a bias table
+    #[command(arg_required_else_help = true)]
+    Stats {
+        /// Input bias table file (.braw or .bias)
+        input: PathBuf,
+        /// Output JSON report to file instead of stderr
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Compare two raw bias tables
+    #[command(arg_required_else_help = true)]
+    Compare {
+        /// First raw bias table (.braw) - treated as positive
+        positive: PathBuf,
+        /// Second raw bias table (.braw) - treated as negative
+        negative: PathBuf,
+        /// Output JSON report to file instead of stderr
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Threshold for summary statistics
+        #[arg(long, default_value = "0.5")]
+        threshold: f32,
     },
 }
