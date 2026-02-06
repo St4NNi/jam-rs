@@ -1,4 +1,4 @@
-use crate::bias::BiasTable;
+use crate::bias::HashBiasTable;
 use crate::format::{BUCKET_COUNT, bucket_id};
 use crate::reader::{JamReader, ReaderError};
 use jamhash::jamhash_u64;
@@ -161,10 +161,7 @@ impl QuerySketch {
                     continue;
                 }
 
-                if bias_table
-                    .as_ref()
-                    .is_some_and(|b| !b.passes_filter(kmer.0, kmer_size))
-                {
+                if bias_table.as_ref().is_some_and(|b| !b.passes_filter(hash)) {
                     continue;
                 }
 
@@ -317,7 +314,7 @@ impl QueryResult {
 
 pub struct QueryEngine {
     reader: JamReader,
-    bias_table: Option<Arc<BiasTable>>,
+    bias_table: Option<Arc<HashBiasTable>>,
 }
 
 impl QueryEngine {
@@ -335,7 +332,7 @@ impl QueryEngine {
         self.reader.kmer_size()
     }
 
-    pub fn bias_table(&self) -> Option<Arc<BiasTable>> {
+    pub fn bias_table(&self) -> Option<Arc<HashBiasTable>> {
         self.bias_table.clone()
     }
 

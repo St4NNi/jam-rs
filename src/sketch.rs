@@ -1,4 +1,4 @@
-use crate::bias::BiasTable;
+use crate::bias::HashBiasTable;
 use crate::core_utils::passes_entropy_filter;
 use crate::format::{BUCKET_COUNT, ENTRY_SIZE, Entry, bucket_id};
 use crate::io::EntryWriter;
@@ -39,7 +39,7 @@ pub struct SketchConfig {
     pub temp_dir_base: Option<PathBuf>,
     pub min_entropy: f64,
     pub singleton: bool,
-    pub bias_table: Option<Arc<BiasTable>>,
+    pub bias_table: Option<Arc<HashBiasTable>>,
     pub send_timeout: Duration,
     pub show_progress: bool,
 }
@@ -791,7 +791,7 @@ fn sketch_records(
                 .config
                 .bias_table
                 .as_ref()
-                .is_some_and(|b| !b.passes_filter(kmer.0, k))
+                .is_some_and(|b| !b.passes_filter(hash))
             {
                 continue;
             }

@@ -1,4 +1,4 @@
-use crate::bias::BiasTable;
+use crate::bias::HashBiasTable;
 use crate::format::{
     BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, ENTRY_SIZE, Entry, FLAG_HAS_BIAS_TABLE,
     FormatError, HEADER_SIZE, Header, PAGE_SIZE, bucket_id,
@@ -133,7 +133,7 @@ pub struct JamReader {
     header: Header,
     bucket_table: Vec<BucketMeta>,
     filters: Vec<Option<FilterMeta>>, // None for empty buckets - zero-copy offsets into mmap
-    bias_table: Option<Arc<BiasTable>>,
+    bias_table: Option<Arc<HashBiasTable>>,
     sample_names: Vec<String>,
     sample_sizes: Vec<u64>, // hash count per sample
 }
@@ -199,7 +199,7 @@ impl JamReader {
             }
             let bias_data = &mmap[offset..offset + size];
             let table =
-                BiasTable::from_bytes(bias_data).map_err(|e| ReaderError::InvalidFilter {
+                HashBiasTable::from_bytes(bias_data).map_err(|e| ReaderError::InvalidFilter {
                     bucket: 0,
                     message: format!("Failed to parse embedded bias table: {}", e),
                 })?;
@@ -396,7 +396,7 @@ impl JamReader {
     }
 
     #[inline]
-    pub fn bias_table(&self) -> Option<Arc<BiasTable>> {
+    pub fn bias_table(&self) -> Option<Arc<HashBiasTable>> {
         self.bias_table.clone()
     }
 

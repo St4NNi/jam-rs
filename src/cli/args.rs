@@ -56,7 +56,7 @@ pub enum Commands {
         /// Custom temporary directory for intermediate files during sorting
         #[arg(long)]
         temp_dir: Option<PathBuf>,
-        /// Path to a bias table file (.bias) for compositional filtering
+        /// Path to a bias table file (.bias) for hash-based filtering
         #[arg(long)]
         bias_table: Option<PathBuf>,
     },
@@ -83,7 +83,7 @@ pub enum Commands {
         singleton: bool,
     },
 
-    /// Build and analyze bias tables for compositional filtering
+    /// Build and analyze hash bias tables for filtering
     #[command(arg_required_else_help = true)]
     Bias {
         #[command(subcommand)]
@@ -107,54 +107,58 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum BiasCommands {
-    /// Create a raw hexamer frequency table from a FASTA file
+    /// Count hashes from reference FASTA files into a raw hash counts file
     #[command(arg_required_else_help = true)]
     Create {
-        /// Input FASTA file
-        input: PathBuf,
-        /// Output raw bias table file (.braw)
+        /// Input FASTA file(s) or glob pattern
+        #[arg(required = true)]
+        input: Vec<PathBuf>,
+        /// Output raw hash counts file (.braw)
         #[arg(short, long)]
         output: PathBuf,
+        /// K-mer size (must match sketch k-mer size)
+        #[arg(short = 'k', long = "kmer-size", default_value = "21")]
+        kmer_size: u8,
+        /// FracMinHash scale (must match sketch fscale)
+        #[arg(long, default_value = "1000")]
+        fscale: u64,
+        /// Count-Min Sketch width (columns, power of 2 recommended)
+        #[arg(long, default_value = "1048576")]
+        cms_width: usize,
+        /// Count-Min Sketch depth (number of hash functions)
+        #[arg(long, default_value = "5")]
+        cms_depth: usize,
     },
 
-    /// Combine two raw tables into a final bias table
+    /// Combine positive and negative raw counts into a trained bias table
     #[command(arg_required_else_help = true)]
     Combine {
-        /// Positive raw bias table (.braw)
+        /// Positive raw hash counts (.braw) - sequences to enrich
         positive: PathBuf,
-        /// Negative raw bias table (.braw)
+        /// Negative raw hash counts (.braw) - sequences to deplete
         negative: PathBuf,
         /// Output combined bias table file (.bias)
         #[arg(short, long)]
         output: PathBuf,
-        /// Score threshold (0.0-1.0). Higher = stricter filtering.
-        /// 0.5 = neutral, 0.7 = keep hexamers 70%+ likely from positive set
-        #[arg(long, default_value = "0.5")]
-        threshold: f32,
+        /// Smoothing parameter for log-ratio computation
+        #[arg(long, default_value = "1.0")]
+        alpha: f32,
+        /// Target selectivity ratio (positive retention / negative retention).
+        /// E.g., 10.0 means positive hashes are retained 10x more than negative.
+        #[arg(long, default_value = "10.0")]
+        selectivity: f32,
     },
 
-    /// Display statistics for a bias table
+    /// Display statistics for a bias table or raw hash counts
     #[command(arg_required_else_help = true)]
     Stats {
-        /// Input bias table file (.braw or .bias)
+        /// Input file (.braw or .bias)
         input: PathBuf,
+        /// Optional second raw hash counts (.braw) for comparison
+        #[arg(long)]
+        compare: Option<PathBuf>,
         /// Output JSON report to file instead of stderr
         #[arg(short, long)]
         output: Option<PathBuf>,
-    },
-
-    /// Compare two raw bias tables
-    #[command(arg_required_else_help = true)]
-    Compare {
-        /// First raw bias table (.braw) - treated as positive
-        positive: PathBuf,
-        /// Second raw bias table (.braw) - treated as negative
-        negative: PathBuf,
-        /// Output JSON report to file instead of stderr
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-        /// Threshold for summary statistics
-        #[arg(long, default_value = "0.5")]
-        threshold: f32,
     },
 }

@@ -1,4 +1,4 @@
-use crate::bias::{BIAS_TABLE_SERIALIZED_SIZE, BiasTable};
+use crate::bias::HashBiasTable;
 use crate::format::{
     BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
     FLAG_HAS_BIAS_TABLE, HEADER_SIZE, Header, MAGIC, VERSION,
@@ -103,7 +103,7 @@ pub struct BuildConfig {
     pub temp_dir_base: Option<PathBuf>,
     pub min_entropy: f64,
     pub singleton: bool,
-    pub bias_table: Option<Arc<BiasTable>>,
+    pub bias_table: Option<Arc<HashBiasTable>>,
     pub show_progress: bool,
 }
 
@@ -188,7 +188,7 @@ pub fn run(
     sketch_result: &SketchResult,
     _config: &CompactConfig,
     kmer_size: u8,
-    bias_table: Option<&BiasTable>,
+    bias_table: Option<&HashBiasTable>,
 ) -> Result<IndexStats, CompactError> {
     let temp_path = sketch_result.temp_dir.path();
 
@@ -261,11 +261,7 @@ pub fn run(
     // This allows per-bucket mmap that can be dropped after processing.
     use crate::format::align_to_page;
 
-    let bias_size: u64 = if bias_table.is_some() {
-        BIAS_TABLE_SERIALIZED_SIZE as u64
-    } else {
-        0
-    };
+    let bias_size: u64 = bias_table.map(|b| b.to_bytes().len() as u64).unwrap_or(0);
     let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names);
     let sample_sizes_bytes = serialize_sample_sizes(&aggregated_sample_sizes);
 
@@ -665,14 +661,22 @@ mod tests {
 
     #[test]
     fn test_build_with_bias_table() {
-        // Create bias table from positive/negative sequences
+        use crate::bias::{CMSConfig, HashBiasTable, RawHashCounts};
+
         let pos_fasta = make_fasta(&[("pos", "ATATATATATATATATATATATATATATATAT")]);
         let neg_fasta = make_fasta(&[("neg", "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC")]);
 
-        let bias_result =
-            crate::bias::BiasTable::build(pos_fasta.path(), neg_fasta.path(), 0.5, None).unwrap();
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 1,
+        };
 
-        // Build JAM file with bias table - use ATATAT-rich sequence that passes bias filter
+        let pos_raw = RawHashCounts::build(&[pos_fasta.path()], config.clone(), None).unwrap();
+        let neg_raw = RawHashCounts::build(&[neg_fasta.path()], config, None).unwrap();
+        let bias_table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2.0).unwrap();
+
         let input = make_fasta(&[("seq1", "ATATATATATATATATATATATATATATATATATAT")]);
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("test.jam");
@@ -682,18 +686,17 @@ mod tests {
             fscale: 1,
             num_threads: 1,
             memory: 1,
-            bias_table: Some(std::sync::Arc::new(bias_result.table.clone())),
+            bias_table: Some(std::sync::Arc::new(bias_table.clone())),
             ..Default::default()
         };
 
         build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
 
-        // Verify the bias table is embedded by reading the file back
         let reader = crate::reader::JamReader::open(&output_path).unwrap();
         assert!(reader.has_bias_table());
 
         let embedded_bias = reader.bias_table().unwrap();
-        assert_eq!(*embedded_bias, bias_result.table);
+        assert_eq!(*embedded_bias, bias_table);
     }
 
     #[test]
