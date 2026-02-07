@@ -1,5 +1,3 @@
-//! Download plasmid and chromosome sequences for bias table generation.
-
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use flate2::read::GzDecoder;
@@ -15,7 +13,7 @@ use std::time::Duration;
 
 const READ_BUFFER_SIZE: usize = 50 * 1024 * 1024;
 const WRITE_BUFFER_SIZE: usize = 50 * 1024 * 1024;
-const ZSTD_COMPRESSION_LEVEL: i32 = 3; // Fast compression
+const ZSTD_COMPRESSION_LEVEL: i32 = 3;
 
 const PLASMIDSCOPE_URLS: &[(&str, &str)] = &[
     ("PLSDB", "https://plasmidapi.deepomics.org/api/database/files/PLSDB/PLSDB.fasta.tar.gz"),
@@ -90,7 +88,6 @@ impl DownloadResult {
     }
 }
 
-/// Tracks the first failure that caused an abort
 #[derive(Debug, Default)]
 struct FirstFailure {
     name: String,
@@ -152,7 +149,7 @@ fn download_file_with_retry(
 
     for attempt in 0..=retries {
         if attempt > 0 {
-            let delay = Duration::from_secs(1 << (attempt - 1)); // 1s, 2s, 4s...
+            let delay = Duration::from_secs(1 << (attempt - 1));
             std::thread::sleep(delay);
             if let Some(pb) = pb {
                 pb.set_message(format!("retry {}/{}...", attempt, retries));
@@ -356,7 +353,6 @@ fn download_plasmidscope_db(
     pb: &ProgressBar,
     retries: u32,
 ) -> DownloadResult {
-    // Output uncompressed fasta (will compress in combine step)
     let output_file = output_dir.join(format!("{}.fasta", name));
 
     if output_file.exists() {
@@ -398,7 +394,6 @@ fn download_plasmidscope_db(
 
         pb.set_message(format!("{} concatenating {} files...", name, fastas.len()));
 
-        // Write uncompressed - will compress in combine step
         let out_file = File::create(&output_file)?;
         let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, out_file);
 
@@ -431,7 +426,6 @@ fn download_chromosome(
     retries: u32,
 ) -> DownloadResult {
     let name = ftp_path.rsplit('/').next().unwrap_or("unknown");
-    // Output uncompressed - will compress in combine step
     let output_file = output_dir.join(format!("{}.chromosome.fna", name));
 
     if output_file.exists() {
@@ -715,7 +709,6 @@ fn combine_fastas_zstd(
 
     for file in &files {
         let f = File::open(file)?;
-        // Read uncompressed files directly
         let reader = BufReader::with_capacity(READ_BUFFER_SIZE, f);
         for line in reader.lines() {
             let line = line?;
@@ -804,7 +797,6 @@ fn main() -> Result<()> {
 
     println!("=== Downloading Data ===");
 
-    // Download plasmids and chromosomes in parallel
     let total_plasmids_filtered = std::thread::scope(|s| -> Result<usize> {
         let plasmid_handle = if !args.skip_plasmids {
             let abort = &abort_flag;
@@ -835,7 +827,6 @@ fn main() -> Result<()> {
             None
         };
 
-        // Wait for both to complete
         if let Some(h) = plasmid_handle {
             h.join().expect("plasmid thread panicked")?;
         }

@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Query sketch with sorted (hash, sample_id) pairs across 256 buckets.
 #[derive(Debug)]
 pub struct QuerySketch {
     pub buckets: [Vec<(u64, u32)>; BUCKET_COUNT],
@@ -39,7 +38,6 @@ impl QuerySketch {
         self.buckets.iter().map(|b| b.len()).sum()
     }
 
-    /// Build from .jam file. Fails if parameters don't match target db.
     pub fn from_jam<P: AsRef<Path>>(path: P, db: &JamReader) -> Result<Self, QueryError> {
         let source = JamReader::open(path)?;
 
@@ -282,8 +280,6 @@ pub struct QueryResult {
     pub query_size: usize,
     pub hashes_found: usize,
     pub matches: Vec<SampleMatch>,
-    /// Number of buckets that failed to mmap during query.
-    /// If > 0, results may be incomplete (some hashes could not be searched).
     pub failed_bucket_count: usize,
 }
 
@@ -306,7 +302,6 @@ impl QueryResult {
         !self.matches.is_empty()
     }
 
-    /// Returns true if some buckets failed during query, meaning results may be incomplete.
     pub fn is_partial(&self) -> bool {
         self.failed_bucket_count > 0
     }
@@ -421,7 +416,6 @@ impl QueryEngine {
 
         let threshold = self.reader.threshold();
 
-        // Disable read-ahead since our access is query-driven, not sequential
         self.reader.advise_random();
 
         let hashes_found: Vec<AtomicU32> = (0..num_samples)
@@ -457,7 +451,6 @@ impl QueryEngine {
                     }
                 }
 
-                // Done with filter - release those pages
                 let (filter_start, filter_end) = self.reader.bucket_filter_byte_range(bucket_idx);
                 self.reader.release_pages(filter_start, filter_end);
 
@@ -493,11 +486,9 @@ impl QueryEngine {
                         d_idx -= 1;
                     }
 
-                    // Progressive page release: release pages before current position
                     let current_byte = entry_start + d_idx * ENTRY_SIZE;
                     let current_page = current_byte & !(PAGE_SIZE - 1);
                     if current_page > last_released_page + PAGE_SIZE {
-                        // Release pages we've passed (keep one page buffer for backtracking)
                         self.reader
                             .release_pages(last_released_page, current_page - PAGE_SIZE);
                         last_released_page = current_page - PAGE_SIZE;
@@ -533,7 +524,6 @@ impl QueryEngine {
             })
             .collect();
 
-        // Calculate offsets for parallel concatenation (prefix sum)
         let bucket_sizes: Vec<usize> = bucket_pairs.iter().map(|v| v.len()).collect();
         let total_pairs: usize = bucket_sizes.iter().sum();
         let mut bucket_offsets = Vec::with_capacity(BUCKET_COUNT + 1);
@@ -548,7 +538,6 @@ impl QueryEngine {
             .enumerate()
             .for_each(|(bucket_idx, pairs)| {
                 let start = bucket_offsets[bucket_idx];
-                // Safety: each bucket writes to non-overlapping slice
                 let dest = unsafe {
                     std::slice::from_raw_parts_mut(
                         all_pairs.as_ptr().add(start) as *mut (u32, u32),
@@ -581,7 +570,6 @@ impl QueryEngine {
             .map(|q_sample| all_pairs.partition_point(|&(qs, _)| qs < q_sample))
             .collect();
 
-        // Process each query sample's range in parallel
         let results: Vec<QueryResult> = (0..num_samples)
             .into_par_iter()
             .map(|sample_idx| {
@@ -596,7 +584,6 @@ impl QueryEngine {
                 let mut matches = Vec::new();
                 let query_size = sketch.query_sizes[sample_idx];
 
-                // Count consecutive (q_sample, db_sample) pairs within this sample's range
                 let mut i = start;
                 while i < end {
                     let (_, db_sample) = all_pairs[i];
@@ -690,7 +677,6 @@ mod tests {
         let (_dir, path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let engine = QueryEngine::open(&path).unwrap();
 
-        // Get some hashes from the database
         let reader = JamReader::open(&path).unwrap();
         let mut test_hashes = Vec::new();
         for bucket_idx in 0..256 {
@@ -725,7 +711,6 @@ mod tests {
         let (_dir, path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let engine = QueryEngine::open(&path).unwrap();
 
-        // Query with hashes above threshold (won't exist)
         let fake_hashes: Vec<u64> = (0..10).map(|i| u64::MAX - i).collect();
         let result = engine.query(&fake_hashes);
         assert_eq!(result.hashes_found, 0);
@@ -742,7 +727,6 @@ mod tests {
         );
         let engine = QueryEngine::open(&path).unwrap();
 
-        // Get hashes from sample 0
         let reader = JamReader::open(&path).unwrap();
         let mut test_hashes = Vec::new();
         for bucket_idx in 0..256 {
@@ -805,8 +789,6 @@ mod tests {
         assert!(!result.is_partial());
     }
 
-    // QuerySketch tests
-
     #[test]
     fn test_query_sketch_new() {
         let sketch = QuerySketch::new();
@@ -830,11 +812,9 @@ mod tests {
     fn test_query_sketch_bucket_accessor() {
         let mut sketch = QuerySketch::new();
 
-        // Add some entries to bucket 0
         sketch.buckets[0].push((100, 0));
         sketch.buckets[0].push((200, 1));
 
-        // Add entries to bucket 255
         sketch.buckets[255].push((300, 0));
 
         let bucket_0 = sketch.bucket(0);
@@ -846,7 +826,6 @@ mod tests {
         assert_eq!(bucket_255.len(), 1);
         assert_eq!(bucket_255[0], (300, 0));
 
-        // Empty bucket
         let bucket_1 = sketch.bucket(1);
         assert!(bucket_1.is_empty());
     }
@@ -869,7 +848,6 @@ mod tests {
         let mut sketch = QuerySketch::new();
         assert_eq!(sketch.total_entries(), 0);
 
-        // Add entries to various buckets
         sketch.buckets[0].push((100, 0));
         sketch.buckets[0].push((200, 0));
         assert_eq!(sketch.total_entries(), 2);
@@ -887,13 +865,10 @@ mod tests {
     fn test_query_sketch_with_populated_fields() {
         let mut sketch = QuerySketch::new();
 
-        // Set up sample names
         sketch.sample_names = vec!["query_sample_1".to_string(), "query_sample_2".to_string()];
 
-        // Set up query sizes (unique hashes per sample)
         sketch.query_sizes = vec![1000, 500];
 
-        // Populate some buckets
         for i in 0..10 {
             sketch.buckets[i].push((i as u64 * 100, 0));
             sketch.buckets[i].push((i as u64 * 100 + 1, 1));
@@ -913,8 +888,6 @@ mod tests {
         let _ = sketch.bucket(256); // Should panic
     }
 
-    // query_sketch tests
-
     #[test]
     fn test_query_sketch_empty() {
         let (_dir, path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
@@ -927,21 +900,18 @@ mod tests {
 
     #[test]
     fn test_query_sketch_single_sample() {
-        // Build a database with one sample
         let (_dir, path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let engine = QueryEngine::open(&path).unwrap();
         let reader = JamReader::open(&path).unwrap();
 
-        // Create a QuerySketch from the database entries (deduplicated)
         let mut sketch = QuerySketch::new();
         sketch.sample_names.push("query_sample".to_string());
 
         let mut unique_hashes = std::collections::HashSet::new();
         for bucket_idx in 0..256 {
             for entry in reader.bucket_entries(bucket_idx) {
-                // Only add each unique hash once
                 if unique_hashes.insert(entry.hash) {
-                    sketch.buckets[bucket_idx].push((entry.hash, 0)); // sample_id 0
+                    sketch.buckets[bucket_idx].push((entry.hash, 0));
                 }
             }
         }
@@ -952,12 +922,9 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(results[0].has_matches());
 
-        // Verify we got a match with db sample 0
         let db_sample_0_match = results[0].matches.iter().find(|m| m.sample_id == 0);
         assert!(db_sample_0_match.is_some(), "Should match db sample 0");
 
-        // hit_count reflects total match count (may exceed query_size if DB has duplicates)
-        // For containment correctness, verify hit_count >= query_size (all query hashes found)
         let m = db_sample_0_match.unwrap();
         assert!(
             m.hit_count >= results[0].query_size as u32,
@@ -969,7 +936,6 @@ mod tests {
 
     #[test]
     fn test_query_sketch_multiple_samples() {
-        // Build a database with two different samples
         let (_dir, path) = build_test_db(
             &[
                 ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
@@ -980,7 +946,6 @@ mod tests {
         let engine = QueryEngine::open(&path).unwrap();
         let reader = JamReader::open(&path).unwrap();
 
-        // Create a QuerySketch with two query samples, each using hashes from one DB sample
         let mut sketch = QuerySketch::new();
         sketch.sample_names.push("query_0".to_string());
         sketch.sample_names.push("query_1".to_string());
@@ -989,7 +954,7 @@ mod tests {
 
         for bucket_idx in 0..256 {
             for entry in reader.bucket_entries(bucket_idx) {
-                let query_sample_id = entry.sample_id; // Map db sample to query sample
+                let query_sample_id = entry.sample_id;
                 if (query_sample_id as usize) < 2 {
                     hashes_per_sample[query_sample_id as usize].insert(entry.hash);
                     sketch.buckets[bucket_idx].push((entry.hash, query_sample_id));
@@ -1004,16 +969,13 @@ mod tests {
 
         assert_eq!(results.len(), 2);
 
-        // Each query sample should have high containment with its corresponding DB sample
         for (query_idx, result) in results.iter().enumerate() {
             assert!(result.has_matches());
-            // Find match with corresponding DB sample
             let self_match = result
                 .matches
                 .iter()
                 .find(|m| m.sample_id == query_idx as u32);
             if let Some(m) = self_match {
-                // Should have high containment with self
                 assert!(
                     m.containment >= 0.9,
                     "Query {} should have high containment with DB sample {}, got {}",
@@ -1030,12 +992,10 @@ mod tests {
         let (_dir, path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let engine = QueryEngine::open(&path).unwrap();
 
-        // Create a QuerySketch with hashes that won't be in the database
         let mut sketch = QuerySketch::new();
         sketch.sample_names.push("fake_sample".to_string());
         sketch.query_sizes.push(10);
 
-        // Add fake hashes above threshold (won't exist in DB)
         for i in 0..10 {
             let fake_hash = u64::MAX - i;
             let bucket_idx = (fake_hash & 0xFF) as usize;
@@ -1055,7 +1015,6 @@ mod tests {
         let engine = QueryEngine::open(&path).unwrap();
         let reader = JamReader::open(&path).unwrap();
 
-        // Get half the hashes from the database
         let mut sketch = QuerySketch::new();
         sketch.sample_names.push("half_sample".to_string());
 
@@ -1066,7 +1025,6 @@ mod tests {
             }
         }
 
-        // Take every other hash
         let selected_hashes: Vec<_> = all_hashes.iter().step_by(2).collect();
         sketch.query_sizes.push(selected_hashes.len());
 
@@ -1078,80 +1036,61 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert!(results[0].has_matches());
-        // With half the hashes, we should get ~100% containment (all queried hashes exist)
-        // but hit count should be about half
         let top = results[0].top(1);
         assert!(!top.is_empty());
-        // All queried hashes should be found, so containment should be ~1.0
         assert!(top[0].containment >= 0.9);
     }
 
-    // QuerySketch::from_fasta tests
-
     #[test]
     fn test_from_fasta_non_singleton() {
-        // Build a database
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create a FASTA file with the same sequence
         let query_fasta = make_fasta(&[("query_seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        // Build QuerySketch from FASTA (non-singleton mode)
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, false).unwrap();
 
-        // Should have one sample (entire file)
         assert_eq!(sketch.sample_count(), 1);
         assert!(!sketch.sample_names[0].is_empty());
 
-        // Should have hashes
         assert!(sketch.total_entries() > 0);
         assert!(sketch.query_sizes[0] > 0);
 
-        // query_sizes should match total_entries for single sample
         assert_eq!(sketch.query_sizes[0], sketch.total_entries());
     }
 
     #[test]
     fn test_from_fasta_singleton() {
-        // Build a database
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create a FASTA file with two sequences
         let query_fasta = make_fasta(&[
             ("query_seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
             ("query_seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
         ]);
 
-        // Build QuerySketch from FASTA (singleton mode)
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, true).unwrap();
 
-        // Should have two samples (one per sequence)
         assert_eq!(sketch.sample_count(), 2);
         assert_eq!(sketch.sample_names[0], "query_seq1");
         assert_eq!(sketch.sample_names[1], "query_seq2");
 
-        // Each sample should have hashes
         assert!(sketch.query_sizes[0] > 0);
         assert!(sketch.query_sizes[1] > 0);
 
-        // query_sizes should sum to approximately total_entries
-        // (may be less due to shared hashes between samples)
         let total_unique: usize = sketch.query_sizes.iter().sum();
         assert!(total_unique <= sketch.total_entries() + sketch.sample_count());
     }
 
     #[test]
     fn test_from_fasta_uses_db_parameters() {
-        // Build a database with specific k-mer size and scale
         let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
         let output_dir = tempfile::tempdir().unwrap();
         let db_path = output_dir.path().join("test.jam");
 
         let config = BuildConfig {
-            kmer_size: 15, // Different k-mer size
-            fscale: 10,    // Scale of 10 means ~10% of hashes kept
+            kmer_size: 15,
+            fscale: 10,
             singleton: false,
             num_threads: 1,
             memory: 1,
@@ -1161,29 +1100,20 @@ mod tests {
         build(&[input.path().to_path_buf()], &db_path, &config).unwrap();
         let db = JamReader::open(&db_path).unwrap();
 
-        // Verify DB parameters
         assert_eq!(db.kmer_size(), 15);
 
-        // Create a query FASTA
         let query_fasta = make_fasta(&[("query", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        // Build QuerySketch - should use DB's parameters
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, false).unwrap();
 
-        // Should have hashes (using DB's threshold, so filtered)
         assert!(sketch.sample_count() == 1);
-
-        // The sketch should have fewer hashes than with fscale=1
-        // because it uses the DB's threshold
     }
 
     #[test]
     fn test_from_fasta_deduplication() {
-        // Build a database
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create a FASTA file with repeated sequence (should produce duplicate k-mers)
         let query_fasta = make_fasta(&[(
             "query",
             "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG",
@@ -1191,14 +1121,11 @@ mod tests {
 
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, false).unwrap();
 
-        // query_sizes should be unique hashes (deduplicated)
-        // total_entries should also be deduplicated (one entry per unique hash)
         assert_eq!(sketch.query_sizes[0], sketch.total_entries());
     }
 
     #[test]
     fn test_from_fasta_bucketization() {
-        // Build a database
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
@@ -1209,7 +1136,6 @@ mod tests {
 
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, false).unwrap();
 
-        // Verify bucketization: each entry's hash should be in the correct bucket
         for (bucket_idx, bucket) in sketch.buckets.iter().enumerate() {
             for &(hash, _sample_id) in bucket {
                 assert_eq!(
@@ -1226,7 +1152,6 @@ mod tests {
 
     #[test]
     fn test_from_fasta_sorted_buckets() {
-        // Build a database
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
@@ -1243,7 +1168,6 @@ mod tests {
 
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, true).unwrap();
 
-        // Verify each bucket is sorted by (hash, sample_id)
         for bucket in &sketch.buckets {
             for window in bucket.windows(2) {
                 assert!(
@@ -1258,12 +1182,10 @@ mod tests {
 
     #[test]
     fn test_from_fasta_short_sequences_skipped() {
-        // Build a database with k=11
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
         assert_eq!(db.kmer_size(), 11);
 
-        // Create a FASTA with sequences shorter than k
         let query_fasta = make_fasta(&[
             ("short", "ATCGATCG"),                        // 8 bp, < 11
             ("long", "ATCGATCGATCGATCGATCGATCGATCGATCG"), // 32 bp, > 11
@@ -1271,13 +1193,10 @@ mod tests {
 
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, true).unwrap();
 
-        // Should have two sample names (both sequences processed)
         assert_eq!(sketch.sample_count(), 2);
 
-        // First sample (short) should have 0 hashes
         assert_eq!(sketch.query_sizes[0], 0);
 
-        // Second sample (long) should have hashes
         assert!(sketch.query_sizes[1] > 0);
     }
 
@@ -1298,25 +1217,20 @@ mod tests {
 
     #[test]
     fn test_from_fasta_integration_with_query_engine() {
-        // Build a database
         let (_dir, db_path) =
             build_test_db(&[("db_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
         let engine = QueryEngine::open(&db_path).unwrap();
 
-        // Create a query FASTA with the same sequence
         let query_fasta = make_fasta(&[("query_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        // Build QuerySketch from FASTA
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, false).unwrap();
 
-        // Query using the engine
         let results = engine.query_sketch(&sketch);
 
         assert_eq!(results.len(), 1);
         assert!(results[0].has_matches());
 
-        // Should have high containment (same sequence)
         let top = results[0].top(1);
         assert!(!top.is_empty());
         assert!(
@@ -1325,8 +1239,6 @@ mod tests {
             top[0].containment
         );
     }
-
-    // QuerySketch::from_jam tests
 
     fn build_test_db_with_params(
         seqs: &[(&str, &str)],
@@ -1353,7 +1265,6 @@ mod tests {
 
     #[test]
     fn test_from_jam_success() {
-        // Create two compatible .jam files with same parameters
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1370,17 +1281,14 @@ mod tests {
         let db = JamReader::open(&db_path).unwrap();
         let sketch = QuerySketch::from_jam(&query_path, &db).unwrap();
 
-        // Verify sketch was loaded
         assert_eq!(sketch.sample_count(), 1);
         assert!(sketch.total_entries() > 0);
-        // Sample name comes from the stored names in the JAM file (FASTA filename in combined mode)
         assert!(!sketch.sample_names[0].is_empty());
         assert!(sketch.query_sizes[0] > 0);
     }
 
     #[test]
     fn test_from_jam_multiple_samples() {
-        // Create query .jam with multiple samples (singleton mode)
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1394,14 +1302,13 @@ mod tests {
             ],
             11,
             1,
-            true, // singleton mode - each sequence is a sample
+            true,
         );
 
         let db = JamReader::open(&db_path).unwrap();
         let sketch = QuerySketch::from_jam(&query_path, &db).unwrap();
 
         assert_eq!(sketch.sample_count(), 2);
-        // Sample names come from the stored names in the JAM file (record IDs in singleton mode)
         assert_eq!(sketch.sample_names[0], "seq1");
         assert_eq!(sketch.sample_names[1], "seq2");
         assert_eq!(sketch.query_sizes.len(), 2);
@@ -1411,16 +1318,15 @@ mod tests {
 
     #[test]
     fn test_from_jam_kmer_size_mismatch() {
-        // Create two .jam files with different k-mer sizes
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
-            11, // k=11
+            11,
             1,
             false,
         );
         let (_dir2, query_path) = build_test_db_with_params(
             &[("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
-            21, // k=21 (different!)
+            21,
             1,
             false,
         );
@@ -1446,17 +1352,16 @@ mod tests {
 
     #[test]
     fn test_from_jam_threshold_mismatch() {
-        // Create two .jam files with different fscale (threshold)
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
-            1, // fscale=1 -> threshold = u64::MAX
+            1,
             false,
         );
         let (_dir2, query_path) = build_test_db_with_params(
             &[("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
             11,
-            1000, // fscale=1000 -> different threshold!
+            1000,
             false,
         );
 
@@ -1472,7 +1377,6 @@ mod tests {
                 target_value,
             } => {
                 assert!(parameter.contains("threshold"));
-                // Just verify they're different - exact values depend on u64::MAX / fscale
                 assert_ne!(source_value, target_value);
             }
             _ => panic!("Expected ParameterMismatch error, got {:?}", err),
@@ -1481,7 +1385,6 @@ mod tests {
 
     #[test]
     fn test_from_jam_preserves_bucketization() {
-        // Verify that entries are correctly distributed to buckets
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1498,7 +1401,6 @@ mod tests {
         let db = JamReader::open(&db_path).unwrap();
         let sketch = QuerySketch::from_jam(&query_path, &db).unwrap();
 
-        // Verify all entries are in the correct bucket based on hash & 0xFF
         for bucket_idx in 0..BUCKET_COUNT {
             for &(hash, _sample_id) in sketch.bucket(bucket_idx) {
                 assert_eq!(
@@ -1513,7 +1415,6 @@ mod tests {
 
     #[test]
     fn test_from_jam_query_sizes_correct() {
-        // Create a query with known multiple samples
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1527,13 +1428,12 @@ mod tests {
             ],
             11,
             1,
-            true, // singleton mode
+            true,
         );
 
         let db = JamReader::open(&db_path).unwrap();
         let sketch = QuerySketch::from_jam(&query_path, &db).unwrap();
 
-        // Verify query_sizes matches the actual unique hash count per sample
         for (sample_id, &expected_size) in sketch.query_sizes.iter().enumerate() {
             let mut unique_hashes = std::collections::HashSet::new();
             for bucket_idx in 0..BUCKET_COUNT {
@@ -1554,29 +1454,24 @@ mod tests {
 
     #[test]
     fn test_from_jam_empty_source() {
-        // Test with a source that has minimal/no entries due to high fscale
-        // Note: With very high fscale, most hashes are filtered out
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
-            1_000_000, // Very high fscale
+            1_000_000,
             false,
         );
         let (_dir2, query_path) = build_test_db_with_params(
             &[("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
             11,
-            1_000_000, // Same high fscale
+            1_000_000,
             false,
         );
 
         let db = JamReader::open(&db_path).unwrap();
         let result = QuerySketch::from_jam(&query_path, &db);
 
-        // Should succeed even with few/no entries
         assert!(result.is_ok());
     }
-
-    // QuerySketch::from_inputs tests
 
     #[test]
     fn test_from_inputs_empty() {
@@ -1641,7 +1536,6 @@ mod tests {
         )
         .unwrap();
 
-        // Two FASTA files in non-singleton mode = 2 samples
         assert_eq!(sketch.sample_count(), 2);
         assert!(sketch.total_entries() > 0);
         assert_eq!(sketch.query_sizes.len(), 2);
@@ -1652,7 +1546,6 @@ mod tests {
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
-        // Each FASTA has 2 sequences
         let fasta1 = make_fasta(&[
             ("seq1a", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
             ("seq1b", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
@@ -1665,11 +1558,10 @@ mod tests {
         let sketch = QuerySketch::from_inputs(
             &[fasta1.path().to_path_buf(), fasta2.path().to_path_buf()],
             &db,
-            true, // singleton mode
+            true,
         )
         .unwrap();
 
-        // Two FASTA files with 2 seqs each in singleton mode = 4 samples
         assert_eq!(sketch.sample_count(), 4);
         assert_eq!(sketch.sample_names.len(), 4);
         assert_eq!(sketch.sample_names[0], "seq1a");
@@ -1680,7 +1572,6 @@ mod tests {
 
     #[test]
     fn test_from_inputs_mixed_fasta_and_jam() {
-        // Create a database
         let (_dir1, db_path) = build_test_db_with_params(
             &[("db_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1689,10 +1580,8 @@ mod tests {
         );
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create a FASTA query
         let query_fasta = make_fasta(&[("fasta_query", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        // Create a .jam query with compatible parameters
         let (_dir2, query_jam) = build_test_db_with_params(
             &[("jam_query", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
             11,
@@ -1704,14 +1593,12 @@ mod tests {
             QuerySketch::from_inputs(&[query_fasta.path().to_path_buf(), query_jam], &db, false)
                 .unwrap();
 
-        // One FASTA + one .jam = 2 samples
         assert_eq!(sketch.sample_count(), 2);
         assert!(sketch.total_entries() > 0);
     }
 
     #[test]
     fn test_from_inputs_sample_id_renumbering() {
-        // Verify sample IDs are renumbered to be contiguous
         let (_dir1, db_path) = build_test_db_with_params(
             &[("db_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1720,7 +1607,6 @@ mod tests {
         );
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create two .jam files with singleton mode (multiple samples each)
         let (_dir2, jam1) = build_test_db_with_params(
             &[
                 ("seq1a", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
@@ -1728,7 +1614,7 @@ mod tests {
             ],
             11,
             1,
-            true, // singleton mode
+            true,
         );
         let (_dir3, jam2) = build_test_db_with_params(
             &[
@@ -1737,29 +1623,25 @@ mod tests {
             ],
             11,
             1,
-            true, // singleton mode
+            true,
         );
 
         let sketch = QuerySketch::from_inputs(&[jam1, jam2], &db, false).unwrap();
 
-        // 2 + 2 = 4 samples total
         assert_eq!(sketch.sample_count(), 4);
 
-        // Verify sample IDs in buckets are in range [0, 4)
         for bucket in &sketch.buckets {
             for &(_hash, sample_id) in bucket {
                 assert!(sample_id < 4, "Sample ID {} should be < 4", sample_id);
             }
         }
 
-        // Verify we have entries for all sample IDs
         let mut seen_samples = std::collections::HashSet::new();
         for bucket in &sketch.buckets {
             for &(_hash, sample_id) in bucket {
                 seen_samples.insert(sample_id);
             }
         }
-        // All 4 samples should have at least some entries
         assert_eq!(seen_samples.len(), 4, "All samples should have entries");
     }
 
@@ -1778,7 +1660,6 @@ mod tests {
         )
         .unwrap();
 
-        // Verify each bucket is sorted by (hash, sample_id)
         for bucket in &sketch.buckets {
             for window in bucket.windows(2) {
                 assert!(
@@ -1799,11 +1680,9 @@ mod tests {
         let fasta1 = make_fasta(&[("q1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
         let fasta2 = make_fasta(&[("q2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")]);
 
-        // Get individual sketches to compare query_sizes
         let sketch1 = QuerySketch::from_fasta(fasta1.path(), &db, false).unwrap();
         let sketch2 = QuerySketch::from_fasta(fasta2.path(), &db, false).unwrap();
 
-        // Re-create FASTAs (NamedTempFile might have been moved)
         let fasta1_new = make_fasta(&[("q1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
         let fasta2_new = make_fasta(&[("q2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")]);
 
@@ -1817,7 +1696,6 @@ mod tests {
         )
         .unwrap();
 
-        // Query sizes should match individual sketches
         assert_eq!(combined.query_sizes.len(), 2);
         assert_eq!(combined.query_sizes[0], sketch1.query_sizes[0]);
         assert_eq!(combined.query_sizes[1], sketch2.query_sizes[0]);
@@ -1833,7 +1711,6 @@ mod tests {
         );
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create a .jam file - it should be detected by extension
         let (_dir2, jam_path) = build_test_db_with_params(
             &[("jam_seq", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
             11,
@@ -1841,14 +1718,11 @@ mod tests {
             false,
         );
 
-        // Verify the file has .jam extension
         assert_eq!(jam_path.extension().unwrap(), "jam");
 
         let sketch = QuerySketch::from_inputs(&[jam_path], &db, false).unwrap();
 
-        // Should load as .jam (sample names now come from the stored names in the JAM file)
         assert_eq!(sketch.sample_count(), 1);
-        // In combined mode (singleton=false), the sample name is the FASTA filename
         assert!(!sketch.sample_names[0].is_empty());
     }
 
@@ -1857,7 +1731,6 @@ mod tests {
         let (_dir, db_path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let db = JamReader::open(&db_path).unwrap();
 
-        // Try to load a non-existent file
         let result = QuerySketch::from_inputs(
             &[std::path::PathBuf::from("/nonexistent/file.fasta")],
             &db,
@@ -1877,10 +1750,9 @@ mod tests {
         );
         let db = JamReader::open(&db_path).unwrap();
 
-        // Create a .jam with different k-mer size
         let (_dir2, jam_path) = build_test_db_with_params(
             &[("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
-            21, // k=21 (mismatch!)
+            21,
             1,
             false,
         );
@@ -1898,7 +1770,6 @@ mod tests {
 
     #[test]
     fn test_from_inputs_integration_with_query_engine() {
-        // Create a database with a known sequence
         let (_dir1, db_path) = build_test_db_with_params(
             &[("db_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
             11,
@@ -1908,7 +1779,6 @@ mod tests {
         let db = JamReader::open(&db_path).unwrap();
         let engine = QueryEngine::open(&db_path).unwrap();
 
-        // Create query inputs: one FASTA with same sequence, one .jam
         let query_fasta = make_fasta(&[("same_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
         let (_dir2, query_jam) = build_test_db_with_params(
             &[("different_seq", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")],
@@ -1923,12 +1793,10 @@ mod tests {
 
         assert_eq!(sketch.sample_count(), 2);
 
-        // Query using the engine
         let results = engine.query_sketch(&sketch);
 
         assert_eq!(results.len(), 2);
 
-        // First query (same sequence as DB) should have high containment
         assert!(results[0].has_matches());
         let top0 = results[0].top(1);
         assert!(!top0.is_empty());
@@ -1938,30 +1806,21 @@ mod tests {
             top0[0].containment
         );
 
-        // Second query (different sequence) should have low/no containment
-        // (Different sequences may still share some k-mers by chance)
     }
-
-    // QueryEngine::query_fasta tests
 
     #[test]
     fn test_query_fasta_non_singleton() {
-        // Build a database with a known sequence
         let (_dir, db_path) =
             build_test_db(&[("db_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let engine = QueryEngine::open(&db_path).unwrap();
 
-        // Create a query FASTA with the same sequence
         let query_fasta = make_fasta(&[("query_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        // Query in non-singleton mode (entire file as one sample)
         let results = engine.query_fasta(query_fasta.path(), false).unwrap();
 
-        // Should have exactly one result (one sample)
         assert_eq!(results.len(), 1);
         assert!(results[0].has_matches());
 
-        // Should have high containment (same sequence)
         let top = results[0].top(1);
         assert!(!top.is_empty());
         assert!(
@@ -1973,7 +1832,6 @@ mod tests {
 
     #[test]
     fn test_query_fasta_singleton() {
-        // Build a database with two sequences (singleton mode)
         let (_dir, db_path) = build_test_db(
             &[
                 ("db_seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
@@ -1983,23 +1841,18 @@ mod tests {
         );
         let engine = QueryEngine::open(&db_path).unwrap();
 
-        // Create a query FASTA with two sequences
         let query_fasta = make_fasta(&[
             ("query1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
             ("query2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
         ]);
 
-        // Query in singleton mode (each sequence as a separate sample)
         let results = engine.query_fasta(query_fasta.path(), true).unwrap();
 
-        // Should have two results (one per sequence)
         assert_eq!(results.len(), 2);
 
-        // Both should have matches
         assert!(results[0].has_matches());
         assert!(results[1].has_matches());
 
-        // Each query should have high containment with its corresponding DB sample
         for (i, result) in results.iter().enumerate() {
             let self_match = result.matches.iter().find(|m| m.sample_id == i as u32);
             if let Some(m) = self_match {
@@ -2016,12 +1869,10 @@ mod tests {
 
     #[test]
     fn test_query_fasta_file_not_found() {
-        // Build a database
         let (_dir, db_path) =
             build_test_db(&[("db_seq", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
         let engine = QueryEngine::open(&db_path).unwrap();
 
-        // Try to query a non-existent file
         let result = engine.query_fasta("/nonexistent/path.fasta", false);
 
         assert!(result.is_err());

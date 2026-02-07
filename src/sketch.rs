@@ -23,9 +23,7 @@ const MIN_MEMORY_GB: usize = 4;
 const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_millis(1);
 const MIN_SPLIT_SIZE: usize = 1024 * 1024;
 const MAX_CONCURRENT_MMAPS: usize = 256;
-// Optimal channel capacity based on benchmarks - prevents cache thrashing while
-// maintaining good throughput. Higher values cause memory pressure and worse parallelism.
-const OPTIMAL_CHANNEL_CAPACITY: usize = 512 * 1024; // 512K entries per channel
+const OPTIMAL_CHANNEL_CAPACITY: usize = 512 * 1024;
 
 type Sender = MTx<mpsc::Array<Entry>>;
 type Receiver = Rx<mpsc::Array<Entry>>;
@@ -158,8 +156,6 @@ impl io::Read for MmapSliceReader {
     }
 }
 
-/// Distributes `total` items across `parts` as evenly as possible.
-/// First `total % parts` get one extra item.
 fn distribute_evenly(total: usize, parts: usize) -> impl Iterator<Item = usize> {
     let per_part = total / parts;
     let remainder = total % parts;
@@ -195,7 +191,6 @@ fn validate_format(magic: [u8; 2], path: &Path) -> Result<(), SketchError> {
     Ok(())
 }
 
-/// Validate file header (size and format). Returns magic bytes on success.
 fn validate_file_header(path: &Path) -> Result<[u8; 2], SketchError> {
     let mut file = File::open(path)?;
     let mut magic = [0u8; 2];
@@ -211,7 +206,6 @@ fn validate_file_header(path: &Path) -> Result<[u8; 2], SketchError> {
     Ok(magic)
 }
 
-/// Validate mmap header (size and format). Returns magic bytes on success.
 fn validate_mmap_header(mmap: &Mmap, path: &Path) -> Result<[u8; 2], SketchError> {
     if mmap.len() < 2 {
         return Err(SketchError::Parse {
@@ -237,12 +231,10 @@ fn scan_fasta_boundaries(data: &[u8]) -> Vec<usize> {
     bounds
 }
 
-/// Check if a byte is a valid IUPAC nucleotide code (DNA or RNA).
-/// Includes: A, C, G, T, U (RNA), N, and ambiguity codes R, Y, S, W, K, M, B, D, H, V.
 #[inline]
 fn is_iupac_nucleotide(b: u8) -> bool {
     matches!(
-        b | 0x20, // ASCII case fold to lowercase
+        b | 0x20,
         b'a' | b'c'
             | b'g'
             | b't'
@@ -267,7 +259,6 @@ fn scan_fastq_boundaries(data: &[u8]) -> Vec<usize> {
 
     while i + 1 < data.len() {
         if data[i] == b'\n' && data[i + 1] == b'@' {
-            // Find end of this potential header line
             let header_start = i + 1;
             let header_end = data[header_start..]
                 .iter()
@@ -275,9 +266,7 @@ fn scan_fastq_boundaries(data: &[u8]) -> Vec<usize> {
                 .map(|p| header_start + p)
                 .unwrap_or(data.len());
 
-            // Header must have content (not just "@\n")
             if header_end > header_start + 1 {
-                // Check if next line looks like sequence
                 let seq_start = header_end + 1;
                 if seq_start < data.len() && is_iupac_nucleotide(data[seq_start]) {
                     bounds.push(header_start);
@@ -302,7 +291,6 @@ fn setup_channels(
         .map(|_| mpsc::bounded_blocking(capacity))
         .unzip();
 
-    // Cap bucket-owning threads to BUCKET_COUNT to ensure each thread gets ≥1 bucket
     let bucket_threads = num_threads.min(BUCKET_COUNT);
     let chunk_sizes = distribute_evenly(BUCKET_COUNT, bucket_threads);
 
@@ -327,36 +315,24 @@ fn setup_channels(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Threads beyond BUCKET_COUNT get empty writer lists (they process work but don't own buckets)
     bucket_writers.resize_with(num_threads, Vec::new);
 
     Ok((senders, bucket_writers))
 }
 
-/// Compute optimal channel capacity based on memory budget and input size.
-///
-/// The capacity is automatically tuned to balance memory usage and performance:
-/// - Accounts for input file mmap overhead
-/// - Accounts for write buffer overhead (256 buckets × 8MB = 2GB)
-/// - Caps at OPTIMAL_CHANNEL_CAPACITY to prevent cache thrashing
 fn compute_channel_capacity(memory_gb: usize, input_size_bytes: u64) -> usize {
     let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
     let writer_memory = BUCKET_COUNT as u64 * WRITE_BUFFER_SIZE as u64;
 
-    // Available memory after accounting for input files and write buffers
     let available = memory_bytes
         .saturating_sub(input_size_bytes)
         .saturating_sub(writer_memory);
 
-    // Calculate capacity from available memory
     let computed = (available / (BUCKET_COUNT as u64 * ENTRY_SIZE as u64)) as usize;
 
-    // Clamp to reasonable bounds - too high causes cache thrashing,
-    // too low causes excessive blocking
     computed.clamp(1024, OPTIMAL_CHANNEL_CAPACITY)
 }
 
-/// Scan file for record boundaries suitable for parallel processing.
 fn scan_boundaries(mmap: &Mmap, magic: [u8; 2]) -> Vec<usize> {
     if mmap.len() < MIN_SPLIT_SIZE {
         return vec![0];
@@ -367,7 +343,6 @@ fn scan_boundaries(mmap: &Mmap, magic: [u8; 2]) -> Vec<usize> {
     }
 }
 
-/// Distribute work units across threads, assigning sample IDs by path content.
 fn distribute_work_units(
     positions: Vec<(Arc<Mmap>, Arc<PathBuf>, usize, usize)>,
     num_threads: usize,
@@ -379,7 +354,6 @@ fn distribute_work_units(
         return;
     }
 
-    // Use path content as key, not pointer identity
     let mut file_sample_ids: std::collections::HashMap<PathBuf, u32> =
         std::collections::HashMap::new();
 
@@ -406,7 +380,6 @@ fn distribute_work_units(
     }
 }
 
-/// Result of building work units, includes total input size for memory planning.
 struct WorkUnitResult {
     thread_work: Vec<Vec<WorkUnit>>,
     total_input_bytes: u64,
@@ -423,7 +396,6 @@ fn build_work_units(
     let mut thread_work: Vec<Vec<WorkUnit>> = (0..num_threads).map(|_| Vec::new()).collect();
     let next_sample = || (!singleton).then(|| sample_counter.fetch_add(1, Ordering::SeqCst));
 
-    // Calculate total input size first
     let total_input_bytes: u64 = input_files
         .iter()
         .filter_map(|p| std::fs::metadata(p).ok())
@@ -432,8 +404,6 @@ fn build_work_units(
 
     let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
 
-    // Skip mmap if: too many files OR total input exceeds memory limit
-    // When input > memory, sequential reading avoids swapping
     let skip_mmap = input_files.len() > MAX_CONCURRENT_MMAPS || total_input_bytes > memory_bytes;
 
     if skip_mmap {
@@ -480,7 +450,7 @@ fn build_work_units(
         }
         return Ok(WorkUnitResult {
             thread_work,
-            total_input_bytes: 0, // Not using mmap, so no mmap memory overhead
+            total_input_bytes: 0,
         });
     }
 
@@ -513,7 +483,6 @@ fn build_work_units(
         &mut thread_work,
     );
 
-    // Compressed files can't be split, distribute round-robin
     for (i, (mmap, path)) in compressed_files.into_iter().enumerate() {
         let end = mmap.len();
         thread_work[i % num_threads].push(WorkUnit {
@@ -630,7 +599,6 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         }
     }
 
-    // Convert DashMap to Vec in sample_id order
     let sample_count = sample_counter.load(Ordering::SeqCst);
     let mut sample_names: Vec<String> = vec![String::new(); sample_count as usize];
 
@@ -758,14 +726,12 @@ fn sketch_records(
 
         if !ctx.sample_names.contains_key(&sample_id) {
             let name = if file_sample_id.is_some() {
-                // Combined mode: use source_path filename WITH extension
                 source_path
                     .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("sample")
                     .to_string()
             } else {
-                // Singleton mode: use record ID
                 String::from_utf8_lossy(record.id()).to_string()
             };
             ctx.sample_names.insert(sample_id, name);
@@ -802,20 +768,13 @@ fn sketch_records(
             if let Err(crossfire::SendTimeoutError::Timeout(mut entry)) =
                 ctx.senders[bucket].send_timeout(entry, timeout)
             {
-                // Drain local buckets and retry with exponential backoff.
-                // The target bucket may be owned by another thread, so we also sleep
-                // to give that thread time to drain. Local drain + sleep together
-                // provide best throughput under backpressure.
                 const MAX_RETRIES: u32 = 10;
 
                 for retry in 0..MAX_RETRIES {
-                    // Drain our local buckets first
                     for bw in bucket_writers.iter_mut() {
                         bw.drain()?;
                     }
 
-                    // Sleep to give other threads time to drain their buckets
-                    // (yield alone is insufficient under heavy load)
                     let backoff_sleep = Duration::from_micros(100 << retry.min(4));
                     std::thread::sleep(backoff_sleep);
 
@@ -825,7 +784,6 @@ fn sketch_records(
                         Err(crossfire::SendTimeoutError::Timeout(e)) => {
                             entry = e;
                             if retry == MAX_RETRIES - 1 {
-                                // Final attempt: blocking send as last resort
                                 if ctx.senders[bucket].send(entry).is_err() {
                                     return Err(SketchError::Channel);
                                 }
@@ -966,19 +924,15 @@ mod tests {
 
     #[test]
     fn test_channel_capacity_calculation() {
-        // With no input overhead, capacity is capped at OPTIMAL_CHANNEL_CAPACITY
         let cap_4gb = compute_channel_capacity(4, 0);
         assert_eq!(cap_4gb, OPTIMAL_CHANNEL_CAPACITY);
 
-        // With large input overhead eating into budget, capacity decreases
         let cap_4gb_with_input = compute_channel_capacity(4, 3 * 1024 * 1024 * 1024);
         assert!(cap_4gb_with_input < cap_4gb);
 
-        // When input exceeds memory, capacity is minimum
         let cap_exceeded = compute_channel_capacity(4, 10 * 1024 * 1024 * 1024);
         assert_eq!(cap_exceeded, 1024);
 
-        // Zero memory should produce minimum capacity
         assert_eq!(compute_channel_capacity(0, 0), 1024);
     }
 
@@ -996,35 +950,27 @@ mod tests {
 
     #[test]
     fn test_scan_fastq_boundaries_wrapped() {
-        // Multi-line sequence (wrapped at 4 chars) - should still find correct boundary
         let data = b"@read1\nATCG\nGCTA\n+\nIIII\nJJJJ\n@read2\nAAAA\n+\nKKKK\n";
         let bounds = scan_fastq_boundaries(data);
         assert_eq!(bounds[0], 0);
-        // Second record starts at @read2 (position 29)
         assert!(bounds.contains(&29));
     }
 
     #[test]
     fn test_scan_fastq_boundaries_at_in_quality() {
-        // @ in quality string should NOT be detected as record boundary
         let data = b"@read1\nATCG\n+\n@@@I\n@read2\nGCTA\n+\nIIII\n";
         let bounds = scan_fastq_boundaries(data);
-        // Should have boundary at 0 and at @read2 (position 19), NOT at the @ in quality
         assert_eq!(bounds, vec![0, 19]);
     }
 
     #[test]
     fn test_scan_fastq_boundaries_at_followed_by_at_skipped() {
-        // @ followed by @ is skipped (conservative: not detected as boundary)
-        // This avoids false positives when quality contains @@ patterns
         let data = b"@read1\nATCG\n+\nIIII\n@@ambiguous\n";
-        // Only the first record boundary is detected
         assert_eq!(scan_fastq_boundaries(data), vec![0]);
     }
 
     #[test]
     fn test_scan_fastq_boundaries_iupac_codes() {
-        // Test that IUPAC ambiguity codes (R, Y, etc.) are recognized as sequence starts
         let data = b"@read1\nRYSW\n+\nIIII\n@read2\nKMBD\n+\nIIII\n";
         let bounds = scan_fastq_boundaries(data);
         assert_eq!(bounds, vec![0, 19]);
@@ -1060,7 +1006,6 @@ mod tests {
     fn test_tiny_file_errors() {
         let dir = tempfile::tempdir().unwrap();
 
-        // Empty file
         let empty_path = dir.path().join("empty.fa");
         std::fs::write(&empty_path, b"").unwrap();
 
@@ -1072,7 +1017,6 @@ mod tests {
         };
         assert!(err.to_string().contains("too small"));
 
-        // 1-byte file
         let tiny_path = dir.path().join("tiny.fa");
         std::fs::write(&tiny_path, b">").unwrap();
 
@@ -1104,7 +1048,6 @@ mod tests {
     fn test_kmer_size_validation() {
         let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
 
-        // kmer_size = 0
         let config = SketchConfig {
             kmer_size: 0,
             memory: 1,
@@ -1119,7 +1062,6 @@ mod tests {
                 .contains("kmer_size must be between 1 and 31")
         );
 
-        // kmer_size = 32 (too large - needletail overflows at k=32)
         let config = SketchConfig {
             kmer_size: 32,
             memory: 1,
@@ -1134,7 +1076,6 @@ mod tests {
                 .contains("kmer_size must be between 1 and 31")
         );
 
-        // kmer_size = 31 (valid upper bound)
         let config = SketchConfig {
             kmer_size: 31,
             fscale: 1,

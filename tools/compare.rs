@@ -1,8 +1,5 @@
-
 use jamhash::jamhash_u64;
 use rand::{Rng, rng};
-
-// a429664bff768316, c6d35be8d0acb457
 
 #[inline]
 pub fn murmur3_u64(kmer: u64) -> u64 {
@@ -78,7 +75,6 @@ fn compute_u64_avalanche() {
         }
     }
 
-    // Write results to CSV files
     std::fs::create_dir_all("out").unwrap();
     std::fs::write(
         "out/avalanche-jam.csv",

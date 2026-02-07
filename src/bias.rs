@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 const BIAS_MAGIC: &[u8; 4] = b"BIA3";
 const BIAS_VERSION: u32 = 3;
 
-const DEFAULT_CMS_WIDTH: usize = 1 << 20; // 1M columns
+const DEFAULT_CMS_WIDTH: usize = 1 << 20;
 const DEFAULT_CMS_DEPTH: usize = 5;
-const QUANTIZATION_SCALE: f32 = 10.0; // Each i8 unit = 0.1 log-ratio
+const QUANTIZATION_SCALE: f32 = 10.0;
 const MAX_SAMPLE_HASHES: usize = 100_000;
 
 #[derive(Debug, Clone)]
@@ -219,7 +219,6 @@ fn downsample_samples(samples: &mut Vec<u64>) {
     samples.truncate(MAX_SAMPLE_HASHES);
 }
 
-/// Configuration for creating a bias table from FASTA files.
 #[derive(Debug, Clone)]
 pub struct BiasCreateConfig {
     pub cms: CMSConfig,
@@ -278,9 +277,6 @@ fn validate_cms_compatibility(positive: &RawHashCounts, negative: &RawHashCounts
 }
 
 impl HashBiasTable {
-    /// Create a bias table directly from positive and negative FASTA files.
-    /// Background subtraction is always applied: the target signal is removed
-    /// from the background before computing log-ratios.
     pub fn create(
         positive_paths: &[&Path],
         negative_paths: &[&Path],
@@ -359,10 +355,6 @@ impl HashBiasTable {
         Ok(table)
     }
 
-    /// Build a bias table from pre-computed hash counts.
-    /// Always applies background subtraction: normalizes counts and subtracts
-    /// the target (positive) signal from the background (negative) before
-    /// computing log-ratios.
     pub(crate) fn build(
         positive: &RawHashCounts,
         negative: &RawHashCounts,
@@ -567,7 +559,7 @@ impl HashBiasTable {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4; // 35 bytes
+        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4;
         let seeds_size = self.config.depth * 8;
         let weights_size = self.config.width * self.config.depth;
         let total_size = header_size + seeds_size + weights_size;
@@ -784,7 +776,6 @@ fn calibrate_threshold(
         });
     }
 
-    // First pass: find maximum achievable fold enrichment across all thresholds
     let mut max_enrichment = 0.0f32;
     let mut max_threshold = 0i8;
     let mut max_pos_ret = 1.0f32;
@@ -811,20 +802,15 @@ fn calibrate_threshold(
     }
 
     match target_fold_enrichment {
-        None => {
-            // Use the threshold that maximizes fold enrichment
-            Ok(CalibrationResult {
-                threshold: max_threshold,
-                positive_retention: max_pos_ret,
-                negative_retention: max_neg_ret,
-                fold_enrichment: max_enrichment,
-                max_fold_enrichment: max_enrichment,
-            })
-        }
+        None => Ok(CalibrationResult {
+            threshold: max_threshold,
+            positive_retention: max_pos_ret,
+            negative_retention: max_neg_ret,
+            fold_enrichment: max_enrichment,
+            max_fold_enrichment: max_enrichment,
+        }),
         Some(target) => {
             if target > max_enrichment {
-                // Target exceeds maximum achievable - use maximum instead
-                // The handler will warn the user
                 return Ok(CalibrationResult {
                     threshold: max_threshold,
                     positive_retention: max_pos_ret,
@@ -834,7 +820,6 @@ fn calibrate_threshold(
                 });
             }
 
-            // Find threshold closest to target fold enrichment
             let mut best_threshold = 0i8;
             let mut best_diff = f32::MAX;
             let mut best_pos_ret = 1.0f32;
@@ -906,8 +891,6 @@ pub const BIAS_TABLE_SERIALIZED_SIZE: usize =
 
 impl PartialEq for HashBiasTable {
     fn eq(&self, other: &Self) -> bool {
-        // max_fold_enrichment is excluded: it's calibration metadata not stored
-        // in the serialized format, so it may differ across round-trips.
         self.config.k == other.config.k
             && self.config.fscale == other.config.fscale
             && self.config.width == other.config.width
@@ -1170,7 +1153,6 @@ mod tests {
         )
         .unwrap();
 
-        // None = maximize fold enrichment
         let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None).unwrap();
         assert!(table.threshold >= -127);
         assert!(table.fold_enrichment() >= 1.0);

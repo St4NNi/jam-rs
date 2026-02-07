@@ -44,25 +44,18 @@ pub struct ReaderStats {
     pub has_bias_table: bool,
 }
 
-/// Zero-copy filter metadata - stores offsets into mmap instead of copying data.
-/// The descriptor is small (20 bytes) and stays hot in L1 cache.
-/// Fingerprints are accessed directly from mmap on each contains() call.
 struct FilterMeta {
     descriptor_offset: usize,
     fingerprints_offset: usize,
     fingerprints_size: usize,
 }
 
-/// Public wrapper for bucket filter access (zero-copy from mmap).
 pub struct BucketFilter<'a> {
     mmap: &'a [u8],
     meta: &'a FilterMeta,
 }
 
 impl BucketFilter<'_> {
-    /// Check if the filter might contain the given hash.
-    /// Returns true if the hash might be present (may have false positives).
-    /// Returns false if the hash is definitely not present.
     #[inline]
     pub fn contains(&self, hash: &u64) -> bool {
         let descriptor = &self.mmap
@@ -73,22 +66,19 @@ impl BucketFilter<'_> {
     }
 }
 
-/// Cached filter metadata for BucketRegion to avoid re-parsing on each contains() call.
 struct CachedFilterMeta {
-    descriptor_start: usize, // offset within mmap data
+    descriptor_start: usize,
     descriptor_size: usize,
     fingerprints_start: usize,
     fingerprints_size: usize,
 }
 
-/// A page-aligned mmap region for a single bucket. Owns its mmap and drops it when done.
-/// This allows memory to be released back to the OS after processing each bucket.
 pub struct BucketRegion {
     mmap: Mmap,
-    data_offset: usize, // offset within mmap where actual data starts (for page alignment)
+    data_offset: usize,
     filter_size: usize,
     entry_count: usize,
-    filter_meta: Option<CachedFilterMeta>, // cached filter metadata, parsed once at construction
+    filter_meta: Option<CachedFilterMeta>,
 }
 
 impl BucketRegion {
@@ -128,26 +118,21 @@ impl BucketRegion {
 }
 
 pub struct JamReader {
-    file: Arc<File>, // shared file handle for bucket region mmaps
+    file: Arc<File>,
     mmap: Mmap,
     header: Header,
     bucket_table: Vec<BucketMeta>,
-    filters: Vec<Option<FilterMeta>>, // None for empty buckets - zero-copy offsets into mmap
+    filters: Vec<Option<FilterMeta>>,
     bias_table: Option<Arc<HashBiasTable>>,
     sample_names: Vec<String>,
-    sample_sizes: Vec<u64>, // hash count per sample
+    sample_sizes: Vec<u64>,
 }
 
 impl JamReader {
-    /// Open a .jam file for reading.
-    ///
-    /// This loads the header, bucket table, and all filters into memory.
-    /// Filters are copied to heap for fast access; entries remain mmap'd.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, ReaderError> {
         let file = Arc::new(File::open(path.as_ref())?);
         let mmap = unsafe { Mmap::map(file.as_ref())? };
 
-        // Validate minimum size for header
         if mmap.len() < HEADER_SIZE {
             return Err(ReaderError::FileTooSmall {
                 expected: HEADER_SIZE,
@@ -155,11 +140,9 @@ impl JamReader {
             });
         }
 
-        // Parse and validate header
         let header: Header = *bytemuck::from_bytes(&mmap[..HEADER_SIZE]);
         header.validate()?;
 
-        // Validate size for bucket table
         let table_end = HEADER_SIZE + BUCKET_TABLE_SIZE;
         if mmap.len() < table_end {
             return Err(ReaderError::FileTooSmall {
@@ -168,11 +151,9 @@ impl JamReader {
             });
         }
 
-        // Parse bucket table
         let bucket_table: Vec<BucketMeta> =
             bytemuck::cast_slice(&mmap[HEADER_SIZE..table_end]).to_vec();
 
-        // Load filter metadata (zero-copy - just offsets into mmap)
         let mut filters = Vec::with_capacity(BUCKET_COUNT);
         for (i, meta) in bucket_table.iter().enumerate() {
             if meta.filter_size == 0 {
@@ -184,7 +165,6 @@ impl JamReader {
             filters.push(Some(filter_meta));
         }
 
-        // Load embedded bias table if present
         let bias_table = if header.flags & FLAG_HAS_BIAS_TABLE != 0
             && header.bias_table_offset > 0
             && header.bias_table_size > 0
@@ -208,7 +188,6 @@ impl JamReader {
             None
         };
 
-        // Load sample names if present
         let sample_names = if header.sample_names_offset > 0 && header.sample_names_size > 0 {
             let offset = header.sample_names_offset as usize;
             let size = header.sample_names_size as usize;
@@ -230,13 +209,11 @@ impl JamReader {
             }
             names
         } else {
-            // Fallback for old files without sample names
             (0..header.sample_count)
                 .map(|i| format!("sample_{}", i))
                 .collect()
         };
 
-        // Load sample sizes if present
         let sample_sizes = if header.sample_sizes_offset > 0 && header.sample_sizes_size > 0 {
             let offset = header.sample_sizes_offset as usize;
             let size = header.sample_sizes_size as usize;
@@ -257,7 +234,6 @@ impl JamReader {
             }
             parse_sample_sizes(&mmap[offset..offset + size])
         } else {
-            // Fallback: zeros for old files
             vec![0u64; header.sample_count as usize]
         };
 
@@ -273,18 +249,10 @@ impl JamReader {
         })
     }
 
-    /// Open a single bucket's region as a separate mmap that can be dropped independently.
-    /// This is useful for reducing memory pressure when processing buckets in parallel.
-    /// The returned BucketRegion owns its mmap and releases it when dropped.
-    ///
-    /// Uses a shared file handle to avoid FD churn when processing many buckets in parallel.
-    /// On Linux, applies madvise hints for sequential access patterns.
     pub fn open_bucket_region(&self, bucket_idx: usize) -> Result<BucketRegion, ReaderError> {
         let meta = &self.bucket_table[bucket_idx];
 
-        // Empty bucket - return empty region with minimal valid mmap
         if meta.filter_size == 0 && meta.entry_count == 0 {
-            // Create a tiny anonymous mmap just to have a valid Mmap object
             let empty_mmap = MmapOptions::new().len(1).map_anon()?.make_read_only()?;
             return Ok(BucketRegion {
                 mmap: empty_mmap,
@@ -295,17 +263,13 @@ impl JamReader {
             });
         }
 
-        // Calculate the page-aligned region to mmap
-        // In v3 format, filter and entries are contiguous starting at filter_offset
         let region_start = meta.filter_offset as usize;
         let data_size = meta.filter_size as usize + (meta.entry_count as usize) * ENTRY_SIZE;
 
-        // Align to page boundaries for mmap
         let page_start = region_start & !(PAGE_SIZE - 1);
         let data_offset = region_start - page_start;
         let mmap_len = data_offset + data_size;
 
-        // Use shared file handle instead of opening a new one
         let mmap = unsafe {
             MmapOptions::new()
                 .offset(page_start as u64)
@@ -313,7 +277,6 @@ impl JamReader {
                 .map(self.file.as_ref())?
         };
 
-        // Apply madvise hints on Unix for sequential access pattern
         #[cfg(unix)]
         {
             let _ = mmap.advise(Advice::Sequential);
@@ -330,7 +293,6 @@ impl JamReader {
                 let fingerprints_size =
                     u32::from_le_bytes(filter_data[4..8].try_into().unwrap()) as usize;
 
-                // Validate descriptor size matches expected value (corrupt filter detection)
                 if descriptor_size != FILTER_DESCRIPTOR_SIZE {
                     return Err(ReaderError::InvalidFilter {
                         bucket: bucket_idx,
@@ -467,19 +429,15 @@ impl JamReader {
         (start, end)
     }
 
-    /// Advise kernel we're done with pages in the given byte range.
-    /// Pages are released back to the OS, reducing RSS.
     #[cfg(unix)]
     pub fn release_pages(&self, start: usize, end: usize) {
         if start >= end {
             return;
         }
-        // Align to page boundaries
         let page_start = start & !(PAGE_SIZE - 1);
         let page_end = (end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
         let len = page_end.saturating_sub(page_start);
         if len > 0 && page_end <= self.mmap.len() {
-            // Safety: DontNeed is safe - it just tells kernel pages can be discarded
             let _ = unsafe {
                 self.mmap
                     .unchecked_advise_range(UncheckedAdvice::DontNeed, page_start, len)
@@ -489,7 +447,6 @@ impl JamReader {
 
     #[cfg(not(unix))]
     pub fn release_pages(&self, _start: usize, _end: usize) {
-        // No-op on non-Unix platforms
     }
 
     pub fn release_bucket(&self, bucket_idx: usize) {
@@ -499,7 +456,6 @@ impl JamReader {
         self.release_pages(entry_start, entry_end);
     }
 
-    /// Hint to kernel that access will be random (disables read-ahead).
     #[cfg(unix)]
     pub fn advise_random(&self) {
         let _ = self.mmap.advise(Advice::Random);
@@ -507,7 +463,6 @@ impl JamReader {
 
     #[cfg(not(unix))]
     pub fn advise_random(&self) {
-        // No-op on non-Unix platforms
     }
 
     #[inline]
@@ -524,13 +479,12 @@ impl JamReader {
 
         if let Some(filter) = self.bucket_filter(bucket_idx) {
             if !filter.contains(&hash) {
-                return false; // Definitely not present
+                return false;
             }
         } else {
-            return false; // Empty bucket
+            return false;
         }
 
-        // Filter says "maybe" - verify with actual lookup
         let entries = self.bucket_entries(bucket_idx);
         self.interpolation_search(entries, hash).is_some()
     }
@@ -549,7 +503,6 @@ impl JamReader {
             &[]
         };
 
-        // Find start position using interpolation, then iterate matches
         let start = if entries.is_empty() {
             0
         } else {
@@ -582,22 +535,15 @@ impl JamReader {
         None
     }
 
-    /// Find starting position for a hash using interpolation.
-    ///
-    /// Uses the known uniform distribution of FracMinHash to estimate position.
-    /// Returns a position that's at or before the target hash.
     #[inline]
     fn interpolation_find_start(&self, entries: &[Entry], key: u64) -> usize {
         let count = entries.len();
         let threshold = self.threshold();
 
-        // Hashes are uniform in [0, threshold), so position ≈ key/threshold * count
         let est = ((key as u128 * count as u128) / threshold as u128) as usize;
 
-        // Bias low to almost always land before target (avoids backtracking)
         let est = est.saturating_sub(16).min(count - 1);
 
-        // Rare backtrack if we overshot
         if entries[est].hash > key {
             let mut i = est;
             while i > 0 && entries[i - 1].hash >= key {
@@ -610,7 +556,6 @@ impl JamReader {
     }
 }
 
-/// Parse sample names from section data. Returns error if data is truncated.
 fn parse_sample_names(data: &[u8], count: u32) -> Result<Vec<String>, ReaderError> {
     let mut names = Vec::with_capacity(count as usize);
     let mut offset = 0;
@@ -643,16 +588,12 @@ fn parse_sample_names(data: &[u8], count: u32) -> Result<Vec<String>, ReaderErro
     Ok(names)
 }
 
-/// Parse sample sizes (hash counts) from section data.
 fn parse_sample_sizes(data: &[u8]) -> Vec<u64> {
-    // Can't use bytemuck::cast_slice because data may not be 8-byte aligned
-    // (it comes after variable-length sample names section)
     data.chunks_exact(8)
         .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
         .collect()
 }
 
-/// Parse filter metadata from mmap - zero-copy, just stores offsets.
 fn parse_filter_meta(
     mmap: &Mmap,
     meta: &BucketMeta,
@@ -675,7 +616,6 @@ fn parse_filter_meta(
 
     let data = &mmap[start..end];
 
-    // Format: descriptor_size(u32) + fingerprints_size(u32) + descriptor + fingerprints
     if data.len() < 8 {
         return Err(ReaderError::InvalidFilter {
             bucket: bucket_idx,
@@ -769,7 +709,6 @@ mod tests {
 
         let reader = JamReader::open(&output_path).unwrap();
 
-        // Get a hash that we know exists
         let entries = reader.bucket_entries(0);
         if !entries.is_empty() {
             let test_hash = entries[0].hash;
@@ -798,8 +737,6 @@ mod tests {
 
         let reader = JamReader::open(&output_path).unwrap();
 
-        // Search for a hash that almost certainly doesn't exist
-        // (threshold is u64::MAX / 1000, so most hashes are above it)
         let fake_hash = u64::MAX - 1;
         assert!(!reader.contains(fake_hash));
 
@@ -811,7 +748,7 @@ mod tests {
     fn test_reader_multiple_samples() {
         let input = make_fasta(&[
             ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
-            ("seq2", "ATCGATCGATCGATCGATCGATCGATCGATCG"), // Same sequence
+            ("seq2", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
         ]);
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("test.jam");
@@ -830,16 +767,14 @@ mod tests {
         let reader = JamReader::open(&output_path).unwrap();
         assert_eq!(reader.stats().sample_count, 2);
 
-        // Find a hash that should be in both samples
         for bucket_idx in 0..BUCKET_COUNT {
             let entries = reader.bucket_entries(bucket_idx);
             if entries.len() >= 2 {
-                // Find a hash with multiple sample hits
                 let test_hash = entries[0].hash;
                 let samples: Vec<_> = reader.search(test_hash).collect();
                 if samples.len() == 2 {
                     assert!(samples.contains(&0) || samples.contains(&1));
-                    return; // Test passed
+                    return;
                 }
             }
         }
@@ -863,7 +798,6 @@ mod tests {
 
         let reader = JamReader::open(&output_path).unwrap();
 
-        // Verify entries are sorted within each bucket
         for bucket_idx in 0..BUCKET_COUNT {
             let entries = reader.bucket_entries(bucket_idx);
             for window in entries.windows(2) {
@@ -874,7 +808,6 @@ mod tests {
                 );
             }
 
-            // Verify all entries belong to this bucket
             for entry in entries {
                 assert_eq!(bucket_id(entry.hash), bucket_idx);
             }

@@ -1,6 +1,5 @@
-/// Shannon entropy calculation for k-mers
 pub fn shannon_entropy(kmer: u64, kmer_length: u8) -> f64 {
-    let mut counts = [0u8; 4]; // A, C, G, T
+    let mut counts = [0u8; 4];
 
     for i in 0..kmer_length {
         let nucleotide = (kmer >> (2 * i)) & 0b11;
@@ -20,7 +19,6 @@ pub fn shannon_entropy(kmer: u64, kmer_length: u8) -> f64 {
     entropy
 }
 
-/// Filter k-mers based on Shannon entropy
 pub fn passes_entropy_filter(kmer: u64, kmer_length: u8, min_entropy: f64) -> bool {
     shannon_entropy(kmer, kmer_length) >= min_entropy
 }
@@ -31,11 +29,9 @@ mod tests {
 
     #[test]
     fn test_shannon_entropy() {
-        // Homopolymer should have low entropy
         let homopolymer = 0; // All A's
         assert!(shannon_entropy(homopolymer, 8) < 1.0);
 
-        // Mixed sequence should have higher entropy
         let mixed = 0b10011100; // ATGC pattern
         assert!(shannon_entropy(mixed, 4) > 1.5);
     }
@@ -51,12 +47,10 @@ mod tests {
 
     #[test]
     fn test_entropy_edge_cases() {
-        // Single nucleotide - zero entropy
         assert_eq!(shannon_entropy(0, 1), 0.0);
 
-        // Maximum entropy for 4-mer with all different bases
         let all_diff = 0b11100100; // TCGA
         let max_entropy = shannon_entropy(all_diff, 4);
-        assert!((max_entropy - 2.0).abs() < 0.01); // Should be exactly 2.0
+        assert!((max_entropy - 2.0).abs() < 0.01);
     }
 }

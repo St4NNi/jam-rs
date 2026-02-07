@@ -46,7 +46,6 @@ fn test_full_roundtrip() {
     assert_eq!(stats.sample_count, 1);
     assert_eq!(stats.kmer_size, 11);
 
-    // Query with hashes from the database itself
     let reader = JamReader::open(&output_path).unwrap();
     let query_hashes = extract_hashes_from_db(&reader);
     assert!(!query_hashes.is_empty(), "Database should have hashes");
@@ -56,7 +55,6 @@ fn test_full_roundtrip() {
     assert!(result.has_matches());
     assert!(result.hashes_found > 0);
 
-    // Should have 100% containment since we're querying with the exact same hashes
     let top = result.top(1);
     assert!(!top.is_empty());
     assert!(
@@ -97,7 +95,6 @@ fn test_singleton_mode() {
 
 #[test]
 fn test_multiple_samples_shared_hashes() {
-    // Two identical sequences should share all hashes
     let seq = "ATCGATCGATCGATCGATCGATCGATCGATCG";
     let input = make_fasta(&[("seq1", seq), ("seq2", seq)]);
     let output_dir = tempfile::tempdir().unwrap();
@@ -119,13 +116,11 @@ fn test_multiple_samples_shared_hashes() {
 
     let engine = QueryEngine::open(&output_path).unwrap();
     let result = engine.query(&query_hashes);
-    // Both samples should have matches
     assert!(result.matches.len() >= 2 || result.matches.iter().any(|m| m.hit_count > 0));
 }
 
 #[test]
 fn test_empty_buckets() {
-    // Use very restrictive fscale to ensure most buckets are empty
     let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
     let output_dir = tempfile::tempdir().unwrap();
     let output_path = output_dir.path().join("test.jam");
@@ -144,7 +139,6 @@ fn test_empty_buckets() {
     let reader = JamReader::open(&output_path).unwrap();
     let stats = reader.stats();
 
-    // Most buckets should be empty
     let empty_count = stats
         .bucket_entry_counts
         .iter()
@@ -207,14 +201,12 @@ fn test_bucket_distribution() {
 
     let reader = JamReader::open(&output_path).unwrap();
 
-    // Verify entries are correctly bucketed
     for bucket_idx in 0..BUCKET_COUNT {
         let entries = reader.bucket_entries(bucket_idx);
         for entry in entries {
             assert_eq!(bucket_id(entry.hash), bucket_idx, "Entry in wrong bucket");
         }
 
-        // Verify entries are sorted within bucket
         for window in entries.windows(2) {
             assert!(window[0] <= window[1], "Entries not sorted");
         }
@@ -239,7 +231,6 @@ fn test_query_batch() {
 
     let engine = QueryEngine::open(&output_path).unwrap();
 
-    // Create multiple queries
     let reader = JamReader::open(&output_path).unwrap();
     let mut all_hashes = Vec::new();
     for bucket_idx in 0..BUCKET_COUNT {
@@ -248,7 +239,6 @@ fn test_query_batch() {
         }
     }
 
-    // Split into batches
     let batch1: Vec<u64> = all_hashes.iter().step_by(2).copied().collect();
     let batch2: Vec<u64> = all_hashes.iter().skip(1).step_by(2).copied().collect();
 

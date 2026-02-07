@@ -6,10 +6,8 @@ use bytemuck::{Pod, Zeroable};
 pub const MAGIC: [u8; 4] = *b"JAM\0";
 pub const VERSION: u32 = 3;
 
-/// Page size for mmap alignment (4KB).
 pub const PAGE_SIZE: usize = 4096;
 
-/// Align a value up to the next page boundary.
 #[inline]
 pub const fn align_to_page(offset: usize) -> usize {
     (offset + PAGE_SIZE - 1) & !(PAGE_SIZE - 1)
@@ -22,7 +20,6 @@ pub const BUCKET_META_SIZE: usize = 32;
 pub const BUCKET_TABLE_SIZE: usize = BUCKET_COUNT * BUCKET_META_SIZE;
 pub const DATA_START: usize = HEADER_SIZE + BUCKET_TABLE_SIZE;
 
-/// Bottom 8 bits — used because fractional MinHash constrains top bits.
 #[inline(always)]
 pub fn bucket_id(hash: u64) -> usize {
     (hash & 0xFF) as usize
@@ -44,7 +41,7 @@ pub struct Header {
 
     pub hash_threshold: u64,
     pub kmer_size: u8,
-    pub _param_reserved: [u8; 7], // reserved for future hashing parameters
+    pub _param_reserved: [u8; 7],
 
     pub bucket_table_offset: u64,
     pub entries_offset: u64,

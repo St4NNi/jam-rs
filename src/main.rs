@@ -1,4 +1,3 @@
-// main.rs
 use anyhow::Result;
 
 #[cfg(not(target_env = "msvc"))]

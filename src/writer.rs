@@ -14,11 +14,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use xorf::{BinaryFuse8, DmaSerializable};
 
-/// BinaryFuse8 descriptor size (seed: u64 + segment_length: u32 + segment_length_mask: u32 + segment_count_length: u32)
 pub const FILTER_DESCRIPTOR_SIZE: usize = 20;
 
-/// Serialize a BinaryFuse8 filter to bytes using DMA format.
-/// Format: descriptor_size(u32) + fingerprints_size(u32) + descriptor + fingerprints
 pub fn serialize_filter(filter: &BinaryFuse8) -> Vec<u8> {
     let fingerprints = filter.dma_fingerprints();
     let descriptor_size = FILTER_DESCRIPTOR_SIZE as u32;
@@ -35,8 +32,6 @@ pub fn serialize_filter(filter: &BinaryFuse8) -> Vec<u8> {
     out
 }
 
-/// Serialize sample names in order. Format: [len0][bytes0][len1][bytes1]...
-/// Warns if any sample name exceeds u16::MAX bytes and will be truncated.
 fn serialize_sample_names(names: &[String]) -> Vec<u8> {
     let mut buf = Vec::new();
     for (idx, name) in names.iter().enumerate() {
@@ -58,7 +53,6 @@ fn serialize_sample_names(names: &[String]) -> Vec<u8> {
     buf
 }
 
-/// Serialize sample sizes (hash counts) as u64 array.
 fn serialize_sample_sizes(sizes: &[u64]) -> Vec<u8> {
     bytemuck::cast_slice(sizes).to_vec()
 }
@@ -93,7 +87,6 @@ pub struct IndexStats {
     pub bucket_entry_counts: [u64; BUCKET_COUNT],
 }
 
-/// Configuration for building a .jam file from input sequence files.
 #[derive(Clone)]
 pub struct BuildConfig {
     pub kmer_size: u8,
@@ -132,12 +125,6 @@ pub enum BuildError {
     Compact(#[from] CompactError),
 }
 
-/// Build a .jam file from input sequence files.
-///
-/// This is the main entry point for creating a .jam database. It:
-/// 1. Sketches input sequences into partitioned bucket files
-/// 2. Sorts entries and builds BinaryFuse8 filters per bucket
-/// 3. Writes the final .jam file with header, bucket table, entries, and filters
 pub fn build(
     input_files: &[PathBuf],
     output_path: &Path,
@@ -182,7 +169,6 @@ pub enum CompactError {
     FilterConstruction { bucket: usize, message: String },
 }
 
-/// Run the two-stage compact pipeline: sort+filter, then mmap write.
 pub fn run(
     output_path: &Path,
     sketch_result: &SketchResult,
@@ -192,13 +178,11 @@ pub fn run(
 ) -> Result<IndexStats, CompactError> {
     let temp_path = sketch_result.temp_dir.path();
 
-    // Stage 1: Parallel sort + filter construction
     let processed: Result<Vec<ProcessedBucket>, CompactError> = (0..BUCKET_COUNT)
         .into_par_iter()
         .map(|bucket_id| {
             let bucket_path = temp_path.join(format!("bucket_{bucket_id:03}.bin"));
 
-            // Read entries from temp bucket file
             let mut entries = if bucket_path.exists() {
                 read_entries(&bucket_path)?
             } else {
@@ -245,7 +229,6 @@ pub fn run(
 
     let processed = processed?;
 
-    // Aggregate unique hash counts per sample from all buckets
     let mut aggregated_sample_sizes: Vec<u64> = vec![0u64; sketch_result.sample_count as usize];
     for bucket in &processed {
         for (&sample_id, &count) in &bucket.sample_hash_counts {
@@ -255,17 +238,12 @@ pub fn run(
         }
     }
 
-    // Stage 2: mmap write of final .jam file
-    // v3 Layout: [Header][BucketTable][pad to page][Bucket0: filter+entries][pad][Bucket1]...[Metadata]
-    // Each bucket region is page-aligned and contains filter immediately followed by entries.
-    // This allows per-bucket mmap that can be dropped after processing.
     use crate::format::align_to_page;
 
     let bias_size: u64 = bias_table.map(|b| b.to_bytes().len() as u64).unwrap_or(0);
     let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names);
     let sample_sizes_bytes = serialize_sample_sizes(&aggregated_sample_sizes);
 
-    // Calculate page-aligned bucket region offsets (each bucket: filter + entries together)
     let bucket_regions_start = align_to_page(DATA_START);
     let mut current_offset = bucket_regions_start;
     let mut bucket_offsets = Vec::with_capacity(BUCKET_COUNT);
@@ -352,7 +330,6 @@ pub fn run(
 
     let total_entries: u64 = processed.iter().map(|b| b.entry_count).sum();
 
-    // Build header (v3: entries_offset and filters_offset point to start of bucket regions)
     let header = Header {
         magic: MAGIC,
         version: VERSION,
@@ -444,14 +421,12 @@ mod tests {
         assert_eq!(stats.kmer_size, 11);
         assert!(output_path.exists());
 
-        // Verify file size matches
         let metadata = std::fs::metadata(&output_path).unwrap();
         assert_eq!(metadata.len(), stats.file_size);
     }
 
     #[test]
     fn test_compact_empty_buckets() {
-        // Use a very restrictive fscale to ensure most buckets are empty
         let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCG")]);
         let sketch_config = SketchConfig {
             kmer_size: 11,
@@ -469,7 +444,6 @@ mod tests {
         let compact_config = CompactConfig::default();
         let result = run(&output_path, &sketch_result, &compact_config, 11, None);
 
-        // Should succeed even with mostly empty buckets
         assert!(result.is_ok());
     }
 
@@ -492,7 +466,6 @@ mod tests {
         let compact_config = CompactConfig::default();
         run(&output_path, &sketch_result, &compact_config, 21, None).unwrap();
 
-        // Read back and validate header
         let file = File::open(&output_path).unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
 
@@ -504,7 +477,6 @@ mod tests {
 
     #[test]
     fn test_compact_entry_sorting() {
-        // Create input that will generate multiple entries per bucket
         let input = make_fasta(&[
             ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"),
             ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
@@ -525,7 +497,6 @@ mod tests {
         let compact_config = CompactConfig::default();
         run(&output_path, &sketch_result, &compact_config, 11, None).unwrap();
 
-        // Read back and verify entries are sorted within each bucket
         let file = File::open(&output_path).unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
 
@@ -541,12 +512,10 @@ mod tests {
             let end = start + (meta.entry_count as usize) * ENTRY_SIZE;
             let entries: &[Entry] = bytemuck::cast_slice(&mmap[start..end]);
 
-            // Verify all entries belong to this bucket
             for entry in entries {
                 assert_eq!(bucket_id(entry.hash), i, "Entry in wrong bucket");
             }
 
-            // Verify entries are sorted
             for window in entries.windows(2) {
                 assert!(
                     window[0] <= window[1],
@@ -634,7 +603,6 @@ mod tests {
 
     #[test]
     fn test_build_with_entropy_filter() {
-        // Low complexity sequence - should be filtered by entropy
         let input = make_fasta(&[
             ("low_complexity", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
             ("high_complexity", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
@@ -645,7 +613,7 @@ mod tests {
         let config = BuildConfig {
             kmer_size: 11,
             fscale: 1,
-            min_entropy: 1.5, // Filter low-complexity k-mers
+            min_entropy: 1.5,
             num_threads: 1,
             memory: 1,
             ..Default::default()
@@ -653,7 +621,6 @@ mod tests {
 
         let stats = build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
 
-        // Should have entries from the high-complexity sequence
         assert!(stats.total_entries > 0);
     }
 
@@ -716,7 +683,6 @@ mod tests {
 
         build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
 
-        // Verify no bias table is embedded
         let reader = crate::reader::JamReader::open(&output_path).unwrap();
         assert!(!reader.has_bias_table());
         assert!(reader.bias_table().is_none());

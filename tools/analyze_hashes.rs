@@ -1,24 +1,13 @@
-//! Hash analysis tool for SLURM - finds duplicates across ALL chunks
-//!
-//! Each job processes one BUCKET (not chunk), reading all chunk files
-//! but only keeping hashes that belong to that bucket.
-//!
-//! Outputs:
-//! - {prefix}_duplicates_bucket_{bucket}.csv: hash,count for collisions
-//! - {prefix}_distribution_bucket_{bucket}.csv: sub-bucket distribution
-//!
-//! Usage: analyze_hashes <bucket> <input_dir> <output_dir> --prefix <prefix> --chunks <N>
-
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
 
-const NUM_BUCKETS: usize = 2048; // Main buckets (top 11 bits) - one SLURM job per bucket
+const NUM_BUCKETS: usize = 2048;
 const BUCKET_SHIFT: u32 = 64 - 11;
 
-const SUB_BUCKETS: usize = 256; // Sub-buckets within each bucket for distribution analysis
-const SUB_BUCKET_SHIFT: u32 = 64 - 11 - 8; // Next 8 bits after bucket
+const SUB_BUCKETS: usize = 256;
+const SUB_BUCKET_SHIFT: u32 = 64 - 11 - 8;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -66,7 +55,6 @@ fn main() {
         bucket, num_chunks, prefix
     );
 
-    // Read ALL chunk files, keeping only hashes for our bucket
     let mut hashes: Vec<u64> = Vec::new();
     let mut sub_buckets = vec![0u64; SUB_BUCKETS];
     let mut files_read = 0;
@@ -87,7 +75,6 @@ fn main() {
         while let Ok(hash) = reader.read_u64::<LittleEndian>() {
             let hash_bucket = (hash >> BUCKET_SHIFT) as usize;
             if hash_bucket == bucket {
-                // Sub-bucket for distribution (next 8 bits)
                 let sub = ((hash >> SUB_BUCKET_SHIFT) & 0xFF) as usize;
                 sub_buckets[sub] += 1;
 
@@ -108,11 +95,9 @@ fn main() {
         bucket
     );
 
-    // Sort for duplicate detection
     eprintln!("  Sorting...");
     hashes.sort_unstable();
 
-    // Find duplicates
     eprintln!("  Finding duplicates...");
     let mut duplicates: Vec<(u64, u32)> = Vec::new();
     let mut i = 0;
@@ -130,7 +115,6 @@ fn main() {
     let total = hashes.len();
     let dup_count: u64 = duplicates.iter().map(|(_, c)| *c as u64 - 1).sum();
 
-    // Write distribution CSV
     let dist_path = output_dir.join(format!("{}_distribution_bucket_{}.csv", prefix, bucket));
     let mut f = BufWriter::new(File::create(&dist_path).unwrap());
     writeln!(f, "sub_bucket,count").unwrap();
@@ -138,7 +122,6 @@ fn main() {
         writeln!(f, "{},{}", sb, c).unwrap();
     }
 
-    // Write duplicates CSV
     let dup_path = output_dir.join(format!("{}_duplicates_bucket_{}.csv", prefix, bucket));
     let mut f = BufWriter::new(File::create(&dup_path).unwrap());
     writeln!(f, "hash,count").unwrap();
