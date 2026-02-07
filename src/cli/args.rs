@@ -107,13 +107,18 @@ pub enum Commands {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum BiasCommands {
-    /// Count hashes from reference FASTA files into a raw hash counts file
+    /// Create a bias table from positive (target) and negative (background) FASTA files.
+    /// Target signal is always subtracted from background before computing bias weights.
     #[command(arg_required_else_help = true)]
     Create {
-        /// Input FASTA file(s) or glob pattern
-        #[arg(required = true)]
-        input: Vec<PathBuf>,
-        /// Output raw hash counts file (.braw)
+        /// Positive (target) FASTA file(s) - sequences to enrich for
+        #[arg(long, required = true, num_args = 1..)]
+        positive: Vec<PathBuf>,
+        /// Negative (background) FASTA file(s) - sequences to deplete.
+        /// Target signal is subtracted from background automatically.
+        #[arg(long, required = true, num_args = 1..)]
+        negative: Vec<PathBuf>,
+        /// Output bias table file (.bias)
         #[arg(short, long)]
         output: PathBuf,
         /// K-mer size (must match sketch k-mer size)
@@ -128,35 +133,24 @@ pub enum BiasCommands {
         /// Count-Min Sketch depth (number of hash functions)
         #[arg(long, default_value = "5")]
         cms_depth: usize,
-    },
-
-    /// Combine positive and negative raw counts into a trained bias table
-    #[command(arg_required_else_help = true)]
-    Combine {
-        /// Positive raw hash counts (.braw) - sequences to enrich
-        positive: PathBuf,
-        /// Negative raw hash counts (.braw) - sequences to deplete
-        negative: PathBuf,
-        /// Output combined bias table file (.bias)
-        #[arg(short, long)]
-        output: PathBuf,
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Target selectivity ratio (positive retention / negative retention).
-        /// E.g., 10.0 means positive hashes are retained 10x more than negative.
-        #[arg(long, default_value = "10.0")]
-        selectivity: f32,
+        /// Target fold enrichment. If not set, maximizes automatically.
+        /// A warning is shown if the requested value exceeds the maximum
+        /// achievable by the data.
+        #[arg(long)]
+        fold_enrichment: Option<f32>,
+        /// Number of threads to use for bias sketching
+        #[arg(long)]
+        threads: Option<usize>,
     },
 
-    /// Display statistics for a bias table or raw hash counts
+    /// Display statistics for a bias table (.bias file)
     #[command(arg_required_else_help = true)]
     Stats {
-        /// Input file (.braw or .bias)
+        /// Input bias table file (.bias)
         input: PathBuf,
-        /// Optional second raw hash counts (.braw) for comparison
-        #[arg(long)]
-        compare: Option<PathBuf>,
         /// Output JSON report to file instead of stderr
         #[arg(short, long)]
         output: Option<PathBuf>,

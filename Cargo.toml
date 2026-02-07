@@ -27,7 +27,7 @@ name = "jam_rs"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.101"
 dashmap = "6.1.0"
 jamhash = "0.1.2"
 needletail = { version = "0.6.3", features = [
@@ -39,10 +39,10 @@ needletail = { version = "0.6.3", features = [
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
-clap = { version = "4.5.56", features = ["derive"] }
+clap = { version = "4.5.57", features = ["derive"] }
 tempfile = "3.24.0"
-crossfire = "3.0.3"
-bytemuck = { version = "1", features = ["derive"] }
+crossfire = "3.0.4"
+bytemuck = { version = "1.25.0", features = ["derive"] }
 memmap2 = "0.9"
 xorf = { version = "0.12", features = ["serde"] }
 thiserror = "2"
@@ -52,7 +52,7 @@ indicatif = "0.18.3"
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
-criterion = { version = "0.8.1", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"

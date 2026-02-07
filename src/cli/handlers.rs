@@ -3,7 +3,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
 use std::{fs::remove_file, path::PathBuf};
 
-use crate::bias::{CMSConfig, HashBiasTable, RawHashCounts, compute_divergence, compute_effect_size};
+use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
 use crate::query::QueryEngine;
 use crate::reader::JamReader;
 use crate::writer::{BuildConfig, build};
@@ -100,7 +100,8 @@ pub fn handle_sketch_command(
         if table.k() != kmer_size {
             return Err(anyhow::anyhow!(
                 "Bias table k-mer size ({}) does not match sketch k-mer size ({})",
-                table.k(), kmer_size
+                table.k(),
+                kmer_size
             ));
         }
 
@@ -108,7 +109,8 @@ pub fn handle_sketch_command(
         if table.fscale() != sketch_fscale {
             return Err(anyhow::anyhow!(
                 "Bias table fscale ({}) does not match sketch fscale ({})",
-                table.fscale(), sketch_fscale
+                table.fscale(),
+                sketch_fscale
             ));
         }
 
@@ -341,23 +343,31 @@ pub fn handle_distance_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_bias_create_command(
-    input: Vec<PathBuf>,
+    positive: Vec<PathBuf>,
+    negative: Vec<PathBuf>,
     output: PathBuf,
     kmer_size: u8,
     fscale: u64,
     cms_width: usize,
     cms_depth: usize,
+    alpha: f32,
+    fold_enrichment: Option<f32>,
+    threads: Option<usize>,
     force: bool,
     silent: bool,
 ) -> Result<()> {
     use std::time::Instant;
 
-    if input.is_empty() {
-        return Err(anyhow::anyhow!("No input files specified"));
+    if positive.is_empty() {
+        return Err(anyhow::anyhow!("No positive input files specified"));
+    }
+    if negative.is_empty() {
+        return Err(anyhow::anyhow!("No negative input files specified"));
     }
 
-    for path in &input {
+    for path in positive.iter().chain(negative.iter()) {
         if !path.exists() {
             return Err(anyhow::anyhow!("Input file does not exist: {:?}", path));
         }
@@ -377,7 +387,11 @@ pub fn handle_bias_create_command(
                 .template("{spinner:.green} [{elapsed_precise}] {msg}")
                 .unwrap(),
         );
-        sp.set_message(format!("Processing {} input files...", input.len()));
+        sp.set_message(format!(
+            "Building bias table from {} positive + {} negative files...",
+            positive.len(),
+            negative.len()
+        ));
         sp.enable_steady_tick(std::time::Duration::from_millis(80));
         Some(sp)
     } else {
@@ -386,100 +400,34 @@ pub fn handle_bias_create_command(
 
     let start = Instant::now();
 
-    let config = CMSConfig {
-        width: cms_width,
-        depth: cms_depth,
-        k: kmer_size,
-        fscale,
+    let config = BiasCreateConfig {
+        cms: CMSConfig {
+            width: cms_width,
+            depth: cms_depth,
+            k: kmer_size,
+            fscale,
+        },
+        alpha,
+        target_fold_enrichment: fold_enrichment,
     };
 
-    let paths: Vec<&std::path::Path> = input.iter().map(|p| p.as_path()).collect();
-    let raw = RawHashCounts::build(&paths, config, spinner.clone())?;
+    let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
+    let neg_paths: Vec<&std::path::Path> = negative.iter().map(|p| p.as_path()).collect();
 
-    if let Some(ref sp) = spinner {
-        sp.set_message("Saving raw hash counts...");
-    }
+    if let Some(threads) = threads
+        && threads == 0 {
+            return Err(anyhow::anyhow!("Thread count must be > 0"));
+        }
 
-    raw.save(&output)?;
-
-    if let Some(sp) = spinner {
-        sp.finish_and_clear();
-    }
-
-    if !silent {
-        let (min, max, mean, std, non_zero) = raw.cms.cell_stats();
-        eprintln!("Raw Hash Counts created in {:.2?}", start.elapsed());
-        eprintln!("  k-mer size:     {}", raw.config.k);
-        eprintln!("  fscale:         {}", raw.config.fscale);
-        eprintln!("  CMS dimensions: {} x {}", raw.config.width, raw.config.depth);
-        eprintln!("  Total hashes:   {}", format_number(raw.total));
-        eprintln!("  Memory usage:   {:.1} MB", raw.memory_usage() as f64 / 1_000_000.0);
-        eprintln!("  Hash distribution:");
-        eprintln!("    min cell:     {}", min);
-        eprintln!("    max cell:     {}", max);
-        eprintln!("    mean cell:    {:.1}", mean);
-        eprintln!("    std cell:     {:.1}", std);
-        eprintln!("    non-zero:     {} ({:.1}%)", non_zero, non_zero as f64 / (raw.config.width * raw.config.depth) as f64 * 100.0);
-        eprintln!("Saved to: {}", output.display());
-    }
-
-    Ok(())
-}
-
-pub fn handle_bias_combine_command(
-    positive: PathBuf,
-    negative: PathBuf,
-    output: PathBuf,
-    alpha: f32,
-    selectivity: f32,
-    force: bool,
-    silent: bool,
-) -> Result<()> {
-    use std::time::Instant;
-
-    if !positive.exists() {
-        return Err(anyhow::anyhow!(
-            "Positive file does not exist: {:?}",
-            positive
-        ));
-    }
-    if !negative.exists() {
-        return Err(anyhow::anyhow!(
-            "Negative file does not exist: {:?}",
-            negative
-        ));
-    }
-    if output.exists() && !force {
-        return Err(anyhow::anyhow!(
-            "Output file {:?} already exists. Use --force to overwrite.",
-            output
-        ));
-    }
-
-    let spinner = if !silent {
-        let sp = ProgressBar::new_spinner();
-        sp.set_style(
-            ProgressStyle::default_spinner()
-                .template("{spinner:.green} [{elapsed_precise}] {msg}")
-                .unwrap(),
-        );
-        sp.set_message("Loading raw hash counts...");
-        sp.enable_steady_tick(std::time::Duration::from_millis(80));
-        Some(sp)
+    let table = if let Some(threads) = threads {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .stack_size(8 * 1024 * 1024)
+            .build()?;
+        pool.install(|| HashBiasTable::create(&pos_paths, &neg_paths, &config, spinner.clone()))?
     } else {
-        None
+        HashBiasTable::create(&pos_paths, &neg_paths, &config, spinner.clone())?
     };
-
-    let start = Instant::now();
-
-    let pos_raw = RawHashCounts::load(&positive)?;
-    let neg_raw = RawHashCounts::load(&negative)?;
-
-    if let Some(ref sp) = spinner {
-        sp.set_message("Building calibrated bias table...");
-    }
-
-    let table = HashBiasTable::build(&pos_raw, &neg_raw, alpha, selectivity)?;
 
     if let Some(ref sp) = spinner {
         sp.set_message("Saving bias table...");
@@ -494,21 +442,53 @@ pub fn handle_bias_combine_command(
     if !silent {
         eprintln!("Hash Bias Table");
         eprintln!("===============");
-        eprintln!("Positive: {} ({} hashes)", positive.display(), format_number(pos_raw.total));
-        eprintln!("Negative: {} ({} hashes)", negative.display(), format_number(neg_raw.total));
+        eprintln!("Positive: {} files", positive.len());
+        eprintln!("Negative: {} files", negative.len());
         eprintln!();
         eprintln!("Configuration:");
         eprintln!("  k-mer size:     {}", table.k());
         eprintln!("  fscale:         {}", table.fscale());
-        eprintln!("  CMS dimensions: {} x {}", table.config.width, table.config.depth);
+        eprintln!(
+            "  CMS dimensions: {} x {}",
+            table.config.width, table.config.depth
+        );
         eprintln!("  Smoothing (alpha): {:.1}", alpha);
         eprintln!();
-        eprintln!("Calibration results:");
-        eprintln!("  Target selectivity: {:.1}x", selectivity);
-        eprintln!("  Actual selectivity: {:.2}x", table.selectivity());
-        eprintln!("  Calibrated threshold: {:.2} (quantized: {})", table.threshold_f32(), table.threshold);
-        eprintln!("  Positive retention: {:.2}%", table.positive_retention * 100.0);
-        eprintln!("  Negative retention: {:.2}%", table.negative_retention * 100.0);
+        eprintln!("Results:");
+        eprintln!("  Fold enrichment: {:.2}x", table.fold_enrichment());
+        eprintln!("  Max achievable:  {:.2}x", table.max_fold_enrichment);
+        eprintln!(
+            "  Threshold: {:.2} (quantized: {})",
+            table.threshold_f32(),
+            table.threshold
+        );
+        eprintln!(
+            "  Positive retention: {:.2}%",
+            table.positive_retention * 100.0
+        );
+        eprintln!(
+            "  Negative retention: {:.2}%",
+            table.negative_retention * 100.0
+        );
+
+        if let Some(requested) = fold_enrichment
+            && requested > table.max_fold_enrichment + 0.01 {
+                eprintln!();
+                eprintln!(
+                    "Warning: Requested fold enrichment ({:.2}x) exceeds maximum achievable ({:.2}x). Using maximum.",
+                    requested, table.max_fold_enrichment
+                );
+            }
+
+        if table.fold_enrichment() < 1.5 {
+            eprintln!();
+            eprintln!(
+                "Warning: Fold enrichment is very low ({:.2}x). The positive and negative \
+                 sets may be too similar for effective filtering.",
+                table.fold_enrichment()
+            );
+        }
+
         eprintln!();
         let (min, max, mean, std, positive_weights) = table.weight_stats();
         let total_cells = table.config.width * table.config.depth;
@@ -517,7 +497,11 @@ pub fn handle_bias_combine_command(
         eprintln!("  max:    {:.2}", max);
         eprintln!("  mean:   {:.2}", mean);
         eprintln!("  std:    {:.2}", std);
-        eprintln!("  >0:     {} cells ({:.1}%)", positive_weights, positive_weights as f64 / total_cells as f64 * 100.0);
+        eprintln!(
+            "  >0:     {} cells ({:.1}%)",
+            positive_weights,
+            positive_weights as f64 / total_cells as f64 * 100.0
+        );
         eprintln!();
         eprintln!("Saved to: {}", output.display());
         eprintln!("Built in {:.2?}", start.elapsed());
@@ -528,7 +512,6 @@ pub fn handle_bias_combine_command(
 
 pub fn handle_bias_stats_command(
     input: PathBuf,
-    compare: Option<PathBuf>,
     output: Option<PathBuf>,
     silent: bool,
 ) -> Result<()> {
@@ -536,164 +519,7 @@ pub fn handle_bias_stats_command(
         return Err(anyhow::anyhow!("Input file does not exist: {:?}", input));
     }
 
-    let extension = input.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-    match extension {
-        "braw" => {
-            if let Some(compare_path) = compare {
-                handle_raw_compare_stats(&input, &compare_path, output, silent)
-            } else {
-                handle_raw_stats(&input, output, silent)
-            }
-        }
-        "bias" => {
-            if compare.is_some() {
-                Err(anyhow::anyhow!(
-                    "--compare is only supported for .braw inputs"
-                ))
-            } else {
-                handle_combined_stats(&input, output, silent)
-            }
-        }
-        _ => Err(anyhow::anyhow!(
-            "Unknown file extension: {}. Expected .braw or .bias",
-            extension
-        )),
-    }
-}
-
-fn handle_raw_compare_stats(
-    positive: &std::path::Path,
-    negative: &std::path::Path,
-    output: Option<PathBuf>,
-    silent: bool,
-) -> Result<()> {
-    if !positive.exists() {
-        return Err(anyhow::anyhow!(
-            "Positive file does not exist: {:?}",
-            positive
-        ));
-    }
-    if !negative.exists() {
-        return Err(anyhow::anyhow!(
-            "Negative file does not exist: {:?}",
-            negative
-        ));
-    }
-
-    let pos_raw = RawHashCounts::load(positive)?;
-    let neg_raw = RawHashCounts::load(negative)?;
-
-    let (kl_pn, kl_np, js) = compute_divergence(&pos_raw, &neg_raw);
-    let effect_size = compute_effect_size(&pos_raw, &neg_raw, 1.0);
-
-    if let Some(output_path) = output {
-        let json = serde_json::json!({
-            "positive": {
-                "file": positive.display().to_string(),
-                "total_hashes": pos_raw.total,
-                "k": pos_raw.config.k,
-                "fscale": pos_raw.config.fscale,
-                "cms_width": pos_raw.config.width,
-                "cms_depth": pos_raw.config.depth,
-            },
-            "negative": {
-                "file": negative.display().to_string(),
-                "total_hashes": neg_raw.total,
-                "k": neg_raw.config.k,
-                "fscale": neg_raw.config.fscale,
-                "cms_width": neg_raw.config.width,
-                "cms_depth": neg_raw.config.depth,
-            },
-            "divergence": {
-                "kl_positive_negative": kl_pn,
-                "kl_negative_positive": kl_np,
-                "jensen_shannon": js,
-            },
-            "effect_size_cohens_d": effect_size,
-        });
-
-        let file = std::fs::File::create(&output_path)?;
-        serde_json::to_writer_pretty(file, &json)?;
-
-        if !silent {
-            eprintln!("Comparison written to: {}", output_path.display());
-        }
-    } else if !silent {
-        eprintln!("Panel Comparison");
-        eprintln!("================");
-        eprintln!("Positive panel: {} hashes", format_number(pos_raw.total));
-        eprintln!("Negative panel: {} hashes", format_number(neg_raw.total));
-        eprintln!();
-        eprintln!("Divergence metrics:");
-        eprintln!("  KL(P||N):       {:.4}", kl_pn);
-        eprintln!("  KL(N||P):       {:.4}", kl_np);
-        eprintln!("  Jensen-Shannon: {:.4}", js);
-        eprintln!();
-        eprintln!("Effect size (Cohen's d): {:.2}", effect_size);
-    }
-
-    Ok(())
-}
-
-fn handle_raw_stats(input: &std::path::Path, output: Option<PathBuf>, silent: bool) -> Result<()> {
-    let raw = RawHashCounts::load(input)?;
-
-    let (min, max, mean, std, non_zero) = raw.cms.cell_stats();
-    let total_cells = raw.config.width * raw.config.depth;
-
-    if let Some(output_path) = output {
-        let json = serde_json::json!({
-            "file": input.display().to_string(),
-            "type": "raw_v3",
-            "k": raw.config.k,
-            "fscale": raw.config.fscale,
-            "cms_width": raw.config.width,
-            "cms_depth": raw.config.depth,
-            "total_hashes": raw.total,
-            "memory_bytes": raw.memory_usage(),
-            "cell_stats": {
-                "min": min,
-                "max": max,
-                "mean": mean,
-                "std": std,
-                "non_zero": non_zero,
-                "non_zero_pct": non_zero as f64 / total_cells as f64 * 100.0,
-            }
-        });
-
-        let file = std::fs::File::create(&output_path)?;
-        serde_json::to_writer_pretty(file, &json)?;
-
-        if !silent {
-            eprintln!("Statistics written to: {}", output_path.display());
-        }
-    } else if !silent {
-        eprintln!("Raw Hash Counts (v3)");
-        eprintln!("====================");
-        eprintln!("File: {}", input.display());
-        eprintln!("  k-mer size:     {}", raw.config.k);
-        eprintln!("  fscale:         {}", raw.config.fscale);
-        eprintln!("  CMS dimensions: {} x {}", raw.config.width, raw.config.depth);
-        eprintln!("  Total hashes:   {}", format_number(raw.total));
-        eprintln!("  Memory usage:   {:.1} MB", raw.memory_usage() as f64 / 1_000_000.0);
-        eprintln!("  Hash distribution:");
-        eprintln!("    min cell:     {}", min);
-        eprintln!("    max cell:     {}", max);
-        eprintln!("    mean cell:    {:.1}", mean);
-        eprintln!("    std cell:     {:.1}", std);
-        eprintln!("    non-zero:     {} ({:.1}%)", non_zero, non_zero as f64 / total_cells as f64 * 100.0);
-    }
-
-    Ok(())
-}
-
-fn handle_combined_stats(
-    input: &std::path::Path,
-    output: Option<PathBuf>,
-    silent: bool,
-) -> Result<()> {
-    let table = HashBiasTable::load(input)?;
+    let table = HashBiasTable::load(&input)?;
 
     let (min, max, mean, std, positive_weights) = table.weight_stats();
     let total_cells = table.config.width * table.config.depth;
@@ -712,7 +538,7 @@ fn handle_combined_stats(
                 "threshold_f32": table.threshold_f32(),
                 "positive_retention": table.positive_retention,
                 "negative_retention": table.negative_retention,
-                "selectivity": table.selectivity(),
+                "fold_enrichment": table.fold_enrichment(),
             },
             "weight_stats": {
                 "min": min,
@@ -737,21 +563,38 @@ fn handle_combined_stats(
         eprintln!("File: {}", input.display());
         eprintln!("  k-mer size:     {}", table.config.k);
         eprintln!("  fscale:         {}", table.config.fscale);
-        eprintln!("  CMS dimensions: {} x {}", table.config.width, table.config.depth);
+        eprintln!(
+            "  CMS dimensions: {} x {}",
+            table.config.width, table.config.depth
+        );
         eprintln!("  Smoothing (alpha): {:.1}", table.alpha);
         eprintln!();
         eprintln!("Calibration:");
-        eprintln!("  threshold:           {:.2} (quantized: {})", table.threshold_f32(), table.threshold);
-        eprintln!("  positive retention:  {:.2}%", table.positive_retention * 100.0);
-        eprintln!("  negative retention:  {:.2}%", table.negative_retention * 100.0);
-        eprintln!("  selectivity:         {:.2}x", table.selectivity());
+        eprintln!(
+            "  threshold:           {:.2} (quantized: {})",
+            table.threshold_f32(),
+            table.threshold
+        );
+        eprintln!(
+            "  positive retention:  {:.2}%",
+            table.positive_retention * 100.0
+        );
+        eprintln!(
+            "  negative retention:  {:.2}%",
+            table.negative_retention * 100.0
+        );
+        eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
         eprintln!();
         eprintln!("Weight distribution:");
         eprintln!("  min:    {:.2}", min);
         eprintln!("  max:    {:.2}", max);
         eprintln!("  mean:   {:.2}", mean);
         eprintln!("  std:    {:.2}", std);
-        eprintln!("  >0:     {} cells ({:.1}%)", positive_weights, positive_weights as f64 / total_cells as f64 * 100.0);
+        eprintln!(
+            "  >0:     {} cells ({:.1}%)",
+            positive_weights,
+            positive_weights as f64 / total_cells as f64 * 100.0
+        );
     }
 
     Ok(())
@@ -823,16 +666,4 @@ pub fn handle_stats_command(
     }
 
     Ok(())
-}
-
-fn format_number(n: u64) -> String {
-    if n >= 1_000_000_000 {
-        format!("{:.2}G", n as f64 / 1_000_000_000.0)
-    } else if n >= 1_000_000 {
-        format!("{:.2}M", n as f64 / 1_000_000.0)
-    } else if n >= 1_000 {
-        format!("{:.2}K", n as f64 / 1_000.0)
-    } else {
-        format!("{}", n)
-    }
 }

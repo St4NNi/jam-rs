@@ -65,10 +65,10 @@ impl BucketFilter<'_> {
     /// Returns false if the hash is definitely not present.
     #[inline]
     pub fn contains(&self, hash: &u64) -> bool {
-        let descriptor =
-            &self.mmap[self.meta.descriptor_offset..self.meta.descriptor_offset + FILTER_DESCRIPTOR_SIZE];
-        let fingerprints =
-            &self.mmap[self.meta.fingerprints_offset..self.meta.fingerprints_offset + self.meta.fingerprints_size];
+        let descriptor = &self.mmap
+            [self.meta.descriptor_offset..self.meta.descriptor_offset + FILTER_DESCRIPTOR_SIZE];
+        let fingerprints = &self.mmap[self.meta.fingerprints_offset
+            ..self.meta.fingerprints_offset + self.meta.fingerprints_size];
         BinaryFuse8Ref::from_dma(descriptor, fingerprints).contains(hash)
     }
 }

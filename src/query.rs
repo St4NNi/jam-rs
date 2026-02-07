@@ -498,7 +498,8 @@ impl QueryEngine {
                     let current_page = current_byte & !(PAGE_SIZE - 1);
                     if current_page > last_released_page + PAGE_SIZE {
                         // Release pages we've passed (keep one page buffer for backtracking)
-                        self.reader.release_pages(last_released_page, current_page - PAGE_SIZE);
+                        self.reader
+                            .release_pages(last_released_page, current_page - PAGE_SIZE);
                         last_released_page = current_page - PAGE_SIZE;
                     }
 
@@ -577,10 +578,7 @@ impl QueryEngine {
 
         let sample_starts: Vec<usize> = (0..num_samples as u32)
             .into_par_iter()
-            .map(|q_sample| {
-                all_pairs
-                    .partition_point(|&(qs, _)| qs < q_sample)
-            })
+            .map(|q_sample| all_pairs.partition_point(|&(qs, _)| qs < q_sample))
             .collect();
 
         // Process each query sample's range in parallel

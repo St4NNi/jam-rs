@@ -279,10 +279,8 @@ pub fn run(
     }
 
     let metadata_offset = current_offset;
-    let total_size = metadata_offset
-        + bias_size as usize
-        + sample_names_bytes.len()
-        + sample_sizes_bytes.len();
+    let total_size =
+        metadata_offset + bias_size as usize + sample_names_bytes.len() + sample_sizes_bytes.len();
 
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -673,9 +671,11 @@ mod tests {
             fscale: 1,
         };
 
-        let pos_raw = RawHashCounts::build(&[pos_fasta.path()], config.clone(), None).unwrap();
-        let neg_raw = RawHashCounts::build(&[neg_fasta.path()], config, None).unwrap();
-        let bias_table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2.0).unwrap();
+        let rc = std::sync::atomic::AtomicU64::new(0);
+        let hc = std::sync::atomic::AtomicU64::new(0);
+        let pos_raw = RawHashCounts::build(&[pos_fasta.path()], config.clone(), &rc, &hc).unwrap();
+        let neg_raw = RawHashCounts::build(&[neg_fasta.path()], config, &rc, &hc).unwrap();
+        let bias_table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0)).unwrap();
 
         let input = make_fasta(&[("seq1", "ATATATATATATATATATATATATATATATATATAT")]);
         let output_dir = tempfile::tempdir().unwrap();

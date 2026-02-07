@@ -4,19 +4,16 @@ use jamhash::jamhash_u64;
 use needletail::{Sequence, parse_fastx_file};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-const BRAW_MAGIC: &[u8; 4] = b"BRW3";
-const BRAW_VERSION: u32 = 3;
 const BIAS_MAGIC: &[u8; 4] = b"BIA3";
 const BIAS_VERSION: u32 = 3;
-
-const OLD_BRAW_MAGIC: &[u8; 4] = b"BRW2";
-const OLD_BIAS_MAGIC: &[u8; 4] = b"BIA2";
 
 const DEFAULT_CMS_WIDTH: usize = 1 << 20; // 1M columns
 const DEFAULT_CMS_DEPTH: usize = 5;
 const QUANTIZATION_SCALE: f32 = 10.0; // Each i8 unit = 0.1 log-ratio
+const MAX_SAMPLE_HASHES: usize = 100_000;
 
 #[derive(Debug, Clone)]
 pub struct CMSConfig {
@@ -47,15 +44,27 @@ pub struct CountMinSketch {
 
 impl CountMinSketch {
     pub fn new(width: usize, depth: usize) -> Self {
-        let seeds: Vec<u64> = (0..depth).map(|i| 0x517cc1b727220a95u64.wrapping_add(i as u64)).collect();
+        let seeds: Vec<u64> = (0..depth)
+            .map(|i| 0x517cc1b727220a95u64.wrapping_add(i as u64))
+            .collect();
         let counts = vec![0u64; width * depth];
-        Self { width, depth, seeds, counts }
+        Self {
+            width,
+            depth,
+            seeds,
+            counts,
+        }
     }
 
     pub fn with_seeds(width: usize, depth: usize, seeds: Vec<u64>) -> Self {
         assert_eq!(seeds.len(), depth);
         let counts = vec![0u64; width * depth];
-        Self { width, depth, seeds, counts }
+        Self {
+            width,
+            depth,
+            seeds,
+            counts,
+        }
     }
 
     #[inline]
@@ -80,190 +89,142 @@ impl CountMinSketch {
             .unwrap_or(0)
     }
 
-    pub fn width(&self) -> usize { self.width }
-    pub fn depth(&self) -> usize { self.depth }
-    pub fn seeds(&self) -> &[u64] { &self.seeds }
-    pub fn counts(&self) -> &[u64] { &self.counts }
+    pub fn width(&self) -> usize {
+        self.width
+    }
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
+    pub fn seeds(&self) -> &[u64] {
+        &self.seeds
+    }
+    pub fn counts(&self) -> &[u64] {
+        &self.counts
+    }
 
     pub fn cell_stats(&self) -> (u64, u64, f64, f64, usize) {
         let min = *self.counts.iter().min().unwrap_or(&0);
         let max = *self.counts.iter().max().unwrap_or(&0);
         let sum: u64 = self.counts.iter().sum();
         let mean = sum as f64 / self.counts.len() as f64;
-        let variance: f64 = self.counts.iter()
-            .map(|&c| { let d = c as f64 - mean; d * d })
-            .sum::<f64>() / self.counts.len() as f64;
+        let variance: f64 = self
+            .counts
+            .iter()
+            .map(|&c| {
+                let d = c as f64 - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / self.counts.len() as f64;
         let non_zero = self.counts.iter().filter(|&&c| c > 0).count();
         (min, max, mean, variance.sqrt(), non_zero)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct RawHashCounts {
-    pub config: CMSConfig,
-    pub cms: CountMinSketch,
-    pub total: u64,
+pub(crate) struct RawHashCounts {
+    pub(crate) config: CMSConfig,
+    pub(crate) cms: CountMinSketch,
+    pub(crate) total: u64,
+    pub(crate) samples: Vec<u64>,
 }
 
 impl RawHashCounts {
-    pub fn new(config: CMSConfig) -> Self {
+    pub(crate) fn new(config: CMSConfig) -> Self {
         let cms = CountMinSketch::new(config.width, config.depth);
-        Self { config, cms, total: 0 }
+        Self {
+            config,
+            cms,
+            total: 0,
+            samples: Vec::with_capacity(MAX_SAMPLE_HASHES),
+        }
     }
 
-    pub fn build(paths: &[&Path], config: CMSConfig, progress: Option<ProgressBar>) -> Result<Self> {
-        let record_counter = AtomicU64::new(0);
-        let hash_counter = AtomicU64::new(0);
+    pub(crate) fn build(
+        paths: &[&Path],
+        config: CMSConfig,
+        record_counter: &AtomicU64,
+        hash_counter: &AtomicU64,
+    ) -> Result<Self> {
+        let frac_max = u64::MAX / config.fscale;
+        let k = config.k;
 
-        let update_handle = progress.as_ref().map(|pb| {
-            let pb = pb.clone();
-            let record_counter = &record_counter as *const AtomicU64 as usize;
-            let hash_counter = &hash_counter as *const AtomicU64 as usize;
-
-            std::thread::spawn(move || {
-                let record_counter = unsafe { &*(record_counter as *const AtomicU64) };
-                let hash_counter = unsafe { &*(hash_counter as *const AtomicU64) };
-
-                loop {
-                    if pb.is_finished() { break; }
-                    let records = record_counter.load(Ordering::Relaxed);
-                    let hashes = hash_counter.load(Ordering::Relaxed);
-                    pb.set_message(format!("{} records, {} hashes", records, format_number(hashes)));
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            })
-        });
-
-        let mut raw = Self::new(config);
-        let frac_max = u64::MAX / raw.config.fscale;
-        let k = raw.config.k;
-
+        let mut raw = RawHashCounts::new(config);
         for path in paths {
-            let mut reader = match parse_fastx_file(path) {
-                Ok(reader) => reader,
-                Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
-                    continue;
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("Failed to parse: {}", path.display()));
-                }
-            };
+            process_path(&mut raw, path, k, frac_max, record_counter, hash_counter)?;
+        }
 
-            while let Some(record) = reader.next() {
-                let record = record.context("Failed to parse sequence record")?;
-                let seq = record.normalize(false);
-                record_counter.fetch_add(1, Ordering::Relaxed);
+        if raw.samples.len() > MAX_SAMPLE_HASHES {
+            downsample_samples(&mut raw.samples);
+        }
 
-                if seq.len() < k as usize { continue; }
+        Ok(raw)
+    }
+}
 
-                for (_, kmer, _) in seq.bit_kmers(k, true) {
-                    let hash = jamhash_u64(kmer.0);
-                    if hash < frac_max {
-                        raw.cms.increment(hash);
-                        raw.total += 1;
-                        hash_counter.fetch_add(1, Ordering::Relaxed);
+fn process_path(
+    raw: &mut RawHashCounts,
+    path: &Path,
+    k: u8,
+    frac_max: u64,
+    record_counter: &AtomicU64,
+    hash_counter: &AtomicU64,
+) -> Result<()> {
+    let mut reader = match parse_fastx_file(path) {
+        Ok(reader) => reader,
+        Err(e) if e.kind == needletail::errors::ParseErrorKind::EmptyFile => {
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to parse: {}", path.display()));
+        }
+    };
+
+    while let Some(record) = reader.next() {
+        let record = record.context("Failed to parse sequence record")?;
+        let seq = record.normalize(false);
+        record_counter.fetch_add(1, Ordering::Relaxed);
+
+        if seq.len() < k as usize {
+            continue;
+        }
+
+        for (_, kmer, _) in seq.bit_kmers(k, true) {
+            let hash = jamhash_u64(kmer.0);
+            if hash < frac_max {
+                raw.cms.increment(hash);
+                raw.total += 1;
+                if raw.samples.len() < MAX_SAMPLE_HASHES {
+                    raw.samples.push(hash);
+                } else {
+                    let seen = raw.total;
+                    let pick = (jamhash_u64(hash ^ seen) % seen) as usize;
+                    if pick < MAX_SAMPLE_HASHES {
+                        raw.samples[pick] = hash;
                     }
                 }
+                hash_counter.fetch_add(1, Ordering::Relaxed);
             }
         }
-
-        if let Some(ref pb) = progress {
-            pb.finish();
-        }
-        if let Some(handle) = update_handle {
-            let _ = handle.join();
-        }
-
-        Ok(raw)
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let mut file = std::fs::File::create(path)
-            .with_context(|| format!("Failed to create raw hash counts file: {}", path.display()))?;
+    Ok(())
+}
 
-        file.write_all(BRAW_MAGIC)?;
-        file.write_all(&BRAW_VERSION.to_le_bytes())?;
-        file.write_all(&[self.config.k])?;
-        file.write_all(&self.config.fscale.to_le_bytes())?;
-        file.write_all(&(self.config.width as u32).to_le_bytes())?;
-        file.write_all(&[self.config.depth as u8])?;
-        file.write_all(&self.total.to_le_bytes())?;
-
-        for &seed in self.cms.seeds() {
-            file.write_all(&seed.to_le_bytes())?;
-        }
-        for &count in self.cms.counts() {
-            file.write_all(&count.to_le_bytes())?;
-        }
-
-        Ok(())
+fn downsample_samples(samples: &mut Vec<u64>) {
+    if samples.len() <= MAX_SAMPLE_HASHES {
+        return;
     }
+    samples.sort_unstable_by_key(|&hash| jamhash_u64(hash));
+    samples.truncate(MAX_SAMPLE_HASHES);
+}
 
-    pub fn load(path: &Path) -> Result<Self> {
-        let mut file = std::fs::File::open(path)
-            .with_context(|| format!("Failed to open raw hash counts file: {}", path.display()))?;
-
-        let mut magic = [0u8; 4];
-        file.read_exact(&mut magic)?;
-
-        if &magic == OLD_BRAW_MAGIC {
-            anyhow::bail!(
-                "Old v2 raw bias table format detected (BRW2). Please recreate with 'jam bias create'.\n\
-                 The new v3 format uses hash-based bias instead of k-mer composition."
-            );
-        }
-        if &magic != BRAW_MAGIC {
-            anyhow::bail!("Invalid raw hash counts file (bad magic): {}", path.display());
-        }
-
-        let mut buf4 = [0u8; 4];
-        file.read_exact(&mut buf4)?;
-        let version = u32::from_le_bytes(buf4);
-        if version != BRAW_VERSION {
-            anyhow::bail!("Unsupported raw hash counts version {} (expected {})", version, BRAW_VERSION);
-        }
-
-        let mut k_buf = [0u8; 1];
-        file.read_exact(&mut k_buf)?;
-        let k = k_buf[0];
-
-        let mut buf8 = [0u8; 8];
-        file.read_exact(&mut buf8)?;
-        let fscale = u64::from_le_bytes(buf8);
-
-        file.read_exact(&mut buf4)?;
-        let width = u32::from_le_bytes(buf4) as usize;
-
-        let mut depth_buf = [0u8; 1];
-        file.read_exact(&mut depth_buf)?;
-        let depth = depth_buf[0] as usize;
-
-        file.read_exact(&mut buf8)?;
-        let total = u64::from_le_bytes(buf8);
-
-        let mut seeds = Vec::with_capacity(depth);
-        for _ in 0..depth {
-            file.read_exact(&mut buf8)?;
-            seeds.push(u64::from_le_bytes(buf8));
-        }
-
-        let mut counts = vec![0u64; width * depth];
-        for count in &mut counts {
-            file.read_exact(&mut buf8)?;
-            *count = u64::from_le_bytes(buf8);
-        }
-
-        let config = CMSConfig { width, depth, k, fscale };
-        let cms = CountMinSketch::with_seeds(width, depth, seeds);
-        let mut raw = Self { config, cms, total };
-        raw.cms.counts = counts;
-
-        Ok(raw)
-    }
-
-    pub fn memory_usage(&self) -> usize {
-        self.cms.counts().len() * 8 + self.cms.seeds().len() * 8
-    }
+/// Configuration for creating a bias table from FASTA files.
+#[derive(Debug, Clone)]
+pub struct BiasCreateConfig {
+    pub cms: CMSConfig,
+    pub alpha: f32,
+    pub target_fold_enrichment: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -271,7 +232,8 @@ pub struct CalibrationResult {
     pub threshold: i8,
     pub positive_retention: f32,
     pub negative_retention: f32,
-    pub selectivity: f32,
+    pub fold_enrichment: f32,
+    pub max_fold_enrichment: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -283,34 +245,131 @@ pub struct HashBiasTable {
     pub threshold: i8,
     pub positive_retention: f32,
     pub negative_retention: f32,
+    pub max_fold_enrichment: f32,
+}
+
+fn validate_cms_compatibility(positive: &RawHashCounts, negative: &RawHashCounts) -> Result<()> {
+    if positive.config.k != negative.config.k {
+        anyhow::bail!(
+            "k-mer size mismatch: positive={}, negative={}",
+            positive.config.k,
+            negative.config.k
+        );
+    }
+    if positive.config.fscale != negative.config.fscale {
+        anyhow::bail!(
+            "fscale mismatch: positive={}, negative={}",
+            positive.config.fscale,
+            negative.config.fscale
+        );
+    }
+    if positive.config.width != negative.config.width
+        || positive.config.depth != negative.config.depth
+    {
+        anyhow::bail!(
+            "CMS dimensions mismatch: positive={}x{}, negative={}x{}",
+            positive.config.width,
+            positive.config.depth,
+            negative.config.width,
+            negative.config.depth
+        );
+    }
+    Ok(())
 }
 
 impl HashBiasTable {
-    pub fn build(
+    /// Create a bias table directly from positive and negative FASTA files.
+    /// Background subtraction is always applied: the target signal is removed
+    /// from the background before computing log-ratios.
+    pub fn create(
+        positive_paths: &[&Path],
+        negative_paths: &[&Path],
+        config: &BiasCreateConfig,
+        progress: Option<ProgressBar>,
+    ) -> Result<Self> {
+        let record_counter = Arc::new(AtomicU64::new(0));
+        let hash_counter = Arc::new(AtomicU64::new(0));
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let update_handle = progress.as_ref().map(|pb| {
+            let pb = pb.clone();
+            let record_counter = Arc::clone(&record_counter);
+            let hash_counter = Arc::clone(&hash_counter);
+            let stop_flag = Arc::clone(&stop_flag);
+
+            std::thread::spawn(move || {
+                loop {
+                    if stop_flag.load(Ordering::Relaxed) || pb.is_finished() {
+                        break;
+                    }
+                    let records = record_counter.load(Ordering::Relaxed);
+                    let hashes = hash_counter.load(Ordering::Relaxed);
+                    pb.set_message(format!(
+                        "{} records, {} hashes",
+                        format_number(records),
+                        format_number(hashes)
+                    ));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            })
+        });
+
+        let (pos_raw, neg_raw) = rayon::join(
+            || {
+                RawHashCounts::build(
+                    positive_paths,
+                    config.cms.clone(),
+                    &record_counter,
+                    &hash_counter,
+                )
+            },
+            || {
+                RawHashCounts::build(
+                    negative_paths,
+                    config.cms.clone(),
+                    &record_counter,
+                    &hash_counter,
+                )
+            },
+        );
+
+        stop_flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = update_handle {
+            let _ = handle.join();
+        }
+
+        let pos_raw = pos_raw?;
+        let neg_raw = neg_raw?;
+
+        if let Some(ref pb) = progress {
+            pb.set_message("Computing bias weights...");
+        }
+
+        let table = Self::build(
+            &pos_raw,
+            &neg_raw,
+            config.alpha,
+            config.target_fold_enrichment,
+        )?;
+
+        if let Some(ref pb) = progress {
+            pb.finish();
+        }
+
+        Ok(table)
+    }
+
+    /// Build a bias table from pre-computed hash counts.
+    /// Always applies background subtraction: normalizes counts and subtracts
+    /// the target (positive) signal from the background (negative) before
+    /// computing log-ratios.
+    pub(crate) fn build(
         positive: &RawHashCounts,
         negative: &RawHashCounts,
         alpha: f32,
-        target_selectivity: f32,
+        target_fold_enrichment: Option<f32>,
     ) -> Result<Self> {
-        if positive.config.k != negative.config.k {
-            anyhow::bail!(
-                "k-mer size mismatch: positive={}, negative={}",
-                positive.config.k, negative.config.k
-            );
-        }
-        if positive.config.fscale != negative.config.fscale {
-            anyhow::bail!(
-                "fscale mismatch: positive={}, negative={}",
-                positive.config.fscale, negative.config.fscale
-            );
-        }
-        if positive.config.width != negative.config.width || positive.config.depth != negative.config.depth {
-            anyhow::bail!(
-                "CMS dimensions mismatch: positive={}x{}, negative={}x{}",
-                positive.config.width, positive.config.depth,
-                negative.config.width, negative.config.depth
-            );
-        }
+        validate_cms_compatibility(positive, negative)?;
 
         let width = positive.config.width;
         let depth = positive.config.depth;
@@ -319,18 +378,33 @@ impl HashBiasTable {
         let pos_counts = positive.cms.counts();
         let neg_counts = negative.cms.counts();
 
+        let pos_total = positive.total as f64;
+        let neg_total = negative.total as f64;
+
         let mut weights = vec![0i8; width * depth];
 
-        for i in 0..(width * depth) {
-            let c_p = pos_counts[i] as f32;
-            let c_n = neg_counts[i] as f32;
-            let log_ratio = ((c_p + alpha) / (c_n + alpha)).ln();
-            let quantized = (log_ratio * QUANTIZATION_SCALE).clamp(-127.0, 127.0) as i8;
-            weights[i] = quantized;
+        if pos_total > 0.0 && neg_total > 0.0 {
+            let scale = pos_total.max(neg_total);
+
+            for i in 0..(width * depth) {
+                let norm_pos = (pos_counts[i] as f64 / pos_total) * scale;
+                let norm_neg = (neg_counts[i] as f64 / neg_total) * scale;
+                let adj_neg = (norm_neg - norm_pos).max(0.0) as f32;
+                let norm_pos_f32 = norm_pos as f32;
+
+                let log_ratio = ((norm_pos_f32 + alpha) / (adj_neg + alpha)).ln();
+                let quantized = (log_ratio * QUANTIZATION_SCALE).clamp(-127.0, 127.0) as i8;
+                weights[i] = quantized;
+            }
         }
 
         let calibration = calibrate_threshold(
-            positive, negative, &weights, &seeds, width, target_selectivity
+            positive,
+            negative,
+            &weights,
+            &seeds,
+            width,
+            target_fold_enrichment,
         )?;
 
         Ok(Self {
@@ -341,6 +415,7 @@ impl HashBiasTable {
             threshold: calibration.threshold,
             positive_retention: calibration.positive_retention,
             negative_retention: calibration.negative_retention,
+            max_fold_enrichment: calibration.max_fold_enrichment,
         })
     }
 
@@ -363,10 +438,14 @@ impl HashBiasTable {
         self.weight(hash) >= self.threshold
     }
 
-    pub fn k(&self) -> u8 { self.config.k }
-    pub fn fscale(&self) -> u64 { self.config.fscale }
+    pub fn k(&self) -> u8 {
+        self.config.k
+    }
+    pub fn fscale(&self) -> u64 {
+        self.config.fscale
+    }
 
-    pub fn selectivity(&self) -> f32 {
+    pub fn fold_enrichment(&self) -> f32 {
         if self.negative_retention > 0.0 {
             self.positive_retention / self.negative_retention
         } else {
@@ -406,12 +485,6 @@ impl HashBiasTable {
         let mut magic = [0u8; 4];
         file.read_exact(&mut magic)?;
 
-        if &magic == OLD_BIAS_MAGIC {
-            anyhow::bail!(
-                "Old v2 bias table format detected (BIA2). Please recreate with 'jam bias combine'.\n\
-                 The new v3 format uses hash-based bias instead of k-mer composition."
-            );
-        }
         if &magic != BIAS_MAGIC {
             anyhow::bail!("Invalid bias table file (bad magic): {}", path.display());
         }
@@ -420,7 +493,11 @@ impl HashBiasTable {
         file.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
         if version != BIAS_VERSION {
-            anyhow::bail!("Unsupported bias table version {} (expected {})", version, BIAS_VERSION);
+            anyhow::bail!(
+                "Unsupported bias table version {} (expected {})",
+                version,
+                BIAS_VERSION
+            );
         }
 
         let mut k_buf = [0u8; 1];
@@ -464,7 +541,18 @@ impl HashBiasTable {
             weights[i] = b as i8;
         }
 
-        let config = CMSConfig { width, depth, k, fscale };
+        let config = CMSConfig {
+            width,
+            depth,
+            k,
+            fscale,
+        };
+
+        let max_fold_enrichment = if negative_retention > 0.0 {
+            positive_retention / negative_retention
+        } else {
+            f32::INFINITY
+        };
 
         Ok(Self {
             config,
@@ -474,6 +562,7 @@ impl HashBiasTable {
             threshold,
             positive_retention,
             negative_retention,
+            max_fold_enrichment,
         })
     }
 
@@ -511,11 +600,6 @@ impl HashBiasTable {
         }
 
         let magic: [u8; 4] = data[0..4].try_into().unwrap();
-        if &magic == OLD_BIAS_MAGIC {
-            anyhow::bail!(
-                "Old v2 bias table format detected (BIA2). Please recreate with 'jam bias combine'."
-            );
-        }
         if &magic != BIAS_MAGIC {
             anyhow::bail!("Invalid bias table magic bytes");
         }
@@ -540,13 +624,19 @@ impl HashBiasTable {
         let weights_end = weights_start + width * depth;
 
         if data.len() < weights_end {
-            anyhow::bail!("Bias table data truncated: expected {} bytes, got {}", weights_end, data.len());
+            anyhow::bail!(
+                "Bias table data truncated: expected {} bytes, got {}",
+                weights_end,
+                data.len()
+            );
         }
 
         let mut seeds = Vec::with_capacity(depth);
         for i in 0..depth {
             let offset = seeds_start + i * 8;
-            seeds.push(u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()));
+            seeds.push(u64::from_le_bytes(
+                data[offset..offset + 8].try_into().unwrap(),
+            ));
         }
 
         let mut weights = vec![0i8; width * depth];
@@ -554,7 +644,18 @@ impl HashBiasTable {
             weights[i] = b as i8;
         }
 
-        let config = CMSConfig { width, depth, k, fscale };
+        let config = CMSConfig {
+            width,
+            depth,
+            k,
+            fscale,
+        };
+
+        let max_fold_enrichment = if negative_retention > 0.0 {
+            positive_retention / negative_retention
+        } else {
+            f32::INFINITY
+        };
 
         Ok(Self {
             config,
@@ -564,6 +665,7 @@ impl HashBiasTable {
             threshold,
             positive_retention,
             negative_retention,
+            max_fold_enrichment,
         })
     }
 
@@ -572,12 +674,15 @@ impl HashBiasTable {
         let max = *self.weights.iter().max().unwrap_or(&0) as f32 / QUANTIZATION_SCALE;
         let sum: i64 = self.weights.iter().map(|&w| w as i64).sum();
         let mean = sum as f32 / self.weights.len() as f32 / QUANTIZATION_SCALE;
-        let variance: f32 = self.weights.iter()
+        let variance: f32 = self
+            .weights
+            .iter()
             .map(|&w| {
                 let d = w as f32 / QUANTIZATION_SCALE - mean;
                 d * d
             })
-            .sum::<f32>() / self.weights.len() as f32;
+            .sum::<f32>()
+            / self.weights.len() as f32;
         let positive = self.weights.iter().filter(|&&w| w > 0).count();
         (min, max, mean, variance.sqrt(), positive)
     }
@@ -596,14 +701,34 @@ impl HashBiasTable {
         eprintln!("Hash Bias Table (v3)");
         eprintln!("  k-mer size:     {}", self.config.k);
         eprintln!("  fscale:         {}", self.config.fscale);
-        eprintln!("  CMS dimensions: {} x {}", self.config.width, self.config.depth);
+        eprintln!(
+            "  CMS dimensions: {} x {}",
+            self.config.width, self.config.depth
+        );
         eprintln!("  Smoothing (alpha): {:.1}", self.alpha);
-        eprintln!("  Threshold: {:.2} (quantized: {})", self.threshold_f32(), self.threshold);
-        eprintln!("  Positive retention: {:.2}%", self.positive_retention * 100.0);
-        eprintln!("  Negative retention: {:.2}%", self.negative_retention * 100.0);
-        eprintln!("  Selectivity: {:.2}x", self.selectivity());
-        eprintln!("  Weight stats: min={:.2}, max={:.2}, mean={:.2}, std={:.2}", min, max, mean, std);
-        eprintln!("  Positive weights: {} ({:.1}%)", positive, positive as f64 / total_cells as f64 * 100.0);
+        eprintln!(
+            "  Threshold: {:.2} (quantized: {})",
+            self.threshold_f32(),
+            self.threshold
+        );
+        eprintln!(
+            "  Positive retention: {:.2}%",
+            self.positive_retention * 100.0
+        );
+        eprintln!(
+            "  Negative retention: {:.2}%",
+            self.negative_retention * 100.0
+        );
+        eprintln!("  Fold enrichment: {:.2}x", self.fold_enrichment());
+        eprintln!(
+            "  Weight stats: min={:.2}, max={:.2}, mean={:.2}, std={:.2}",
+            min, max, mean, std
+        );
+        eprintln!(
+            "  Positive weights: {} ({:.1}%)",
+            positive,
+            positive as f64 / total_cells as f64 * 100.0
+        );
     }
 }
 
@@ -613,32 +738,19 @@ fn calibrate_threshold(
     weights: &[i8],
     seeds: &[u64],
     width: usize,
-    target_selectivity: f32,
+    target_fold_enrichment: Option<f32>,
 ) -> Result<CalibrationResult> {
     let sample_hashes = |raw: &RawHashCounts, max_samples: usize| -> Vec<u64> {
-        let frac_max = u64::MAX / raw.config.fscale;
-        let mut hashes = Vec::new();
-        let step = if raw.total > max_samples as u64 { raw.total as usize / max_samples } else { 1 };
-        let mut counter = 0usize;
-
-        for row in 0..raw.config.depth {
-            for col in 0..raw.config.width {
-                let idx = row * raw.config.width + col;
-                let count = raw.cms.counts()[idx];
-                if count > 0 {
-                    for h_offset in 0..count.min(10) as u64 {
-                        let pseudo_hash = (col as u64).wrapping_mul(seeds[row]).wrapping_add(h_offset);
-                        if pseudo_hash < frac_max {
-                            counter += 1;
-                            if counter % step == 0 {
-                                hashes.push(pseudo_hash);
-                            }
-                        }
-                    }
-                }
-            }
+        if raw.samples.len() <= max_samples {
+            return raw.samples.clone();
         }
-        hashes
+        let step = raw.samples.len() / max_samples;
+        raw.samples
+            .iter()
+            .step_by(step)
+            .take(max_samples)
+            .copied()
+            .collect()
     };
 
     let estimate_weight = |hash: u64| -> i8 {
@@ -667,14 +779,16 @@ fn calibrate_threshold(
             threshold: 0,
             positive_retention: 1.0,
             negative_retention: 1.0,
-            selectivity: 1.0,
+            fold_enrichment: 1.0,
+            max_fold_enrichment: 1.0,
         });
     }
 
-    let mut best_threshold = 0i8;
-    let mut best_diff = f32::MAX;
-    let mut best_pos_ret = 1.0f32;
-    let mut best_neg_ret = 1.0f32;
+    // First pass: find maximum achievable fold enrichment across all thresholds
+    let mut max_enrichment = 0.0f32;
+    let mut max_threshold = 0i8;
+    let mut max_pos_ret = 1.0f32;
+    let mut max_neg_ret = 1.0f32;
 
     for t in -127i8..=127i8 {
         let pos_passing = pos_sample_weights.iter().filter(|&&w| w >= t).count();
@@ -683,25 +797,84 @@ fn calibrate_threshold(
         let pos_ret = pos_passing as f32 / pos_sample_weights.len() as f32;
         let neg_ret = neg_passing as f32 / neg_sample_weights.len().max(1) as f32;
 
-        if neg_ret < 1e-6 { continue; }
+        if neg_ret < 1e-6 {
+            continue;
+        }
 
-        let selectivity = pos_ret / neg_ret;
-        let diff = (selectivity - target_selectivity).abs();
-
-        if diff < best_diff {
-            best_diff = diff;
-            best_threshold = t;
-            best_pos_ret = pos_ret;
-            best_neg_ret = neg_ret;
+        let enrichment = pos_ret / neg_ret;
+        if enrichment > max_enrichment {
+            max_enrichment = enrichment;
+            max_threshold = t;
+            max_pos_ret = pos_ret;
+            max_neg_ret = neg_ret;
         }
     }
 
-    Ok(CalibrationResult {
-        threshold: best_threshold,
-        positive_retention: best_pos_ret,
-        negative_retention: best_neg_ret,
-        selectivity: if best_neg_ret > 0.0 { best_pos_ret / best_neg_ret } else { f32::INFINITY },
-    })
+    match target_fold_enrichment {
+        None => {
+            // Use the threshold that maximizes fold enrichment
+            Ok(CalibrationResult {
+                threshold: max_threshold,
+                positive_retention: max_pos_ret,
+                negative_retention: max_neg_ret,
+                fold_enrichment: max_enrichment,
+                max_fold_enrichment: max_enrichment,
+            })
+        }
+        Some(target) => {
+            if target > max_enrichment {
+                // Target exceeds maximum achievable - use maximum instead
+                // The handler will warn the user
+                return Ok(CalibrationResult {
+                    threshold: max_threshold,
+                    positive_retention: max_pos_ret,
+                    negative_retention: max_neg_ret,
+                    fold_enrichment: max_enrichment,
+                    max_fold_enrichment: max_enrichment,
+                });
+            }
+
+            // Find threshold closest to target fold enrichment
+            let mut best_threshold = 0i8;
+            let mut best_diff = f32::MAX;
+            let mut best_pos_ret = 1.0f32;
+            let mut best_neg_ret = 1.0f32;
+
+            for t in -127i8..=127i8 {
+                let pos_passing = pos_sample_weights.iter().filter(|&&w| w >= t).count();
+                let neg_passing = neg_sample_weights.iter().filter(|&&w| w >= t).count();
+
+                let pos_ret = pos_passing as f32 / pos_sample_weights.len() as f32;
+                let neg_ret = neg_passing as f32 / neg_sample_weights.len().max(1) as f32;
+
+                if neg_ret < 1e-6 {
+                    continue;
+                }
+
+                let enrichment = pos_ret / neg_ret;
+                let diff = (enrichment - target).abs();
+
+                if diff < best_diff {
+                    best_diff = diff;
+                    best_threshold = t;
+                    best_pos_ret = pos_ret;
+                    best_neg_ret = neg_ret;
+                }
+            }
+
+            Ok(CalibrationResult {
+                threshold: best_threshold,
+                positive_retention: best_pos_ret,
+                negative_retention: best_neg_ret,
+                fold_enrichment: if best_neg_ret > 0.0 {
+                    best_pos_ret / best_neg_ret
+                } else {
+                    f32::INFINITY
+                },
+                max_fold_enrichment: max_enrichment,
+            })
+        }
+    }
 }
 
 fn format_number(n: u64) -> String {
@@ -728,82 +901,13 @@ pub fn format_bp(bp: u64) -> String {
     }
 }
 
-pub fn compute_divergence(positive: &RawHashCounts, negative: &RawHashCounts) -> (f64, f64, f64) {
-    let pos_counts = positive.cms.counts();
-    let neg_counts = negative.cms.counts();
-    let pos_total = positive.total as f64;
-    let neg_total = negative.total as f64;
-
-    if pos_total == 0.0 || neg_total == 0.0 {
-        return (0.0, 0.0, 0.0);
-    }
-
-    let width = positive.config.width;
-    let mut kl_pn = 0.0f64;
-    let mut kl_np = 0.0f64;
-
-    for col in 0..width {
-        let p = pos_counts[col] as f64 / pos_total;
-        let q = neg_counts[col] as f64 / neg_total;
-
-        if p > 1e-12 && q > 1e-12 {
-            kl_pn += p * (p / q).ln();
-            kl_np += q * (q / p).ln();
-        }
-    }
-
-    kl_pn /= std::f64::consts::LN_2;
-    kl_np /= std::f64::consts::LN_2;
-
-    let js = (kl_pn + kl_np) / 2.0;
-
-    (kl_pn, kl_np, js.sqrt())
-}
-
-pub fn compute_effect_size(positive: &RawHashCounts, negative: &RawHashCounts, alpha: f32) -> f64 {
-    let pos_counts = positive.cms.counts();
-    let neg_counts = negative.cms.counts();
-
-    let width = positive.config.width;
-    let mut pos_weights = Vec::with_capacity(width);
-    let mut neg_weights = Vec::with_capacity(width);
-
-    for col in 0..width {
-        let c_p = pos_counts[col] as f32;
-        let c_n = neg_counts[col] as f32;
-        let log_ratio = ((c_p + alpha) / (c_n + alpha)).ln();
-
-        if pos_counts[col] > 0 {
-            pos_weights.push(log_ratio);
-        }
-        if neg_counts[col] > 0 {
-            neg_weights.push(log_ratio);
-        }
-    }
-
-    if pos_weights.is_empty() || neg_weights.is_empty() {
-        return 0.0;
-    }
-
-    let pos_mean = pos_weights.iter().sum::<f32>() / pos_weights.len() as f32;
-    let neg_mean = neg_weights.iter().sum::<f32>() / neg_weights.len() as f32;
-
-    let pos_var = pos_weights.iter().map(|&w| (w - pos_mean).powi(2)).sum::<f32>() / pos_weights.len() as f32;
-    let neg_var = neg_weights.iter().map(|&w| (w - neg_mean).powi(2)).sum::<f32>() / neg_weights.len() as f32;
-
-    let pooled_std = ((pos_var + neg_var) / 2.0).sqrt();
-
-    if pooled_std > 0.0 {
-        ((pos_mean - neg_mean) / pooled_std) as f64
-    } else {
-        0.0
-    }
-}
-
-pub const BIAS_TABLE_SERIALIZED_SIZE: usize = 35 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
+pub const BIAS_TABLE_SERIALIZED_SIZE: usize =
+    35 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
 
 impl PartialEq for HashBiasTable {
     fn eq(&self, other: &Self) -> bool {
+        // max_fold_enrichment is excluded: it's calibration metadata not stored
+        // in the serialized format, so it may differ across round-trips.
         self.config.k == other.config.k
             && self.config.fscale == other.config.fscale
             && self.config.width == other.config.width
@@ -871,30 +975,14 @@ mod tests {
             fscale: 1,
         };
 
-        let raw = RawHashCounts::build(&[fasta.path()], config, None).unwrap();
+        let raw = RawHashCounts::build(
+            &[fasta.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
         assert!(raw.total > 0);
-    }
-
-    #[test]
-    fn test_raw_hash_counts_save_load() {
-        let fasta = create_fasta(&["ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"]);
-        let config = CMSConfig {
-            width: 1024,
-            depth: 3,
-            k: 11,
-            fscale: 10,
-        };
-
-        let raw = RawHashCounts::build(&[fasta.path()], config, None).unwrap();
-
-        let output = NamedTempFile::new().unwrap();
-        raw.save(output.path()).unwrap();
-
-        let loaded = RawHashCounts::load(output.path()).unwrap();
-        assert_eq!(raw.total, loaded.total);
-        assert_eq!(raw.config.k, loaded.config.k);
-        assert_eq!(raw.config.fscale, loaded.config.fscale);
-        assert_eq!(raw.cms.counts(), loaded.cms.counts());
     }
 
     #[test]
@@ -915,11 +1003,23 @@ mod tests {
             fscale: 1,
         };
 
-        let pos_raw = RawHashCounts::build(&[pos.path()], config.clone(), None).unwrap();
-        let neg_raw = RawHashCounts::build(&[neg.path()], config, None).unwrap();
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 5.0).unwrap();
-        assert!(table.threshold >= -127 && table.threshold <= 127);
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(5.0)).unwrap();
+        assert!(table.threshold >= -127);
     }
 
     #[test]
@@ -934,10 +1034,22 @@ mod tests {
             fscale: 10,
         };
 
-        let pos_raw = RawHashCounts::build(&[pos.path()], config.clone(), None).unwrap();
-        let neg_raw = RawHashCounts::build(&[neg.path()], config, None).unwrap();
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2.0).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0)).unwrap();
 
         let output = NamedTempFile::new().unwrap();
         table.save(output.path()).unwrap();
@@ -960,10 +1072,22 @@ mod tests {
             fscale: 10,
         };
 
-        let pos_raw = RawHashCounts::build(&[pos.path()], config.clone(), None).unwrap();
-        let neg_raw = RawHashCounts::build(&[neg.path()], config, None).unwrap();
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2.0).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0)).unwrap();
 
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
@@ -983,10 +1107,22 @@ mod tests {
             fscale: 1,
         };
 
-        let pos_raw = RawHashCounts::build(&[pos.path()], config.clone(), None).unwrap();
-        let neg_raw = RawHashCounts::build(&[neg.path()], config, None).unwrap();
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2.0).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0)).unwrap();
 
         let mut passed = 0;
         let mut failed = 0;
@@ -999,5 +1135,66 @@ mod tests {
         }
 
         assert!(passed > 0 || failed > 0);
+    }
+
+    #[test]
+    fn test_maximize_fold_enrichment() {
+        let pos = create_fasta(&[
+            "ATATATATATATATATATATATATATATATATATATATAT",
+            "TATATATATATATATATATATATATATATATATATATAT",
+        ]);
+        let neg = create_fasta(&[
+            "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC",
+            "CGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCG",
+        ]);
+
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 1,
+        };
+
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        // None = maximize fold enrichment
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None).unwrap();
+        assert!(table.threshold >= -127);
+        assert!(table.fold_enrichment() >= 1.0);
+    }
+
+    #[test]
+    fn test_create_unified() {
+        let pos = create_fasta(&["ATATATATATATATATATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let config = BiasCreateConfig {
+            cms: CMSConfig {
+                width: 1024,
+                depth: 3,
+                k: 11,
+                fscale: 1,
+            },
+            alpha: 1.0,
+            target_fold_enrichment: None,
+        };
+
+        let table = HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap();
+
+        assert!(table.threshold >= -127);
+        assert!(table.fold_enrichment() >= 1.0);
     }
 }
