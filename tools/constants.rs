@@ -1,16 +1,11 @@
-//! Tool for analyzing jamhash avalanche properties.
-//! This validates the quality of the jamhash function.
-
 use jamhash::jamhash_u64;
 use rand::{Rng, rng};
 
-/// Cumulative Distribution Function for the Uniform Distribution.
 #[allow(dead_code)]
 fn cdf_uniform(x: u64) -> f64 {
     (x as f64) / (std::u64::MAX as f64)
 }
 
-/// Compute the Kolmogorov-Smirnov test.
 #[allow(dead_code)]
 fn ks(samples: &[u64]) -> f64 {
     let n = samples.len() as f64;

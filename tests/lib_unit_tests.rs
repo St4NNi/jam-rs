@@ -4,7 +4,6 @@ use std::fs;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-/// Unit tests for lib.rs internal functions to maximize code coverage
 struct LibTestEnvironment {
     temp_dir: TempDir,
 }
@@ -51,7 +50,7 @@ fn test_expand_input_paths_single_file() -> Result<()> {
     let env = LibTestEnvironment::new()?;
     let test_file = env.create_test_fasta("test.fa", ">seq\nACGT\n")?;
 
-    let result = expand_input_paths(&[test_file.clone()])?;
+    let result = expand_input_paths(std::slice::from_ref(&test_file))?;
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0], test_file);
@@ -73,7 +72,6 @@ fn test_expand_input_paths_directory() -> Result<()> {
     let test_dir = env.create_directory_with_files("test_dir", &test_files)?;
     let result = expand_input_paths(&[test_dir])?;
 
-    // Should find 3 sequence files, sorted alphabetically
     assert_eq!(result.len(), 3);
     assert!(
         result[0]
@@ -134,8 +132,8 @@ fn test_expand_input_paths_mixed_extensions() -> Result<()> {
         ("test.fna", ">seq\nACGT\n"),
         ("test.fastq", "@seq\nACGT\n+\nIIII\n"),
         ("test.fq", "@seq\nACGT\n+\nIIII\n"),
-        ("test.fa.gz", ">seq\nACGT\n"), // Would be compressed in real usage
-        ("test.fastq.gz", "@seq\nACGT\n+\nIIII\n"), // Would be compressed in real usage
+        ("test.fa.gz", ">seq\nACGT\n"),
+        ("test.fastq.gz", "@seq\nACGT\n+\nIIII\n"),
     ];
 
     let test_dir = env.create_directory_with_files("extensions", &test_files)?;
@@ -188,21 +186,16 @@ fn test_expand_input_paths_multiple_inputs() -> Result<()> {
     let result = expand_input_paths(&[file1.clone(), test_dir])?;
 
     assert_eq!(result.len(), 2);
-    // Results should be sorted
     assert!(result.contains(&file1));
 
     Ok(())
 }
-
-// Now let's test the handle functions directly by importing them from lib.rs
-// We need to make these functions public in lib.rs first, or create a test module
 
 #[cfg(test)]
 mod handle_function_tests {
     use super::*;
     use jam_rs::expand_input_paths;
 
-    // Test expand_input_paths edge cases
     #[test]
     fn test_expand_paths_file_list_with_invalid_entries() -> Result<()> {
         let env = LibTestEnvironment::new()?;
@@ -220,7 +213,6 @@ mod handle_function_tests {
 
         let result = expand_input_paths(&[file_list])?;
 
-        // Should only include valid files
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], valid_file);
 
@@ -231,18 +223,15 @@ mod handle_function_tests {
     fn test_expand_paths_nested_directories() -> Result<()> {
         let env = LibTestEnvironment::new()?;
 
-        // Create nested structure
         let level1 = env.temp_path().join("level1");
         let level2 = level1.join("level2");
         fs::create_dir_all(&level2)?;
 
-        // Only files in the direct directory should be found (not recursive)
         fs::write(level1.join("file1.fa"), ">seq1\nACGT\n")?;
         fs::write(level2.join("file2.fa"), ">seq2\nTGCA\n")?;
 
         let result = expand_input_paths(&[level1])?;
 
-        // Should only find file1.fa, not file2.fa (no recursive search)
         assert_eq!(result.len(), 1);
         assert!(result[0].file_name().unwrap().to_str().unwrap() == "file1.fa");
 
@@ -281,7 +270,6 @@ mod handle_function_tests {
         let result = expand_input_paths(&[test_dir])?;
 
         assert_eq!(result.len(), 3);
-        // Should be sorted alphabetically
         assert!(
             result[0]
                 .file_name()
@@ -335,12 +323,9 @@ mod handle_function_tests {
     }
 }
 
-// Test sequence file detection function
 #[cfg(test)]
 mod sequence_file_tests {
     use super::*;
-
-    // We need to access the is_sequence_file function - it should be made public or tested indirectly
 
     #[test]
     fn test_sequence_file_detection_through_expand() -> Result<()> {

@@ -1,6 +1,6 @@
 [package]
 name = "jam-rs"
-version = "0.9.9"
+version = "0.9.10"
 edition = "2024"
 repository = "https://github.com/St4NNi/jam-rs"
 license = "MIT"
@@ -27,23 +27,32 @@ name = "jam_rs"
 path = "src/lib.rs"
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.101"
+dashmap = "6.1.0"
 jamhash = "0.1.2"
-needletail = "0.6.3"
+needletail = { version = "0.6.3", features = [
+    "flate2",
+    "bzip2",
+    "xz2",
+    "zstd",
+] }
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
-clap = { version = "4.5.54", features = ["derive"] }
-itertools = "0.14.0"
-heed = "0.22.1-nested-rtxns-6"
-byteorder = "1.5.0"
-integer-encoding = "4.1.0"
-indicatif = { version = "0.18.3", features = ["rayon"] }
+serde_json = "1.0"
+clap = { version = "4.5.57", features = ["derive"] }
 tempfile = "3.24.0"
-crossbeam-channel = "0.5.15"
-serde_json = "1.0.149"
+crossfire = "3.0.4"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+memmap2 = "0.9"
+xorf = { version = "0.12", features = ["serde"] }
+thiserror = "2"
+indicatif = "0.18.3"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 [dev-dependencies]
-criterion = { version = "0.8.1", features = ["html_reports"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"

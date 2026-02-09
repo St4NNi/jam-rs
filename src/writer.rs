@@ -1,461 +1,690 @@
-use anyhow::Result;
-use byteorder::{BigEndian, ReadBytesExt};
-use crossbeam_channel::Receiver;
-use heed::types::U64;
-use heed::{Database, DatabaseFlags, Env, IntegerComparator, PutFlags};
-use indicatif::{ProgressBar, ProgressStyle};
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Write};
+use crate::bias::HashBiasTable;
+use crate::format::{
+    BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
+    FLAG_HAS_BIAS_TABLE, HEADER_SIZE, Header, MAGIC, VERSION,
+};
+use crate::io::{extract_unique_hashes, read_entries, write_entries};
+use crate::sketch::{SketchConfig, SketchResult};
+use bytemuck;
+use memmap2::MmapMut;
+use rayon::prelude::*;
+use std::io;
 use std::path::{Path, PathBuf};
-use tempfile::NamedTempFile;
+use std::sync::Arc;
+use std::time::Duration;
+use xorf::{BinaryFuse8, DmaSerializable};
 
-pub struct MergeIterator {
-    heap: BinaryHeap<Reverse<(u64, u64, usize)>>,
-    taken: Vec<usize>,
-    readers: Vec<Option<BufReader<File>>>,
-    batch_size: usize,
+pub const FILTER_DESCRIPTOR_SIZE: usize = 20;
+
+pub fn serialize_filter(filter: &BinaryFuse8) -> Vec<u8> {
+    let fingerprints = filter.dma_fingerprints();
+    let descriptor_size = FILTER_DESCRIPTOR_SIZE as u32;
+    let fingerprints_size = fingerprints.len() as u32;
+
+    let total_size = 4 + 4 + FILTER_DESCRIPTOR_SIZE + fingerprints.len();
+    let mut out = vec![0u8; total_size];
+
+    out[0..4].copy_from_slice(&descriptor_size.to_le_bytes());
+    out[4..8].copy_from_slice(&fingerprints_size.to_le_bytes());
+    filter.dma_copy_descriptor_to(&mut out[8..8 + FILTER_DESCRIPTOR_SIZE]);
+    out[8 + FILTER_DESCRIPTOR_SIZE..].copy_from_slice(fingerprints);
+
+    out
 }
 
-impl MergeIterator {
-    pub fn new<P: AsRef<Path>>(file_paths: Vec<P>, memory_limit_gb: f64) -> Result<Self> {
-        let num_files = file_paths.len();
-
-        let memory_limit_bytes = (memory_limit_gb * 1024.0 * 1024.0 * 1024.0) as usize;
-        let batch_size = std::cmp::max(1000, memory_limit_bytes / (num_files * 2 * 24));
-
-        let mut readers: Vec<Option<BufReader<File>>> = Vec::with_capacity(num_files);
-        let mut heap = BinaryHeap::new();
-        let taken = vec![0; num_files];
-
-        for (file_idx, path) in file_paths.into_iter().enumerate() {
-            let file = File::open(path.as_ref())
-                .map_err(|e| anyhow::anyhow!("Failed to open temp file {:?}: {}", path.as_ref(), e))?;
-            let mut reader = BufReader::new(file);
-
-            let loaded = Self::load_batch(&mut reader, &mut heap, file_idx, 2 * batch_size)?;
-
-            if loaded > 0 {
-                readers.push(Some(reader));
-            } else {
-                readers.push(None);
-            }
-        }
-
-        Ok(MergeIterator {
-            heap,
-            taken,
-            readers,
-            batch_size,
-        })
-    }
-
-    fn load_batch(
-        reader: &mut BufReader<File>,
-        heap: &mut BinaryHeap<Reverse<(u64, u64, usize)>>,
-        file_idx: usize,
-        max_count: usize,
-    ) -> Result<usize> {
-        let mut loaded = 0;
-
-        for _ in 0..max_count {
-            let first = match reader.read_u64::<BigEndian>() {
-                Ok(val) => val,
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(anyhow::anyhow!("Failed to read hash from temp file {}: {}", file_idx, e)),
-            };
-            let second = reader.read_u64::<BigEndian>()
-                .map_err(|e| anyhow::anyhow!("Failed to read metadata from temp file {}: {}", file_idx, e))?;
-            heap.push(Reverse((first, second, file_idx)));
-            loaded += 1;
-        }
-
-        Ok(loaded)
-    }
-
-    fn reload_if_needed(&mut self, file_idx: usize) -> Result<()> {
-        if self.taken[file_idx] >= self.batch_size
-            && let Some(ref mut reader) = self.readers[file_idx]
-        {
-            let loaded = Self::load_batch(reader, &mut self.heap, file_idx, self.batch_size)?;
-
-            if loaded == 0 {
-                self.readers[file_idx] = None;
-            }
-
-            self.taken[file_idx] = 0;
-        }
-        Ok(())
-    }
-}
-
-impl Iterator for MergeIterator {
-    type Item = Result<(u64, u64)>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(Reverse((first, second, file_idx))) = self.heap.pop() {
-            self.taken[file_idx] += 1;
-
-            if let Err(e) = self.reload_if_needed(file_idx) {
-                return Some(Err(e));
-            }
-
-            Some(Ok((first, second)))
-        } else {
-            None
-        }
-    }
-}
-
-// Main LMDBWriter implementation
-pub struct LMDBWriter {
-    memory_budget: usize,
-    env: Env,
-    receiver: Receiver<(u64, u64)>,
-    current_chunk: BinaryHeap<Reverse<(u64, u64)>>,
-    current_memory_usage: usize,
-    chunk_files: Vec<NamedTempFile>,
-    total_entries: u64,
-    temp_dir: Option<PathBuf>,
-    silent: bool,
-    bar: Option<indicatif::MultiProgress>,
-}
-
-impl LMDBWriter {
-    pub fn new(
-        memory_budget: usize,
-        env: Env,
-        receiver: Receiver<(u64, u64)>,
-        temp_dir: Option<PathBuf>,
-        silent: bool,
-        bar: Option<indicatif::MultiProgress>,
-    ) -> Self {
-        Self {
-            memory_budget,
-            env,
-            receiver,
-            current_chunk: BinaryHeap::new(),
-            current_memory_usage: 0,
-            chunk_files: Vec::new(),
-            total_entries: 0,
-            temp_dir,
-            silent,
-            bar,
-        }
-    }
-
-    pub fn run(mut self) -> Result<()> {
-        // Process all entries from the channel
-        while let Ok((hash, metadata)) = self.receiver.recv() {
-            self.current_chunk.push(Reverse((hash, metadata)));
-            self.current_memory_usage += 16; // 8 bytes hash + 8 bytes metadata
-            self.total_entries += 1;
-
-            // Check if we need to flush to temp file
-            if self.current_memory_usage >= self.memory_budget {
-                self.flush_chunk_to_tempfile()?;
-            }
-        }
-
-        // Channel closed, finalize to LMDB
-        self.finalize_to_lmdb()
-    }
-
-    fn flush_chunk_to_tempfile(&mut self) -> Result<()> {
-        let temp_file = if let Some(ref temp_dir) = self.temp_dir {
-            NamedTempFile::new_in(temp_dir)?
-        } else {
-            NamedTempFile::new()?
-        };
-
-        if !self.silent {
+fn serialize_sample_names(names: &[String]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    for (idx, name) in names.iter().enumerate() {
+        let bytes = name.as_bytes();
+        let len = if bytes.len() > u16::MAX as usize {
             eprintln!(
-                "Creating temporary sort file: {} ({} entries, {:.1} MB)",
-                temp_file.path().display(),
-                self.current_chunk.len(),
-                self.current_memory_usage as f64 / (1024.0 * 1024.0)
+                "Warning: Sample name at index {} is {} bytes, truncating to {} bytes",
+                idx,
+                bytes.len(),
+                u16::MAX
             );
-        }
-
-        let mut writer = BufWriter::new(temp_file);
-
-        // Write entries in sorted order (BinaryHeap with Reverse gives us min-heap)
-        while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
-            writer.write_all(&hash.to_be_bytes())?;
-            writer.write_all(&metadata.to_be_bytes())?;
-        }
-
-        writer.flush()?;
-        let temp_file = writer.into_inner()?;
-        self.chunk_files.push(temp_file);
-        self.current_memory_usage = 0;
-        Ok(())
-    }
-
-    fn finalize_to_lmdb(mut self) -> Result<()> {
-        // Create LMDB environment
-        let mut write_txn = self.env.write_txn()?;
-        let db = self
-            .env
-            .database_options()
-            .types::<U64<BigEndian>, U64<BigEndian>>()
-            .flags(DatabaseFlags::DUP_SORT | DatabaseFlags::DUP_FIXED)
-            .name("HASHES")
-            .key_comparator::<IntegerComparator>()
-            .create(&mut write_txn)?;
-
-        write_txn.commit()?;
-
-        let option_bar = if let Some(ref bar) = self.bar {
-            let sub_bar = ProgressBar::new(self.total_entries);
-            sub_bar.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} kmers processed ({percent}%)")
-                    .unwrap()
-                    .progress_chars("█▉▊▋▌▍▎▏  ")
-            );
-
-            Some(bar.add(sub_bar))
+            u16::MAX
         } else {
-            None
+            bytes.len() as u16
         };
-
-        if self.chunk_files.is_empty() {
-            // Everything fits in memory - write current chunk directly
-            self.write_current_chunk_to_lmdb(&db, option_bar)?;
-        } else {
-            // Need to merge temp files with current chunk
-            self.merge_all_to_lmdb(&db, option_bar)?;
-        }
-
-        Ok(())
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&bytes[..len as usize]);
     }
+    buf
+}
 
-    fn write_current_chunk_to_lmdb(
-        &mut self,
-        db: &Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator>,
-        option_bar: Option<ProgressBar>,
-    ) -> Result<()> {
-        let mut wtxn = self.env.write_txn()?;
-        let mut batch_count = 0;
+fn serialize_sample_sizes(sizes: &[u64]) -> Vec<u8> {
+    bytemuck::cast_slice(sizes).to_vec()
+}
 
-        // Write current chunk in sorted order
-        let mut prev = (0u64, 0u64);
-        while let Some(Reverse((hash, metadata))) = self.current_chunk.pop() {
-            if let Some(ref bar) = option_bar {
-                bar.inc(1);
-            }
+#[derive(Clone)]
+pub struct CompactConfig {
+    pub num_threads: usize,
+}
 
-            if prev.0 == hash && prev.1 == metadata {
-                // Skip duplicates
-                continue;
-            }
-            prev = (hash, metadata);
-
-            db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
-            batch_count += 1;
-
-            // Commit in batches for performance
-            if batch_count >= 100000 {
-                wtxn.commit()?;
-                wtxn = self.env.write_txn()?;
-                batch_count = 0;
-            }
-        }
-
-        wtxn.commit()?;
-
-        if let Some(ref bar) = option_bar {
-            bar.finish_with_message("Data merged successfully");
-        }
-
-        Ok(())
-    }
-
-    fn merge_all_to_lmdb(
-        &mut self,
-        db: &Database<U64<BigEndian>, U64<BigEndian>, IntegerComparator>,
-        option_bar: Option<ProgressBar>,
-    ) -> Result<()> {
-        // If current chunk has data, write it to a temp file first
-        if !self.current_chunk.is_empty() {
-            self.flush_chunk_to_tempfile()?;
-        }
-
-        let num_temp_files = self.chunk_files.len();
-        if num_temp_files > 0 {
-            if !self.silent {
-                eprintln!(
-                    "Merging {} temporary files into LMDB database...",
-                    num_temp_files
-                );
-            }
-        } else if !self.silent {
-            eprintln!("Writing hash data directly to LMDB (no temporary files needed)...");
-        }
-
-        // Collect all temp file paths
-        let file_paths: Vec<PathBuf> = self
-            .chunk_files
-            .iter()
-            .map(|tf| tf.path().to_path_buf())
-            .collect();
-
-        // Calculate memory limit for MergeIterator (convert from bytes to GB)
-        let memory_limit_gb = (self.memory_budget as f64) / (1024.0 * 1024.0 * 1024.0);
-
-        let iterator = MergeIterator::new(file_paths, memory_limit_gb)?;
-
-        let mut wtxn = self.env.write_txn()?;
-        let mut batch_count = 0;
-        let mut total_written = 0u64;
-        let mut duplicates_skipped = 0u64;
-
-        let mut prev = (0u64, 0u64);
-        for result in iterator {
-            let (hash, metadata) = result?;
-            if let Some(ref bar) = option_bar {
-                bar.inc(1);
-            }
-            if prev.0 == hash && prev.1 == metadata {
-                duplicates_skipped += 1;
-                continue;
-            }
-            prev = (hash, metadata);
-            db.put_with_flags(&mut wtxn, PutFlags::APPEND_DUP, &hash, &metadata)?;
-            batch_count += 1;
-            total_written += 1;
-
-            if batch_count >= 10000 {
-                wtxn.commit()?;
-                wtxn = self.env.write_txn()?;
-                batch_count = 0;
-            }
-        }
-
-        if let Some(ref bar) = option_bar {
-            bar.finish_with_message("Data merged successfully");
-        }
-
-        wtxn.commit()?;
-
-        if !self.silent {
-            if num_temp_files > 0 {
-                eprintln!(
-                    "Merge complete! {} unique hashes written, {} duplicates skipped",
-                    total_written, duplicates_skipped
-                );
-            } else {
-                eprintln!(
-                    "Direct write complete! {} unique hashes written",
-                    total_written
-                );
-            }
-        }
-
-        Ok(())
+impl Default for CompactConfig {
+    fn default() -> Self {
+        Self { num_threads: 1 }
     }
 }
 
-pub type SenderWithHandle = (
-    crossbeam_channel::Sender<(u64, u64)>,
-    std::thread::JoinHandle<Result<(), anyhow::Error>>,
-);
+struct ProcessedBucket {
+    bucket_id: usize,
+    entry_count: u64,
+    unique_hash_count: u64,
+    filter_bytes: Vec<u8>,
+    sample_hash_counts: std::collections::HashMap<u32, u64>,
+}
 
-// Usage example
-pub fn create_lmdb_writer(
-    memory_budget_gb: f64,
-    env: Env,
-    channel_capacity: usize,
-    temp_dir: Option<PathBuf>,
-    silent: bool,
-    bar: Option<indicatif::MultiProgress>,
-) -> SenderWithHandle {
-    let memory_budget = (memory_budget_gb * 1024.0 * 1024.0 * 1024.0) as usize;
-    let (sender, receiver) = crossbeam_channel::bounded(channel_capacity);
+#[derive(Debug, Clone)]
+pub struct IndexStats {
+    pub total_entries: u64,
+    pub unique_hashes: u64,
+    pub sample_count: u32,
+    pub file_size: u64,
+    pub kmer_size: u8,
+    pub frac_max: u64,
+    pub bucket_entry_counts: [u64; BUCKET_COUNT],
+}
 
-    let writer = LMDBWriter::new(memory_budget, env, receiver, temp_dir, silent, bar);
+#[derive(Clone)]
+pub struct BuildConfig {
+    pub kmer_size: u8,
+    pub fscale: u64,
+    pub num_threads: usize,
+    pub memory: usize,
+    pub temp_dir_base: Option<PathBuf>,
+    pub min_entropy: f64,
+    pub singleton: bool,
+    pub bias_table: Option<Arc<HashBiasTable>>,
+    pub show_progress: bool,
+}
 
-    let handle = std::thread::spawn(move || writer.run());
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            kmer_size: 21,
+            fscale: 1000,
+            num_threads: 1,
+            memory: 4,
+            temp_dir_base: None,
+            min_entropy: 0.0,
+            singleton: false,
+            bias_table: None,
+            show_progress: false,
+        }
+    }
+}
 
-    (sender, handle)
+#[derive(Debug, thiserror::Error)]
+pub enum BuildError {
+    #[error("Sketch error: {0}")]
+    Sketch(#[from] crate::sketch::SketchError),
+
+    #[error("Compact error: {0}")]
+    Compact(#[from] CompactError),
+}
+
+pub fn build(
+    input_files: &[PathBuf],
+    output_path: &Path,
+    config: &BuildConfig,
+) -> Result<IndexStats, BuildError> {
+    let sketch_config = SketchConfig {
+        kmer_size: config.kmer_size,
+        fscale: config.fscale,
+        num_threads: config.num_threads,
+        memory: config.memory,
+        temp_dir_base: config.temp_dir_base.clone(),
+        min_entropy: config.min_entropy,
+        singleton: config.singleton,
+        bias_table: config.bias_table.clone(),
+        send_timeout: Duration::from_millis(1),
+        show_progress: config.show_progress,
+    };
+
+    let sketch_result = crate::sketch::run(input_files, &sketch_config)?;
+
+    let compact_config = CompactConfig {
+        num_threads: config.num_threads,
+    };
+
+    let stats = run(
+        output_path,
+        &sketch_result,
+        &compact_config,
+        config.kmer_size,
+        config.bias_table.as_deref(),
+    )?;
+
+    Ok(stats)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CompactError {
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("Filter construction failed for bucket {bucket}: {message}")]
+    FilterConstruction { bucket: usize, message: String },
+}
+
+pub fn run(
+    output_path: &Path,
+    sketch_result: &SketchResult,
+    _config: &CompactConfig,
+    kmer_size: u8,
+    bias_table: Option<&HashBiasTable>,
+) -> Result<IndexStats, CompactError> {
+    let temp_path = sketch_result.temp_dir.path();
+
+    let processed: Result<Vec<ProcessedBucket>, CompactError> = (0..BUCKET_COUNT)
+        .into_par_iter()
+        .map(|bucket_id| {
+            let bucket_path = temp_path.join(format!("bucket_{bucket_id:03}.bin"));
+
+            let mut entries = if bucket_path.exists() {
+                read_entries(&bucket_path)?
+            } else {
+                Vec::new()
+            };
+
+            entries.sort_unstable();
+            entries.dedup();
+
+            let mut sample_hash_counts: std::collections::HashMap<u32, u64> =
+                std::collections::HashMap::new();
+            for entry in &entries {
+                *sample_hash_counts.entry(entry.sample_id).or_insert(0) += 1;
+            }
+
+            let unique_hashes = extract_unique_hashes(&entries);
+            let unique_hash_count = unique_hashes.len() as u64;
+
+            let filter_bytes = if unique_hashes.is_empty() {
+                Vec::new()
+            } else {
+                let filter = BinaryFuse8::try_from(&unique_hashes[..]).map_err(|e| {
+                    CompactError::FilterConstruction {
+                        bucket: bucket_id,
+                        message: format!("{e:?}"),
+                    }
+                })?;
+                serialize_filter(&filter)
+            };
+
+            if !entries.is_empty() {
+                write_entries(&bucket_path, &entries)?;
+            }
+
+            Ok(ProcessedBucket {
+                bucket_id,
+                entry_count: entries.len() as u64,
+                unique_hash_count,
+                filter_bytes,
+                sample_hash_counts,
+            })
+        })
+        .collect();
+
+    let processed = processed?;
+
+    let mut aggregated_sample_sizes: Vec<u64> = vec![0u64; sketch_result.sample_count as usize];
+    for bucket in &processed {
+        for (&sample_id, &count) in &bucket.sample_hash_counts {
+            if (sample_id as usize) < aggregated_sample_sizes.len() {
+                aggregated_sample_sizes[sample_id as usize] += count;
+            }
+        }
+    }
+
+    use crate::format::align_to_page;
+
+    let bias_size: u64 = bias_table.map(|b| b.to_bytes().len() as u64).unwrap_or(0);
+    let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names);
+    let sample_sizes_bytes = serialize_sample_sizes(&aggregated_sample_sizes);
+
+    let bucket_regions_start = align_to_page(DATA_START);
+    let mut current_offset = bucket_regions_start;
+    let mut bucket_offsets = Vec::with_capacity(BUCKET_COUNT);
+
+    for bucket in &processed {
+        bucket_offsets.push(current_offset);
+        let bucket_size = bucket.filter_bytes.len() + (bucket.entry_count as usize) * ENTRY_SIZE;
+        if bucket_size > 0 {
+            current_offset = align_to_page(current_offset + bucket_size);
+        }
+    }
+
+    let metadata_offset = current_offset;
+    let total_size =
+        metadata_offset + bias_size as usize + sample_names_bytes.len() + sample_sizes_bytes.len();
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(output_path)?;
+    file.set_len(total_size as u64)?;
+
+    let mut mmap = unsafe { MmapMut::map_mut(&file)? };
+
+    let mut bucket_metas = vec![BucketMeta::default(); BUCKET_COUNT];
+    let mut total_unique_hashes = 0u64;
+    let mut entries_size = 0u64;
+    let mut filters_size = 0u64;
+
+    for bucket in &processed {
+        let bucket_offset = bucket_offsets[bucket.bucket_id];
+        let filter_size = bucket.filter_bytes.len();
+        let entries_bytes_len = (bucket.entry_count as usize) * ENTRY_SIZE;
+
+        if !bucket.filter_bytes.is_empty() {
+            mmap[bucket_offset..bucket_offset + filter_size].copy_from_slice(&bucket.filter_bytes);
+        }
+
+        let entry_offset = bucket_offset + filter_size;
+        if bucket.entry_count > 0 {
+            let bucket_path = temp_path.join(format!("bucket_{:03}.bin", bucket.bucket_id));
+            let entries = read_entries(&bucket_path)?;
+            let entry_bytes = bytemuck::cast_slice::<Entry, u8>(&entries);
+            mmap[entry_offset..entry_offset + entry_bytes.len()].copy_from_slice(entry_bytes);
+        }
+
+        bucket_metas[bucket.bucket_id] = BucketMeta {
+            filter_offset: bucket_offset as u64,
+            filter_size: filter_size as u64,
+            entry_offset: entry_offset as u64,
+            entry_count: bucket.entry_count,
+        };
+
+        total_unique_hashes += bucket.unique_hash_count;
+        entries_size += entries_bytes_len as u64;
+        filters_size += filter_size as u64;
+    }
+
+    let mut meta_offset = metadata_offset;
+
+    let (bias_table_offset, bias_table_size, flags) = if let Some(bias) = bias_table {
+        let bias_bytes = bias.to_bytes();
+        mmap[meta_offset..meta_offset + bias_bytes.len()].copy_from_slice(&bias_bytes);
+        let offset = meta_offset;
+        meta_offset += bias_bytes.len();
+        (offset as u64, bias_bytes.len() as u64, FLAG_HAS_BIAS_TABLE)
+    } else {
+        (0, 0, 0)
+    };
+
+    let sample_names_offset = meta_offset;
+    mmap[sample_names_offset..sample_names_offset + sample_names_bytes.len()]
+        .copy_from_slice(&sample_names_bytes);
+    meta_offset += sample_names_bytes.len();
+
+    let sample_sizes_offset = meta_offset;
+    mmap[sample_sizes_offset..sample_sizes_offset + sample_sizes_bytes.len()]
+        .copy_from_slice(&sample_sizes_bytes);
+
+    let table_bytes = bytemuck::cast_slice::<BucketMeta, u8>(&bucket_metas);
+    mmap[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE].copy_from_slice(table_bytes);
+
+    let total_entries: u64 = processed.iter().map(|b| b.entry_count).sum();
+
+    let header = Header {
+        magic: MAGIC,
+        version: VERSION,
+        flags,
+        entry_count: total_entries,
+        unique_hash_count: total_unique_hashes,
+        sample_count: sketch_result.sample_count,
+        bucket_count: BUCKET_COUNT as u16,
+        bucket_bits: 8,
+        entry_size: ENTRY_SIZE as u8,
+        hash_threshold: sketch_result.frac_max,
+        kmer_size,
+        _param_reserved: [0; 7],
+        bucket_table_offset: HEADER_SIZE as u64,
+        entries_offset: bucket_regions_start as u64,
+        filters_offset: bucket_regions_start as u64,
+        bias_table_offset,
+        entries_size,
+        filters_size,
+        bias_table_size,
+        sample_names_offset: sample_names_offset as u64,
+        sample_names_size: sample_names_bytes.len() as u64,
+        sample_sizes_offset: sample_sizes_offset as u64,
+        sample_sizes_size: sample_sizes_bytes.len() as u64,
+        _padding: [0; 16],
+    };
+
+    let header_bytes = bytemuck::bytes_of(&header);
+    mmap[..HEADER_SIZE].copy_from_slice(header_bytes);
+
+    mmap.flush()?;
+    drop(mmap);
+
+    let mut bucket_entry_counts = [0u64; BUCKET_COUNT];
+    for bucket in &processed {
+        bucket_entry_counts[bucket.bucket_id] = bucket.entry_count;
+    }
+
+    Ok(IndexStats {
+        total_entries,
+        unique_hashes: total_unique_hashes,
+        sample_count: sketch_result.sample_count,
+        file_size: total_size as u64,
+        kmer_size,
+        frac_max: sketch_result.frac_max,
+        bucket_entry_counts,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
+    use crate::format::bucket_id;
+    use crate::sketch::{SketchConfig, run as sketch_run};
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
-    fn create_env(path: PathBuf) -> Env {
-        // SAFETY: heed requires unsafe for mmap; we control file access
-        unsafe {
-            heed::EnvOpenOptions::new()
-                .flags(
-                    heed::EnvFlags::NO_SUB_DIR
-                        | heed::EnvFlags::MAP_ASYNC
-                        | heed::EnvFlags::NO_SYNC,
-                )
-                .max_dbs(3)
-                .map_size(10 * 1024 * 1024 * 1024) // 10GB map size
-                .open(&path)
-                .unwrap()
+    fn make_fasta(seqs: &[(&str, &str)]) -> NamedTempFile {
+        let mut f = NamedTempFile::with_suffix(".fa").unwrap();
+        for (name, seq) in seqs {
+            writeln!(f, ">{name}").unwrap();
+            writeln!(f, "{seq}").unwrap();
+        }
+        f
+    }
+
+    #[test]
+    fn test_compact_basic() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let sketch_config = SketchConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 2,
+            memory: 1,
+            ..Default::default()
+        };
+
+        let sketch_result = sketch_run(&[input.path().to_path_buf()], &sketch_config).unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let compact_config = CompactConfig::default();
+        let stats = run(&output_path, &sketch_result, &compact_config, 11, None).unwrap();
+
+        assert!(stats.total_entries > 0);
+        assert_eq!(stats.sample_count, 1);
+        assert_eq!(stats.kmer_size, 11);
+        assert!(output_path.exists());
+
+        let metadata = std::fs::metadata(&output_path).unwrap();
+        assert_eq!(metadata.len(), stats.file_size);
+    }
+
+    #[test]
+    fn test_compact_empty_buckets() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCG")]);
+        let sketch_config = SketchConfig {
+            kmer_size: 11,
+            fscale: 1_000_000, // Very restrictive - few hashes pass
+            num_threads: 1,
+            memory: 1,
+            ..Default::default()
+        };
+
+        let sketch_result = sketch_run(&[input.path().to_path_buf()], &sketch_config).unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let compact_config = CompactConfig::default();
+        let result = run(&output_path, &sketch_result, &compact_config, 11, None);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compact_header_validation() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let sketch_config = SketchConfig {
+            kmer_size: 21,
+            fscale: 10,
+            num_threads: 1,
+            memory: 1,
+            ..Default::default()
+        };
+
+        let sketch_result = sketch_run(&[input.path().to_path_buf()], &sketch_config).unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let compact_config = CompactConfig::default();
+        run(&output_path, &sketch_result, &compact_config, 21, None).unwrap();
+
+        let file = File::open(&output_path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+
+        let header: &Header = bytemuck::from_bytes(&mmap[..HEADER_SIZE]);
+        assert!(header.validate().is_ok());
+        assert_eq!(header.kmer_size, 21);
+        assert_eq!(header.sample_count, 1);
+    }
+
+    #[test]
+    fn test_compact_entry_sorting() {
+        let input = make_fasta(&[
+            ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCGATCG"),
+            ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
+        ]);
+        let sketch_config = SketchConfig {
+            kmer_size: 11,
+            fscale: 1, // Keep all hashes
+            num_threads: 2,
+            memory: 1,
+            ..Default::default()
+        };
+
+        let sketch_result = sketch_run(&[input.path().to_path_buf()], &sketch_config).unwrap();
+
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let compact_config = CompactConfig::default();
+        run(&output_path, &sketch_result, &compact_config, 11, None).unwrap();
+
+        let file = File::open(&output_path).unwrap();
+        let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
+
+        let bucket_table: &[BucketMeta] =
+            bytemuck::cast_slice(&mmap[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE]);
+
+        for (i, meta) in bucket_table.iter().enumerate() {
+            if meta.entry_count == 0 {
+                continue;
+            }
+
+            let start = meta.entry_offset as usize;
+            let end = start + (meta.entry_count as usize) * ENTRY_SIZE;
+            let entries: &[Entry] = bytemuck::cast_slice(&mmap[start..end]);
+
+            for entry in entries {
+                assert_eq!(bucket_id(entry.hash), i, "Entry in wrong bucket");
+            }
+
+            for window in entries.windows(2) {
+                assert!(
+                    window[0] <= window[1],
+                    "Entries not sorted in bucket {i}: {:?} > {:?}",
+                    window[0],
+                    window[1]
+                );
+            }
         }
     }
 
     #[test]
-    fn test_lmdb_writer_memory_only() {
-        let temp_dir = tempdir().unwrap();
-        let lmdb_path = temp_dir.path().join("test.lmdb");
+    fn test_build_basic() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
 
-        let env = create_env(lmdb_path.clone());
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 2,
+            memory: 1,
+            ..Default::default()
+        };
 
-        let (sender, handle) = create_lmdb_writer(
-            1.0, // 1GB memory budget
-            env, 1000, // channel capacity
-            None, // Use default temp directory
-            true, // Silent mode for tests
-            None, // No progress bar in tests
-        );
+        let stats = build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
 
-        // Send test data
-        let test_data = vec![(300, 3), (100, 1), (200, 2), (500, 5), (400, 4)];
-
-        for (hash, metadata) in test_data {
-            sender.send((hash, metadata)).unwrap();
-        }
-
-        drop(sender); // Close channel
-
-        // Wait for completion
-        handle.join().unwrap().unwrap();
-
-        // Verify data was written (basic check)
-        assert!(lmdb_path.exists());
+        assert!(stats.total_entries > 0);
+        assert_eq!(stats.sample_count, 1);
+        assert_eq!(stats.kmer_size, 11);
+        assert!(output_path.exists());
     }
 
     #[test]
-    fn test_lmdb_writer_with_temp_files() {
-        let temp_dir = tempdir().unwrap();
-        let lmdb_path = temp_dir.path().join("test.lmdb");
+    fn test_build_singleton_mode() {
+        let input = make_fasta(&[
+            ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+            ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
+        ]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
 
-        let env = create_env(lmdb_path.clone());
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            singleton: true,
+            num_threads: 2,
+            memory: 1,
+            ..Default::default()
+        };
 
-        let (sender, handle) = create_lmdb_writer(
-            0.001, // Very small memory budget to force temp files
-            env, 1000, None, // Use default temp directory
-            true, // Silent mode for tests
-            None, // No progress bar in tests
+        let stats = build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
+
+        assert_eq!(
+            stats.sample_count, 2,
+            "Singleton mode should create one sample per sequence"
         );
+    }
 
-        // Send enough data to exceed memory budget
-        for i in 0..1000 {
-            sender.send((i * 2, i)).unwrap(); // Ensure some ordering
-        }
+    #[test]
+    fn test_build_multiple_files() {
+        let input1 = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let input2 = make_fasta(&[("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
 
-        drop(sender);
-        handle.join().unwrap().unwrap();
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 2,
+            memory: 1,
+            ..Default::default()
+        };
 
-        assert!(lmdb_path.exists());
+        let stats = build(
+            &[input1.path().to_path_buf(), input2.path().to_path_buf()],
+            &output_path,
+            &config,
+        )
+        .unwrap();
+
+        assert_eq!(stats.sample_count, 2);
+        assert!(stats.total_entries > 0);
+    }
+
+    #[test]
+    fn test_build_with_entropy_filter() {
+        let input = make_fasta(&[
+            ("low_complexity", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            ("high_complexity", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+        ]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            min_entropy: 1.5,
+            num_threads: 1,
+            memory: 1,
+            ..Default::default()
+        };
+
+        let stats = build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
+
+        assert!(stats.total_entries > 0);
+    }
+
+    #[test]
+    fn test_build_with_bias_table() {
+        use crate::bias::{CMSConfig, HashBiasTable, RawHashCounts};
+
+        let pos_fasta = make_fasta(&[("pos", "ATATATATATATATATATATATATATATATAT")]);
+        let neg_fasta = make_fasta(&[("neg", "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC")]);
+
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 1,
+        };
+
+        let rc = std::sync::atomic::AtomicU64::new(0);
+        let hc = std::sync::atomic::AtomicU64::new(0);
+        let pos_raw = RawHashCounts::build(&[pos_fasta.path()], config.clone(), &rc, &hc).unwrap();
+        let neg_raw = RawHashCounts::build(&[neg_fasta.path()], config, &rc, &hc).unwrap();
+        let bias_table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0)).unwrap();
+
+        let input = make_fasta(&[("seq1", "ATATATATATATATATATATATATATATATATATAT")]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 1,
+            memory: 1,
+            bias_table: Some(std::sync::Arc::new(bias_table.clone())),
+            ..Default::default()
+        };
+
+        build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
+
+        let reader = crate::reader::JamReader::open(&output_path).unwrap();
+        assert!(reader.has_bias_table());
+
+        let embedded_bias = reader.bias_table().unwrap();
+        assert_eq!(*embedded_bias, bias_table);
+    }
+
+    #[test]
+    fn test_build_without_bias_table() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 1,
+            memory: 1,
+            bias_table: None,
+            ..Default::default()
+        };
+
+        build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
+
+        let reader = crate::reader::JamReader::open(&output_path).unwrap();
+        assert!(!reader.has_bias_table());
+        assert!(reader.bias_table().is_none());
     }
 }

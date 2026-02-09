@@ -41,13 +41,35 @@ path = "findconstants.rs"
 name = "duplicates"
 path = "duplicates.rs"
 
+[[bin]]
+name = "find_duplicates_with_counts"
+path = "find_duplicates_with_counts.rs"
+
+[[bin]]
+name = "hash_uniformity"
+path = "hash_uniformity.rs"
+
+[[bin]]
+name = "analyze_hashes"
+path = "analyze_hashes.rs"
+
+[[bin]]
+name = "convert_v2_to_v3"
+path = "convert_v2_to_v3.rs"
+
+[[bin]]
+name = "download_bias_data"
+path = "download_bias_data.rs"
+
 [dependencies]
-criterion = { version = "0.7.0", features = ["html_reports"] }
+bytemuck = { version = "1.25.0", features = ["derive"] }
+mimalloc = { version = "0.1", default-features = false }
+criterion = { version = "0.8.1", features = ["html_reports"] }
 jamhash = "0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-roaring = "0.11.2"
+roaring = "0.11.3"
 rand = "0.9.2"
 jam-rs = { path = "../" }
 rayon = "1.11.0"
@@ -58,6 +80,14 @@ kanal = "0.1.1"
 num-bigint = "0.4.6"
 num-rational = "0.4.2"
 num-traits = "0.2.19"
+libm = "0.2"
+# For download_bias_data
+reqwest = { version = "0.13.1", features = ["blocking", "gzip"] }
+tar = "0.4"
+flate2 = "1.1.8"
+zstd = "0.13"
+indicatif = { version = "0.18", features = ["rayon"] }
+anyhow = "1.0"
 
 [profile.release]
 opt-level = 3

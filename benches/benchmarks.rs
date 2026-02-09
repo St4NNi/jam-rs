@@ -26,8 +26,7 @@ fn bench_hash_functions(c: &mut Criterion) {
     group.warm_up_time(Duration::from_millis(500));
     group.measurement_time(Duration::from_secs(2));
 
-    // Pre-generate enough values for the benchmark
-    let mut values = (0..100000u64).into_iter().cycle();
+    let mut values = (0..100000u64).cycle();
 
     group.bench_function("xxhash3", |b| {
         b.iter(|| xxhash3(black_box(values.next().unwrap())))

@@ -1,11 +1,10 @@
-// Update to cli.rs - enhanced version with input path expansion
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "1.0.0")]
+#[command(version = "0.9.10")]
 #[command(
     about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
     long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
@@ -36,7 +35,7 @@ pub enum Commands {
         /// Input file(s), directories, or file with list of files to be hashed
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         input: Vec<PathBuf>,
-        /// Output file (.lmdb will be appended if not present)
+        /// Output file (.jam format)
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: PathBuf,
@@ -46,9 +45,6 @@ pub enum Commands {
         /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
         #[arg(long)]
         fscale: Option<u64>,
-        /// Maximum number of k-mers (per record) to be hashed, top cut-off
-        #[arg(long)]
-        nmax: Option<u64>,
         /// Complexity cut-off, only hash sequences with complexity above this value
         /// This is created via shannon entropy
         #[arg(long, default_value = "0.0")]
@@ -60,16 +56,19 @@ pub enum Commands {
         /// Custom temporary directory for intermediate files during sorting
         #[arg(long)]
         temp_dir: Option<PathBuf>,
+        /// Path to a bias table file (.bias) for hash-based filtering
+        #[arg(long)]
+        bias_table: Option<PathBuf>,
     },
 
-    /// Estimate containment of a (small) sketch against a subset of one or more sketches as database.
+    /// Estimate containment of a query sequence against a sketch database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
     Dist {
-        /// Input sketch or raw sequence file
+        /// Input FASTA/FASTQ file to query
         #[arg(short, long)]
         input: PathBuf,
-        /// Database sketch (.lmdb file)
+        /// Database sketch (.jam file)
         #[arg(short, long)]
         database: PathBuf,
         /// Output to file instead of stdout
@@ -80,21 +79,80 @@ pub enum Commands {
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
         /// Singleton mode, process each query sequence separately
-        #[arg(short, long, default_value = "false")]
+        #[arg(long, default_value = "false")]
         singleton: bool,
     },
 
-    /// Display statistics about an LMDB database
+    /// Build and analyze hash bias tables for filtering
+    #[command(arg_required_else_help = true)]
+    Bias {
+        #[command(subcommand)]
+        command: BiasCommands,
+    },
+
+    /// Display statistics about a JAM database
     #[command(arg_required_else_help = true)]
     Stats {
-        /// Input LMDB database
+        /// Input JAM database (.jam file)
         #[arg(short, long)]
         input: PathBuf,
         /// Short summary only
-        #[arg(short, long)]
+        #[arg(long)]
         short: bool,
         /// Include the full entry statistics
-        #[arg(short, long)]
+        #[arg(long)]
         full: bool,
+    },
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum BiasCommands {
+    /// Create a bias table from positive (target) and negative (background) FASTA files.
+    /// Target signal is always subtracted from background before computing bias weights.
+    #[command(arg_required_else_help = true)]
+    Create {
+        /// Positive (target) FASTA file(s) - sequences to enrich for
+        #[arg(long, required = true, num_args = 1..)]
+        positive: Vec<PathBuf>,
+        /// Negative (background) FASTA file(s) - sequences to deplete.
+        /// Target signal is subtracted from background automatically.
+        #[arg(long, required = true, num_args = 1..)]
+        negative: Vec<PathBuf>,
+        /// Output bias table file (.bias)
+        #[arg(short, long)]
+        output: PathBuf,
+        /// K-mer size (must match sketch k-mer size)
+        #[arg(short = 'k', long = "kmer-size", default_value = "21")]
+        kmer_size: u8,
+        /// FracMinHash scale (must match sketch fscale)
+        #[arg(long, default_value = "1000")]
+        fscale: u64,
+        /// Count-Min Sketch width (columns, power of 2 recommended)
+        #[arg(long, default_value = "1048576")]
+        cms_width: usize,
+        /// Count-Min Sketch depth (number of hash functions)
+        #[arg(long, default_value = "5")]
+        cms_depth: usize,
+        /// Smoothing parameter for log-ratio computation
+        #[arg(long, default_value = "1.0")]
+        alpha: f32,
+        /// Target fold enrichment. If not set, maximizes automatically.
+        /// A warning is shown if the requested value exceeds the maximum
+        /// achievable by the data.
+        #[arg(long)]
+        fold_enrichment: Option<f32>,
+        /// Number of threads to use for bias sketching
+        #[arg(long)]
+        threads: Option<usize>,
+    },
+
+    /// Display statistics for a bias table (.bias file)
+    #[command(arg_required_else_help = true)]
+    Stats {
+        /// Input bias table file (.bias)
+        input: PathBuf,
+        /// Output JSON report to file instead of stderr
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
 }

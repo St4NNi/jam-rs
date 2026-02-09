@@ -1,18 +1,22 @@
+pub mod bias;
 pub mod cli;
 pub mod core_utils;
-pub mod db;
-pub mod distance;
+pub mod format;
 pub mod io;
+pub mod query;
+pub mod reader;
 pub mod sketch;
-pub mod stats;
 pub mod writer;
+pub use cli::handlers::{
+    handle_bias_create_command, handle_bias_stats_command, handle_distance_command,
+    handle_sketch_command, handle_stats_command,
+};
 pub use io::{expand_input_paths, is_sequence_file};
-pub use cli::handlers::{handle_sketch_command, handle_distance_command, handle_stats_command};
 pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{Cli, Commands};
+use cli::{BiasCommands, Cli, Commands};
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -20,6 +24,7 @@ pub fn run() -> Result<()> {
     if let Some(threads) = cli.threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
+            .stack_size(8 * 1024 * 1024)
             .build_global()?;
     }
 
@@ -29,10 +34,10 @@ pub fn run() -> Result<()> {
             output,
             kmer_size,
             fscale,
-            nmax,
             complexity,
             singleton,
             temp_dir,
+            bias_table,
         } => {
             let expanded_inputs = expand_input_paths(&input)?;
             handle_sketch_command(
@@ -40,7 +45,6 @@ pub fn run() -> Result<()> {
                 output,
                 kmer_size,
                 fscale,
-                nmax,
                 singleton,
                 cli.threads.unwrap_or(1),
                 cli.memory.unwrap_or(2),
@@ -48,8 +52,40 @@ pub fn run() -> Result<()> {
                 cli.silent,
                 complexity,
                 temp_dir,
+                bias_table,
             )
         }
+
+        Commands::Bias { command } => match command {
+            BiasCommands::Create {
+                positive,
+                negative,
+                output,
+                kmer_size,
+                fscale,
+                cms_width,
+                cms_depth,
+                alpha,
+                fold_enrichment,
+                threads,
+            } => handle_bias_create_command(
+                positive,
+                negative,
+                output,
+                kmer_size,
+                fscale,
+                cms_width,
+                cms_depth,
+                alpha,
+                fold_enrichment,
+                threads.or(cli.threads),
+                cli.force,
+                cli.silent,
+            ),
+            BiasCommands::Stats { input, output } => {
+                handle_bias_stats_command(input, output, cli.silent)
+            }
+        },
 
         Commands::Dist {
             input,
