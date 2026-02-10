@@ -12,7 +12,6 @@
 # ///
 """
 Analyze hash collision distribution from duplicate files.
-Generates publication-ready plots for Section 1.1.2 of the research paper.
 
 Supports two formats:
 - Old format: duplicates_{bindex}_{bin_id}.bin (hash only, u64)
