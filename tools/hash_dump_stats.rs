@@ -19,7 +19,7 @@ struct Stats {
     minv: u64,
     maxv: u64,
     // byte_hist[pos][byte], pos=0 is least significant byte
-    byte_hist: [[u64; 256]; 8],
+    byte_hist: Box<[[u64; 256]; 8]>,
     // pass counts for thresholds at S_LIST
     pass_counts: [u128; S_LIST.len()],
 }
@@ -30,7 +30,7 @@ impl Stats {
             n: 0,
             minv: u64::MAX,
             maxv: 0,
-            byte_hist: [[0u64; 256]; 8],
+            byte_hist: Box::new([[0u64; 256]; 8]),
             pass_counts: [0u128; S_LIST.len()],
         }
     }
