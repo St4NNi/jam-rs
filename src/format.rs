@@ -41,7 +41,8 @@ pub struct Header {
 
     pub hash_threshold: u64,
     pub kmer_size: u8,
-    pub _param_reserved: [u8; 7],
+    pub _param_reserved: [u8; 3],
+    pub min_entropy: f32,
 
     pub bucket_table_offset: u64,
     pub entries_offset: u64,

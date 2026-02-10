@@ -155,6 +155,7 @@ pub fn build(
         &compact_config,
         config.kmer_size,
         config.bias_table.as_deref(),
+        config.min_entropy,
     )?;
 
     Ok(stats)
@@ -175,6 +176,7 @@ pub fn run(
     _config: &CompactConfig,
     kmer_size: u8,
     bias_table: Option<&HashBiasTable>,
+    min_entropy: f64,
 ) -> Result<IndexStats, CompactError> {
     let temp_path = sketch_result.temp_dir.path();
 
@@ -342,7 +344,8 @@ pub fn run(
         entry_size: ENTRY_SIZE as u8,
         hash_threshold: sketch_result.frac_max,
         kmer_size,
-        _param_reserved: [0; 7],
+        _param_reserved: [0; 3],
+        min_entropy: min_entropy as f32,
         bucket_table_offset: HEADER_SIZE as u64,
         entries_offset: bucket_regions_start as u64,
         filters_offset: bucket_regions_start as u64,
@@ -414,7 +417,7 @@ mod tests {
         let output_path = output_dir.path().join("test.jam");
 
         let compact_config = CompactConfig::default();
-        let stats = run(&output_path, &sketch_result, &compact_config, 11, None).unwrap();
+        let stats = run(&output_path, &sketch_result, &compact_config, 11, None, 0.0).unwrap();
 
         assert!(stats.total_entries > 0);
         assert_eq!(stats.sample_count, 1);
@@ -442,7 +445,7 @@ mod tests {
         let output_path = output_dir.path().join("test.jam");
 
         let compact_config = CompactConfig::default();
-        let result = run(&output_path, &sketch_result, &compact_config, 11, None);
+        let result = run(&output_path, &sketch_result, &compact_config, 11, None, 0.0);
 
         assert!(result.is_ok());
     }
@@ -464,7 +467,7 @@ mod tests {
         let output_path = output_dir.path().join("test.jam");
 
         let compact_config = CompactConfig::default();
-        run(&output_path, &sketch_result, &compact_config, 21, None).unwrap();
+        run(&output_path, &sketch_result, &compact_config, 21, None, 0.0).unwrap();
 
         let file = File::open(&output_path).unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };
@@ -495,7 +498,7 @@ mod tests {
         let output_path = output_dir.path().join("test.jam");
 
         let compact_config = CompactConfig::default();
-        run(&output_path, &sketch_result, &compact_config, 11, None).unwrap();
+        run(&output_path, &sketch_result, &compact_config, 11, None, 0.0).unwrap();
 
         let file = File::open(&output_path).unwrap();
         let mmap = unsafe { memmap2::Mmap::map(&file).unwrap() };

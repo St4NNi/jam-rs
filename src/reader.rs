@@ -358,6 +358,11 @@ impl JamReader {
     }
 
     #[inline]
+    pub fn min_entropy(&self) -> f64 {
+        self.header.min_entropy as f64
+    }
+
+    #[inline]
     pub fn bias_table(&self) -> Option<Arc<HashBiasTable>> {
         self.bias_table.clone()
     }

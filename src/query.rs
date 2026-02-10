@@ -1,4 +1,5 @@
 use crate::bias::HashBiasTable;
+use crate::core_utils::passes_entropy_filter;
 use crate::format::{BUCKET_COUNT, bucket_id};
 use crate::reader::{JamReader, ReaderError};
 use jamhash::jamhash_u64;
@@ -97,6 +98,7 @@ impl QuerySketch {
         let input_path = input.as_ref();
         let kmer_size = db.kmer_size();
         let threshold = db.threshold();
+        let min_entropy = db.min_entropy();
         let bias_table = db.bias_table();
 
         let mut reader = match parse_fastx_file(input_path) {
@@ -156,6 +158,12 @@ impl QuerySketch {
                 let hash = jamhash_u64(kmer.0);
 
                 if hash >= threshold {
+                    continue;
+                }
+
+                if min_entropy > 0.0
+                    && !passes_entropy_filter(kmer.0, kmer_size, min_entropy)
+                {
                     continue;
                 }
 
