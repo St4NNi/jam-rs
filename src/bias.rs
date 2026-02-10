@@ -45,7 +45,7 @@ pub struct CountMinSketch {
 impl CountMinSketch {
     pub fn new(width: usize, depth: usize) -> Self {
         let seeds: Vec<u64> = (0..depth)
-            .map(|i| 0x517cc1b727220a95u64.wrapping_add(i as u64))
+            .map(|i| jamhash_u64(i as u64))
             .collect();
         let counts = vec![0u64; width * depth];
         Self {
