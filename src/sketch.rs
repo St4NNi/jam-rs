@@ -783,10 +783,9 @@ fn sketch_records(
                         Ok(()) => break,
                         Err(crossfire::SendTimeoutError::Timeout(e)) => {
                             entry = e;
-                            if retry == MAX_RETRIES - 1 {
-                                if ctx.senders[bucket].send(entry).is_err() {
-                                    return Err(SketchError::Channel);
-                                }
+                            if retry == MAX_RETRIES - 1 && ctx.senders[bucket].send(entry).is_err()
+                            {
+                                return Err(SketchError::Channel);
                             }
                         }
                         Err(crossfire::SendTimeoutError::Disconnected(_)) => {

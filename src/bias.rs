@@ -562,6 +562,11 @@ impl HashBiasTable {
         }
     }
 
+    /// Public wrapper for effective_fscale. Takes a quantized i8 weight.
+    pub fn effective_fscale_at(&self, w: i8) -> f64 {
+        self.effective_fscale(w)
+    }
+
     pub fn negative_fscale_label(&self) -> String {
         if self.negative_fscale == u64::MAX {
             "drop".to_string()
@@ -908,6 +913,92 @@ impl HashBiasTable {
             above_threshold,
             above_threshold as f64 / total_cells as f64 * 100.0
         );
+
+        if self.is_soft_filter() {
+            self.print_sigmoid_curve(min, max);
+        }
+    }
+
+    pub fn print_sigmoid_curve(&self, min: f32, max: f32) {
+        let base = self.config.fscale as f64;
+        let steepness = self.steepness as f64;
+        let threshold_q = self.threshold as i32;
+
+        let (lower_qi, upper_qi) = if steepness > 0.0 {
+            let ln19 = 19.0_f64.ln();
+            let lo = (threshold_q as f64 - ln19 / steepness).round() as i32;
+            let hi = (threshold_q as f64 + ln19 / steepness).round() as i32;
+            (lo.clamp(-127, 127), hi.clamp(-127, 127))
+        } else {
+            (-127, 127)
+        };
+
+        eprintln!();
+        eprintln!("Sigmoid response curve:");
+        if steepness > 0.0 {
+            eprintln!(
+                "  Bounds: {:.2} (5%) \u{2014} {:.2} (threshold) \u{2014} {:.2} (95%)",
+                lower_qi as f64 / 10.0,
+                self.threshold_f32(),
+                upper_qi as f64 / 10.0
+            );
+        }
+
+        let mut points = std::collections::BTreeSet::new();
+        let start_q = (min.floor() as i32) * 10;
+        let end_q = (max.ceil() as i32) * 10;
+        for q in (start_q..=end_q).step_by(10) {
+            points.insert(q.clamp(-127, 127));
+        }
+        points.insert(0);
+        points.insert(threshold_q);
+        if steepness > 0.0 {
+            points.insert(lower_qi);
+            points.insert(upper_qi);
+        }
+
+        eprintln!();
+        eprintln!(
+            "  {:>7}  {:>11}  {:>10}  {:>8}",
+            "Weight", "Eff.fscale", "Retention", "vs Base"
+        );
+        eprintln!(
+            "  {:>7}  {:>11}  {:>10}  {:>8}",
+            "------", "----------", "---------", "-------"
+        );
+
+        for q in &points {
+            let w = (*q).clamp(-128, 127) as i8;
+            let eff = self.effective_fscale_at(w);
+            let retention_pct = 100.0 / eff;
+            let vs_base = base / eff;
+            let weight_f = *q as f64 / 10.0;
+
+            let mut markers: Vec<&str> = Vec::new();
+            if *q == 0 {
+                markers.push("unseen");
+            }
+            if *q == threshold_q {
+                markers.push("threshold");
+            }
+            if steepness > 0.0 && *q == lower_qi && lower_qi != threshold_q {
+                markers.push("5%");
+            }
+            if steepness > 0.0 && *q == upper_qi && upper_qi != threshold_q {
+                markers.push("95%");
+            }
+
+            let marker = if markers.is_empty() {
+                String::new()
+            } else {
+                format!("  <- {}", markers.join(", "))
+            };
+
+            eprintln!(
+                "  {:>7.2}  {:>11.1}  {:>9.4}%  {:>7.2}x{}",
+                weight_f, eff, retention_pct, vs_base, marker
+            );
+        }
     }
 }
 

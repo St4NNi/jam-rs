@@ -161,9 +161,7 @@ impl QuerySketch {
                     continue;
                 }
 
-                if min_entropy > 0.0
-                    && !passes_entropy_filter(kmer.0, kmer_size, min_entropy)
-                {
+                if min_entropy > 0.0 && !passes_entropy_filter(kmer.0, kmer_size, min_entropy) {
                     continue;
                 }
 
@@ -1813,7 +1811,6 @@ mod tests {
             "Same sequence should have high containment, got {}",
             top0[0].containment
         );
-
     }
 
     #[test]

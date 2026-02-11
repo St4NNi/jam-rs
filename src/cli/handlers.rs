@@ -553,6 +553,11 @@ pub fn handle_bias_create_command(
             above_threshold,
             above_threshold as f64 / total_cells as f64 * 100.0
         );
+
+        if table.is_soft_filter() {
+            table.print_sigmoid_curve(min, max);
+        }
+
         eprintln!();
         eprintln!("Saved to: {}", output.display());
         eprintln!("Built in {:.2?}", start.elapsed());
@@ -617,6 +622,59 @@ pub fn handle_bias_stats_command(
             "memory_bytes": table.memory_usage(),
         });
 
+        let json = if table.is_soft_filter() {
+            let base = table.config.fscale as f64;
+            let steepness = table.steepness as f64;
+            let threshold_q = table.threshold as i32;
+
+            let (lower_qi, upper_qi) = if steepness > 0.0 {
+                let ln19 = 19.0_f64.ln();
+                let lo = (threshold_q as f64 - ln19 / steepness).round() as i32;
+                let hi = (threshold_q as f64 + ln19 / steepness).round() as i32;
+                (lo.clamp(-127, 127), hi.clamp(-127, 127))
+            } else {
+                (-127, 127)
+            };
+
+            let mut points = std::collections::BTreeSet::new();
+            let start = (min.floor() as i32) * 10;
+            let end = (max.ceil() as i32) * 10;
+            for q in (start..=end).step_by(10) {
+                points.insert(q.clamp(-127, 127));
+            }
+            points.insert(0);
+            points.insert(threshold_q);
+            if steepness > 0.0 {
+                points.insert(lower_qi);
+                points.insert(upper_qi);
+            }
+
+            let curve: Vec<serde_json::Value> = points
+                .iter()
+                .map(|q| {
+                    let w = (*q).clamp(-128, 127) as i8;
+                    let eff = table.effective_fscale_at(w);
+                    serde_json::json!({
+                        "weight": *q as f64 / 10.0,
+                        "effective_fscale": eff,
+                        "retention_pct": 100.0 / eff,
+                        "vs_base": base / eff,
+                    })
+                })
+                .collect();
+
+            let mut json = json;
+            json["sigmoid_bounds"] = serde_json::json!({
+                "lower_5pct": lower_qi as f64 / 10.0,
+                "threshold": table.threshold_f32(),
+                "upper_95pct": upper_qi as f64 / 10.0,
+            });
+            json["sigmoid_curve"] = serde_json::json!(curve);
+            json
+        } else {
+            json
+        };
+
         let file = std::fs::File::create(&output_path)?;
         serde_json::to_writer_pretty(file, &json)?;
 
@@ -672,6 +730,10 @@ pub fn handle_bias_stats_command(
             above_threshold,
             above_threshold as f64 / total_cells as f64 * 100.0
         );
+
+        if table.is_soft_filter() {
+            table.print_sigmoid_curve(min, max);
+        }
     }
 
     Ok(())
