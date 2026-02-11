@@ -141,6 +141,20 @@ pub enum BiasCommands {
         /// achievable by the data.
         #[arg(long)]
         fold_enrichment: Option<f32>,
+        /// Effective fscale for positively biased hashes (soft filter).
+        /// Must be >= global fscale. Enables soft sigmoid filtering when
+        /// both positive-fscale and negative-fscale are set.
+        #[arg(long)]
+        positive_fscale: Option<u64>,
+        /// Effective fscale for negatively biased hashes (soft filter).
+        /// Must be > positive-fscale. Higher values = lower retention.
+        /// Use "drop" to discard hashes below the threshold.
+        #[arg(long)]
+        negative_fscale: Option<String>,
+        /// Steepness of the sigmoid curve. Auto-derived from fold enrichment
+        /// if not set. Higher values = sharper transition.
+        #[arg(long)]
+        steepness: Option<f32>,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,
