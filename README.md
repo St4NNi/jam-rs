@@ -8,7 +8,7 @@
 
 Just another minhash (jam). A high-performance FracMinHash implementation for genomic sequence similarity analysis, optimized for searching plasmids, phages, and other small genomic elements in large datasets.
 
-jam uses a custom hash function ([jamhash](https://github.com/St4NNi/jamhash)) that provides lower collision rates, 2-10x higher speed and better uniformity than murmur3. It also includes a compact memory-mapped database format (`.jam`) for fast random access, and a bias filtering system based on Count-Min Sketches to selectively increase sensitivity for target sequences.
+jam uses a custom hash function ([jamhash](https://github.com/St4NNi/jamhash)) that provides lower collision rates, 2-10x higher speed and better uniformity than murmur3. It also includes a compact memory-mapped database format (`.jam`) for fast random access, and a bias filtering system based on Count-Min Sketches to selectively increase sensitivity for target sequences with either hard cutoffs or soft sigmoid filtering.
 
 ### Installation
 
@@ -27,7 +27,7 @@ cargo install --git https://github.com/St4NNi/jam-rs
 ### Key Features
 
 - **Custom hash function**: [jamhash](https://github.com/St4NNi/jamhash) provides lower collisions, better uniformity and is faster compared to murmur3
-- **Bias-aware sketching**: Count-Min Sketch based compositional filtering with automatic background extraction
+- **Bias-aware sketching**: Count-Min Sketch based compositional filtering with automatic background extraction and optional soft sigmoid filtering
 - **Complexity filtering**: Shannon entropy threshold to exclude low-complexity k-mers
 - **Memory-efficient**: External sorting for processing datasets larger than available RAM
 - **Compact storage**: 256-bucket memory-mapped `.jam` format with binary fuse filters for fast random access
@@ -132,7 +132,7 @@ Output is tab-separated: `query`, `sample_id`, `hit_count`, `containment`.
 
 #### Bias Table Construction
 
-Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set.
+Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set. By default, hashes are filtered with a hard threshold, but you can enable soft sigmoid filtering by supplying both `--positive-fscale` and `--negative-fscale` to smoothly vary retention by bias weight.
 
 The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic structure that approximates k-mer frequencies using multiple independent hash functions mapped to a fixed-width table. This keeps memory usage constant regardless of the number of distinct k-mers. By default, the CMS uses 1,048,576 columns and 5 hash functions (~5 MB).
 
@@ -143,6 +143,7 @@ The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic s
 3. A log-ratio weight is computed per CMS cell: `log((pos + alpha) / (adjusted_neg + alpha))`, where `alpha` is a smoothing parameter.
 4. Weights are quantized to `i8` (-127 to +127) for compact storage.
 5. **Threshold calibration**: All 255 possible thresholds are evaluated. The threshold that maximizes fold enrichment (positive retention / negative retention) is selected. If a target fold enrichment is specified, the closest achievable threshold is used instead.
+6. **Soft filtering (optional)**: When `--positive-fscale` and `--negative-fscale` are set, the threshold defines the midpoint of a sigmoid that maps bias weights to an effective fscale. Higher weights retain hashes near `positive-fscale`, lower weights drift toward `negative-fscale` (or are dropped entirely if `negative-fscale` is `drop`).
 
 ```console
 $ jam bias create --help
@@ -161,6 +162,9 @@ Options:
       --cms-depth <CMS_DEPTH>            CMS hash functions [default: 5]
       --alpha <ALPHA>                    Smoothing parameter for log-ratio [default: 1.0]
       --fold-enrichment <FOLD_ENRICHMENT>  Target fold enrichment (auto-maximized if not set)
+      --positive-fscale <POSITIVE_FSCALE>  Effective fscale for positively biased hashes (soft filter)
+      --negative-fscale <NEGATIVE_FSCALE>  Effective fscale for negatively biased hashes, or "drop"
+      --steepness <STEEPNESS>            Sigmoid steepness (auto-derived if not set)
       --threads <THREADS>                Number of threads
   -h, --help                             Print help
 ```
@@ -172,6 +176,10 @@ jam bias create --positive plasmids.fasta --negative host_genome.fasta -o host_f
 
 # With custom fold enrichment target
 jam bias create --positive targets.fasta --negative background.fasta -o filter.bias --fold-enrichment 10.0
+
+# Soft sigmoid filtering with different retention for positive vs negative bias weights
+jam bias create --positive targets.fasta --negative background.fasta -o filter.bias \
+  --positive-fscale 1000 --negative-fscale 5000
 
 # Inspect a bias table
 jam bias stats filter.bias
