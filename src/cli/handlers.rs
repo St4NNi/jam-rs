@@ -490,17 +490,22 @@ pub fn handle_bias_create_command(
         }
 
         eprintln!();
-        let (min, max, mean, std, positive_weights) = table.weight_stats();
+        let (min, max, mean, std, positive_weights, above_threshold) = table.weight_stats();
         let total_cells = table.config.width * table.config.depth;
-        eprintln!("Weight distribution:");
+        eprintln!("Weight distribution (clamped to +/-12.70):");
         eprintln!("  min:    {:.2}", min);
         eprintln!("  max:    {:.2}", max);
         eprintln!("  mean:   {:.2}", mean);
         eprintln!("  std:    {:.2}", std);
         eprintln!(
-            "  >0:     {} cells ({:.1}%)",
+            "  >0:             {} cells ({:.1}%)",
             positive_weights,
             positive_weights as f64 / total_cells as f64 * 100.0
+        );
+        eprintln!(
+            "  >= threshold:   {} cells ({:.1}%)",
+            above_threshold,
+            above_threshold as f64 / total_cells as f64 * 100.0
         );
         eprintln!();
         eprintln!("Saved to: {}", output.display());
@@ -521,7 +526,7 @@ pub fn handle_bias_stats_command(
 
     let table = HashBiasTable::load(&input)?;
 
-    let (min, max, mean, std, positive_weights) = table.weight_stats();
+    let (min, max, mean, std, positive_weights, above_threshold) = table.weight_stats();
     let total_cells = table.config.width * table.config.depth;
 
     if let Some(output_path) = output {
@@ -547,6 +552,8 @@ pub fn handle_bias_stats_command(
                 "std": std,
                 "positive_count": positive_weights,
                 "positive_pct": positive_weights as f64 / total_cells as f64 * 100.0,
+                "above_threshold_count": above_threshold,
+                "above_threshold_pct": above_threshold as f64 / total_cells as f64 * 100.0,
             },
             "memory_bytes": table.memory_usage(),
         });
@@ -585,15 +592,20 @@ pub fn handle_bias_stats_command(
         );
         eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
         eprintln!();
-        eprintln!("Weight distribution:");
+        eprintln!("Weight distribution (clamped to +/-12.70):");
         eprintln!("  min:    {:.2}", min);
         eprintln!("  max:    {:.2}", max);
         eprintln!("  mean:   {:.2}", mean);
         eprintln!("  std:    {:.2}", std);
         eprintln!(
-            "  >0:     {} cells ({:.1}%)",
+            "  >0:             {} cells ({:.1}%)",
             positive_weights,
             positive_weights as f64 / total_cells as f64 * 100.0
+        );
+        eprintln!(
+            "  >= threshold:   {} cells ({:.1}%)",
+            above_threshold,
+            above_threshold as f64 / total_cells as f64 * 100.0
         );
     }
 

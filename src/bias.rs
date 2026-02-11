@@ -661,7 +661,7 @@ impl HashBiasTable {
         })
     }
 
-    pub fn weight_stats(&self) -> (f32, f32, f32, f32, usize) {
+    pub fn weight_stats(&self) -> (f32, f32, f32, f32, usize, usize) {
         let min = *self.weights.iter().min().unwrap_or(&0) as f32 / QUANTIZATION_SCALE;
         let max = *self.weights.iter().max().unwrap_or(&0) as f32 / QUANTIZATION_SCALE;
         let sum: i64 = self.weights.iter().map(|&w| w as i64).sum();
@@ -676,7 +676,8 @@ impl HashBiasTable {
             .sum::<f32>()
             / self.weights.len() as f32;
         let positive = self.weights.iter().filter(|&&w| w > 0).count();
-        (min, max, mean, variance.sqrt(), positive)
+        let above_threshold = self.weights.iter().filter(|&&w| w >= self.threshold).count();
+        (min, max, mean, variance.sqrt(), positive, above_threshold)
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -688,7 +689,7 @@ impl HashBiasTable {
     }
 
     pub fn print_stats(&self) {
-        let (min, max, mean, std, positive) = self.weight_stats();
+        let (min, max, mean, std, positive, above_threshold) = self.weight_stats();
         let total_cells = self.config.width * self.config.depth;
         eprintln!("Hash Bias Table (v3)");
         eprintln!("  k-mer size:     {}", self.config.k);
@@ -713,13 +714,19 @@ impl HashBiasTable {
         );
         eprintln!("  Fold enrichment: {:.2}x", self.fold_enrichment());
         eprintln!(
-            "  Weight stats: min={:.2}, max={:.2}, mean={:.2}, std={:.2}",
-            min, max, mean, std
+            "  Weight stats (range: {:.2} to {:.2}, clamped to +/-12.70):",
+            min, max
         );
+        eprintln!("    mean={:.2}, std={:.2}", mean, std);
         eprintln!(
-            "  Positive weights: {} ({:.1}%)",
+            "    >0: {} cells ({:.1}%)",
             positive,
             positive as f64 / total_cells as f64 * 100.0
+        );
+        eprintln!(
+            "    >= threshold: {} cells ({:.1}%)",
+            above_threshold,
+            above_threshold as f64 / total_cells as f64 * 100.0
         );
     }
 }
