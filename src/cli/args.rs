@@ -136,11 +136,14 @@ pub enum BiasCommands {
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Target fold enrichment. If not set, maximizes automatically.
-        /// A warning is shown if the requested value exceeds the maximum
-        /// achievable by the data.
+        /// Target positive retention (0.0–1.0). Fraction of positive k-mers
+        /// to retain. If not set, auto-derived to maximize fold enrichment.
         #[arg(long)]
-        fold_enrichment: Option<f32>,
+        positive_retention: Option<f32>,
+        /// Target negative retention (0.0–1.0). Fraction of negative k-mers
+        /// allowed through. If not set, auto-derived to maximize fold enrichment.
+        #[arg(long)]
+        negative_retention: Option<f32>,
         /// Effective fscale for positively biased hashes (soft filter).
         /// Must be >= global fscale. Enables soft sigmoid filtering when
         /// both positive-fscale and negative-fscale are set.
@@ -151,10 +154,6 @@ pub enum BiasCommands {
         /// Use "drop" to discard hashes below the threshold.
         #[arg(long)]
         negative_fscale: Option<String>,
-        /// Steepness of the sigmoid curve. Auto-derived from fold enrichment
-        /// if not set. Higher values = sharper transition.
-        #[arg(long)]
-        steepness: Option<f32>,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,

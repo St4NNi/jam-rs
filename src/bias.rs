@@ -221,10 +221,10 @@ fn downsample_samples(samples: &mut Vec<u64>) {
 pub struct BiasCreateConfig {
     pub cms: CMSConfig,
     pub alpha: f32,
-    pub target_fold_enrichment: Option<f32>,
+    pub target_positive_retention: Option<f32>,
+    pub target_negative_retention: Option<f32>,
     pub positive_fscale: Option<u64>,
     pub negative_fscale: Option<u64>,
-    pub steepness: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -248,7 +248,8 @@ pub struct HashBiasTable {
     pub max_fold_enrichment: f32,
     pub positive_fscale: u64,
     pub negative_fscale: u64,
-    pub steepness: f32,
+    pub k_pos: f32,
+    pub k_neg: f32,
 }
 
 fn validate_cms_compatibility(positive: &RawHashCounts, negative: &RawHashCounts) -> Result<()> {
@@ -349,10 +350,10 @@ impl HashBiasTable {
             &pos_raw,
             &neg_raw,
             config.alpha,
-            config.target_fold_enrichment,
+            config.target_positive_retention,
+            config.target_negative_retention,
             config.positive_fscale.unwrap_or(0),
             config.negative_fscale.unwrap_or(0),
-            config.steepness,
         )?;
 
         if let Some(ref pb) = progress {
@@ -366,10 +367,10 @@ impl HashBiasTable {
         positive: &RawHashCounts,
         negative: &RawHashCounts,
         alpha: f32,
-        target_fold_enrichment: Option<f32>,
+        target_positive_retention: Option<f32>,
+        target_negative_retention: Option<f32>,
         positive_fscale: u64,
         negative_fscale: u64,
-        steepness: Option<f32>,
     ) -> Result<Self> {
         validate_cms_compatibility(positive, negative)?;
 
@@ -421,22 +422,11 @@ impl HashBiasTable {
             }
         }
 
+        // Calibrate threshold (informational for soft filter, functional for hard cutoff)
         let calibration = calibrate_threshold(
-            positive,
-            negative,
-            &weights,
-            &seeds,
-            width,
-            target_fold_enrichment,
+            positive, negative, &weights, &seeds, width,
+            None, // always maximize — threshold is informational for soft mode
         )?;
-
-        // Auto-derive steepness from fold enrichment when soft filter is active
-        let steepness = if positive_fscale > 0 && negative_fscale > 0 {
-            steepness
-                .unwrap_or_else(|| calibration.fold_enrichment.max(1.0).ln() / QUANTIZATION_SCALE)
-        } else {
-            steepness.unwrap_or(0.0)
-        };
 
         let mut table = Self {
             config: positive.config.clone(),
@@ -449,10 +439,11 @@ impl HashBiasTable {
             max_fold_enrichment: calibration.max_fold_enrichment,
             positive_fscale,
             negative_fscale,
-            steepness,
+            k_pos: 0.0,
+            k_neg: 0.0,
         };
 
-        // Recompute effective retention using the soft filter
+        // Auto-derive k_pos and k_neg when soft filter is active
         if table.is_soft_filter() {
             let fscale = table.config.fscale;
             let frac_max = u64::MAX / fscale;
@@ -473,24 +464,35 @@ impl HashBiasTable {
             let pos_hashes = sample_hashes(positive, MAX_SAMPLE_HASHES);
             let neg_hashes = sample_hashes(negative, MAX_SAMPLE_HASHES);
 
-            let pos_in_range = pos_hashes.iter().filter(|&&h| h < frac_max).count();
-            let neg_in_range = neg_hashes.iter().filter(|&&h| h < frac_max).count();
-
-            let pos_passing = pos_hashes
+            let pos_in_range: Vec<u64> = pos_hashes
                 .iter()
-                .filter(|&&h| h < frac_max && table.passes_soft_filter(h))
-                .count();
-            let neg_passing = neg_hashes
+                .copied()
+                .filter(|&h| h < frac_max)
+                .collect();
+            let neg_in_range: Vec<u64> = neg_hashes
                 .iter()
-                .filter(|&&h| h < frac_max && table.passes_soft_filter(h))
-                .count();
+                .copied()
+                .filter(|&h| h < frac_max)
+                .collect();
 
-            if pos_in_range > 0 {
-                table.positive_retention = pos_passing as f32 / pos_in_range as f32;
-            }
-            if neg_in_range > 0 {
-                table.negative_retention = neg_passing as f32 / neg_in_range as f32;
-            }
+            // Derive k_pos
+            table.k_pos = if let Some(target) = target_positive_retention {
+                Self::search_k_for_target_retention(&table, &pos_in_range, target, true)
+            } else {
+                Self::sweep_k_for_max_enrichment(&table, &pos_in_range, &neg_in_range, true)
+            };
+
+            // Derive k_neg (with k_pos already set)
+            table.k_neg = if let Some(target) = target_negative_retention {
+                Self::search_k_for_target_retention(&table, &neg_in_range, target, false)
+            } else {
+                Self::sweep_k_for_max_enrichment(&table, &pos_in_range, &neg_in_range, false)
+            };
+
+            // Final retention computation with both k values set
+            let (pos_ret, neg_ret) = Self::compute_retention(&table, &pos_in_range, &neg_in_range);
+            table.positive_retention = pos_ret;
+            table.negative_retention = neg_ret;
             if table.negative_retention > 0.0 {
                 table.max_fold_enrichment = table.positive_retention / table.negative_retention;
             } else {
@@ -499,6 +501,119 @@ impl HashBiasTable {
         }
 
         Ok(table)
+    }
+
+    /// Compute (positive_retention, negative_retention) using the soft filter.
+    fn compute_retention(table: &Self, pos_in_range: &[u64], neg_in_range: &[u64]) -> (f32, f32) {
+        let pos_passing = pos_in_range
+            .iter()
+            .filter(|&&h| table.passes_soft_filter(h))
+            .count();
+        let neg_passing = neg_in_range
+            .iter()
+            .filter(|&&h| table.passes_soft_filter(h))
+            .count();
+
+        let pos_ret = if pos_in_range.is_empty() {
+            0.0
+        } else {
+            pos_passing as f32 / pos_in_range.len() as f32
+        };
+        let neg_ret = if neg_in_range.is_empty() {
+            0.0
+        } else {
+            neg_passing as f32 / neg_in_range.len() as f32
+        };
+        (pos_ret, neg_ret)
+    }
+
+    /// Binary search for k that achieves the target retention.
+    /// `for_positive_side`: true = searching k_pos (affects w>=0), false = searching k_neg (affects w<0).
+    fn search_k_for_target_retention(
+        table: &Self,
+        hashes: &[u64],
+        target: f32,
+        for_positive_side: bool,
+    ) -> f32 {
+        if hashes.is_empty() {
+            return 0.0;
+        }
+
+        let mut lo: f32 = 0.001;
+        let mut hi: f32 = 5.0;
+
+        for _ in 0..50 {
+            let mid = (lo + hi) / 2.0;
+            let mut probe = table.clone();
+            if for_positive_side {
+                probe.k_pos = mid;
+            } else {
+                probe.k_neg = mid;
+            }
+
+            let retention = hashes
+                .iter()
+                .filter(|&&h| probe.passes_soft_filter(h))
+                .count() as f32
+                / hashes.len() as f32;
+
+            if for_positive_side {
+                // Higher k_pos → higher positive retention
+                if retention < target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            } else {
+                // Higher k_neg → lower negative retention
+                if retention > target {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+
+        (lo + hi) / 2.0
+    }
+
+    /// Sweep k over a log-scale grid to maximize fold enrichment.
+    /// `for_positive_side`: true = sweeping k_pos, false = sweeping k_neg.
+    fn sweep_k_for_max_enrichment(
+        table: &Self,
+        pos_in_range: &[u64],
+        neg_in_range: &[u64],
+        for_positive_side: bool,
+    ) -> f32 {
+        const STEPS: usize = 200;
+        const MIN_RETENTION: f64 = 1e-6;
+        let log_lo = 0.001_f64.ln();
+        let log_hi = 5.0_f64.ln();
+
+        let mut best_k: f32 = 0.001;
+        let mut best_enrichment: f64 = 0.0;
+
+        for i in 0..=STEPS {
+            let k = (log_lo + (log_hi - log_lo) * i as f64 / STEPS as f64).exp() as f32;
+            let mut probe = table.clone();
+            if for_positive_side {
+                probe.k_pos = k;
+            } else {
+                probe.k_neg = k;
+            }
+
+            let (pos_ret, neg_ret) = Self::compute_retention(&probe, pos_in_range, neg_in_range);
+
+            let neg_ret = (neg_ret as f64).max(MIN_RETENTION);
+            let enrichment = pos_ret as f64 / neg_ret;
+
+            if enrichment > best_enrichment && enrichment.is_finite() {
+                best_enrichment = enrichment;
+                best_k = k;
+            }
+        }
+
+        best_k
     }
 
     #[inline]
@@ -528,11 +643,12 @@ impl HashBiasTable {
         self.positive_fscale > 0 && self.negative_fscale > 0
     }
 
-    /// Compute the effective fscale for a given weight using sigmoid + log-space interpolation.
-    /// High weight → positive_fscale (high retention), low weight → negative_fscale (low retention).
+    /// Compute the effective fscale using piecewise sigmoid centered at 0.
+    /// w >= 0 uses k_pos, w < 0 uses k_neg. At w=0: s=0.5 → geometric mean (midpoint anchor).
     #[inline]
     fn effective_fscale(&self, w: i8) -> f64 {
-        let x = self.steepness as f64 * (w as f64 - self.threshold as f64);
+        let k = if w >= 0 { self.k_pos } else { self.k_neg };
+        let x = k as f64 * w as f64;
         let s = 1.0 / (1.0 + (-x).exp());
         let log_pos = (self.positive_fscale as f64).ln();
         let log_neg = (self.negative_fscale as f64).ln();
@@ -591,7 +707,8 @@ impl HashBiasTable {
         file.write_all(&self.negative_retention.to_le_bytes())?;
         file.write_all(&self.positive_fscale.to_le_bytes())?;
         file.write_all(&self.negative_fscale.to_le_bytes())?;
-        file.write_all(&self.steepness.to_le_bytes())?;
+        file.write_all(&self.k_pos.to_le_bytes())?;
+        file.write_all(&self.k_neg.to_le_bytes())?;
 
         for &seed in &self.seeds {
             file.write_all(&seed.to_le_bytes())?;
@@ -663,7 +780,10 @@ impl HashBiasTable {
         let negative_fscale = u64::from_le_bytes(buf8);
 
         file.read_exact(&mut buf4)?;
-        let steepness = f32::from_le_bytes(buf4);
+        let k_pos = f32::from_le_bytes(buf4);
+
+        file.read_exact(&mut buf4)?;
+        let k_neg = f32::from_le_bytes(buf4);
 
         let mut seeds = Vec::with_capacity(depth);
         for _ in 0..depth {
@@ -702,12 +822,13 @@ impl HashBiasTable {
             max_fold_enrichment,
             positive_fscale,
             negative_fscale,
-            steepness,
+            k_pos,
+            k_neg,
         })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4; // 55 bytes
+        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4 + 4; // 59 bytes
         let seeds_size = self.config.depth * 8;
         let weights_size = self.config.width * self.config.depth;
         let total_size = header_size + seeds_size + weights_size;
@@ -725,7 +846,8 @@ impl HashBiasTable {
         out.extend_from_slice(&self.negative_retention.to_le_bytes());
         out.extend_from_slice(&self.positive_fscale.to_le_bytes());
         out.extend_from_slice(&self.negative_fscale.to_le_bytes());
-        out.extend_from_slice(&self.steepness.to_le_bytes());
+        out.extend_from_slice(&self.k_pos.to_le_bytes());
+        out.extend_from_slice(&self.k_neg.to_le_bytes());
 
         for &seed in &self.seeds {
             out.extend_from_slice(&seed.to_le_bytes());
@@ -738,9 +860,9 @@ impl HashBiasTable {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 55 {
+        if data.len() < 59 {
             anyhow::bail!(
-                "Bias table data too small: {} bytes (expected >= 55)",
+                "Bias table data too small: {} bytes (expected >= 59)",
                 data.len()
             );
         }
@@ -769,9 +891,10 @@ impl HashBiasTable {
         let negative_retention = f32::from_le_bytes(data[31..35].try_into().unwrap());
         let positive_fscale = u64::from_le_bytes(data[35..43].try_into().unwrap());
         let negative_fscale = u64::from_le_bytes(data[43..51].try_into().unwrap());
-        let steepness = f32::from_le_bytes(data[51..55].try_into().unwrap());
+        let k_pos = f32::from_le_bytes(data[51..55].try_into().unwrap());
+        let k_neg = f32::from_le_bytes(data[55..59].try_into().unwrap());
 
-        let seeds_start = 55;
+        let seeds_start = 59;
         let seeds_end = seeds_start + depth * 8;
         let weights_start = seeds_end;
         let weights_end = weights_start + width * depth;
@@ -821,7 +944,8 @@ impl HashBiasTable {
             max_fold_enrichment,
             positive_fscale,
             negative_fscale,
-            steepness,
+            k_pos,
+            k_neg,
         })
     }
 
@@ -860,6 +984,7 @@ impl HashBiasTable {
         let (min, max, mean, std, positive, above_threshold) = self.weight_stats();
         let total_cells = self.config.width * self.config.depth;
         eprintln!("Hash Bias Table (v4)");
+        eprintln!("====================");
         eprintln!("  k-mer size:     {}", self.config.k);
         eprintln!("  fscale:         {}", self.config.fscale);
         eprintln!(
@@ -867,49 +992,52 @@ impl HashBiasTable {
             self.config.width, self.config.depth
         );
         eprintln!("  Smoothing (alpha): {:.1}", self.alpha);
+        if self.is_soft_filter() {
+            eprintln!("  Filter mode: soft sigmoid (piecewise, centered at 0)");
+        } else {
+            eprintln!("  Filter mode: hard cutoff");
+        }
+        eprintln!();
+
+        // Primary outcomes
+        eprintln!("Calibration:");
+        if self.is_soft_filter() {
+            eprintln!("  positive_fscale:     {}", self.positive_fscale);
+            eprintln!("  negative_fscale:     {}", self.negative_fscale_label());
+        }
         eprintln!(
-            "  Threshold: {:.2} (quantized: {})",
+            "  positive retention:  {:.2}%",
+            self.positive_retention * 100.0
+        );
+        eprintln!(
+            "  negative retention:  {:.2}%",
+            self.negative_retention * 100.0
+        );
+        eprintln!("  fold enrichment:     {:.2}x", self.fold_enrichment());
+        if self.is_soft_filter() {
+            eprintln!("  k_pos:               {:.4}", self.k_pos);
+            eprintln!("  k_neg:               {:.4}", self.k_neg);
+        }
+        eprintln!(
+            "  threshold:           {:.2} (quantized: {})",
             self.threshold_f32(),
             self.threshold
         );
-        if self.is_soft_filter() {
-            eprintln!("  Filter mode: soft sigmoid");
-            eprintln!("    positive_fscale: {}", self.positive_fscale);
-            eprintln!("    negative_fscale: {}", self.negative_fscale_label());
-            eprintln!("    steepness:       {:.4}", self.steepness);
-            eprintln!(
-                "  Positive retention (soft): {:.2}%",
-                self.positive_retention * 100.0
-            );
-            eprintln!(
-                "  Negative retention (soft): {:.2}%",
-                self.negative_retention * 100.0
-            );
-            eprintln!("  Fold enrichment (soft): {:.2}x", self.fold_enrichment());
-        } else {
-            eprintln!("  Filter mode: hard cutoff");
-            eprintln!(
-                "  Positive retention: {:.2}%",
-                self.positive_retention * 100.0
-            );
-            eprintln!(
-                "  Negative retention: {:.2}%",
-                self.negative_retention * 100.0
-            );
-            eprintln!("  Fold enrichment: {:.2}x", self.fold_enrichment());
-        }
+        eprintln!();
+
+        // Weight distribution
+        eprintln!("Weight distribution (clamped to +/-12.70):");
+        eprintln!("  min:    {:.2}", min);
+        eprintln!("  max:    {:.2}", max);
+        eprintln!("  mean:   {:.2}", mean);
+        eprintln!("  std:    {:.2}", std);
         eprintln!(
-            "  Weight stats (range: {:.2} to {:.2}, clamped to +/-12.70):",
-            min, max
-        );
-        eprintln!("    mean={:.2}, std={:.2}", mean, std);
-        eprintln!(
-            "    >0: {} cells ({:.1}%)",
+            "  >0:             {} cells ({:.1}%)",
             positive,
             positive as f64 / total_cells as f64 * 100.0
         );
         eprintln!(
-            "    >= threshold: {} cells ({:.1}%)",
+            "  >= threshold:   {} cells ({:.1}%)",
             above_threshold,
             above_threshold as f64 / total_cells as f64 * 100.0
         );
@@ -921,28 +1049,30 @@ impl HashBiasTable {
 
     pub fn print_sigmoid_curve(&self, min: f32, max: f32) {
         let base = self.config.fscale as f64;
-        let steepness = self.steepness as f64;
+        let k_pos = self.k_pos as f64;
+        let k_neg = self.k_neg as f64;
         let threshold_q = self.threshold as i32;
+        let ln19 = 19.0_f64.ln();
 
-        let (lower_qi, upper_qi) = if steepness > 0.0 {
-            let ln19 = 19.0_f64.ln();
-            let lo = (threshold_q as f64 - ln19 / steepness).round() as i32;
-            let hi = (threshold_q as f64 + ln19 / steepness).round() as i32;
-            (lo.clamp(-127, 127), hi.clamp(-127, 127))
+        // Asymmetric 5%/95% bounds centered at 0
+        let neg_5pct_qi = if k_neg > 0.0 {
+            (-ln19 / k_neg).round() as i32
         } else {
-            (-127, 127)
+            -127
+        };
+        let pos_95pct_qi = if k_pos > 0.0 {
+            (ln19 / k_pos).round() as i32
+        } else {
+            127
         };
 
         eprintln!();
-        eprintln!("Sigmoid response curve:");
-        if steepness > 0.0 {
-            eprintln!(
-                "  Bounds: {:.2} (5%) \u{2014} {:.2} (threshold) \u{2014} {:.2} (95%)",
-                lower_qi as f64 / 10.0,
-                self.threshold_f32(),
-                upper_qi as f64 / 10.0
-            );
-        }
+        eprintln!("Sigmoid response curve (piecewise, centered at 0):");
+        eprintln!(
+            "  Bounds: {:.2} (neg 5%) \u{2014} 0.00 (unseen/midpoint) \u{2014} {:.2} (pos 95%)",
+            neg_5pct_qi as f64 / 10.0,
+            pos_95pct_qi as f64 / 10.0
+        );
 
         let mut points = std::collections::BTreeSet::new();
         let start_q = (min.floor() as i32) * 10;
@@ -952,10 +1082,8 @@ impl HashBiasTable {
         }
         points.insert(0);
         points.insert(threshold_q);
-        if steepness > 0.0 {
-            points.insert(lower_qi);
-            points.insert(upper_qi);
-        }
+        points.insert(neg_5pct_qi.clamp(-127, 127));
+        points.insert(pos_95pct_qi.clamp(-127, 127));
 
         eprintln!();
         eprintln!(
@@ -978,14 +1106,14 @@ impl HashBiasTable {
             if *q == 0 {
                 markers.push("unseen");
             }
-            if *q == threshold_q {
+            if *q == threshold_q && *q != 0 {
                 markers.push("threshold");
             }
-            if steepness > 0.0 && *q == lower_qi && lower_qi != threshold_q {
-                markers.push("5%");
+            if *q == neg_5pct_qi && *q != 0 {
+                markers.push("neg 5%");
             }
-            if steepness > 0.0 && *q == upper_qi && upper_qi != threshold_q {
-                markers.push("95%");
+            if *q == pos_95pct_qi && *q != 0 {
+                markers.push("pos 95%");
             }
 
             let marker = if markers.is_empty() {
@@ -1165,7 +1293,7 @@ pub fn format_bp(bp: u64) -> String {
 }
 
 pub const BIAS_TABLE_SERIALIZED_SIZE: usize =
-    55 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
+    59 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
 
 impl PartialEq for HashBiasTable {
     fn eq(&self, other: &Self) -> bool {
@@ -1179,7 +1307,8 @@ impl PartialEq for HashBiasTable {
             && self.negative_retention == other.negative_retention
             && self.positive_fscale == other.positive_fscale
             && self.negative_fscale == other.negative_fscale
-            && self.steepness == other.steepness
+            && self.k_pos == other.k_pos
+            && self.k_neg == other.k_neg
             && self.seeds == other.seeds
             && self.weights == other.weights
     }
@@ -1190,6 +1319,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn assert_approx_eq(actual: f64, expected: f64, tol: f64) {
+        let diff = (actual - expected).abs();
+        assert!(
+            diff <= tol,
+            "expected {expected}, got {actual} (diff {diff} > tol {tol})"
+        );
+    }
 
     fn create_fasta(sequences: &[&str]) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();
@@ -1282,7 +1419,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(5.0), 0, 0, None).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0).unwrap();
         assert!(table.threshold >= -127);
     }
 
@@ -1313,7 +1450,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 0, 0, None).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0).unwrap();
 
         let output = NamedTempFile::new().unwrap();
         table.save(output.path()).unwrap();
@@ -1351,7 +1488,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 0, 0, None).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0).unwrap();
 
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
@@ -1386,7 +1523,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 0, 0, None).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0).unwrap();
 
         let mut passed = 0;
         let mut failed = 0;
@@ -1434,7 +1571,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, 0, 0, None).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0).unwrap();
         assert!(table.threshold >= -127);
         assert!(table.fold_enrichment() >= 1.0);
     }
@@ -1452,10 +1589,10 @@ mod tests {
                 fscale: 1,
             },
             alpha: 1.0,
-            target_fold_enrichment: None,
+            target_positive_retention: None,
+            target_negative_retention: None,
             positive_fscale: None,
             negative_fscale: None,
-            steepness: None,
         };
 
         let table = HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap();
@@ -1498,7 +1635,7 @@ mod tests {
         .unwrap();
 
         // Hard cutoff mode (positive_fscale=0, negative_fscale=0)
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 0, 0, None).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0).unwrap();
         assert!(!table.is_soft_filter());
 
         // Verify passes_filter matches weight >= threshold for many hashes
@@ -1542,8 +1679,7 @@ mod tests {
         )
         .unwrap();
 
-        let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 1, 1000, Some(0.2)).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000).unwrap();
         assert!(table.is_soft_filter());
 
         // Same hash always gives the same result
@@ -1581,13 +1717,47 @@ mod tests {
         )
         .unwrap();
 
-        let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 10, 5000, Some(0.3)).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000).unwrap();
         assert!(table.is_soft_filter());
 
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
         assert_eq!(table, loaded);
+    }
+
+    #[test]
+    fn test_unseen_midpoint_is_geometric_mean() {
+        let pos = create_fasta(&["ATATATATATATATATATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 10,
+        };
+
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000).unwrap();
+        assert!(table.is_soft_filter());
+
+        let expected = (100.0_f64 * 10_000.0_f64).sqrt();
+        let actual = table.effective_fscale_at(0);
+        assert_approx_eq(actual, expected, 1e-6);
     }
 
     #[test]
@@ -1618,23 +1788,23 @@ mod tests {
         .unwrap();
 
         // positive_fscale < global fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 50, 1000, None);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 50, 1000);
         assert!(result.is_err());
 
         // positive_fscale without negative_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 100, 0, None);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 0);
         assert!(result.is_err());
 
         // negative_fscale without positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 0, 1000, None);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 1000);
         assert!(result.is_err());
 
         // negative_fscale <= positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 100, 100, None);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 100);
         assert!(result.is_err());
 
         // Valid soft filter
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, Some(2.0), 100, 5000, None);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000);
         assert!(result.is_ok());
     }
 }

@@ -353,10 +353,10 @@ pub fn handle_bias_create_command(
     cms_width: usize,
     cms_depth: usize,
     alpha: f32,
-    fold_enrichment: Option<f32>,
+    positive_retention: Option<f32>,
+    negative_retention: Option<f32>,
     positive_fscale: Option<u64>,
     negative_fscale: Option<String>,
-    steepness: Option<f32>,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -432,10 +432,10 @@ pub fn handle_bias_create_command(
             fscale,
         },
         alpha,
-        target_fold_enrichment: fold_enrichment,
+        target_positive_retention: positive_retention,
+        target_negative_retention: negative_retention,
         positive_fscale,
         negative_fscale,
-        steepness,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -481,50 +481,37 @@ pub fn handle_bias_create_command(
             table.config.width, table.config.depth
         );
         eprintln!("  Smoothing (alpha): {:.1}", alpha);
+        if table.is_soft_filter() {
+            eprintln!("  Filter mode: soft sigmoid (piecewise, centered at 0)");
+        } else {
+            eprintln!("  Filter mode: hard cutoff");
+        }
         eprintln!();
-        eprintln!("Results:");
+
+        // Primary outcomes
+        eprintln!("Calibration:");
+        if table.is_soft_filter() {
+            eprintln!("  positive_fscale:     {}", table.positive_fscale);
+            eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
+        }
         eprintln!(
-            "  Threshold: {:.2} (quantized: {})",
+            "  positive retention:  {:.2}%",
+            table.positive_retention * 100.0
+        );
+        eprintln!(
+            "  negative retention:  {:.2}%",
+            table.negative_retention * 100.0
+        );
+        eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
+        if table.is_soft_filter() {
+            eprintln!("  k_pos:               {:.4}", table.k_pos);
+            eprintln!("  k_neg:               {:.4}", table.k_neg);
+        }
+        eprintln!(
+            "  threshold:           {:.2} (quantized: {})",
             table.threshold_f32(),
             table.threshold
         );
-        if table.is_soft_filter() {
-            eprintln!("  Filter mode: soft sigmoid");
-            eprintln!("    positive_fscale: {}", table.positive_fscale);
-            eprintln!("    negative_fscale: {}", table.negative_fscale_label());
-            eprintln!("    steepness:       {:.4}", table.steepness);
-            eprintln!("  Fold enrichment (soft): {:.2}x", table.fold_enrichment());
-            eprintln!(
-                "  Positive retention (soft): {:.2}%",
-                table.positive_retention * 100.0
-            );
-            eprintln!(
-                "  Negative retention (soft): {:.2}%",
-                table.negative_retention * 100.0
-            );
-        } else {
-            eprintln!("  Filter mode: hard cutoff");
-            eprintln!("  Fold enrichment: {:.2}x", table.fold_enrichment());
-            eprintln!("  Max achievable:  {:.2}x", table.max_fold_enrichment);
-            eprintln!(
-                "  Positive retention: {:.2}%",
-                table.positive_retention * 100.0
-            );
-            eprintln!(
-                "  Negative retention: {:.2}%",
-                table.negative_retention * 100.0
-            );
-        }
-
-        if let Some(requested) = fold_enrichment
-            && requested > table.max_fold_enrichment + 0.01
-        {
-            eprintln!();
-            eprintln!(
-                "Warning: Requested fold enrichment ({:.2}x) exceeds maximum achievable ({:.2}x). Using maximum.",
-                requested, table.max_fold_enrichment
-            );
-        }
 
         if table.fold_enrichment() < 1.5 {
             eprintln!();
@@ -581,7 +568,7 @@ pub fn handle_bias_stats_command(
     let total_cells = table.config.width * table.config.depth;
 
     let filter_mode = if table.is_soft_filter() {
-        "soft sigmoid"
+        "soft sigmoid (piecewise, centered at 0)"
     } else {
         "hard cutoff"
     };
@@ -607,7 +594,8 @@ pub fn handle_bias_stats_command(
                 "positive_fscale": table.positive_fscale,
                 "negative_fscale": table.negative_fscale,
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
-                "steepness": table.steepness,
+                "k_pos": table.k_pos,
+                "k_neg": table.k_neg,
             },
             "weight_stats": {
                 "min": min,
@@ -624,16 +612,20 @@ pub fn handle_bias_stats_command(
 
         let json = if table.is_soft_filter() {
             let base = table.config.fscale as f64;
-            let steepness = table.steepness as f64;
+            let k_pos = table.k_pos as f64;
+            let k_neg = table.k_neg as f64;
             let threshold_q = table.threshold as i32;
+            let ln19 = 19.0_f64.ln();
 
-            let (lower_qi, upper_qi) = if steepness > 0.0 {
-                let ln19 = 19.0_f64.ln();
-                let lo = (threshold_q as f64 - ln19 / steepness).round() as i32;
-                let hi = (threshold_q as f64 + ln19 / steepness).round() as i32;
-                (lo.clamp(-127, 127), hi.clamp(-127, 127))
+            let neg_5pct_qi = if k_neg > 0.0 {
+                (-ln19 / k_neg).round() as i32
             } else {
-                (-127, 127)
+                -127
+            };
+            let pos_95pct_qi = if k_pos > 0.0 {
+                (ln19 / k_pos).round() as i32
+            } else {
+                127
             };
 
             let mut points = std::collections::BTreeSet::new();
@@ -644,10 +636,8 @@ pub fn handle_bias_stats_command(
             }
             points.insert(0);
             points.insert(threshold_q);
-            if steepness > 0.0 {
-                points.insert(lower_qi);
-                points.insert(upper_qi);
-            }
+            points.insert(neg_5pct_qi.clamp(-127, 127));
+            points.insert(pos_95pct_qi.clamp(-127, 127));
 
             let curve: Vec<serde_json::Value> = points
                 .iter()
@@ -665,9 +655,9 @@ pub fn handle_bias_stats_command(
 
             let mut json = json;
             json["sigmoid_bounds"] = serde_json::json!({
-                "lower_5pct": lower_qi as f64 / 10.0,
-                "threshold": table.threshold_f32(),
-                "upper_95pct": upper_qi as f64 / 10.0,
+                "neg_5pct": neg_5pct_qi as f64 / 10.0,
+                "unseen_midpoint": 0.0,
+                "pos_95pct": pos_95pct_qi as f64 / 10.0,
             });
             json["sigmoid_curve"] = serde_json::json!(curve);
             json
@@ -682,58 +672,7 @@ pub fn handle_bias_stats_command(
             eprintln!("Statistics written to: {}", output_path.display());
         }
     } else if !silent {
-        eprintln!("Hash Bias Table (v4)");
-        eprintln!("====================");
-        eprintln!("File: {}", input.display());
-        eprintln!("  k-mer size:     {}", table.config.k);
-        eprintln!("  fscale:         {}", table.config.fscale);
-        eprintln!(
-            "  CMS dimensions: {} x {}",
-            table.config.width, table.config.depth
-        );
-        eprintln!("  Smoothing (alpha): {:.1}", table.alpha);
-        eprintln!("  Filter mode: {}", filter_mode);
-        eprintln!();
-        eprintln!("Calibration:");
-        eprintln!(
-            "  threshold:           {:.2} (quantized: {})",
-            table.threshold_f32(),
-            table.threshold
-        );
-        if table.is_soft_filter() {
-            eprintln!("  positive_fscale:     {}", table.positive_fscale);
-            eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
-            eprintln!("  steepness:           {:.4}", table.steepness);
-        }
-        eprintln!(
-            "  positive retention:  {:.2}%",
-            table.positive_retention * 100.0
-        );
-        eprintln!(
-            "  negative retention:  {:.2}%",
-            table.negative_retention * 100.0
-        );
-        eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
-        eprintln!();
-        eprintln!("Weight distribution (clamped to +/-12.70):");
-        eprintln!("  min:    {:.2}", min);
-        eprintln!("  max:    {:.2}", max);
-        eprintln!("  mean:   {:.2}", mean);
-        eprintln!("  std:    {:.2}", std);
-        eprintln!(
-            "  >0:             {} cells ({:.1}%)",
-            positive_weights,
-            positive_weights as f64 / total_cells as f64 * 100.0
-        );
-        eprintln!(
-            "  >= threshold:   {} cells ({:.1}%)",
-            above_threshold,
-            above_threshold as f64 / total_cells as f64 * 100.0
-        );
-
-        if table.is_soft_filter() {
-            table.print_sigmoid_curve(min, max);
-        }
+        table.print_stats();
     }
 
     Ok(())
