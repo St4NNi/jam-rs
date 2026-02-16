@@ -154,10 +154,16 @@ pub enum BiasCommands {
         /// Use "drop" to discard hashes below the threshold.
         #[arg(long)]
         negative_fscale: Option<String>,
-        /// Power exponent for sigmoid curve shaping (>1 flattens the middle,
-        /// so only strongly biased k-mers get preferential treatment).
-        #[arg(long, default_value = "1.0")]
-        curve_power: f32,
+        /// Deadzone fraction for positively biased k-mers (0.0–1.0).
+        /// Fraction of positive weight range that stays flat before sigmoid kicks in.
+        /// E.g. 0.95 means only the top 5% of positively biased k-mers get boosted.
+        #[arg(long, default_value = "0.0")]
+        deadzone_pos: f32,
+        /// Deadzone fraction for negatively biased k-mers (0.0–1.0).
+        /// Fraction of negative weight range that stays flat before sigmoid kicks in.
+        /// E.g. 0.0 means transition starts immediately (cliff behavior with high k_neg).
+        #[arg(long, default_value = "0.0")]
+        deadzone_neg: f32,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,

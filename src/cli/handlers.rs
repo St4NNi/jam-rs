@@ -357,7 +357,8 @@ pub fn handle_bias_create_command(
     negative_retention: Option<f32>,
     positive_fscale: Option<u64>,
     negative_fscale: Option<String>,
-    curve_power: f32,
+    deadzone_pos: f32,
+    deadzone_neg: f32,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -388,8 +389,17 @@ pub fn handle_bias_create_command(
         return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
     }
 
-    if !curve_power.is_finite() || curve_power <= 0.0 {
-        return Err(anyhow::anyhow!("--curve-power must be finite and > 0"));
+    if !deadzone_pos.is_finite() || !(0.0..1.0).contains(&deadzone_pos) {
+        return Err(anyhow::anyhow!(
+            "--deadzone-pos must be finite and in [0.0, 1.0), got {}",
+            deadzone_pos
+        ));
+    }
+    if !deadzone_neg.is_finite() || !(0.0..1.0).contains(&deadzone_neg) {
+        return Err(anyhow::anyhow!(
+            "--deadzone-neg must be finite and in [0.0, 1.0), got {}",
+            deadzone_neg
+        ));
     }
 
     if let Some(v) = positive_retention
@@ -461,7 +471,8 @@ pub fn handle_bias_create_command(
         target_negative_retention: negative_retention,
         positive_fscale,
         negative_fscale,
-        curve_power,
+        deadzone_pos,
+        deadzone_neg,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -532,7 +543,8 @@ pub fn handle_bias_create_command(
         if table.is_soft_filter() {
             eprintln!("  k_pos:               {:.4}", table.k_pos);
             eprintln!("  k_neg:               {:.4}", table.k_neg);
-            eprintln!("  curve_power:         {:.2}", table.curve_power);
+            eprintln!("  deadzone_pos:        {:.2}", table.deadzone_pos);
+            eprintln!("  deadzone_neg:        {:.2}", table.deadzone_neg);
             eprintln!("  reference points:");
             for p in table.soft_filter_reference_points() {
                 eprintln!(
@@ -630,7 +642,8 @@ pub fn handle_bias_stats_command(
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
                 "k_pos": table.k_pos,
                 "k_neg": table.k_neg,
-                "curve_power": table.curve_power,
+                "deadzone_pos": table.deadzone_pos,
+                "deadzone_neg": table.deadzone_neg,
             },
             "weight_stats": {
                 "min": min,
