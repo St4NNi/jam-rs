@@ -357,6 +357,7 @@ pub fn handle_bias_create_command(
     negative_retention: Option<f32>,
     positive_fscale: Option<u64>,
     negative_fscale: Option<String>,
+    curve_power: f32,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -436,6 +437,7 @@ pub fn handle_bias_create_command(
         target_negative_retention: negative_retention,
         positive_fscale,
         negative_fscale,
+        curve_power,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -506,6 +508,7 @@ pub fn handle_bias_create_command(
         if table.is_soft_filter() {
             eprintln!("  k_pos:               {:.4}", table.k_pos);
             eprintln!("  k_neg:               {:.4}", table.k_neg);
+            eprintln!("  curve_power:         {:.2}", table.curve_power);
         }
         eprintln!(
             "  threshold:           {:.2} (quantized: {})",
@@ -596,6 +599,7 @@ pub fn handle_bias_stats_command(
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
                 "k_pos": table.k_pos,
                 "k_neg": table.k_neg,
+                "curve_power": table.curve_power,
             },
             "weight_stats": {
                 "min": min,

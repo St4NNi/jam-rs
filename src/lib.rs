@@ -70,6 +70,7 @@ pub fn run() -> Result<()> {
                 negative_retention,
                 positive_fscale,
                 negative_fscale,
+                curve_power,
                 threads,
             } => handle_bias_create_command(
                 positive,
@@ -84,6 +85,7 @@ pub fn run() -> Result<()> {
                 negative_retention,
                 positive_fscale,
                 negative_fscale,
+                curve_power,
                 threads.or(cli.threads),
                 cli.force,
                 cli.silent,

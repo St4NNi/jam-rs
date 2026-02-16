@@ -154,6 +154,10 @@ pub enum BiasCommands {
         /// Use "drop" to discard hashes below the threshold.
         #[arg(long)]
         negative_fscale: Option<String>,
+        /// Power exponent for sigmoid curve shaping (>1 flattens the middle,
+        /// so only strongly biased k-mers get preferential treatment).
+        #[arg(long, default_value = "1.0")]
+        curve_power: f32,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,
