@@ -254,6 +254,15 @@ pub struct HashBiasTable {
     pub curve_power: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SoftFilterReferencePoint {
+    pub weight: i8,
+    pub weight_f32: f32,
+    pub effective_fscale: f64,
+    pub retention_pct: f64,
+    pub vs_base: f64,
+}
+
 fn validate_cms_compatibility(positive: &RawHashCounts, negative: &RawHashCounts) -> Result<()> {
     if positive.config.k != negative.config.k {
         anyhow::bail!(
@@ -378,6 +387,26 @@ impl HashBiasTable {
         curve_power: f32,
     ) -> Result<Self> {
         validate_cms_compatibility(positive, negative)?;
+
+        if !alpha.is_finite() || alpha <= 0.0 {
+            anyhow::bail!("alpha must be finite and > 0, got {}", alpha);
+        }
+
+        if !curve_power.is_finite() || curve_power <= 0.0 {
+            anyhow::bail!("curve_power must be finite and > 0, got {}", curve_power);
+        }
+
+        if let Some(target) = target_positive_retention {
+            if !target.is_finite() || !(0.0..=1.0).contains(&target) {
+                anyhow::bail!("target_positive_retention must be in [0,1], got {}", target);
+            }
+        }
+
+        if let Some(target) = target_negative_retention {
+            if !target.is_finite() || !(0.0..=1.0).contains(&target) {
+                anyhow::bail!("target_negative_retention must be in [0,1], got {}", target);
+            }
+        }
 
         // Enforce soft-filter invariants
         if positive_fscale > 0 || negative_fscale > 0 {
@@ -998,6 +1027,29 @@ impl HashBiasTable {
         self.threshold as f32 / QUANTIZATION_SCALE
     }
 
+    pub fn soft_filter_reference_points(&self) -> Vec<SoftFilterReferencePoint> {
+        if !self.is_soft_filter() {
+            return Vec::new();
+        }
+
+        const WEIGHTS: [i8; 9] = [-127, -64, -32, -16, 0, 16, 32, 64, 127];
+        let base = self.config.fscale as f64;
+
+        WEIGHTS
+            .iter()
+            .map(|&w| {
+                let effective_fscale = self.effective_fscale_at(w);
+                SoftFilterReferencePoint {
+                    weight: w,
+                    weight_f32: w as f32 / QUANTIZATION_SCALE,
+                    effective_fscale,
+                    retention_pct: 100.0 / effective_fscale,
+                    vs_base: base / effective_fscale,
+                }
+            })
+            .collect()
+    }
+
     pub fn print_stats(&self) {
         let (min, max, mean, std, positive, above_threshold) = self.weight_stats();
         let total_cells = self.config.width * self.config.depth;
@@ -1036,6 +1088,14 @@ impl HashBiasTable {
             eprintln!("  k_pos:               {:.4}", self.k_pos);
             eprintln!("  k_neg:               {:.4}", self.k_neg);
             eprintln!("  curve_power:         {:.2}", self.curve_power);
+
+            eprintln!("  reference points:");
+            for p in self.soft_filter_reference_points() {
+                eprintln!(
+                    "    w={:>5.2}: eff={:>10.1}, ret={:>9.4}%, vs_base={:>7.2}x",
+                    p.weight_f32, p.effective_fscale, p.retention_pct, p.vs_base
+                );
+            }
         }
         eprintln!(
             "  threshold:           {:.2} (quantized: {})",
@@ -1700,7 +1760,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000, 1.0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000, 1.0).unwrap();
         assert!(table.is_soft_filter());
 
         // Same hash always gives the same result
@@ -1738,7 +1799,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000, 1.0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000, 1.0).unwrap();
         assert!(table.is_soft_filter());
 
         let bytes = table.to_bytes();
@@ -1773,7 +1835,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 1.0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 1.0).unwrap();
         assert!(table.is_soft_filter());
 
         let expected = (100.0_f64 * 10_000.0_f64).sqrt();

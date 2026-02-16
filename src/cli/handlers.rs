@@ -384,6 +384,30 @@ pub fn handle_bias_create_command(
         ));
     }
 
+    if !alpha.is_finite() || alpha <= 0.0 {
+        return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
+    }
+
+    if !curve_power.is_finite() || curve_power <= 0.0 {
+        return Err(anyhow::anyhow!("--curve-power must be finite and > 0"));
+    }
+
+    if let Some(v) = positive_retention
+        && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+    {
+        return Err(anyhow::anyhow!(
+            "--positive-retention must be in the range [0, 1]"
+        ));
+    }
+
+    if let Some(v) = negative_retention
+        && (!v.is_finite() || !(0.0..=1.0).contains(&v))
+    {
+        return Err(anyhow::anyhow!(
+            "--negative-retention must be in the range [0, 1]"
+        ));
+    }
+
     // Validate soft-filter fscale pair: both or neither
     match (positive_fscale.as_ref(), negative_fscale.as_ref()) {
         (Some(_), None) | (None, Some(_)) => {
@@ -509,6 +533,13 @@ pub fn handle_bias_create_command(
             eprintln!("  k_pos:               {:.4}", table.k_pos);
             eprintln!("  k_neg:               {:.4}", table.k_neg);
             eprintln!("  curve_power:         {:.2}", table.curve_power);
+            eprintln!("  reference points:");
+            for p in table.soft_filter_reference_points() {
+                eprintln!(
+                    "    w={:>5.2}: eff={:>10.1}, ret={:>9.4}%, vs_base={:>7.2}x",
+                    p.weight_f32, p.effective_fscale, p.retention_pct, p.vs_base
+                );
+            }
         }
         eprintln!(
             "  threshold:           {:.2} (quantized: {})",
@@ -663,6 +694,20 @@ pub fn handle_bias_stats_command(
                 "unseen_midpoint": 0.0,
                 "pos_95pct": pos_95pct_qi as f64 / 10.0,
             });
+            let reference_points: Vec<serde_json::Value> = table
+                .soft_filter_reference_points()
+                .iter()
+                .map(|p| {
+                    serde_json::json!({
+                        "weight_q": p.weight,
+                        "weight": p.weight_f32,
+                        "effective_fscale": p.effective_fscale,
+                        "retention_pct": p.retention_pct,
+                        "vs_base": p.vs_base,
+                    })
+                })
+                .collect();
+            json["soft_filter"]["reference_points"] = serde_json::json!(reference_points);
             json["sigmoid_curve"] = serde_json::json!(curve);
             json
         } else {
