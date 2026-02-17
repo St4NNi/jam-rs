@@ -504,7 +504,7 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  Smoothing (alpha): {:.1}", alpha);
         if table.is_soft_filter() {
-            eprintln!("  Filter mode: soft sigmoid (piecewise, w=0 fixed)");
+            eprintln!("  Filter mode: soft sigmoid (threshold-centered, w=0 override)");
         } else {
             eprintln!("  Filter mode: hard cutoff");
         }
@@ -600,7 +600,7 @@ pub fn handle_bias_stats_command(
     let total_cells = table.config.width * table.config.depth;
 
     let filter_mode = if table.is_soft_filter() {
-        "soft sigmoid (piecewise, w=0 fixed)"
+        "soft sigmoid (threshold-centered, w=0 override)"
     } else {
         "hard cutoff"
     };
@@ -608,7 +608,7 @@ pub fn handle_bias_stats_command(
     if let Some(output_path) = output {
         let json = serde_json::json!({
             "file": input.display().to_string(),
-            "type": "bias_v4",
+            "type": "bias_v5",
             "k": table.config.k,
             "fscale": table.config.fscale,
             "cms_width": table.config.width,
@@ -650,10 +650,9 @@ pub fn handle_bias_stats_command(
             let threshold_q = table.threshold as i32;
             let ln19 = 19.0_f64.ln();
             let center_pos = table.center_pos as f64;
-            let center_neg = table.center_neg as f64;
 
             let neg_5pct_qi = if k_neg > 0.0 {
-                (center_neg - ln19 / k_neg).round() as i32
+                (center_pos - ln19 / k_neg).round() as i32
             } else {
                 -127
             };
@@ -664,8 +663,6 @@ pub fn handle_bias_stats_command(
             };
 
             let center_pos_q = (center_pos * 10.0).round() as i32;
-            let center_neg_q = (center_neg * 10.0).round() as i32;
-
             let mut points = std::collections::BTreeSet::new();
             let start = (min.floor() as i32) * 10;
             let end = (max.ceil() as i32) * 10;
@@ -675,7 +672,6 @@ pub fn handle_bias_stats_command(
             points.insert(0);
             points.insert(threshold_q);
             points.insert(center_pos_q.clamp(-127, 127));
-            points.insert(center_neg_q.clamp(-127, 127));
             points.insert(neg_5pct_qi.clamp(-127, 127));
             points.insert(pos_95pct_qi.clamp(-127, 127));
 
@@ -696,7 +692,8 @@ pub fn handle_bias_stats_command(
             let mut json = json;
             json["sigmoid_bounds"] = serde_json::json!({
                 "neg_5pct": neg_5pct_qi as f64 / 10.0,
-                "unseen_midpoint": 0.0,
+                "center_threshold": center_pos_q as f64 / 10.0,
+                "unseen_override": 0.0,
                 "pos_95pct": pos_95pct_qi as f64 / 10.0,
             });
             let reference_points: Vec<serde_json::Value> = table
