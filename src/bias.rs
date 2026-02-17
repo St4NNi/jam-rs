@@ -225,8 +225,7 @@ pub struct BiasCreateConfig {
     pub target_negative_retention: Option<f32>,
     pub positive_fscale: Option<u64>,
     pub negative_fscale: Option<u64>,
-    pub deadzone_pos: f32,
-    pub deadzone_neg: f32,
+    pub unbiased_fscale: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -252,8 +251,9 @@ pub struct HashBiasTable {
     pub negative_fscale: u64,
     pub k_pos: f32,
     pub k_neg: f32,
-    pub deadzone_pos: f32,
-    pub deadzone_neg: f32,
+    pub center_pos: f32,
+    pub center_neg: f32,
+    pub unbiased_fscale: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -367,8 +367,7 @@ impl HashBiasTable {
             config.target_negative_retention,
             config.positive_fscale.unwrap_or(0),
             config.negative_fscale.unwrap_or(0),
-            config.deadzone_pos,
-            config.deadzone_neg,
+            config.unbiased_fscale.unwrap_or(0),
         )?;
 
         if let Some(ref pb) = progress {
@@ -387,26 +386,12 @@ impl HashBiasTable {
         target_negative_retention: Option<f32>,
         positive_fscale: u64,
         negative_fscale: u64,
-        deadzone_pos: f32,
-        deadzone_neg: f32,
+        unbiased_fscale: u64,
     ) -> Result<Self> {
         validate_cms_compatibility(positive, negative)?;
 
         if !alpha.is_finite() || alpha <= 0.0 {
             anyhow::bail!("alpha must be finite and > 0, got {}", alpha);
-        }
-
-        if !deadzone_pos.is_finite() || !(0.0..1.0).contains(&deadzone_pos) {
-            anyhow::bail!(
-                "deadzone_pos must be finite and in [0.0, 1.0), got {}",
-                deadzone_pos
-            );
-        }
-        if !deadzone_neg.is_finite() || !(0.0..1.0).contains(&deadzone_neg) {
-            anyhow::bail!(
-                "deadzone_neg must be finite and in [0.0, 1.0), got {}",
-                deadzone_neg
-            );
         }
 
         if let Some(target) = target_positive_retention
@@ -440,6 +425,24 @@ impl HashBiasTable {
                     positive_fscale
                 );
             }
+            if unbiased_fscale > 0 {
+                if unbiased_fscale < positive_fscale {
+                    anyhow::bail!(
+                        "unbiased_fscale ({}) must be >= positive_fscale ({})",
+                        unbiased_fscale,
+                        positive_fscale
+                    );
+                }
+                if negative_fscale != u64::MAX && unbiased_fscale > negative_fscale {
+                    anyhow::bail!(
+                        "unbiased_fscale ({}) must be <= negative_fscale ({})",
+                        unbiased_fscale,
+                        negative_fscale
+                    );
+                }
+            }
+        } else if unbiased_fscale > 0 {
+            anyhow::bail!("--unbiased-fscale requires soft filter mode (set --positive-fscale and --negative-fscale)");
         }
 
         let width = positive.config.width;
@@ -488,12 +491,17 @@ impl HashBiasTable {
             negative_fscale,
             k_pos: 0.0,
             k_neg: 0.0,
-            deadzone_pos,
-            deadzone_neg,
+            center_pos: 0.0,
+            center_neg: 0.0,
+            unbiased_fscale,
         };
 
-        // Auto-derive k_pos and k_neg when soft filter is active
+        // Auto-derive centers and k_pos/k_neg when soft filter is active
         if table.is_soft_filter() {
+            // Auto-derive centers from threshold
+            let c = (calibration.threshold.unsigned_abs()).max(1) as f32;
+            table.center_pos = c;
+            table.center_neg = -c;
             let fscale = table.config.fscale;
             let frac_max = u64::MAX / fscale;
 
@@ -692,30 +700,50 @@ impl HashBiasTable {
         self.positive_fscale > 0 && self.negative_fscale > 0
     }
 
-    /// Compute the effective fscale using piecewise sigmoid centered at 0.
-    /// w >= 0 uses k_pos, w < 0 uses k_neg. At w=0: s=0.5 → geometric mean (midpoint anchor).
-    /// deadzone_pos/deadzone_neg define the fraction of each side's weight range that stays
-    /// flat (no effect) before the sigmoid transition kicks in.
+    /// Compute the effective fscale using a shifted piecewise sigmoid.
+    ///
+    /// - w=0 always returns the geometric mean of positive_fscale and negative_fscale
+    ///   (fixed anchor for unseen/balanced k-mers).
+    /// - w>0 transitions from geometric mean toward positive_fscale, with the sigmoid
+    ///   inflection at center_pos.
+    /// - w<0 transitions from geometric mean toward negative_fscale, with the sigmoid
+    ///   inflection at center_neg.
     #[inline]
     fn effective_fscale(&self, w: i8) -> f64 {
-        let k = if w >= 0 { self.k_pos } else { self.k_neg };
-        let deadzone = if w >= 0 {
-            self.deadzone_pos
-        } else {
-            self.deadzone_neg
-        } as f64;
-        let w_norm = w as f64 / 127.0;
-        let abs_w = w_norm.abs();
-        let remapped = if abs_w <= deadzone {
-            0.0
-        } else {
-            (abs_w - deadzone) / (1.0 - deadzone)
-        };
-        let x = k as f64 * w_norm.signum() * remapped * 127.0;
-        let s = 1.0 / (1.0 + (-x).exp());
         let log_pos = (self.positive_fscale as f64).ln();
         let log_neg = (self.negative_fscale as f64).ln();
-        (log_pos * s + log_neg * (1.0 - s)).exp()
+        let midpoint = if self.unbiased_fscale > 0 {
+            (self.unbiased_fscale as f64).ln()
+        } else {
+            (log_pos + log_neg) / 2.0
+        };
+
+        if w == 0 {
+            return midpoint.exp();
+        }
+
+        let (k, center) = if w > 0 {
+            (self.k_pos as f64, self.center_pos as f64)
+        } else {
+            (self.k_neg as f64, self.center_neg as f64)
+        };
+
+        let w_f = w as f64;
+        let s_raw = 1.0 / (1.0 + (-k * (w_f - center)).exp());
+        let s_0 = 1.0 / (1.0 + (k * center).exp());
+
+        // Epsilon clamp to avoid division by zero at extreme k*center
+        let eps = 1e-12;
+
+        let (t, target_log) = if w > 0 {
+            // Normalize: t=0 at w=0, t→1 at w→+∞
+            ((s_raw - s_0) / (1.0 - s_0).max(eps), log_pos)
+        } else {
+            // Normalize: t=0 at w=0, t→1 at w→-∞
+            ((s_0 - s_raw) / s_0.max(eps), log_neg)
+        };
+
+        (midpoint + t.clamp(0.0, 1.0) * (target_log - midpoint)).exp()
     }
 
     /// Soft sigmoid-based filter. Uses the hash value directly against an adjusted frac_max.
@@ -772,8 +800,9 @@ impl HashBiasTable {
         file.write_all(&self.negative_fscale.to_le_bytes())?;
         file.write_all(&self.k_pos.to_le_bytes())?;
         file.write_all(&self.k_neg.to_le_bytes())?;
-        file.write_all(&self.deadzone_pos.to_le_bytes())?;
-        file.write_all(&self.deadzone_neg.to_le_bytes())?;
+        file.write_all(&self.center_pos.to_le_bytes())?;
+        file.write_all(&self.center_neg.to_le_bytes())?;
+        file.write_all(&self.unbiased_fscale.to_le_bytes())?;
 
         for &seed in &self.seeds {
             file.write_all(&seed.to_le_bytes())?;
@@ -851,10 +880,13 @@ impl HashBiasTable {
         let k_neg = f32::from_le_bytes(buf4);
 
         file.read_exact(&mut buf4)?;
-        let deadzone_pos = f32::from_le_bytes(buf4);
+        let center_pos = f32::from_le_bytes(buf4);
 
         file.read_exact(&mut buf4)?;
-        let deadzone_neg = f32::from_le_bytes(buf4);
+        let center_neg = f32::from_le_bytes(buf4);
+
+        file.read_exact(&mut buf8)?;
+        let unbiased_fscale = u64::from_le_bytes(buf8);
 
         let mut seeds = Vec::with_capacity(depth);
         for _ in 0..depth {
@@ -895,13 +927,14 @@ impl HashBiasTable {
             negative_fscale,
             k_pos,
             k_neg,
-            deadzone_pos,
-            deadzone_neg,
+            center_pos,
+            center_neg,
+            unbiased_fscale,
         })
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4 + 4 + 4 + 4; // 67 bytes
+        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4 + 4 + 4 + 4 + 8; // 75 bytes
         let seeds_size = self.config.depth * 8;
         let weights_size = self.config.width * self.config.depth;
         let total_size = header_size + seeds_size + weights_size;
@@ -921,8 +954,9 @@ impl HashBiasTable {
         out.extend_from_slice(&self.negative_fscale.to_le_bytes());
         out.extend_from_slice(&self.k_pos.to_le_bytes());
         out.extend_from_slice(&self.k_neg.to_le_bytes());
-        out.extend_from_slice(&self.deadzone_pos.to_le_bytes());
-        out.extend_from_slice(&self.deadzone_neg.to_le_bytes());
+        out.extend_from_slice(&self.center_pos.to_le_bytes());
+        out.extend_from_slice(&self.center_neg.to_le_bytes());
+        out.extend_from_slice(&self.unbiased_fscale.to_le_bytes());
 
         for &seed in &self.seeds {
             out.extend_from_slice(&seed.to_le_bytes());
@@ -935,9 +969,9 @@ impl HashBiasTable {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 63 {
+        if data.len() < 75 {
             anyhow::bail!(
-                "Bias table data too small: {} bytes (expected >= 63)",
+                "Bias table data too small: {} bytes (expected >= 75)",
                 data.len()
             );
         }
@@ -968,10 +1002,11 @@ impl HashBiasTable {
         let negative_fscale = u64::from_le_bytes(data[43..51].try_into().unwrap());
         let k_pos = f32::from_le_bytes(data[51..55].try_into().unwrap());
         let k_neg = f32::from_le_bytes(data[55..59].try_into().unwrap());
-        let deadzone_pos = f32::from_le_bytes(data[59..63].try_into().unwrap());
-        let deadzone_neg = f32::from_le_bytes(data[63..67].try_into().unwrap());
+        let center_pos = f32::from_le_bytes(data[59..63].try_into().unwrap());
+        let center_neg = f32::from_le_bytes(data[63..67].try_into().unwrap());
+        let unbiased_fscale = u64::from_le_bytes(data[67..75].try_into().unwrap());
 
-        let seeds_start = 67;
+        let seeds_start = 75;
         let seeds_end = seeds_start + depth * 8;
         let weights_start = seeds_end;
         let weights_end = weights_start + width * depth;
@@ -1023,8 +1058,9 @@ impl HashBiasTable {
             negative_fscale,
             k_pos,
             k_neg,
-            deadzone_pos,
-            deadzone_neg,
+            center_pos,
+            center_neg,
+            unbiased_fscale,
         })
     }
 
@@ -1095,7 +1131,7 @@ impl HashBiasTable {
         );
         eprintln!("  Smoothing (alpha): {:.1}", self.alpha);
         if self.is_soft_filter() {
-            eprintln!("  Filter mode: soft sigmoid (piecewise, centered at 0)");
+            eprintln!("  Filter mode: soft sigmoid (piecewise, w=0 fixed)");
         } else {
             eprintln!("  Filter mode: hard cutoff");
         }
@@ -1119,8 +1155,9 @@ impl HashBiasTable {
         if self.is_soft_filter() {
             eprintln!("  k_pos:               {:.4}", self.k_pos);
             eprintln!("  k_neg:               {:.4}", self.k_neg);
-            eprintln!("  deadzone_pos:        {:.2}", self.deadzone_pos);
-            eprintln!("  deadzone_neg:        {:.2}", self.deadzone_neg);
+            if self.unbiased_fscale > 0 {
+                eprintln!("  unbiased_fscale:     {}", self.unbiased_fscale);
+            }
 
             eprintln!("  reference points:");
             for p in self.soft_filter_reference_points() {
@@ -1165,21 +1202,26 @@ impl HashBiasTable {
         let k_neg = self.k_neg as f64;
         let threshold_q = self.threshold as i32;
         let ln19 = 19.0_f64.ln();
+        let center_pos = self.center_pos as f64;
+        let center_neg = self.center_neg as f64;
 
-        // Asymmetric 5%/95% bounds centered at 0
+        // 5%/95% bounds relative to shifted centers
         let neg_5pct_qi = if k_neg > 0.0 {
-            (-ln19 / k_neg).round() as i32
+            (center_neg - ln19 / k_neg).round() as i32
         } else {
             -127
         };
         let pos_95pct_qi = if k_pos > 0.0 {
-            (ln19 / k_pos).round() as i32
+            (center_pos + ln19 / k_pos).round() as i32
         } else {
             127
         };
 
+        let center_pos_q = (center_pos * 10.0).round() as i32;
+        let center_neg_q = (center_neg * 10.0).round() as i32;
+
         eprintln!();
-        eprintln!("Sigmoid response curve (piecewise, centered at 0):");
+        eprintln!("Sigmoid response curve (piecewise, w=0 fixed at geometric mean):");
         eprintln!(
             "  Bounds: {:.2} (neg 5%) \u{2014} 0.00 (unseen/midpoint) \u{2014} {:.2} (pos 95%)",
             neg_5pct_qi as f64 / 10.0,
@@ -1194,6 +1236,8 @@ impl HashBiasTable {
         }
         points.insert(0);
         points.insert(threshold_q);
+        points.insert(center_pos_q.clamp(-127, 127));
+        points.insert(center_neg_q.clamp(-127, 127));
         points.insert(neg_5pct_qi.clamp(-127, 127));
         points.insert(pos_95pct_qi.clamp(-127, 127));
 
@@ -1216,10 +1260,16 @@ impl HashBiasTable {
 
             let mut markers: Vec<&str> = Vec::new();
             if *q == 0 {
-                markers.push("unseen");
+                markers.push("unseen/midpoint");
             }
             if *q == threshold_q && *q != 0 {
                 markers.push("threshold");
+            }
+            if *q == center_pos_q && *q != 0 {
+                markers.push("center_pos");
+            }
+            if *q == center_neg_q && *q != 0 {
+                markers.push("center_neg");
             }
             if *q == neg_5pct_qi && *q != 0 {
                 markers.push("neg 5%");
@@ -1405,7 +1455,7 @@ pub fn format_bp(bp: u64) -> String {
 }
 
 pub const BIAS_TABLE_SERIALIZED_SIZE: usize =
-    63 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
+    75 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
 
 impl PartialEq for HashBiasTable {
     fn eq(&self, other: &Self) -> bool {
@@ -1421,8 +1471,9 @@ impl PartialEq for HashBiasTable {
             && self.negative_fscale == other.negative_fscale
             && self.k_pos == other.k_pos
             && self.k_neg == other.k_neg
-            && self.deadzone_pos == other.deadzone_pos
-            && self.deadzone_neg == other.deadzone_neg
+            && self.center_pos == other.center_pos
+            && self.center_neg == other.center_neg
+            && self.unbiased_fscale == other.unbiased_fscale
             && self.seeds == other.seeds
             && self.weights == other.weights
     }
@@ -1534,7 +1585,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
         assert!(table.threshold >= -127);
     }
 
@@ -1566,7 +1617,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
 
         let output = NamedTempFile::new().unwrap();
         table.save(output.path()).unwrap();
@@ -1605,7 +1656,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
 
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
@@ -1641,7 +1692,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
 
         let mut passed = 0;
         let mut failed = 0;
@@ -1690,7 +1741,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
         assert!(table.threshold >= -127);
         assert!(table.fold_enrichment() >= 1.0);
     }
@@ -1712,8 +1763,7 @@ mod tests {
             target_negative_retention: None,
             positive_fscale: None,
             negative_fscale: None,
-            deadzone_pos: 0.0,
-            deadzone_neg: 0.0,
+            unbiased_fscale: None,
         };
 
         let table = HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap();
@@ -1757,7 +1807,7 @@ mod tests {
 
         // Hard cutoff mode (positive_fscale=0, negative_fscale=0)
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
         assert!(!table.is_soft_filter());
 
         // Verify passes_filter matches weight >= threshold for many hashes
@@ -1802,7 +1852,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000, 0).unwrap();
         assert!(table.is_soft_filter());
 
         // Same hash always gives the same result
@@ -1841,7 +1891,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000, 0.0, 0.0).unwrap();
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000, 0).unwrap();
         assert!(table.is_soft_filter());
 
         let bytes = table.to_bytes();
@@ -1877,7 +1927,7 @@ mod tests {
         .unwrap();
 
         let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0.0, 0.0)
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0)
                 .unwrap();
         assert!(table.is_soft_filter());
 
@@ -1914,23 +1964,155 @@ mod tests {
         .unwrap();
 
         // positive_fscale < global fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 50, 1000, 0.0, 0.0);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 50, 1000, 0);
         assert!(result.is_err());
 
         // positive_fscale without negative_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 0, 0.0, 0.0);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 0, 0);
         assert!(result.is_err());
 
         // negative_fscale without positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 1000, 0.0, 0.0);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 1000, 0);
         assert!(result.is_err());
 
         // negative_fscale <= positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 100, 0.0, 0.0);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 100, 0);
         assert!(result.is_err());
 
         // Valid soft filter
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 0.0, 0.0);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 0);
         assert!(result.is_ok());
+
+        // unbiased_fscale < positive_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 50);
+        assert!(result.is_err());
+
+        // unbiased_fscale > negative_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 6000);
+        assert!(result.is_err());
+
+        // unbiased_fscale without soft filter → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 500);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_soft_filter_monotonicity() {
+        let pos = create_fasta(&["ATATATATATATATATATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 10,
+        };
+
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0)
+                .unwrap();
+        assert!(table.is_soft_filter());
+
+        let pos_fscale = table.positive_fscale as f64;
+        let neg_fscale = table.negative_fscale as f64;
+
+        // Positive side: effective_fscale should monotonically decrease toward positive_fscale
+        let mut prev = table.effective_fscale_at(1);
+        for w in 2..=127i8 {
+            let curr = table.effective_fscale_at(w);
+            assert!(
+                curr <= prev + 1e-6,
+                "Positive side not monotonic at w={}: prev={}, curr={}",
+                w, prev, curr
+            );
+            prev = curr;
+        }
+        // At w=127, should be closer to positive_fscale than to midpoint
+        let midpoint = (pos_fscale * neg_fscale).sqrt();
+        let at_127 = table.effective_fscale_at(127);
+        assert!(
+            at_127 < midpoint,
+            "w=127 should be below midpoint={}. got={}",
+            midpoint, at_127
+        );
+
+        // Negative side: effective_fscale should monotonically increase toward negative_fscale
+        let mut prev = table.effective_fscale_at(-1);
+        for w in (-127..=-2).rev() {
+            let w = w as i8;
+            let curr = table.effective_fscale_at(w);
+            assert!(
+                curr >= prev - 1e-6,
+                "Negative side not monotonic at w={}: prev={}, curr={}",
+                w, prev, curr
+            );
+            prev = curr;
+        }
+        // At w=-127, should be closer to negative_fscale than to midpoint
+        let at_neg127 = table.effective_fscale_at(-127);
+        assert!(
+            at_neg127 > midpoint,
+            "w=-127 should be above midpoint={}. got={}",
+            midpoint, at_neg127
+        );
+    }
+
+    #[test]
+    fn test_custom_unbiased_fscale() {
+        let pos = create_fasta(&["ATATATATATATATATATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 10,
+        };
+
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        // Custom unbiased_fscale = 500 (between 100 and 10_000)
+        let table = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 500,
+        )
+        .unwrap();
+        assert!(table.is_soft_filter());
+        assert_eq!(table.unbiased_fscale, 500);
+
+        // w=0 should return unbiased_fscale, not geometric mean
+        assert_approx_eq(table.effective_fscale_at(0), 500.0, 1e-6);
+
+        // Geometric mean would be sqrt(100 * 10_000) = 1000
+        // Our custom value 500 is different
+        let geom_mean = (100.0_f64 * 10_000.0_f64).sqrt();
+        assert!((table.effective_fscale_at(0) - geom_mean).abs() > 1.0);
     }
 }

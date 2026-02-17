@@ -154,16 +154,10 @@ pub enum BiasCommands {
         /// Use "drop" to discard hashes below the threshold.
         #[arg(long)]
         negative_fscale: Option<String>,
-        /// Deadzone fraction for positively biased k-mers (0.0–1.0).
-        /// Fraction of positive weight range that stays flat before sigmoid kicks in.
-        /// E.g. 0.95 means only the top 5% of positively biased k-mers get boosted.
-        #[arg(long, default_value = "0.0")]
-        deadzone_pos: f32,
-        /// Deadzone fraction for negatively biased k-mers (0.0–1.0).
-        /// Fraction of negative weight range that stays flat before sigmoid kicks in.
-        /// E.g. 0.0 means transition starts immediately (cliff behavior with high k_neg).
-        #[arg(long, default_value = "0.0")]
-        deadzone_neg: f32,
+        /// Effective fscale at w=0 (unseen/balanced k-mers) for soft filter.
+        /// Default: geometric mean of positive-fscale and negative-fscale.
+        #[arg(long)]
+        unbiased_fscale: Option<u64>,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,
