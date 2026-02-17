@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-const BIAS_MAGIC: &[u8; 4] = b"BIA5";
-const BIAS_VERSION: u32 = 5;
+const BIAS_MAGIC: &[u8; 4] = b"BIA1";
+const BIAS_VERSION: u32 = 1;
 
 const DEFAULT_CMS_WIDTH: usize = 1 << 20;
 const DEFAULT_CMS_DEPTH: usize = 5;
@@ -226,6 +226,8 @@ pub struct BiasCreateConfig {
     pub positive_fscale: Option<u64>,
     pub negative_fscale: Option<u64>,
     pub unbiased_fscale: Option<u64>,
+    pub lambda: Option<f32>,
+    pub gamma: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -249,10 +251,11 @@ pub struct HashBiasTable {
     pub max_fold_enrichment: f32,
     pub positive_fscale: u64,
     pub negative_fscale: u64,
-    pub k_pos: f32,
-    pub k_neg: f32,
-    pub center_pos: f32,
+    pub lambda: f32,
+    pub gamma: f32,
     pub unbiased_fscale: u64,
+    pub fscale_lut: [u64; 255],
+    frac_max_lut: [u64; 255],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -291,6 +294,228 @@ fn validate_cms_compatibility(positive: &RawHashCounts, negative: &RawHashCounts
         );
     }
     Ok(())
+}
+
+// ── LUT Optimizer ──────────────────────────────────────────────────────────
+
+/// Build a histogram of hashes per weight bucket, normalized with Laplace smoothing.
+/// Returns `[f64; 255]` where index `i` corresponds to quantized weight `i - 127`.
+fn histogram_weights(hashes: &[u64], bias_table: &HashBiasTable) -> [f64; 255] {
+    let mut counts = [0u64; 255];
+    for &h in hashes {
+        let w = bias_table.weight(h);
+        let idx = HashBiasTable::weight_to_index(w);
+        counts[idx] += 1;
+    }
+    let total: f64 = counts.iter().sum::<u64>() as f64 + 255.0; // Laplace smoothing
+    let mut hist = [0.0f64; 255];
+    for i in 0..255 {
+        hist[i] = (counts[i] as f64 + 1.0) / total;
+    }
+    hist
+}
+
+/// Pool Adjacent Violators Algorithm — enforce monotonically non-decreasing.
+/// Operates in-place on a slice. Clamps values to `[lo, hi]`.
+fn pava_increasing(r: &mut [f64], lo: f64, hi: f64) {
+    let n = r.len();
+    if n == 0 {
+        return;
+    }
+    // Clamp first
+    for v in r.iter_mut() {
+        *v = v.clamp(lo, hi);
+    }
+    // Weighted PAVA using block representation
+    // Each block stores (sum_of_values, count)
+    let mut blocks: Vec<(f64, usize)> = r.iter().map(|&v| (v, 1)).collect();
+    let mut i = 0;
+    while i < blocks.len() - 1 {
+        let mean_i = blocks[i].0 / blocks[i].1 as f64;
+        let mean_next = blocks[i + 1].0 / blocks[i + 1].1 as f64;
+        if mean_i > mean_next {
+            // Pool blocks i and i+1
+            blocks[i].0 += blocks[i + 1].0;
+            blocks[i].1 += blocks[i + 1].1;
+            blocks.remove(i + 1);
+            // Step back
+            if i > 0 {
+                i -= 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    // Expand blocks back into r
+    let mut idx = 0;
+    for (sum, count) in &blocks {
+        let val = (sum / *count as f64).clamp(lo, hi);
+        for _ in 0..*count {
+            r[idx] = val;
+            idx += 1;
+        }
+    }
+}
+
+/// Optimize the LUT via projected gradient ascent.
+///
+/// - `p_pos[i]`, `p_neg[i]`: histogram weights for positive/negative samples
+/// - `lambda`: penalty on negative retention
+/// - `gamma`: smoothness penalty coefficient
+/// - `r_min`, `r_max`: retention bounds (1/negative_fscale, 1/positive_fscale)
+/// - `anchor_idx`: if Some, fix that index to `anchor_val` (w=0 pinned to unbiased_fscale)
+/// - Returns: `[u64; 255]` fscale values (fscale = round(1/r))
+fn optimize_lut(
+    p_pos: &[f64; 255],
+    p_neg: &[f64; 255],
+    lambda: f64,
+    gamma: f64,
+    r_min: f64,
+    r_max: f64,
+    anchor_idx: Option<usize>,
+    anchor_val: f64,
+) -> [u64; 255] {
+    let mut r = [0.0f64; 255];
+
+    // Initialize linearly from r_min to r_max
+    for i in 0..255 {
+        r[i] = r_min + (r_max - r_min) * (i as f64 / 254.0);
+    }
+
+    // Pin anchor
+    if let Some(idx) = anchor_idx {
+        r[idx] = anchor_val;
+    }
+
+    let lr = 0.01;
+    let max_iters = 2000;
+
+    for _iter in 0..max_iters {
+        let mut grad = [0.0f64; 255];
+
+        // Objective gradient: P+(i) - lambda * P-(i)
+        for i in 0..255 {
+            grad[i] = p_pos[i] - lambda * p_neg[i];
+        }
+
+        // Smoothness penalty gradient: -2*gamma*(2*r[i] - r[i-1] - r[i+1])
+        if gamma > 0.0 {
+            for i in 0..255 {
+                let left = if i > 0 { r[i - 1] } else { r[i] };
+                let right = if i < 254 { r[i + 1] } else { r[i] };
+                grad[i] -= 2.0 * gamma * (2.0 * r[i] - left - right);
+            }
+        }
+
+        // Zero anchor gradient
+        if let Some(idx) = anchor_idx {
+            grad[idx] = 0.0;
+        }
+
+        // Gradient step
+        let mut delta = 0.0f64;
+        for i in 0..255 {
+            let old = r[i];
+            r[i] += lr * grad[i];
+            r[i] = r[i].clamp(r_min, r_max);
+            delta += (r[i] - old).abs();
+        }
+
+        // Restore anchor
+        if let Some(idx) = anchor_idx {
+            r[idx] = anchor_val;
+        }
+
+        // PAVA projection: run on left/right halves independently with anchor-aware bounds
+        if let Some(idx) = anchor_idx {
+            // Left half: indices 0..=idx, must be in [r_min, anchor_val]
+            pava_increasing(&mut r[..=idx], r_min, anchor_val);
+            // Right half: indices idx..255, must be in [anchor_val, r_max]
+            pava_increasing(&mut r[idx..], anchor_val, r_max);
+            // Restore anchor (PAVA may have nudged it)
+            r[idx] = anchor_val;
+        } else {
+            pava_increasing(&mut r[..], r_min, r_max);
+        }
+
+        // Convergence check
+        if delta < 1e-10 {
+            break;
+        }
+    }
+
+    // Convert retention → fscale: fscale = round(1/r), clamped
+    let fscale_min = (1.0 / r_max).round() as u64;
+    let fscale_max = (1.0 / r_min).round() as u64;
+    let mut lut = [0u64; 255];
+    for i in 0..255 {
+        let fs = if r[i] <= 0.0 {
+            fscale_max
+        } else {
+            (1.0 / r[i]).round() as u64
+        };
+        lut[i] = fs.clamp(fscale_min, fscale_max);
+    }
+    lut
+}
+
+/// Two-phase lambda search: coarse grid scan + binary search.
+/// Returns lambda that achieves the target retention for the given sample type.
+///
+/// `target_fn` computes retention given a lambda value. It should return the
+/// retention metric to match against `target`.
+fn search_lambda<F>(target: f64, max_lambda: f64, mut target_fn: F) -> f64
+where
+    F: FnMut(f64) -> f64,
+{
+    // Phase A: coarse grid scan to bracket the target
+    let grid_steps = 50;
+    let mut best_lo = 0.0f64;
+    let mut best_hi = max_lambda;
+    let mut val_lo = target_fn(best_lo);
+    let mut found_bracket = false;
+
+    for i in 1..=grid_steps {
+        let lam = max_lambda * i as f64 / grid_steps as f64;
+        let val = target_fn(lam);
+        if (val_lo >= target && val <= target) || (val_lo <= target && val >= target) {
+            best_lo = max_lambda * (i - 1) as f64 / grid_steps as f64;
+            best_hi = lam;
+            found_bracket = true;
+            break;
+        }
+        val_lo = val;
+    }
+
+    if !found_bracket {
+        // If no bracket found, return the endpoint closer to target
+        let val_0 = target_fn(0.0);
+        let val_max = target_fn(max_lambda);
+        return if (val_0 - target).abs() < (val_max - target).abs() {
+            0.0
+        } else {
+            max_lambda
+        };
+    }
+
+    // Phase B: binary search within bracket
+    for _ in 0..50 {
+        let mid = (best_lo + best_hi) / 2.0;
+        let val_mid = target_fn(mid);
+        let val_at_lo = target_fn(best_lo);
+
+        if (val_at_lo >= target) == (val_mid >= target) {
+            best_lo = mid;
+        } else {
+            best_hi = mid;
+        }
+
+        if (best_hi - best_lo) < 1e-6 {
+            break;
+        }
+    }
+
+    (best_lo + best_hi) / 2.0
 }
 
 impl HashBiasTable {
@@ -367,6 +592,8 @@ impl HashBiasTable {
             config.positive_fscale.unwrap_or(0),
             config.negative_fscale.unwrap_or(0),
             config.unbiased_fscale.unwrap_or(0),
+            config.lambda,
+            config.gamma,
         )?;
 
         if let Some(ref pb) = progress {
@@ -386,6 +613,8 @@ impl HashBiasTable {
         positive_fscale: u64,
         negative_fscale: u64,
         unbiased_fscale: u64,
+        lambda_arg: Option<f32>,
+        gamma: f32,
     ) -> Result<Self> {
         validate_cms_compatibility(positive, negative)?;
 
@@ -403,6 +632,16 @@ impl HashBiasTable {
             && (!target.is_finite() || !(0.0..=1.0).contains(&target))
         {
             anyhow::bail!("target_negative_retention must be in [0,1], got {}", target);
+        }
+
+        if let Some(lam) = lambda_arg {
+            if !lam.is_finite() || lam < 0.0 {
+                anyhow::bail!("lambda must be finite and >= 0, got {}", lam);
+            }
+        }
+
+        if !gamma.is_finite() || gamma < 0.0 {
+            anyhow::bail!("gamma must be finite and >= 0, got {}", gamma);
         }
 
         // Enforce soft-filter invariants
@@ -479,6 +718,11 @@ impl HashBiasTable {
             None, // always maximize — threshold is informational for soft mode
         )?;
 
+        // Initialize with default LUT (all base fscale)
+        let base_fscale = positive.config.fscale;
+        let fscale_lut = [base_fscale; 255];
+        let frac_max_lut = [0u64; 255];
+
         let mut table = Self {
             config: positive.config.clone(),
             seeds,
@@ -490,16 +734,15 @@ impl HashBiasTable {
             max_fold_enrichment: calibration.max_fold_enrichment,
             positive_fscale,
             negative_fscale,
-            k_pos: 0.0,
-            k_neg: 0.0,
-            center_pos: 0.0,
+            lambda: lambda_arg.unwrap_or(0.0),
+            gamma,
             unbiased_fscale,
+            fscale_lut,
+            frac_max_lut,
         };
 
-        // Auto-derive centers and k_pos/k_neg when soft filter is active
+        // LUT optimization when soft filter is active
         if table.is_soft_filter() {
-            // Center transition around threshold
-            table.center_pos = calibration.threshold as f32;
             let fscale = table.config.fscale;
             let frac_max = u64::MAX / fscale;
 
@@ -530,21 +773,77 @@ impl HashBiasTable {
                 .filter(|&h| h < frac_max)
                 .collect();
 
-            // Derive k_pos
-            table.k_pos = if let Some(target) = target_positive_retention {
-                Self::search_k_for_target_retention(&table, &pos_in_range, target, true)
+            // Histogram positive/negative hashes by weight bucket
+            let p_pos = histogram_weights(&pos_in_range, &table);
+            let p_neg = histogram_weights(&neg_in_range, &table);
+
+            // Retention bounds from fscale endpoints
+            let r_min = 1.0 / negative_fscale as f64; // lowest retention (most filtered)
+            let r_max = 1.0 / positive_fscale as f64; // highest retention (least filtered)
+
+            // Anchor w=0 to unbiased_fscale if set, else geometric mean
+            let anchor_idx = Some(127usize); // w=0
+            let anchor_fscale = if unbiased_fscale > 0 {
+                unbiased_fscale as f64
             } else {
-                Self::sweep_k_for_max_enrichment(&table, &pos_in_range, &neg_in_range, true)
+                (positive_fscale as f64 * negative_fscale as f64).sqrt()
+            };
+            let anchor_val = 1.0 / anchor_fscale;
+
+            // Determine lambda
+            let gamma_f64 = gamma as f64;
+            let resolved_lambda = if let Some(lam) = lambda_arg {
+                lam as f64
+            } else if let Some(target) = target_negative_retention {
+                // Auto-derive lambda to hit negative retention target
+                let target_f64 = target as f64;
+                search_lambda(target_f64, 1000.0, |lam| {
+                    let lut = optimize_lut(
+                        &p_pos, &p_neg, lam, gamma_f64, r_min, r_max, anchor_idx, anchor_val,
+                    );
+                    let mut trial = table.clone();
+                    trial.fscale_lut = lut;
+                    trial.recompute_frac_max_lut();
+                    let (_, neg_ret) =
+                        Self::compute_retention(&trial, &pos_in_range, &neg_in_range);
+                    neg_ret as f64
+                })
+            } else if let Some(target) = target_positive_retention {
+                // Auto-derive lambda to hit positive retention target
+                let target_f64 = target as f64;
+                search_lambda(target_f64, 1000.0, |lam| {
+                    let lut = optimize_lut(
+                        &p_pos, &p_neg, lam, gamma_f64, r_min, r_max, anchor_idx, anchor_val,
+                    );
+                    let mut trial = table.clone();
+                    trial.fscale_lut = lut;
+                    trial.recompute_frac_max_lut();
+                    let (pos_ret, _) =
+                        Self::compute_retention(&trial, &pos_in_range, &neg_in_range);
+                    pos_ret as f64
+                })
+            } else {
+                // Default lambda
+                10.0
             };
 
-            // Derive k_neg (with k_pos already set)
-            table.k_neg = if let Some(target) = target_negative_retention {
-                Self::search_k_for_target_retention(&table, &neg_in_range, target, false)
-            } else {
-                Self::sweep_k_for_max_enrichment(&table, &pos_in_range, &neg_in_range, false)
-            };
+            table.lambda = resolved_lambda as f32;
 
-            // Final retention computation with both k values set
+            // Run optimizer with resolved lambda
+            table.fscale_lut = optimize_lut(
+                &p_pos,
+                &p_neg,
+                resolved_lambda,
+                gamma_f64,
+                r_min,
+                r_max,
+                anchor_idx,
+                anchor_val,
+            );
+
+            table.recompute_frac_max_lut();
+
+            // Compute actual retention
             let (pos_ret, neg_ret) = Self::compute_retention(&table, &pos_in_range, &neg_in_range);
             table.positive_retention = pos_ret;
             table.negative_retention = neg_ret;
@@ -555,6 +854,7 @@ impl HashBiasTable {
             }
         }
 
+        table.recompute_frac_max_lut();
         Ok(table)
     }
 
@@ -580,95 +880,6 @@ impl HashBiasTable {
             neg_passing as f32 / neg_in_range.len() as f32
         };
         (pos_ret, neg_ret)
-    }
-
-    /// Binary search for k that achieves the target retention.
-    /// `for_positive_side`: true = searching k_pos (affects w>=center), false = searching k_neg (affects w<center).
-    fn search_k_for_target_retention(
-        table: &Self,
-        hashes: &[u64],
-        target: f32,
-        for_positive_side: bool,
-    ) -> f32 {
-        if hashes.is_empty() {
-            return 0.0;
-        }
-
-        let mut lo: f32 = 0.001;
-        let mut hi: f32 = 5.0;
-
-        for _ in 0..50 {
-            let mid = (lo + hi) / 2.0;
-            let mut probe = table.clone();
-            if for_positive_side {
-                probe.k_pos = mid;
-            } else {
-                probe.k_neg = mid;
-            }
-
-            let retention = hashes
-                .iter()
-                .filter(|&&h| probe.passes_soft_filter(h))
-                .count() as f32
-                / hashes.len() as f32;
-
-            if for_positive_side {
-                // Higher k_pos → higher positive retention
-                if retention < target {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            } else {
-                // Higher k_neg → lower negative retention
-                if retention > target {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-        }
-
-        (lo + hi) / 2.0
-    }
-
-    /// Sweep k over a log-scale grid to maximize fold enrichment.
-    /// `for_positive_side`: true = sweeping k_pos (w>=center), false = sweeping k_neg (w<center).
-    fn sweep_k_for_max_enrichment(
-        table: &Self,
-        pos_in_range: &[u64],
-        neg_in_range: &[u64],
-        for_positive_side: bool,
-    ) -> f32 {
-        const STEPS: usize = 200;
-        const MIN_RETENTION: f64 = 1e-6;
-        let log_lo = 0.001_f64.ln();
-        let log_hi = 5.0_f64.ln();
-
-        let mut best_k: f32 = 0.001;
-        let mut best_enrichment: f64 = 0.0;
-
-        for i in 0..=STEPS {
-            let k = (log_lo + (log_hi - log_lo) * i as f64 / STEPS as f64).exp() as f32;
-            let mut probe = table.clone();
-            if for_positive_side {
-                probe.k_pos = k;
-            } else {
-                probe.k_neg = k;
-            }
-
-            let (pos_ret, neg_ret) = Self::compute_retention(&probe, pos_in_range, neg_in_range);
-
-            let neg_ret = (neg_ret as f64).max(MIN_RETENTION);
-            let enrichment = pos_ret as f64 / neg_ret;
-
-            if enrichment > best_enrichment && enrichment.is_finite() {
-                best_enrichment = enrichment;
-                best_k = k;
-            }
-        }
-
-        best_k
     }
 
     #[inline]
@@ -698,45 +909,34 @@ impl HashBiasTable {
         self.positive_fscale > 0 && self.negative_fscale > 0
     }
 
-    /// Compute the effective fscale using a threshold-centered sigmoid.
-    ///
-    /// - w=0 returns the unbiased_fscale anchor when configured, otherwise geometric mean.
-    /// - w!=0 follows a single negative→positive transition centered at center_pos.
-    /// - k_neg controls steepness below center; k_pos controls steepness at/above center.
+    /// Map a quantized weight to a LUT index.
     #[inline]
-    fn effective_fscale(&self, w: i8) -> f64 {
-        let log_pos = (self.positive_fscale as f64).ln();
-        let log_neg = (self.negative_fscale as f64).ln();
-        let unbiased = if self.unbiased_fscale > 0 {
-            (self.unbiased_fscale as f64).ln()
-        } else {
-            (log_pos + log_neg) / 2.0
-        };
-
-        if w == 0 {
-            return unbiased.exp();
-        }
-
-        let center = self.center_pos as f64;
-        let w_f = w as f64;
-        let k = if w_f < center {
-            self.k_neg as f64
-        } else {
-            self.k_pos as f64
-        };
-
-        let s = 1.0 / (1.0 + (-k * (w_f - center)).exp());
-        let target_log = log_neg + s * (log_pos - log_neg);
-
-        target_log.exp()
+    fn weight_to_index(w: i8) -> usize {
+        (w as i16 + 127) as usize
     }
 
-    /// Soft sigmoid-based filter. Uses the hash value directly against an adjusted frac_max.
+    /// Recompute the precomputed frac_max LUT from fscale_lut.
+    fn recompute_frac_max_lut(&mut self) {
+        for i in 0..255 {
+            self.frac_max_lut[i] = if self.fscale_lut[i] == 0 {
+                u64::MAX
+            } else {
+                u64::MAX / self.fscale_lut[i]
+            };
+        }
+    }
+
+    /// Compute the effective fscale for a given weight via LUT lookup.
+    #[inline]
+    fn effective_fscale(&self, w: i8) -> f64 {
+        self.fscale_lut[Self::weight_to_index(w)] as f64
+    }
+
+    /// Soft LUT-based filter. Uses precomputed frac_max for zero floating-point overhead.
     #[inline]
     fn passes_soft_filter(&self, hash: u64) -> bool {
         let w = self.weight(hash);
-        let eff = self.effective_fscale(w);
-        hash < (u64::MAX as f64 / eff) as u64
+        hash < self.frac_max_lut[Self::weight_to_index(w)]
     }
 
     pub fn k(&self) -> u8 {
@@ -783,10 +983,14 @@ impl HashBiasTable {
         file.write_all(&self.negative_retention.to_le_bytes())?;
         file.write_all(&self.positive_fscale.to_le_bytes())?;
         file.write_all(&self.negative_fscale.to_le_bytes())?;
-        file.write_all(&self.k_pos.to_le_bytes())?;
-        file.write_all(&self.k_neg.to_le_bytes())?;
-        file.write_all(&self.center_pos.to_le_bytes())?;
+        file.write_all(&self.lambda.to_le_bytes())?;
+        file.write_all(&self.gamma.to_le_bytes())?;
+        file.write_all(&[0u8; 4])?; // reserved
         file.write_all(&self.unbiased_fscale.to_le_bytes())?;
+
+        for &f in &self.fscale_lut {
+            file.write_all(&f.to_le_bytes())?;
+        }
 
         for &seed in &self.seeds {
             file.write_all(&seed.to_le_bytes())?;
@@ -807,7 +1011,7 @@ impl HashBiasTable {
 
         if &magic != BIAS_MAGIC {
             anyhow::bail!(
-                "Invalid bias table file (bad magic, expected BIA5): {}",
+                "Invalid bias table file (bad magic, expected BIA1): {}",
                 path.display()
             );
         }
@@ -858,16 +1062,27 @@ impl HashBiasTable {
         let negative_fscale = u64::from_le_bytes(buf8);
 
         file.read_exact(&mut buf4)?;
-        let k_pos = f32::from_le_bytes(buf4);
+        let lambda = f32::from_le_bytes(buf4);
 
         file.read_exact(&mut buf4)?;
-        let k_neg = f32::from_le_bytes(buf4);
+        let gamma = f32::from_le_bytes(buf4);
 
-        file.read_exact(&mut buf4)?;
-        let center_pos = f32::from_le_bytes(buf4);
+        let mut reserved = [0u8; 4];
+        file.read_exact(&mut reserved)?;
+        if reserved != [0u8; 4] {
+            anyhow::bail!(
+                "Reserved bytes are non-zero — file may be corrupt or unsupported format"
+            );
+        }
 
         file.read_exact(&mut buf8)?;
         let unbiased_fscale = u64::from_le_bytes(buf8);
+
+        let mut fscale_lut = [0u64; 255];
+        for entry in &mut fscale_lut {
+            file.read_exact(&mut buf8)?;
+            *entry = u64::from_le_bytes(buf8);
+        }
 
         let mut seeds = Vec::with_capacity(depth);
         for _ in 0..depth {
@@ -895,7 +1110,7 @@ impl HashBiasTable {
             f32::INFINITY
         };
 
-        Ok(Self {
+        let mut table = Self {
             config,
             seeds,
             weights,
@@ -906,15 +1121,18 @@ impl HashBiasTable {
             max_fold_enrichment,
             positive_fscale,
             negative_fscale,
-            k_pos,
-            k_neg,
-            center_pos,
+            lambda,
+            gamma,
             unbiased_fscale,
-        })
+            fscale_lut,
+            frac_max_lut: [0u64; 255],
+        };
+        table.recompute_frac_max_lut();
+        Ok(table)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4 + 4 + 4 + 8; // 71 bytes
+        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4 + 4 + 4 + 8 + 255 * 8; // 2111 bytes
         let seeds_size = self.config.depth * 8;
         let weights_size = self.config.width * self.config.depth;
         let total_size = header_size + seeds_size + weights_size;
@@ -932,10 +1150,14 @@ impl HashBiasTable {
         out.extend_from_slice(&self.negative_retention.to_le_bytes());
         out.extend_from_slice(&self.positive_fscale.to_le_bytes());
         out.extend_from_slice(&self.negative_fscale.to_le_bytes());
-        out.extend_from_slice(&self.k_pos.to_le_bytes());
-        out.extend_from_slice(&self.k_neg.to_le_bytes());
-        out.extend_from_slice(&self.center_pos.to_le_bytes());
+        out.extend_from_slice(&self.lambda.to_le_bytes());
+        out.extend_from_slice(&self.gamma.to_le_bytes());
+        out.extend_from_slice(&[0u8; 4]); // reserved
         out.extend_from_slice(&self.unbiased_fscale.to_le_bytes());
+
+        for &f in &self.fscale_lut {
+            out.extend_from_slice(&f.to_le_bytes());
+        }
 
         for &seed in &self.seeds {
             out.extend_from_slice(&seed.to_le_bytes());
@@ -948,16 +1170,18 @@ impl HashBiasTable {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 71 {
+        const HEADER_SIZE: usize = 2111;
+        if data.len() < HEADER_SIZE {
             anyhow::bail!(
-                "Bias table data too small: {} bytes (expected >= 71)",
-                data.len()
+                "Bias table data too small: {} bytes (expected >= {})",
+                data.len(),
+                HEADER_SIZE
             );
         }
 
         let magic: [u8; 4] = data[0..4].try_into().unwrap();
         if &magic != BIAS_MAGIC {
-            anyhow::bail!("Invalid bias table magic bytes (expected BIA5)");
+            anyhow::bail!("Invalid bias table magic bytes (expected BIA1)");
         }
 
         let version = u32::from_le_bytes(data[4..8].try_into().unwrap());
@@ -979,12 +1203,23 @@ impl HashBiasTable {
         let negative_retention = f32::from_le_bytes(data[31..35].try_into().unwrap());
         let positive_fscale = u64::from_le_bytes(data[35..43].try_into().unwrap());
         let negative_fscale = u64::from_le_bytes(data[43..51].try_into().unwrap());
-        let k_pos = f32::from_le_bytes(data[51..55].try_into().unwrap());
-        let k_neg = f32::from_le_bytes(data[55..59].try_into().unwrap());
-        let center_pos = f32::from_le_bytes(data[59..63].try_into().unwrap());
+        let lambda = f32::from_le_bytes(data[51..55].try_into().unwrap());
+        let gamma = f32::from_le_bytes(data[55..59].try_into().unwrap());
+        let reserved: [u8; 4] = data[59..63].try_into().unwrap();
+        if reserved != [0u8; 4] {
+            anyhow::bail!(
+                "Reserved bytes are non-zero — file may be corrupt or unsupported format"
+            );
+        }
         let unbiased_fscale = u64::from_le_bytes(data[63..71].try_into().unwrap());
 
-        let seeds_start = 71;
+        let mut fscale_lut = [0u64; 255];
+        for i in 0..255 {
+            let offset = 71 + i * 8;
+            fscale_lut[i] = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        }
+
+        let seeds_start = HEADER_SIZE;
         let seeds_end = seeds_start + depth * 8;
         let weights_start = seeds_end;
         let weights_end = weights_start + width * depth;
@@ -1023,7 +1258,7 @@ impl HashBiasTable {
             f32::INFINITY
         };
 
-        Ok(Self {
+        let mut table = Self {
             config,
             seeds,
             weights,
@@ -1034,11 +1269,14 @@ impl HashBiasTable {
             max_fold_enrichment,
             positive_fscale,
             negative_fscale,
-            k_pos,
-            k_neg,
-            center_pos,
+            lambda,
+            gamma,
             unbiased_fscale,
-        })
+            fscale_lut,
+            frac_max_lut: [0u64; 255],
+        };
+        table.recompute_frac_max_lut();
+        Ok(table)
     }
 
     pub fn weight_stats(&self) -> (f32, f32, f32, f32, usize, usize) {
@@ -1108,7 +1346,10 @@ impl HashBiasTable {
         );
         eprintln!("  Smoothing (alpha): {:.1}", self.alpha);
         if self.is_soft_filter() {
-            eprintln!("  Filter mode: soft sigmoid (threshold-centered, w=0 override)");
+            eprintln!(
+                "  Filter mode: optimized LUT (lambda={:.2}, gamma={:.2})",
+                self.lambda, self.gamma
+            );
         } else {
             eprintln!("  Filter mode: hard cutoff");
         }
@@ -1130,8 +1371,8 @@ impl HashBiasTable {
         );
         eprintln!("  fold enrichment:     {:.2}x", self.fold_enrichment());
         if self.is_soft_filter() {
-            eprintln!("  k_pos:               {:.4}", self.k_pos);
-            eprintln!("  k_neg:               {:.4}", self.k_neg);
+            eprintln!("  lambda:              {:.4}", self.lambda);
+            eprintln!("  gamma:               {:.4}", self.gamma);
             if self.unbiased_fscale > 0 {
                 eprintln!("  unbiased_fscale:     {}", self.unbiased_fscale);
             }
@@ -1169,51 +1410,34 @@ impl HashBiasTable {
         );
 
         if self.is_soft_filter() {
-            self.print_sigmoid_curve(min, max);
+            self.print_lut_curve(min, max);
         }
     }
 
-    pub fn print_sigmoid_curve(&self, min: f32, max: f32) {
+    pub fn print_lut_curve(&self, min: f32, max: f32) {
         let base = self.config.fscale as f64;
-        let k_pos = self.k_pos as f64;
-        let k_neg = self.k_neg as f64;
         let threshold_q = self.threshold as i32;
-        let ln19 = 19.0_f64.ln();
-        let center_pos = self.center_pos as f64;
 
-        // 5%/95% bounds around threshold-centered transition
-        let neg_5pct_qi = if k_neg > 0.0 {
-            (center_pos - ln19 / k_neg).round() as i32
-        } else {
-            -127
-        };
-        let pos_95pct_qi = if k_pos > 0.0 {
-            (center_pos + ln19 / k_pos).round() as i32
-        } else {
-            127
-        };
-        let center_pos_q = (center_pos * 10.0).round() as i32;
+        // Collect distinct fscale values for summary
+        let distinct: std::collections::BTreeSet<u64> = self.fscale_lut.iter().copied().collect();
+        let lut_min = self.fscale_lut.iter().copied().min().unwrap_or(0);
+        let lut_max = self.fscale_lut.iter().copied().max().unwrap_or(0);
 
         eprintln!();
-        eprintln!("Sigmoid response curve (threshold-centered, w=0 override):");
         eprintln!(
-            "  Bounds: {:.2} (neg 5%) \u{2014} {:.2} (center/threshold) \u{2014} {:.2} (pos 95%)",
-            neg_5pct_qi as f64 / 10.0,
-            center_pos_q as f64 / 10.0,
-            pos_95pct_qi as f64 / 10.0
+            "LUT response curve (optimized, {} distinct fscale values):",
+            distinct.len()
         );
+        eprintln!("  fscale range: {} \u{2014} {}", lut_min, lut_max);
 
         let mut points = std::collections::BTreeSet::new();
-        let start_q = (min.floor() as i32) * 10;
-        let end_q = (max.ceil() as i32) * 10;
-        for q in (start_q..=end_q).step_by(10) {
+        let start_q = (min * QUANTIZATION_SCALE).floor() as i32;
+        let end_q = (max * QUANTIZATION_SCALE).ceil() as i32;
+        for q in start_q..=end_q {
             points.insert(q.clamp(-127, 127));
         }
         points.insert(0);
         points.insert(threshold_q);
-        points.insert(center_pos_q.clamp(-127, 127));
-        points.insert(neg_5pct_qi.clamp(-127, 127));
-        points.insert(pos_95pct_qi.clamp(-127, 127));
 
         eprintln!();
         eprintln!(
@@ -1234,19 +1458,10 @@ impl HashBiasTable {
 
             let mut markers: Vec<&str> = Vec::new();
             if *q == 0 {
-                markers.push("unseen override");
+                markers.push("unseen");
             }
             if *q == threshold_q && *q != 0 {
-                markers.push("threshold");
-            }
-            if *q == center_pos_q && *q != 0 {
-                markers.push("center");
-            }
-            if *q == neg_5pct_qi && *q != 0 {
-                markers.push("neg 5%");
-            }
-            if *q == pos_95pct_qi && *q != 0 {
-                markers.push("pos 95%");
+                markers.push("threshold (informational)");
             }
 
             let marker = if markers.is_empty() {
@@ -1426,7 +1641,7 @@ pub fn format_bp(bp: u64) -> String {
 }
 
 pub const BIAS_TABLE_SERIALIZED_SIZE: usize =
-    71 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
+    2111 + DEFAULT_CMS_DEPTH * 8 + DEFAULT_CMS_WIDTH * DEFAULT_CMS_DEPTH;
 
 impl PartialEq for HashBiasTable {
     fn eq(&self, other: &Self) -> bool {
@@ -1440,10 +1655,10 @@ impl PartialEq for HashBiasTable {
             && self.negative_retention == other.negative_retention
             && self.positive_fscale == other.positive_fscale
             && self.negative_fscale == other.negative_fscale
-            && self.k_pos == other.k_pos
-            && self.k_neg == other.k_neg
-            && self.center_pos == other.center_pos
+            && self.lambda == other.lambda
+            && self.gamma == other.gamma
             && self.unbiased_fscale == other.unbiased_fscale
+            && self.fscale_lut == other.fscale_lut
             && self.seeds == other.seeds
             && self.weights == other.weights
     }
@@ -1554,7 +1769,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
         assert!(table.threshold >= -127);
     }
 
@@ -1585,7 +1801,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
 
         let output = NamedTempFile::new().unwrap();
         table.save(output.path()).unwrap();
@@ -1623,7 +1840,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
 
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
@@ -1658,7 +1876,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
 
         let mut passed = 0;
         let mut failed = 0;
@@ -1706,7 +1925,8 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
         assert!(table.threshold >= -127);
         assert!(table.fold_enrichment() >= 1.0);
     }
@@ -1729,6 +1949,8 @@ mod tests {
             positive_fscale: None,
             negative_fscale: None,
             unbiased_fscale: None,
+            lambda: None,
+            gamma: 1.0,
         };
 
         let table = HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap();
@@ -1771,7 +1993,8 @@ mod tests {
         .unwrap();
 
         // Hard cutoff mode (positive_fscale=0, negative_fscale=0)
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
         assert!(!table.is_soft_filter());
 
         // Verify passes_filter matches weight >= threshold for many hashes
@@ -1815,7 +2038,9 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 1, 1000, 0, None, 1.0)
+                .unwrap();
         assert!(table.is_soft_filter());
 
         // Same hash always gives the same result
@@ -1853,7 +2078,9 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000, 0).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 10, 5000, 0, None, 1.0)
+                .unwrap();
         assert!(table.is_soft_filter());
 
         let bytes = table.to_bytes();
@@ -1888,8 +2115,10 @@ mod tests {
         )
         .unwrap();
 
-        let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0).unwrap();
+        let table = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0, None, 1.0,
+        )
+        .unwrap();
         assert!(table.is_soft_filter());
 
         let expected = (100.0_f64 * 10_000.0_f64).sqrt();
@@ -1925,35 +2154,45 @@ mod tests {
         .unwrap();
 
         // positive_fscale < global fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 50, 1000, 0);
+        let result =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 50, 1000, 0, None, 1.0);
         assert!(result.is_err());
 
         // positive_fscale without negative_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 0, 0);
+        let result =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 0, 0, None, 1.0);
         assert!(result.is_err());
 
         // negative_fscale without positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 1000, 0);
+        let result =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 1000, 0, None, 1.0);
         assert!(result.is_err());
 
         // negative_fscale <= positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 100, 0);
+        let result =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 100, 0, None, 1.0);
         assert!(result.is_err());
 
         // Valid soft filter
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 0);
+        let result =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 0, None, 1.0);
         assert!(result.is_ok());
 
         // unbiased_fscale < positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 50);
+        let result = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 50, None, 1.0,
+        );
         assert!(result.is_err());
 
         // unbiased_fscale > negative_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 6000);
+        let result = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 5000, 6000, None, 1.0,
+        );
         assert!(result.is_err());
 
         // unbiased_fscale without soft filter → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 500);
+        let result =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 500, None, 1.0);
         assert!(result.is_err());
     }
 
@@ -1984,8 +2223,10 @@ mod tests {
         )
         .unwrap();
 
-        let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0).unwrap();
+        let table = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0, None, 1.0,
+        )
+        .unwrap();
         assert!(table.is_soft_filter());
 
         let pos_fscale = table.positive_fscale as f64;
@@ -2004,12 +2245,12 @@ mod tests {
             );
             prev = curr;
         }
-        // At w=127, should be closer to positive_fscale than to midpoint
+        // At w=127, should be at or below midpoint (anchor is at geometric mean)
         let midpoint = (pos_fscale * neg_fscale).sqrt();
         let at_127 = table.effective_fscale_at(127);
         assert!(
-            at_127 < midpoint,
-            "w=127 should be below midpoint={}. got={}",
+            at_127 <= midpoint + 1e-6,
+            "w=127 should be at or below midpoint={}. got={}",
             midpoint,
             at_127
         );
@@ -2066,8 +2307,10 @@ mod tests {
         .unwrap();
 
         // Custom unbiased_fscale = 500 (between 100 and 10_000)
-        let table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 500).unwrap();
+        let table = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 500, None, 1.0,
+        )
+        .unwrap();
         assert!(table.is_soft_filter());
         assert_eq!(table.unbiased_fscale, 500);
 
@@ -2081,8 +2324,17 @@ mod tests {
     }
 
     #[test]
-    fn test_nonzero_weights_use_threshold_centered_sigmoid() {
-        let table = HashBiasTable {
+    fn test_lut_direct_lookup() {
+        // Build a LUT that linearly decreases fscale from 10000 to 100
+        let mut fscale_lut = [0u64; 255];
+        for i in 0..255 {
+            // fscale decreases as weight increases (retention increases)
+            fscale_lut[i] = 10_000u64 - ((10_000u64 - 100) * i as u64 / 254);
+        }
+        // Pin w=0 (index 127) to unbiased_fscale
+        fscale_lut[127] = 1_000;
+
+        let mut table = HashBiasTable {
             config: CMSConfig {
                 width: 1,
                 depth: 1,
@@ -2098,35 +2350,236 @@ mod tests {
             max_fold_enrichment: 0.0,
             positive_fscale: 100,
             negative_fscale: 10_000,
-            k_pos: 1.0,
-            k_neg: 1.0,
-            center_pos: 10.0,
+            lambda: 10.0,
+            gamma: 1.0,
             unbiased_fscale: 1_000,
+            fscale_lut,
+            frac_max_lut: [0u64; 255],
         };
+        table.recompute_frac_max_lut();
 
+        // w=0 (index 127) returns the pinned value
         assert_approx_eq(table.effective_fscale_at(0), 1_000.0, 1e-6);
 
-        let near_zero = table.effective_fscale_at(1);
+        // w=-127 (index 0) should be at max fscale
+        assert_approx_eq(table.effective_fscale_at(-127), 10_000.0, 1e-6);
+
+        // w=127 (index 254) should be at min fscale
+        assert_approx_eq(table.effective_fscale_at(127), 100.0, 1.0);
+
+        // Monotonicity: higher weight → lower fscale
+        let below = table.effective_fscale_at(-50);
+        let above = table.effective_fscale_at(50);
         assert!(
-            near_zero > 5_000.0,
-            "expected nonzero low weight near negative_fscale, got {}",
-            near_zero
+            below > above,
+            "expected monotonic decrease: below={}, above={}",
+            below,
+            above
+        );
+    }
+
+    #[test]
+    fn test_lut_bounds_respected() {
+        // All fscale_lut entries should be in [positive_fscale, negative_fscale]
+        let pos = create_fasta(&["ATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGC"]);
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 100,
+        };
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        let table = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0, None, 1.0,
+        )
+        .unwrap();
+        assert!(table.is_soft_filter());
+
+        for (i, &fs) in table.fscale_lut.iter().enumerate() {
+            assert!(
+                fs >= table.positive_fscale && fs <= table.negative_fscale,
+                "fscale_lut[{}] = {} out of bounds [{}, {}]",
+                i,
+                fs,
+                table.positive_fscale,
+                table.negative_fscale
+            );
+        }
+    }
+
+    #[test]
+    fn test_gamma_zero_produces_step() {
+        // gamma=0 should produce at most 3 distinct fscale values
+        // (left extreme, anchor, right extreme)
+        let pos = create_fasta(&["ATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGC"]);
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 100,
+        };
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        let table = HashBiasTable::build(
+            &pos_raw, &neg_raw, 1.0, None, None, 100, 10_000, 0, None, 0.0,
+        )
+        .unwrap();
+        assert!(table.is_soft_filter());
+
+        let distinct: std::collections::BTreeSet<u64> = table.fscale_lut.iter().copied().collect();
+        assert!(
+            distinct.len() <= 3,
+            "gamma=0 should produce at most 3 distinct fscale values, got {}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn test_gamma_positive_produces_graded() {
+        // With synthetic histogram data, gamma>0 should produce a graded curve
+        let mut p_pos = [0.0f64; 255];
+        let mut p_neg = [0.0f64; 255];
+        // Positive hashes cluster at high weights, negative at low
+        for i in 128..255 {
+            p_pos[i] = 1.0 / 127.0;
+        }
+        for i in 0..127 {
+            p_neg[i] = 1.0 / 127.0;
+        }
+
+        let r_min = 1.0 / 10_000.0;
+        let r_max = 1.0 / 100.0;
+        let anchor_val = 1.0 / 1_000.0;
+
+        let lut = optimize_lut(
+            &p_pos,
+            &p_neg,
+            10.0,
+            5.0,
+            r_min,
+            r_max,
+            Some(127),
+            anchor_val,
         );
 
-        let below_center = table.effective_fscale_at(9);
-        let above_center = table.effective_fscale_at(11);
+        let distinct: std::collections::BTreeSet<u64> = lut.iter().copied().collect();
         assert!(
-            below_center > above_center,
-            "expected monotonic decrease across center: below={}, above={}",
-            below_center,
-            above_center
+            distinct.len() > 3,
+            "gamma>0 should produce more than 3 distinct fscale values, got {}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn test_pava_basic() {
+        // Simple test: enforce monotonically non-decreasing
+        let mut r = [3.0, 1.0, 2.0, 5.0, 4.0];
+        pava_increasing(&mut r, 0.0, 10.0);
+        for i in 0..r.len() - 1 {
+            assert!(
+                r[i] <= r[i + 1] + 1e-10,
+                "PAVA failed monotonicity at {}: {} > {}",
+                i,
+                r[i],
+                r[i + 1]
+            );
+        }
+
+        // All values should be clamped to bounds
+        let mut r2 = [5.0, 3.0, 1.0];
+        pava_increasing(&mut r2, 2.0, 4.0);
+        for &v in &r2 {
+            assert!(v >= 2.0 - 1e-10 && v <= 4.0 + 1e-10);
+        }
+        for i in 0..r2.len() - 1 {
+            assert!(r2[i] <= r2[i + 1] + 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_optimizer_convergence() {
+        // Create a simple histogram and verify optimizer produces valid output
+        let mut p_pos = [0.0f64; 255];
+        let mut p_neg = [0.0f64; 255];
+
+        // Positive hashes cluster at high weights, negative at low weights
+        for i in 128..255 {
+            p_pos[i] = 1.0 / 127.0;
+        }
+        for i in 0..127 {
+            p_neg[i] = 1.0 / 127.0;
+        }
+
+        let r_min = 1.0 / 10_000.0;
+        let r_max = 1.0 / 100.0;
+        let anchor_val = 1.0 / 1_000.0;
+
+        let lut = optimize_lut(
+            &p_pos,
+            &p_neg,
+            10.0,
+            1.0,
+            r_min,
+            r_max,
+            Some(127),
+            anchor_val,
         );
 
-        let far_positive = table.effective_fscale_at(127);
-        assert!(
-            far_positive < 120.0,
-            "expected far-positive weights near positive_fscale, got {}",
-            far_positive
+        // Verify bounds
+        for (i, &fs) in lut.iter().enumerate() {
+            assert!(
+                fs >= 100 && fs <= 10_000,
+                "lut[{}] = {} out of bounds [100, 10000]",
+                i,
+                fs
+            );
+        }
+
+        // Verify monotonicity (fscale should decrease as index increases)
+        for i in 0..254 {
+            assert!(
+                lut[i] >= lut[i + 1],
+                "LUT not monotonic at {}: {} < {}",
+                i,
+                lut[i],
+                lut[i + 1]
+            );
+        }
+
+        // Verify anchor
+        assert_eq!(
+            lut[127], 1000,
+            "Anchor at index 127 should be 1000, got {}",
+            lut[127]
         );
     }
 }

@@ -71,6 +71,8 @@ pub fn run() -> Result<()> {
                 positive_fscale,
                 negative_fscale,
                 unbiased_fscale,
+                lambda,
+                gamma,
                 threads,
             } => handle_bias_create_command(
                 positive,
@@ -86,6 +88,8 @@ pub fn run() -> Result<()> {
                 positive_fscale,
                 negative_fscale,
                 unbiased_fscale,
+                lambda,
+                gamma,
                 threads.or(cli.threads),
                 cli.force,
                 cli.silent,

@@ -358,6 +358,8 @@ pub fn handle_bias_create_command(
     positive_fscale: Option<u64>,
     negative_fscale: Option<String>,
     unbiased_fscale: Option<u64>,
+    lambda: Option<f32>,
+    gamma: f32,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -401,6 +403,20 @@ pub fn handle_bias_create_command(
     {
         return Err(anyhow::anyhow!(
             "--negative-retention must be in the range [0, 1]"
+        ));
+    }
+
+    if let Some(v) = lambda
+        && (!v.is_finite() || v < 0.0)
+    {
+        return Err(anyhow::anyhow!(
+            "--lambda must be finite and >= 0, got {}", v
+        ));
+    }
+
+    if !gamma.is_finite() || gamma < 0.0 {
+        return Err(anyhow::anyhow!(
+            "--gamma must be finite and >= 0, got {}", gamma
         ));
     }
 
@@ -458,6 +474,8 @@ pub fn handle_bias_create_command(
         positive_fscale,
         negative_fscale,
         unbiased_fscale,
+        lambda,
+        gamma,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -504,7 +522,7 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  Smoothing (alpha): {:.1}", alpha);
         if table.is_soft_filter() {
-            eprintln!("  Filter mode: soft sigmoid (threshold-centered, w=0 override)");
+            eprintln!("  Filter mode: optimized LUT (lambda={:.2}, gamma={:.2})", table.lambda, table.gamma);
         } else {
             eprintln!("  Filter mode: hard cutoff");
         }
@@ -526,8 +544,8 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
         if table.is_soft_filter() {
-            eprintln!("  k_pos:               {:.4}", table.k_pos);
-            eprintln!("  k_neg:               {:.4}", table.k_neg);
+            eprintln!("  lambda:              {:.4}", table.lambda);
+            eprintln!("  gamma:               {:.4}", table.gamma);
             if table.unbiased_fscale > 0 {
                 eprintln!("  unbiased_fscale:     {}", table.unbiased_fscale);
             }
@@ -574,7 +592,7 @@ pub fn handle_bias_create_command(
         );
 
         if table.is_soft_filter() {
-            table.print_sigmoid_curve(min, max);
+            table.print_lut_curve(min, max);
         }
 
         eprintln!();
@@ -600,15 +618,17 @@ pub fn handle_bias_stats_command(
     let total_cells = table.config.width * table.config.depth;
 
     let filter_mode = if table.is_soft_filter() {
-        "soft sigmoid (threshold-centered, w=0 override)"
+        "optimized LUT"
     } else {
         "hard cutoff"
     };
 
     if let Some(output_path) = output {
-        let json = serde_json::json!({
+        let base = table.config.fscale as f64;
+
+        let mut json = serde_json::json!({
             "file": input.display().to_string(),
-            "type": "bias_v5",
+            "type": "bias_v1",
             "k": table.config.k,
             "fscale": table.config.fscale,
             "cms_width": table.config.width,
@@ -618,6 +638,7 @@ pub fn handle_bias_stats_command(
             "calibration": {
                 "threshold": table.threshold,
                 "threshold_f32": table.threshold_f32(),
+                "threshold_note": "informational only in LUT mode",
                 "positive_retention": table.positive_retention,
                 "negative_retention": table.negative_retention,
                 "fold_enrichment": table.fold_enrichment(),
@@ -626,8 +647,8 @@ pub fn handle_bias_stats_command(
                 "positive_fscale": table.positive_fscale,
                 "negative_fscale": table.negative_fscale,
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
-                "k_pos": table.k_pos,
-                "k_neg": table.k_neg,
+                "lambda": table.lambda,
+                "gamma": table.gamma,
                 "unbiased_fscale": table.unbiased_fscale,
             },
             "weight_stats": {
@@ -643,78 +664,24 @@ pub fn handle_bias_stats_command(
             "memory_bytes": table.memory_usage(),
         });
 
-        let json = if table.is_soft_filter() {
-            let base = table.config.fscale as f64;
-            let k_pos = table.k_pos as f64;
-            let k_neg = table.k_neg as f64;
-            let threshold_q = table.threshold as i32;
-            let ln19 = 19.0_f64.ln();
-            let center_pos = table.center_pos as f64;
-
-            let neg_5pct_qi = if k_neg > 0.0 {
-                (center_pos - ln19 / k_neg).round() as i32
-            } else {
-                -127
-            };
-            let pos_95pct_qi = if k_pos > 0.0 {
-                (center_pos + ln19 / k_pos).round() as i32
-            } else {
-                127
-            };
-
-            let center_pos_q = (center_pos * 10.0).round() as i32;
-            let mut points = std::collections::BTreeSet::new();
-            let start = (min.floor() as i32) * 10;
-            let end = (max.ceil() as i32) * 10;
-            for q in (start..=end).step_by(10) {
-                points.insert(q.clamp(-127, 127));
-            }
-            points.insert(0);
-            points.insert(threshold_q);
-            points.insert(center_pos_q.clamp(-127, 127));
-            points.insert(neg_5pct_qi.clamp(-127, 127));
-            points.insert(pos_95pct_qi.clamp(-127, 127));
-
-            let curve: Vec<serde_json::Value> = points
-                .iter()
-                .map(|q| {
-                    let w = (*q).clamp(-128, 127) as i8;
+        if table.is_soft_filter() {
+            let lut_curve: Vec<serde_json::Value> = (-127i8..=127i8)
+                .map(|w| {
                     let eff = table.effective_fscale_at(w);
                     serde_json::json!({
-                        "weight": *q as f64 / 10.0,
+                        "weight": w as f64 / 10.0,
+                        "weight_q": w,
                         "effective_fscale": eff,
                         "retention_pct": 100.0 / eff,
                         "vs_base": base / eff,
                     })
                 })
                 .collect();
+            json["lut_curve"] = serde_json::json!(lut_curve);
 
-            let mut json = json;
-            json["sigmoid_bounds"] = serde_json::json!({
-                "neg_5pct": neg_5pct_qi as f64 / 10.0,
-                "center_threshold": center_pos_q as f64 / 10.0,
-                "unseen_override": 0.0,
-                "pos_95pct": pos_95pct_qi as f64 / 10.0,
-            });
-            let reference_points: Vec<serde_json::Value> = table
-                .soft_filter_reference_points()
-                .iter()
-                .map(|p| {
-                    serde_json::json!({
-                        "weight_q": p.weight,
-                        "weight": p.weight_f32,
-                        "effective_fscale": p.effective_fscale,
-                        "retention_pct": p.retention_pct,
-                        "vs_base": p.vs_base,
-                    })
-                })
-                .collect();
-            json["soft_filter"]["reference_points"] = serde_json::json!(reference_points);
-            json["sigmoid_curve"] = serde_json::json!(curve);
-            json
-        } else {
-            json
-        };
+            let fscale_lut: Vec<u64> = table.fscale_lut.to_vec();
+            json["soft_filter"]["fscale_lut"] = serde_json::json!(fscale_lut);
+        }
 
         let file = std::fs::File::create(&output_path)?;
         serde_json::to_writer_pretty(file, &json)?;

@@ -109,6 +109,7 @@ pub enum Commands {
 pub enum BiasCommands {
     /// Create a bias table from positive (target) and negative (background) FASTA files.
     /// Target signal is always subtracted from background before computing bias weights.
+    /// Note: bias table format is experimental and may change between versions.
     #[command(arg_required_else_help = true)]
     Create {
         /// Positive (target) FASTA file(s) - sequences to enrich for
@@ -145,7 +146,7 @@ pub enum BiasCommands {
         #[arg(long)]
         negative_retention: Option<f32>,
         /// Effective fscale for positively biased hashes (soft filter).
-        /// Must be >= global fscale. Enables soft sigmoid filtering when
+        /// Must be >= global fscale. Enables optimized LUT filtering when
         /// both positive-fscale and negative-fscale are set.
         #[arg(long)]
         positive_fscale: Option<u64>,
@@ -158,6 +159,16 @@ pub enum BiasCommands {
         /// Default: geometric mean of positive-fscale and negative-fscale.
         #[arg(long)]
         unbiased_fscale: Option<u64>,
+        /// Negative retention penalty for LUT optimizer.
+        /// Higher values penalize negative k-mer retention more aggressively.
+        /// If not set, auto-derived from --negative-retention or --positive-retention target,
+        /// or defaults to 10.0.
+        #[arg(long)]
+        lambda: Option<f32>,
+        /// Smoothness penalty for LUT optimizer. Controls curve shape.
+        /// 0 = step function, higher = smoother gradient.
+        #[arg(long, default_value = "1.0")]
+        gamma: f32,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,
