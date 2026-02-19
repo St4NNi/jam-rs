@@ -137,16 +137,8 @@ pub enum BiasCommands {
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Target positive retention (0.0–1.0). Fraction of positive k-mers
-        /// to retain. If not set, auto-derived to maximize fold enrichment.
-        #[arg(long)]
-        positive_retention: Option<f32>,
-        /// Target negative retention (0.0–1.0). Fraction of negative k-mers
-        /// allowed through. If not set, auto-derived to maximize fold enrichment.
-        #[arg(long)]
-        negative_retention: Option<f32>,
         /// Effective fscale for positively biased hashes (soft filter).
-        /// Must be >= global fscale. Enables optimized LUT filtering when
+        /// Must be >= global fscale. Enables enrichment LUT filtering when
         /// both positive-fscale and negative-fscale are set.
         #[arg(long)]
         positive_fscale: Option<u64>,
@@ -156,19 +148,13 @@ pub enum BiasCommands {
         #[arg(long)]
         negative_fscale: Option<String>,
         /// Effective fscale at w=0 (unseen/balanced k-mers) for soft filter.
-        /// Default: geometric mean of positive-fscale and negative-fscale.
+        /// Default: data-driven from enrichment optimization.
         #[arg(long)]
         unbiased_fscale: Option<u64>,
-        /// Negative retention penalty for LUT optimizer.
-        /// Higher values penalize negative k-mer retention more aggressively.
-        /// If not set, auto-derived from --negative-retention or --positive-retention target,
-        /// or defaults to 10.0.
-        #[arg(long)]
-        lambda: Option<f32>,
-        /// Smoothness penalty for LUT optimizer. Controls curve shape.
-        /// 0 = step function, higher = smoother gradient.
-        #[arg(long, default_value = "1.0")]
-        gamma: f32,
+        /// Minimum positive retention floor (0.0–1.0). The optimizer will not
+        /// reduce positive retention below this value. [default: 0.1]
+        #[arg(long, default_value = "0.1")]
+        min_positive_retention: f32,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,

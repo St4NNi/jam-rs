@@ -8,7 +8,7 @@
 
 Just another minhash (jam). A high-performance FracMinHash implementation for genomic sequence similarity analysis, optimized for searching plasmids, phages, and other small genomic elements in large datasets.
 
-jam uses a custom hash function ([jamhash](https://github.com/St4NNi/jamhash)) that provides lower collision rates, 2-10x higher speed and better uniformity than murmur3. It also includes a compact memory-mapped database format (`.jam`) for fast random access, and a bias filtering system based on Count-Min Sketches to selectively increase sensitivity for target sequences with either hard cutoffs or soft sigmoid filtering.
+jam uses a custom hash function ([jamhash](https://github.com/St4NNi/jamhash)) that provides lower collision rates, 2-10x higher speed and better uniformity than murmur3. It also includes a compact memory-mapped database format (`.jam`) for fast random access, and a bias filtering system based on Count-Min Sketches to selectively increase sensitivity for target sequences with either hard cutoffs or a enrichment-based look up table (LUT) filtering.
 
 ### Installation
 
@@ -24,10 +24,12 @@ From source:
 cargo install --git https://github.com/St4NNi/jam-rs
 ```
 
+Conda, Docker images and python bindings are planned for the future. In the meantime, you can use the CLI tool directly or call the Rust library from your own Rust code.
+
 ### Key Features
 
 - **Custom hash function**: [jamhash](https://github.com/St4NNi/jamhash) provides lower collisions, better uniformity and is faster compared to murmur3
-- **Bias-aware sketching**: Count-Min Sketch based compositional filtering with automatic background extraction and optional soft sigmoid filtering
+- **Bias-aware sketching**: Count-Min Sketch based compositional filtering with automatic background extraction and optional per-bucket enrichment LUT filtering
 - **Complexity filtering**: Shannon entropy threshold to exclude low-complexity k-mers
 - **Memory-efficient**: External sorting for processing datasets larger than available RAM
 - **Compact storage**: 256-bucket memory-mapped `.jam` format with binary fuse filters for fast random access
@@ -132,9 +134,9 @@ Output is tab-separated: `query`, `sample_id`, `hit_count`, `containment`.
 
 #### Bias Table Construction
 
-Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set. By default, hashes are filtered with a hard threshold, but you can enable soft sigmoid filtering by supplying both `--positive-fscale` and `--negative-fscale` to smoothly vary retention by bias weight.
+Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set. By default, hashes are filtered with a hard threshold, but you can enable per-bucket enrichment LUT filtering by supplying both `--positive-fscale` and `--negative-fscale`.
 
-The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic structure that approximates k-mer frequencies using multiple independent hash functions mapped to a fixed-width table. This keeps memory usage constant regardless of the number of distinct k-mers. By default, the CMS uses 1,048,576 columns and 5 hash functions (~5 MB).
+The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic structure that approximates k-mer frequencies using multiple independent hash functions mapped to a fixed-width table. This keeps memory usage constant regardless of the number of distinct k-mers. By default, the CMS uses 1,048,576 columns and 5 hash functions (~5 MB), this should be increased if the expected number of distinct k-mers exceeds ~100 million.
 
 **How it works:**
 
@@ -142,53 +144,39 @@ The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic s
 2. **Background extraction**: The positive counts are subtracted from the negative counts (floored at zero). This prevents k-mers naturally shared between target and background from being penalized.
 3. A log-ratio weight is computed per CMS cell: `log((pos + alpha) / (adjusted_neg + alpha))`, where `alpha` is a smoothing parameter.
 4. Weights are quantized to `i8` (-127 to +127) for compact storage.
-5. **Threshold calibration**: All 255 possible thresholds are evaluated. The threshold that maximizes fold enrichment (positive retention / negative retention) is selected. If a target fold enrichment is specified, the closest achievable threshold is used instead.
-6. **Soft filtering (optional)**: When `--positive-fscale` and `--negative-fscale` are set, the threshold defines the midpoint of a sigmoid that maps bias weights to an effective fscale. Higher weights retain hashes near `positive-fscale`, lower weights drift toward `negative-fscale` (or are dropped entirely if `negative-fscale` is `drop`).
+5. **Threshold calibration**: All 255 possible thresholds are evaluated. The threshold that maximizes fold enrichment (positive retention / negative retention) is selected.
+6. **Enrichment LUT (optional)**: When `--positive-fscale` and `--negative-fscale` are set, each weight bucket independently gets an effective fscale derived from its empirical enrichment ratio (positive/negative hash frequency). The optimizer maximizes `pos_retention² / neg_retention` subject to a minimum positive retention floor (`--min-positive-retention`). The resulting response curve directly reflects the biological data, with no monotonicity or smoothness constraints imposed. Buckets with insufficient observations inherit from the nearest reliable neighbor.
+7. **Unbiased fscale (optional)**: `--unbiased-fscale` sets a fixed effective fscale for weight-zero buckets (k-mers with equal positive and negative frequency), independent of the LUT optimizer.
 
-```console
-$ jam bias create --help
-Create a bias table from positive (target) and negative (background) FASTA files.
-Target signal is always subtracted from background before computing bias weights.
+**Effective fscale**: Because the LUT assigns different sampling rates per weight bucket, the overall sampling rate is not uniform. The calibration output reports three derived values:
+- `eff. fscale (pos)`: effective fscale on the positive calibration population (`base_fscale / positive_retention`)
+- `eff. fscale (neg)`: effective fscale on the negative calibration population (`base_fscale / negative_retention`)
+- `eff. fscale (combined)`: geometric mean of the two, useful as a single summary (`base_fscale / sqrt(pos_ret × neg_ret)`)
 
-Usage: jam bias create [OPTIONS] --positive <POSITIVE> --negative <NEGATIVE> --output <OUTPUT>
-
-Options:
-      --positive <POSITIVE>              Positive (target) FASTA file(s)
-      --negative <NEGATIVE>              Negative (background) FASTA file(s)
-  -o, --output <OUTPUT>                  Output bias table file (.bias)
-  -k, --kmer-size <KMER_SIZE>            K-mer size (must match sketch) [default: 21]
-      --fscale <FSCALE>                  FracMinHash scale (must match sketch) [default: 1000]
-      --cms-width <CMS_WIDTH>            CMS columns, power of 2 recommended [default: 1048576]
-      --cms-depth <CMS_DEPTH>            CMS hash functions [default: 5]
-      --alpha <ALPHA>                    Smoothing parameter for log-ratio [default: 1.0]
-      --fold-enrichment <FOLD_ENRICHMENT>  Target fold enrichment (auto-maximized if not set)
-      --positive-fscale <POSITIVE_FSCALE>  Effective fscale for positively biased hashes (soft filter)
-      --negative-fscale <NEGATIVE_FSCALE>  Effective fscale for negatively biased hashes, or "drop"
-      --steepness <STEEPNESS>            Sigmoid steepness (auto-derived if not set)
-      --threads <THREADS>                Number of threads
-  -h, --help                             Print help
-```
+`jam stats` on a database with an embedded bias table also reports the combined effective fscale inline with the sample rate, e.g. `Sample rate: 1/100 (effective: 1/432)`.
 
 Examples:
 ```bash
 # Build a bias table to filter out host sequences
 jam bias create --positive plasmids.fasta --negative host_genome.fasta -o host_filter.bias
 
-# With custom fold enrichment target
-jam bias create --positive targets.fasta --negative background.fasta -o filter.bias --fold-enrichment 10.0
+# Enrichment LUT filtering: base fscale 100, pass plasmid-enriched kmers more, suppress host kmers
+jam bias create --positive plasmids.fasta --negative host.fasta -o filter.bias \
+  --positive-fscale 100 --negative-fscale 10000
 
-# Soft sigmoid filtering with different retention for positive vs negative bias weights
-jam bias create --positive targets.fasta --negative background.fasta -o filter.bias \
-  --positive-fscale 1000 --negative-fscale 5000
+# With a stricter positive retention floor and fixed sampling for unbiased kmers
+jam bias create --positive plasmids.fasta --negative host.fasta -o filter.bias \
+  --positive-fscale 100 --negative-fscale 10000 \
+  --min-positive-retention 0.1 --unbiased-fscale 1000
 
-# Inspect a bias table
+# Inspect bias table (text or JSON)
 jam bias stats filter.bias
 jam bias stats filter.bias -o report.json
 ```
 
 #### Statistics
 
-Display database statistics including hash counts and distribution analysis.
+Display database statistics including hash counts, distribution analysis, and effective fscale when a bias table is embedded.
 
 ```console
 $ jam stats --help

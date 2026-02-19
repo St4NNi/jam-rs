@@ -353,13 +353,10 @@ pub fn handle_bias_create_command(
     cms_width: usize,
     cms_depth: usize,
     alpha: f32,
-    positive_retention: Option<f32>,
-    negative_retention: Option<f32>,
     positive_fscale: Option<u64>,
     negative_fscale: Option<String>,
     unbiased_fscale: Option<u64>,
-    lambda: Option<f32>,
-    gamma: f32,
+    min_positive_retention: f32,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -390,33 +387,9 @@ pub fn handle_bias_create_command(
         return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
     }
 
-    if let Some(v) = positive_retention
-        && (!v.is_finite() || !(0.0..=1.0).contains(&v))
-    {
+    if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
         return Err(anyhow::anyhow!(
-            "--positive-retention must be in the range [0, 1]"
-        ));
-    }
-
-    if let Some(v) = negative_retention
-        && (!v.is_finite() || !(0.0..=1.0).contains(&v))
-    {
-        return Err(anyhow::anyhow!(
-            "--negative-retention must be in the range [0, 1]"
-        ));
-    }
-
-    if let Some(v) = lambda
-        && (!v.is_finite() || v < 0.0)
-    {
-        return Err(anyhow::anyhow!(
-            "--lambda must be finite and >= 0, got {}", v
-        ));
-    }
-
-    if !gamma.is_finite() || gamma < 0.0 {
-        return Err(anyhow::anyhow!(
-            "--gamma must be finite and >= 0, got {}", gamma
+            "--min-positive-retention must be in the range [0, 1]"
         ));
     }
 
@@ -469,13 +442,10 @@ pub fn handle_bias_create_command(
             fscale,
         },
         alpha,
-        target_positive_retention: positive_retention,
-        target_negative_retention: negative_retention,
         positive_fscale,
         negative_fscale,
         unbiased_fscale,
-        lambda,
-        gamma,
+        min_positive_retention,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -522,17 +492,17 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  Smoothing (alpha): {:.1}", alpha);
         if table.is_soft_filter() {
-            eprintln!("  Filter mode: optimized LUT (lambda={:.2}, gamma={:.2})", table.lambda, table.gamma);
+            eprintln!("  Filter mode: enrichment LUT");
         } else {
             eprintln!("  Filter mode: hard cutoff");
         }
         eprintln!();
 
-        // Primary outcomes
         eprintln!("Calibration:");
         if table.is_soft_filter() {
             eprintln!("  positive_fscale:     {}", table.positive_fscale);
             eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
+            eprintln!("  min_pos_retention:   {:.2}", table.min_positive_retention);
         }
         eprintln!(
             "  positive retention:  {:.2}%",
@@ -544,8 +514,18 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
         if table.is_soft_filter() {
-            eprintln!("  lambda:              {:.4}", table.lambda);
-            eprintln!("  gamma:               {:.4}", table.gamma);
+            eprintln!(
+                "  eff. fscale (pos):   {:.0}",
+                table.effective_fscale_on_population(table.positive_retention)
+            );
+            eprintln!(
+                "  eff. fscale (neg):   {:.0}",
+                table.effective_fscale_on_population(table.negative_retention)
+            );
+            eprintln!(
+                "  eff. fscale (combined): {:.0}",
+                table.effective_fscale_combined()
+            );
             if table.unbiased_fscale > 0 {
                 eprintln!("  unbiased_fscale:     {}", table.unbiased_fscale);
             }
@@ -618,7 +598,7 @@ pub fn handle_bias_stats_command(
     let total_cells = table.config.width * table.config.depth;
 
     let filter_mode = if table.is_soft_filter() {
-        "optimized LUT"
+        "enrichment LUT"
     } else {
         "hard cutoff"
     };
@@ -642,13 +622,15 @@ pub fn handle_bias_stats_command(
                 "positive_retention": table.positive_retention,
                 "negative_retention": table.negative_retention,
                 "fold_enrichment": table.fold_enrichment(),
+                "effective_fscale_positive": table.effective_fscale_on_population(table.positive_retention),
+                "effective_fscale_negative": table.effective_fscale_on_population(table.negative_retention),
+                "effective_fscale_combined": table.effective_fscale_combined(),
             },
             "soft_filter": {
                 "positive_fscale": table.positive_fscale,
                 "negative_fscale": table.negative_fscale,
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
-                "lambda": table.lambda,
-                "gamma": table.gamma,
+                "min_positive_retention": table.min_positive_retention,
                 "unbiased_fscale": table.unbiased_fscale,
             },
             "weight_stats": {
@@ -728,7 +710,17 @@ pub fn handle_stats_command(
         println!();
         println!("K-mer size: {}", stats.kmer_size);
         println!("Hash threshold: {}", stats.hash_threshold);
-        println!("Sample rate: 1/{}", u64::MAX / stats.hash_threshold.max(1));
+        let base_fscale = u64::MAX / stats.hash_threshold.max(1);
+        if let Some(bias) = reader.bias_table() {
+            if bias.is_soft_filter() {
+                let eff = bias.effective_fscale_combined().round() as u64;
+                println!("Sample rate: 1/{} (effective: 1/{})", base_fscale, eff);
+            } else {
+                println!("Sample rate: 1/{}", base_fscale);
+            }
+        } else {
+            println!("Sample rate: 1/{}", base_fscale);
+        }
         println!(
             "Embedded bias table: {}",
             if stats.has_bias_table { "yes" } else { "no" }

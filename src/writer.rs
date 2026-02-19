@@ -645,8 +645,7 @@ mod tests {
         let hc = std::sync::atomic::AtomicU64::new(0);
         let pos_raw = RawHashCounts::build(&[pos_fasta.path()], config.clone(), &rc, &hc).unwrap();
         let neg_raw = RawHashCounts::build(&[neg_fasta.path()], config, &rc, &hc).unwrap();
-        let bias_table =
-            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, None, None, 0, 0, 0, None, 1.0).unwrap();
+        let bias_table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
 
         let input = make_fasta(&[("seq1", "ATATATATATATATATATATATATATATATATATAT")]);
         let output_dir = tempfile::tempdir().unwrap();
