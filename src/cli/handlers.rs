@@ -353,7 +353,10 @@ pub fn handle_bias_create_command(
     cms_width: usize,
     cms_depth: usize,
     alpha: f32,
-    fold_enrichment: Option<f32>,
+    positive_fscale: Option<u64>,
+    negative_fscale: Option<String>,
+    unbiased_fscale: Option<u64>,
+    min_positive_retention: f32,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -379,6 +382,37 @@ pub fn handle_bias_create_command(
             output
         ));
     }
+
+    if !alpha.is_finite() || alpha <= 0.0 {
+        return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
+    }
+
+    if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
+        return Err(anyhow::anyhow!(
+            "--min-positive-retention must be in the range [0, 1]"
+        ));
+    }
+
+    // Validate soft-filter fscale pair: both or neither
+    match (positive_fscale.as_ref(), negative_fscale.as_ref()) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(anyhow::anyhow!(
+                "Both --positive-fscale and --negative-fscale must be set together"
+            ));
+        }
+        _ => {}
+    }
+
+    let negative_fscale = match negative_fscale.as_deref() {
+        Some(value) if value.eq_ignore_ascii_case("drop") => Some(u64::MAX),
+        Some(value) => {
+            let parsed = value
+                .parse::<u64>()
+                .map_err(|_| anyhow::anyhow!("--negative-fscale must be an integer or 'drop'"))?;
+            Some(parsed)
+        }
+        None => None,
+    };
 
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
@@ -408,16 +442,20 @@ pub fn handle_bias_create_command(
             fscale,
         },
         alpha,
-        target_fold_enrichment: fold_enrichment,
+        positive_fscale,
+        negative_fscale,
+        unbiased_fscale,
+        min_positive_retention,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
     let neg_paths: Vec<&std::path::Path> = negative.iter().map(|p| p.as_path()).collect();
 
     if let Some(threads) = threads
-        && threads == 0 {
-            return Err(anyhow::anyhow!("Thread count must be > 0"));
-        }
+        && threads == 0
+    {
+        return Err(anyhow::anyhow!("Thread count must be > 0"));
+    }
 
     let table = if let Some(threads) = threads {
         let pool = rayon::ThreadPoolBuilder::new()
@@ -453,32 +491,57 @@ pub fn handle_bias_create_command(
             table.config.width, table.config.depth
         );
         eprintln!("  Smoothing (alpha): {:.1}", alpha);
+        if table.is_soft_filter() {
+            eprintln!("  Filter mode: enrichment LUT");
+        } else {
+            eprintln!("  Filter mode: hard cutoff");
+        }
         eprintln!();
-        eprintln!("Results:");
-        eprintln!("  Fold enrichment: {:.2}x", table.fold_enrichment());
-        eprintln!("  Max achievable:  {:.2}x", table.max_fold_enrichment);
+
+        eprintln!("Calibration:");
+        if table.is_soft_filter() {
+            eprintln!("  positive_fscale:     {}", table.positive_fscale);
+            eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
+            eprintln!("  min_pos_retention:   {:.2}", table.min_positive_retention);
+        }
         eprintln!(
-            "  Threshold: {:.2} (quantized: {})",
-            table.threshold_f32(),
-            table.threshold
-        );
-        eprintln!(
-            "  Positive retention: {:.2}%",
+            "  positive retention:  {:.2}%",
             table.positive_retention * 100.0
         );
         eprintln!(
-            "  Negative retention: {:.2}%",
+            "  negative retention:  {:.2}%",
             table.negative_retention * 100.0
         );
-
-        if let Some(requested) = fold_enrichment
-            && requested > table.max_fold_enrichment + 0.01 {
-                eprintln!();
+        eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
+        if table.is_soft_filter() {
+            eprintln!(
+                "  eff. fscale (pos):   {:.0}",
+                table.effective_fscale_on_population(table.positive_retention)
+            );
+            eprintln!(
+                "  eff. fscale (neg):   {:.0}",
+                table.effective_fscale_on_population(table.negative_retention)
+            );
+            eprintln!(
+                "  eff. fscale (combined): {:.0}",
+                table.effective_fscale_combined()
+            );
+            if table.unbiased_fscale > 0 {
+                eprintln!("  unbiased_fscale:     {}", table.unbiased_fscale);
+            }
+            eprintln!("  reference points:");
+            for p in table.soft_filter_reference_points() {
                 eprintln!(
-                    "Warning: Requested fold enrichment ({:.2}x) exceeds maximum achievable ({:.2}x). Using maximum.",
-                    requested, table.max_fold_enrichment
+                    "    w={:>5.2}: eff={:>10.1}, ret={:>9.4}%, vs_base={:>7.2}x",
+                    p.weight_f32, p.effective_fscale, p.retention_pct, p.vs_base
                 );
             }
+        }
+        eprintln!(
+            "  threshold:           {:.2} (quantized: {})",
+            table.threshold_f32(),
+            table.threshold
+        );
 
         if table.fold_enrichment() < 1.5 {
             eprintln!();
@@ -507,6 +570,11 @@ pub fn handle_bias_create_command(
             above_threshold,
             above_threshold as f64 / total_cells as f64 * 100.0
         );
+
+        if table.is_soft_filter() {
+            table.print_lut_curve(min, max);
+        }
+
         eprintln!();
         eprintln!("Saved to: {}", output.display());
         eprintln!("Built in {:.2?}", start.elapsed());
@@ -529,21 +597,41 @@ pub fn handle_bias_stats_command(
     let (min, max, mean, std, positive_weights, above_threshold) = table.weight_stats();
     let total_cells = table.config.width * table.config.depth;
 
+    let filter_mode = if table.is_soft_filter() {
+        "enrichment LUT"
+    } else {
+        "hard cutoff"
+    };
+
     if let Some(output_path) = output {
-        let json = serde_json::json!({
+        let base = table.config.fscale as f64;
+
+        let mut json = serde_json::json!({
             "file": input.display().to_string(),
-            "type": "bias_v3",
+            "type": "bias_v1",
             "k": table.config.k,
             "fscale": table.config.fscale,
             "cms_width": table.config.width,
             "cms_depth": table.config.depth,
             "alpha": table.alpha,
+            "filter_mode": filter_mode,
             "calibration": {
                 "threshold": table.threshold,
                 "threshold_f32": table.threshold_f32(),
+                "threshold_note": "informational only in LUT mode",
                 "positive_retention": table.positive_retention,
                 "negative_retention": table.negative_retention,
                 "fold_enrichment": table.fold_enrichment(),
+                "effective_fscale_positive": table.effective_fscale_on_population(table.positive_retention),
+                "effective_fscale_negative": table.effective_fscale_on_population(table.negative_retention),
+                "effective_fscale_combined": table.effective_fscale_combined(),
+            },
+            "soft_filter": {
+                "positive_fscale": table.positive_fscale,
+                "negative_fscale": table.negative_fscale,
+                "negative_fscale_drop": table.negative_fscale == u64::MAX,
+                "min_positive_retention": table.min_positive_retention,
+                "unbiased_fscale": table.unbiased_fscale,
             },
             "weight_stats": {
                 "min": min,
@@ -558,6 +646,25 @@ pub fn handle_bias_stats_command(
             "memory_bytes": table.memory_usage(),
         });
 
+        if table.is_soft_filter() {
+            let lut_curve: Vec<serde_json::Value> = (-127i8..=127i8)
+                .map(|w| {
+                    let eff = table.effective_fscale_at(w);
+                    serde_json::json!({
+                        "weight": w as f64 / 10.0,
+                        "weight_q": w,
+                        "effective_fscale": eff,
+                        "retention_pct": 100.0 / eff,
+                        "vs_base": base / eff,
+                    })
+                })
+                .collect();
+            json["lut_curve"] = serde_json::json!(lut_curve);
+
+            let fscale_lut: Vec<u64> = table.fscale_lut.to_vec();
+            json["soft_filter"]["fscale_lut"] = serde_json::json!(fscale_lut);
+        }
+
         let file = std::fs::File::create(&output_path)?;
         serde_json::to_writer_pretty(file, &json)?;
 
@@ -565,48 +672,7 @@ pub fn handle_bias_stats_command(
             eprintln!("Statistics written to: {}", output_path.display());
         }
     } else if !silent {
-        eprintln!("Hash Bias Table (v3)");
-        eprintln!("====================");
-        eprintln!("File: {}", input.display());
-        eprintln!("  k-mer size:     {}", table.config.k);
-        eprintln!("  fscale:         {}", table.config.fscale);
-        eprintln!(
-            "  CMS dimensions: {} x {}",
-            table.config.width, table.config.depth
-        );
-        eprintln!("  Smoothing (alpha): {:.1}", table.alpha);
-        eprintln!();
-        eprintln!("Calibration:");
-        eprintln!(
-            "  threshold:           {:.2} (quantized: {})",
-            table.threshold_f32(),
-            table.threshold
-        );
-        eprintln!(
-            "  positive retention:  {:.2}%",
-            table.positive_retention * 100.0
-        );
-        eprintln!(
-            "  negative retention:  {:.2}%",
-            table.negative_retention * 100.0
-        );
-        eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
-        eprintln!();
-        eprintln!("Weight distribution (clamped to +/-12.70):");
-        eprintln!("  min:    {:.2}", min);
-        eprintln!("  max:    {:.2}", max);
-        eprintln!("  mean:   {:.2}", mean);
-        eprintln!("  std:    {:.2}", std);
-        eprintln!(
-            "  >0:             {} cells ({:.1}%)",
-            positive_weights,
-            positive_weights as f64 / total_cells as f64 * 100.0
-        );
-        eprintln!(
-            "  >= threshold:   {} cells ({:.1}%)",
-            above_threshold,
-            above_threshold as f64 / total_cells as f64 * 100.0
-        );
+        table.print_stats();
     }
 
     Ok(())
@@ -644,7 +710,17 @@ pub fn handle_stats_command(
         println!();
         println!("K-mer size: {}", stats.kmer_size);
         println!("Hash threshold: {}", stats.hash_threshold);
-        println!("Sample rate: 1/{}", u64::MAX / stats.hash_threshold.max(1));
+        let base_fscale = u64::MAX / stats.hash_threshold.max(1);
+        if let Some(bias) = reader.bias_table() {
+            if bias.is_soft_filter() {
+                let eff = bias.effective_fscale_combined().round() as u64;
+                println!("Sample rate: 1/{} (effective: 1/{})", base_fscale, eff);
+            } else {
+                println!("Sample rate: 1/{}", base_fscale);
+            }
+        } else {
+            println!("Sample rate: 1/{}", base_fscale);
+        }
         println!(
             "Embedded bias table: {}",
             if stats.has_bias_table { "yes" } else { "no" }

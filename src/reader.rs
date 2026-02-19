@@ -451,8 +451,7 @@ impl JamReader {
     }
 
     #[cfg(not(unix))]
-    pub fn release_pages(&self, _start: usize, _end: usize) {
-    }
+    pub fn release_pages(&self, _start: usize, _end: usize) {}
 
     pub fn release_bucket(&self, bucket_idx: usize) {
         let (filter_start, filter_end) = self.bucket_filter_byte_range(bucket_idx);
@@ -467,8 +466,7 @@ impl JamReader {
     }
 
     #[cfg(not(unix))]
-    pub fn advise_random(&self) {
-    }
+    pub fn advise_random(&self) {}
 
     #[inline]
     pub fn bucket_filter(&self, bucket_idx: usize) -> Option<BucketFilter<'_>> {

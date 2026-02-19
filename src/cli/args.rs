@@ -109,6 +109,7 @@ pub enum Commands {
 pub enum BiasCommands {
     /// Create a bias table from positive (target) and negative (background) FASTA files.
     /// Target signal is always subtracted from background before computing bias weights.
+    /// Note: bias table format is experimental and may change between versions.
     #[command(arg_required_else_help = true)]
     Create {
         /// Positive (target) FASTA file(s) - sequences to enrich for
@@ -136,11 +137,24 @@ pub enum BiasCommands {
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Target fold enrichment. If not set, maximizes automatically.
-        /// A warning is shown if the requested value exceeds the maximum
-        /// achievable by the data.
+        /// Effective fscale for positively biased hashes (soft filter).
+        /// Must be >= global fscale. Enables enrichment LUT filtering when
+        /// both positive-fscale and negative-fscale are set.
         #[arg(long)]
-        fold_enrichment: Option<f32>,
+        positive_fscale: Option<u64>,
+        /// Effective fscale for negatively biased hashes (soft filter).
+        /// Must be > positive-fscale. Higher values = lower retention.
+        /// Use "drop" to discard hashes below the threshold.
+        #[arg(long)]
+        negative_fscale: Option<String>,
+        /// Effective fscale at w=0 (unseen/balanced k-mers) for soft filter.
+        /// Default: data-driven from enrichment optimization.
+        #[arg(long)]
+        unbiased_fscale: Option<u64>,
+        /// Minimum positive retention floor (0.0–1.0). The optimizer will not
+        /// reduce positive retention below this value. [default: 0.1]
+        #[arg(long, default_value = "0.1")]
+        min_positive_retention: f32,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,
