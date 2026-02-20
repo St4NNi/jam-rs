@@ -223,10 +223,9 @@ fn downsample_samples(samples: &mut Vec<u64>) {
 pub struct BiasCreateConfig {
     pub cms: CMSConfig,
     pub alpha: f32,
-    pub positive_fscale: Option<u64>,
+    pub target_fscale: Option<u64>,
     pub negative_fscale: Option<u64>,
-    pub unbiased_fscale: Option<u64>,
-    pub min_positive_retention: f32,
+    pub unseen_fscale: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -248,10 +247,9 @@ pub struct HashBiasTable {
     pub positive_retention: f32,
     pub negative_retention: f32,
     pub max_fold_enrichment: f32,
-    pub positive_fscale: u64,
+    pub target_fscale: u64,
     pub negative_fscale: u64,
-    pub min_positive_retention: f32,
-    pub unbiased_fscale: u64,
+    pub unseen_fscale: u64,
     pub fscale_lut: [u64; 255],
     frac_max_lut: [u64; 255],
 }
@@ -341,160 +339,220 @@ fn fill_unreliable_bins(
     }
 }
 
-fn enrichment_lut(
+/// Compute empirical weight distribution across all CMS cells.
+/// This is the deployment prior q_i for the budget constraint.
+fn compute_empirical_prior(weights: &[i8]) -> [f64; 255] {
+    let mut counts = [0u64; 255];
+    for &w in weights {
+        let idx = HashBiasTable::weight_to_index(w);
+        counts[idx] += 1;
+    }
+    let total = weights.len() as f64;
+    let mut q = [0.0f64; 255];
+    for (i, &c) in counts.iter().enumerate() {
+        q[i] = c as f64 / total;
+    }
+    q
+}
+
+/// Solve: maximize sum(c_i * r_i) subject to sum(q_i * r_i) = budget, r_i in [r_min, r_max]
+/// `fixed` specifies (index, retention) pairs for pinned buckets (e.g., w=0).
+/// Returns None if infeasible (budget too tight even with all free buckets at r_min).
+fn water_fill_solve(
+    coeffs: &[f64; 255],
+    q: &[f64; 255],
+    r_min: f64,
+    r_max: f64,
+    budget: f64,
+    fixed: &[(usize, f64)],
+) -> Option<[f64; 255]> {
+    let mut result = [0.0f64; 255];
+    let mut is_fixed = [false; 255];
+    let mut remaining_budget = budget;
+
+    // Set fixed buckets
+    for &(idx, r) in fixed {
+        result[idx] = r;
+        is_fixed[idx] = true;
+        remaining_budget -= q[idx] * r;
+    }
+
+    // Collect free bucket indices (skip fixed and zero-prior buckets)
+    let mut indices: Vec<usize> = (0..255).filter(|&i| !is_fixed[i] && q[i] > 1e-30).collect();
+
+    // Sort by bang-per-buck: v_i = c_i / q_i, descending
+    indices.sort_by(|&a, &b| {
+        let va = coeffs[a] / q[a];
+        let vb = coeffs[b] / q[b];
+        vb.partial_cmp(&va).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Start all free buckets at r_min
+    let mut min_cost = 0.0;
+    for &i in &indices {
+        result[i] = r_min;
+        min_cost += q[i] * r_min;
+    }
+
+    // Check feasibility
+    if min_cost > remaining_budget + 1e-12 {
+        return None;
+    }
+
+    let mut slack = remaining_budget - min_cost;
+
+    // Greedily upgrade highest-value buckets from r_min to r_max
+    for &i in &indices {
+        if slack <= 1e-15 {
+            break;
+        }
+        let upgrade_cost = q[i] * (r_max - r_min);
+        if upgrade_cost <= slack {
+            result[i] = r_max;
+            slack -= upgrade_cost;
+        } else {
+            // Fractional assignment to exactly exhaust budget
+            result[i] = r_min + slack / q[i];
+            result[i] = result[i].min(r_max);
+            break;
+        }
+    }
+
+    // Handle zero-prior free buckets: assign r_max (they don't affect budget)
+    for i in 0..255 {
+        if !is_fixed[i] && q[i] <= 1e-30 {
+            result[i] = r_max;
+        }
+    }
+
+    Some(result)
+}
+
+/// Dinkelbach + water-filling optimizer for target-fscale bias LUT.
+/// Returns (lut, iteration_count).
+fn target_fscale_lut(
     p_pos: &[f64; 255],
     p_neg: &[f64; 255],
+    q: &[f64; 255],
     pos_counts: &[u64; 255],
     neg_counts: &[u64; 255],
     base_fscale: u64,
-    positive_fscale: u64,
+    target_fscale: u64,
     negative_fscale: u64,
-    unbiased_fscale: u64,
-    min_positive_retention: f64,
-) -> Result<[u64; 255]> {
-    if base_fscale == 0 || positive_fscale == 0 || negative_fscale == 0 {
+    unseen_fscale: u64,
+) -> Result<([u64; 255], u32)> {
+    if base_fscale == 0 || target_fscale == 0 || negative_fscale == 0 {
         anyhow::bail!("fscale values must be > 0");
     }
-
-    if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
+    if target_fscale < base_fscale {
         anyhow::bail!(
-            "min_positive_retention must be in [0,1], got {}",
-            min_positive_retention
+            "target_fscale ({}) must be >= base fscale ({})",
+            target_fscale,
+            base_fscale
+        );
+    }
+    if negative_fscale != u64::MAX && negative_fscale < target_fscale {
+        anyhow::bail!(
+            "negative_fscale ({}) must be >= target_fscale ({})",
+            negative_fscale,
+            target_fscale
         );
     }
 
     let base_fs = base_fscale as f64;
-    let pos_fs = positive_fscale as f64;
-    let neg_fs = negative_fscale as f64;
-    let unbiased_fs = unbiased_fscale as f64;
+    let r_max = 1.0_f64;
+    let r_min = if negative_fscale == u64::MAX {
+        0.0
+    } else {
+        (base_fs / negative_fscale as f64).min(1.0)
+    };
+    let r_target = base_fs / target_fscale as f64;
     let w0_idx = HashBiasTable::weight_to_index(0);
-    let retention_tol = 1e-6;
 
-    let mut e = [0.0f64; 255];
-    for i in 0..255 {
-        e[i] = p_pos[i] / p_neg[i].max(1e-30);
-    }
+    // Fixed buckets (w=0 pinned to unseen_fscale)
+    let fixed: Vec<(usize, f64)> = if unseen_fscale > 0 {
+        let r_unseen = (base_fs / unseen_fscale as f64).min(r_max);
+        vec![(w0_idx, r_unseen)]
+    } else {
+        vec![]
+    };
 
-    let e_min = e.iter().copied().fold(f64::INFINITY, f64::min);
-    let e_max = e.iter().copied().fold(0.0f64, f64::max);
-    let c_lo = (pos_fs * e_min).max(1e-30).ln();
-    let c_hi = (neg_fs * e_max).max(1e-30).ln();
-
-    let retention_for_fscale = |fs: f64| -> f64 { (base_fs / fs).min(1.0) };
-
-    let max_pos_ret = (0..255)
+    // Check budget feasibility
+    let max_budget: f64 = (0..255)
         .map(|i| {
-            let fs = if i == w0_idx && unbiased_fscale > 0 {
-                unbiased_fs
+            if let Some(&(_, fr)) = fixed.iter().find(|&&(fi, _)| fi == i) {
+                q[i] * fr
             } else {
-                pos_fs
-            };
-            p_pos[i] * retention_for_fscale(fs)
+                q[i] * r_max
+            }
         })
-        .sum::<f64>();
-
-    if max_pos_ret + retention_tol < min_positive_retention {
-        anyhow::bail!(
-            "min_positive_retention={} is infeasible (max achievable {:.6}) for fscale range [{}, {}]",
-            min_positive_retention,
-            max_pos_ret,
-            positive_fscale,
-            negative_fscale
-        );
-    }
-
-    let compute_score = |c: f64| -> (f64, f64, f64) {
-        let mut pos_ret = 0.0f64;
-        let mut neg_ret = 0.0f64;
-        for i in 0..255 {
-            let fs = if i == w0_idx && unbiased_fscale > 0 {
-                unbiased_fs
+        .sum();
+    let min_budget: f64 = (0..255)
+        .map(|i| {
+            if let Some(&(_, fr)) = fixed.iter().find(|&&(fi, _)| fi == i) {
+                q[i] * fr
             } else {
-                (c / e[i]).clamp(pos_fs, neg_fs)
-            };
-            let r = retention_for_fscale(fs);
-            pos_ret += p_pos[i] * r;
-            neg_ret += p_neg[i] * r;
+                q[i] * r_min
+            }
+        })
+        .sum();
+
+    let clamped_target = r_target.clamp(min_budget, max_budget);
+
+    // Dinkelbach iterations
+    let max_iter = 50;
+    let eps = 1e-10;
+    let mut lambda = 1.0_f64;
+    let mut best_r = [r_min; 255];
+    let mut iterations = 0u32;
+
+    for iter in 0..max_iter {
+        iterations = iter + 1;
+
+        // Coefficients for this lambda
+        let mut coeffs = [0.0f64; 255];
+        for i in 0..255 {
+            coeffs[i] = p_pos[i] - lambda * p_neg[i];
         }
-        let score = if neg_ret > 0.0 {
-            pos_ret * pos_ret / neg_ret
+
+        // Solve inner water-filling problem
+        let r = match water_fill_solve(&coeffs, q, r_min, r_max, clamped_target, &fixed) {
+            Some(r) => r,
+            None => break,
+        };
+
+        // Compute new lambda
+        let pos_ret: f64 = (0..255).map(|i| p_pos[i] * r[i]).sum();
+        let neg_ret: f64 = (0..255).map(|i| p_neg[i] * r[i]).sum();
+
+        let new_lambda = if neg_ret > eps {
+            pos_ret / neg_ret
         } else {
             f64::INFINITY
         };
-        (score, pos_ret, neg_ret)
-    };
 
-    // Coarse grid search
-    let grid_steps = 500;
-    let mut best_c = c_lo.exp();
-    let mut best_score = f64::NEG_INFINITY;
-    let mut found_feasible = false;
+        best_r = r;
 
-    for step in 0..=grid_steps {
-        let c = (c_lo + (c_hi - c_lo) * step as f64 / grid_steps as f64).exp();
-        let (score, pos_ret, _) = compute_score(c);
-        if pos_ret + retention_tol >= min_positive_retention && score > best_score {
-            found_feasible = true;
-            best_score = score;
-            best_c = c;
+        if (new_lambda - lambda).abs() < eps || !new_lambda.is_finite() {
+            break;
         }
+        lambda = new_lambda;
     }
 
-    if !found_feasible {
-        anyhow::bail!(
-            "no feasible LUT found for min_positive_retention={} in fscale range [{}, {}]",
-            min_positive_retention,
-            positive_fscale,
-            negative_fscale
-        );
-    }
-
-    // Ternary search refinement
-    let grid_width = (c_hi - c_lo) / grid_steps as f64;
-    let mut lo = (best_c.ln() - grid_width).max(c_lo);
-    let mut hi = (best_c.ln() + grid_width).min(c_hi);
-    for _ in 0..50 {
-        let m1 = lo + (hi - lo) / 3.0;
-        let m2 = hi - (hi - lo) / 3.0;
-        let (s1, pr1, _) = compute_score(m1.exp());
-        let (s2, pr2, _) = compute_score(m2.exp());
-        let s1_valid = if pr1 + retention_tol >= min_positive_retention {
-            s1
-        } else {
-            f64::NEG_INFINITY
-        };
-        let s2_valid = if pr2 + retention_tol >= min_positive_retention {
-            s2
-        } else {
-            f64::NEG_INFINITY
-        };
-        if s1_valid < s2_valid {
-            lo = m1;
-            if s2_valid > best_score {
-                best_score = s2_valid;
-                best_c = m2.exp();
-            }
-        } else {
-            hi = m2;
-            if s1_valid > best_score {
-                best_score = s1_valid;
-                best_c = m1.exp();
-            }
-        }
-    }
-
+    // Convert retentions to fscale LUT
     let mut lut = [0u64; 255];
-    for (i, slot) in lut.iter_mut().enumerate() {
-        *slot = if i == w0_idx && unbiased_fscale > 0 {
-            unbiased_fscale
+    for i in 0..255 {
+        let fs = if best_r[i] > 1e-30 {
+            (base_fs / best_r[i]).ceil() as u64
         } else {
-            (best_c / e[i]).round().clamp(pos_fs, neg_fs) as u64
+            u64::MAX
         };
+        lut[i] = fs.max(base_fscale);
     }
 
     fill_unreliable_bins(&mut lut, pos_counts, neg_counts, w0_idx);
 
-    Ok(lut)
+    Ok((lut, iterations))
 }
 
 impl HashBiasTable {
@@ -566,10 +624,9 @@ impl HashBiasTable {
             &pos_raw,
             &neg_raw,
             config.alpha,
-            config.positive_fscale.unwrap_or(0),
+            config.target_fscale.unwrap_or(0),
             config.negative_fscale.unwrap_or(0),
-            config.unbiased_fscale.unwrap_or(0),
-            config.min_positive_retention,
+            config.unseen_fscale.unwrap_or(0),
         )?;
 
         if let Some(ref pb) = progress {
@@ -584,10 +641,9 @@ impl HashBiasTable {
         positive: &RawHashCounts,
         negative: &RawHashCounts,
         alpha: f32,
-        positive_fscale: u64,
+        target_fscale: u64,
         negative_fscale: u64,
-        unbiased_fscale: u64,
-        min_positive_retention: f32,
+        unseen_fscale: u64,
     ) -> Result<Self> {
         validate_cms_compatibility(positive, negative)?;
 
@@ -595,51 +651,44 @@ impl HashBiasTable {
             anyhow::bail!("alpha must be finite and > 0, got {}", alpha);
         }
 
-        if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
-            anyhow::bail!(
-                "min_positive_retention must be in [0,1], got {}",
-                min_positive_retention
-            );
-        }
-
         // Enforce soft-filter invariants
-        if positive_fscale > 0 || negative_fscale > 0 {
-            if positive_fscale == 0 || negative_fscale == 0 {
-                anyhow::bail!("positive_fscale and negative_fscale must be set together");
+        if target_fscale > 0 || negative_fscale > 0 {
+            if target_fscale == 0 || negative_fscale == 0 {
+                anyhow::bail!("target_fscale and negative_fscale must be set together");
             }
-            if positive_fscale < positive.config.fscale {
+            if target_fscale < positive.config.fscale {
                 anyhow::bail!(
-                    "positive_fscale ({}) must be >= global fscale ({})",
-                    positive_fscale,
+                    "target_fscale ({}) must be >= global fscale ({})",
+                    target_fscale,
                     positive.config.fscale
                 );
             }
-            if negative_fscale <= positive_fscale {
+            if negative_fscale <= target_fscale {
                 anyhow::bail!(
-                    "negative_fscale ({}) must be > positive_fscale ({})",
+                    "negative_fscale ({}) must be > target_fscale ({})",
                     negative_fscale,
-                    positive_fscale
+                    target_fscale
                 );
             }
-            if unbiased_fscale > 0 {
-                if unbiased_fscale < positive_fscale {
+            if unseen_fscale > 0 {
+                if unseen_fscale < target_fscale {
                     anyhow::bail!(
-                        "unbiased_fscale ({}) must be >= positive_fscale ({})",
-                        unbiased_fscale,
-                        positive_fscale
+                        "unseen_fscale ({}) must be >= target_fscale ({})",
+                        unseen_fscale,
+                        target_fscale
                     );
                 }
-                if negative_fscale != u64::MAX && unbiased_fscale > negative_fscale {
+                if negative_fscale != u64::MAX && unseen_fscale > negative_fscale {
                     anyhow::bail!(
-                        "unbiased_fscale ({}) must be <= negative_fscale ({})",
-                        unbiased_fscale,
+                        "unseen_fscale ({}) must be <= negative_fscale ({})",
+                        unseen_fscale,
                         negative_fscale
                     );
                 }
             }
-        } else if unbiased_fscale > 0 {
+        } else if unseen_fscale > 0 {
             anyhow::bail!(
-                "--unbiased-fscale requires soft filter mode (set --positive-fscale and --negative-fscale)"
+                "--unseen-fscale requires soft filter mode (set --target-fscale and --negative-fscale)"
             );
         }
 
@@ -670,10 +719,7 @@ impl HashBiasTable {
             }
         }
 
-        let calibration = calibrate_threshold(
-            positive, negative, &weights, &seeds, width,
-            None,
-        )?;
+        let calibration = calibrate_threshold(positive, negative, &weights, &seeds, width, None)?;
 
         let base_fscale = positive.config.fscale;
         let fscale_lut = [base_fscale; 255];
@@ -688,10 +734,9 @@ impl HashBiasTable {
             positive_retention: calibration.positive_retention,
             negative_retention: calibration.negative_retention,
             max_fold_enrichment: calibration.max_fold_enrichment,
-            positive_fscale,
+            target_fscale,
             negative_fscale,
-            min_positive_retention,
-            unbiased_fscale,
+            unseen_fscale,
             fscale_lut,
             frac_max_lut,
         };
@@ -730,17 +775,21 @@ impl HashBiasTable {
             let (p_pos, pos_bin_counts) = histogram_weights(&pos_in_range, &table);
             let (p_neg, neg_bin_counts) = histogram_weights(&neg_in_range, &table);
 
-            table.fscale_lut = enrichment_lut(
+            let q = compute_empirical_prior(&table.weights);
+
+            let (lut, _iterations) = target_fscale_lut(
                 &p_pos,
                 &p_neg,
+                &q,
                 &pos_bin_counts,
                 &neg_bin_counts,
                 table.config.fscale,
-                positive_fscale,
+                target_fscale,
                 negative_fscale,
-                unbiased_fscale,
-                min_positive_retention as f64,
+                unseen_fscale,
             )?;
+
+            table.fscale_lut = lut;
 
             table.recompute_frac_max_lut();
 
@@ -805,7 +854,7 @@ impl HashBiasTable {
 
     #[inline]
     pub fn is_soft_filter(&self) -> bool {
-        self.positive_fscale > 0 && self.negative_fscale > 0
+        self.target_fscale > 0 && self.negative_fscale > 0
     }
 
     #[inline]
@@ -889,11 +938,11 @@ impl HashBiasTable {
         file.write_all(&[self.threshold as u8])?;
         file.write_all(&self.positive_retention.to_le_bytes())?;
         file.write_all(&self.negative_retention.to_le_bytes())?;
-        file.write_all(&self.positive_fscale.to_le_bytes())?;
+        file.write_all(&self.target_fscale.to_le_bytes())?;
         file.write_all(&self.negative_fscale.to_le_bytes())?;
-        file.write_all(&self.min_positive_retention.to_le_bytes())?;
+        file.write_all(&0.0f32.to_le_bytes())?; // legacy min_positive_retention slot
         file.write_all(&[0u8; 8])?; // reserved
-        file.write_all(&self.unbiased_fscale.to_le_bytes())?;
+        file.write_all(&self.unseen_fscale.to_le_bytes())?;
 
         for &f in &self.fscale_lut {
             file.write_all(&f.to_le_bytes())?;
@@ -963,19 +1012,19 @@ impl HashBiasTable {
         let negative_retention = f32::from_le_bytes(buf4);
 
         file.read_exact(&mut buf8)?;
-        let positive_fscale = u64::from_le_bytes(buf8);
+        let target_fscale = u64::from_le_bytes(buf8);
 
         file.read_exact(&mut buf8)?;
         let negative_fscale = u64::from_le_bytes(buf8);
 
         file.read_exact(&mut buf4)?;
-        let min_positive_retention = f32::from_le_bytes(buf4);
+        let _min_positive_retention = f32::from_le_bytes(buf4); // legacy, discarded
 
         let mut reserved = [0u8; 8];
         file.read_exact(&mut reserved)?;
 
         file.read_exact(&mut buf8)?;
-        let unbiased_fscale = u64::from_le_bytes(buf8);
+        let unseen_fscale = u64::from_le_bytes(buf8);
 
         let mut fscale_lut = [0u64; 255];
         for entry in &mut fscale_lut {
@@ -1018,10 +1067,9 @@ impl HashBiasTable {
             positive_retention,
             negative_retention,
             max_fold_enrichment,
-            positive_fscale,
+            target_fscale,
             negative_fscale,
-            min_positive_retention,
-            unbiased_fscale,
+            unseen_fscale,
             fscale_lut,
             frac_max_lut: [0u64; 255],
         };
@@ -1046,11 +1094,11 @@ impl HashBiasTable {
         out.push(self.threshold as u8);
         out.extend_from_slice(&self.positive_retention.to_le_bytes());
         out.extend_from_slice(&self.negative_retention.to_le_bytes());
-        out.extend_from_slice(&self.positive_fscale.to_le_bytes());
+        out.extend_from_slice(&self.target_fscale.to_le_bytes());
         out.extend_from_slice(&self.negative_fscale.to_le_bytes());
-        out.extend_from_slice(&self.min_positive_retention.to_le_bytes());
+        out.extend_from_slice(&0.0f32.to_le_bytes()); // legacy min_positive_retention slot
         out.extend_from_slice(&[0u8; 8]); // reserved
-        out.extend_from_slice(&self.unbiased_fscale.to_le_bytes());
+        out.extend_from_slice(&self.unseen_fscale.to_le_bytes());
 
         for &f in &self.fscale_lut {
             out.extend_from_slice(&f.to_le_bytes());
@@ -1098,11 +1146,11 @@ impl HashBiasTable {
         let threshold = data[26] as i8;
         let positive_retention = f32::from_le_bytes(data[27..31].try_into().unwrap());
         let negative_retention = f32::from_le_bytes(data[31..35].try_into().unwrap());
-        let positive_fscale = u64::from_le_bytes(data[35..43].try_into().unwrap());
+        let target_fscale = u64::from_le_bytes(data[35..43].try_into().unwrap());
         let negative_fscale = u64::from_le_bytes(data[43..51].try_into().unwrap());
-        let min_positive_retention = f32::from_le_bytes(data[51..55].try_into().unwrap());
+        let _min_positive_retention = f32::from_le_bytes(data[51..55].try_into().unwrap()); // legacy, discarded
         // bytes 55..63 reserved
-        let unbiased_fscale = u64::from_le_bytes(data[63..71].try_into().unwrap());
+        let unseen_fscale = u64::from_le_bytes(data[63..71].try_into().unwrap());
 
         let mut fscale_lut = [0u64; 255];
         for (i, slot) in fscale_lut.iter_mut().enumerate() {
@@ -1158,10 +1206,9 @@ impl HashBiasTable {
             positive_retention,
             negative_retention,
             max_fold_enrichment,
-            positive_fscale,
+            target_fscale,
             negative_fscale,
-            min_positive_retention,
-            unbiased_fscale,
+            unseen_fscale,
             fscale_lut,
             frac_max_lut: [0u64; 255],
         };
@@ -1244,9 +1291,8 @@ impl HashBiasTable {
 
         eprintln!("Calibration:");
         if self.is_soft_filter() {
-            eprintln!("  positive_fscale:     {}", self.positive_fscale);
+            eprintln!("  target_fscale:       {}", self.target_fscale);
             eprintln!("  negative_fscale:     {}", self.negative_fscale_label());
-            eprintln!("  min_pos_retention:   {:.2}", self.min_positive_retention);
         }
         eprintln!(
             "  positive retention:  {:.2}%",
@@ -1270,8 +1316,8 @@ impl HashBiasTable {
                 "  eff. fscale (combined): {:.0}",
                 self.effective_fscale_combined()
             );
-            if self.unbiased_fscale > 0 {
-                eprintln!("  unbiased_fscale:     {}", self.unbiased_fscale);
+            if self.unseen_fscale > 0 {
+                eprintln!("  unseen_fscale:       {}", self.unseen_fscale);
             }
 
             eprintln!("  reference points:");
@@ -1580,10 +1626,9 @@ impl PartialEq for HashBiasTable {
             && self.threshold == other.threshold
             && self.positive_retention == other.positive_retention
             && self.negative_retention == other.negative_retention
-            && self.positive_fscale == other.positive_fscale
+            && self.target_fscale == other.target_fscale
             && self.negative_fscale == other.negative_fscale
-            && self.min_positive_retention == other.min_positive_retention
-            && self.unbiased_fscale == other.unbiased_fscale
+            && self.unseen_fscale == other.unseen_fscale
             && self.fscale_lut == other.fscale_lut
             && self.seeds == other.seeds
             && self.weights == other.weights
@@ -1695,7 +1740,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
         assert!(table.threshold >= -127);
     }
 
@@ -1726,7 +1771,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
 
         let output = NamedTempFile::new().unwrap();
         table.save(output.path()).unwrap();
@@ -1764,7 +1809,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
 
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
@@ -1799,7 +1844,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
 
         let mut passed = 0;
         let mut failed = 0;
@@ -1847,7 +1892,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
         assert!(table.threshold >= -127);
         assert!(table.fold_enrichment() >= 1.0);
     }
@@ -1865,10 +1910,9 @@ mod tests {
                 fscale: 1,
             },
             alpha: 1.0,
-            positive_fscale: None,
+            target_fscale: None,
             negative_fscale: None,
-            unbiased_fscale: None,
-            min_positive_retention: 0.1,
+            unseen_fscale: None,
         };
 
         let table = HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap();
@@ -1910,7 +1954,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
         assert!(!table.is_soft_filter());
 
         for h in 0..10_000u64 {
@@ -1953,7 +1997,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 1, 1000, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 1, 1000, 0).unwrap();
         assert!(table.is_soft_filter());
 
         for h in 0..10_000u64 {
@@ -1990,7 +2034,7 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 10, 5000, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 10, 5000, 0).unwrap();
         assert!(table.is_soft_filter());
 
         let bytes = table.to_bytes();
@@ -2025,8 +2069,8 @@ mod tests {
         )
         .unwrap();
 
-        // Without unbiased_fscale, w=0 is determined by enrichment data
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 10_000, 0, 0.1).unwrap();
+        // Without unseen_fscale, w=0 is determined by enrichment data
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 10_000, 0).unwrap();
         assert!(table.is_soft_filter());
 
         let at_0 = table.effective_fscale_at(0);
@@ -2060,71 +2104,37 @@ mod tests {
         )
         .unwrap();
 
-        // positive_fscale < global fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 50, 1000, 0, 0.1);
+        // target_fscale < global fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 50, 1000, 0);
         assert!(result.is_err());
 
-        // positive_fscale without negative_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 0, 0, 0.1);
+        // target_fscale without negative_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 0, 0);
         assert!(result.is_err());
 
-        // negative_fscale without positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 1000, 0, 0.1);
+        // negative_fscale without target_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 1000, 0);
         assert!(result.is_err());
 
-        // negative_fscale <= positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 100, 0, 0.1);
+        // negative_fscale <= target_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 100, 0);
         assert!(result.is_err());
 
         // Valid soft filter
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 5000, 0, 0.1);
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 5000, 0);
         assert!(result.is_ok());
 
-        // unbiased_fscale < positive_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 5000, 50, 0.1);
+        // unseen_fscale < target_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 5000, 50);
         assert!(result.is_err());
 
-        // unbiased_fscale > negative_fscale → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 5000, 6000, 0.1);
+        // unseen_fscale > negative_fscale → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 5000, 6000);
         assert!(result.is_err());
 
-        // unbiased_fscale without soft filter → error
-        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 500, 0.1);
+        // unseen_fscale without soft filter → error
+        let result = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 500);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_enrichment_lut_bounds() {
-        let mut p_pos = [HISTOGRAM_EPS; 255];
-        let mut p_neg = [HISTOGRAM_EPS; 255];
-        // Clear separation: positive at high indices, negative at low
-        for v in p_pos[180..255].iter_mut() {
-            *v = 1.0 / 75.0;
-        }
-        for v in p_neg[0..75].iter_mut() {
-            *v = 1.0 / 75.0;
-        }
-        // All bins reliable (high counts)
-        let counts_high = [1000u64; 255];
-
-        let lut = enrichment_lut(&p_pos, &p_neg, &counts_high, &counts_high, 100, 100, 10_000, 0, 0.0).unwrap();
-
-        for (i, &fs) in lut.iter().enumerate() {
-            assert!(
-                (100..=10_000).contains(&fs),
-                "lut[{}] = {} out of bounds [100, 10000]",
-                i,
-                fs
-            );
-        }
-
-        // High-enrichment and low-enrichment buckets should differ
-        let has_low_fscale = lut.iter().any(|&fs| fs <= 500);
-        let has_high_fscale = lut.iter().any(|&fs| fs >= 5000);
-        assert!(
-            has_low_fscale && has_high_fscale,
-            "LUT should have both low and high fscale values"
-        );
     }
 
     #[test]
@@ -2136,7 +2146,7 @@ mod tests {
             width: 1024,
             depth: 3,
             k: 11,
-            fscale: 10,
+            fscale: 1,
         };
 
         let pos_raw = RawHashCounts::build(
@@ -2154,17 +2164,20 @@ mod tests {
         )
         .unwrap();
 
-        // Custom unbiased_fscale = 500 (between 100 and 10_000)
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 10_000, 500, 0.05).unwrap();
+        // Custom unseen_fscale = 10 (between 5 and 100)
+        // With fscale=1, r_target = 1/5 = 0.2, r_unseen = 1/10 = 0.1
+        // Most CMS weights land at w=0, so we need r_target <= r_unseen-ish
+        // to be feasible. Use target_fscale=10 so r_target = 0.1, same as unseen.
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 10, 100, 10).unwrap();
         assert!(table.is_soft_filter());
-        assert_eq!(table.unbiased_fscale, 500);
+        assert_eq!(table.unseen_fscale, 10);
 
-        // w=0 should return unbiased_fscale, not geometric mean
-        assert_approx_eq(table.effective_fscale_at(0), 500.0, 1e-6);
+        // w=0 should return unseen_fscale
+        assert_approx_eq(table.effective_fscale_at(0), 10.0, 1e-6);
 
-        // Geometric mean would be sqrt(100 * 10_000) = 1000
-        // Our custom value 500 is different
-        let geom_mean = (100.0_f64 * 10_000.0_f64).sqrt();
+        // Geometric mean would be sqrt(10 * 100) ≈ 31.6
+        // Our custom value 10 is different
+        let geom_mean = (10.0_f64 * 100.0_f64).sqrt();
         assert!((table.effective_fscale_at(0) - geom_mean).abs() > 1.0);
     }
 
@@ -2176,7 +2189,7 @@ mod tests {
             // fscale decreases as weight increases (retention increases)
             *slot = 10_000u64 - ((10_000u64 - 100) * i as u64 / 254);
         }
-        // Pin w=0 (index 127) to unbiased_fscale
+        // Pin w=0 (index 127) to unseen_fscale
         fscale_lut[127] = 1_000;
 
         let mut table = HashBiasTable {
@@ -2193,10 +2206,9 @@ mod tests {
             positive_retention: 0.0,
             negative_retention: 0.0,
             max_fold_enrichment: 0.0,
-            positive_fscale: 100,
+            target_fscale: 100,
             negative_fscale: 10_000,
-            min_positive_retention: 0.1,
-            unbiased_fscale: 1_000,
+            unseen_fscale: 1_000,
             fscale_lut,
             frac_max_lut: [0u64; 255],
         };
@@ -2224,7 +2236,7 @@ mod tests {
 
     #[test]
     fn test_lut_bounds_respected() {
-        // All fscale_lut entries should be in [positive_fscale, negative_fscale]
+        // All fscale_lut entries should be in [target_fscale, negative_fscale]
         let pos = create_fasta(&["ATATATATATATATATATATATAT"]);
         let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGC"]);
         let config = CMSConfig {
@@ -2248,92 +2260,162 @@ mod tests {
         )
         .unwrap();
 
-        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 10_000, 0, 0.1).unwrap();
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 100, 10_000, 0).unwrap();
         assert!(table.is_soft_filter());
 
         for (i, &fs) in table.fscale_lut.iter().enumerate() {
             assert!(
-                fs >= table.positive_fscale && fs <= table.negative_fscale,
+                fs >= table.target_fscale && fs <= table.negative_fscale,
                 "fscale_lut[{}] = {} out of bounds [{}, {}]",
                 i,
                 fs,
-                table.positive_fscale,
+                table.target_fscale,
                 table.negative_fscale
             );
         }
     }
 
     #[test]
-    fn test_enrichment_lut_separates_signal() {
+    fn test_water_fill_solve_uniform() {
+        let q = [1.0 / 255.0; 255];
+        let coeffs = [1.0; 255];
+        let result = water_fill_solve(&coeffs, &q, 0.1, 1.0, 0.5, &[]);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        let actual_budget: f64 = (0..255).map(|i| q[i] * r[i]).sum();
+        assert_approx_eq(actual_budget, 0.5, 1e-6);
+    }
+
+    #[test]
+    fn test_water_fill_solve_fixed_bucket() {
+        let q = [1.0 / 255.0; 255];
+        let coeffs = [1.0; 255];
+        let w0_idx = HashBiasTable::weight_to_index(0);
+        let fixed = vec![(w0_idx, 0.3)];
+        let result = water_fill_solve(&coeffs, &q, 0.01, 1.0, 0.5, &fixed);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert_approx_eq(r[w0_idx], 0.3, 1e-10);
+    }
+
+    #[test]
+    fn test_water_fill_solve_infeasible() {
+        let q = [1.0 / 255.0; 255];
+        let coeffs = [1.0; 255];
+        let result = water_fill_solve(&coeffs, &q, 0.5, 1.0, 0.01, &[]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_target_fscale_lut_hits_budget() {
         let mut p_pos = [HISTOGRAM_EPS; 255];
         let mut p_neg = [HISTOGRAM_EPS; 255];
-        for v in p_pos[200..255].iter_mut() {
-            *v = 1.0 / 55.0;
+        let q = [1.0 / 255.0; 255];
+        let pos_counts = [100u64; 255];
+        let neg_counts = [100u64; 255];
+
+        // Positive concentrated at high weights (200-254)
+        for i in 200..255 {
+            p_pos[i] = 1.0 / 55.0;
         }
-        for v in p_neg[0..55].iter_mut() {
-            *v = 1.0 / 55.0;
+        // Negative concentrated at low weights (0-54)
+        for i in 0..55 {
+            p_neg[i] = 1.0 / 55.0;
         }
-        let counts_high = [1000u64; 255];
 
-        let lut = enrichment_lut(&p_pos, &p_neg, &counts_high, &counts_high, 100, 100, 10_000, 0, 0.0).unwrap();
+        // Normalize
+        let pos_sum: f64 = p_pos.iter().sum();
+        let neg_sum: f64 = p_neg.iter().sum();
+        let mut p_pos_norm = p_pos;
+        let mut p_neg_norm = p_neg;
+        for v in p_pos_norm.iter_mut() {
+            *v /= pos_sum;
+        }
+        for v in p_neg_norm.iter_mut() {
+            *v /= neg_sum;
+        }
 
-        // High-enrichment buckets (200+) should have low fscale
-        let high_avg: f64 = lut[200..255].iter().map(|&f| f as f64).sum::<f64>() / 55.0;
-        // Low-enrichment buckets (0..55) should have high fscale
-        let low_avg: f64 = lut[0..55].iter().map(|&f| f as f64).sum::<f64>() / 55.0;
+        let base_fscale = 100u64;
+        let target_fscale = 500u64;
+        let negative_fscale = 10000u64;
+        let unseen_fscale = 500u64;
 
+        let (lut, iters) = target_fscale_lut(
+            &p_pos_norm,
+            &p_neg_norm,
+            &q,
+            &pos_counts,
+            &neg_counts,
+            base_fscale,
+            target_fscale,
+            negative_fscale,
+            unseen_fscale,
+        )
+        .unwrap();
+
+        assert!(iters > 0);
+        assert!(iters <= 50);
+
+        // Verify effective combined fscale is close to target
+        let r_target = base_fscale as f64 / target_fscale as f64;
+        let actual_retention: f64 = (0..255)
+            .map(|i| {
+                let r = (base_fscale as f64 / lut[i] as f64).min(1.0);
+                q[i] * r
+            })
+            .sum();
         assert!(
-            low_avg > high_avg,
-            "negative-enriched buckets should have higher fscale: low_avg={}, high_avg={}",
-            low_avg,
-            high_avg
+            (actual_retention - r_target).abs() / r_target < 0.3,
+            "actual retention {actual_retention} too far from target {r_target}"
+        );
+
+        // Verify enrichment: positive buckets should have lower fscale
+        let avg_pos_fscale: f64 = (200..255).map(|i| lut[i] as f64).sum::<f64>() / 55.0;
+        let avg_neg_fscale: f64 = (0..55).map(|i| lut[i] as f64).sum::<f64>() / 55.0;
+        assert!(
+            avg_pos_fscale < avg_neg_fscale,
+            "positive buckets should have lower fscale: pos={avg_pos_fscale}, neg={avg_neg_fscale}"
         );
     }
 
     #[test]
-    fn test_enrichment_lut_min_retention_floor() {
-        let mut p_pos = [HISTOGRAM_EPS; 255];
-        let mut p_neg = [HISTOGRAM_EPS; 255];
-        // Very few positive hashes
-        p_pos[200] = 1.0;
-        // Lots of negative everywhere
-        for v in p_neg.iter_mut() {
-            *v = 1.0 / 255.0;
-        }
+    fn test_target_fscale_lut_integration() {
+        let pos = create_fasta(&[
+            "ATATATATATATATATATATATATATATATATATATATAT",
+            "TATATATATATATATATATATATATATATATATATATAT",
+        ]);
+        let neg = create_fasta(&[
+            "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC",
+            "CGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCG",
+        ]);
 
-        let counts_high = [1000u64; 255];
-        let lut_low = enrichment_lut(&p_pos, &p_neg, &counts_high, &counts_high, 100, 100, 10_000, 0, 0.0).unwrap();
-        let lut_high = enrichment_lut(&p_pos, &p_neg, &counts_high, &counts_high, 100, 100, 10_000, 0, 0.5).unwrap();
+        let config = CMSConfig {
+            width: 1024,
+            depth: 3,
+            k: 11,
+            fscale: 1,
+        };
 
-        // With high retention floor, more buckets should have lower fscale (higher retention)
-        let open_low = lut_low.iter().filter(|&&f| f == 100).count();
-        let open_high = lut_high.iter().filter(|&&f| f == 100).count();
-        assert!(
-            open_high >= open_low,
-            "higher min retention should open more buckets: floor=0.0 has {} open, floor=0.5 has {} open",
-            open_low,
-            open_high
-        );
-    }
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
 
-    #[test]
-    fn test_enrichment_lut_uses_full_range() {
-        let mut p_pos = [HISTOGRAM_EPS; 255];
-        let mut p_neg = [HISTOGRAM_EPS; 255];
-        // Positive hashes at high indices, negative at low, with overlap
-        p_pos[80..255].fill(1.0 / 175.0);
-        p_neg[0..180].fill(1.0 / 180.0);
-        let counts_high = [1000u64; 255];
-
-        let lut = enrichment_lut(&p_pos, &p_neg, &counts_high, &counts_high, 100, 100, 10_000, 0, 0.0).unwrap();
-
-        let has_low = lut.iter().any(|&fs| fs <= 500);
-        let has_high = lut.iter().any(|&fs| fs >= 3000);
-        assert!(
-            has_low && has_high,
-            "LUT should use the fscale range: has_low={}, has_high={}",
-            has_low,
-            has_high
-        );
+        // With fscale=1 all hashes are in range; use modest target_fscale
+        // so target retention = 1/2 = 0.5 which is achievable
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2, 100, 0).unwrap();
+        assert!(table.is_soft_filter());
+        assert!(table.positive_retention > 0.0);
+        assert!(table.fold_enrichment() >= 1.0);
     }
 }

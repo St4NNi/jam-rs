@@ -137,24 +137,19 @@ pub enum BiasCommands {
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Effective fscale for positively biased hashes (soft filter).
-        /// Must be >= global fscale. Enables enrichment LUT filtering when
-        /// both positive-fscale and negative-fscale are set.
+        /// Target effective fscale for combined retention budget.
+        /// Enables enrichment LUT filtering. Must be >= base fscale.
         #[arg(long)]
-        positive_fscale: Option<u64>,
-        /// Effective fscale for negatively biased hashes (soft filter).
-        /// Must be > positive-fscale. Higher values = lower retention.
-        /// Use "drop" to discard hashes below the threshold.
+        target_fscale: Option<u64>,
+        /// Maximum fscale per bucket (minimum retention). Higher = more suppression.
+        /// Use "drop" to allow complete suppression of negatively biased hashes.
+        /// Required when --target-fscale is set.
         #[arg(long)]
-        negative_fscale: Option<String>,
-        /// Effective fscale at w=0 (unseen/balanced k-mers) for soft filter.
-        /// Default: data-driven from enrichment optimization.
+        max_fscale: Option<String>,
+        /// Fixed fscale for weight=0 (unseen/balanced k-mers).
+        /// Default: same as --target-fscale.
         #[arg(long)]
-        unbiased_fscale: Option<u64>,
-        /// Minimum positive retention floor (0.0–1.0). The optimizer will not
-        /// reduce positive retention below this value. [default: 0.1]
-        #[arg(long, default_value = "0.1")]
-        min_positive_retention: f32,
+        unseen_fscale: Option<u64>,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,

@@ -105,12 +105,11 @@ pub fn handle_sketch_command(
             ));
         }
 
-        let sketch_fscale = fscale.unwrap_or(1000);
-        if table.fscale() != sketch_fscale {
+        if fscale.is_some() {
             return Err(anyhow::anyhow!(
-                "Bias table fscale ({}) does not match sketch fscale ({})",
-                table.fscale(),
-                sketch_fscale
+                "--fscale cannot be used with --bias-table. \
+                 The bias table's stored fscale ({}) is used automatically.",
+                table.fscale()
             ));
         }
 
@@ -122,9 +121,14 @@ pub fn handle_sketch_command(
         None
     };
 
+    let effective_fscale = match &bias_table {
+        Some(table) => table.fscale(),
+        None => fscale.unwrap_or(1000),
+    };
+
     let config = BuildConfig {
         kmer_size,
-        fscale: fscale.unwrap_or(1000),
+        fscale: effective_fscale,
         num_threads: threads,
         memory,
         singleton,
@@ -379,10 +383,9 @@ pub fn handle_bias_create_command(
     cms_width: usize,
     cms_depth: usize,
     alpha: f32,
-    positive_fscale: Option<u64>,
-    negative_fscale: Option<String>,
-    unbiased_fscale: Option<u64>,
-    min_positive_retention: f32,
+    target_fscale: Option<u64>,
+    max_fscale: Option<String>,
+    unseen_fscale: Option<u64>,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -413,31 +416,27 @@ pub fn handle_bias_create_command(
         return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
     }
 
-    if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
-        return Err(anyhow::anyhow!(
-            "--min-positive-retention must be in the range [0, 1]"
-        ));
-    }
-
-    match (positive_fscale.as_ref(), negative_fscale.as_ref()) {
+    match (target_fscale.as_ref(), max_fscale.as_ref()) {
         (Some(_), None) | (None, Some(_)) => {
             return Err(anyhow::anyhow!(
-                "Both --positive-fscale and --negative-fscale must be set together"
+                "Both --target-fscale and --max-fscale must be set together"
             ));
         }
         _ => {}
     }
 
-    let negative_fscale = match negative_fscale.as_deref() {
+    let negative_fscale = match max_fscale.as_deref() {
         Some(value) if value.eq_ignore_ascii_case("drop") => Some(u64::MAX),
         Some(value) => {
             let parsed = value
                 .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("--negative-fscale must be an integer or 'drop'"))?;
+                .map_err(|_| anyhow::anyhow!("--max-fscale must be an integer or 'drop'"))?;
             Some(parsed)
         }
         None => None,
     };
+
+    let unseen_fscale = unseen_fscale.or(target_fscale);
 
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
@@ -467,10 +466,9 @@ pub fn handle_bias_create_command(
             fscale,
         },
         alpha,
-        positive_fscale,
+        target_fscale,
         negative_fscale,
-        unbiased_fscale,
-        min_positive_retention,
+        unseen_fscale,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -525,9 +523,8 @@ pub fn handle_bias_create_command(
 
         eprintln!("Calibration:");
         if table.is_soft_filter() {
-            eprintln!("  positive_fscale:     {}", table.positive_fscale);
+            eprintln!("  target fscale:       {}", table.target_fscale);
             eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
-            eprintln!("  min_pos_retention:   {:.2}", table.min_positive_retention);
         }
         eprintln!(
             "  positive retention:  {:.2}%",
@@ -551,8 +548,8 @@ pub fn handle_bias_create_command(
                 "  eff. fscale (combined): {:.0}",
                 table.effective_fscale_combined()
             );
-            if table.unbiased_fscale > 0 {
-                eprintln!("  unbiased_fscale:     {}", table.unbiased_fscale);
+            if table.unseen_fscale > 0 {
+                eprintln!("  unseen fscale:       {}", table.unseen_fscale);
             }
             eprintln!("  reference points:");
             for p in table.soft_filter_reference_points() {
@@ -652,11 +649,10 @@ pub fn handle_bias_stats_command(
                 "effective_fscale_combined": table.effective_fscale_combined(),
             },
             "soft_filter": {
-                "positive_fscale": table.positive_fscale,
+                "target_fscale": table.target_fscale,
                 "negative_fscale": table.negative_fscale,
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
-                "min_positive_retention": table.min_positive_retention,
-                "unbiased_fscale": table.unbiased_fscale,
+                "unseen_fscale": table.unseen_fscale,
             },
             "weight_stats": {
                 "min": min,
