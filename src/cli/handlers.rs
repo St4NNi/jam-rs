@@ -156,6 +156,7 @@ pub fn handle_distance_command(
     cutoff: f64,
     singleton: bool,
     silent: bool,
+    memory_gb: usize,
 ) -> Result<()> {
     use std::time::Instant;
 
@@ -238,75 +239,19 @@ pub fn handle_distance_command(
         ));
     }
 
-    let phase_start = Instant::now();
-    let results = engine.query_sketch(&sketch);
+    let total_samples = sketch.sample_count();
+    let budget_bytes = memory_gb * 1024 * 1024 * 1024 * 7 / 10;
+    let per_sample_bytes = (db_stats.sample_count as usize).max(1) * 40;
+    let chunk_size = (budget_bytes / per_sample_bytes).clamp(100, total_samples);
 
     if let Some(ref sp) = spinner {
-        let total_matches: usize = results.iter().map(|r| r.matches.len()).sum();
-        sp.println(format!(
-            "[3/4] Search completed in {:.2?}: {} total matches",
-            phase_start.elapsed(),
-            total_matches
+        sp.set_message(format!(
+            "[3/4] Searching {} query samples against {} db samples (chunk size {})...",
+            total_samples, db_stats.sample_count, chunk_size,
         ));
-        sp.set_message("[4/4] Writing output...");
     }
 
-    let phase_start = Instant::now();
-
     use rayon::prelude::*;
-
-    let formatted_chunks: Vec<String> = results
-        .par_iter()
-        .enumerate()
-        .map(|(query_idx, result)| {
-            let query_name = &sketch.sample_names[query_idx];
-            let query_hashes = result.query_size;
-
-            let mut matches: Vec<_> = result
-                .matches
-                .iter()
-                .filter(|m| m.containment >= cutoff)
-                .collect();
-
-            if matches.is_empty() {
-                return String::new();
-            }
-
-            matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
-
-            let mut chunk = String::with_capacity(matches.len() * 100);
-
-            for m in &matches {
-                let db_name = db_names
-                    .get(m.sample_id as usize)
-                    .map(|s| s.as_str())
-                    .unwrap_or("unknown");
-                let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
-                let shared_hashes = m.hit_count;
-                let query_containment = m.containment;
-                let db_containment = if db_hashes > 0 {
-                    shared_hashes as f64 / db_hashes as f64
-                } else {
-                    0.0
-                };
-
-                use std::fmt::Write;
-                let _ = writeln!(
-                    chunk,
-                    "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
-                    query_name,
-                    db_name,
-                    shared_hashes,
-                    query_hashes,
-                    db_hashes,
-                    query_containment,
-                    db_containment
-                );
-            }
-
-            chunk
-        })
-        .collect();
 
     const WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
@@ -326,11 +271,92 @@ pub fn handle_distance_command(
         "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment"
     )?;
 
-    for chunk in &formatted_chunks {
-        if !chunk.is_empty() {
-            writer.write_all(chunk.as_bytes())?;
+    let flush_threshold = memory_gb * 1024 * 1024 * 1024 / 2;
+    let mut temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
+    let mut pending: Vec<u8> = Vec::new();
+
+    let phase_start = Instant::now();
+    let mut total_matches: usize = 0;
+
+    for chunk_start in (0..total_samples).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(total_samples);
+
+        let results = engine.query_sketch_chunked(&sketch, chunk_start..chunk_end, cutoff);
+
+        let formatted: Vec<String> = results
+            .par_iter()
+            .enumerate()
+            .map(|(local_idx, result)| {
+                let global_idx = chunk_start + local_idx;
+                let query_name = &sketch.sample_names[global_idx];
+                let query_hashes = result.query_size;
+
+                if result.matches.is_empty() {
+                    return String::new();
+                }
+
+                let mut matches: Vec<_> = result.matches.iter().collect();
+                matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
+
+                let mut out = String::with_capacity(matches.len() * 100);
+                for m in &matches {
+                    let db_name = db_names
+                        .get(m.sample_id as usize)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
+                    let db_containment = if db_hashes > 0 {
+                        m.hit_count as f64 / db_hashes as f64
+                    } else {
+                        0.0
+                    };
+                    use std::fmt::Write;
+                    let _ = writeln!(
+                        out,
+                        "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
+                        query_name,
+                        db_name,
+                        m.hit_count,
+                        query_hashes,
+                        db_hashes,
+                        m.containment,
+                        db_containment,
+                    );
+                }
+                out
+            })
+            .collect();
+
+        for s in &formatted {
+            if !s.is_empty() {
+                total_matches += s.lines().count();
+                pending.extend_from_slice(s.as_bytes());
+            }
+        }
+
+        if pending.len() > flush_threshold {
+            let mut tmp = tempfile::NamedTempFile::new()?;
+            tmp.write_all(&pending)?;
+            temp_files.push(tmp);
+            pending.clear();
         }
     }
+
+    if let Some(ref sp) = spinner {
+        sp.println(format!(
+            "[3/4] Search completed in {:.2?}: {} total matches",
+            phase_start.elapsed(),
+            total_matches,
+        ));
+        sp.set_message("[4/4] Writing output...");
+    }
+
+    let phase_start = Instant::now();
+
+    for tmp in &temp_files {
+        std::io::copy(&mut std::fs::File::open(tmp.path())?, &mut writer)?;
+    }
+    writer.write_all(&pending)?;
 
     if let Some(ref sp) = spinner {
         sp.println(format!(
@@ -393,7 +419,6 @@ pub fn handle_bias_create_command(
         ));
     }
 
-    // Validate soft-filter fscale pair: both or neither
     match (positive_fscale.as_ref(), negative_fscale.as_ref()) {
         (Some(_), None) | (None, Some(_)) => {
             return Err(anyhow::anyhow!(

@@ -99,7 +99,15 @@ pub fn run() -> Result<()> {
             output,
             cutoff,
             singleton,
-        } => handle_distance_command(input, database, output, cutoff, singleton, cli.silent),
+        } => handle_distance_command(
+            input,
+            database,
+            output,
+            cutoff,
+            singleton,
+            cli.silent,
+            cli.memory.unwrap_or(2),
+        ),
 
         Commands::Stats { input, short, full } => {
             handle_stats_command(input, short, full, cli.silent)

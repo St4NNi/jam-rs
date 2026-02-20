@@ -702,7 +702,7 @@ mod tests {
 
         let config = BuildConfig {
             kmer_size: 11,
-            fscale: 1, // Keep all hashes
+            fscale: 1,
             num_threads: 1,
             memory: 1,
             ..Default::default()
@@ -730,7 +730,7 @@ mod tests {
 
         let config = BuildConfig {
             kmer_size: 11,
-            fscale: 1000, // Keep only ~0.1% of hashes
+            fscale: 1000,
             num_threads: 1,
             memory: 1,
             ..Default::default()
@@ -759,7 +759,7 @@ mod tests {
         let config = BuildConfig {
             kmer_size: 11,
             fscale: 1,
-            singleton: true, // Each sequence is a separate sample
+            singleton: true,
             num_threads: 1,
             memory: 1,
             ..Default::default()

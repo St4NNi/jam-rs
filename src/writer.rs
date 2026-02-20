@@ -433,7 +433,7 @@ mod tests {
         let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCG")]);
         let sketch_config = SketchConfig {
             kmer_size: 11,
-            fscale: 1_000_000, // Very restrictive - few hashes pass
+            fscale: 1_000_000,
             num_threads: 1,
             memory: 1,
             ..Default::default()
@@ -486,7 +486,7 @@ mod tests {
         ]);
         let sketch_config = SketchConfig {
             kmer_size: 11,
-            fscale: 1, // Keep all hashes
+            fscale: 1,
             num_threads: 2,
             memory: 1,
             ..Default::default()

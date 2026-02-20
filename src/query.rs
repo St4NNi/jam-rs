@@ -411,39 +411,49 @@ impl QueryEngine {
     }
 
     pub fn query_sketch(&self, sketch: &QuerySketch) -> Vec<QueryResult> {
+        self.query_sketch_chunked(sketch, 0..sketch.sample_count(), 0.0)
+    }
+
+    pub fn query_sketch_chunked(
+        &self,
+        sketch: &QuerySketch,
+        sample_range: std::ops::Range<usize>,
+        min_containment: f64,
+    ) -> Vec<QueryResult> {
         use crate::format::{ENTRY_SIZE, PAGE_SIZE};
         use rayon::prelude::*;
+        use std::collections::HashMap;
         use std::sync::atomic::{AtomicU32, Ordering};
 
-        let num_samples = sketch.sample_count();
-        if num_samples == 0 {
+        let chunk_len = sample_range.len();
+        if chunk_len == 0 {
             return Vec::new();
         }
 
+        let range_start = sample_range.start;
         let threshold = self.reader.threshold();
 
         self.reader.advise_random();
 
-        let hashes_found: Vec<AtomicU32> = (0..num_samples)
-            .into_par_iter()
-            .map(|_| AtomicU32::new(0))
-            .collect();
+        let hashes_found: Vec<AtomicU32> = (0..chunk_len).map(|_| AtomicU32::new(0)).collect();
 
-        let bucket_pairs: Vec<Vec<(u32, u32)>> = (0..BUCKET_COUNT)
+        let bucket_maps: Vec<Vec<HashMap<u32, u32>>> = (0..BUCKET_COUNT)
             .into_par_iter()
             .map(|bucket_idx| {
-                let mut pairs = Vec::new();
+                let mut local_maps: Vec<HashMap<u32, u32>> =
+                    (0..chunk_len).map(|_| HashMap::new()).collect();
+
                 let query_bucket = sketch.bucket(bucket_idx);
                 if query_bucket.is_empty() {
-                    return pairs;
+                    return local_maps;
                 }
 
                 let filter = match self.reader.bucket_filter(bucket_idx) {
                     Some(f) => f,
-                    None => return pairs,
+                    None => return local_maps,
                 };
 
-                let mut survivors = Vec::with_capacity(query_bucket.len() / 10);
+                let mut survivors: Vec<(u64, u32)> = Vec::with_capacity(query_bucket.len() / 10);
                 let mut prev_hash = u64::MAX;
                 let mut prev_passed = false;
 
@@ -452,25 +462,25 @@ impl QueryEngine {
                         prev_hash = hash;
                         prev_passed = filter.contains(&hash);
                     }
-                    if prev_passed {
+                    if prev_passed
+                        && (sample_id as usize) >= range_start
+                        && (sample_id as usize) < range_start + chunk_len
+                    {
                         survivors.push((hash, sample_id));
                     }
                 }
 
-                let (filter_start, filter_end) = self.reader.bucket_filter_byte_range(bucket_idx);
-                self.reader.release_pages(filter_start, filter_end);
-
                 if survivors.is_empty() {
-                    return pairs;
+                    return local_maps;
                 }
 
                 let db_bucket = self.reader.bucket_entries(bucket_idx);
                 let count = db_bucket.len();
                 if count == 0 {
-                    return pairs;
+                    return local_maps;
                 }
 
-                let (entry_start, _entry_end) = self.reader.bucket_entry_byte_range(bucket_idx);
+                let (entry_start, entry_end) = self.reader.bucket_entry_byte_range(bucket_idx);
                 let mut last_released_page = entry_start & !(PAGE_SIZE - 1);
 
                 let mut q_idx = 0;
@@ -483,11 +493,9 @@ impl QueryEngine {
                     while d_idx > 0 && db_bucket[d_idx].hash > q_hash {
                         d_idx -= 1;
                     }
-
                     while d_idx < count && db_bucket[d_idx].hash < q_hash {
                         d_idx += 1;
                     }
-
                     while d_idx > 0 && db_bucket[d_idx - 1].hash == q_hash {
                         d_idx -= 1;
                     }
@@ -513,10 +521,13 @@ impl QueryEngine {
 
                         if q_sample != prev_sample {
                             if has_matches {
+                                let local_idx = (q_sample as usize) - range_start;
                                 for db_entry in &db_bucket[db_start..db_end] {
-                                    pairs.push((q_sample, db_entry.sample_id));
+                                    *local_maps[local_idx]
+                                        .entry(db_entry.sample_id)
+                                        .or_insert(0) += 1;
                                 }
-                                hashes_found[q_sample as usize].fetch_add(1, Ordering::Relaxed);
+                                hashes_found[local_idx].fetch_add(1, Ordering::Relaxed);
                             }
                             prev_sample = q_sample;
                         }
@@ -524,103 +535,59 @@ impl QueryEngine {
                     }
                 }
 
-                self.reader.release_bucket(bucket_idx);
+                self.reader.release_pages(last_released_page, entry_end);
 
-                pairs
+                local_maps
             })
             .collect();
 
-        let bucket_sizes: Vec<usize> = bucket_pairs.iter().map(|v| v.len()).collect();
-        let total_pairs: usize = bucket_sizes.iter().sum();
-        let mut bucket_offsets = Vec::with_capacity(BUCKET_COUNT + 1);
-        bucket_offsets.push(0usize);
-        for size in &bucket_sizes {
-            bucket_offsets.push(bucket_offsets.last().unwrap() + size);
-        }
-
-        let mut all_pairs: Vec<(u32, u32)> = vec![(0, 0); total_pairs];
-        bucket_pairs
+        let merged: Vec<HashMap<u32, u32>> = (0..chunk_len)
             .into_par_iter()
-            .enumerate()
-            .for_each(|(bucket_idx, pairs)| {
-                let start = bucket_offsets[bucket_idx];
-                let dest = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        all_pairs.as_ptr().add(start) as *mut (u32, u32),
-                        pairs.len(),
-                    )
-                };
-                dest.copy_from_slice(&pairs);
-            });
-
-        let merged_hashes_found: Vec<u32> = hashes_found
-            .into_par_iter()
-            .map(|a| a.load(Ordering::Relaxed))
-            .collect();
-
-        all_pairs.par_sort_unstable();
-
-        if all_pairs.is_empty() {
-            return (0..num_samples)
-                .map(|i| QueryResult {
-                    query_size: sketch.query_sizes[i],
-                    hashes_found: merged_hashes_found[i] as usize,
-                    matches: Vec::new(),
-                    failed_bucket_count: 0,
-                })
-                .collect();
-        }
-
-        let sample_starts: Vec<usize> = (0..num_samples as u32)
-            .into_par_iter()
-            .map(|q_sample| all_pairs.partition_point(|&(qs, _)| qs < q_sample))
-            .collect();
-
-        let results: Vec<QueryResult> = (0..num_samples)
-            .into_par_iter()
-            .map(|sample_idx| {
-                let q_sample = sample_idx as u32;
-                let start = sample_starts[sample_idx];
-                let end = if sample_idx + 1 < num_samples {
-                    sample_starts[sample_idx + 1]
-                } else {
-                    all_pairs.len()
-                };
-
-                let mut matches = Vec::new();
-                let query_size = sketch.query_sizes[sample_idx];
-
-                let mut i = start;
-                while i < end {
-                    let (_, db_sample) = all_pairs[i];
-                    let mut count = 1u32;
-                    while i + (count as usize) < end
-                        && all_pairs[i + count as usize] == (q_sample, db_sample)
-                    {
-                        count += 1;
+            .map(|local_idx| {
+                let mut combined: HashMap<u32, u32> = HashMap::new();
+                for per_bucket in &bucket_maps {
+                    for (&db_id, &count) in &per_bucket[local_idx] {
+                        *combined.entry(db_id).or_insert(0) += count;
                     }
-                    matches.push(SampleMatch {
-                        sample_id: db_sample,
+                }
+                combined
+            })
+            .collect();
+
+        (0..chunk_len)
+            .into_par_iter()
+            .map(|local_idx| {
+                let global_idx = range_start + local_idx;
+                let query_size = sketch.query_sizes[global_idx];
+
+                let min_hits = if min_containment > 0.0 && query_size > 0 {
+                    (min_containment * query_size as f64).ceil() as u32
+                } else {
+                    0
+                };
+
+                let matches: Vec<SampleMatch> = merged[local_idx]
+                    .iter()
+                    .filter(|&(_, &count)| count >= min_hits)
+                    .map(|(&db_id, &count)| SampleMatch {
+                        sample_id: db_id,
                         hit_count: count,
                         containment: if query_size > 0 {
                             count as f64 / query_size as f64
                         } else {
                             0.0
                         },
-                    });
-                    i += count as usize;
-                }
+                    })
+                    .collect();
 
                 QueryResult {
                     query_size,
-                    hashes_found: merged_hashes_found[sample_idx] as usize,
+                    hashes_found: hashes_found[local_idx].load(Ordering::Relaxed) as usize,
                     matches,
                     failed_bucket_count: 0,
                 }
             })
-            .collect();
-
-        results
+            .collect()
     }
 
     pub fn query_fasta<P: AsRef<Path>>(
@@ -891,7 +858,7 @@ mod tests {
     #[should_panic]
     fn test_query_sketch_bucket_out_of_bounds() {
         let sketch = QuerySketch::new();
-        let _ = sketch.bucket(256); // Should panic
+        let _ = sketch.bucket(256);
     }
 
     #[test]
@@ -947,7 +914,7 @@ mod tests {
                 ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
                 ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
             ],
-            true, // singleton mode - each sequence is a separate sample
+            true,
         );
         let engine = QueryEngine::open(&path).unwrap();
         let reader = JamReader::open(&path).unwrap();
@@ -1193,8 +1160,8 @@ mod tests {
         assert_eq!(db.kmer_size(), 11);
 
         let query_fasta = make_fasta(&[
-            ("short", "ATCGATCG"),                        // 8 bp, < 11
-            ("long", "ATCGATCGATCGATCGATCGATCGATCGATCG"), // 32 bp, > 11
+            ("short", "ATCGATCG"),
+            ("long", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
         ]);
 
         let sketch = QuerySketch::from_fasta(query_fasta.path(), &db, true).unwrap();
@@ -1750,7 +1717,7 @@ mod tests {
     fn test_from_inputs_jam_parameter_mismatch_propagates() {
         let (_dir1, db_path) = build_test_db_with_params(
             &[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
-            11, // k=11
+            11,
             1,
             false,
         );
@@ -1771,6 +1738,159 @@ mod tests {
                 assert!(parameter.contains("k-mer"));
             }
             e => panic!("Expected ParameterMismatch error, got {:?}", e),
+        }
+    }
+
+    fn normalize_results(results: &mut [QueryResult]) {
+        for r in results.iter_mut() {
+            r.matches.sort_by_key(|m| m.sample_id);
+        }
+    }
+
+    #[test]
+    fn test_chunked_full_range_matches_query_sketch() {
+        let (_dir, db_path) = build_test_db_with_params(
+            &[
+                ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+                ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
+            ],
+            11,
+            1,
+            true,
+        );
+        let engine = QueryEngine::open(&db_path).unwrap();
+        let reader = JamReader::open(&db_path).unwrap();
+        let sketch = QuerySketch::from_jam(&db_path, &reader).unwrap();
+        let n = sketch.sample_count();
+
+        let mut expected = engine.query_sketch(&sketch);
+        let mut actual = engine.query_sketch_chunked(&sketch, 0..n, 0.0);
+
+        normalize_results(&mut expected);
+        normalize_results(&mut actual);
+
+        assert_eq!(actual.len(), expected.len());
+        for (a, e) in actual.iter().zip(expected.iter()) {
+            assert_eq!(a.query_size, e.query_size, "query_size mismatch");
+            assert_eq!(a.hashes_found, e.hashes_found, "hashes_found mismatch");
+            assert_eq!(a.matches.len(), e.matches.len(), "match count mismatch");
+            for (am, em) in a.matches.iter().zip(e.matches.iter()) {
+                assert_eq!(am.sample_id, em.sample_id);
+                assert_eq!(am.hit_count, em.hit_count);
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunked_by_one_sample_matches_query_sketch() {
+        let (_dir, db_path) = build_test_db_with_params(
+            &[
+                ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+                ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
+            ],
+            11,
+            1,
+            true,
+        );
+        let engine = QueryEngine::open(&db_path).unwrap();
+        let reader = JamReader::open(&db_path).unwrap();
+        let sketch = QuerySketch::from_jam(&db_path, &reader).unwrap();
+        let n = sketch.sample_count();
+
+        let mut expected = engine.query_sketch(&sketch);
+        normalize_results(&mut expected);
+
+        let mut chunked_results: Vec<QueryResult> = Vec::new();
+        for i in 0..n {
+            let mut chunk = engine.query_sketch_chunked(&sketch, i..i + 1, 0.0);
+            normalize_results(&mut chunk);
+            chunked_results.extend(chunk);
+        }
+
+        assert_eq!(chunked_results.len(), expected.len());
+        for (a, e) in chunked_results.iter().zip(expected.iter()) {
+            assert_eq!(a.query_size, e.query_size);
+            assert_eq!(a.hashes_found, e.hashes_found);
+            assert_eq!(a.matches.len(), e.matches.len());
+            for (am, em) in a.matches.iter().zip(e.matches.iter()) {
+                assert_eq!(am.sample_id, em.sample_id);
+                assert_eq!(am.hit_count, em.hit_count);
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunked_cutoff_removes_low_containment() {
+        let (_dir, db_path) = build_test_db_with_params(
+            &[
+                ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+                ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
+            ],
+            11,
+            1,
+            true,
+        );
+        let engine = QueryEngine::open(&db_path).unwrap();
+        let reader = JamReader::open(&db_path).unwrap();
+        let sketch = QuerySketch::from_jam(&db_path, &reader).unwrap();
+        let n = sketch.sample_count();
+
+        let all_results = engine.query_sketch_chunked(&sketch, 0..n, 0.0);
+        let filtered_results = engine.query_sketch_chunked(&sketch, 0..n, 0.9);
+
+        for result in &filtered_results {
+            for m in &result.matches {
+                assert!(
+                    m.containment >= 0.9,
+                    "containment {} below cutoff",
+                    m.containment
+                );
+            }
+        }
+
+        for (filtered, full) in filtered_results.iter().zip(all_results.iter()) {
+            assert!(filtered.matches.len() <= full.matches.len());
+        }
+    }
+
+    #[test]
+    fn test_chunked_two_halves_match_full_range() {
+        let (_dir, db_path) = build_test_db_with_params(
+            &[
+                ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+                ("seq2", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA"),
+                ("seq3", "TATATATATATATATATATATATATATATATA"),
+                ("seq4", "GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC"),
+            ],
+            11,
+            1,
+            true,
+        );
+        let engine = QueryEngine::open(&db_path).unwrap();
+        let reader = JamReader::open(&db_path).unwrap();
+        let sketch = QuerySketch::from_jam(&db_path, &reader).unwrap();
+        let n = sketch.sample_count();
+
+        let mut expected = engine.query_sketch(&sketch);
+        normalize_results(&mut expected);
+
+        let mut first_half = engine.query_sketch_chunked(&sketch, 0..n / 2, 0.0);
+        let mut second_half = engine.query_sketch_chunked(&sketch, n / 2..n, 0.0);
+        normalize_results(&mut first_half);
+        normalize_results(&mut second_half);
+
+        let mut combined = first_half;
+        combined.extend(second_half);
+
+        assert_eq!(combined.len(), expected.len());
+        for (a, e) in combined.iter().zip(expected.iter()) {
+            assert_eq!(a.query_size, e.query_size);
+            assert_eq!(a.hashes_found, e.hashes_found);
+            assert_eq!(a.matches.len(), e.matches.len());
+            for (am, em) in a.matches.iter().zip(e.matches.iter()) {
+                assert_eq!(am.sample_id, em.sample_id);
+                assert_eq!(am.hit_count, em.hit_count);
+            }
         }
     }
 
