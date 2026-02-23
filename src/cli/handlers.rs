@@ -523,7 +523,7 @@ pub fn handle_bias_create_command(
 
         eprintln!("Calibration:");
         if table.is_soft_filter() {
-            eprintln!("  target fscale:       {}", table.target_fscale);
+            eprintln!("  requested target:    {}", table.target_fscale);
             eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
         }
         eprintln!(
@@ -536,13 +536,31 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
         if table.is_soft_filter() {
+            let target_fs = table.target_fscale as f64;
+            let eff_target = table.effective_fscale_target_prior();
+            let eff_pos = table.effective_fscale_on_population(table.positive_retention);
+            let eff_neg = table.effective_fscale_on_population(table.negative_retention);
+            let delta_pct = |achieved: f64| {
+                if target_fs > 0.0 {
+                    (achieved / target_fs - 1.0) * 100.0
+                } else {
+                    0.0
+                }
+            };
             eprintln!(
-                "  eff. fscale (pos):   {:.0}",
-                table.effective_fscale_on_population(table.positive_retention)
+                "  eff. fscale (target prior): {:.0} ({:+.1}%)",
+                eff_target,
+                delta_pct(eff_target)
             );
             eprintln!(
-                "  eff. fscale (neg):   {:.0}",
-                table.effective_fscale_on_population(table.negative_retention)
+                "  eff. fscale (pos):      {:.0} ({:+.1}%)",
+                eff_pos,
+                delta_pct(eff_pos)
+            );
+            eprintln!(
+                "  eff. fscale (neg):      {:.0} ({:+.1}%)",
+                eff_neg,
+                delta_pct(eff_neg)
             );
             eprintln!(
                 "  eff. fscale (combined): {:.0}",
@@ -646,6 +664,12 @@ pub fn handle_bias_stats_command(
                 "fold_enrichment": table.fold_enrichment(),
                 "effective_fscale_positive": table.effective_fscale_on_population(table.positive_retention),
                 "effective_fscale_negative": table.effective_fscale_on_population(table.negative_retention),
+                "effective_fscale_target_prior": table.effective_fscale_target_prior(),
+                "effective_fscale_target_prior_delta_pct": if table.target_fscale > 0 {
+                    (table.effective_fscale_target_prior() / table.target_fscale as f64 - 1.0) * 100.0
+                } else {
+                    0.0
+                },
                 "effective_fscale_combined": table.effective_fscale_combined(),
             },
             "soft_filter": {

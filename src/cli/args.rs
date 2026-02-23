@@ -137,7 +137,7 @@ pub enum BiasCommands {
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Target effective fscale for combined retention budget.
+        /// Target effective fscale under the empirical CMS weight prior.
         /// Enables enrichment LUT filtering. Must be >= base fscale.
         #[arg(long)]
         target_fscale: Option<u64>,
