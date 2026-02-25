@@ -65,6 +65,10 @@ path = "download_bias_data.rs"
 name = "hash_dump_stats"
 path = "hash_dump_stats.rs"
 
+[[bin]]
+name = "k21_pipeline"
+path = "k21_pipeline.rs"
+
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
@@ -93,8 +97,12 @@ zstd = "0.13"
 indicatif = { version = "0.18", features = ["rayon"] }
 anyhow = "1.0"
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
 csv = "1"
 glob = "0.3"
+
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = "0.6"
 
 [profile.release]
 opt-level = 3
