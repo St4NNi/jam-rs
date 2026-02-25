@@ -270,10 +270,18 @@ pub fn handle_distance_command(
         ))
     };
 
-    writeln!(
-        writer,
-        "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment"
-    )?;
+    let has_bias = engine.has_bias_table();
+    if has_bias {
+        writeln!(
+            writer,
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment\te_value\tcorrected_query_containment"
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment\te_value"
+        )?;
+    }
 
     let flush_threshold = memory_gb * 1024 * 1024 * 1024 / 2;
     let mut temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
@@ -302,7 +310,7 @@ pub fn handle_distance_command(
                 let mut matches: Vec<_> = result.matches.iter().collect();
                 matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
 
-                let mut out = String::with_capacity(matches.len() * 100);
+                let mut out = String::with_capacity(matches.len() * 120);
                 for m in &matches {
                     let db_name = db_names
                         .get(m.sample_id as usize)
@@ -315,17 +323,35 @@ pub fn handle_distance_command(
                         0.0
                     };
                     use std::fmt::Write;
-                    let _ = writeln!(
-                        out,
-                        "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
-                        query_name,
-                        db_name,
-                        m.hit_count,
-                        query_hashes,
-                        db_hashes,
-                        m.containment,
-                        db_containment,
-                    );
+                    if has_bias && result.total_query_weight > 0.0 {
+                        let corrected = m.hit_weight / result.total_query_weight;
+                        let _ = writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6e}\t{:.6}",
+                            query_name,
+                            db_name,
+                            m.hit_count,
+                            query_hashes,
+                            db_hashes,
+                            m.containment,
+                            db_containment,
+                            m.e_value,
+                            corrected,
+                        );
+                    } else {
+                        let _ = writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6e}",
+                            query_name,
+                            db_name,
+                            m.hit_count,
+                            query_hashes,
+                            db_hashes,
+                            m.containment,
+                            db_containment,
+                            m.e_value,
+                        );
+                    }
                 }
                 out
             })
