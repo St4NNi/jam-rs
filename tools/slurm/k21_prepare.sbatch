@@ -16,7 +16,8 @@ SLURMOUT_DIR="${HOME}/slurmout"
 
 mkdir -p "${SLURMOUT_DIR}"
 JOB_TAG="${SLURM_JOB_NAME:-k21-prepare}-${SLURM_JOB_ID:-manual}"
-exec >"${SLURMOUT_DIR}/${JOB_TAG}.out" 2>"${SLURMOUT_DIR}/${JOB_TAG}.err"
+LOG_FILE="${SLURMOUT_DIR}/${JOB_TAG}.log"
+exec >"${LOG_FILE}" 2>&1
 
 if [[ ! -x "${BIN}" ]]; then
     echo "Missing executable: ${BIN}" >&2

@@ -3,7 +3,9 @@ use bytemuck::cast_slice;
 use clap::{Parser, Subcommand};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::fs::{create_dir_all, remove_dir_all, File};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::fs::{create_dir_all, remove_dir_all, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -11,7 +13,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(not(target_endian = "little"))]
 compile_error!("k21_pipeline requires little-endian targets");
@@ -36,7 +38,15 @@ const DEFAULT_MAP_FILE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
 const DEFAULT_LOCAL_BUFFER_VALUES: usize = 32 * 1024;
 const DEFAULT_MAP_IO_THREADS: usize = 16;
 const DEFAULT_MAP_CHANNEL_ENTRIES: usize = 4_000_000;
+const DEFAULT_MAP_MAX_OPEN_WRITERS_PER_WORKER: usize = 8;
 const DEFAULT_LOCAL_SCRATCH_BASE: &str = "/var/scratch/sbeyvers/k21";
+const DEFAULT_SORT_CHUNK_GIB: usize = 4;
+const DEFAULT_SORT_SCRATCH_BASE: &str = "/var/scratch/sbeyvers/k21_sort";
+const SORT_OUTPUT_BUFFER_VALUES: usize = 1 << 20;
+
+const TRANSIENT_IO_RETRIES: usize = 8;
+const TRANSIENT_IO_SLEEP_MS: u64 = 250;
+const CPB_STATUS_RETRIES: usize = 6;
 
 const FRAC_SCALES: [u64; 4] = [10, 100, 1000, 10000];
 
@@ -80,6 +90,16 @@ enum Command {
         /// Output directory root
         output_dir: PathBuf,
     },
+    /// Linear uniformity map: process one shard of the canonical k=21 space (array task)
+    LinearMap {
+        /// Output directory root
+        output_dir: PathBuf,
+    },
+    /// Linear uniformity aggregate: combine all linear-map shards into final report
+    LinearAggregate {
+        /// Output directory root
+        output_dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +107,8 @@ struct MapTaskSummary {
     task_id: usize,
     raw_start: u64,
     raw_end: u64,
+    #[serde(default)]
+    raw_ranges: Vec<[u64; 2]>,
     canonical_count: u64,
     partition_counts: Vec<Vec<u64>>, // [hash][partition]
     elapsed_seconds: f64,
@@ -150,6 +172,55 @@ struct CombinedReport {
     hashes: Vec<HashMetrics>,
 }
 
+const LINEAR_TASKS: usize = 32;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinearHashAccum {
+    hash_name: String,
+    sum_x: f64,
+    sum_y: f64,
+    sum_xy: f64,
+    sum_x2: f64,
+    sum_y2: f64,
+    serial_n: u64,
+    order_preserved: u64,
+    gap_bins: Vec<u64>,
+    hamming_sum: u64,
+    hamming_sum_sq: u64,
+    hamming_min: u32,
+    hamming_max: u32,
+    mutation_count: u64,
+    mutation_diff_bins: Vec<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinearTaskResult {
+    task_id: usize,
+    canonical_count: u64,
+    elapsed_seconds: f64,
+    hash_accums: Vec<LinearHashAccum>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinearHashMetrics {
+    hash_name: String,
+    serial_correlation: f64,
+    order_preservation_frac: f64,
+    gap_chi_squared: f64,
+    mutation_avg_hamming: f64,
+    mutation_hamming_std: f64,
+    mutation_min_hamming: u32,
+    mutation_max_hamming: u32,
+    mutation_diff_chi_squared: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LinearReport {
+    total_canonical: u64,
+    tasks: usize,
+    hashes: Vec<LinearHashMetrics>,
+}
+
 #[derive(Clone)]
 struct WorkerSummary {
     canonical_count: u64,
@@ -194,6 +265,212 @@ impl Drop for ScratchCleanupGuard {
     }
 }
 
+struct SortStatsAccumulator {
+    hash_name: String,
+    partition_id: usize,
+    partition_offset: u64,
+    total_hashes: u64,
+    count: u64,
+    min_hash: u64,
+    max_hash: u64,
+    observed_collision_pairs: u64,
+    duplicate_hashes: u64,
+    collision_elements: u64,
+    max_multiplicity: u64,
+    ks_statistic_max: f64,
+    frac_pass_counts: Vec<u64>,
+    frac_thresholds: [u64; FRAC_SCALES.len()],
+    chi_bucket_counts: Vec<u64>,
+    byte_hist_counts: Vec<u64>,
+    prev_hash: Option<u64>,
+    run_len: u64,
+}
+
+impl SortStatsAccumulator {
+    fn new(hash_name: &str, partition_id: usize, partition_offset: u64, total_hashes: u64) -> Self {
+        Self {
+            hash_name: hash_name.to_string(),
+            partition_id,
+            partition_offset,
+            total_hashes,
+            count: 0,
+            min_hash: 0,
+            max_hash: 0,
+            observed_collision_pairs: 0,
+            duplicate_hashes: 0,
+            collision_elements: 0,
+            max_multiplicity: 0,
+            ks_statistic_max: 0.0,
+            frac_pass_counts: vec![0u64; FRAC_SCALES.len()],
+            frac_thresholds: FRAC_SCALES.map(|s| u64::MAX / s),
+            chi_bucket_counts: vec![0u64; CHI_BUCKETS],
+            byte_hist_counts: vec![0u64; 8 * 256],
+            prev_hash: None,
+            run_len: 0,
+        }
+    }
+
+    fn observe(&mut self, hash: u64) {
+        self.count += 1;
+        if self.count == 1 {
+            self.min_hash = hash;
+        }
+        self.max_hash = hash;
+
+        if self.total_hashes > 0 {
+            let n_f = self.total_hashes as f64;
+            let global_rank = self.partition_offset + self.count;
+            let rank_f = global_rank as f64;
+            let x = hash as f64 / U64_SPACE_F64;
+            let d1 = (rank_f / n_f - x).abs();
+            let d2 = (x - ((rank_f - 1.0) / n_f)).abs();
+            self.ks_statistic_max = self.ks_statistic_max.max(d1.max(d2));
+        }
+
+        for (i, threshold) in self.frac_thresholds.iter().enumerate() {
+            if hash < *threshold {
+                self.frac_pass_counts[i] += 1;
+            }
+        }
+
+        let chi_bucket = (hash >> (64 - CHI_BUCKET_BITS)) as usize;
+        self.chi_bucket_counts[chi_bucket] += 1;
+
+        for byte_pos in 0..8 {
+            let byte = ((hash >> (8 * byte_pos)) & 0xFF) as usize;
+            self.byte_hist_counts[byte_pos * 256 + byte] += 1;
+        }
+
+        match self.prev_hash {
+            Some(prev) if prev == hash => {
+                self.run_len += 1;
+            }
+            Some(_) => {
+                finalize_collision_run(
+                    self.run_len,
+                    &mut self.observed_collision_pairs,
+                    &mut self.duplicate_hashes,
+                    &mut self.collision_elements,
+                    &mut self.max_multiplicity,
+                );
+                self.prev_hash = Some(hash);
+                self.run_len = 1;
+            }
+            None => {
+                self.prev_hash = Some(hash);
+                self.run_len = 1;
+            }
+        }
+    }
+
+    fn finalize(mut self) -> PartitionStats {
+        finalize_collision_run(
+            self.run_len,
+            &mut self.observed_collision_pairs,
+            &mut self.duplicate_hashes,
+            &mut self.collision_elements,
+            &mut self.max_multiplicity,
+        );
+
+        if self.count == 0 {
+            self.max_multiplicity = 0;
+        }
+
+        PartitionStats {
+            hash_name: self.hash_name,
+            partition_id: self.partition_id,
+            count: self.count,
+            min_hash: self.min_hash,
+            max_hash: self.max_hash,
+            observed_collision_pairs: self.observed_collision_pairs,
+            duplicate_hashes: self.duplicate_hashes,
+            collision_elements: self.collision_elements,
+            max_multiplicity: self.max_multiplicity,
+            ks_statistic_max: self.ks_statistic_max,
+            frac_pass_counts: self.frac_pass_counts,
+            chi_bucket_counts: self.chi_bucket_counts,
+            byte_hist_counts: self.byte_hist_counts,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MergeHeapItem {
+    value: u64,
+    run_idx: usize,
+}
+
+impl Ord for MergeHeapItem {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .value
+            .cmp(&self.value)
+            .then_with(|| other.run_idx.cmp(&self.run_idx))
+    }
+}
+
+impl PartialOrd for MergeHeapItem {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+struct RunStream {
+    reader: BufReader<File>,
+    buf: Vec<u8>,
+    pos: usize,
+    usable_len: usize,
+    carry_len: usize,
+    eof: bool,
+}
+
+impl RunStream {
+    fn open(path: &Path) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        Ok(Self {
+            reader: BufReader::with_capacity(IO_BUFFER_BYTES, file),
+            buf: vec![0u8; IO_BUFFER_BYTES],
+            pos: 0,
+            usable_len: 0,
+            carry_len: 0,
+            eof: false,
+        })
+    }
+
+    fn next_u64(&mut self) -> Result<Option<u64>> {
+        loop {
+            if self.pos < self.usable_len {
+                let ptr = unsafe { self.buf.as_ptr().add(self.pos) as *const u64 };
+                let value = unsafe { ptr.read_unaligned() };
+                self.pos += 8;
+                return Ok(Some(u64::from_le(value)));
+            }
+
+            if self.eof {
+                if self.carry_len != 0 {
+                    bail!("run stream has trailing bytes (not a multiple of 8)");
+                }
+                return Ok(None);
+            }
+
+            let n = self.reader.read(&mut self.buf[self.carry_len..])?;
+            if n == 0 {
+                self.eof = true;
+                continue;
+            }
+
+            let filled = self.carry_len + n;
+            self.usable_len = filled / 8 * 8;
+            self.pos = 0;
+            self.carry_len = filled - self.usable_len;
+            if self.carry_len > 0 {
+                self.buf.copy_within(self.usable_len..filled, 0);
+            }
+        }
+    }
+}
+
 impl Default for WorkerSummary {
     fn default() -> Self {
         Self {
@@ -211,7 +488,386 @@ fn main() -> Result<()> {
         Command::SortReduce { output_dir } => cmd_sort_reduce(&output_dir),
         Command::AggregateHash { output_dir } => cmd_aggregate_hash(&output_dir),
         Command::AggregateAll { output_dir } => cmd_aggregate_all(&output_dir),
+        Command::LinearMap { output_dir } => cmd_linear_map(&output_dir),
+        Command::LinearAggregate { output_dir } => cmd_linear_aggregate(&output_dir),
     }
+}
+
+fn cmd_linear_map(output_dir: &Path) -> Result<()> {
+    let linear_dir = output_dir.join("linear_test");
+    create_dir_all(&linear_dir)?;
+
+    let task_id = slurm_array_task_id_or_default(0)?;
+    if task_id >= LINEAR_TASKS {
+        bail!(
+            "linear-map task id {} out of range 0..{}",
+            task_id,
+            LINEAR_TASKS - 1
+        );
+    }
+
+    let start = Instant::now();
+    let raw_per_task = RAW_SPACE_SIZE / LINEAR_TASKS as u64;
+    let raw_start = task_id as u64 * raw_per_task;
+    let raw_end = if task_id == LINEAR_TASKS - 1 {
+        RAW_SPACE_SIZE
+    } else {
+        (task_id as u64 + 1) * raw_per_task
+    };
+
+    let hash_fns: [(&str, fn(u64) -> u64); HASH_COUNT] = [
+        ("jamhash", |x| jamhash::jamhash_u64(x)),
+        ("murmur3", murmur3_u64),
+        ("xxhash3", xxhash3_u64),
+        ("wang64", wang64),
+    ];
+
+    // Split this task's range across rayon threads
+    let num_threads = rayon::current_num_threads().max(1) as u64;
+    let raw_per_thread = (raw_end - raw_start) / num_threads;
+
+    struct ThreadAccum {
+        prev_hash: [Option<u64>; HASH_COUNT],
+        sum_x: [f64; HASH_COUNT],
+        sum_y: [f64; HASH_COUNT],
+        sum_xy: [f64; HASH_COUNT],
+        sum_x2: [f64; HASH_COUNT],
+        sum_y2: [f64; HASH_COUNT],
+        serial_n: [u64; HASH_COUNT],
+        order_preserved: [u64; HASH_COUNT],
+        gap_bins: [[u64; 256]; HASH_COUNT],
+        hamming_sum: [u64; HASH_COUNT],
+        hamming_sum_sq: [u64; HASH_COUNT],
+        hamming_min: [u32; HASH_COUNT],
+        hamming_max: [u32; HASH_COUNT],
+        mutation_count: [u64; HASH_COUNT],
+        mutation_diff_bins: [[u64; 256]; HASH_COUNT],
+        canonical_count: u64,
+    }
+
+    impl ThreadAccum {
+        fn new() -> Self {
+            Self {
+                prev_hash: [None; HASH_COUNT],
+                sum_x: [0.0; HASH_COUNT],
+                sum_y: [0.0; HASH_COUNT],
+                sum_xy: [0.0; HASH_COUNT],
+                sum_x2: [0.0; HASH_COUNT],
+                sum_y2: [0.0; HASH_COUNT],
+                serial_n: [0; HASH_COUNT],
+                order_preserved: [0; HASH_COUNT],
+                gap_bins: [[0; 256]; HASH_COUNT],
+                hamming_sum: [0; HASH_COUNT],
+                hamming_sum_sq: [0; HASH_COUNT],
+                hamming_min: [64; HASH_COUNT],
+                hamming_max: [0; HASH_COUNT],
+                mutation_count: [0; HASH_COUNT],
+                mutation_diff_bins: [[0; 256]; HASH_COUNT],
+                canonical_count: 0,
+            }
+        }
+    }
+
+    let thread_results: Vec<ThreadAccum> = (0..num_threads)
+        .into_par_iter()
+        .map(|t| {
+            let t_start = raw_start + t * raw_per_thread;
+            let t_end = if t == num_threads - 1 {
+                raw_end
+            } else {
+                raw_start + (t + 1) * raw_per_thread
+            };
+
+            let mut acc = ThreadAccum::new();
+
+            for raw in t_start..t_end {
+                let rc = reverse_complement_21(raw);
+                if raw > rc {
+                    continue;
+                }
+
+                for (hi, (_name, hash_fn)) in hash_fns.iter().enumerate() {
+                    let h = hash_fn(raw);
+
+                    if let Some(prev) = acc.prev_hash[hi] {
+                        let x = prev as f64;
+                        let y = h as f64;
+                        acc.sum_x[hi] += x;
+                        acc.sum_y[hi] += y;
+                        acc.sum_xy[hi] += x * y;
+                        acc.sum_x2[hi] += x * x;
+                        acc.sum_y2[hi] += y * y;
+                        acc.serial_n[hi] += 1;
+
+                        if h > prev {
+                            acc.order_preserved[hi] += 1;
+                        }
+
+                        let gap = h.wrapping_sub(prev);
+                        acc.gap_bins[hi][(gap >> 56) as usize] += 1;
+                    }
+                    acc.prev_hash[hi] = Some(h);
+
+                    if raw & 0x3F == 0 {
+                        for pos in 0..KMER_SIZE {
+                            let shift = 2 * pos as u32;
+                            let current_base = (raw >> shift) & 0b11;
+                            for base in 0u64..4 {
+                                if base == current_base {
+                                    continue;
+                                }
+                                let mutated = (raw & !(0b11u64 << shift)) | (base << shift);
+                                let mh = hash_fn(mutated);
+                                let hamming = (h ^ mh).count_ones();
+                                acc.hamming_sum[hi] += hamming as u64;
+                                acc.hamming_sum_sq[hi] += (hamming as u64) * (hamming as u64);
+                                acc.hamming_min[hi] = acc.hamming_min[hi].min(hamming);
+                                acc.hamming_max[hi] = acc.hamming_max[hi].max(hamming);
+                                acc.mutation_count[hi] += 1;
+
+                                let diff = h.wrapping_sub(mh);
+                                acc.mutation_diff_bins[hi][(diff >> 56) as usize] += 1;
+                            }
+                        }
+                    }
+                }
+                acc.canonical_count += 1;
+            }
+
+            acc
+        })
+        .collect();
+
+    // Merge thread results into per-hash accumulators
+    let mut canonical_count = 0u64;
+    let mut hash_accums = Vec::with_capacity(HASH_COUNT);
+    for (hi, (name, _)) in hash_fns.iter().enumerate() {
+        let mut a = LinearHashAccum {
+            hash_name: name.to_string(),
+            sum_x: 0.0,
+            sum_y: 0.0,
+            sum_xy: 0.0,
+            sum_x2: 0.0,
+            sum_y2: 0.0,
+            serial_n: 0,
+            order_preserved: 0,
+            gap_bins: vec![0u64; 256],
+            hamming_sum: 0,
+            hamming_sum_sq: 0,
+            hamming_min: 64,
+            hamming_max: 0,
+            mutation_count: 0,
+            mutation_diff_bins: vec![0u64; 256],
+        };
+        for t in &thread_results {
+            if hi == 0 {
+                canonical_count += t.canonical_count;
+            }
+            a.sum_x += t.sum_x[hi];
+            a.sum_y += t.sum_y[hi];
+            a.sum_xy += t.sum_xy[hi];
+            a.sum_x2 += t.sum_x2[hi];
+            a.sum_y2 += t.sum_y2[hi];
+            a.serial_n += t.serial_n[hi];
+            a.order_preserved += t.order_preserved[hi];
+            for b in 0..256 {
+                a.gap_bins[b] += t.gap_bins[hi][b];
+                a.mutation_diff_bins[b] += t.mutation_diff_bins[hi][b];
+            }
+            a.hamming_sum += t.hamming_sum[hi];
+            a.hamming_sum_sq += t.hamming_sum_sq[hi];
+            a.hamming_min = a.hamming_min.min(t.hamming_min[hi]);
+            a.hamming_max = a.hamming_max.max(t.hamming_max[hi]);
+            a.mutation_count += t.mutation_count[hi];
+        }
+        hash_accums.push(a);
+    }
+
+    let result = LinearTaskResult {
+        task_id,
+        canonical_count,
+        elapsed_seconds: start.elapsed().as_secs_f64(),
+        hash_accums,
+    };
+
+    let out_path = linear_dir.join(format!("linear_task_{task_id:02}.json"));
+    write_json_pretty(&out_path, &result)?;
+
+    eprintln!(
+        "[linear-map:{}] done in {:.1}s, {} canonical k-mers, wrote {}",
+        task_id,
+        result.elapsed_seconds,
+        canonical_count,
+        out_path.display()
+    );
+
+    Ok(())
+}
+
+fn cmd_linear_aggregate(output_dir: &Path) -> Result<()> {
+    let linear_dir = output_dir.join("linear_test");
+
+    // Load all task results
+    let mut tasks = Vec::with_capacity(LINEAR_TASKS);
+    for task_id in 0..LINEAR_TASKS {
+        let path = linear_dir.join(format!("linear_task_{task_id:02}.json"));
+        let result: LinearTaskResult =
+            read_json(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        tasks.push(result);
+    }
+
+    let total_canonical: u64 = tasks.iter().map(|t| t.canonical_count).sum();
+
+    // Aggregate per hash function
+    let mut results = Vec::with_capacity(HASH_COUNT);
+    for hi in 0..HASH_COUNT {
+        let mut total_sx = 0.0f64;
+        let mut total_sy = 0.0f64;
+        let mut total_sxy = 0.0f64;
+        let mut total_sx2 = 0.0f64;
+        let mut total_sy2 = 0.0f64;
+        let mut total_sn = 0u64;
+        let mut total_order = 0u64;
+        let mut total_gap_bins = [0u64; 256];
+        let mut total_hamming_sum = 0u64;
+        let mut total_hamming_sum_sq = 0u64;
+        let mut total_hamming_min = 64u32;
+        let mut total_hamming_max = 0u32;
+        let mut total_mutation_count = 0u64;
+        let mut total_mut_diff_bins = [0u64; 256];
+
+        for task in &tasks {
+            let a = &task.hash_accums[hi];
+            total_sx += a.sum_x;
+            total_sy += a.sum_y;
+            total_sxy += a.sum_xy;
+            total_sx2 += a.sum_x2;
+            total_sy2 += a.sum_y2;
+            total_sn += a.serial_n;
+            total_order += a.order_preserved;
+            for b in 0..256 {
+                total_gap_bins[b] += a.gap_bins[b];
+                total_mut_diff_bins[b] += a.mutation_diff_bins[b];
+            }
+            total_hamming_sum += a.hamming_sum;
+            total_hamming_sum_sq += a.hamming_sum_sq;
+            total_hamming_min = total_hamming_min.min(a.hamming_min);
+            total_hamming_max = total_hamming_max.max(a.hamming_max);
+            total_mutation_count += a.mutation_count;
+        }
+
+        let hash_name = tasks[0].hash_accums[hi].hash_name.clone();
+
+        // Pearson correlation
+        let n = total_sn as f64;
+        let serial_correlation = if total_sn > 1 {
+            let num = n * total_sxy - total_sx * total_sy;
+            let den_x = (n * total_sx2 - total_sx * total_sx).sqrt();
+            let den_y = (n * total_sy2 - total_sy * total_sy).sqrt();
+            if den_x > 0.0 && den_y > 0.0 {
+                num / (den_x * den_y)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let order_frac = if total_sn > 0 {
+            total_order as f64 / total_sn as f64
+        } else {
+            0.0
+        };
+
+        let gap_expected = total_sn as f64 / 256.0;
+        let gap_chi: f64 = if gap_expected > 0.0 {
+            total_gap_bins
+                .iter()
+                .map(|&c| {
+                    let d = c as f64 - gap_expected;
+                    d * d / gap_expected
+                })
+                .sum()
+        } else {
+            0.0
+        };
+
+        let mc = total_mutation_count as f64;
+        let avg_hamming = if mc > 0.0 {
+            total_hamming_sum as f64 / mc
+        } else {
+            0.0
+        };
+        let hamming_std = if mc > 1.0 {
+            let var = total_hamming_sum_sq as f64 / mc - avg_hamming * avg_hamming;
+            var.max(0.0).sqrt()
+        } else {
+            0.0
+        };
+
+        let mut_expected = total_mutation_count as f64 / 256.0;
+        let mut_diff_chi: f64 = if mut_expected > 0.0 {
+            total_mut_diff_bins
+                .iter()
+                .map(|&c| {
+                    let d = c as f64 - mut_expected;
+                    d * d / mut_expected
+                })
+                .sum()
+        } else {
+            0.0
+        };
+
+        results.push(LinearHashMetrics {
+            hash_name,
+            serial_correlation,
+            order_preservation_frac: order_frac,
+            gap_chi_squared: gap_chi,
+            mutation_avg_hamming: avg_hamming,
+            mutation_hamming_std: hamming_std,
+            mutation_min_hamming: total_hamming_min,
+            mutation_max_hamming: total_hamming_max,
+            mutation_diff_chi_squared: mut_diff_chi,
+        });
+    }
+
+    let report = LinearReport {
+        total_canonical,
+        tasks: LINEAR_TASKS,
+        hashes: results,
+    };
+
+    let json_path = linear_dir.join("linear_test.json");
+    write_json_pretty(&json_path, &report)?;
+
+    eprintln!("\n{:=<100}", "");
+    eprintln!(
+        "{:<10} {:>14} {:>10} {:>12} {:>10} {:>10} {:>6} {:>6} {:>12}",
+        "Hash", "SerialCorr", "OrderFrac", "GapChi²", "AvgHamm", "StdHamm", "MinH", "MaxH", "MutDiffChi²"
+    );
+    eprintln!("{:-<100}", "");
+    for m in &report.hashes {
+        eprintln!(
+            "{:<10} {:>14.8} {:>10.6} {:>12.1} {:>10.4} {:>10.4} {:>6} {:>6} {:>12.1}",
+            m.hash_name,
+            m.serial_correlation,
+            m.order_preservation_frac,
+            m.gap_chi_squared,
+            m.mutation_avg_hamming,
+            m.mutation_hamming_std,
+            m.mutation_min_hamming,
+            m.mutation_max_hamming,
+            m.mutation_diff_chi_squared,
+        );
+    }
+    eprintln!("{:=<100}", "");
+    eprintln!(
+        "[linear-aggregate] total_canonical={}, wrote {}",
+        total_canonical,
+        json_path.display()
+    );
+
+    Ok(())
 }
 
 fn cmd_map(output_dir: &Path) -> Result<()> {
@@ -228,6 +884,7 @@ fn cmd_map(output_dir: &Path) -> Result<()> {
     let channel_entries = configured_map_channel_entries(local_buffer_values);
     let channel_capacity = div_ceil(channel_entries, local_buffer_values).max(1);
     let map_file_buffer_bytes = configured_map_file_buffer_bytes();
+    let max_open_writers_per_worker = configured_map_max_open_writers_per_worker();
     let local_scratch_base = configured_local_scratch_base();
     let local_task_scratch = map_task_scratch_dir(&local_scratch_base, task_id);
 
@@ -249,20 +906,26 @@ fn cmd_map(output_dir: &Path) -> Result<()> {
 
     configure_rayon(compute_threads);
 
-    let range = get_chunk_range(RAW_SPACE_SIZE, MAP_TASKS as u64, task_id as u64);
+    let ranges = map_task_raw_ranges(task_id);
     let start = Instant::now();
 
+    let raw_start = ranges[0].start;
+    let raw_end = ranges[0].end;
+
     eprintln!(
-        "[map:{}] range={}..{} compute_threads={} io_threads={} local_buf_values={} file_buf_mb={} channel_entries={} channel_chunks={} partitions={} scratch={}",
+        "[map:{}] raw_ranges=[{}..{},{}..{}] compute_threads={} io_threads={} local_buf_values={} file_buf_mb={} channel_entries={} channel_chunks={} max_open_writers_per_worker={} partitions={} scratch={}",
         task_id,
-        range.start,
-        range.end,
+        ranges[0].start,
+        ranges[0].end,
+        ranges[1].start,
+        ranges[1].end,
         compute_threads,
         io_threads,
         local_buffer_values,
         map_file_buffer_bytes / (1024 * 1024),
         channel_entries,
         channel_capacity,
+        max_open_writers_per_worker,
         PARTITIONS,
         local_task_scratch.display()
     );
@@ -273,10 +936,14 @@ fn cmd_map(output_dir: &Path) -> Result<()> {
         io_threads,
         channel_capacity,
         map_file_buffer_bytes,
+        max_open_writers_per_worker,
     )?;
     let io_senders = Arc::new(io_senders);
 
-    let subranges = split_range(range.clone(), compute_threads.saturating_mul(2).max(1));
+    let mut subranges = Vec::new();
+    for range in &ranges {
+        subranges.extend(split_range(range.clone(), compute_threads.max(1)));
+    }
 
     let worker_results: Vec<Result<WorkerSummary>> = subranges
         .into_par_iter()
@@ -284,23 +951,49 @@ fn cmd_map(output_dir: &Path) -> Result<()> {
         .collect();
 
     let mut combined = WorkerSummary::default();
+    let mut compute_error: Option<anyhow::Error> = None;
     for result in worker_results {
-        let ws = result?;
-        combined.canonical_count += ws.canonical_count;
-        for h in 0..HASH_COUNT {
-            for p in 0..PARTITIONS {
-                combined.partition_counts[h][p] += ws.partition_counts[h][p];
+        match result {
+            Ok(ws) => {
+                combined.canonical_count += ws.canonical_count;
+                for h in 0..HASH_COUNT {
+                    for p in 0..PARTITIONS {
+                        combined.partition_counts[h][p] += ws.partition_counts[h][p];
+                    }
+                }
+            }
+            Err(err) => {
+                if compute_error.is_none() {
+                    compute_error = Some(err);
+                }
             }
         }
     }
 
     drop(io_senders);
 
+    let mut io_error: Option<anyhow::Error> = None;
     for handle in io_handles {
-        let worker_result = handle
-            .join()
-            .map_err(|_| anyhow::anyhow!("map io worker panicked"))?;
-        worker_result?;
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                if io_error.is_none() {
+                    io_error = Some(err);
+                }
+            }
+            Err(_) => {
+                if io_error.is_none() {
+                    io_error = Some(anyhow::anyhow!("map io worker panicked"));
+                }
+            }
+        }
+    }
+
+    if let Some(err) = io_error {
+        return Err(err.context("map io worker failed"));
+    }
+    if let Some(err) = compute_error {
+        return Err(err.context("map compute worker failed"));
     }
 
     copy_map_shards_to_output(&local_task_scratch, output_dir, task_id)?;
@@ -319,8 +1012,12 @@ fn cmd_map(output_dir: &Path) -> Result<()> {
 
     let summary = MapTaskSummary {
         task_id,
-        raw_start: range.start,
-        raw_end: range.end,
+        raw_start,
+        raw_end,
+        raw_ranges: vec![
+            [ranges[0].start, ranges[0].end],
+            [ranges[1].start, ranges[1].end],
+        ],
         canonical_count: combined.canonical_count,
         partition_counts,
         elapsed_seconds: start.elapsed().as_secs_f64(),
@@ -431,58 +1128,114 @@ fn cmd_sort_reduce(output_dir: &Path) -> Result<()> {
 
     let expected = plan.hash_partition_counts[hash_idx][partition_id];
     let global_offset = plan.hash_partition_offsets[hash_idx][partition_id];
+    let threads = configured_threads();
+    configure_rayon(threads);
 
-    let mut values = Vec::with_capacity(expected as usize);
+    let chunk_values = configured_sort_chunk_values();
+    let sort_scratch_base = configured_sort_scratch_base();
+    let sort_task_scratch = sort_task_scratch_dir(&sort_scratch_base, task_id);
+
+    if sort_task_scratch.exists() {
+        remove_dir_all(&sort_task_scratch).with_context(|| {
+            format!(
+                "failed to remove previous sort scratch {}",
+                sort_task_scratch.display()
+            )
+        })?;
+    }
+    create_dir_all(&sort_task_scratch).with_context(|| {
+        format!(
+            "failed to create sort scratch {}",
+            sort_task_scratch.display()
+        )
+    })?;
+    let mut scratch_guard = ScratchCleanupGuard::new(sort_task_scratch.clone());
 
     let read_start = Instant::now();
+    let mut sort_secs = 0.0f64;
+    let mut loaded = 0u64;
+    let mut run_idx = 0usize;
+    let mut run_paths = Vec::new();
+    let mut chunk = Vec::with_capacity(chunk_values);
+
     for map_task in 0..plan.map_tasks {
         let path = shard_path(output_dir, hash_name, map_task, partition_id);
-        read_u64_file_into_vec(&path, &mut values)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+        read_u64_file_into_runs(
+            &path,
+            &mut chunk,
+            chunk_values,
+            &mut run_paths,
+            &sort_task_scratch,
+            &mut run_idx,
+            &mut loaded,
+            &mut sort_secs,
+        )
+        .with_context(|| format!("failed to read {}", path.display()))?;
     }
+
+    spill_sorted_run(
+        &mut chunk,
+        &mut run_paths,
+        &sort_task_scratch,
+        &mut run_idx,
+        &mut sort_secs,
+    )?;
+
     let read_secs = read_start.elapsed().as_secs_f64();
 
-    if values.len() as u64 != expected {
+    if loaded != expected {
         bail!(
             "{} part {}: loaded {} hashes, expected {}",
             hash_name,
             partition_id,
-            values.len(),
+            loaded,
             expected
         );
     }
 
-    let threads = configured_threads();
-    configure_rayon(threads);
-
-    let sort_start = Instant::now();
-    values.par_sort_unstable();
-    let sort_secs = sort_start.elapsed().as_secs_f64();
-
-    let stats_start = Instant::now();
-    let stats = compute_partition_stats(
+    let merge_start = Instant::now();
+    let sorted_path = sorted_partition_path(output_dir, hash_name, partition_id);
+    let stats = merge_runs_to_sorted_output(
+        &run_paths,
+        &sorted_path,
         hash_name,
         partition_id,
-        &values,
         global_offset,
         plan.total_canonical,
     )?;
-    let stats_secs = stats_start.elapsed().as_secs_f64();
+    let stats_secs = merge_start.elapsed().as_secs_f64();
 
-    let sorted_path = sorted_partition_path(output_dir, hash_name, partition_id);
-    write_u64_file(&sorted_path, &values)?;
+    if stats.count != expected {
+        bail!(
+            "{} part {}: merged {} hashes, expected {}",
+            hash_name,
+            partition_id,
+            stats.count,
+            expected
+        );
+    }
+
+    remove_dir_all(&sort_task_scratch).with_context(|| {
+        format!(
+            "failed to cleanup sort scratch {}",
+            sort_task_scratch.display()
+        )
+    })?;
+    scratch_guard.disarm();
 
     let part_stats_path = partition_stats_path(output_dir, hash_name, partition_id);
     write_json_pretty(&part_stats_path, &stats)?;
 
     eprintln!(
-        "[sort-reduce:{}:{}] n={} read={:.2}s sort={:.2}s stats={:.2}s",
+        "[sort-reduce:{}:{}] n={} runs={} read={:.2}s sort={:.2}s merge+stats={:.2}s chunk_values={}",
         hash_name,
         partition_id,
-        values.len(),
+        loaded,
+        run_paths.len(),
         read_secs,
         sort_secs,
-        stats_secs
+        stats_secs,
+        chunk_values,
     );
 
     Ok(())
@@ -728,110 +1481,6 @@ fn process_subrange(
     Ok(out)
 }
 
-fn compute_partition_stats(
-    hash_name: &str,
-    partition_id: usize,
-    values: &[u64],
-    partition_offset: u64,
-    total_hashes: u64,
-) -> Result<PartitionStats> {
-    if values.is_empty() {
-        return Ok(PartitionStats {
-            hash_name: hash_name.to_string(),
-            partition_id,
-            count: 0,
-            min_hash: 0,
-            max_hash: 0,
-            observed_collision_pairs: 0,
-            duplicate_hashes: 0,
-            collision_elements: 0,
-            max_multiplicity: 0,
-            ks_statistic_max: 0.0,
-            frac_pass_counts: vec![0u64; FRAC_SCALES.len()],
-            chi_bucket_counts: vec![0u64; CHI_BUCKETS],
-            byte_hist_counts: vec![0u64; 8 * 256],
-        });
-    }
-
-    let mut frac_pass_counts = vec![0u64; FRAC_SCALES.len()];
-    let frac_thresholds = FRAC_SCALES.map(|s| u64::MAX / s);
-
-    let mut chi_bucket_counts = vec![0u64; CHI_BUCKETS];
-    let mut byte_hist_counts = vec![0u64; 8 * 256];
-
-    let n_f = total_hashes as f64;
-    let mut ks_statistic_max = 0.0f64;
-
-    let mut observed_collision_pairs = 0u64;
-    let mut duplicate_hashes = 0u64;
-    let mut collision_elements = 0u64;
-    let mut max_multiplicity = 1u64;
-
-    let mut prev = values[0];
-    let mut run_len = 0u64;
-
-    for (local_idx, &hash) in values.iter().enumerate() {
-        let global_rank = partition_offset + local_idx as u64 + 1;
-        let x = hash as f64 / U64_SPACE_F64;
-        let rank_f = global_rank as f64;
-        let d1 = (rank_f / n_f - x).abs();
-        let d2 = (x - ((rank_f - 1.0) / n_f)).abs();
-        ks_statistic_max = ks_statistic_max.max(d1.max(d2));
-
-        for (i, threshold) in frac_thresholds.iter().enumerate() {
-            if hash < *threshold {
-                frac_pass_counts[i] += 1;
-            }
-        }
-
-        let chi_bucket = (hash >> (64 - CHI_BUCKET_BITS)) as usize;
-        chi_bucket_counts[chi_bucket] += 1;
-
-        for byte_pos in 0..8 {
-            let byte = ((hash >> (8 * byte_pos)) & 0xFF) as usize;
-            byte_hist_counts[byte_pos * 256 + byte] += 1;
-        }
-
-        if hash == prev {
-            run_len += 1;
-        } else {
-            finalize_collision_run(
-                run_len,
-                &mut observed_collision_pairs,
-                &mut duplicate_hashes,
-                &mut collision_elements,
-                &mut max_multiplicity,
-            );
-            prev = hash;
-            run_len = 1;
-        }
-    }
-
-    finalize_collision_run(
-        run_len,
-        &mut observed_collision_pairs,
-        &mut duplicate_hashes,
-        &mut collision_elements,
-        &mut max_multiplicity,
-    );
-
-    Ok(PartitionStats {
-        hash_name: hash_name.to_string(),
-        partition_id,
-        count: values.len() as u64,
-        min_hash: values[0],
-        max_hash: values[values.len() - 1],
-        observed_collision_pairs,
-        duplicate_hashes,
-        collision_elements,
-        max_multiplicity,
-        ks_statistic_max,
-        frac_pass_counts,
-        chi_bucket_counts,
-        byte_hist_counts,
-    })
-}
-
 fn finalize_collision_run(
     run_len: u64,
     observed_collision_pairs: &mut u64,
@@ -878,6 +1527,7 @@ fn start_map_io_workers(
     io_threads: usize,
     channel_capacity: usize,
     map_file_buffer_bytes: usize,
+    max_open_writers_per_worker: usize,
 ) -> Result<(
     Vec<SyncSender<WriteChunk>>,
     Vec<thread::JoinHandle<Result<()>>>,
@@ -898,6 +1548,7 @@ fn start_map_io_workers(
                     worker_idx,
                     io_threads,
                     map_file_buffer_bytes,
+                    max_open_writers_per_worker,
                     rx,
                 )
             })
@@ -916,30 +1567,52 @@ fn map_io_worker_loop(
     worker_idx: usize,
     worker_count: usize,
     map_file_buffer_bytes: usize,
+    max_open_writers_per_worker: usize,
     rx: Receiver<WriteChunk>,
 ) -> Result<()> {
     let mut writers = (0..(HASH_COUNT * PARTITIONS))
         .map(|_| None)
         .collect::<Vec<Option<BufWriter<File>>>>();
 
-    for stream_idx in 0..(HASH_COUNT * PARTITIONS) {
-        if stream_idx % worker_count != worker_idx {
-            continue;
-        }
-
-        let (hash_name, partition) = stream_to_hash_partition(stream_idx);
-        let path = shard_path(&base, hash_name, map_task, partition);
-        if let Some(parent) = path.parent() {
-            create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        let file =
-            File::create(&path).with_context(|| format!("failed to create {}", path.display()))?;
-        let writer = BufWriter::with_capacity(map_file_buffer_bytes, file);
-        writers[stream_idx] = Some(writer);
-    }
+    let mut open_order: Vec<usize> = Vec::new();
+    let max_open = max_open_writers_per_worker.max(1);
 
     while let Ok(chunk) = rx.recv() {
+        if chunk.stream_idx % worker_count != worker_idx {
+            bail!(
+                "received chunk for stream {} in wrong io worker {}",
+                chunk.stream_idx,
+                worker_idx
+            );
+        }
+
+        if writers[chunk.stream_idx].is_none() {
+            if open_order.len() >= max_open {
+                let evict_stream = open_order.remove(0);
+                if let Some(mut writer) = writers[evict_stream].take() {
+                    writer.flush().with_context(|| {
+                        format!("failed to flush evicted writer stream {}", evict_stream)
+                    })?;
+                }
+            }
+
+            let (hash_name, partition) = stream_to_hash_partition(chunk.stream_idx);
+            let path = shard_path(&base, hash_name, map_task, partition);
+            if let Some(parent) = path.parent() {
+                create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .with_context(|| format!("failed to open {}", path.display()))?;
+            writers[chunk.stream_idx] = Some(BufWriter::with_capacity(map_file_buffer_bytes, file));
+        }
+
+        open_order.retain(|&s| s != chunk.stream_idx);
+        open_order.push(chunk.stream_idx);
+
         let writer = writers[chunk.stream_idx]
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("missing writer for stream {}", chunk.stream_idx))?;
@@ -970,33 +1643,23 @@ fn copy_map_shards_to_output(local_base: &Path, output_base: &Path, map_task: us
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
 
-            let status = ProcessCommand::new("cpb")
-                .arg(&src)
-                .arg(&dst)
-                .status()
-                .with_context(|| {
-                    format!(
-                        "failed to execute cpb from {} to {}",
-                        src.display(),
-                        dst.display()
-                    )
-                })?;
-
-            if !status.success() {
-                bail!(
-                    "cpb failed with status {} for {} -> {}",
-                    status,
-                    src.display(),
-                    dst.display()
-                );
-            }
+            run_cpb_with_retries(&src, &dst)?;
         }
     }
 
     Ok(())
 }
 
-fn read_u64_file_into_vec(path: &Path, out: &mut Vec<u64>) -> Result<()> {
+fn read_u64_file_into_runs(
+    path: &Path,
+    chunk: &mut Vec<u64>,
+    chunk_values: usize,
+    run_paths: &mut Vec<PathBuf>,
+    scratch_dir: &Path,
+    run_idx: &mut usize,
+    loaded: &mut u64,
+    sort_secs: &mut f64,
+) -> Result<()> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::with_capacity(IO_BUFFER_BYTES, file);
     let mut buf = vec![0u8; IO_BUFFER_BYTES];
@@ -1015,7 +1678,13 @@ fn read_u64_file_into_vec(path: &Path, out: &mut Vec<u64>) -> Result<()> {
         while idx < usable {
             let ptr = unsafe { buf.as_ptr().add(idx) as *const u64 };
             let value = unsafe { ptr.read_unaligned() };
-            out.push(u64::from_le(value));
+            chunk.push(u64::from_le(value));
+            *loaded += 1;
+
+            if chunk.len() >= chunk_values {
+                spill_sorted_run(chunk, run_paths, scratch_dir, run_idx, sort_secs)?;
+            }
+
             idx += 8;
         }
 
@@ -1033,6 +1702,192 @@ fn read_u64_file_into_vec(path: &Path, out: &mut Vec<u64>) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn spill_sorted_run(
+    chunk: &mut Vec<u64>,
+    run_paths: &mut Vec<PathBuf>,
+    scratch_dir: &Path,
+    run_idx: &mut usize,
+    sort_secs: &mut f64,
+) -> Result<()> {
+    if chunk.is_empty() {
+        return Ok(());
+    }
+
+    let sort_start = Instant::now();
+    chunk.par_sort_unstable();
+    *sort_secs += sort_start.elapsed().as_secs_f64();
+
+    let path = scratch_dir.join(format!("run_{:04}.bin", *run_idx));
+    *run_idx += 1;
+    write_u64_file(&path, chunk)?;
+    run_paths.push(path);
+    chunk.clear();
+
+    Ok(())
+}
+
+fn merge_runs_to_sorted_output(
+    run_paths: &[PathBuf],
+    sorted_path: &Path,
+    hash_name: &str,
+    partition_id: usize,
+    partition_offset: u64,
+    total_hashes: u64,
+) -> Result<PartitionStats> {
+    if run_paths.is_empty() {
+        write_u64_file(sorted_path, &[])?;
+        return Ok(PartitionStats {
+            hash_name: hash_name.to_string(),
+            partition_id,
+            count: 0,
+            min_hash: 0,
+            max_hash: 0,
+            observed_collision_pairs: 0,
+            duplicate_hashes: 0,
+            collision_elements: 0,
+            max_multiplicity: 0,
+            ks_statistic_max: 0.0,
+            frac_pass_counts: vec![0u64; FRAC_SCALES.len()],
+            chi_bucket_counts: vec![0u64; CHI_BUCKETS],
+            byte_hist_counts: vec![0u64; 8 * 256],
+        });
+    }
+
+    let mut streams = Vec::with_capacity(run_paths.len());
+    for path in run_paths {
+        streams.push(RunStream::open(path)?);
+    }
+
+    let file = File::create(sorted_path)
+        .with_context(|| format!("failed to create {}", sorted_path.display()))?;
+    let mut writer = BufWriter::with_capacity(IO_BUFFER_BYTES, file);
+    let mut out_values = Vec::<u64>::with_capacity(SORT_OUTPUT_BUFFER_VALUES);
+
+    let mut heap = BinaryHeap::<MergeHeapItem>::new();
+    for (run_idx, stream) in streams.iter_mut().enumerate() {
+        if let Some(value) = stream.next_u64()? {
+            heap.push(MergeHeapItem { value, run_idx });
+        }
+    }
+
+    let mut acc =
+        SortStatsAccumulator::new(hash_name, partition_id, partition_offset, total_hashes);
+
+    while let Some(item) = heap.pop() {
+        out_values.push(item.value);
+        acc.observe(item.value);
+
+        if out_values.len() >= SORT_OUTPUT_BUFFER_VALUES {
+            writer.write_all(cast_slice::<u64, u8>(&out_values))?;
+            out_values.clear();
+        }
+
+        if let Some(next_value) = streams[item.run_idx].next_u64()? {
+            heap.push(MergeHeapItem {
+                value: next_value,
+                run_idx: item.run_idx,
+            });
+        }
+    }
+
+    if !out_values.is_empty() {
+        writer.write_all(cast_slice::<u64, u8>(&out_values))?;
+    }
+    writer.flush()?;
+
+    Ok(acc.finalize())
+}
+
+fn run_cpb_with_retries(src: &Path, dst: &Path) -> Result<()> {
+    let mut last_status = None;
+    let mut last_spawn_err: Option<std::io::Error> = None;
+
+    let max_attempts = CPB_STATUS_RETRIES.max(TRANSIENT_IO_RETRIES).max(1);
+
+    for attempt in 1..=max_attempts {
+        match ProcessCommand::new("cpb").arg(src).arg(dst).status() {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                last_status = Some(status);
+                if attempt < max_attempts {
+                    let backoff_ms = retry_backoff_ms(attempt as u32);
+                    eprintln!(
+                        "[copy] cpb retry {}/{} status={} src={} dst={}",
+                        attempt,
+                        max_attempts,
+                        status,
+                        src.display(),
+                        dst.display()
+                    );
+                    thread::sleep(Duration::from_millis(backoff_ms));
+                    continue;
+                }
+            }
+            Err(err) => {
+                if is_transient_spawn_error(&err) && attempt < max_attempts {
+                    let backoff_ms = retry_backoff_ms(attempt as u32);
+                    eprintln!(
+                        "[copy] cpb spawn retry {}/{} os_error={:?} src={} dst={}",
+                        attempt,
+                        max_attempts,
+                        err.raw_os_error(),
+                        src.display(),
+                        dst.display()
+                    );
+                    thread::sleep(Duration::from_millis(backoff_ms));
+                    last_spawn_err = Some(err);
+                    continue;
+                }
+
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed to execute cpb from {} to {}",
+                        src.display(),
+                        dst.display()
+                    )
+                });
+            }
+        }
+    }
+
+    if let Some(status) = last_status {
+        bail!(
+            "cpb failed after {} attempts with status {} for {} -> {}",
+            max_attempts,
+            status,
+            src.display(),
+            dst.display()
+        );
+    }
+
+    if let Some(err) = last_spawn_err {
+        return Err(err).with_context(|| {
+            format!(
+                "cpb spawn failed after {} attempts for {} -> {}",
+                max_attempts,
+                src.display(),
+                dst.display()
+            )
+        });
+    }
+
+    bail!(
+        "cpb failed after {} attempts for {} -> {}",
+        max_attempts,
+        src.display(),
+        dst.display()
+    );
+}
+
+fn retry_backoff_ms(attempt: u32) -> u64 {
+    let shift = attempt.saturating_sub(1).min(6);
+    TRANSIENT_IO_SLEEP_MS.saturating_mul(1u64 << shift)
+}
+
+fn is_transient_spawn_error(err: &std::io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(11) | Some(4) | Some(35))
 }
 
 fn write_u64_file(path: &Path, values: &[u64]) -> Result<()> {
@@ -1271,6 +2126,14 @@ fn configured_map_file_buffer_bytes() -> usize {
     mb.saturating_mul(1024 * 1024)
 }
 
+fn configured_map_max_open_writers_per_worker() -> usize {
+    std::env::var("K21_IO_MAX_OPEN_WRITERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAP_MAX_OPEN_WRITERS_PER_WORKER)
+}
+
 fn configured_local_scratch_base() -> PathBuf {
     std::env::var("K21_LOCAL_SCRATCH_BASE")
         .ok()
@@ -1279,9 +2142,40 @@ fn configured_local_scratch_base() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_LOCAL_SCRATCH_BASE))
 }
 
+fn configured_sort_chunk_values() -> usize {
+    if let Some(values) = std::env::var("K21_SORT_CHUNK_VALUES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+    {
+        return values;
+    }
+
+    let gib = std::env::var("K21_SORT_CHUNK_GIB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_SORT_CHUNK_GIB);
+
+    gib.saturating_mul(1024 * 1024 * 1024) / std::mem::size_of::<u64>()
+}
+
+fn configured_sort_scratch_base() -> PathBuf {
+    std::env::var("K21_SORT_SCRATCH_BASE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SORT_SCRATCH_BASE))
+}
+
 fn map_task_scratch_dir(base: &Path, task_id: usize) -> PathBuf {
     let job_id = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "manual".to_string());
     base.join(format!("k21-map-{job_id}-task-{task_id:02}"))
+}
+
+fn sort_task_scratch_dir(base: &Path, task_id: usize) -> PathBuf {
+    let job_id = std::env::var("SLURM_JOB_ID").unwrap_or_else(|_| "manual".to_string());
+    base.join(format!("k21-sort-{job_id}-task-{task_id:03}"))
 }
 
 fn configure_rayon(threads: usize) {
@@ -1331,6 +2225,17 @@ fn get_chunk_range(total: u64, chunks: u64, idx: u64) -> Range<u64> {
     };
     let size = if idx < rem { base + 1 } else { base };
     start..(start + size)
+}
+
+fn map_task_raw_ranges(task_id: usize) -> [Range<u64>; 2] {
+    let chunks = (MAP_TASKS * 2) as u64;
+    let left_idx = task_id as u64;
+    let right_idx = chunks - 1 - task_id as u64;
+
+    [
+        get_chunk_range(RAW_SPACE_SIZE, chunks, left_idx),
+        get_chunk_range(RAW_SPACE_SIZE, chunks, right_idx),
+    ]
 }
 
 fn split_range(range: Range<u64>, parts: usize) -> Vec<Range<u64>> {

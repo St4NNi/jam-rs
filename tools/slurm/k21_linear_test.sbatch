@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=k21-aggregate-hash
+#SBATCH --job-name=k21-linear-map
 #SBATCH --partition=bcf
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --array=0-3
+#SBATCH --cpus-per-task=128
+#SBATCH --array=0-31
 #SBATCH --output=/dev/null
 #SBATCH --error=/dev/null
 
@@ -27,7 +27,7 @@ BIN="${HOME}/k21_pipeline"
 SLURMOUT_DIR="${HOME}/slurmout"
 
 mkdir -p "${SLURMOUT_DIR}"
-JOB_TAG="${SLURM_JOB_NAME:-k21-aggregate-hash}-${SLURM_JOB_ID:-manual}_${SLURM_ARRAY_TASK_ID:-0}"
+JOB_TAG="${SLURM_JOB_NAME:-k21-linear-map}-${SLURM_JOB_ID:-manual}_${SLURM_ARRAY_TASK_ID:-0}"
 LOG_FILE="${SLURMOUT_DIR}/${JOB_TAG}.log"
 exec >"${LOG_FILE}" 2>&1
 
@@ -36,6 +36,7 @@ if [[ ! -x "${BIN}" ]]; then
     exit 1
 fi
 
+export RAYON_NUM_THREADS="${SLURM_CPUS_PER_TASK:-128}"
 export MALLOC_CONF="${MALLOC_CONF:-background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000,metadata_thp:auto}"
 
-/usr/bin/time -v "${BIN}" aggregate-hash "${OUTDIR}"
+/usr/bin/time -v "${BIN}" linear-map "${OUTDIR}"

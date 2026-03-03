@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=k21-aggregate-all
+#SBATCH --job-name=k21-linear-agg
 #SBATCH --partition=bcf
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -15,7 +15,7 @@ BIN="${HOME}/k21_pipeline"
 SLURMOUT_DIR="${HOME}/slurmout"
 
 mkdir -p "${SLURMOUT_DIR}"
-JOB_TAG="${SLURM_JOB_NAME:-k21-aggregate-all}-${SLURM_JOB_ID:-manual}"
+JOB_TAG="${SLURM_JOB_NAME:-k21-linear-agg}-${SLURM_JOB_ID:-manual}"
 LOG_FILE="${SLURMOUT_DIR}/${JOB_TAG}.log"
 exec >"${LOG_FILE}" 2>&1
 
@@ -26,4 +26,4 @@ fi
 
 export MALLOC_CONF="${MALLOC_CONF:-background_thread:true,dirty_decay_ms:5000,muzzy_decay_ms:5000,metadata_thp:auto}"
 
-/usr/bin/time -v "${BIN}" aggregate-all "${OUTDIR}"
+/usr/bin/time -v "${BIN}" linear-aggregate "${OUTDIR}"

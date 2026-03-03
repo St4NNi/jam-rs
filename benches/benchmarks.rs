@@ -21,6 +21,17 @@ pub fn jamhash(value: u64) -> u64 {
     jamhash::jamhash_u64(value)
 }
 
+#[inline]
+pub fn wang64(mut key: u64) -> u64 {
+    key = (!key).wrapping_add(key << 21);
+    key ^= key >> 24;
+    key = key.wrapping_add(key << 3).wrapping_add(key << 8);
+    key ^= key >> 14;
+    key = key.wrapping_add(key << 2).wrapping_add(key << 4);
+    key ^= key >> 28;
+    key.wrapping_add(key << 31)
+}
+
 fn bench_hash_functions(c: &mut Criterion) {
     let mut group = c.benchmark_group("single_hash");
     group.warm_up_time(Duration::from_millis(500));
@@ -42,6 +53,10 @@ fn bench_hash_functions(c: &mut Criterion) {
 
     group.bench_function("jamhash", |b| {
         b.iter(|| jamhash(black_box(values.next().unwrap())))
+    });
+
+    group.bench_function("wang64", |b| {
+        b.iter(|| wang64(black_box(values.next().unwrap())))
     });
 
     group.finish();
