@@ -244,9 +244,10 @@ pub fn handle_distance_command(
     }
 
     let total_samples = sketch.sample_count();
+    let cutoff = normalize_distance_cutoff(cutoff);
     let budget_bytes = memory_gb * 1024 * 1024 * 1024 * 7 / 10;
     let per_sample_bytes = (db_stats.sample_count as usize).max(1) * 40;
-    let chunk_size = (budget_bytes / per_sample_bytes).clamp(100, total_samples);
+    let chunk_size = compute_distance_chunk_size(total_samples, budget_bytes, per_sample_bytes);
 
     if let Some(ref sp) = spinner {
         sp.set_message(format!(
@@ -293,7 +294,8 @@ pub fn handle_distance_command(
     for chunk_start in (0..total_samples).step_by(chunk_size) {
         let chunk_end = (chunk_start + chunk_size).min(total_samples);
 
-        let results = engine.query_sketch_chunked(&sketch, chunk_start..chunk_end, cutoff);
+        let results =
+            engine.query_sketch_chunked(&sketch, chunk_start..chunk_end, cutoff.unwrap_or(0.0));
 
         let formatted: Vec<String> = results
             .par_iter()
@@ -397,6 +399,27 @@ pub fn handle_distance_command(
     }
 
     Ok(())
+}
+
+fn normalize_distance_cutoff(cutoff: f64) -> Option<f64> {
+    if cutoff.is_finite() && cutoff > 0.0 {
+        Some(cutoff)
+    } else {
+        None
+    }
+}
+
+fn compute_distance_chunk_size(
+    total_samples: usize,
+    budget_bytes: usize,
+    per_sample_bytes: usize,
+) -> usize {
+    debug_assert!(total_samples > 0);
+
+    let min_chunk_size = total_samples.min(100).max(1);
+    let raw_chunk_size = budget_bytes / per_sample_bytes.max(1);
+
+    raw_chunk_size.clamp(min_chunk_size, total_samples)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -825,4 +848,32 @@ pub fn handle_stats_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_distance_chunk_size, normalize_distance_cutoff};
+
+    #[test]
+    fn distance_chunk_size_handles_small_query_counts() {
+        let chunk_size = compute_distance_chunk_size(3, 0, 1024);
+        assert_eq!(chunk_size, 3);
+    }
+
+    #[test]
+    fn distance_chunk_size_uses_default_minimum_for_large_queries() {
+        let chunk_size = compute_distance_chunk_size(1000, 0, 1024);
+        assert_eq!(chunk_size, 100);
+    }
+
+    #[test]
+    fn distance_cutoff_non_positive_is_disabled() {
+        assert_eq!(normalize_distance_cutoff(0.0), None);
+        assert_eq!(normalize_distance_cutoff(-0.1), None);
+    }
+
+    #[test]
+    fn distance_cutoff_positive_is_kept() {
+        assert_eq!(normalize_distance_cutoff(0.25), Some(0.25));
+    }
 }
