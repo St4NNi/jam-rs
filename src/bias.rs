@@ -1180,10 +1180,10 @@ impl HashBiasTable {
             for i in 0..(width * depth) {
                 let norm_pos = (pos_counts[i] as f64 / pos_total) * scale;
                 let norm_neg = (neg_counts[i] as f64 / neg_total) * scale;
+                let adj_pos = (norm_pos - norm_neg).max(0.0) as f32;
                 let adj_neg = (norm_neg - norm_pos).max(0.0) as f32;
-                let norm_pos_f32 = norm_pos as f32;
 
-                let log_ratio = ((norm_pos_f32 + alpha) / (adj_neg + alpha)).ln();
+                let log_ratio = ((adj_pos + alpha) / (adj_neg + alpha)).ln();
                 let quantized = (log_ratio * QUANTIZATION_SCALE).clamp(-127.0, 127.0) as i8;
                 weights[i] = quantized;
             }

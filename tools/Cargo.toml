@@ -69,6 +69,10 @@ path = "hash_dump_stats.rs"
 name = "k21_pipeline"
 path = "k21_pipeline.rs"
 
+[[bin]]
+name = "bias_effectiveness"
+path = "bias_effectiveness.rs"
+
 [dependencies]
 bytemuck = { version = "1.25.0", features = ["derive"] }
 mimalloc = { version = "0.1", default-features = false }
@@ -96,6 +100,8 @@ flate2 = "1.1.8"
 zstd = "0.13"
 indicatif = { version = "0.18", features = ["rayon"] }
 anyhow = "1.0"
+needletail = "0.6.3"
+tempfile = "3.25.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
 csv = "1"

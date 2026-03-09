@@ -10,3 +10,5 @@
 /tools/out
 /tools/target
 /tools/Cargo.lock
+tests/testfiles/chromosomes_small.fasta
+tests/testfiles/plasmidscope_clean_50MB.fasta
