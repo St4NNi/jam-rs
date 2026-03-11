@@ -2,124 +2,29 @@ use anyhow::{Context, Result};
 use jam_rs::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
 use jam_rs::jamhash_u64;
 use needletail::{Sequence, parse_fastx_file};
-use std::io::Write;
+use rayon::prelude::*;
 use std::path::Path;
 use std::time::Instant;
-use tempfile::NamedTempFile;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-const PLASMID_PATH: &str = "tests/testfiles/plasmidscope_clean_50MB.fasta";
-const CHROMO_PATH: &str = "tests/testfiles/chromosomes_small.fasta";
-const TRAIN_FRACTION: f64 = 0.7;
+const PLASMID_TRAIN: &str = "tests/testfiles/plasmidscope_clean_50MB_train.fasta";
+const PLASMID_TEST: &str = "tests/testfiles/plasmidscope_clean_50MB_test.fasta";
+const CHROMO_TRAIN: &str = "tests/testfiles/all_chromosomes_1GB_train.fasta";
+const CHROMO_TEST: &str = "tests/testfiles/all_chromosomes_1GB_test.fasta";
 
-// ---------------------------------------------------------------------------
-// Parameter sweep types
-// ---------------------------------------------------------------------------
+const ALPHA: f32 = 1.0;
+const K: u8 = 21;
+const FSCALE: u64 = 100;
+const WIDTH: usize = 1 << 23; // 8M
+const DEPTH: usize = 7;
 
-struct TrialResult {
-    alpha: f32,
-    target_fscale: u64,
-    negative_fscale: u64,
-    pos_retention: f32,
-    neg_retention: f32,
-    fold_enrichment: f32,
-    max_fold_enrichment: f32,
-    threshold: i8,
-    weight_min: f32,
-    weight_max: f32,
-    weight_mean: f32,
-    weight_std: f32,
-    pct_positive: f64,
-    pct_above_threshold: f64,
-    elapsed_secs: f64,
-}
-
-fn run_trial(
-    alpha: f32,
-    target_fscale: Option<u64>,
-    negative_fscale: Option<u64>,
-    fscale: u64,
-    k: u8,
-) -> Result<TrialResult> {
-    let config = BiasCreateConfig {
-        cms: CMSConfig {
-            k,
-            fscale,
-            ..Default::default()
-        },
-        alpha,
-        target_fscale,
-        negative_fscale,
-        unseen_fscale: None,
-    };
-
-    let plasmid = Path::new(PLASMID_PATH);
-    let chromo = Path::new(CHROMO_PATH);
-
-    let start = Instant::now();
-    let table = HashBiasTable::create(&[plasmid], &[chromo], &config, None)?;
-    let elapsed = start.elapsed().as_secs_f64();
-
-    let (min, max, mean, std, positive, above_threshold) = table.weight_stats();
-    let total_cells = config.cms.width * config.cms.depth;
-
-    Ok(TrialResult {
-        alpha,
-        target_fscale: target_fscale.unwrap_or(0),
-        negative_fscale: negative_fscale.unwrap_or(0),
-        pos_retention: table.positive_retention,
-        neg_retention: table.negative_retention,
-        fold_enrichment: table.fold_enrichment(),
-        max_fold_enrichment: table.max_fold_enrichment,
-        threshold: table.threshold,
-        weight_min: min,
-        weight_max: max,
-        weight_mean: mean,
-        weight_std: std,
-        pct_positive: positive as f64 / total_cells as f64 * 100.0,
-        pct_above_threshold: above_threshold as f64 / total_cells as f64 * 100.0,
-        elapsed_secs: elapsed,
-    })
-}
-
-fn print_header() {
-    println!(
-        "{:<8} {:<12} {:<12} {:>8} {:>8} {:>8} {:>10} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>8}",
-        "alpha", "tgt_fscale", "neg_fscale",
-        "pos_ret", "neg_ret", "fold_e", "max_fold",
-        "thr", "w_min", "w_max", "w_mean", "w_std",
-        "%pos", "%>=thr", "time_s"
-    );
-    println!("{}", "-".repeat(160));
-}
-
-fn print_row(r: &TrialResult) {
-    println!(
-        "{:<8.2} {:<12} {:<12} {:>7.2}% {:>7.2}% {:>8.2} {:>10.2} {:>6} {:>8.2} {:>8.2} {:>8.4} {:>8.4} {:>7.1}% {:>9.1}% {:>8.1}",
-        r.alpha, r.target_fscale, r.negative_fscale,
-        r.pos_retention * 100.0, r.neg_retention * 100.0,
-        r.fold_enrichment, r.max_fold_enrichment,
-        r.threshold,
-        r.weight_min, r.weight_max, r.weight_mean, r.weight_std,
-        r.pct_positive, r.pct_above_threshold,
-        r.elapsed_secs
-    );
-}
-
-// ---------------------------------------------------------------------------
-// FASTA splitting & k-mer retention measurement
-// ---------------------------------------------------------------------------
-
-/// One FASTA record stored in memory (header + sequence bytes).
 struct FastaRecord {
-    header: Vec<u8>,
     seq: Vec<u8>,
 }
 
-/// Read all records from a FASTA file into memory.
 fn read_fasta_records(path: &Path) -> Result<Vec<FastaRecord>> {
     let mut records = Vec::new();
     let mut reader = parse_fastx_file(path)
@@ -127,34 +32,14 @@ fn read_fasta_records(path: &Path) -> Result<Vec<FastaRecord>> {
     while let Some(rec) = reader.next() {
         let rec = rec.context("Failed to parse record")?;
         records.push(FastaRecord {
-            header: rec.id().to_vec(),
             seq: rec.normalize(false).to_vec(),
         });
     }
     Ok(records)
 }
 
-/// Write a slice of records to a temporary FASTA file; returns the temp file handle.
-fn write_temp_fasta(records: &[FastaRecord]) -> Result<NamedTempFile> {
-    let mut tmp = NamedTempFile::new()?;
-    for rec in records {
-        write!(tmp, ">")?;
-        tmp.write_all(&rec.header)?;
-        writeln!(tmp)?;
-        tmp.write_all(&rec.seq)?;
-        writeln!(tmp)?;
-    }
-    tmp.flush()?;
-    Ok(tmp)
-}
-
-/// Count k-mers and how many pass the bias filter (hard threshold).
 struct RetentionStats {
-    total_kmers: u64,
-    retained_kmers: u64,
-    /// k-mers that even pass the fscale subsampling (i.e., are in sketch space).
     sketch_kmers: u64,
-    /// Of the sketch-space k-mers, how many pass the bias filter.
     sketch_retained: u64,
 }
 
@@ -166,71 +51,359 @@ impl RetentionStats {
         self.sketch_retained as f64 / self.sketch_kmers as f64 * 100.0
     }
 
-    fn overall_pct(&self) -> f64 {
-        if self.total_kmers == 0 {
-            return 0.0;
+    fn effective_fscale(&self, base_fscale: u64) -> f64 {
+        if self.sketch_retained == 0 {
+            return f64::INFINITY;
         }
-        self.retained_kmers as f64 / self.total_kmers as f64 * 100.0
+        base_fscale as f64 * self.sketch_kmers as f64 / self.sketch_retained as f64
     }
 }
 
-/// Measure k-mer retention for a set of FASTA records against a bias table.
 fn measure_retention(records: &[FastaRecord], table: &HashBiasTable, k: u8) -> RetentionStats {
     let frac_max = u64::MAX / table.fscale();
-    let mut stats = RetentionStats {
-        total_kmers: 0,
-        retained_kmers: 0,
-        sketch_kmers: 0,
-        sketch_retained: 0,
-    };
-
-    for rec in records {
-        if rec.seq.len() < k as usize {
-            continue;
-        }
-        for (_, kmer, _) in rec.seq.bit_kmers(k, true) {
-            let hash = jamhash_u64(kmer.0);
-            stats.total_kmers += 1;
-            if hash < frac_max {
-                stats.sketch_kmers += 1;
-                if table.passes_filter(hash) {
-                    stats.sketch_retained += 1;
-                    stats.retained_kmers += 1;
+    let (sketch_kmers, sketch_retained) = records
+        .par_iter()
+        .filter(|rec| rec.seq.len() >= k as usize)
+        .map(|rec| {
+            let mut sk = 0u64;
+            let mut sr = 0u64;
+            for (_, kmer, _) in rec.seq.bit_kmers(k, true) {
+                let hash = jamhash_u64(kmer.0);
+                if hash < frac_max {
+                    sk += 1;
+                    if table.passes_filter(hash) {
+                        sr += 1;
+                    }
                 }
             }
-        }
-    }
-    stats
+            (sk, sr)
+        })
+        .reduce(|| (0, 0), |(a1, b1), (a2, b2)| (a1 + a2, b1 + b2));
+
+    RetentionStats { sketch_kmers, sketch_retained }
 }
 
-/// Measure per-record retention and return (mean, std, min, max) of per-record retention %.
+fn measure_weight_distribution(
+    records: &[FastaRecord],
+    table: &HashBiasTable,
+    k: u8,
+) -> [u64; 255] {
+    let frac_max = u64::MAX / table.fscale();
+    let histograms: Vec<[u64; 255]> = records
+        .par_iter()
+        .filter(|rec| rec.seq.len() >= k as usize)
+        .map(|rec| {
+            let mut hist = [0u64; 255];
+            for (_, kmer, _) in rec.seq.bit_kmers(k, true) {
+                let hash = jamhash_u64(kmer.0);
+                if hash < frac_max {
+                    let w = table.weight(hash);
+                    let idx = (w as i16 + 127) as usize;
+                    hist[idx] += 1;
+                }
+            }
+            hist
+        })
+        .collect();
+
+    let mut total = [0u64; 255];
+    for h in &histograms {
+        for i in 0..255 {
+            total[i] += h[i];
+        }
+    }
+    total
+}
+
+fn print_weight_distribution(label: &str, hist: &[u64; 255], table: &HashBiasTable) {
+    let total: u64 = hist.iter().sum();
+    if total == 0 {
+        println!("  {label}: no k-mers");
+        return;
+    }
+
+    println!("  Weight distribution for: {label}");
+    println!(
+        "    {:>7} {:>7} {:>12} {:>8} {:>12}",
+        "weight", "index", "count", "pct", "eff_fscale"
+    );
+
+    let ranges = [
+        (-127i8, -101i8, "[-127,-101]"),
+        (-100, -51, "[-100, -51]"),
+        (-50, -11, "[ -50, -11]"),
+        (-10, -1, "[ -10,  -1]"),
+        (0, 0, "[   0,   0]"),
+        (1, 10, "[   1,  10]"),
+        (11, 50, "[  11,  50]"),
+        (51, 100, "[  51, 100]"),
+        (101, 127, "[ 101, 127]"),
+    ];
+
+    for (lo, hi, label_range) in &ranges {
+        let lo_idx = (*lo as i16 + 127) as usize;
+        let hi_idx = (*hi as i16 + 127) as usize;
+        let count: u64 = hist[lo_idx..=hi_idx].iter().sum();
+        let pct = count as f64 / total as f64 * 100.0;
+        let mid = ((*lo as i16 + *hi as i16) / 2) as i8;
+        let fs = table.effective_fscale_at(mid);
+        println!(
+            "    {:<11} {:>5}-{:<5} {:>12} {:>7.2}% {:>12.0}",
+            label_range, lo_idx, hi_idx, count, pct, fs
+        );
+    }
+    println!(
+        "    {:.<11} {:>13} {:>12}",
+        "TOTAL", "", total
+    );
+    println!();
+}
+
+fn print_oracle_analysis(
+    test_pos_hist: &[u64; 255],
+    test_neg_hist: &[u64; 255],
+    table: &HashBiasTable,
+    base_fscale: u64,
+    target_fscale: u64,
+    negative_fscale: u64,
+) {
+    let pos_total: u64 = test_pos_hist.iter().sum();
+    let neg_total: u64 = test_neg_hist.iter().sum();
+    if pos_total == 0 || neg_total == 0 {
+        return;
+    }
+
+    let ranges: &[(i8, i8, &str)] = &[
+        (-127, -101, "[-127,-101]"),
+        (-100, -51, "[-100, -51]"),
+        (-50, -11, "[ -50, -11]"),
+        (-10, -1, "[ -10,  -1]"),
+        (0, 0, "[   0,   0]"),
+        (1, 10, "[   1,  10]"),
+        (11, 50, "[  11,  50]"),
+        (51, 100, "[  51, 100]"),
+        (101, 127, "[ 101, 127]"),
+    ];
+
+    println!("  === Per-Bin Analysis (test/unseen data) ===");
+    println!(
+        "    {:>11} {:>10} {:>10} {:>8} {:>8} {:>8} {:>10} {:>10}",
+        "weight", "pos_cnt", "neg_cnt", "pos_%", "neg_%", "ratio", "cur_fscale", "ideal_fs"
+    );
+
+    // Compute per-bin probabilities on test data
+    let pt = pos_total as f64;
+    let nt = neg_total as f64;
+    let base = base_fscale as f64;
+    let target_ret = base / target_fscale as f64;
+
+    // For each range, compute enrichment ratio and "ideal" fscale
+    struct BinInfo {
+        label: String,
+        pos_count: u64,
+        neg_count: u64,
+        pos_frac: f64,
+        neg_frac: f64,
+        ratio: f64,
+        cur_fscale: f64,
+    }
+
+    let mut bins: Vec<BinInfo> = Vec::new();
+
+    for &(lo, hi, label) in ranges {
+        let lo_idx = (lo as i16 + 127) as usize;
+        let hi_idx = (hi as i16 + 127) as usize;
+        let pos_count: u64 = test_pos_hist[lo_idx..=hi_idx].iter().sum();
+        let neg_count: u64 = test_neg_hist[lo_idx..=hi_idx].iter().sum();
+        let pos_frac = pos_count as f64 / pt;
+        let neg_frac = neg_count as f64 / nt;
+        let ratio = if neg_frac > 1e-12 { pos_frac / neg_frac } else { f64::INFINITY };
+        let mid = (lo as i16 + hi as i16) / 2;
+        let cur_fscale = table.effective_fscale_at(mid as i8);
+
+        bins.push(BinInfo {
+            label: label.to_string(), pos_count, neg_count, pos_frac, neg_frac, ratio, cur_fscale,
+        });
+    }
+
+    // Compute oracle LUT via greedy: sort bins by pos/neg ratio descending,
+    // assign max retention (base_fscale) to highest-ratio bins until we exhaust
+    // the target retention budget on a uniform prior, then assign min retention.
+    // Use fine-grained per-index bins for the oracle.
+    let mut idx_bins: Vec<(usize, f64, f64)> = (0..255)
+        .map(|i| {
+            let pf = test_pos_hist[i] as f64 / pt;
+            let nf = test_neg_hist[i] as f64 / nt;
+            (i, pf, nf)
+        })
+        .collect();
+
+    // Sort by pos/neg ratio descending (highest enrichment first)
+    idx_bins.sort_by(|a, b| {
+        let ra = if a.2 > 1e-15 { a.1 / a.2 } else { f64::INFINITY };
+        let rb = if b.2 > 1e-15 { b.1 / b.2 } else { f64::INFINITY };
+        rb.partial_cmp(&ra).unwrap()
+    });
+
+    // Use p_target as average of pos and neg priors (unseen mix)
+    let mut oracle_fscale = [negative_fscale as f64; 255];
+    let min_ret = base / negative_fscale as f64;
+    let max_ret = 1.0f64; // retention at base_fscale
+
+    // Start with everything at max fscale (min retention)
+    // Budget: how much more retention can we add?
+    let baseline_target_ret: f64 = (0..255)
+        .map(|i| {
+            let tf = (test_pos_hist[i] as f64 / pt + test_neg_hist[i] as f64 / nt) / 2.0;
+            tf * min_ret
+        })
+        .sum();
+
+    let mut remaining_budget = target_ret - baseline_target_ret;
+
+    for &(i, _pf, _nf) in &idx_bins {
+        if remaining_budget <= 0.0 {
+            break;
+        }
+        let tf = (test_pos_hist[i] as f64 / pt + test_neg_hist[i] as f64 / nt) / 2.0;
+        let extra_ret = tf * (max_ret - min_ret);
+        if extra_ret <= 0.0 {
+            oracle_fscale[i] = base_fscale as f64;
+            continue;
+        }
+        if extra_ret <= remaining_budget {
+            oracle_fscale[i] = base_fscale as f64;
+            remaining_budget -= extra_ret;
+        } else {
+            // Partial: find fscale that uses exactly the remaining budget
+            let needed_ret = remaining_budget / tf + min_ret;
+            let fs = base / needed_ret;
+            oracle_fscale[i] = fs.clamp(base, negative_fscale as f64);
+            remaining_budget = 0.0;
+        }
+    }
+
+    // Compute oracle fold enrichment on test data
+    let oracle_pos_ret: f64 = (0..255)
+        .map(|i| {
+            let pf = test_pos_hist[i] as f64 / pt;
+            pf * (base / oracle_fscale[i]).min(1.0)
+        })
+        .sum();
+    let oracle_neg_ret: f64 = (0..255)
+        .map(|i| {
+            let nf = test_neg_hist[i] as f64 / nt;
+            nf * (base / oracle_fscale[i]).min(1.0)
+        })
+        .sum();
+    let oracle_fold = if oracle_neg_ret > 1e-30 { oracle_pos_ret / oracle_neg_ret } else { f64::INFINITY };
+    let oracle_pos_eff = if oracle_pos_ret > 0.0 { base / oracle_pos_ret } else { f64::INFINITY };
+    let oracle_neg_eff = if oracle_neg_ret > 0.0 { base / oracle_neg_ret } else { f64::INFINITY };
+
+    // Compute oracle fscale per display range (weighted average)
+    let range_oracle: Vec<f64> = ranges.iter().map(|&(lo, hi, _)| {
+        let lo_idx = (lo as i16 + 127) as usize;
+        let hi_idx = (hi as i16 + 127) as usize;
+        let total_weight: f64 = (lo_idx..=hi_idx)
+            .map(|i| test_pos_hist[i] as f64 + test_neg_hist[i] as f64)
+            .sum();
+        if total_weight > 0.0 {
+            let weighted_fs: f64 = (lo_idx..=hi_idx)
+                .map(|i| (test_pos_hist[i] as f64 + test_neg_hist[i] as f64) * oracle_fscale[i])
+                .sum();
+            weighted_fs / total_weight
+        } else {
+            negative_fscale as f64
+        }
+    }).collect();
+
+    // Compute current actual fold using per-index fscale (not range midpoints)
+    let cur_pos_ret: f64 = (0..255).map(|i| {
+        let pf = test_pos_hist[i] as f64 / pt;
+        let w = (i as i16 - 127) as i8;
+        let fs = table.effective_fscale_at(w);
+        pf * (base / fs).min(1.0)
+    }).sum();
+    let cur_neg_ret: f64 = (0..255).map(|i| {
+        let nf = test_neg_hist[i] as f64 / nt;
+        let w = (i as i16 - 127) as i8;
+        let fs = table.effective_fscale_at(w);
+        nf * (base / fs).min(1.0)
+    }).sum();
+    let cur_fold = if cur_neg_ret > 1e-30 { cur_pos_ret / cur_neg_ret } else { f64::INFINITY };
+
+    // Compute weighted-average current fscale per range (using per-index values)
+    let range_cur: Vec<f64> = ranges.iter().map(|&(lo, hi, _)| {
+        let lo_idx = (lo as i16 + 127) as usize;
+        let hi_idx = (hi as i16 + 127) as usize;
+        let total_weight: f64 = (lo_idx..=hi_idx)
+            .map(|i| test_pos_hist[i] as f64 + test_neg_hist[i] as f64)
+            .sum();
+        if total_weight > 0.0 {
+            let weighted_fs: f64 = (lo_idx..=hi_idx)
+                .map(|i| {
+                    let w = (i as i16 - 127) as i8;
+                    let fs = table.effective_fscale_at(w);
+                    (test_pos_hist[i] as f64 + test_neg_hist[i] as f64) * fs
+                })
+                .sum();
+            weighted_fs / total_weight
+        } else {
+            negative_fscale as f64
+        }
+    }).collect();
+
+    for (j, b) in bins.iter().enumerate() {
+        println!(
+            "    {:<11} {:>10} {:>10} {:>7.2}% {:>7.2}% {:>7.1}x {:>10.0} {:>10.0}",
+            b.label, b.pos_count, b.neg_count,
+            b.pos_frac * 100.0, b.neg_frac * 100.0,
+            b.ratio, range_cur[j], range_oracle[j]
+        );
+    }
+
+    let cur_pos_eff = if cur_pos_ret > 0.0 { base / cur_pos_ret } else { f64::INFINITY };
+    let cur_neg_eff = if cur_neg_ret > 0.0 { base / cur_neg_ret } else { f64::INFINITY };
+
+    println!();
+    println!("    Current:  pos_eff={:.0}, neg_eff={:.0}, fold={:.2}x",
+        cur_pos_eff, cur_neg_eff, cur_fold);
+    println!("    Oracle:   pos_eff={:.0}, neg_eff={:.0}, fold={:.2}x  (theoretical max at target={})",
+        oracle_pos_eff, oracle_neg_eff, oracle_fold, target_fscale);
+    println!("    Gap:      {:.1}x fold left on the table", oracle_fold / cur_fold);
+    println!();
+}
+
 fn measure_per_record_retention(
     records: &[FastaRecord],
     table: &HashBiasTable,
     k: u8,
 ) -> (f64, f64, f64, f64) {
     let frac_max = u64::MAX / table.fscale();
-    let mut retentions = Vec::with_capacity(records.len());
-
-    for rec in records {
-        if rec.seq.len() < k as usize {
-            continue;
-        }
-        let mut sketch = 0u64;
-        let mut passed = 0u64;
-        for (_, kmer, _) in rec.seq.bit_kmers(k, true) {
-            let hash = jamhash_u64(kmer.0);
-            if hash < frac_max {
-                sketch += 1;
-                if table.passes_filter(hash) {
-                    passed += 1;
+    let retentions: Vec<f64> = records
+        .par_iter()
+        .filter_map(|rec| {
+            if rec.seq.len() < k as usize {
+                return None;
+            }
+            let mut sketch = 0u64;
+            let mut passed = 0u64;
+            for (_, kmer, _) in rec.seq.bit_kmers(k, true) {
+                let hash = jamhash_u64(kmer.0);
+                if hash < frac_max {
+                    sketch += 1;
+                    if table.passes_filter(hash) {
+                        passed += 1;
+                    }
                 }
             }
-        }
-        if sketch > 0 {
-            retentions.push(passed as f64 / sketch as f64 * 100.0);
-        }
-    }
+            if sketch > 0 {
+                Some(passed as f64 / sketch as f64 * 100.0)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     if retentions.is_empty() {
         return (0.0, 0.0, 0.0, 0.0);
@@ -246,268 +419,284 @@ fn measure_per_record_retention(
     (mean, std, min, max)
 }
 
-/// Run the generalization test: train/test split on plasmids, measure retention
-/// on train plasmids, test (held-out) plasmids, and chromosomes.
-fn run_generalization_test(alpha: f32, fscale: u64, k: u8) -> Result<()> {
-    let plasmid_path = Path::new(PLASMID_PATH);
-    let chromo_path = Path::new(CHROMO_PATH);
+struct SoftTrialResult {
+    target_fscale: u64,
+    negative_fscale: u64,
+    unseen_fscale: u64,
+    train_pos_ret: f64,
+    test_pos_ret: f64,
+    train_neg_ret: f64,
+    test_neg_ret: f64,
+    fold_train: f64,
+    fold_test: f64,
+    eff_fs_test_pos: f64,
+    eff_fs_test_neg: f64,
+    pos_gap: f64,
+    neg_gap: f64,
+    build_secs: f64,
+}
 
-    // Load all records
-    println!("  Loading FASTA records...");
-    let all_plasmids = read_fasta_records(plasmid_path)?;
-    let chromosomes = read_fasta_records(chromo_path)?;
-
-    let n_total = all_plasmids.len();
-    let n_train = (n_total as f64 * TRAIN_FRACTION).round() as usize;
-    let n_test = n_total - n_train;
-
-    println!(
-        "  Plasmids: {} total, {} train ({:.0}%), {} test ({:.0}%)",
-        n_total,
-        n_train,
-        TRAIN_FRACTION * 100.0,
-        n_test,
-        (1.0 - TRAIN_FRACTION) * 100.0
-    );
-    println!("  Chromosomes: {} records", chromosomes.len());
-
-    let train_plasmids = &all_plasmids[..n_train];
-    let test_plasmids = &all_plasmids[n_train..];
-
-    // Write train split to temp file for bias table creation
-    println!("  Writing train split to temp file...");
-    let train_tmp = write_temp_fasta(train_plasmids)?;
-
-    // Build bias table on train plasmids vs chromosomes
+fn run_soft_trial(
+    target_fscale: u64,
+    negative_fscale: u64,
+    unseen_fscale: Option<u64>,
+    train_plasmids: &[FastaRecord],
+    test_plasmids: &[FastaRecord],
+    train_chromosomes: &[FastaRecord],
+    test_chromosomes: &[FastaRecord],
+) -> Result<SoftTrialResult> {
     let config = BiasCreateConfig {
         cms: CMSConfig {
-            k,
-            fscale,
-            ..Default::default()
+            k: K,
+            fscale: FSCALE,
+            width: WIDTH,
+            depth: DEPTH,
         },
-        alpha,
-        target_fscale: None,
-        negative_fscale: None,
-        unseen_fscale: None,
+        alpha: ALPHA,
+        target_fscale: Some(target_fscale),
+        negative_fscale: Some(negative_fscale),
+        unseen_fscale,
     };
 
-    println!("  Building bias table (train plasmids vs chromosomes)...");
     let start = Instant::now();
-    let table = HashBiasTable::create(&[train_tmp.path()], &[chromo_path], &config, None)?;
+
+    let table = HashBiasTable::create(
+        &[Path::new(PLASMID_TRAIN)],
+        &[Path::new(CHROMO_TRAIN)],
+        &config,
+        None,
+    )?;
+    let build_secs = start.elapsed().as_secs_f64();
+
+    let tp = measure_retention(train_plasmids, &table, K);
+    let tsp = measure_retention(test_plasmids, &table, K);
+    let tn = measure_retention(train_chromosomes, &table, K);
+    let tsn = measure_retention(test_chromosomes, &table, K);
+
+    let fold_train = if tn.retention_pct() > 0.0 {
+        tp.retention_pct() / tn.retention_pct()
+    } else {
+        f64::INFINITY
+    };
+    let fold_test = if tsn.retention_pct() > 0.0 {
+        tsp.retention_pct() / tsn.retention_pct()
+    } else {
+        f64::INFINITY
+    };
+
+    Ok(SoftTrialResult {
+        target_fscale,
+        negative_fscale,
+        unseen_fscale: unseen_fscale.unwrap_or(0),
+        train_pos_ret: tp.retention_pct(),
+        test_pos_ret: tsp.retention_pct(),
+        train_neg_ret: tn.retention_pct(),
+        test_neg_ret: tsn.retention_pct(),
+        fold_train,
+        fold_test,
+        eff_fs_test_pos: tsp.effective_fscale(FSCALE),
+        eff_fs_test_neg: tsn.effective_fscale(FSCALE),
+        pos_gap: tp.retention_pct() - tsp.retention_pct(),
+        neg_gap: tn.retention_pct() - tsn.retention_pct(),
+        build_secs,
+    })
+}
+
+fn print_summary_header() {
+    println!(
+        "{:<10} {:<10} {:<10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>6}",
+        "tgt_fs", "neg_fs", "unseen_fs",
+        "trn_pos", "tst_pos", "trn_neg", "tst_neg",
+        "fold_trn", "fold_tst",
+        "eff_pos", "eff_neg",
+        "pos_gap", "neg_gap", "time"
+    );
+    println!("{}", "-".repeat(148));
+}
+
+fn print_summary_row(r: &SoftTrialResult) {
+    println!(
+        "{:<10} {:<10} {:<10} {:>9.2}% {:>9.2}% {:>9.2}% {:>9.2}% {:>9.2}x {:>9.2}x {:>10.0} {:>10.0} {:>7.1}pp {:>7.1}pp {:>5.1}s",
+        r.target_fscale, r.negative_fscale,
+        if r.unseen_fscale > 0 { format!("{}", r.unseen_fscale) } else { "-".to_string() },
+        r.train_pos_ret, r.test_pos_ret,
+        r.train_neg_ret, r.test_neg_ret,
+        r.fold_train, r.fold_test,
+        r.eff_fs_test_pos, r.eff_fs_test_neg,
+        r.pos_gap, r.neg_gap,
+        r.build_secs
+    );
+}
+
+fn run_detailed(
+    label: &str,
+    target_fscale: u64,
+    negative_fscale: u64,
+    unseen_fscale: Option<u64>,
+    train_plasmids: &[FastaRecord],
+    test_plasmids: &[FastaRecord],
+    train_chromosomes: &[FastaRecord],
+    test_chromosomes: &[FastaRecord],
+) -> Result<()> {
+    let config = BiasCreateConfig {
+        cms: CMSConfig {
+            k: K,
+            fscale: FSCALE,
+            width: WIDTH,
+            depth: DEPTH,
+        },
+        alpha: ALPHA,
+        target_fscale: Some(target_fscale),
+        negative_fscale: Some(negative_fscale),
+        unseen_fscale,
+    };
+
+    println!("--- {} (tgt={}, neg={}, unseen={}) ---",
+        label, target_fscale, negative_fscale,
+        unseen_fscale.map_or("-".to_string(), |v| v.to_string()));
+
+    let start = Instant::now();
+    let table = HashBiasTable::create(
+        &[Path::new(PLASMID_TRAIN)],
+        &[Path::new(CHROMO_TRAIN)],
+        &config,
+        None,
+    )?;
     let build_time = start.elapsed().as_secs_f64();
     println!("  Built in {build_time:.1}s");
-    println!();
 
-    // Also build a "full" table using all plasmids for comparison
-    println!("  Building full bias table (all plasmids vs chromosomes)...");
-    let full_table = HashBiasTable::create(&[plasmid_path], &[chromo_path], &config, None)?;
-
-    // --- Aggregate retention ---
-    println!();
-    println!("  === Aggregate k-mer Retention (train-based bias table) ===");
     println!(
-        "  {:.<30} {:>12} {:>12} {:>10} {:>10}",
-        "Population", "sketch_kmers", "retained", "sketch_%", "overall_%"
+        "  {:.<35} {:>12} {:>12} {:>10} {:>12}",
+        "Population", "sketch_kmers", "retained", "sketch_%", "eff_fscale"
     );
-    println!("  {}", "-".repeat(78));
+    println!("  {}", "-".repeat(87));
 
-    for (label, records) in [
+    for (lbl, records) in [
         ("Train plasmids (seen)", train_plasmids),
         ("Test plasmids (unseen)", test_plasmids),
-        ("Chromosomes (negative)", chromosomes.as_slice()),
+        ("Train chromosomes (seen neg)", train_chromosomes),
+        ("Test chromosomes (unseen neg)", test_chromosomes),
     ] {
-        let s = measure_retention(records, &table, k);
+        let s = measure_retention(records, &table, K);
         println!(
-            "  {:.<30} {:>12} {:>12} {:>9.2}% {:>9.4}%",
-            label,
-            s.sketch_kmers,
-            s.sketch_retained,
-            s.retention_pct(),
-            s.overall_pct()
+            "  {:.<35} {:>12} {:>12} {:>9.2}% {:>12.0}",
+            lbl, s.sketch_kmers, s.sketch_retained, s.retention_pct(),
+            s.effective_fscale(FSCALE)
         );
     }
 
-    // --- Per-record retention distribution ---
     println!();
-    println!("  === Per-Record Retention Distribution (train-based bias table) ===");
     println!(
-        "  {:.<30} {:>10} {:>10} {:>10} {:>10}",
+        "  {:.<35} {:>10} {:>10} {:>10} {:>10}",
         "Population", "mean_%", "std_%", "min_%", "max_%"
     );
-    println!("  {}", "-".repeat(54));
+    println!("  {}", "-".repeat(59));
 
-    for (label, records) in [
+    for (lbl, records) in [
         ("Train plasmids (seen)", train_plasmids),
         ("Test plasmids (unseen)", test_plasmids),
-        ("Chromosomes (negative)", chromosomes.as_slice()),
+        ("Train chromosomes (seen neg)", train_chromosomes),
+        ("Test chromosomes (unseen neg)", test_chromosomes),
     ] {
-        let (mean, std, min, max) = measure_per_record_retention(records, &table, k);
+        let (mean, std, min, max) = measure_per_record_retention(records, &table, K);
         println!(
-            "  {:.<30} {:>9.2}% {:>9.2}% {:>9.2}% {:>9.2}%",
-            label, mean, std, min, max
+            "  {:.<35} {:>9.2}% {:>9.2}% {:>9.2}% {:>9.2}%",
+            lbl, mean, std, min, max
         );
     }
-
-    // --- Comparison: train-only vs full table ---
     println!();
-    println!("  === Comparison: Train-only vs Full Table (on test plasmids) ===");
-    let test_train_only = measure_retention(test_plasmids, &table, k);
-    let test_full = measure_retention(test_plasmids, &full_table, k);
-    let chromo_train_only = measure_retention(&chromosomes, &table, k);
-    let chromo_full = measure_retention(&chromosomes, &full_table, k);
 
-    println!(
-        "  {:.<40} {:>10} {:>10}",
-        "", "train-only", "full"
-    );
-    println!("  {}", "-".repeat(64));
-    println!(
-        "  {:.<40} {:>9.2}% {:>9.2}%",
-        "Test plasmid retention",
-        test_train_only.retention_pct(),
-        test_full.retention_pct()
-    );
-    println!(
-        "  {:.<40} {:>9.2}% {:>9.2}%",
-        "Chromosome retention",
-        chromo_train_only.retention_pct(),
-        chromo_full.retention_pct()
-    );
-    let fold_train = if chromo_train_only.retention_pct() > 0.0 {
-        test_train_only.retention_pct() / chromo_train_only.retention_pct()
-    } else {
-        f64::INFINITY
-    };
-    let fold_full = if chromo_full.retention_pct() > 0.0 {
-        test_full.retention_pct() / chromo_full.retention_pct()
-    } else {
-        f64::INFINITY
-    };
-    println!(
-        "  {:.<40} {:>9.2}x {:>9.2}x",
-        "Fold enrichment (test/chromo)", fold_train, fold_full
-    );
-
-    // --- Generalization gap ---
-    let train_ret = measure_retention(train_plasmids, &table, k);
-    let gap = train_ret.retention_pct() - test_train_only.retention_pct();
-    println!();
-    println!("  === Generalization Gap ===");
-    println!(
-        "  Train plasmid retention:  {:.2}%",
-        train_ret.retention_pct()
-    );
-    println!(
-        "  Test plasmid retention:   {:.2}%",
-        test_train_only.retention_pct()
-    );
-    println!("  Gap (train - test):       {:.2} pp", gap);
-    println!(
-        "  Interpretation: {}",
-        if gap.abs() < 2.0 {
-            "Excellent generalization (gap < 2pp)"
-        } else if gap.abs() < 5.0 {
-            "Good generalization (gap < 5pp)"
-        } else if gap.abs() < 10.0 {
-            "Moderate generalization (gap < 10pp)"
-        } else {
-            "Poor generalization (gap >= 10pp) - possible overfitting"
+    println!("  === Weight Distributions ===");
+    let mut test_pos_hist = [0u64; 255];
+    let mut test_neg_hist = [0u64; 255];
+    for (lbl, records, capture) in [
+        ("Train plasmids (seen)", train_plasmids, None),
+        ("Test plasmids (unseen)", test_plasmids, Some(&mut test_pos_hist as &mut [u64; 255])),
+        ("Train chromosomes (seen neg)", train_chromosomes, None),
+        ("Test chromosomes (unseen neg)", test_chromosomes, Some(&mut test_neg_hist as &mut [u64; 255])),
+    ] {
+        let hist = measure_weight_distribution(records, &table, K);
+        print_weight_distribution(lbl, &hist, &table);
+        if let Some(dst) = capture {
+            *dst = hist;
         }
+    }
+
+    print_oracle_analysis(
+        &test_pos_hist, &test_neg_hist, &table,
+        FSCALE, target_fscale, negative_fscale,
     );
 
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
 fn main() -> Result<()> {
-    let k: u8 = 21;
-    let fscale: u64 = 1000;
-
-    // Check files exist
-    for p in [PLASMID_PATH, CHROMO_PATH] {
+    for p in [PLASMID_TRAIN, PLASMID_TEST, CHROMO_TRAIN, CHROMO_TEST] {
         if !Path::new(p).exists() {
             anyhow::bail!("Missing test file: {p}");
         }
     }
 
-    println!("Bias Table Effectiveness Benchmark");
-    println!("===================================");
-    println!("  Positive (plasmid):    {PLASMID_PATH}");
-    println!("  Negative (chromosome): {CHROMO_PATH}");
-    println!("  k={k}, fscale={fscale}");
+    println!("Bias Table Effectiveness — Soft Filter Sweep");
+    println!("==============================================");
+    println!("  Train positive: {PLASMID_TRAIN}");
+    println!("  Test positive:  {PLASMID_TEST}");
+    println!("  Train negative: {CHROMO_TRAIN}");
+    println!("  Test negative:  {CHROMO_TEST}");
+    println!("  k={K}, fscale={FSCALE}, alpha={ALPHA}, width={}M, depth={DEPTH}", WIDTH >> 20);
     println!();
 
-    // --- Hard filter mode: sweep alpha ---
-    println!("=== Hard Filter Mode (alpha sweep) ===");
-    print_header();
-
-    let alphas = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0];
-    for &alpha in &alphas {
-        match run_trial(alpha, None, None, fscale, k) {
-            Ok(r) => print_row(&r),
-            Err(e) => println!("alpha={alpha:.2}: ERROR: {e}"),
-        }
-    }
-
+    println!("Loading FASTA records...");
+    let train_plasmids = read_fasta_records(Path::new(PLASMID_TRAIN))?;
+    let test_plasmids = read_fasta_records(Path::new(PLASMID_TEST))?;
+    let train_chromosomes = read_fasta_records(Path::new(CHROMO_TRAIN))?;
+    let test_chromosomes = read_fasta_records(Path::new(CHROMO_TEST))?;
+    println!(
+        "  Train: {} plasmids, {} chromosomes",
+        train_plasmids.len(), train_chromosomes.len()
+    );
+    println!(
+        "  Test:  {} plasmids, {} chromosomes",
+        test_plasmids.len(), test_chromosomes.len()
+    );
     println!();
 
-    // --- Soft filter mode: sweep alpha x target_fscale x negative_fscale ---
-    println!("=== Soft Filter Mode (alpha x fscale sweep) ===");
-    print_header();
+    println!("=== Sweep: target_fscale x negative_fscale (unseen = target) ===");
+    print_summary_header();
 
-    let soft_alphas = [0.5, 1.0, 2.0, 5.0];
-    let target_fscales: Vec<u64> = vec![2000, 5000, 10000];
-    let neg_fscale_multipliers: Vec<u64> = vec![2, 5, 10];
+    let target_fscales: Vec<u64> = vec![500, 1000, 2000, 5000];
+    let neg_fscales: Vec<u64> = vec![10000, 50000, 100000, 500000];
 
-    for &alpha in &soft_alphas {
-        for &tf in &target_fscales {
-            for &mult in &neg_fscale_multipliers {
-                let nf = tf * mult;
-                match run_trial(alpha, Some(tf), Some(nf), fscale, k) {
-                    Ok(r) => print_row(&r),
-                    Err(e) => println!("alpha={alpha:.2} tf={tf} nf={nf}: ERROR: {e}"),
-                }
+    let mut configs: Vec<(u64, u64)> = Vec::new();
+    for &tf in &target_fscales {
+        for &nf in &neg_fscales {
+            if nf > tf {
+                configs.push((tf, nf));
             }
         }
     }
 
-    println!();
+    let results: Vec<_> = configs
+        .par_iter()
+        .map(|&(tf, nf)| {
+            (tf, nf, run_soft_trial(tf, nf, Some(tf),
+                &train_plasmids, &test_plasmids, &train_chromosomes, &test_chromosomes))
+        })
+        .collect();
 
-    // --- Generalization test ---
-    println!("=== Generalization Test (train/test split, {:.0}%/{:.0}%) ===",
-        TRAIN_FRACTION * 100.0, (1.0 - TRAIN_FRACTION) * 100.0);
-    println!();
-
-    for &alpha in &[0.5, 1.0, 2.0, 5.0] {
-        println!("--- alpha={alpha:.1} ---");
-        run_generalization_test(alpha, fscale, k)?;
-        println!();
+    for (tf, nf, res) in &results {
+        match res {
+            Ok(r) => print_summary_row(r),
+            Err(e) => println!("tgt={tf} neg={nf}: ERROR: {e}"),
+        }
     }
 
-    // --- Detailed stats for reference ---
-    println!("=== Detailed Stats (alpha=1.0, hard filter, all plasmids) ===");
-    let config = BiasCreateConfig {
-        cms: CMSConfig {
-            k,
-            fscale,
-            ..Default::default()
-        },
-        alpha: 1.0,
-        target_fscale: None,
-        negative_fscale: None,
-        unseen_fscale: None,
-    };
+    println!();
+    println!("=== Detailed Results with Weight Distributions ===");
+    println!();
 
-    let table = HashBiasTable::create(
-        &[Path::new(PLASMID_PATH)],
-        &[Path::new(CHROMO_PATH)],
-        &config,
-        None,
-    )?;
-    table.print_stats();
+    run_detailed("User config (100/1000/1000/100000)", 1000, 100000, Some(1000),
+        &train_plasmids, &test_plasmids, &train_chromosomes, &test_chromosomes)?;
 
     Ok(())
 }

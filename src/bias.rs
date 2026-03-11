@@ -252,6 +252,10 @@ pub struct HashBiasTable {
     pub unseen_fscale: u64,
     pub fscale_lut: [u64; 255],
     frac_max_lut: [u64; 255],
+    cms_pos_counts: Option<Vec<u32>>,
+    cms_neg_counts: Option<Vec<u32>>,
+    cms_pos_total: f64,
+    cms_neg_total: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -376,11 +380,10 @@ fn empirical_prior_from_weights(weights: &[i8]) -> [f64; 255] {
 
 const DROP_MODE_LOG_CAP: f64 = 1e18;
 const FIXED_INDICES: [usize; 3] = [0, 127, 254];
-const LUT_MAX_LOG_STEP_DIVISOR: f64 = 6.0;
-const LUT_SMOOTH_LAMBDA_SCALE: f64 = 0.0005;
-const LUT_LOG_FOLD_WEIGHT: f64 = 0.15;
-const LUT_NEG_RET_WEIGHT: f64 = 1.4;
+const LUT_MAX_LOG_STEP_DIVISOR: f64 = 2.0;
+const LUT_SMOOTH_LAMBDA_SCALE: f64 = 0.00005;
 const LUT_BOUNDARY_SNAP_LOG_EPS: f64 = 0.015;
+const LUT_NEG_PENALTY_WEIGHT: f64 = 50.0;
 
 #[inline]
 fn retention_from_log_fscale(log_fs: f64, base_fs: f64) -> f64 {
@@ -460,11 +463,12 @@ fn shifted_prior_retention(
     base_fs: f64,
     ln_base: f64,
     ln_neg: f64,
+    w0_idx: usize,
     delta: f64,
 ) -> f64 {
     let mut prior_ret = 0.0f64;
     for i in 0..255 {
-        let xi = if fixed_mask[i] {
+        let xi = if fixed_mask[i] || i > w0_idx {
             x[i]
         } else {
             (x[i] + delta).clamp(ln_base, ln_neg)
@@ -482,14 +486,15 @@ fn project_to_target_prior_retention(
     base_fs: f64,
     ln_base: f64,
     ln_neg: f64,
+    w0_idx: usize,
     target_ret: f64,
 ) {
     let span = (ln_neg - ln_base) * 2.0 + 2.0;
     let mut lo = -span;
     let mut hi = span;
 
-    let mut ret_lo = shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, lo);
-    let mut ret_hi = shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, hi);
+    let mut ret_lo = shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, w0_idx, lo);
+    let mut ret_hi = shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, w0_idx, hi);
 
     if ret_lo < ret_hi {
         std::mem::swap(&mut lo, &mut hi);
@@ -507,7 +512,7 @@ fn project_to_target_prior_retention(
         for _ in 0..60 {
             let mid = (a + b) * 0.5;
             let ret_mid =
-                shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, mid);
+                shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, w0_idx, mid);
             if ret_mid >= target {
                 a = mid;
             } else {
@@ -518,7 +523,7 @@ fn project_to_target_prior_retention(
     };
 
     for i in 0..255 {
-        if !fixed_mask[i] {
+        if !fixed_mask[i] && i < w0_idx {
             x[i] = (x[i] + best_delta).clamp(ln_base, ln_neg);
         }
     }
@@ -611,6 +616,7 @@ fn eval_coord_objective(
     pos_ret_other: f64,
     neg_ret_other: f64,
     base_fs: f64,
+    target_neg_ret: f64,
     lambda: f64,
     sc: &SmoothContext,
 ) -> f64 {
@@ -618,12 +624,11 @@ fn eval_coord_objective(
     let pos_ret = pos_ret_other + pp_j * r_j;
     let neg_ret = neg_ret_other + pn_j * r_j;
 
-    let log_fold = if pos_ret > 1e-30 && neg_ret > 1e-30 {
-        pos_ret.ln() - (neg_ret + 1e-9).ln()
-    } else {
-        0.0
-    };
-    let separation = pos_ret - LUT_NEG_RET_WEIGHT * neg_ret;
+    // Primary: maximize positive retention
+    // Secondary: penalize negative retention exceeding target threshold
+    //   (neg_ret > target_neg_ret means chromosome eff_fscale < target)
+    let neg_excess = (neg_ret - target_neg_ret).max(0.0);
+    let neg_penalty = LUT_NEG_PENALTY_WEIGHT * neg_excess * neg_excess;
 
     let mut roughness = 0.0;
     if sc.has_center_triple {
@@ -639,7 +644,7 @@ fn eval_coord_objective(
         roughness += d * d;
     }
 
-    separation + LUT_LOG_FOLD_WEIGHT * log_fold - lambda * roughness
+    pos_ret - neg_penalty - lambda * roughness
 }
 
 /// Build a free-form LUT via adaptive penalized coordinate descent.
@@ -815,6 +820,7 @@ fn target_fscale_lut(
                         pos_ret_other,
                         neg_ret_other,
                         base_fs,
+                        target_ret,
                         lambda,
                         &sc,
                     );
@@ -825,6 +831,7 @@ fn target_fscale_lut(
                         pos_ret_other,
                         neg_ret_other,
                         base_fs,
+                        target_ret,
                         lambda,
                         &sc,
                     );
@@ -854,6 +861,7 @@ fn target_fscale_lut(
                 base_fs,
                 ln_base,
                 ln_neg,
+                w0_idx,
                 target_ret,
             );
             x[0] = ln_neg;
@@ -882,6 +890,7 @@ fn target_fscale_lut(
         base_fs,
         ln_base,
         ln_neg,
+        w0_idx,
         target_ret,
     );
     x[0] = ln_neg;
@@ -957,6 +966,7 @@ fn target_fscale_lut(
         base_fs,
         ln_base,
         ln_neg,
+        w0_idx,
         target_ret,
     );
     x_post[0] = ln_neg;
@@ -1166,11 +1176,20 @@ impl HashBiasTable {
         let depth = positive.config.depth;
         let seeds = positive.cms.seeds().to_vec();
 
-        let pos_counts = positive.cms.counts();
-        let neg_counts = negative.cms.counts();
+        let pos_counts_raw = positive.cms.counts();
+        let neg_counts_raw = negative.cms.counts();
 
         let pos_total = positive.total as f64;
         let neg_total = negative.total as f64;
+
+        let cms_pos_counts: Vec<u32> = pos_counts_raw
+            .iter()
+            .map(|&c| c.min(u32::MAX as u64) as u32)
+            .collect();
+        let cms_neg_counts: Vec<u32> = neg_counts_raw
+            .iter()
+            .map(|&c| c.min(u32::MAX as u64) as u32)
+            .collect();
 
         let mut weights = vec![0i8; width * depth];
 
@@ -1178,8 +1197,8 @@ impl HashBiasTable {
             let scale = pos_total.max(neg_total);
 
             for i in 0..(width * depth) {
-                let norm_pos = (pos_counts[i] as f64 / pos_total) * scale;
-                let norm_neg = (neg_counts[i] as f64 / neg_total) * scale;
+                let norm_pos = (pos_counts_raw[i] as f64 / pos_total) * scale;
+                let norm_neg = (neg_counts_raw[i] as f64 / neg_total) * scale;
                 let adj_pos = (norm_pos - norm_neg).max(0.0) as f32;
                 let adj_neg = (norm_neg - norm_pos).max(0.0) as f32;
 
@@ -1209,6 +1228,10 @@ impl HashBiasTable {
             unseen_fscale,
             fscale_lut,
             frac_max_lut,
+            cms_pos_counts: Some(cms_pos_counts),
+            cms_neg_counts: Some(cms_neg_counts),
+            cms_pos_total: pos_total,
+            cms_neg_total: neg_total,
         };
 
         if table.is_soft_filter() {
@@ -1244,7 +1267,14 @@ impl HashBiasTable {
 
             let (p_pos, pos_bin_counts) = histogram_weights(&pos_in_range, &table);
             let (p_neg, neg_bin_counts) = histogram_weights(&neg_in_range, &table);
-            let p_target = empirical_prior_from_weights(&table.weights);
+            let p_target = if table.cms_pos_counts.is_some() {
+                let mut combined: Vec<u64> = Vec::with_capacity(pos_in_range.len() + neg_in_range.len());
+                combined.extend_from_slice(&pos_in_range);
+                combined.extend_from_slice(&neg_in_range);
+                histogram_weights(&combined, &table).0
+            } else {
+                empirical_prior_from_weights(&table.weights)
+            };
 
             let lut = target_fscale_lut(
                 &p_pos,
@@ -1307,10 +1337,39 @@ impl HashBiasTable {
 
     #[inline]
     pub fn weight(&self, hash: u64) -> i8 {
+        if let (Some(pos), Some(neg)) = (&self.cms_pos_counts, &self.cms_neg_counts) {
+            self.cms_query_weight(hash, pos, neg)
+        } else {
+            self.cell_min_weight(hash)
+        }
+    }
+
+    #[inline]
+    fn cell_min_weight(&self, hash: u64) -> i8 {
         (0..self.config.depth)
             .map(|row| self.weights[self.index(row, hash)])
             .min()
             .unwrap_or(0)
+    }
+
+    #[inline]
+    fn cms_query_weight(&self, hash: u64, pos: &[u32], neg: &[u32]) -> i8 {
+        let mut min_pos = u32::MAX;
+        let mut min_neg = u32::MAX;
+        for row in 0..self.config.depth {
+            let idx = self.index(row, hash);
+            min_pos = min_pos.min(pos[idx]);
+            min_neg = min_neg.min(neg[idx]);
+        }
+
+        let scale = self.cms_pos_total.max(self.cms_neg_total);
+        let norm_pos = (min_pos as f64 / self.cms_pos_total) * scale;
+        let norm_neg = (min_neg as f64 / self.cms_neg_total) * scale;
+        let adj_pos = (norm_pos - norm_neg).max(0.0) as f32;
+        let adj_neg = (norm_neg - norm_pos).max(0.0) as f32;
+
+        let log_ratio = ((adj_pos + self.alpha) / (adj_neg + self.alpha)).ln();
+        (log_ratio * QUANTIZATION_SCALE).clamp(-127.0, 127.0) as i8
     }
 
     #[inline]
@@ -1562,6 +1621,10 @@ impl HashBiasTable {
             unseen_fscale,
             fscale_lut,
             frac_max_lut: [0u64; 255],
+            cms_pos_counts: None,
+            cms_neg_counts: None,
+            cms_pos_total: 0.0,
+            cms_neg_total: 0.0,
         };
         table.recompute_frac_max_lut();
         Ok(table)
@@ -1701,6 +1764,10 @@ impl HashBiasTable {
             unseen_fscale,
             fscale_lut,
             frac_max_lut: [0u64; 255],
+            cms_pos_counts: None,
+            cms_neg_counts: None,
+            cms_pos_total: 0.0,
+            cms_neg_total: 0.0,
         };
         table.recompute_frac_max_lut();
         Ok(table)
@@ -2701,6 +2768,10 @@ mod tests {
             unseen_fscale: 1_000,
             fscale_lut,
             frac_max_lut: [0u64; 255],
+            cms_pos_counts: None,
+            cms_neg_counts: None,
+            cms_pos_total: 0.0,
+            cms_neg_total: 0.0,
         };
         table.recompute_frac_max_lut();
 
