@@ -15,7 +15,6 @@ const DEFAULT_CMS_DEPTH: usize = 5;
 const QUANTIZATION_SCALE: f32 = 10.0;
 const MAX_SAMPLE_HASHES: usize = 100_000;
 const HISTOGRAM_EPS: f64 = 1e-6;
-const MIN_BIN_FRACTION: f64 = 0.01;
 
 #[derive(Debug, Clone)]
 pub struct CMSConfig {
@@ -313,57 +312,6 @@ fn histogram_weights(hashes: &[u64], bias_table: &HashBiasTable) -> ([f64; 255],
 
 /// Fill unreliable (sparse) bins via log-space linear interpolation between reliable neighbors.
 #[allow(clippy::needless_range_loop)]
-fn fill_unreliable_bins(
-    lut: &mut [u64; 255],
-    pos_counts: &[u64; 255],
-    neg_counts: &[u64; 255],
-    w0_idx: usize,
-) {
-    let total: u64 = pos_counts.iter().sum::<u64>() + neg_counts.iter().sum::<u64>();
-    let expected_per_bin = total as f64 / 255.0;
-    let threshold = (expected_per_bin * MIN_BIN_FRACTION).max(1.0) as u64;
-
-    let is_reliable = |i: usize| -> bool {
-        i == w0_idx || i == 0 || i == 254 || pos_counts[i] + neg_counts[i] >= threshold
-    };
-
-    let mut reliable: Vec<(usize, f64)> = Vec::new();
-    for i in 0..255 {
-        if is_reliable(i) {
-            reliable.push((i, (lut[i] as f64).ln()));
-        }
-    }
-
-    if reliable.is_empty() {
-        return;
-    }
-
-    let mut r_idx = 0;
-    for i in 0..255 {
-        if is_reliable(i) {
-            while r_idx + 1 < reliable.len() && reliable[r_idx].0 < i {
-                r_idx += 1;
-            }
-            continue;
-        }
-
-        let left = reliable.iter().rev().find(|&&(ri, _)| ri < i);
-        let right = reliable.iter().find(|&&(ri, _)| ri > i);
-
-        let log_fs = match (left, right) {
-            (Some(&(li, lv)), Some(&(ri, rv))) => {
-                let t = (i - li) as f64 / (ri - li) as f64;
-                lv + t * (rv - lv)
-            }
-            (Some(&(_, lv)), None) => lv,
-            (None, Some(&(_, rv))) => rv,
-            (None, None) => unreachable!(),
-        };
-
-        lut[i] = log_fs.exp().round() as u64;
-    }
-}
-
 fn empirical_prior_from_weights(weights: &[i8]) -> [f64; 255] {
     let mut counts = [0u64; 255];
     for &w in weights {
@@ -379,11 +327,7 @@ fn empirical_prior_from_weights(weights: &[i8]) -> [f64; 255] {
 }
 
 const DROP_MODE_LOG_CAP: f64 = 1e18;
-const FIXED_INDICES: [usize; 3] = [0, 127, 254];
-const LUT_MAX_LOG_STEP_DIVISOR: f64 = 2.0;
-const LUT_SMOOTH_LAMBDA_SCALE: f64 = 0.00005;
-const LUT_BOUNDARY_SNAP_LOG_EPS: f64 = 0.015;
-const LUT_NEG_PENALTY_WEIGHT: f64 = 50.0;
+
 
 #[inline]
 fn retention_from_log_fscale(log_fs: f64, base_fs: f64) -> f64 {
@@ -409,252 +353,13 @@ fn compute_retentions(
     (pos_ret, neg_ret, target_ret)
 }
 
-fn enforce_local_step_bounds(
-    x: &mut [f64; 255],
-    fixed_mask: &[bool; 255],
-    ln_base: f64,
-    ln_neg: f64,
-    s_max: f64,
-    barrier_idx: usize,
-) {
-    let mut fixed_values = [0.0f64; 255];
-    for i in 0..255 {
-        x[i] = x[i].clamp(ln_base, ln_neg);
-        fixed_values[i] = x[i];
-    }
-
-    for _ in 0..8 {
-        for i in 1..255 {
-            if fixed_mask[i] {
-                x[i] = fixed_values[i];
-                continue;
-            }
-            if i - 1 != barrier_idx {
-                let lo = (x[i - 1] - s_max).max(ln_base);
-                let hi = (x[i - 1] + s_max).min(ln_neg);
-                x[i] = x[i].clamp(lo, hi);
-            }
-        }
-
-        for i in (0..254).rev() {
-            if fixed_mask[i] {
-                x[i] = fixed_values[i];
-                continue;
-            }
-            if i + 1 != barrier_idx {
-                let lo = (x[i + 1] - s_max).max(ln_base);
-                let hi = (x[i + 1] + s_max).min(ln_neg);
-                x[i] = x[i].clamp(lo, hi);
-            }
-        }
-
-        for i in 0..255 {
-            if fixed_mask[i] {
-                x[i] = fixed_values[i];
-            }
-        }
-    }
-}
-
-fn shifted_prior_retention(
-    x: &[f64; 255],
-    p_target: &[f64; 255],
-    fixed_mask: &[bool; 255],
-    base_fs: f64,
-    ln_base: f64,
-    ln_neg: f64,
-    w0_idx: usize,
-    delta: f64,
-) -> f64 {
-    let mut prior_ret = 0.0f64;
-    for i in 0..255 {
-        let xi = if fixed_mask[i] || i > w0_idx {
-            x[i]
-        } else {
-            (x[i] + delta).clamp(ln_base, ln_neg)
-        };
-        prior_ret += p_target[i] * retention_from_log_fscale(xi, base_fs);
-    }
-    prior_ret
-}
-
-#[allow(clippy::too_many_arguments)]
-fn project_to_target_prior_retention(
-    x: &mut [f64; 255],
-    p_target: &[f64; 255],
-    fixed_mask: &[bool; 255],
-    base_fs: f64,
-    ln_base: f64,
-    ln_neg: f64,
-    w0_idx: usize,
-    target_ret: f64,
-) {
-    let span = (ln_neg - ln_base) * 2.0 + 2.0;
-    let mut lo = -span;
-    let mut hi = span;
-
-    let mut ret_lo = shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, w0_idx, lo);
-    let mut ret_hi = shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, w0_idx, hi);
-
-    if ret_lo < ret_hi {
-        std::mem::swap(&mut lo, &mut hi);
-        std::mem::swap(&mut ret_lo, &mut ret_hi);
-    }
-
-    let target = target_ret.clamp(ret_hi, ret_lo);
-    let best_delta = if target >= ret_lo - 1e-12 {
-        lo
-    } else if target <= ret_hi + 1e-12 {
-        hi
-    } else {
-        let mut a = lo;
-        let mut b = hi;
-        for _ in 0..60 {
-            let mid = (a + b) * 0.5;
-            let ret_mid =
-                shifted_prior_retention(x, p_target, fixed_mask, base_fs, ln_base, ln_neg, w0_idx, mid);
-            if ret_mid >= target {
-                a = mid;
-            } else {
-                b = mid;
-            }
-        }
-        (a + b) * 0.5
-    };
-
-    for i in 0..255 {
-        if !fixed_mask[i] && i < w0_idx {
-            x[i] = (x[i] + best_delta).clamp(ln_base, ln_neg);
-        }
-    }
-}
-
-fn log_lut_to_fscale_lut(x: &[f64; 255], base_fscale: u64, negative_fscale: u64) -> [u64; 255] {
-    let mut lut = [0u64; 255];
-    let clamp_upper = if negative_fscale == u64::MAX {
-        u64::MAX
-    } else {
-        negative_fscale
-    };
-    let ln_base = (base_fscale as f64).ln();
-    let ln_upper = if negative_fscale == u64::MAX {
-        f64::INFINITY
-    } else {
-        (negative_fscale as f64).ln()
-    };
-
-    for (i, &xi) in x.iter().enumerate() {
-        if xi - ln_base <= LUT_BOUNDARY_SNAP_LOG_EPS {
-            lut[i] = base_fscale;
-            continue;
-        }
-        if negative_fscale != u64::MAX && ln_upper - xi <= LUT_BOUNDARY_SNAP_LOG_EPS {
-            lut[i] = negative_fscale;
-            continue;
-        }
-
-        let fs = xi.exp().round() as u64;
-        lut[i] = fs.clamp(base_fscale, clamp_upper);
-    }
-    lut
-}
-
-struct SmoothContext {
-    x_left: f64,
-    x_right: f64,
-    x_left2: f64,
-    x_right2: f64,
-    has_center_triple: bool,
-    has_left_triple: bool,
-    has_right_triple: bool,
-}
-
-fn get_smooth_neighbors(x: &[f64; 255], j: usize) -> SmoothContext {
-    let is_fixed = |i: usize| FIXED_INDICES.contains(&i);
-
-    let left = if j > 0 && !is_fixed(j - 1) {
-        Some(j - 1)
-    } else {
-        None
-    };
-    let right = if j < 254 && !is_fixed(j + 1) {
-        Some(j + 1)
-    } else {
-        None
-    };
-    let left2 = left.and_then(|l| {
-        if l > 0 && !is_fixed(l - 1) {
-            Some(l - 1)
-        } else {
-            None
-        }
-    });
-    let right2 = right.and_then(|r| {
-        if r < 254 && !is_fixed(r + 1) {
-            Some(r + 1)
-        } else {
-            None
-        }
-    });
-
-    SmoothContext {
-        x_left: left.map_or(x[j], |i| x[i]),
-        x_right: right.map_or(x[j], |i| x[i]),
-        x_left2: left2.map_or(left.map_or(x[j], |i| x[i]), |i| x[i]),
-        x_right2: right2.map_or(right.map_or(x[j], |i| x[i]), |i| x[i]),
-        has_center_triple: left.is_some() && right.is_some(),
-        has_left_triple: left.is_some() && left2.is_some(),
-        has_right_triple: right.is_some() && right2.is_some(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn eval_coord_objective(
-    xj: f64,
-    pp_j: f64,
-    pn_j: f64,
-    pos_ret_other: f64,
-    neg_ret_other: f64,
-    base_fs: f64,
-    target_neg_ret: f64,
-    lambda: f64,
-    sc: &SmoothContext,
-) -> f64 {
-    let r_j = retention_from_log_fscale(xj, base_fs);
-    let pos_ret = pos_ret_other + pp_j * r_j;
-    let neg_ret = neg_ret_other + pn_j * r_j;
-
-    // Primary: maximize positive retention
-    // Secondary: penalize negative retention exceeding target threshold
-    //   (neg_ret > target_neg_ret means chromosome eff_fscale < target)
-    let neg_excess = (neg_ret - target_neg_ret).max(0.0);
-    let neg_penalty = LUT_NEG_PENALTY_WEIGHT * neg_excess * neg_excess;
-
-    let mut roughness = 0.0;
-    if sc.has_center_triple {
-        let d = sc.x_left - 2.0 * xj + sc.x_right;
-        roughness += d * d;
-    }
-    if sc.has_left_triple {
-        let d = sc.x_left2 - 2.0 * sc.x_left + xj;
-        roughness += d * d;
-    }
-    if sc.has_right_triple {
-        let d = xj - 2.0 * sc.x_right + sc.x_right2;
-        roughness += d * d;
-    }
-
-    pos_ret - neg_penalty - lambda * roughness
-}
-
-/// Build a free-form LUT via adaptive penalized coordinate descent.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn target_fscale_lut(
     p_pos: &[f64; 255],
     p_neg: &[f64; 255],
-    p_target: &[f64; 255],
-    pos_counts: &[u64; 255],
-    neg_counts: &[u64; 255],
+    _p_target: &[f64; 255],
+    _pos_counts: &[u64; 255],
+    _neg_counts: &[u64; 255],
     base_fscale: u64,
     target_fscale: u64,
     negative_fscale: u64,
@@ -689,303 +394,117 @@ fn target_fscale_lut(
     } else {
         target_fscale as f64
     };
-
-    let ln_base = base_fs.ln();
-    let ln_neg = neg_fs.ln();
-    let ln_f0 = f0.ln();
-    let target_ret = base_fs / target_fscale as f64;
     let w0_idx = HashBiasTable::weight_to_index(0);
 
-    let s_max = (ln_neg - ln_base) / LUT_MAX_LOG_STEP_DIVISOR;
-    let log_range = ln_neg - ln_base;
-    let lambda = LUT_SMOOTH_LAMBDA_SCALE / (log_range * log_range);
+    let r_max = 1.0f64;
+    let r_min = base_fs / neg_fs;
 
-    let mut fixed_mask = [false; 255];
-    fixed_mask[0] = true;
-    fixed_mask[w0_idx] = true;
-    fixed_mask[254] = true;
+    let budget_fscale = (target_fscale as f64 * 1.5).min(neg_fs);
+    let target_ret = base_fs / budget_fscale;
 
-    let is_fixed = |i: usize| fixed_mask[i];
-
-    let max_possible_target_ret: f64 = (0..255)
-        .map(|i| {
-            if is_fixed(i) {
-                let xi = match i {
-                    0 => ln_neg,
-                    127 => ln_f0,
-                    254 => ln_base,
-                    _ => unreachable!(),
-                };
-                p_target[i] * retention_from_log_fscale(xi, base_fs)
-            } else {
-                p_target[i]
-            }
+    let fixed_neg_ret: f64 = [0usize, w0_idx, 254]
+        .iter()
+        .map(|&i| {
+            let fs = match i {
+                0 => neg_fs,
+                127 => f0,
+                254 => base_fs,
+                _ => unreachable!(),
+            };
+            p_neg[i] * (base_fs / fs).min(1.0)
         })
         .sum();
 
-    let min_possible_target_ret: f64 = (0..255)
-        .map(|i| {
-            if is_fixed(i) {
-                let xi = match i {
-                    0 => ln_neg,
-                    127 => ln_f0,
-                    254 => ln_base,
-                    _ => unreachable!(),
-                };
-                p_target[i] * retention_from_log_fscale(xi, base_fs)
-            } else {
-                p_target[i] * retention_from_log_fscale(ln_neg, base_fs)
-            }
-        })
-        .sum();
+    let neg_budget = (target_ret - fixed_neg_ret).max(0.0);
 
-    if target_ret > max_possible_target_ret * 1.01 {
-        eprintln!(
-            "WARNING: target effective fscale {} may be infeasible for the target prior (need ret={:.4}, max={:.4})",
-            target_fscale, target_ret, max_possible_target_ret
-        );
-        eprintln!("  Hint: lower target_fscale or raise base_fscale");
-    }
-    if target_ret < min_possible_target_ret * 0.99 {
-        eprintln!(
-            "WARNING: target effective fscale {} requires more suppression than possible for the target prior (need ret={:.4}, min={:.4})",
-            target_fscale, target_ret, min_possible_target_ret
-        );
-        eprintln!("  Hint: raise negative_fscale or lower base_fscale");
+    struct BinEntry {
+        idx: usize,
+        ratio: f64,
+        neg_cost: f64,
     }
 
-    let mut x = [0.0f64; 255];
-    x[0] = ln_neg;
-    x[w0_idx] = ln_f0;
-    x[254] = ln_base;
-
-    for i in 1..w0_idx {
-        let t = i as f64 / w0_idx as f64;
-        x[i] = ln_neg + t * (ln_f0 - ln_neg);
-    }
-    for i in (w0_idx + 1)..254 {
-        let t = (i - w0_idx) as f64 / (254 - w0_idx) as f64;
-        x[i] = ln_f0 + t * (ln_base - ln_f0);
-    }
-
-    let max_outer_iters = 36usize;
-    let max_inner_iters = 6usize;
-    let line_search_steps = 18usize;
-
-    for _outer in 0..max_outer_iters {
-        for _inner in 0..max_inner_iters {
-            let (mut pos_ret, mut neg_ret, _) =
-                compute_retentions(&x, p_pos, p_neg, p_target, base_fs);
-
-            for j in 0..255 {
-                if is_fixed(j) {
-                    continue;
-                }
-
-                let r_j = retention_from_log_fscale(x[j], base_fs);
-                let pos_ret_other = pos_ret - p_pos[j] * r_j;
-                let neg_ret_other = neg_ret - p_neg[j] * r_j;
-
-                let sc = get_smooth_neighbors(&x, j);
-
-                let mut lo = ln_base;
-                let mut hi = ln_neg;
-                if j > 0 {
-                    lo = lo.max(x[j - 1] - s_max);
-                    hi = hi.min(x[j - 1] + s_max);
-                }
-                if j < 254 {
-                    lo = lo.max(x[j + 1] - s_max);
-                    hi = hi.min(x[j + 1] + s_max);
-                }
-                lo = lo.clamp(ln_base, ln_neg);
-                hi = hi.clamp(ln_base, ln_neg);
-
-                if hi - lo < 1e-10 {
-                    continue;
-                }
-
-                let gr = 0.618_033_988_7;
-                let mut a = lo;
-                let mut b = hi;
-
-                for _ in 0..line_search_steps {
-                    let x1 = b - gr * (b - a);
-                    let x2 = a + gr * (b - a);
-
-                    let obj1 = eval_coord_objective(
-                        x1,
-                        p_pos[j],
-                        p_neg[j],
-                        pos_ret_other,
-                        neg_ret_other,
-                        base_fs,
-                        target_ret,
-                        lambda,
-                        &sc,
-                    );
-                    let obj2 = eval_coord_objective(
-                        x2,
-                        p_pos[j],
-                        p_neg[j],
-                        pos_ret_other,
-                        neg_ret_other,
-                        base_fs,
-                        target_ret,
-                        lambda,
-                        &sc,
-                    );
-
-                    if obj1 > obj2 {
-                        b = x2;
-                    } else {
-                        a = x1;
-                    }
-                }
-
-                let x_new = (a + b) / 2.0;
-                let r_new = retention_from_log_fscale(x_new, base_fs);
-                pos_ret = pos_ret_other + p_pos[j] * r_new;
-                neg_ret = neg_ret_other + p_neg[j] * r_new;
-                x[j] = x_new;
-            }
-
-            x[0] = ln_neg;
-            x[w0_idx] = ln_f0;
-            x[254] = ln_base;
-            enforce_local_step_bounds(&mut x, &fixed_mask, ln_base, ln_neg, s_max, w0_idx);
-            project_to_target_prior_retention(
-                &mut x,
-                p_target,
-                &fixed_mask,
-                base_fs,
-                ln_base,
-                ln_neg,
-                w0_idx,
-                target_ret,
-            );
-            x[0] = ln_neg;
-            x[w0_idx] = ln_f0;
-            x[254] = ln_base;
-            enforce_local_step_bounds(&mut x, &fixed_mask, ln_base, ln_neg, s_max, w0_idx);
+    let mut bins: Vec<BinEntry> = Vec::new();
+    for i in 0..255 {
+        if i == 0 || i == w0_idx || i == 254 {
+            continue;
         }
+        let neg_cost = p_neg[i] * (r_max - r_min);
+        let ratio = if p_neg[i] > 1e-30 {
+            p_pos[i] / p_neg[i]
+        } else if p_pos[i] > 1e-30 {
+            f64::INFINITY
+        } else {
+            0.0
+        };
+        bins.push(BinEntry { idx: i, ratio, neg_cost });
+    }
 
-        let (_, _, target_prior_ret) = compute_retentions(&x, p_pos, p_neg, p_target, base_fs);
-        let eff_fscale_target = base_fs / target_prior_ret;
-        let rel_error = ((eff_fscale_target - target_fscale as f64) / target_fscale as f64).abs();
+    bins.sort_by(|a, b| b.ratio.partial_cmp(&a.ratio).unwrap_or(std::cmp::Ordering::Equal));
 
-        if rel_error < 0.02 {
+    let all_min_neg_ret: f64 = bins.iter().map(|b| p_neg[b.idx] * r_min).sum();
+    let mut remaining_budget = neg_budget - all_min_neg_ret;
+
+    let mut retention = [0.0f64; 255];
+    retention[0] = (base_fs / neg_fs).min(1.0);
+    retention[w0_idx] = (base_fs / f0).min(1.0);
+    retention[254] = 1.0;
+
+    for b in &bins {
+        retention[b.idx] = r_min;
+    }
+
+    for b in &bins {
+        if remaining_budget <= 1e-30 {
             break;
         }
+        if b.neg_cost <= remaining_budget {
+            retention[b.idx] = r_max;
+            remaining_budget -= b.neg_cost;
+        } else {
+            let frac = remaining_budget / b.neg_cost;
+            retention[b.idx] = r_min + frac * (r_max - r_min);
+            remaining_budget = 0.0;
+        }
     }
 
-    x[0] = ln_neg;
-    x[w0_idx] = ln_f0;
-    x[254] = ln_base;
-    enforce_local_step_bounds(&mut x, &fixed_mask, ln_base, ln_neg, s_max, w0_idx);
-    project_to_target_prior_retention(
-        &mut x,
-        p_target,
-        &fixed_mask,
-        base_fs,
-        ln_base,
-        ln_neg,
-        w0_idx,
-        target_ret,
-    );
-    x[0] = ln_neg;
-    x[w0_idx] = ln_f0;
-    x[254] = ln_base;
-    enforce_local_step_bounds(&mut x, &fixed_mask, ln_base, ln_neg, s_max, w0_idx);
+    let mut lut = [0u64; 255];
+    for i in 0..255 {
+        let r = retention[i].clamp(r_min, r_max);
+        let fs = base_fs / r;
+        lut[i] = (fs.round() as u64).clamp(base_fscale, if negative_fscale == u64::MAX { u64::MAX } else { negative_fscale });
+    }
 
-    let (final_pos_ret, final_neg_ret, final_target_ret) =
-        compute_retentions(&x, p_pos, p_neg, p_target, base_fs);
-    let final_eff_target = base_fs / final_target_ret;
+    lut[0] = if negative_fscale == u64::MAX {
+        u64::MAX
+    } else {
+        negative_fscale
+    };
+    lut[w0_idx] = if unseen_fscale > 0 {
+        unseen_fscale
+    } else {
+        target_fscale
+    };
+    lut[254] = base_fscale;
+
+    let (final_pos_ret, final_neg_ret, _) = {
+        let mut x = [0.0f64; 255];
+        for i in 0..255 {
+            let fs = if lut[i] == u64::MAX { neg_fs } else { lut[i] as f64 };
+            x[i] = fs.ln();
+        }
+        compute_retentions(&x, p_pos, p_neg, _p_target, base_fs)
+    };
     let final_fold = if final_neg_ret > 1e-30 {
         final_pos_ret / final_neg_ret
     } else {
         f64::INFINITY
     };
-    let rel_error = ((final_eff_target - target_fscale as f64) / target_fscale as f64).abs();
-
-    if rel_error > 0.10 {
-        eprintln!(
-            "WARNING: Could not achieve target effective fscale {} on target prior. Achieved: {:.0} ({:.1}% off)",
-            target_fscale,
-            final_eff_target,
-            rel_error * 100.0
-        );
-        if final_eff_target > target_fscale as f64 {
-            eprintln!("  Hint: lower negative_fscale to allow more retention headroom");
-            eprintln!("  Hint: raise base_fscale to increase baseline retention");
-        } else {
-            eprintln!("  Hint: raise target_fscale or lower base_fscale");
-        }
-        eprintln!("  Fold enrichment achieved: {:.2}x", final_fold);
-    }
-
-    let mut lut = log_lut_to_fscale_lut(&x, base_fscale, negative_fscale);
-
-    fill_unreliable_bins(&mut lut, pos_counts, neg_counts, w0_idx);
-
-    lut[0] = if negative_fscale == u64::MAX {
-        u64::MAX
-    } else {
-        negative_fscale
-    };
-    lut[w0_idx] = if unseen_fscale > 0 {
-        unseen_fscale
-    } else {
-        target_fscale
-    };
-    lut[254] = base_fscale;
-
-    let mut x_post = [0.0f64; 255];
-    for i in 0..255 {
-        if i == 0 {
-            x_post[i] = ln_neg;
-        } else if i == w0_idx {
-            x_post[i] = ln_f0;
-        } else if i == 254 {
-            x_post[i] = ln_base;
-        } else {
-            let fs = if lut[i] == u64::MAX {
-                neg_fs
-            } else {
-                lut[i] as f64
-            };
-            x_post[i] = fs.ln().clamp(ln_base, ln_neg);
-        }
-    }
-
-    enforce_local_step_bounds(&mut x_post, &fixed_mask, ln_base, ln_neg, s_max, w0_idx);
-    project_to_target_prior_retention(
-        &mut x_post,
-        p_target,
-        &fixed_mask,
-        base_fs,
-        ln_base,
-        ln_neg,
-        w0_idx,
-        target_ret,
+    let pos_eff = base_fs / final_pos_ret;
+    let neg_eff = base_fs / final_neg_ret;
+    eprintln!(
+        "  Knapsack LUT: pos_eff={:.0}, neg_eff={:.0}, fold={:.2}x, neg_ret={:.4} (budget={:.4})",
+        pos_eff, neg_eff, final_fold, final_neg_ret, target_ret
     );
-    x_post[0] = ln_neg;
-    x_post[w0_idx] = ln_f0;
-    x_post[254] = ln_base;
-    enforce_local_step_bounds(&mut x_post, &fixed_mask, ln_base, ln_neg, s_max, w0_idx);
-
-    lut = log_lut_to_fscale_lut(&x_post, base_fscale, negative_fscale);
-    lut[0] = if negative_fscale == u64::MAX {
-        u64::MAX
-    } else {
-        negative_fscale
-    };
-    lut[w0_idx] = if unseen_fscale > 0 {
-        unseen_fscale
-    } else {
-        target_fscale
-    };
-    lut[254] = base_fscale;
 
     Ok(lut)
 }
