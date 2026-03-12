@@ -85,7 +85,17 @@ impl QuerySketch {
             }
         }
 
-        let query_weight_sums = vec![0.0; query_sizes.len()];
+        let query_weight_sums = if let Some(ref bt) = db.bias_table() {
+            let mut sums = vec![0.0f64; query_sizes.len()];
+            for bucket in &buckets {
+                for &(hash, sample_id) in bucket {
+                    sums[sample_id as usize] += bt.effective_fscale_at(bt.weight(hash));
+                }
+            }
+            sums
+        } else {
+            vec![0.0; query_sizes.len()]
+        };
         Ok(Self {
             buckets,
             sample_names,
@@ -101,7 +111,10 @@ impl QuerySketch {
     ) -> Result<Self, QueryError> {
         let input_path = input.as_ref();
         let kmer_size = db.kmer_size();
-        let threshold = db.threshold();
+        let threshold = match db.bias_table() {
+            Some(ref bt) if bt.is_soft_filter() => u64::MAX / bt.min_fscale(),
+            _ => db.threshold(),
+        };
         let min_entropy = db.min_entropy();
         let bias_table = db.bias_table();
 
@@ -434,7 +447,13 @@ impl QueryEngine {
             .map(|(sample_id, (hit_count, hit_weight))| SampleMatch {
                 sample_id,
                 hit_count,
-                containment: hit_count as f64 / query_size as f64,
+                containment: if total_query_weight > 0.0 && hit_weight > 0.0 {
+                    hit_weight / total_query_weight
+                } else if query_size > 0 {
+                    hit_count as f64 / query_size as f64
+                } else {
+                    0.0
+                },
                 hit_weight,
                 e_value: compute_e_value(
                     hit_count,
@@ -651,10 +670,15 @@ impl QueryEngine {
                     .map(|(&db_id, &(count, weight))| SampleMatch {
                         sample_id: db_id,
                         hit_count: count,
-                        containment: if query_size > 0 {
-                            count as f64 / query_size as f64
-                        } else {
-                            0.0
+                        containment: {
+                            let total_w = sketch.query_weight_sums.get(global_idx).copied().unwrap_or(0.0);
+                            if total_w > 0.0 && weight > 0.0 {
+                                weight / total_w
+                            } else if query_size > 0 {
+                                count as f64 / query_size as f64
+                            } else {
+                                0.0
+                            }
                         },
                         hit_weight: weight,
                         e_value: compute_e_value(

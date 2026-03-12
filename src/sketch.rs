@@ -516,7 +516,10 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         None => tempfile::Builder::new().prefix("jam_").tempdir()?,
     };
 
-    let frac_max = u64::MAX / config.fscale;
+    let frac_max = match &config.bias_table {
+        Some(bt) if bt.is_soft_filter() => u64::MAX / bt.min_fscale(),
+        _ => u64::MAX / config.fscale,
+    };
     let sample_counter = Arc::new(AtomicU32::new(0));
     let num_threads = config.num_threads.max(1);
 

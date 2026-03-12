@@ -12,3 +12,4 @@
 /tools/Cargo.lock
 tests/testfiles/all*
 tests/testfiles/plas*
+tests/testfiles/chrom*

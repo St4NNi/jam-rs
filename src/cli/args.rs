@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "0.9.10")]
+#[command(version = "0.9.11-alpha")]
 #[command(
     about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
     long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
