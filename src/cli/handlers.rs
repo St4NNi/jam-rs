@@ -440,7 +440,7 @@ fn compute_distance_chunk_size(
 ) -> usize {
     debug_assert!(total_samples > 0);
 
-    let min_chunk_size = total_samples.min(100).max(1);
+    let min_chunk_size = total_samples.clamp(1, 100);
     let raw_chunk_size = budget_bytes / per_sample_bytes.max(1);
 
     raw_chunk_size.clamp(min_chunk_size, total_samples)

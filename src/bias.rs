@@ -2514,11 +2514,11 @@ mod tests {
         let pos_counts = [100u64; 255];
         let neg_counts = [100u64; 255];
 
-        for i in 200..255 {
-            p_pos[i] = 1.0 / 55.0;
+        for value in p_pos.iter_mut().skip(200) {
+            *value = 1.0 / 55.0;
         }
-        for i in 0..55 {
-            p_neg[i] = 1.0 / 55.0;
+        for value in p_neg.iter_mut().take(55) {
+            *value = 1.0 / 55.0;
         }
 
         let pos_sum: f64 = p_pos.iter().sum();
@@ -2640,11 +2640,11 @@ mod tests {
         let pos_counts = [100u64; 255];
         let neg_counts = [100u64; 255];
 
-        for i in 180..255 {
-            p_pos[i] = 1.0 / 75.0;
+        for value in p_pos.iter_mut().skip(180) {
+            *value = 1.0 / 75.0;
         }
-        for i in 0..75 {
-            p_neg[i] = 1.0 / 75.0;
+        for value in p_neg.iter_mut().take(75) {
+            *value = 1.0 / 75.0;
         }
 
         let pos_sum: f64 = p_pos.iter().sum();

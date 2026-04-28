@@ -65,7 +65,7 @@ pub fn is_sequence_file(path: &Path) -> bool {
 pub fn read_entries<P: AsRef<Path>>(path: P) -> io::Result<Vec<Entry>> {
     let file = File::open(path)?;
     let file_size = file.metadata()?.len() as usize;
-    if file_size % ENTRY_SIZE != 0 {
+    if !file_size.is_multiple_of(ENTRY_SIZE) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("entry file size {file_size} is not a multiple of {ENTRY_SIZE}"),

@@ -318,6 +318,9 @@ pub struct QueryResult {
     pub total_query_weight: f64,
 }
 
+type SampleHitMap = HashMap<u32, (u32, f64)>;
+type QueryBucketHitMap = HashMap<usize, SampleHitMap>;
+
 impl QueryResult {
     pub fn top(&self, n: usize) -> Vec<&SampleMatch> {
         let mut sorted: Vec<_> = self.matches.iter().collect();
@@ -528,10 +531,10 @@ impl QueryEngine {
 
         let bias_table = &self.bias_table;
 
-        let bucket_maps: Vec<HashMap<usize, HashMap<u32, (u32, f64)>>> = (0..BUCKET_COUNT)
+        let bucket_maps: Vec<QueryBucketHitMap> = (0..BUCKET_COUNT)
             .into_par_iter()
             .map(|bucket_idx| {
-                let mut local_maps: HashMap<usize, HashMap<u32, (u32, f64)>> = HashMap::new();
+                let mut local_maps: QueryBucketHitMap = HashMap::new();
 
                 let query_bucket = sketch.bucket(bucket_idx);
                 if query_bucket.is_empty() {
@@ -627,10 +630,10 @@ impl QueryEngine {
             })
             .collect();
 
-        let merged: Vec<HashMap<u32, (u32, f64)>> = (0..chunk_len)
+        let merged: Vec<SampleHitMap> = (0..chunk_len)
             .into_par_iter()
             .map(|local_idx| {
-                let mut combined: HashMap<u32, (u32, f64)> = HashMap::new();
+                let mut combined: SampleHitMap = HashMap::new();
                 for per_bucket in &bucket_maps {
                     if let Some(local_map) = per_bucket.get(&local_idx) {
                         for (&db_id, &(count, weight)) in local_map {
