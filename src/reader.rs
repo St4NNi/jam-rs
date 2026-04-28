@@ -1,7 +1,7 @@
 use crate::bias::HashBiasTable;
 use crate::format::{
-    BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, ENTRY_SIZE, Entry, FLAG_HAS_BIAS_TABLE,
-    FormatError, HEADER_SIZE, Header, PAGE_SIZE, bucket_id,
+    BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
+    FLAG_HAS_BIAS_TABLE, FormatError, HEADER_SIZE, Header, PAGE_SIZE, bucket_id,
 };
 use crate::writer::FILTER_DESCRIPTOR_SIZE;
 use memmap2::{Mmap, MmapOptions};
@@ -30,6 +30,9 @@ pub enum ReaderError {
 
     #[error("Invalid sample data: {message}")]
     InvalidSampleData { message: String },
+
+    #[error("Invalid metadata: {message}")]
+    InvalidMetadata { message: String },
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +157,10 @@ impl JamReader {
         let bucket_table: Vec<BucketMeta> =
             bytemuck::cast_slice(&mmap[HEADER_SIZE..table_end]).to_vec();
 
+        for (i, meta) in bucket_table.iter().enumerate() {
+            validate_bucket_meta(meta, i, mmap.len())?;
+        }
+
         let mut filters = Vec::with_capacity(BUCKET_COUNT);
         for (i, meta) in bucket_table.iter().enumerate() {
             if meta.filter_size == 0 {
@@ -169,15 +176,13 @@ impl JamReader {
             && header.bias_table_offset > 0
             && header.bias_table_size > 0
         {
-            let offset = header.bias_table_offset as usize;
-            let size = header.bias_table_size as usize;
-            if offset + size > mmap.len() {
-                return Err(ReaderError::FileTooSmall {
-                    expected: offset + size,
-                    actual: mmap.len(),
-                });
-            }
-            let bias_data = &mmap[offset..offset + size];
+            let (offset, end) = checked_file_range(
+                header.bias_table_offset,
+                header.bias_table_size,
+                mmap.len(),
+                "bias table",
+            )?;
+            let bias_data = &mmap[offset..end];
             let table =
                 HashBiasTable::from_bytes(bias_data).map_err(|e| ReaderError::InvalidFilter {
                     bucket: 0,
@@ -189,15 +194,19 @@ impl JamReader {
         };
 
         let sample_names = if header.sample_names_offset > 0 && header.sample_names_size > 0 {
-            let offset = header.sample_names_offset as usize;
-            let size = header.sample_names_size as usize;
-            if offset + size > mmap.len() {
+            let (offset, end) = checked_file_range(
+                header.sample_names_offset,
+                header.sample_names_size,
+                mmap.len(),
+                "sample names",
+            )?;
+            if end > mmap.len() {
                 return Err(ReaderError::FileTooSmall {
-                    expected: offset + size,
+                    expected: end,
                     actual: mmap.len(),
                 });
             }
-            let names = parse_sample_names(&mmap[offset..offset + size], header.sample_count)?;
+            let names = parse_sample_names(&mmap[offset..end], header.sample_count)?;
             if names.len() != header.sample_count as usize {
                 return Err(ReaderError::InvalidSampleData {
                     message: format!(
@@ -215,9 +224,18 @@ impl JamReader {
         };
 
         let sample_sizes = if header.sample_sizes_offset > 0 && header.sample_sizes_size > 0 {
-            let offset = header.sample_sizes_offset as usize;
-            let size = header.sample_sizes_size as usize;
-            let expected_size = header.sample_count as usize * 8;
+            let (offset, end) = checked_file_range(
+                header.sample_sizes_offset,
+                header.sample_sizes_size,
+                mmap.len(),
+                "sample sizes",
+            )?;
+            let size = end - offset;
+            let expected_size = (header.sample_count as usize)
+                .checked_mul(8)
+                .ok_or_else(|| ReaderError::InvalidSampleData {
+                    message: "sample sizes section size overflow".to_string(),
+                })?;
             if size != expected_size {
                 return Err(ReaderError::InvalidSampleData {
                     message: format!(
@@ -226,13 +244,13 @@ impl JamReader {
                     ),
                 });
             }
-            if offset + size > mmap.len() {
+            if end > mmap.len() {
                 return Err(ReaderError::FileTooSmall {
-                    expected: offset + size,
+                    expected: end,
                     actual: mmap.len(),
                 });
             }
-            parse_sample_sizes(&mmap[offset..offset + size])
+            parse_sample_sizes(&mmap[offset..end])
         } else {
             vec![0u64; header.sample_count as usize]
         };
@@ -554,9 +572,95 @@ impl JamReader {
             }
             i
         } else {
-            est
+            if entries[est].hash == key {
+                let mut i = est;
+                while i > 0 && entries[i - 1].hash == key {
+                    i -= 1;
+                }
+                i
+            } else {
+                est
+            }
         }
     }
+}
+
+fn checked_file_range(
+    offset: u64,
+    size: u64,
+    file_len: usize,
+    label: &str,
+) -> Result<(usize, usize), ReaderError> {
+    let start = usize::try_from(offset).map_err(|_| ReaderError::InvalidMetadata {
+        message: format!("{label} offset does not fit usize: {offset}"),
+    })?;
+    let size = usize::try_from(size).map_err(|_| ReaderError::InvalidMetadata {
+        message: format!("{label} size does not fit usize: {size}"),
+    })?;
+    let end = start
+        .checked_add(size)
+        .ok_or_else(|| ReaderError::InvalidMetadata {
+            message: format!("{label} range overflows: offset={offset}, size={size}"),
+        })?;
+
+    if end > file_len {
+        return Err(ReaderError::FileTooSmall {
+            expected: end,
+            actual: file_len,
+        });
+    }
+
+    Ok((start, end))
+}
+
+fn validate_bucket_meta(
+    meta: &BucketMeta,
+    bucket_idx: usize,
+    file_len: usize,
+) -> Result<(), ReaderError> {
+    let entry_count =
+        usize::try_from(meta.entry_count).map_err(|_| ReaderError::InvalidFilter {
+            bucket: bucket_idx,
+            message: format!("entry count does not fit usize: {}", meta.entry_count),
+        })?;
+    let entry_size =
+        entry_count
+            .checked_mul(ENTRY_SIZE)
+            .ok_or_else(|| ReaderError::InvalidFilter {
+                bucket: bucket_idx,
+                message: format!("entry range size overflows: count={}", meta.entry_count),
+            })?;
+    if entry_size > 0 && meta.entry_offset < DATA_START as u64 {
+        return Err(ReaderError::InvalidFilter {
+            bucket: bucket_idx,
+            message: format!(
+                "entry range starts before data section: {} < {}",
+                meta.entry_offset, DATA_START
+            ),
+        });
+    }
+    if meta.filter_size > 0 && meta.filter_offset < DATA_START as u64 {
+        return Err(ReaderError::InvalidFilter {
+            bucket: bucket_idx,
+            message: format!(
+                "filter range starts before data section: {} < {}",
+                meta.filter_offset, DATA_START
+            ),
+        });
+    }
+    checked_file_range(
+        meta.entry_offset,
+        entry_size as u64,
+        file_len,
+        &format!("bucket {bucket_idx} entries"),
+    )?;
+    checked_file_range(
+        meta.filter_offset,
+        meta.filter_size,
+        file_len,
+        &format!("bucket {bucket_idx} filter"),
+    )?;
+    Ok(())
 }
 
 fn parse_sample_names(data: &[u8], count: u32) -> Result<Vec<String>, ReaderError> {
@@ -602,20 +706,12 @@ fn parse_filter_meta(
     meta: &BucketMeta,
     bucket_idx: usize,
 ) -> Result<FilterMeta, ReaderError> {
-    let start = meta.filter_offset as usize;
-    let end = start + meta.filter_size as usize;
-
-    if end > mmap.len() {
-        return Err(ReaderError::InvalidFilter {
-            bucket: bucket_idx,
-            message: format!(
-                "filter extends beyond file: {}..{} > {}",
-                start,
-                end,
-                mmap.len()
-            ),
-        });
-    }
+    let (start, end) = checked_file_range(
+        meta.filter_offset,
+        meta.filter_size,
+        mmap.len(),
+        &format!("bucket {bucket_idx} filter"),
+    )?;
 
     let data = &mmap[start..end];
 
@@ -639,7 +735,13 @@ fn parse_filter_meta(
         });
     }
 
-    let expected_size = 8 + descriptor_size + fingerprints_size;
+    let expected_size = 8usize
+        .checked_add(descriptor_size)
+        .and_then(|size| size.checked_add(fingerprints_size))
+        .ok_or_else(|| ReaderError::InvalidFilter {
+            bucket: bucket_idx,
+            message: "filter data size overflows".to_string(),
+        })?;
     if data.len() < expected_size {
         return Err(ReaderError::InvalidFilter {
             bucket: bucket_idx,
@@ -657,9 +759,11 @@ fn parse_filter_meta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::writer::{BuildConfig, build};
+    use crate::format::{MAGIC, VERSION};
+    use crate::writer::{BuildConfig, build, serialize_filter};
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use xorf::BinaryFuse8;
 
     fn make_fasta(seqs: &[(&str, &str)]) -> NamedTempFile {
         let mut f = NamedTempFile::with_suffix(".fa").unwrap();
@@ -668,6 +772,114 @@ mod tests {
             writeln!(f, "{seq}").unwrap();
         }
         f
+    }
+
+    fn valid_test_header(entry_count: u64, unique_hash_count: u64, sample_count: u32) -> Header {
+        Header {
+            magic: MAGIC,
+            version: VERSION,
+            flags: 0,
+            entry_count,
+            unique_hash_count,
+            sample_count,
+            bucket_count: BUCKET_COUNT as u16,
+            bucket_bits: 8,
+            entry_size: ENTRY_SIZE as u8,
+            hash_threshold: 1024,
+            kmer_size: 11,
+            _param_reserved: [0; 3],
+            min_entropy: 0.0,
+            bucket_table_offset: HEADER_SIZE as u64,
+            entries_offset: DATA_START as u64,
+            filters_offset: DATA_START as u64,
+            bias_table_offset: 0,
+            entries_size: entry_count * ENTRY_SIZE as u64,
+            filters_size: 0,
+            bias_table_size: 0,
+            sample_names_offset: 0,
+            sample_names_size: 0,
+            sample_sizes_offset: 0,
+            sample_sizes_size: 0,
+            _padding: [0; 16],
+        }
+    }
+
+    fn write_minimal_jam(bucket_table: &[BucketMeta], body_len: usize) -> NamedTempFile {
+        let mut file = NamedTempFile::with_suffix(".jam").unwrap();
+        let header = valid_test_header(0, 0, 0);
+        let mut bytes = vec![0u8; DATA_START + body_len];
+        bytes[..HEADER_SIZE].copy_from_slice(bytemuck::bytes_of(&header));
+        bytes[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE]
+            .copy_from_slice(bytemuck::cast_slice(bucket_table));
+        file.write_all(&bytes).unwrap();
+        file.flush().unwrap();
+        file
+    }
+
+    #[test]
+    fn test_reader_search_duplicate_run_returns_all_samples() {
+        let hash = 512u64;
+        let entry_count = 64usize;
+        let entries: Vec<Entry> = (0..entry_count)
+            .map(|sample_id| Entry::new(hash, sample_id as u32))
+            .collect();
+        let filter = BinaryFuse8::try_from(&[hash][..]).unwrap();
+        let filter_bytes = serialize_filter(&filter);
+
+        let entry_offset = DATA_START + filter_bytes.len();
+        let file_len = entry_offset + entries.len() * ENTRY_SIZE;
+        let mut bucket_table = vec![BucketMeta::default(); BUCKET_COUNT];
+        bucket_table[0] = BucketMeta {
+            entry_offset: entry_offset as u64,
+            entry_count: entries.len() as u64,
+            filter_offset: DATA_START as u64,
+            filter_size: filter_bytes.len() as u64,
+        };
+
+        let mut header = valid_test_header(entries.len() as u64, 1, entries.len() as u32);
+        header.filters_size = filter_bytes.len() as u64;
+        let mut bytes = vec![0u8; file_len];
+        bytes[..HEADER_SIZE].copy_from_slice(bytemuck::bytes_of(&header));
+        bytes[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE]
+            .copy_from_slice(bytemuck::cast_slice(&bucket_table));
+        bytes[DATA_START..entry_offset].copy_from_slice(&filter_bytes);
+        bytes[entry_offset..file_len].copy_from_slice(bytemuck::cast_slice(&entries));
+
+        let mut file = NamedTempFile::with_suffix(".jam").unwrap();
+        file.write_all(&bytes).unwrap();
+        file.flush().unwrap();
+
+        let reader = JamReader::open(file.path()).unwrap();
+        let samples: Vec<_> = reader.search(hash).collect();
+        assert_eq!(samples, (0..entry_count as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_reader_open_rejects_malformed_bucket_entry_range() {
+        let mut bucket_table = vec![BucketMeta::default(); BUCKET_COUNT];
+        bucket_table[0] = BucketMeta {
+            entry_offset: u64::MAX,
+            entry_count: 1,
+            filter_offset: 0,
+            filter_size: 0,
+        };
+        let file = write_minimal_jam(&bucket_table, 0);
+
+        assert!(JamReader::open(file.path()).is_err());
+    }
+
+    #[test]
+    fn test_reader_open_rejects_malformed_bucket_filter_range() {
+        let mut bucket_table = vec![BucketMeta::default(); BUCKET_COUNT];
+        bucket_table[0] = BucketMeta {
+            entry_offset: 0,
+            entry_count: 0,
+            filter_offset: DATA_START as u64,
+            filter_size: 1,
+        };
+        let file = write_minimal_jam(&bucket_table, 0);
+
+        assert!(JamReader::open(file.path()).is_err());
     }
 
     #[test]
