@@ -342,7 +342,13 @@ impl QueryResult {
     }
 }
 
-fn compute_e_value(hit_count: u32, query_size: usize, db_size: u64, threshold: u64, num_db_samples: u32) -> f64 {
+fn compute_e_value(
+    hit_count: u32,
+    query_size: usize,
+    db_size: u64,
+    threshold: u64,
+    num_db_samples: u32,
+) -> f64 {
     use statrs::distribution::{DiscreteCDF, Poisson};
 
     if hit_count == 0 {
@@ -439,7 +445,12 @@ impl QueryEngine {
         let total_query_weight = self
             .bias_table
             .as_ref()
-            .map(|bt| hashes.iter().map(|&h| bt.effective_fscale_at(bt.weight(h))).sum())
+            .map(|bt| {
+                hashes
+                    .iter()
+                    .map(|&h| bt.effective_fscale_at(bt.weight(h)))
+                    .sum()
+            })
             .unwrap_or(0.0);
 
         let matches: Vec<SampleMatch> = sample_hits
@@ -474,18 +485,12 @@ impl QueryEngine {
         }
     }
 
-    pub fn query_filtered(
-        &self,
-        hashes: &[u64],
-        min_containment: f64,
-        max_results: usize,
-    ) -> QueryResult {
+    pub fn query_filtered(&self, hashes: &[u64], min_containment: f64) -> QueryResult {
         let mut result = self.query(hashes);
         result.matches.retain(|m| m.containment >= min_containment);
         result
             .matches
             .sort_by(|a, b| b.containment.total_cmp(&a.containment));
-        result.matches.truncate(max_results);
         result
     }
 
@@ -523,11 +528,10 @@ impl QueryEngine {
 
         let bias_table = &self.bias_table;
 
-        let bucket_maps: Vec<Vec<HashMap<u32, (u32, f64)>>> = (0..BUCKET_COUNT)
+        let bucket_maps: Vec<HashMap<usize, HashMap<u32, (u32, f64)>>> = (0..BUCKET_COUNT)
             .into_par_iter()
             .map(|bucket_idx| {
-                let mut local_maps: Vec<HashMap<u32, (u32, f64)>> =
-                    (0..chunk_len).map(|_| HashMap::new()).collect();
+                let mut local_maps: HashMap<usize, HashMap<u32, (u32, f64)>> = HashMap::new();
 
                 let query_bucket = sketch.bucket(bucket_idx);
                 if query_bucket.is_empty() {
@@ -613,10 +617,10 @@ impl QueryEngine {
                         if q_sample != prev_sample {
                             if has_matches {
                                 let local_idx = (q_sample as usize) - range_start;
+                                let sample_map = local_maps.entry(local_idx).or_default();
                                 for db_entry in &db_bucket[db_start..db_end] {
-                                    let entry = local_maps[local_idx]
-                                        .entry(db_entry.sample_id)
-                                        .or_insert((0, 0.0));
+                                    let entry =
+                                        sample_map.entry(db_entry.sample_id).or_insert((0, 0.0));
                                     entry.0 += 1;
                                     entry.1 += hash_weight;
                                 }
@@ -639,10 +643,12 @@ impl QueryEngine {
             .map(|local_idx| {
                 let mut combined: HashMap<u32, (u32, f64)> = HashMap::new();
                 for per_bucket in &bucket_maps {
-                    for (&db_id, &(count, weight)) in &per_bucket[local_idx] {
-                        let entry = combined.entry(db_id).or_insert((0, 0.0));
-                        entry.0 += count;
-                        entry.1 += weight;
+                    if let Some(local_map) = per_bucket.get(&local_idx) {
+                        for (&db_id, &(count, weight)) in local_map {
+                            let entry = combined.entry(db_id).or_insert((0, 0.0));
+                            entry.0 += count;
+                            entry.1 += weight;
+                        }
                     }
                 }
                 combined
@@ -658,20 +664,15 @@ impl QueryEngine {
                 let global_idx = range_start + local_idx;
                 let query_size = sketch.query_sizes[global_idx];
 
-                let min_hits = if min_containment > 0.0 && query_size > 0 {
-                    (min_containment * query_size as f64).ceil() as u32
-                } else {
-                    0
-                };
-
                 let matches: Vec<SampleMatch> = merged[local_idx]
                     .iter()
-                    .filter(|&(_, &(count, _))| count >= min_hits)
-                    .map(|(&db_id, &(count, weight))| SampleMatch {
-                        sample_id: db_id,
-                        hit_count: count,
-                        containment: {
-                            let total_w = sketch.query_weight_sums.get(global_idx).copied().unwrap_or(0.0);
+                    .filter_map(|(&db_id, &(count, weight))| {
+                        let containment = {
+                            let total_w = sketch
+                                .query_weight_sums
+                                .get(global_idx)
+                                .copied()
+                                .unwrap_or(0.0);
                             if total_w > 0.0 && weight > 0.0 {
                                 weight / total_w
                             } else if query_size > 0 {
@@ -679,15 +680,20 @@ impl QueryEngine {
                             } else {
                                 0.0
                             }
-                        },
-                        hit_weight: weight,
-                        e_value: compute_e_value(
-                            count,
-                            query_size,
-                            sample_sizes.get(db_id as usize).copied().unwrap_or(0),
-                            threshold,
-                            num_db_samples,
-                        ),
+                        };
+                        (containment >= min_containment).then(|| SampleMatch {
+                            sample_id: db_id,
+                            hit_count: count,
+                            containment,
+                            hit_weight: weight,
+                            e_value: compute_e_value(
+                                count,
+                                query_size,
+                                sample_sizes.get(db_id as usize).copied().unwrap_or(0),
+                                threshold,
+                                num_db_samples,
+                            ),
+                        })
                     })
                     .collect();
 
@@ -696,7 +702,11 @@ impl QueryEngine {
                     hashes_found: hashes_found[local_idx].load(Ordering::Relaxed) as usize,
                     matches,
                     failed_bucket_count: 0,
-                    total_query_weight: sketch.query_weight_sums.get(global_idx).copied().unwrap_or(0.0),
+                    total_query_weight: sketch
+                        .query_weight_sums
+                        .get(global_idx)
+                        .copied()
+                        .unwrap_or(0.0),
                 }
             })
             .collect()
@@ -829,8 +839,7 @@ mod tests {
         }
 
         if !test_hashes.is_empty() {
-            let result = engine.query_filtered(&test_hashes, 0.5, 10);
-            assert!(result.matches.len() <= 10);
+            let result = engine.query_filtered(&test_hashes, 0.5);
             for m in &result.matches {
                 assert!(m.containment >= 0.5);
             }

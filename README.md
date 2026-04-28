@@ -117,7 +117,6 @@ Options:
   -d, --database <DATABASE>  Database sketch (.jam file)
   -o, --output <OUTPUT>      Output to file instead of stdout
   -c, --cutoff <CUTOFF>      Cut-off value for similarity/containment [default: 0.0]
-      --max-results <N>      Maximum matches to report per query sequence
       --singleton             Singleton mode, process each query sequence separately
   -h, --help                 Print help
 ```

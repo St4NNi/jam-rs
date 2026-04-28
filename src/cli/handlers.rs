@@ -67,6 +67,15 @@ pub fn handle_sketch_command(
             kmer_size
         ));
     }
+    if !min_entropy.is_finite() || !(0.0..=2.0).contains(&min_entropy) {
+        return Err(anyhow::anyhow!(
+            "--complexity must be finite and between 0.0 and 2.0, got {}",
+            min_entropy
+        ));
+    }
+    if fscale == Some(0) {
+        return Err(anyhow::anyhow!("--fscale must be > 0"));
+    }
 
     if !silent {
         let mut settings = format!(
@@ -123,7 +132,7 @@ pub fn handle_sketch_command(
 
     let effective_fscale = match &bias_table {
         Some(table) => table.fscale(),
-        None => fscale.unwrap_or(1000),
+        None => fscale.unwrap_or(100),
     };
 
     let config = BuildConfig {
@@ -176,7 +185,15 @@ pub fn handle_distance_command(
             input_path
         ));
     }
-
+    if !cutoff.is_finite() {
+        return Err(anyhow::anyhow!("--cutoff must be finite, got {}", cutoff));
+    }
+    if !(0.0..=1.0).contains(&cutoff) {
+        return Err(anyhow::anyhow!(
+            "--cutoff must be between 0.0 and 1.0, got {}",
+            cutoff
+        ));
+    }
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
         sp.set_style(
@@ -207,6 +224,9 @@ pub fn handle_distance_command(
         ));
         if engine.has_bias_table() {
             sp.println("      Using embedded bias table from database");
+            sp.println(
+                "      Bias mode reports containment on the retained/weighted k-mer subset; E-values are uniform-hash approximations",
+            );
         }
         sp.set_message("[2/4] Loading query...");
     }
@@ -258,7 +278,7 @@ pub fn handle_distance_command(
 
     use rayon::prelude::*;
 
-    const WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
+    const WRITE_BUFFER_SIZE: usize = 1024 * 1024;
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
         Box::new(std::io::BufWriter::with_capacity(
             WRITE_BUFFER_SIZE,
@@ -275,16 +295,16 @@ pub fn handle_distance_command(
     if has_bias {
         writeln!(
             writer,
-            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment\te_value\tcorrected_query_containment"
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\traw_query_containment\tdb_containment_unweighted\tuniform_hash_e_value\tbias_weighted_query_containment"
         )?;
     } else {
         writeln!(
             writer,
-            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment\te_value"
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment\tuniform_hash_e_value"
         )?;
     }
 
-    let flush_threshold = memory_gb * 1024 * 1024 * 1024 / 2;
+    let flush_threshold = (memory_gb * 1024 * 1024 * 1024 / 16).clamp(1024 * 1024, 8 * 1024 * 1024);
     let mut temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
     let mut pending: Vec<u8> = Vec::new();
 
@@ -326,7 +346,11 @@ pub fn handle_distance_command(
                     };
                     use std::fmt::Write;
                     if has_bias && result.total_query_weight > 0.0 {
-                        let corrected = m.hit_weight / result.total_query_weight;
+                        let raw_query_containment = if query_hashes > 0 {
+                            m.hit_count as f64 / query_hashes as f64
+                        } else {
+                            0.0
+                        };
                         let _ = writeln!(
                             out,
                             "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6e}\t{:.6}",
@@ -335,10 +359,10 @@ pub fn handle_distance_command(
                             m.hit_count,
                             query_hashes,
                             db_hashes,
-                            m.containment,
+                            raw_query_containment,
                             db_containment,
                             m.e_value,
-                            corrected,
+                            m.containment,
                         );
                     } else {
                         let _ = writeln!(
@@ -463,6 +487,15 @@ pub fn handle_bias_create_command(
 
     if !alpha.is_finite() || alpha <= 0.0 {
         return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
+    }
+    if !(1..=31).contains(&kmer_size) {
+        return Err(anyhow::anyhow!(
+            "K-mer size must be between 1 and 31, got {}",
+            kmer_size
+        ));
+    }
+    if fscale == 0 {
+        return Err(anyhow::anyhow!("--fscale must be > 0"));
     }
 
     match (target_fscale.as_ref(), max_fscale.as_ref()) {
@@ -748,7 +781,7 @@ pub fn handle_bias_stats_command(
                         "weight": w as f64 / 10.0,
                         "weight_q": w,
                         "effective_fscale": eff,
-                        "retention_pct": 100.0 / eff,
+                        "retention_pct": 100.0 * base / eff,
                         "vs_base": base / eff,
                     })
                 })

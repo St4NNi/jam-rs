@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "0.9.11-alpha")]
+#[command(version)]
 #[command(
     about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
     long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
@@ -42,7 +42,7 @@ pub enum Commands {
         /// K-mer size, all sketches must have the same size to be compared and below 32
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
-        /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+        /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash, default 100)
         #[arg(long)]
         fscale: Option<u64>,
         /// Complexity cut-off, only hash sequences with complexity above this value
@@ -126,7 +126,7 @@ pub enum BiasCommands {
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
         /// FracMinHash scale (must match sketch fscale)
-        #[arg(long, default_value = "1000")]
+        #[arg(long, default_value = "100")]
         fscale: u64,
         /// Count-Min Sketch width (columns, power of 2 recommended)
         #[arg(long, default_value = "1048576")]
