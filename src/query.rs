@@ -1,7 +1,7 @@
 use crate::bias::HashBiasTable;
 use crate::core_utils::passes_entropy_filter;
 use crate::format::{BUCKET_COUNT, bucket_id};
-use crate::reader::{JamReader, ReaderError};
+use crate::reader::{JamReader, ReaderError, lower_bound_hash};
 use jamhash::jamhash_u64;
 use needletail::{Sequence, parse_fastx_file};
 use std::collections::{HashMap, HashSet};
@@ -577,18 +577,7 @@ impl QueryEngine {
                 while q_idx < survivors.len() {
                     let q_hash = survivors[q_idx].0;
 
-                    let est = ((q_hash as u128 * count as u128) / threshold as u128) as usize;
-                    let mut d_idx = est.saturating_sub(16).min(count.saturating_sub(1));
-
-                    while d_idx > 0 && db_bucket[d_idx].hash > q_hash {
-                        d_idx -= 1;
-                    }
-                    while d_idx < count && db_bucket[d_idx].hash < q_hash {
-                        d_idx += 1;
-                    }
-                    while d_idx > 0 && db_bucket[d_idx - 1].hash == q_hash {
-                        d_idx -= 1;
-                    }
+                    let d_idx = lower_bound_hash(db_bucket, q_hash);
 
                     let current_byte = entry_start + d_idx * ENTRY_SIZE;
                     let current_page = current_byte & !(PAGE_SIZE - 1);

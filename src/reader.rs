@@ -507,7 +507,8 @@ impl JamReader {
         }
 
         let entries = self.bucket_entries(bucket_idx);
-        self.interpolation_search(entries, hash).is_some()
+        let idx = lower_bound_hash(entries, hash);
+        entries.get(idx).is_some_and(|entry| entry.hash == hash)
     }
 
     #[inline]
@@ -524,65 +525,77 @@ impl JamReader {
             &[]
         };
 
-        let start = if entries.is_empty() {
-            0
-        } else {
-            self.interpolation_find_start(entries, hash)
-        };
+        let start = lower_bound_hash(entries, hash);
 
         entries[start..]
             .iter()
-            .skip_while(move |e| e.hash < hash)
             .take_while(move |e| e.hash == hash)
             .map(|e| e.sample_id)
     }
+}
 
-    fn interpolation_search(&self, entries: &[Entry], key: u64) -> Option<usize> {
-        if entries.is_empty() {
-            return None;
-        }
+#[inline]
+pub(crate) fn lower_bound_hash(entries: &[Entry], key: u64) -> usize {
+    const MAX_INTERPOLATION_PROBES: usize = 8;
+    const BINARY_SEARCH_CUTOFF: usize = 64;
 
-        let start = self.interpolation_find_start(entries, key);
-
-        for (i, entry) in entries[start..].iter().enumerate() {
-            if entry.hash == key {
-                return Some(start + i);
-            }
-            if entry.hash > key {
-                break;
-            }
-        }
-
-        None
+    let mut lo = 0usize;
+    let mut hi = entries.len();
+    if hi == 0 {
+        return 0;
     }
 
-    #[inline]
-    fn interpolation_find_start(&self, entries: &[Entry], key: u64) -> usize {
-        let count = entries.len();
-        let threshold = self.threshold();
+    if entries[lo].hash >= key {
+        return lo;
+    }
+    if entries[hi - 1].hash < key {
+        return hi;
+    }
 
-        let est = ((key as u128 * count as u128) / threshold as u128) as usize;
+    for _ in 0..MAX_INTERPOLATION_PROBES {
+        if hi - lo <= BINARY_SEARCH_CUTOFF {
+            break;
+        }
 
-        let est = est.saturating_sub(16).min(count - 1);
+        let lo_hash = entries[lo].hash;
+        let hi_hash = entries[hi - 1].hash;
+        if lo_hash >= key {
+            return lo;
+        }
+        if hi_hash < key {
+            return hi;
+        }
+        if lo_hash == hi_hash {
+            break;
+        }
 
-        if entries[est].hash > key {
-            let mut i = est;
-            while i > 0 && entries[i - 1].hash >= key {
-                i -= 1;
-            }
-            i
+        let width = hi - lo - 1;
+        let span = hi_hash - lo_hash;
+        let rel = key.saturating_sub(lo_hash);
+        let probe = lo + ((rel as u128 * width as u128) / span as u128) as usize;
+        let probe_hash = entries[probe].hash;
+
+        if probe_hash < key {
+            lo = probe + 1;
         } else {
-            if entries[est].hash == key {
-                let mut i = est;
-                while i > 0 && entries[i - 1].hash == key {
-                    i -= 1;
-                }
-                i
-            } else {
-                est
-            }
+            hi = probe + 1;
         }
     }
+
+    lower_bound_hash_binary(entries, key, lo, hi)
+}
+
+#[inline]
+fn lower_bound_hash_binary(entries: &[Entry], key: u64, mut lo: usize, mut hi: usize) -> usize {
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if entries[mid].hash < key {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 fn checked_file_range(
@@ -852,6 +865,26 @@ mod tests {
         let reader = JamReader::open(file.path()).unwrap();
         let samples: Vec<_> = reader.search(hash).collect();
         assert_eq!(samples, (0..entry_count as u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_lower_bound_hash_handles_skewed_distribution() {
+        let mut hashes: Vec<u64> = (0..9000).map(|i| i * 2).collect();
+        hashes.extend((0..1000).map(|i| 1_000_000 + i * 2));
+        hashes.splice(4500..4500, [9000, 9000, 9000]);
+
+        let entries: Vec<Entry> = hashes
+            .iter()
+            .enumerate()
+            .map(|(sample_id, &hash)| Entry::new(hash, sample_id as u32))
+            .collect();
+
+        for key in [
+            0, 1, 8999, 9000, 9001, 20_000, 1_000_000, 1_001_999, 2_000_000,
+        ] {
+            let expected = entries.partition_point(|entry| entry.hash < key);
+            assert_eq!(lower_bound_hash(&entries, key), expected, "key {key}");
+        }
     }
 
     #[test]
