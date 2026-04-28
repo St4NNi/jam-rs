@@ -18,12 +18,13 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
-const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+const MIN_WRITE_BUFFER_SIZE: usize = 64 * 1024;
+const MAX_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 const MIN_MEMORY_GB: usize = 4;
 const DEFAULT_SEND_TIMEOUT: Duration = Duration::from_millis(1);
 const MIN_SPLIT_SIZE: usize = 1024 * 1024;
 const MAX_CONCURRENT_MMAPS: usize = 256;
-const OPTIMAL_CHANNEL_CAPACITY: usize = 512 * 1024;
+const OPTIMAL_CHANNEL_CAPACITY: usize = 8 * 1024;
 
 type Sender = MTx<mpsc::Array<Entry>>;
 type Receiver = Rx<mpsc::Array<Entry>>;
@@ -46,7 +47,7 @@ impl Default for SketchConfig {
     fn default() -> Self {
         Self {
             kmer_size: 21,
-            fscale: 1000,
+            fscale: 100,
             num_threads: 1,
             memory: MIN_MEMORY_GB,
             temp_dir_base: None,
@@ -231,52 +232,100 @@ fn scan_fasta_boundaries(data: &[u8]) -> Vec<usize> {
     bounds
 }
 
-#[inline]
-fn is_iupac_nucleotide(b: u8) -> bool {
-    matches!(
-        b | 0x20,
-        b'a' | b'c'
-            | b'g'
-            | b't'
-            | b'u'
-            | b'n'
-            | b'r'
-            | b'y'
-            | b's'
-            | b'w'
-            | b'k'
-            | b'm'
-            | b'b'
-            | b'd'
-            | b'h'
-            | b'v'
-    )
-}
-
 fn scan_fastq_boundaries(data: &[u8]) -> Vec<usize> {
-    let mut bounds = vec![0];
-    let mut i = 0;
-
-    while i + 1 < data.len() {
-        if data[i] == b'\n' && data[i + 1] == b'@' {
-            let header_start = i + 1;
-            let header_end = data[header_start..]
-                .iter()
-                .position(|&b| b == b'\n')
-                .map(|p| header_start + p)
-                .unwrap_or(data.len());
-
-            if header_end > header_start + 1 {
-                let seq_start = header_end + 1;
-                if seq_start < data.len() && is_iupac_nucleotide(data[seq_start]) {
-                    bounds.push(header_start);
-                }
-            }
-        }
-        i += 1;
+    fn line_end(data: &[u8], start: usize) -> usize {
+        data[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|offset| start + offset)
+            .unwrap_or(data.len())
     }
 
-    bounds
+    fn next_line(data: &[u8], end: usize) -> usize {
+        if end < data.len() { end + 1 } else { end }
+    }
+
+    fn line_len(data: &[u8], start: usize, end: usize) -> usize {
+        if end > start && data[end - 1] == b'\r' {
+            end - start - 1
+        } else {
+            end - start
+        }
+    }
+
+    let mut bounds = Vec::new();
+    let mut pos = 0;
+
+    while pos < data.len() {
+        if data[pos] != b'@' {
+            return vec![0];
+        }
+
+        bounds.push(pos);
+
+        let header_end = line_end(data, pos);
+        if line_len(data, pos, header_end) <= 1 {
+            return vec![0];
+        }
+        pos = next_line(data, header_end);
+
+        let mut seq_len = 0usize;
+        loop {
+            if pos >= data.len() {
+                return vec![0];
+            }
+            if data[pos] == b'+' {
+                let plus_end = line_end(data, pos);
+                pos = next_line(data, plus_end);
+                break;
+            }
+
+            let seq_end = line_end(data, pos);
+            let len = line_len(data, pos, seq_end);
+            if len == 0 {
+                return vec![0];
+            }
+            seq_len = match seq_len.checked_add(len) {
+                Some(len) => len,
+                None => return vec![0],
+            };
+            pos = next_line(data, seq_end);
+        }
+
+        if seq_len == 0 {
+            return vec![0];
+        }
+
+        let mut qual_len = 0usize;
+        loop {
+            if pos >= data.len() {
+                return vec![0];
+            }
+
+            let qual_end = line_end(data, pos);
+            qual_len = match qual_len.checked_add(line_len(data, pos, qual_end)) {
+                Some(len) => len,
+                None => return vec![0],
+            };
+            pos = next_line(data, qual_end);
+
+            if qual_len == seq_len {
+                break;
+            }
+            if qual_len > seq_len {
+                return vec![0];
+            }
+        }
+    }
+
+    if bounds.is_empty() { vec![0] } else { bounds }
+}
+
+fn compute_write_buffer_size(memory_gb: usize) -> usize {
+    let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
+    let budget = memory_bytes / 20;
+    let per_bucket = (budget / BUCKET_COUNT as u64) as usize;
+    per_bucket.clamp(MIN_WRITE_BUFFER_SIZE, MAX_WRITE_BUFFER_SIZE)
 }
 
 fn setup_channels(
@@ -285,7 +334,8 @@ fn setup_channels(
     input_size_bytes: u64,
     temp_path: &Path,
 ) -> Result<(Vec<Sender>, Vec<Vec<BucketWriter>>), SketchError> {
-    let capacity = compute_channel_capacity(memory_gb, input_size_bytes);
+    let write_buffer_size = compute_write_buffer_size(memory_gb);
+    let capacity = compute_channel_capacity(memory_gb, input_size_bytes, write_buffer_size);
 
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..BUCKET_COUNT)
         .map(|_| mpsc::bounded_blocking(capacity))
@@ -303,7 +353,7 @@ fn setup_channels(
                 .map(|(bucket_id, receiver)| {
                     let writer = EntryWriter::new(
                         temp_path.join(format!("bucket_{bucket_id:03}.bin")),
-                        WRITE_BUFFER_SIZE,
+                        write_buffer_size,
                     )?;
                     Ok(BucketWriter {
                         receiver,
@@ -320,9 +370,13 @@ fn setup_channels(
     Ok((senders, bucket_writers))
 }
 
-fn compute_channel_capacity(memory_gb: usize, input_size_bytes: u64) -> usize {
+fn compute_channel_capacity(
+    memory_gb: usize,
+    input_size_bytes: u64,
+    write_buffer_size: usize,
+) -> usize {
     let memory_bytes = memory_gb as u64 * 1024 * 1024 * 1024;
-    let writer_memory = BUCKET_COUNT as u64 * WRITE_BUFFER_SIZE as u64;
+    let writer_memory = BUCKET_COUNT as u64 * write_buffer_size as u64;
 
     let available = memory_bytes
         .saturating_sub(input_size_bytes)
@@ -339,7 +393,8 @@ fn scan_boundaries(mmap: &Mmap, magic: [u8; 2]) -> Vec<usize> {
     }
     match magic[0] {
         b'>' => scan_fasta_boundaries(mmap),
-        _ => scan_fastq_boundaries(mmap),
+        b'@' => scan_fastq_boundaries(mmap),
+        _ => vec![0],
     }
 }
 
@@ -508,6 +563,12 @@ pub fn run(input_files: &[PathBuf], config: &SketchConfig) -> Result<SketchResul
         return Err(SketchError::Config(format!(
             "kmer_size must be between 1 and 31, got {}",
             config.kmer_size
+        )));
+    }
+    if !config.min_entropy.is_finite() || !(0.0..=2.0).contains(&config.min_entropy) {
+        return Err(SketchError::Config(format!(
+            "min_entropy must be finite and between 0.0 and 2.0, got {}",
+            config.min_entropy
         )));
     }
 
@@ -926,16 +987,23 @@ mod tests {
 
     #[test]
     fn test_channel_capacity_calculation() {
-        let cap_4gb = compute_channel_capacity(4, 0);
+        let write_buffer_size = compute_write_buffer_size(4);
+        assert!(write_buffer_size < 8 * 1024 * 1024);
+
+        let cap_4gb = compute_channel_capacity(4, 0, write_buffer_size);
         assert_eq!(cap_4gb, OPTIMAL_CHANNEL_CAPACITY);
 
-        let cap_4gb_with_input = compute_channel_capacity(4, 3 * 1024 * 1024 * 1024);
+        let cap_4gb_with_input =
+            compute_channel_capacity(4, 4 * 1024 * 1024 * 1024, write_buffer_size);
         assert!(cap_4gb_with_input < cap_4gb);
 
-        let cap_exceeded = compute_channel_capacity(4, 10 * 1024 * 1024 * 1024);
+        let cap_exceeded = compute_channel_capacity(4, 10 * 1024 * 1024 * 1024, write_buffer_size);
         assert_eq!(cap_exceeded, 1024);
 
-        assert_eq!(compute_channel_capacity(0, 0), 1024);
+        assert_eq!(
+            compute_channel_capacity(0, 0, compute_write_buffer_size(0)),
+            1024
+        );
     }
 
     #[test]
@@ -954,8 +1022,7 @@ mod tests {
     fn test_scan_fastq_boundaries_wrapped() {
         let data = b"@read1\nATCG\nGCTA\n+\nIIII\nJJJJ\n@read2\nAAAA\n+\nKKKK\n";
         let bounds = scan_fastq_boundaries(data);
-        assert_eq!(bounds[0], 0);
-        assert!(bounds.contains(&29));
+        assert_eq!(bounds, vec![0, 29]);
     }
 
     #[test]
@@ -963,6 +1030,12 @@ mod tests {
         let data = b"@read1\nATCG\n+\n@@@I\n@read2\nGCTA\n+\nIIII\n";
         let bounds = scan_fastq_boundaries(data);
         assert_eq!(bounds, vec![0, 19]);
+    }
+
+    #[test]
+    fn test_scan_fastq_boundaries_at_quality_nucleotide_text_no_split() {
+        let data = b"@read1\nATCG\n+\n!!!!\n@not_a_header\nACGTNRY\n@read2\nGCTA\n+\nIIII\n";
+        assert_eq!(scan_fastq_boundaries(data), vec![0]);
     }
 
     #[test]
@@ -1086,5 +1159,23 @@ mod tests {
         };
         let result = run(&[input.path().to_path_buf()], &config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_min_entropy_validation() {
+        let input = make_fasta(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        for min_entropy in [f64::NAN, f64::INFINITY, -0.1, 2.1] {
+            let config = SketchConfig {
+                kmer_size: 11,
+                min_entropy,
+                memory: 1,
+                ..Default::default()
+            };
+            let err = match run(&[input.path().to_path_buf()], &config) {
+                Err(e) => e,
+                Ok(_) => panic!("expected error for min_entropy={min_entropy}"),
+            };
+            assert!(err.to_string().contains("min_entropy must be finite"));
+        }
     }
 }

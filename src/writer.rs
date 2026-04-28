@@ -7,7 +7,6 @@ use crate::io::{extract_unique_hashes, read_entries, write_entries};
 use crate::sketch::{SketchConfig, SketchResult};
 use bytemuck;
 use memmap2::MmapMut;
-use rayon::prelude::*;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -85,6 +84,8 @@ pub struct IndexStats {
     pub kmer_size: u8,
     pub frac_max: u64,
     pub bucket_entry_counts: [u64; BUCKET_COUNT],
+    pub sample_names: Vec<String>,
+    pub sample_sizes: Vec<u64>,
 }
 
 #[derive(Clone)]
@@ -104,7 +105,7 @@ impl Default for BuildConfig {
     fn default() -> Self {
         Self {
             kmer_size: 21,
-            fscale: 1000,
+            fscale: 100,
             num_threads: 1,
             memory: 4,
             temp_dir_base: None,
@@ -173,63 +174,61 @@ pub enum CompactError {
 pub fn run(
     output_path: &Path,
     sketch_result: &SketchResult,
-    _config: &CompactConfig,
+    config: &CompactConfig,
     kmer_size: u8,
     bias_table: Option<&HashBiasTable>,
     min_entropy: f64,
 ) -> Result<IndexStats, CompactError> {
     let temp_path = sketch_result.temp_dir.path();
 
-    let processed: Result<Vec<ProcessedBucket>, CompactError> = (0..BUCKET_COUNT)
-        .into_par_iter()
-        .map(|bucket_id| {
-            let bucket_path = temp_path.join(format!("bucket_{bucket_id:03}.bin"));
+    let mut processed = Vec::with_capacity(BUCKET_COUNT);
+    for bucket_id in 0..BUCKET_COUNT {
+        let bucket_path = temp_path.join(format!("bucket_{bucket_id:03}.bin"));
 
-            let mut entries = if bucket_path.exists() {
-                read_entries(&bucket_path)?
-            } else {
-                Vec::new()
-            };
+        let mut entries = if bucket_path.exists() {
+            read_entries(&bucket_path)?
+        } else {
+            Vec::new()
+        };
 
-            entries.sort_unstable();
-            entries.dedup();
+        entries.sort_unstable();
+        entries.dedup();
 
-            let mut sample_hash_counts: std::collections::HashMap<u32, u64> =
-                std::collections::HashMap::new();
-            for entry in &entries {
-                *sample_hash_counts.entry(entry.sample_id).or_insert(0) += 1;
-            }
+        let mut sample_hash_counts: std::collections::HashMap<u32, u64> =
+            std::collections::HashMap::new();
+        for entry in &entries {
+            *sample_hash_counts.entry(entry.sample_id).or_insert(0) += 1;
+        }
 
-            let unique_hashes = extract_unique_hashes(&entries);
-            let unique_hash_count = unique_hashes.len() as u64;
+        let unique_hashes = extract_unique_hashes(&entries);
+        let unique_hash_count = unique_hashes.len() as u64;
 
-            let filter_bytes = if unique_hashes.is_empty() {
-                Vec::new()
-            } else {
-                let filter = BinaryFuse8::try_from(&unique_hashes[..]).map_err(|e| {
-                    CompactError::FilterConstruction {
-                        bucket: bucket_id,
-                        message: format!("{e:?}"),
-                    }
-                })?;
-                serialize_filter(&filter)
-            };
+        let filter_bytes = if unique_hashes.is_empty() {
+            Vec::new()
+        } else {
+            let filter = BinaryFuse8::try_from(&unique_hashes[..]).map_err(|e| {
+                CompactError::FilterConstruction {
+                    bucket: bucket_id,
+                    message: format!("{e:?}"),
+                }
+            })?;
+            serialize_filter(&filter)
+        };
 
-            if !entries.is_empty() {
-                write_entries(&bucket_path, &entries)?;
-            }
+        if !entries.is_empty() {
+            write_entries(&bucket_path, &entries)?;
+        }
 
-            Ok(ProcessedBucket {
-                bucket_id,
-                entry_count: entries.len() as u64,
-                unique_hash_count,
-                filter_bytes,
-                sample_hash_counts,
-            })
-        })
-        .collect();
+        processed.push(ProcessedBucket {
+            bucket_id,
+            entry_count: entries.len() as u64,
+            unique_hash_count,
+            filter_bytes,
+            sample_hash_counts,
+        });
+    }
 
-    let processed = processed?;
+    let _ = config.num_threads;
 
     let mut aggregated_sample_sizes: Vec<u64> = vec![0u64; sketch_result.sample_count as usize];
     for bucket in &processed {
@@ -379,6 +378,8 @@ pub fn run(
         kmer_size,
         frac_max: sketch_result.frac_max,
         bucket_entry_counts,
+        sample_names: sketch_result.sample_names.clone(),
+        sample_sizes: aggregated_sample_sizes,
     })
 }
 

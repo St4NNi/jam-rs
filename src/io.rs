@@ -45,7 +45,7 @@ pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
 pub fn is_sequence_file(path: &Path) -> bool {
     if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
-        if ext == "gz"
+        if matches!(ext.as_str(), "gz" | "bz2" | "xz" | "zst" | "zstd")
             && let Some(stem_ext) = path.file_stem().and_then(|s| Path::new(s).extension())
         {
             let stem_ext = stem_ext.to_string_lossy().to_lowercase();
@@ -65,6 +65,12 @@ pub fn is_sequence_file(path: &Path) -> bool {
 pub fn read_entries<P: AsRef<Path>>(path: P) -> io::Result<Vec<Entry>> {
     let file = File::open(path)?;
     let file_size = file.metadata()?.len() as usize;
+    if file_size % ENTRY_SIZE != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("entry file size {file_size} is not a multiple of {ENTRY_SIZE}"),
+        ));
+    }
     let entry_count = file_size / ENTRY_SIZE;
 
     let mut reader = BufReader::with_capacity(8 * 1024 * 1024, file);
