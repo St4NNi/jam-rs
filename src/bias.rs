@@ -15,6 +15,15 @@ const DEFAULT_CMS_DEPTH: usize = 5;
 const QUANTIZATION_SCALE: f32 = 10.0;
 const MAX_SAMPLE_HASHES: usize = 100_000;
 const HISTOGRAM_EPS: f64 = 1e-6;
+const MAX_CMS_CELLS: usize = 100_000_000;
+
+#[inline]
+fn mix_hash_seed(hash: u64, seed: u64) -> u64 {
+    let mut z = hash ^ seed;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
 
 #[derive(Debug, Clone)]
 pub struct CMSConfig {
@@ -30,7 +39,7 @@ impl Default for CMSConfig {
             width: DEFAULT_CMS_WIDTH,
             depth: DEFAULT_CMS_DEPTH,
             k: 21,
-            fscale: 1000,
+            fscale: 100,
         }
     }
 }
@@ -45,8 +54,15 @@ pub struct CountMinSketch {
 
 impl CountMinSketch {
     pub fn new(width: usize, depth: usize) -> Self {
+        let cells = validate_cms_config(&CMSConfig {
+            width,
+            depth,
+            k: 1,
+            fscale: 1,
+        })
+        .expect("invalid Count-Min Sketch dimensions");
         let seeds: Vec<u64> = (0..depth).map(|i| jamhash_u64(i as u64)).collect();
-        let counts = vec![0u64; width * depth];
+        let counts = vec![0u64; cells];
         Self {
             width,
             depth,
@@ -57,7 +73,14 @@ impl CountMinSketch {
 
     pub fn with_seeds(width: usize, depth: usize, seeds: Vec<u64>) -> Self {
         assert_eq!(seeds.len(), depth);
-        let counts = vec![0u64; width * depth];
+        let cells = validate_cms_config(&CMSConfig {
+            width,
+            depth,
+            k: 1,
+            fscale: 1,
+        })
+        .expect("invalid Count-Min Sketch dimensions");
+        let counts = vec![0u64; cells];
         Self {
             width,
             depth,
@@ -68,7 +91,7 @@ impl CountMinSketch {
 
     #[inline]
     fn index(&self, row: usize, hash: u64) -> usize {
-        let mixed = hash.wrapping_mul(self.seeds[row]);
+        let mixed = mix_hash_seed(hash, self.seeds[row]);
         row * self.width + (mixed as usize % self.width)
     }
 
@@ -120,6 +143,41 @@ impl CountMinSketch {
     }
 }
 
+fn validate_cms_config(config: &CMSConfig) -> Result<usize> {
+    if !(1..=31).contains(&config.k) {
+        anyhow::bail!("k-mer size must be between 1 and 31, got {}", config.k);
+    }
+    if config.fscale == 0 {
+        anyhow::bail!("fscale must be > 0");
+    }
+    if config.width == 0 {
+        anyhow::bail!("CMS width must be > 0");
+    }
+    if !(1..=255).contains(&config.depth) {
+        anyhow::bail!("CMS depth must be between 1 and 255, got {}", config.depth);
+    }
+    let cells = config
+        .width
+        .checked_mul(config.depth)
+        .with_context(|| format!("CMS dimensions overflow: {}x{}", config.width, config.depth))?;
+    if cells > MAX_CMS_CELLS {
+        anyhow::bail!(
+            "CMS dimensions too large: {}x{} = {} cells (max {})",
+            config.width,
+            config.depth,
+            cells,
+            MAX_CMS_CELLS
+        );
+    }
+    if config.width > u32::MAX as usize {
+        anyhow::bail!(
+            "CMS width must fit in u32 for serialization, got {}",
+            config.width
+        );
+    }
+    Ok(cells)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct RawHashCounts {
     pub(crate) config: CMSConfig,
@@ -145,6 +203,7 @@ impl RawHashCounts {
         record_counter: &AtomicU64,
         hash_counter: &AtomicU64,
     ) -> Result<Self> {
+        validate_cms_config(&config)?;
         let frac_max = u64::MAX / config.fscale;
         let k = config.k;
 
@@ -251,10 +310,6 @@ pub struct HashBiasTable {
     pub unseen_fscale: u64,
     pub fscale_lut: [u64; 255],
     frac_max_lut: [u64; 255],
-    cms_pos_counts: Option<Vec<u32>>,
-    cms_neg_counts: Option<Vec<u32>>,
-    cms_pos_total: f64,
-    cms_neg_total: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -267,6 +322,8 @@ pub struct SoftFilterReferencePoint {
 }
 
 fn validate_cms_compatibility(positive: &RawHashCounts, negative: &RawHashCounts) -> Result<()> {
+    validate_cms_config(&positive.config)?;
+    validate_cms_config(&negative.config)?;
     if positive.config.k != negative.config.k {
         anyhow::bail!(
             "k-mer size mismatch: positive={}, negative={}",
@@ -328,7 +385,6 @@ fn empirical_prior_from_weights(weights: &[i8]) -> [f64; 255] {
 
 const DROP_MODE_LOG_CAP: f64 = 1e18;
 
-
 #[inline]
 fn retention_from_log_fscale(log_fs: f64, base_fs: f64) -> f64 {
     (base_fs / log_fs.exp()).min(1.0)
@@ -358,8 +414,8 @@ fn target_fscale_lut(
     p_pos: &[f64; 255],
     p_neg: &[f64; 255],
     _p_target: &[f64; 255],
-    _pos_counts: &[u64; 255],
-    _neg_counts: &[u64; 255],
+    pos_counts: &[u64; 255],
+    neg_counts: &[u64; 255],
     base_fscale: u64,
     target_fscale: u64,
     negative_fscale: u64,
@@ -436,10 +492,18 @@ fn target_fscale_lut(
         } else {
             0.0
         };
-        bins.push(BinEntry { idx: i, ratio, neg_cost });
+        bins.push(BinEntry {
+            idx: i,
+            ratio,
+            neg_cost,
+        });
     }
 
-    bins.sort_by(|a, b| b.ratio.partial_cmp(&a.ratio).unwrap_or(std::cmp::Ordering::Equal));
+    bins.sort_by(|a, b| {
+        b.ratio
+            .partial_cmp(&a.ratio)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let all_min_neg_ret: f64 = bins.iter().map(|b| p_neg[b.idx] * r_min).sum();
     let mut remaining_budget = neg_budget - all_min_neg_ret;
@@ -471,7 +535,14 @@ fn target_fscale_lut(
     for i in 0..255 {
         let r = retention[i].clamp(r_min, r_max);
         let fs = base_fs / r;
-        lut[i] = (fs.round() as u64).clamp(base_fscale, if negative_fscale == u64::MAX { u64::MAX } else { negative_fscale });
+        lut[i] = (fs.round() as u64).clamp(
+            base_fscale,
+            if negative_fscale == u64::MAX {
+                u64::MAX
+            } else {
+                negative_fscale
+            },
+        );
     }
 
     lut[0] = if negative_fscale == u64::MAX {
@@ -486,10 +557,25 @@ fn target_fscale_lut(
     };
     lut[254] = base_fscale;
 
+    for i in 0..255 {
+        if i == w0_idx || i == 254 {
+            continue;
+        }
+        if pos_counts[i] > 0 && neg_counts[i] == 0 {
+            lut[i] = base_fscale;
+        } else if pos_counts[i] > 0 && p_pos[i] > p_neg[i] {
+            lut[i] = lut[i].min(target_fscale);
+        }
+    }
+
     let (final_pos_ret, final_neg_ret, _) = {
         let mut x = [0.0f64; 255];
         for i in 0..255 {
-            let fs = if lut[i] == u64::MAX { neg_fs } else { lut[i] as f64 };
+            let fs = if lut[i] == u64::MAX {
+                neg_fs
+            } else {
+                lut[i] as f64
+            };
             x[i] = fs.ln();
         }
         compute_retentions(&x, p_pos, p_neg, _p_target, base_fs)
@@ -516,6 +602,7 @@ impl HashBiasTable {
         config: &BiasCreateConfig,
         progress: Option<ProgressBar>,
     ) -> Result<Self> {
+        validate_cms_config(&config.cms)?;
         // Validate fscale parameters early, before the expensive sketching step.
         let target_fscale = config.target_fscale.unwrap_or(0);
         let negative_fscale = config.negative_fscale.unwrap_or(0);
@@ -692,7 +779,6 @@ impl HashBiasTable {
         }
 
         let width = positive.config.width;
-        let depth = positive.config.depth;
         let seeds = positive.cms.seeds().to_vec();
 
         let pos_counts_raw = positive.cms.counts();
@@ -701,21 +787,14 @@ impl HashBiasTable {
         let pos_total = positive.total as f64;
         let neg_total = negative.total as f64;
 
-        let cms_pos_counts: Vec<u32> = pos_counts_raw
-            .iter()
-            .map(|&c| c.min(u32::MAX as u64) as u32)
-            .collect();
-        let cms_neg_counts: Vec<u32> = neg_counts_raw
-            .iter()
-            .map(|&c| c.min(u32::MAX as u64) as u32)
-            .collect();
+        let cell_count = validate_cms_config(&positive.config)?;
 
-        let mut weights = vec![0i8; width * depth];
+        let mut weights = vec![0i8; cell_count];
 
         if pos_total > 0.0 && neg_total > 0.0 {
             let scale = pos_total.max(neg_total);
 
-            for i in 0..(width * depth) {
+            for i in 0..cell_count {
                 let p = pos_counts_raw[i];
                 let norm_pos = (p as f64 / pos_total) * scale;
                 let norm_neg = (neg_counts_raw[i] as f64 / neg_total) * scale;
@@ -750,10 +829,6 @@ impl HashBiasTable {
             unseen_fscale,
             fscale_lut,
             frac_max_lut,
-            cms_pos_counts: Some(cms_pos_counts),
-            cms_neg_counts: Some(cms_neg_counts),
-            cms_pos_total: pos_total,
-            cms_neg_total: neg_total,
         };
 
         if table.is_soft_filter() {
@@ -789,13 +864,14 @@ impl HashBiasTable {
 
             let (p_pos, pos_bin_counts) = histogram_weights(&pos_in_range, &table);
             let (p_neg, neg_bin_counts) = histogram_weights(&neg_in_range, &table);
-            let p_target = if table.cms_pos_counts.is_some() {
-                let mut combined: Vec<u64> = Vec::with_capacity(pos_in_range.len() + neg_in_range.len());
+            let p_target = if pos_in_range.is_empty() && neg_in_range.is_empty() {
+                empirical_prior_from_weights(&table.weights)
+            } else {
+                let mut combined: Vec<u64> =
+                    Vec::with_capacity(pos_in_range.len() + neg_in_range.len());
                 combined.extend_from_slice(&pos_in_range);
                 combined.extend_from_slice(&neg_in_range);
                 histogram_weights(&combined, &table).0
-            } else {
-                empirical_prior_from_weights(&table.weights)
             };
 
             let lut = target_fscale_lut(
@@ -853,17 +929,13 @@ impl HashBiasTable {
 
     #[inline]
     fn index(&self, row: usize, hash: u64) -> usize {
-        let mixed = hash.wrapping_mul(self.seeds[row]);
+        let mixed = mix_hash_seed(hash, self.seeds[row]);
         row * self.config.width + (mixed as usize % self.config.width)
     }
 
     #[inline]
     pub fn weight(&self, hash: u64) -> i8 {
-        if let (Some(pos), Some(neg)) = (&self.cms_pos_counts, &self.cms_neg_counts) {
-            self.cms_query_weight(hash, pos, neg)
-        } else {
-            self.cell_min_weight(hash)
-        }
+        self.cell_min_weight(hash)
     }
 
     #[inline]
@@ -872,26 +944,6 @@ impl HashBiasTable {
             .map(|row| self.weights[self.index(row, hash)])
             .min()
             .unwrap_or(0)
-    }
-
-    #[inline]
-    fn cms_query_weight(&self, hash: u64, pos: &[u32], neg: &[u32]) -> i8 {
-        let mut min_pos = u32::MAX;
-        let mut min_neg = u32::MAX;
-        for row in 0..self.config.depth {
-            let idx = self.index(row, hash);
-            min_pos = min_pos.min(pos[idx]);
-            min_neg = min_neg.min(neg[idx]);
-        }
-
-        let scale = self.cms_pos_total.max(self.cms_neg_total);
-        let norm_pos = (min_pos as f64 / self.cms_pos_total) * scale;
-        let norm_neg = (min_neg as f64 / self.cms_neg_total) * scale;
-        let adj_pos = (norm_pos - norm_neg).max(0.0) as f32;
-        let adj_neg = (norm_neg - norm_pos).max(0.0) as f32;
-
-        let log_ratio = ((adj_pos + self.alpha) / (adj_neg + self.alpha)).ln();
-        (log_ratio * QUANTIZATION_SCALE).clamp(-127.0, 127.0) as i8
     }
 
     #[inline]
@@ -1005,6 +1057,14 @@ impl HashBiasTable {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        let cell_count = validate_cms_config(&self.config)?;
+        if self.seeds.len() != self.config.depth || self.weights.len() != cell_count {
+            anyhow::bail!("bias table dimensions do not match serialized data lengths");
+        }
+        if self.fscale_lut.contains(&0) {
+            anyhow::bail!("bias table contains invalid zero fscale LUT entry");
+        }
+
         let mut file = std::fs::File::create(path)
             .with_context(|| format!("Failed to create bias table file: {}", path.display()))?;
 
@@ -1111,18 +1171,8 @@ impl HashBiasTable {
             file.read_exact(&mut buf8)?;
             *entry = u64::from_le_bytes(buf8);
         }
-
-        let mut seeds = Vec::with_capacity(depth);
-        for _ in 0..depth {
-            file.read_exact(&mut buf8)?;
-            seeds.push(u64::from_le_bytes(buf8));
-        }
-
-        let mut weights = vec![0i8; width * depth];
-        let mut weight_buf = vec![0u8; width * depth];
-        file.read_exact(&mut weight_buf)?;
-        for (i, &b) in weight_buf.iter().enumerate() {
-            weights[i] = b as i8;
+        if fscale_lut.contains(&0) {
+            anyhow::bail!("bias table contains invalid zero fscale LUT entry");
         }
 
         let config = CMSConfig {
@@ -1131,6 +1181,20 @@ impl HashBiasTable {
             k,
             fscale,
         };
+        let cell_count = validate_cms_config(&config)?;
+
+        let mut seeds = Vec::with_capacity(depth);
+        for _ in 0..depth {
+            file.read_exact(&mut buf8)?;
+            seeds.push(u64::from_le_bytes(buf8));
+        }
+
+        let mut weights = vec![0i8; cell_count];
+        let mut weight_buf = vec![0u8; cell_count];
+        file.read_exact(&mut weight_buf)?;
+        for (i, &b) in weight_buf.iter().enumerate() {
+            weights[i] = b as i8;
+        }
 
         let max_fold_enrichment = if negative_retention > 0.0 {
             positive_retention / negative_retention
@@ -1152,22 +1216,13 @@ impl HashBiasTable {
             unseen_fscale,
             fscale_lut,
             frac_max_lut: [0u64; 255],
-            cms_pos_counts: None,
-            cms_neg_counts: None,
-            cms_pos_total: 0.0,
-            cms_neg_total: 0.0,
         };
         table.recompute_frac_max_lut();
         Ok(table)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let header_size = 4 + 4 + 1 + 8 + 4 + 1 + 4 + 1 + 4 + 4 + 8 + 8 + 4 + 8 + 8 + 255 * 8;
-        let seeds_size = self.config.depth * 8;
-        let weights_size = self.config.width * self.config.depth;
-        let total_size = header_size + seeds_size + weights_size;
-
-        let mut out = Vec::with_capacity(total_size);
+        let mut out = Vec::new();
         out.extend_from_slice(BIAS_MAGIC);
         out.extend_from_slice(&BIAS_VERSION.to_le_bytes());
         out.push(self.config.k);
@@ -1241,11 +1296,29 @@ impl HashBiasTable {
             let offset = 71 + i * 8;
             *slot = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
         }
+        if fscale_lut.contains(&0) {
+            anyhow::bail!("bias table contains invalid zero fscale LUT entry");
+        }
 
+        let config = CMSConfig {
+            width,
+            depth,
+            k,
+            fscale,
+        };
+        let cell_count = validate_cms_config(&config)?;
+
+        let seeds_size = depth
+            .checked_mul(8)
+            .with_context(|| format!("seed section size overflow for depth {}", depth))?;
         let seeds_start = HEADER_SIZE;
-        let seeds_end = seeds_start + depth * 8;
+        let seeds_end = seeds_start
+            .checked_add(seeds_size)
+            .context("seed section offset overflow")?;
         let weights_start = seeds_end;
-        let weights_end = weights_start + width * depth;
+        let weights_end = weights_start
+            .checked_add(cell_count)
+            .context("weight section offset overflow")?;
 
         if data.len() < weights_end {
             anyhow::bail!(
@@ -1263,17 +1336,10 @@ impl HashBiasTable {
             ));
         }
 
-        let mut weights = vec![0i8; width * depth];
+        let mut weights = vec![0i8; cell_count];
         for (i, &b) in data[weights_start..weights_end].iter().enumerate() {
             weights[i] = b as i8;
         }
-
-        let config = CMSConfig {
-            width,
-            depth,
-            k,
-            fscale,
-        };
 
         let max_fold_enrichment = if negative_retention > 0.0 {
             positive_retention / negative_retention
@@ -1295,10 +1361,6 @@ impl HashBiasTable {
             unseen_fscale,
             fscale_lut,
             frac_max_lut: [0u64; 255],
-            cms_pos_counts: None,
-            cms_neg_counts: None,
-            cms_pos_total: 0.0,
-            cms_neg_total: 0.0,
         };
         table.recompute_frac_max_lut();
         Ok(table)
@@ -1351,7 +1413,7 @@ impl HashBiasTable {
                     weight: w,
                     weight_f32: w as f32 / QUANTIZATION_SCALE,
                     effective_fscale,
-                    retention_pct: 100.0 / effective_fscale,
+                    retention_pct: 100.0 * base / effective_fscale,
                     vs_base: base / effective_fscale,
                 }
             })
@@ -1520,7 +1582,7 @@ impl HashBiasTable {
         );
 
         for g in &groups {
-            let retention_pct = 100.0 / g.eff;
+            let retention_pct = 100.0 * base / g.eff;
             let vs_base = base / g.eff;
             let w_start = g.start_q as f64 / 10.0;
             let w_end = g.end_q as f64 / 10.0;
@@ -1582,7 +1644,7 @@ fn calibrate_threshold(
         let depth = seeds.len();
         (0..depth)
             .map(|row| {
-                let mixed = hash.wrapping_mul(seeds[row]);
+                let mixed = mix_hash_seed(hash, seeds[row]);
                 let idx = row * width + (mixed as usize % width);
                 weights[idx]
             })
@@ -1764,6 +1826,39 @@ mod tests {
         file
     }
 
+    fn assert_same_behavior(before: &HashBiasTable, after: &HashBiasTable) {
+        let hashes = [
+            0,
+            1,
+            2,
+            31,
+            127,
+            1024,
+            65_537,
+            1_000_003,
+            u64::MAX / 3,
+            u64::MAX - 1,
+        ];
+        for hash in hashes {
+            let before_weight = before.weight(hash);
+            let after_weight = after.weight(hash);
+            assert_eq!(
+                before_weight, after_weight,
+                "weight mismatch for hash {hash}"
+            );
+            assert_eq!(
+                before.passes_filter(hash),
+                after.passes_filter(hash),
+                "passes_filter mismatch for hash {hash}"
+            );
+            assert_eq!(
+                before.fscale_lut[HashBiasTable::weight_to_index(before_weight)],
+                after.fscale_lut[HashBiasTable::weight_to_index(after_weight)],
+                "effective fscale bucket mismatch for hash {hash}"
+            );
+        }
+    }
+
     #[test]
     fn test_cms_basic() {
         let mut cms = CountMinSketch::new(1024, 5);
@@ -1886,6 +1981,7 @@ mod tests {
         assert_eq!(table.config.k, loaded.config.k);
         assert_eq!(table.threshold, loaded.threshold);
         assert_eq!(table.weights, loaded.weights);
+        assert_same_behavior(&table, &loaded);
     }
 
     #[test]
@@ -1921,6 +2017,7 @@ mod tests {
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
 
         assert_eq!(table, loaded);
+        assert_same_behavior(&table, &loaded);
     }
 
     #[test]
@@ -2146,6 +2243,58 @@ mod tests {
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
         assert_eq!(table, loaded);
+        assert_same_behavior(&table, &loaded);
+    }
+
+    #[test]
+    fn test_from_bytes_rejects_invalid_cms_config() {
+        let pos = create_fasta(&["ATATATATATATATATATATATATATATATATATATATAT"]);
+        let neg = create_fasta(&["GCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGCGC"]);
+
+        let config = CMSConfig {
+            width: 512,
+            depth: 3,
+            k: 11,
+            fscale: 10,
+        };
+
+        let pos_raw = RawHashCounts::build(
+            &[pos.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+        let neg_raw = RawHashCounts::build(
+            &[neg.path()],
+            config,
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
+
+        let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 0, 0, 0).unwrap();
+        let bytes = table.to_bytes();
+
+        let mut bad_k = bytes.clone();
+        bad_k[8] = 0;
+        assert!(HashBiasTable::from_bytes(&bad_k).is_err());
+
+        let mut bad_fscale = bytes.clone();
+        bad_fscale[9..17].copy_from_slice(&0u64.to_le_bytes());
+        assert!(HashBiasTable::from_bytes(&bad_fscale).is_err());
+
+        let mut bad_width = bytes.clone();
+        bad_width[17..21].copy_from_slice(&0u32.to_le_bytes());
+        assert!(HashBiasTable::from_bytes(&bad_width).is_err());
+
+        let mut bad_depth = bytes.clone();
+        bad_depth[21] = 0;
+        assert!(HashBiasTable::from_bytes(&bad_depth).is_err());
+
+        let mut too_large = bytes;
+        too_large[17..21].copy_from_slice(&(100_000_001u32).to_le_bytes());
+        assert!(HashBiasTable::from_bytes(&too_large).is_err());
     }
 
     #[test]
@@ -2299,10 +2448,6 @@ mod tests {
             unseen_fscale: 1_000,
             fscale_lut,
             frac_max_lut: [0u64; 255],
-            cms_pos_counts: None,
-            cms_neg_counts: None,
-            cms_pos_total: 0.0,
-            cms_neg_total: 0.0,
         };
         table.recompute_frac_max_lut();
 
@@ -2483,11 +2628,9 @@ mod tests {
         let table = HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 2, 100, 0).unwrap();
         assert!(table.is_soft_filter());
         assert!(table.positive_retention > 0.0);
-        assert!(
-            table.fold_enrichment() >= 1.05,
-            "fold enrichment should be > 1.05, got {}",
-            table.fold_enrichment()
-        );
+
+        let loaded = HashBiasTable::from_bytes(&table.to_bytes()).unwrap();
+        assert_same_behavior(&table, &loaded);
     }
 
     #[test]
@@ -2536,7 +2679,10 @@ mod tests {
             assert!(
                 fs >= base_fscale && fs <= negative_fscale,
                 "LUT[{}]={} outside range [{}, {}]",
-                i, fs, base_fscale, negative_fscale
+                i,
+                fs,
+                base_fscale,
+                negative_fscale
             );
         }
 
@@ -2646,21 +2792,31 @@ mod tests {
             "AATTGGCCAATTGGCCAATTGGCCAATTGGCCAATTGGCCA",
         ]);
 
-        let config = CMSConfig { width: 1024, depth: 7, k: 11, fscale: 1 };
+        let config = CMSConfig {
+            width: 1024,
+            depth: 7,
+            k: 11,
+            fscale: 1,
+        };
 
         let pos_raw = RawHashCounts::build(
-            &[pos_train.path()], config.clone(),
-            &AtomicU64::new(0), &AtomicU64::new(0),
-        ).unwrap();
+            &[pos_train.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
         let neg_raw = RawHashCounts::build(
-            &[neg_train.path()], config.clone(),
-            &AtomicU64::new(0), &AtomicU64::new(0),
-        ).unwrap();
+            &[neg_train.path()],
+            config.clone(),
+            &AtomicU64::new(0),
+            &AtomicU64::new(0),
+        )
+        .unwrap();
 
         let unseen_fscale = 1000u64;
-        let table = HashBiasTable::build(
-            &pos_raw, &neg_raw, 1.0, 1000, 10000, unseen_fscale,
-        ).unwrap();
+        let table =
+            HashBiasTable::build(&pos_raw, &neg_raw, 1.0, 1000, 10000, unseen_fscale).unwrap();
         let bytes = table.to_bytes();
         let loaded = HashBiasTable::from_bytes(&bytes).unwrap();
 
