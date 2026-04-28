@@ -1,2 +1,8 @@
-FROM busybox
-COPY ./target/x86_64-unknown-linux-musl/release/jam /bin/jam
+FROM rust:1-slim AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --locked
+
+FROM debian:stable-slim
+COPY --from=builder /app/target/release/jam /usr/local/bin/jam
+ENTRYPOINT ["jam"]
