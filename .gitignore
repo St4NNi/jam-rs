@@ -5,7 +5,6 @@
 /*.fa
 /*.sig
 /test.*
-.github/copilot-instructions.md
 /testout
 /tools/out
 /tools/target
