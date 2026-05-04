@@ -62,10 +62,6 @@ roaring = "0.11.3"
 rand = "0.10.0"
 foldhash = "0.2.0"
 
-[[bench]]
-name = "benchmarks"
-harness = false
-
 [profile.release]
 opt-level = 3
 lto = true
