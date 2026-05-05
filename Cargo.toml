@@ -1,18 +1,12 @@
 [package]
 name = "jam-rs"
-version = "0.9.11"
+version = "0.11.0"
 edition = "2024"
 repository = "https://github.com/St4NNi/jam-rs"
 license = "MIT"
 authors = ["Sebastian Beyvers <sebastian.beyvers@cb.jlug.de>"]
-description = "Just another (genomic) minhash (Jam) implementation in Rust"
-keywords = [
-    "minhash",
-    "metagenomics",
-    "bioinformatics",
-    "containment",
-    "jaccard",
-]
+description = "Just another minimizer (jam): find and align small sequences in very large assembly sets"
+keywords = ["minimizer", "alignment", "metagenomics", "bioinformatics", "search"]
 categories = ["command-line-utilities", "science", "algorithms"]
 exclude = ["/tests"]
 readme = "README.md"

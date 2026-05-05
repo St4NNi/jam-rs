@@ -41,7 +41,7 @@ Every module, type, option, comment and document uses these terms with exactly t
 | packed sequence | The contigs of an entry, 2 bits per base, with a table of contig names, lengths and runs of N. |
 | anchor | An exact match of length a (15 by default) between the query and an alignment window. |
 | chain | Anchors in order along nearly the same diagonal. |
-| alignment | A gapped, base-level alignment of a query interval to a contig interval, with score, CIGAR and counts. |
+| alignment | A gapped, base-level alignment of a query interval to a contig interval, with score, CIGAR and counts. CIGAR follows SAM with the contig as the reference: `I` marks bases only in the query, `D` bases only in the contig. |
 | fragment | An alignment placed in query and contig coordinates; a fragment over the end of a circular query has two query segments. |
 | mosaic | The fragments of one entry chosen to cover the query without counting a query base twice. |
 | query coverage | The share of query bases covered by an entry's mosaic. |
