@@ -1,6 +1,6 @@
 use crate::bias::HashBiasTable;
 use crate::format::{
-    BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
+    BUCKET_BITS, BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
     FLAG_HAS_BIAS_TABLE, FormatError, HEADER_SIZE, Header, PAGE_SIZE, bucket_id,
 };
 use crate::writer::FILTER_DESCRIPTOR_SIZE;
@@ -145,6 +145,7 @@ impl JamReader {
 
         let header: Header = *bytemuck::from_bytes(&mmap[..HEADER_SIZE]);
         header.validate()?;
+        validate_header_layout(&header)?;
 
         let table_end = HEADER_SIZE + BUCKET_TABLE_SIZE;
         if mmap.len() < table_end {
@@ -160,6 +161,7 @@ impl JamReader {
         for (i, meta) in bucket_table.iter().enumerate() {
             validate_bucket_meta(meta, i, mmap.len())?;
         }
+        validate_bucket_totals(&header, &bucket_table)?;
 
         let mut filters = Vec::with_capacity(BUCKET_COUNT);
         for (i, meta) in bucket_table.iter().enumerate() {
@@ -281,12 +283,39 @@ impl JamReader {
             });
         }
 
-        let region_start = meta.filter_offset as usize;
-        let data_size = meta.filter_size as usize + (meta.entry_count as usize) * ENTRY_SIZE;
+        let region_start =
+            usize::try_from(meta.filter_offset).map_err(|_| ReaderError::InvalidMetadata {
+                message: format!("bucket {bucket_idx} filter offset does not fit usize"),
+            })?;
+        let filter_size =
+            usize::try_from(meta.filter_size).map_err(|_| ReaderError::InvalidMetadata {
+                message: format!("bucket {bucket_idx} filter size does not fit usize"),
+            })?;
+        let entry_count =
+            usize::try_from(meta.entry_count).map_err(|_| ReaderError::InvalidMetadata {
+                message: format!("bucket {bucket_idx} entry count does not fit usize"),
+            })?;
+        let entry_size =
+            entry_count
+                .checked_mul(ENTRY_SIZE)
+                .ok_or_else(|| ReaderError::InvalidMetadata {
+                    message: format!("bucket {bucket_idx} entry byte size overflows"),
+                })?;
+        let data_size =
+            filter_size
+                .checked_add(entry_size)
+                .ok_or_else(|| ReaderError::InvalidMetadata {
+                    message: format!("bucket {bucket_idx} mapped region size overflows"),
+                })?;
 
         let page_start = region_start & !(PAGE_SIZE - 1);
         let data_offset = region_start - page_start;
-        let mmap_len = data_offset + data_size;
+        let mmap_len =
+            data_offset
+                .checked_add(data_size)
+                .ok_or_else(|| ReaderError::InvalidMetadata {
+                    message: format!("bucket {bucket_idx} mmap length overflows"),
+                })?;
 
         let mmap = unsafe {
             MmapOptions::new()
@@ -302,8 +331,7 @@ impl JamReader {
 
         let filter_meta = if meta.filter_size > 0 {
             let filter_data_start = data_offset;
-            let filter_data =
-                &mmap[filter_data_start..filter_data_start + meta.filter_size as usize];
+            let filter_data = &mmap[filter_data_start..filter_data_start + filter_size];
 
             if filter_data.len() >= 8 {
                 let descriptor_size =
@@ -354,8 +382,8 @@ impl JamReader {
         Ok(BucketRegion {
             mmap,
             data_offset,
-            filter_size: meta.filter_size as usize,
-            entry_count: meta.entry_count as usize,
+            filter_size,
+            entry_count,
             filter_meta,
         })
     }
@@ -626,6 +654,73 @@ fn checked_file_range(
     Ok((start, end))
 }
 
+fn invalid_metadata(message: impl Into<String>) -> ReaderError {
+    ReaderError::InvalidMetadata {
+        message: message.into(),
+    }
+}
+
+fn validate_header_layout(header: &Header) -> Result<(), ReaderError> {
+    if header.bucket_bits != BUCKET_BITS {
+        return Err(invalid_metadata(format!(
+            "invalid bucket_bits: got {}, expected {}",
+            header.bucket_bits, BUCKET_BITS
+        )));
+    }
+    if header.bucket_table_offset != HEADER_SIZE as u64 {
+        return Err(invalid_metadata(format!(
+            "invalid bucket_table_offset: got {}, expected {}",
+            header.bucket_table_offset, HEADER_SIZE
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bucket_totals(header: &Header, bucket_table: &[BucketMeta]) -> Result<(), ReaderError> {
+    let mut entry_count = 0u64;
+    let mut entries_size = 0u64;
+    let mut filters_size = 0u64;
+
+    for (bucket_idx, meta) in bucket_table.iter().enumerate() {
+        entry_count = entry_count.checked_add(meta.entry_count).ok_or_else(|| {
+            invalid_metadata(format!("bucket {bucket_idx} entry count total overflows"))
+        })?;
+        let bucket_entry_size =
+            meta.entry_count
+                .checked_mul(ENTRY_SIZE as u64)
+                .ok_or_else(|| {
+                    invalid_metadata(format!("bucket {bucket_idx} entry byte size overflows"))
+                })?;
+        entries_size = entries_size.checked_add(bucket_entry_size).ok_or_else(|| {
+            invalid_metadata(format!("bucket {bucket_idx} entry byte total overflows"))
+        })?;
+        filters_size = filters_size.checked_add(meta.filter_size).ok_or_else(|| {
+            invalid_metadata(format!("bucket {bucket_idx} filter byte total overflows"))
+        })?;
+    }
+
+    if entry_count != header.entry_count {
+        return Err(invalid_metadata(format!(
+            "entry_count mismatch: bucket table sums to {}, header reports {}",
+            entry_count, header.entry_count
+        )));
+    }
+    if entries_size != header.entries_size {
+        return Err(invalid_metadata(format!(
+            "entries_size mismatch: bucket table sums to {}, header reports {}",
+            entries_size, header.entries_size
+        )));
+    }
+    if filters_size != header.filters_size {
+        return Err(invalid_metadata(format!(
+            "filters_size mismatch: bucket table sums to {}, header reports {}",
+            filters_size, header.filters_size
+        )));
+    }
+
+    Ok(())
+}
+
 fn validate_bucket_meta(
     meta: &BucketMeta,
     bucket_idx: usize,
@@ -673,6 +768,32 @@ fn validate_bucket_meta(
         file_len,
         &format!("bucket {bucket_idx} filter"),
     )?;
+
+    if meta.entry_count > 0 && meta.filter_size == 0 {
+        return Err(ReaderError::InvalidFilter {
+            bucket: bucket_idx,
+            message: "non-empty bucket is missing its filter".to_string(),
+        });
+    }
+
+    if meta.filter_size > 0 && meta.entry_count > 0 {
+        let expected_entry_offset = meta
+            .filter_offset
+            .checked_add(meta.filter_size)
+            .ok_or_else(|| ReaderError::InvalidFilter {
+                bucket: bucket_idx,
+                message: "filter range end overflows".to_string(),
+            })?;
+        if meta.entry_offset != expected_entry_offset {
+            return Err(ReaderError::InvalidFilter {
+                bucket: bucket_idx,
+                message: format!(
+                    "entry range must start immediately after filter: got {}, expected {}",
+                    meta.entry_offset, expected_entry_offset
+                ),
+            });
+        }
+    }
     Ok(())
 }
 
@@ -703,6 +824,15 @@ fn parse_sample_names(data: &[u8], count: u32) -> Result<Vec<String>, ReaderErro
         }
         names.push(String::from_utf8_lossy(&data[offset..offset + len]).to_string());
         offset += len;
+    }
+
+    if offset != data.len() {
+        return Err(ReaderError::InvalidSampleData {
+            message: format!(
+                "sample names section has {} trailing bytes",
+                data.len() - offset
+            ),
+        });
     }
 
     Ok(names)
@@ -755,10 +885,14 @@ fn parse_filter_meta(
             bucket: bucket_idx,
             message: "filter data size overflows".to_string(),
         })?;
-    if data.len() < expected_size {
+    if data.len() != expected_size {
         return Err(ReaderError::InvalidFilter {
             bucket: bucket_idx,
-            message: format!("filter data too small: {} < {}", data.len(), expected_size),
+            message: format!(
+                "filter data size mismatch: got {}, expected {}",
+                data.len(),
+                expected_size
+            ),
         });
     }
 
