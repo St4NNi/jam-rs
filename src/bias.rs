@@ -966,7 +966,11 @@ impl HashBiasTable {
 
     fn recompute_frac_max_lut(&mut self) {
         for (frac, &fs) in self.frac_max_lut.iter_mut().zip(self.fscale_lut.iter()) {
-            *frac = u64::MAX.checked_div(fs).unwrap_or(u64::MAX);
+            *frac = if fs == u64::MAX {
+                0
+            } else {
+                u64::MAX.checked_div(fs).unwrap_or(u64::MAX)
+            };
         }
     }
 
@@ -2465,6 +2469,36 @@ mod tests {
             below,
             above
         );
+    }
+
+    #[test]
+    fn test_drop_fscale_rejects_hash_zero() {
+        let mut fscale_lut = [100u64; 255];
+        fscale_lut[0] = u64::MAX;
+
+        let mut table = HashBiasTable {
+            config: CMSConfig {
+                width: 1,
+                depth: 1,
+                k: 11,
+                fscale: 100,
+            },
+            seeds: vec![1],
+            weights: vec![-127],
+            alpha: 1.0,
+            threshold: 0,
+            positive_retention: 0.0,
+            negative_retention: 0.0,
+            max_fold_enrichment: 0.0,
+            target_fscale: 100,
+            negative_fscale: u64::MAX,
+            unseen_fscale: 100,
+            fscale_lut,
+            frac_max_lut: [0u64; 255],
+        };
+        table.recompute_frac_max_lut();
+
+        assert!(!table.passes_filter(0));
     }
 
     #[test]
