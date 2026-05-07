@@ -103,6 +103,7 @@ pub fn run() -> Result<()> {
             output,
             cutoff,
             singleton,
+            cli.force,
             cli.silent,
             cli.memory.unwrap_or(2),
         ),

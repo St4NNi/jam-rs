@@ -162,12 +162,14 @@ pub fn handle_sketch_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_distance_command(
     input_path: PathBuf,
     database_path: PathBuf,
     output_path: Option<PathBuf>,
     cutoff: f64,
     singleton: bool,
+    force: bool,
     silent: bool,
     memory_gb: usize,
 ) -> Result<()> {
@@ -193,6 +195,22 @@ pub fn handle_distance_command(
             "--cutoff must be between 0.0 and 1.0, got {}",
             cutoff
         ));
+    }
+    if let Some(ref out) = output_path
+        && out.exists()
+    {
+        if !out.is_file() {
+            return Err(anyhow::anyhow!(
+                "Output path must be a file, not a directory: {:?}",
+                out
+            ));
+        }
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Output file {:?} already exists. Use --force to overwrite.",
+                out
+            ));
+        }
     }
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
