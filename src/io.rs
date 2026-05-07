@@ -7,9 +7,11 @@ use crate::format::{ENTRY_SIZE, Entry};
 
 pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut expanded_paths = Vec::new();
+    let mut rejected_paths = Vec::new();
 
     for path in input_paths {
         if path.is_dir() {
+            let before = expanded_paths.len();
             for entry in std::fs::read_dir(path)? {
                 let entry = entry?;
                 let file_path = entry.path();
@@ -18,25 +20,52 @@ pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
                     expanded_paths.push(file_path);
                 }
             }
+            if expanded_paths.len() == before {
+                rejected_paths.push(format!(
+                    "{} (directory contains no sequence files)",
+                    path.display()
+                ));
+            }
         } else if path.is_file() {
             if is_sequence_file(path) {
                 expanded_paths.push(path.clone());
             } else {
                 let content = std::fs::read_to_string(path)?;
+                let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
                 for line in content.lines() {
-                    let file_path = PathBuf::from(line.trim());
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    let listed_path = PathBuf::from(line);
+                    let file_path = if listed_path.is_relative() {
+                        base_dir.join(listed_path)
+                    } else {
+                        listed_path
+                    };
                     if file_path.exists() && is_sequence_file(&file_path) {
-                        expanded_paths.push(file_path);
+                        expanded_paths.push(file_path.canonicalize().unwrap_or(file_path));
+                    } else {
+                        rejected_paths.push(format!(
+                            "{} (listed in {}, missing or unsupported extension)",
+                            file_path.display(),
+                            path.display()
+                        ));
                     }
                 }
             }
+        } else {
+            rejected_paths.push(format!("{} (does not exist)", path.display()));
         }
     }
 
     if expanded_paths.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No valid sequence files found in input paths"
-        ));
+        let mut message = "No valid sequence files found in input paths".to_string();
+        if !rejected_paths.is_empty() {
+            message.push_str(": ");
+            message.push_str(&rejected_paths.join(", "));
+        }
+        return Err(anyhow::anyhow!(message));
     }
 
     expanded_paths.sort();

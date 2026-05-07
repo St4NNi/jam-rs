@@ -192,6 +192,28 @@ fn test_expand_input_paths_file_list_with_comments() -> Result<()> {
 }
 
 #[test]
+fn test_expand_input_paths_file_list_relative_to_list_file() -> Result<()> {
+    let env = CoverageTestEnvironment::new()?;
+
+    let list_dir = env.temp_path().join("lists");
+    let data_dir = env.temp_path().join("data");
+    fs::create_dir_all(&list_dir)?;
+    fs::create_dir_all(&data_dir)?;
+
+    let valid_file = data_dir.join("valid.fa");
+    fs::write(&valid_file, ">seq\nACGT\n")?;
+
+    let file_list = list_dir.join("inputs.txt");
+    fs::write(&file_list, "../data/valid.fa\n")?;
+
+    let result = expand_input_paths(&[file_list])?;
+
+    assert_eq!(result, vec![valid_file]);
+
+    Ok(())
+}
+
+#[test]
 fn test_expand_input_paths_duplicate_files() -> Result<()> {
     let env = CoverageTestEnvironment::new()?;
 
