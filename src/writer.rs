@@ -1,7 +1,7 @@
 use crate::bias::HashBiasTable;
 use crate::format::{
     BUCKET_COUNT, BUCKET_TABLE_SIZE, BucketMeta, DATA_START, ENTRY_SIZE, Entry,
-    FLAG_HAS_BIAS_TABLE, HEADER_SIZE, Header, MAGIC, VERSION,
+    FLAG_HAS_BIAS_TABLE, HEADER_SIZE, Header, MAGIC, PAGE_SIZE, VERSION,
 };
 use crate::io::{extract_unique_hashes, read_entries, write_entries};
 use crate::sketch::{SketchConfig, SketchResult};
@@ -31,25 +31,21 @@ pub fn serialize_filter(filter: &BinaryFuse8) -> Vec<u8> {
     out
 }
 
-fn serialize_sample_names(names: &[String]) -> Vec<u8> {
+fn serialize_sample_names(names: &[String]) -> Result<Vec<u8>, CompactError> {
     let mut buf = Vec::new();
     for (idx, name) in names.iter().enumerate() {
         let bytes = name.as_bytes();
-        let len = if bytes.len() > u16::MAX as usize {
-            eprintln!(
-                "Warning: Sample name at index {} is {} bytes, truncating to {} bytes",
-                idx,
+        let len = u16::try_from(bytes.len()).map_err(|_| {
+            CompactError::SizeOverflow(format!(
+                "sample name at index {idx} is {} bytes, maximum is {}",
                 bytes.len(),
                 u16::MAX
-            );
-            u16::MAX
-        } else {
-            bytes.len() as u16
-        };
+            ))
+        })?;
         buf.extend_from_slice(&len.to_le_bytes());
         buf.extend_from_slice(&bytes[..len as usize]);
     }
-    buf
+    Ok(buf)
 }
 
 fn serialize_sample_sizes(sizes: &[u64]) -> Vec<u8> {
@@ -169,6 +165,31 @@ pub enum CompactError {
 
     #[error("Filter construction failed for bucket {bucket}: {message}")]
     FilterConstruction { bucket: usize, message: String },
+
+    #[error("Size overflow: {0}")]
+    SizeOverflow(String),
+}
+
+fn checked_add_usize(lhs: usize, rhs: usize, label: &str) -> Result<usize, CompactError> {
+    lhs.checked_add(rhs).ok_or_else(|| {
+        CompactError::SizeOverflow(format!("{label} overflows usize: {lhs} + {rhs}"))
+    })
+}
+
+fn checked_mul_usize(lhs: usize, rhs: usize, label: &str) -> Result<usize, CompactError> {
+    lhs.checked_mul(rhs).ok_or_else(|| {
+        CompactError::SizeOverflow(format!("{label} overflows usize: {lhs} * {rhs}"))
+    })
+}
+
+fn checked_add_u64(lhs: u64, rhs: u64, label: &str) -> Result<u64, CompactError> {
+    lhs.checked_add(rhs)
+        .ok_or_else(|| CompactError::SizeOverflow(format!("{label} overflows u64: {lhs} + {rhs}")))
+}
+
+fn align_to_page_checked(offset: usize) -> Result<usize, CompactError> {
+    let padded = checked_add_usize(offset, PAGE_SIZE - 1, "page alignment")?;
+    Ok(padded & !(PAGE_SIZE - 1))
 }
 
 pub fn run(
@@ -241,8 +262,9 @@ pub fn run(
 
     use crate::format::align_to_page;
 
-    let bias_size: u64 = bias_table.map(|b| b.to_bytes().len() as u64).unwrap_or(0);
-    let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names);
+    let bias_bytes = bias_table.map(|b| b.to_bytes());
+    let bias_size = bias_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
+    let sample_names_bytes = serialize_sample_names(&sketch_result.sample_names)?;
     let sample_sizes_bytes = serialize_sample_sizes(&aggregated_sample_sizes);
 
     let bucket_regions_start = align_to_page(DATA_START);
@@ -251,15 +273,41 @@ pub fn run(
 
     for bucket in &processed {
         bucket_offsets.push(current_offset);
-        let bucket_size = bucket.filter_bytes.len() + (bucket.entry_count as usize) * ENTRY_SIZE;
+        let entry_count = usize::try_from(bucket.entry_count).map_err(|_| {
+            CompactError::SizeOverflow(format!(
+                "bucket {} entry count does not fit usize: {}",
+                bucket.bucket_id, bucket.entry_count
+            ))
+        })?;
+        let entries_bytes_len = checked_mul_usize(
+            entry_count,
+            ENTRY_SIZE,
+            &format!("bucket {} entry byte size", bucket.bucket_id),
+        )?;
+        let bucket_size = checked_add_usize(
+            bucket.filter_bytes.len(),
+            entries_bytes_len,
+            &format!("bucket {} region size", bucket.bucket_id),
+        )?;
         if bucket_size > 0 {
-            current_offset = align_to_page(current_offset + bucket_size);
+            current_offset = align_to_page_checked(checked_add_usize(
+                current_offset,
+                bucket_size,
+                &format!("bucket {} end offset", bucket.bucket_id),
+            )?)?;
         }
     }
 
     let metadata_offset = current_offset;
-    let total_size =
-        metadata_offset + bias_size as usize + sample_names_bytes.len() + sample_sizes_bytes.len();
+    let total_size = checked_add_usize(
+        checked_add_usize(
+            checked_add_usize(metadata_offset, bias_size, "metadata bias section")?,
+            sample_names_bytes.len(),
+            "metadata sample names section",
+        )?,
+        sample_sizes_bytes.len(),
+        "metadata sample sizes section",
+    )?;
 
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -267,7 +315,9 @@ pub fn run(
         .create(true)
         .truncate(true)
         .open(output_path)?;
-    file.set_len(total_size as u64)?;
+    file.set_len(u64::try_from(total_size).map_err(|_| {
+        CompactError::SizeOverflow(format!("file size does not fit u64: {total_size}"))
+    })?)?;
 
     let mut mmap = unsafe { MmapMut::map_mut(&file)? };
 
@@ -279,13 +329,27 @@ pub fn run(
     for bucket in &processed {
         let bucket_offset = bucket_offsets[bucket.bucket_id];
         let filter_size = bucket.filter_bytes.len();
-        let entries_bytes_len = (bucket.entry_count as usize) * ENTRY_SIZE;
+        let entry_count = usize::try_from(bucket.entry_count).map_err(|_| {
+            CompactError::SizeOverflow(format!(
+                "bucket {} entry count does not fit usize: {}",
+                bucket.bucket_id, bucket.entry_count
+            ))
+        })?;
+        let entries_bytes_len = checked_mul_usize(
+            entry_count,
+            ENTRY_SIZE,
+            &format!("bucket {} entry byte size", bucket.bucket_id),
+        )?;
 
         if !bucket.filter_bytes.is_empty() {
             mmap[bucket_offset..bucket_offset + filter_size].copy_from_slice(&bucket.filter_bytes);
         }
 
-        let entry_offset = bucket_offset + filter_size;
+        let entry_offset = checked_add_usize(
+            bucket_offset,
+            filter_size,
+            &format!("bucket {} entry offset", bucket.bucket_id),
+        )?;
         if bucket.entry_count > 0 {
             let bucket_path = temp_path.join(format!("bucket_{:03}.bin", bucket.bucket_id));
             let entries = read_entries(&bucket_path)?;
@@ -300,16 +364,38 @@ pub fn run(
             entry_count: bucket.entry_count,
         };
 
-        total_unique_hashes += bucket.unique_hash_count;
-        entries_size += entries_bytes_len as u64;
-        filters_size += filter_size as u64;
+        total_unique_hashes = checked_add_u64(
+            total_unique_hashes,
+            bucket.unique_hash_count,
+            "total unique hash count",
+        )?;
+        entries_size = checked_add_u64(
+            entries_size,
+            u64::try_from(entries_bytes_len).map_err(|_| {
+                CompactError::SizeOverflow(format!(
+                    "bucket {} entry byte size does not fit u64: {}",
+                    bucket.bucket_id, entries_bytes_len
+                ))
+            })?,
+            "total entry byte size",
+        )?;
+        filters_size = checked_add_u64(
+            filters_size,
+            u64::try_from(filter_size).map_err(|_| {
+                CompactError::SizeOverflow(format!(
+                    "bucket {} filter byte size does not fit u64: {}",
+                    bucket.bucket_id, filter_size
+                ))
+            })?,
+            "total filter byte size",
+        )?;
     }
 
     let mut meta_offset = metadata_offset;
 
-    let (bias_table_offset, bias_table_size, flags) = if let Some(bias) = bias_table {
-        let bias_bytes = bias.to_bytes();
-        mmap[meta_offset..meta_offset + bias_bytes.len()].copy_from_slice(&bias_bytes);
+    let (bias_table_offset, bias_table_size, flags) = if let Some(bias_bytes) = bias_bytes.as_ref()
+    {
+        mmap[meta_offset..meta_offset + bias_bytes.len()].copy_from_slice(bias_bytes);
         let offset = meta_offset;
         meta_offset += bias_bytes.len();
         (offset as u64, bias_bytes.len() as u64, FLAG_HAS_BIAS_TABLE)
@@ -329,7 +415,9 @@ pub fn run(
     let table_bytes = bytemuck::cast_slice::<BucketMeta, u8>(&bucket_metas);
     mmap[HEADER_SIZE..HEADER_SIZE + BUCKET_TABLE_SIZE].copy_from_slice(table_bytes);
 
-    let total_entries: u64 = processed.iter().map(|b| b.entry_count).sum();
+    let total_entries: u64 = processed.iter().try_fold(0u64, |acc, bucket| {
+        checked_add_u64(acc, bucket.entry_count, "total entry count")
+    })?;
 
     let header = Header {
         magic: MAGIC,
@@ -374,7 +462,9 @@ pub fn run(
         total_entries,
         unique_hashes: total_unique_hashes,
         sample_count: sketch_result.sample_count,
-        file_size: total_size as u64,
+        file_size: u64::try_from(total_size).map_err(|_| {
+            CompactError::SizeOverflow(format!("file size does not fit u64: {total_size}"))
+        })?,
         kmer_size,
         frac_max: sketch_result.frac_max,
         bucket_entry_counts,
