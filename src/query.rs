@@ -200,7 +200,9 @@ impl QuerySketch {
                 sample_names.push(name);
                 sample_hash_sets.push(HashSet::new());
                 weight_sums.push(0.0);
-                current_sample_id = (sample_names.len() - 1) as u32;
+                current_sample_id = u32::try_from(sample_names.len() - 1).map_err(|_| {
+                    QueryError::Config("query sample count exceeds u32::MAX".to_string())
+                })?;
             }
 
             let sequence = record.normalize(false);
@@ -287,14 +289,22 @@ impl QuerySketch {
                 Self::from_fasta(input, db, singleton)?
             };
 
-            let sample_offset = combined.sample_count() as u32;
+            let sample_offset = u32::try_from(combined.sample_count()).map_err(|_| {
+                QueryError::Config("combined query sample count exceeds u32::MAX".to_string())
+            })?;
             combined.sample_names.extend(sketch.sample_names);
             combined.query_sizes.extend(sketch.query_sizes);
             combined.query_weight_sums.extend(sketch.query_weight_sums);
 
             for (bucket_idx, bucket) in sketch.buckets.into_iter().enumerate() {
                 for (hash, sample_id) in bucket {
-                    combined.buckets[bucket_idx].push((hash, sample_id + sample_offset));
+                    let combined_sample_id =
+                        sample_id.checked_add(sample_offset).ok_or_else(|| {
+                            QueryError::Config(
+                                "combined query sample ID exceeds u32::MAX".to_string(),
+                            )
+                        })?;
+                    combined.buckets[bucket_idx].push((hash, combined_sample_id));
                 }
             }
         }
@@ -332,6 +342,9 @@ pub enum QueryError {
         source_value: String,
         target_value: String,
     },
+
+    #[error("Invalid query configuration: {0}")]
+    Config(String),
 }
 
 #[derive(Debug, Clone)]
