@@ -453,6 +453,7 @@ impl QueryEngine {
 
         let mut sorted_hashes = hashes.to_vec();
         sorted_hashes.sort_unstable_by_key(|&h| (h & 0xFF, h));
+        sorted_hashes.dedup();
 
         let mut sample_hits: HashMap<u32, (u32, f64)> = HashMap::new();
         let mut hashes_found = 0;
@@ -475,7 +476,7 @@ impl QueryEngine {
             }
         }
 
-        let query_size = hashes.len();
+        let query_size = sorted_hashes.len();
         let threshold = self.reader.threshold();
         let sample_sizes = self.reader.sample_sizes();
         let num_db_samples = self.reader.stats().sample_count;
@@ -483,7 +484,7 @@ impl QueryEngine {
             .bias_table
             .as_ref()
             .map(|bt| {
-                hashes
+                sorted_hashes
                     .iter()
                     .map(|&h| bt.effective_fscale_at(bt.weight(h)))
                     .sum()
@@ -1419,6 +1420,28 @@ mod tests {
             unseen_fscale: None,
         };
         HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap()
+    }
+
+    #[test]
+    fn test_query_deduplicates_direct_hashes() {
+        let (_dir, path) = build_test_db(&[("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG")], false);
+        let reader = JamReader::open(&path).unwrap();
+        let hash = (0..BUCKET_COUNT)
+            .find_map(|bucket_idx| {
+                reader
+                    .bucket_entries(bucket_idx)
+                    .first()
+                    .map(|entry| entry.hash)
+            })
+            .expect("test database should contain at least one hash");
+
+        let engine = QueryEngine::open(&path).unwrap();
+        let result = engine.query(&[hash, hash, hash]);
+
+        assert_eq!(result.query_size, 1);
+        assert_eq!(result.hashes_found, 1);
+        let m = result.matches.iter().find(|m| m.sample_id == 0).unwrap();
+        assert_eq!(m.hit_count, 1);
     }
 
     #[test]
