@@ -385,30 +385,6 @@ fn empirical_prior_from_weights(weights: &[i8]) -> [f64; 255] {
 
 const DROP_MODE_LOG_CAP: f64 = 1e18;
 
-#[inline]
-fn retention_from_log_fscale(log_fs: f64, base_fs: f64) -> f64 {
-    (base_fs / log_fs.exp()).min(1.0)
-}
-
-fn compute_retentions(
-    x: &[f64; 255],
-    p_pos: &[f64; 255],
-    p_neg: &[f64; 255],
-    p_target: &[f64; 255],
-    base_fs: f64,
-) -> (f64, f64, f64) {
-    let mut pos_ret = 0.0f64;
-    let mut neg_ret = 0.0f64;
-    let mut target_ret = 0.0f64;
-    for i in 0..255 {
-        let r = retention_from_log_fscale(x[i], base_fs);
-        pos_ret += p_pos[i] * r;
-        neg_ret += p_neg[i] * r;
-        target_ret += p_target[i] * r;
-    }
-    (pos_ret, neg_ret, target_ret)
-}
-
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn target_fscale_lut(
     p_pos: &[f64; 255],
@@ -567,30 +543,6 @@ fn target_fscale_lut(
             lut[i] = lut[i].min(target_fscale);
         }
     }
-
-    let (final_pos_ret, final_neg_ret, _) = {
-        let mut x = [0.0f64; 255];
-        for i in 0..255 {
-            let fs = if lut[i] == u64::MAX {
-                neg_fs
-            } else {
-                lut[i] as f64
-            };
-            x[i] = fs.ln();
-        }
-        compute_retentions(&x, p_pos, p_neg, _p_target, base_fs)
-    };
-    let final_fold = if final_neg_ret > 1e-30 {
-        final_pos_ret / final_neg_ret
-    } else {
-        f64::INFINITY
-    };
-    let pos_eff = base_fs / final_pos_ret;
-    let neg_eff = base_fs / final_neg_ret;
-    eprintln!(
-        "  Knapsack LUT: pos_eff={:.0}, neg_eff={:.0}, fold={:.2}x, neg_ret={:.4} (budget={:.4})",
-        pos_eff, neg_eff, final_fold, final_neg_ret, target_ret
-    );
 
     Ok(lut)
 }
