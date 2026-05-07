@@ -60,6 +60,40 @@ impl QuerySketch {
             });
         }
 
+        if source.min_entropy().to_bits() != db.min_entropy().to_bits() {
+            return Err(QueryError::ParameterMismatch {
+                parameter: "minimum entropy".to_string(),
+                source_value: source.min_entropy().to_string(),
+                target_value: db.min_entropy().to_string(),
+            });
+        }
+
+        match (source.bias_table(), db.bias_table()) {
+            (None, None) => {}
+            (Some(source_bias), Some(db_bias)) if source_bias.as_ref() == db_bias.as_ref() => {}
+            (Some(_), Some(_)) => {
+                return Err(QueryError::ParameterMismatch {
+                    parameter: "bias table".to_string(),
+                    source_value: "different bias table".to_string(),
+                    target_value: "database bias table".to_string(),
+                });
+            }
+            (Some(_), None) => {
+                return Err(QueryError::ParameterMismatch {
+                    parameter: "bias table".to_string(),
+                    source_value: "present".to_string(),
+                    target_value: "absent".to_string(),
+                });
+            }
+            (None, Some(_)) => {
+                return Err(QueryError::ParameterMismatch {
+                    parameter: "bias table".to_string(),
+                    source_value: "absent".to_string(),
+                    target_value: "present".to_string(),
+                });
+            }
+        }
+
         let stats = source.stats();
         let expected_sample_count = stats.sample_count as usize;
 
@@ -717,8 +751,10 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
     use crate::writer::{BuildConfig, build};
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::NamedTempFile;
 
     fn make_fasta(seqs: &[(&str, &str)]) -> NamedTempFile {
@@ -1354,6 +1390,99 @@ mod tests {
 
         build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
         (output_dir, output_path)
+    }
+
+    fn build_test_db_with_config(
+        seqs: &[(&str, &str)],
+        config: BuildConfig,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let input = make_fasta(seqs);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+        build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
+        (output_dir, output_path)
+    }
+
+    fn make_bias_table(k: u8, fscale: u64) -> HashBiasTable {
+        let pos = make_fasta(&[("pos", "ATCGATCGATCGATCGATCGATCGATCGATCG")]);
+        let neg = make_fasta(&[("neg", "GCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTA")]);
+        let config = BiasCreateConfig {
+            cms: CMSConfig {
+                width: 1024,
+                depth: 3,
+                k,
+                fscale,
+            },
+            alpha: 1.0,
+            target_fscale: None,
+            negative_fscale: None,
+            unseen_fscale: None,
+        };
+        HashBiasTable::create(&[pos.path()], &[neg.path()], &config, None).unwrap()
+    }
+
+    #[test]
+    fn test_from_jam_min_entropy_mismatch() {
+        let base_config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 1,
+            memory: 1,
+            ..Default::default()
+        };
+        let (_source_dir, source_path) = build_test_db_with_config(
+            &[("source", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
+            base_config.clone(),
+        );
+
+        let mut target_config = base_config;
+        target_config.min_entropy = 1.0;
+        let (_target_dir, target_path) = build_test_db_with_config(
+            &[("target", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
+            target_config,
+        );
+
+        let db = JamReader::open(&target_path).unwrap();
+        let err = QuerySketch::from_jam(&source_path, &db).unwrap_err();
+        match err {
+            QueryError::ParameterMismatch { parameter, .. } => {
+                assert!(parameter.contains("entropy"));
+            }
+            e => panic!("Expected ParameterMismatch error, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_from_jam_bias_presence_mismatch() {
+        let bias_table = make_bias_table(11, 1);
+        let (_source_dir, source_path) = build_test_db_with_params(
+            &[("source", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
+            11,
+            1,
+            false,
+        );
+
+        let target_config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            num_threads: 1,
+            memory: 1,
+            bias_table: Some(Arc::new(bias_table)),
+            ..Default::default()
+        };
+        let (_target_dir, target_path) = build_test_db_with_config(
+            &[("target", "ATCGATCGATCGATCGATCGATCGATCGATCG")],
+            target_config,
+        );
+
+        let db = JamReader::open(&target_path).unwrap();
+        let err = QuerySketch::from_jam(&source_path, &db).unwrap_err();
+        match err {
+            QueryError::ParameterMismatch { parameter, .. } => {
+                assert!(parameter.contains("bias"));
+            }
+            e => panic!("Expected ParameterMismatch error, got {:?}", e),
+        }
     }
 
     #[test]
