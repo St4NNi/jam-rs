@@ -46,7 +46,7 @@ Every module, type, option, comment and document uses these terms with exactly t
 | mosaic | The fragments of one entry chosen to cover the query without counting a query base twice. |
 | query coverage | The share of query bases covered by an entry's mosaic. |
 | identity | Matches divided by alignment columns, over the fragments of the mosaic together. |
-| decision | The rule that reports an entry: query coverage, identity and the contig rule (each counted contig is aligned at least halfway at the identity limit). |
+| decision | The rule that reports an entry: query coverage, identity, and the optional contig rule (a contig counts only when a set share of its bases aligns to the query at a set identity, so a contig that only shares a gene or a repeat is left out). |
 | shard | A part of an index (a set of entries) that one process opens. An index has one or more shards. |
 | coordinator | The server that sends a query to every shard and merges their results. |
 | screen | The reverse direction: the small sequences form the index and large assemblies stream past it once. Results use the same decision. |
