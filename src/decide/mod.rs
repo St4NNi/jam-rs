@@ -2,8 +2,10 @@
 //! entry.
 
 mod coverage;
+mod fragment;
 
 pub use coverage::QueryCoverage;
+pub use fragment::{Fragment, QueryWindow};
 
 use crate::align::AlignmentError;
 use thiserror::Error;
