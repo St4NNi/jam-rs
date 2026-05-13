@@ -4,10 +4,12 @@
 mod coverage;
 mod fragment;
 mod mosaic;
+mod policy;
 
 pub use coverage::QueryCoverage;
 pub use fragment::{Fragment, QueryWindow};
 pub use mosaic::{Mosaic, SelectedFragment, build_mosaic};
+pub use policy::{Decision, DecisionRule};
 
 use crate::align::AlignmentError;
 use thiserror::Error;

@@ -1,0 +1,370 @@
+//! The decision rule: when an entry is reported.
+//!
+//! Fragments. A fragment counts when it has at least `min_fragment_columns` alignment columns and
+//! an identity of at least `min_fragment_identity`. Others are left out. Identical fragments count
+//! once; distinct copies and overlapping fragments each count, primary and alternative alike.
+//!
+//! Decision. The identity of the entry is the sum of matches over the sum of columns of all
+//! counted fragments, so a diverged contig can be offset by a conserved one. The entry is
+//! reported when this identity reaches `min_identity` and the mosaic reaches `min_query_coverage`.
+//! Limits are compared exactly as `matches >= limit * columns`.
+
+use super::{DecideError, Fragment, Mosaic, QueryCoverage, build_mosaic};
+use crate::align::{Alignment, EditCounts};
+
+/// The limits that decide whether an entry is reported.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecisionRule {
+    /// The least query coverage of the mosaic. A share must be at least 0.05, as a large plasmid
+    /// can show as a few small pieces.
+    pub min_query_coverage: QueryCoverage,
+    /// The least identity over all counted fragments together.
+    pub min_identity: f64,
+    /// The least identity of one fragment to count. 0 lets every fragment count.
+    pub min_fragment_identity: f64,
+    /// The least number of alignment columns of one fragment to count.
+    pub min_fragment_columns: u64,
+}
+
+impl Default for DecisionRule {
+    fn default() -> Self {
+        Self {
+            min_query_coverage: QueryCoverage::Share {
+                numerator: 5,
+                decimal_places: 1,
+            },
+            min_identity: 0.8,
+            min_fragment_identity: 0.0,
+            min_fragment_columns: 100,
+        }
+    }
+}
+
+/// The result of applying a rule to the fragments of one entry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decision {
+    /// The mosaic of the counted fragments.
+    pub mosaic: Mosaic,
+    /// Base counts summed over the counted fragments.
+    pub counts: EditCounts,
+    /// Fragments left out because they fall below the fragment limits.
+    pub dropped_fragments: usize,
+    /// Whether the entry is reported.
+    pub qualifies: bool,
+}
+
+impl Decision {
+    /// Matches over columns of the counted fragments; 0 when none counts.
+    pub fn identity(&self) -> f64 {
+        self.counts.identity()
+    }
+}
+
+impl DecisionRule {
+    /// Checks that the limits make sense.
+    pub fn validate(&self) -> Result<(), DecideError> {
+        // A share is tested on a length where every decimal share of up to 17 digits is exact.
+        const LENGTH: u64 = 1_000_000_000_000_000_000;
+        let required = self.min_query_coverage.required_bases(LENGTH);
+        let fraction = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
+        if !(LENGTH / 20..=LENGTH).contains(&required) && !self.has_base_count() {
+            return Err(DecideError::InvalidRule("query coverage is below 0.05"));
+        }
+        if self.has_base_count() && self.min_query_coverage == QueryCoverage::Bases(0) {
+            return Err(DecideError::InvalidRule("query coverage is zero bases"));
+        }
+        if !fraction(self.min_identity) || !fraction(self.min_fragment_identity) {
+            return Err(DecideError::InvalidRule("identity is not from 0 to 1"));
+        }
+        if self.min_fragment_columns == 0 {
+            return Err(DecideError::InvalidRule("fragment columns is zero"));
+        }
+        Ok(())
+    }
+
+    fn has_base_count(&self) -> bool {
+        matches!(self.min_query_coverage, QueryCoverage::Bases(_))
+    }
+
+    /// Whether a fragment with this alignment counts.
+    pub fn counts_fragment(&self, alignment: &Alignment) -> bool {
+        let counts = alignment.counts();
+        counts.columns() >= self.min_fragment_columns
+            && counts.matches as f64 >= self.min_fragment_identity * counts.columns() as f64
+    }
+
+    /// Builds the mosaic of the counted fragments of one entry and decides.
+    pub fn decide(
+        &self,
+        query_length: u64,
+        fragments: Vec<Fragment>,
+    ) -> Result<Decision, DecideError> {
+        let before = fragments.len();
+        let counted: Vec<Fragment> = fragments
+            .into_iter()
+            .filter(|fragment| self.counts_fragment(&fragment.alignment))
+            .collect();
+        let dropped_fragments = before - counted.len();
+        let mosaic = build_mosaic(query_length, &counted)?;
+        let mut counts = EditCounts::default();
+        let used = mosaic
+            .primary
+            .iter()
+            .map(|selected| &selected.fragment)
+            .chain(&mosaic.alternatives);
+        for fragment in used {
+            let part = fragment.alignment.counts();
+            counts.matches += part.matches;
+            counts.substitutions += part.substitutions;
+            counts.insertions += part.insertions;
+            counts.deletions += part.deletions;
+        }
+        let qualifies = counts.columns() > 0
+            && counts.matches as f64 >= self.min_identity * counts.columns() as f64
+            && self
+                .min_query_coverage
+                .accepts(mosaic.covered_bases, query_length);
+        Ok(Decision {
+            mosaic,
+            counts,
+            dropped_fragments,
+            qualifies,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::align::{Interval, Strand, parse_cigar};
+
+    fn fragment(contig_index: u32, segments: &[(u64, u64)], cigar: &str) -> Fragment {
+        let runs = parse_cigar(cigar).unwrap();
+        let mut alignment = Alignment {
+            score: 0,
+            strand: Strand::Forward,
+            query_interval: Interval::new(0, 0).unwrap(),
+            contig_interval: Interval::new(0, 0).unwrap(),
+            runs,
+        };
+        let counts = alignment.counts();
+        let query = counts.matches + counts.substitutions + counts.insertions;
+        let contig = counts.matches + counts.substitutions + counts.deletions;
+        alignment.score = (2 * counts.matches) as i32
+            - (3 * counts.substitutions + counts.insertions + counts.deletions) as i32;
+        alignment.query_interval = Interval::new(0, query).unwrap();
+        alignment.contig_interval = Interval::new(0, contig).unwrap();
+        Fragment {
+            contig_index,
+            query_segments: segments
+                .iter()
+                .map(|&(start, end)| Interval::new(start, end).unwrap())
+                .collect(),
+            alignment,
+        }
+    }
+
+    fn rule(coverage: &str) -> DecisionRule {
+        DecisionRule {
+            min_query_coverage: coverage.parse().unwrap(),
+            ..DecisionRule::default()
+        }
+    }
+
+    fn columns_and_matches(decision: &Decision) -> (u64, u64) {
+        (decision.counts.matches, decision.counts.columns())
+    }
+
+    #[test]
+    fn mixed_identity_passes_only_combined() {
+        let conserved = fragment(0, &[(0, 3000)], "1425=150X1425=");
+        let diverged = fragment(1, &[(3000, 5000)], "720=280X720=280X");
+        let both = rule("0.5")
+            .decide(10_000, vec![conserved.clone(), diverged.clone()])
+            .unwrap();
+        assert!(both.qualifies);
+        assert_eq!(columns_and_matches(&both), (2850 + 1440, 5000));
+        assert_eq!(both.mosaic.covered_bases, 5000);
+        for alone in [conserved.clone(), diverged.clone()] {
+            assert!(!rule("0.5").decide(10_000, vec![alone]).unwrap().qualifies);
+        }
+        // A limit on each fragment drops the 72 percent contig and the coverage falls short.
+        let strict = DecisionRule {
+            min_fragment_identity: 0.8,
+            ..rule("0.5")
+        };
+        let decision = strict.decide(10_000, vec![conserved, diverged]).unwrap();
+        assert!(!decision.qualifies);
+        assert_eq!(decision.dropped_fragments, 1);
+    }
+
+    #[test]
+    fn identity_just_below_the_limit_fails() {
+        let low = fragment(1, &[(1000, 2000)], "700=300X");
+        let below = fragment(0, &[(0, 1000)], "899=101X");
+        let decision = rule("1").decide(2000, vec![below, low.clone()]).unwrap();
+        assert_eq!(columns_and_matches(&decision), (1599, 2000));
+        assert!(!decision.qualifies);
+        let exact = fragment(0, &[(0, 1000)], "900=100X");
+        assert!(rule("1").decide(2000, vec![exact, low]).unwrap().qualifies);
+    }
+
+    #[test]
+    fn identity_is_weighted_by_columns_not_averaged() {
+        let short = fragment(1, &[(9000, 10_000)], "990=10X");
+        // 75 and 99 percent average 87, but 7,740 of 10,000 columns match.
+        let long = fragment(0, &[(0, 9000)], "6750=2250X");
+        let decision = rule("1").decide(10_000, vec![long, short.clone()]).unwrap();
+        assert!(!decision.qualifies);
+        assert!((decision.identity() - 0.774).abs() < 1e-12);
+        let long = fragment(0, &[(0, 9000)], "7020=1980X");
+        assert!(
+            rule("1")
+                .decide(10_000, vec![long, short])
+                .unwrap()
+                .qualifies
+        );
+    }
+
+    #[test]
+    fn copies_count_and_duplicates_count_once() {
+        let first = fragment(0, &[(0, 5000)], "4500=500X");
+        let copy = fragment(1, &[(0, 5000)], "3600=1400X");
+        let decision = rule("0.5")
+            .decide(10_000, vec![first.clone(), copy, first.clone()])
+            .unwrap();
+        assert_eq!(columns_and_matches(&decision), (8100, 10_000));
+        assert_eq!(decision.mosaic.covered_bases, 5000);
+        assert_eq!(decision.mosaic.primary.len(), 1);
+        assert_eq!(decision.mosaic.alternatives.len(), 1);
+        assert!(decision.qualifies);
+        // A 65 percent copy stays in, so the identity falls to 77.5 percent.
+        let weak = fragment(1, &[(0, 5000)], "3250=1750X");
+        let decision = rule("0.5")
+            .decide(10_000, vec![first.clone(), weak.clone()])
+            .unwrap();
+        assert!(!decision.qualifies);
+        assert!((decision.identity() - 0.775).abs() < 1e-12);
+        let strict = DecisionRule {
+            min_fragment_identity: 0.7,
+            ..rule("0.5")
+        };
+        assert!(strict.decide(10_000, vec![first, weak]).unwrap().qualifies);
+    }
+
+    #[test]
+    fn a_weak_piece_can_be_needed_for_the_coverage() {
+        let conserved = fragment(0, &[(0, 4000)], "3960=40X");
+        let divergent = fragment(1, &[(4000, 5000)], "650=350X");
+        for coverage in ["0.5", "1"] {
+            let decision = rule(coverage)
+                .decide(5000, vec![conserved.clone(), divergent.clone()])
+                .unwrap();
+            assert!(decision.qualifies);
+            assert_eq!(decision.dropped_fragments, 0);
+            assert_eq!(decision.mosaic.covered_bases, 5000);
+            assert!((decision.identity() - 0.922).abs() < 1e-12);
+        }
+        let strict = DecisionRule {
+            min_fragment_identity: 0.7,
+            ..rule("0.5")
+        };
+        assert!(
+            !strict
+                .decide(10_000, vec![conserved, divergent])
+                .unwrap()
+                .qualifies
+        );
+    }
+
+    #[test]
+    fn insertions_and_deletions_are_columns_and_bases_only_in_the_query_are_not_covered() {
+        let gapped = fragment(0, &[(0, 1000)], "800=50I100=50D50=");
+        let decision = rule("1").decide(1000, vec![gapped.clone()]).unwrap();
+        assert_eq!(columns_and_matches(&decision), (950, 1050));
+        // The 50 query-only bases are not covered, and the 50 contig-only bases use no query base.
+        assert_eq!(decision.mosaic.covered_bases, 950);
+        assert!(!decision.qualifies);
+        assert!(rule("0.95").decide(1000, vec![gapped]).unwrap().qualifies);
+    }
+
+    #[test]
+    fn coverage_limits_are_exact() {
+        for (limit, required) in [("0.50", 501), ("0.75", 751), ("0.90", 901), ("1.00", 1001)] {
+            for (bases, expected) in [(required, true), (required - 1, false)] {
+                let exact = fragment(0, &[(0, bases)], &format!("{bases}="));
+                let decision = rule(limit).decide(1001, vec![exact]).unwrap();
+                assert_eq!(decision.qualifies, expected, "{limit} {bases}");
+            }
+        }
+        let wrapped = fragment(0, &[(900, 1001), (0, 400)], "501=");
+        let decision = rule("0.5").decide(1001, vec![wrapped]).unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(decision.mosaic.covered_bases, 501);
+    }
+
+    #[test]
+    fn a_base_count_decides_like_a_share() {
+        let piece = fragment(0, &[(0, 800)], "800=");
+        assert!(
+            rule("800bp")
+                .decide(100_000, vec![piece.clone()])
+                .unwrap()
+                .qualifies
+        );
+        assert!(
+            !rule("801bp")
+                .decide(100_000, vec![piece])
+                .unwrap()
+                .qualifies
+        );
+    }
+
+    #[test]
+    fn fragment_limits() {
+        let rule = rule("0.5");
+        let counts = |cigar: &str, length| {
+            rule.counts_fragment(&fragment(0, &[(0, length)], cigar).alignment)
+        };
+        assert!(!counts("99=", 99));
+        assert!(counts("100=", 100));
+        assert!(counts("70=30X", 100));
+        assert!(counts("65=35X", 100));
+        let strict = DecisionRule {
+            min_fragment_identity: 0.7,
+            ..rule
+        };
+        assert!(!strict.counts_fragment(&fragment(0, &[(0, 100)], "69=31X").alignment));
+        // Four decimals would print 0.79996 as 0.8000, but the limit is compared exactly.
+        let rounded = fragment(0, &[(0, 100_000)], "79996=20004X");
+        let decision = rule.decide(100_000, vec![rounded]).unwrap();
+        assert_eq!(format!("{:.4}", decision.identity()), "0.8000");
+        assert!(!decision.qualifies);
+    }
+
+    #[test]
+    fn rule_limits_are_checked() {
+        assert!(DecisionRule::default().validate().is_ok());
+        for coverage in ["0.05", "0.1", "0.4999", "0.5", "0.75", "1", "1bp", "5000bp"] {
+            assert!(rule(coverage).validate().is_ok(), "{coverage}");
+        }
+        for coverage in ["0.0499", "0", "0bp"] {
+            assert!(rule(coverage).validate().is_err(), "{coverage}");
+        }
+        let invalid = [
+            DecisionRule {
+                min_identity: f64::NAN,
+                ..DecisionRule::default()
+            },
+            DecisionRule {
+                min_fragment_identity: 1.5,
+                ..DecisionRule::default()
+            },
+            DecisionRule {
+                min_fragment_columns: 0,
+                ..DecisionRule::default()
+            },
+        ];
+        assert!(invalid.iter().all(|rule| rule.validate().is_err()));
+    }
+}
