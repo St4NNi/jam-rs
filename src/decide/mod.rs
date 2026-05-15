@@ -1,6 +1,7 @@
 //! Fragments, the mosaic of an entry, query coverage, identity and the decision that reports an
 //! entry.
 
+mod contigs;
 mod coverage;
 mod fragment;
 mod mosaic;
