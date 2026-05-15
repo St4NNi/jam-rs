@@ -174,10 +174,7 @@ impl MissModel {
         if identity >= 1.0 {
             return 0.0;
         }
-        let (row, row_weight) = locate(
-            &self.lengths.iter().map(|&l| l as f64).collect::<Vec<_>>(),
-            stretch_bases as f64,
-        );
+        let (row, row_weight) = locate(&self.lengths, stretch_bases as f64);
         let (column, column_weight) = locate(&self.identities, identity);
         let width = self.identities.len();
         let at = |r: usize, c: usize| self.ln_miss[r * width + c];
