@@ -289,3 +289,6 @@ impl LossBudget {
         absent
     }
 }
+
+#[cfg(test)]
+mod tests;
