@@ -402,6 +402,43 @@ mod tests {
     }
 
     #[test]
+    fn a_contig_that_only_shares_a_part_does_not_lower_the_identity() {
+        // Contig 0 is the query. Contig 1 shares 400 of 10,000 bases at 75 percent.
+        let query_copy = fragment(0, &[(0, 3000)], "2970=30X");
+        let shared_part = fragment(1, &[(3000, 3400)], "300=100X");
+        let lengths = |contig: u32| [3000, 10_000][contig as usize];
+        let fragments = || vec![query_copy.clone(), shared_part.clone()];
+        let open = rule("0.5");
+        let decision = open.decide(3400, fragments(), lengths).unwrap();
+        assert_eq!(columns_and_matches(&decision), (3270, 3400));
+        let by_contig = DecisionRule {
+            min_contig_coverage: 0.5,
+            min_identity: 0.98,
+            ..open
+        };
+        let decision = by_contig.decide(3400, fragments(), lengths).unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(columns_and_matches(&decision), (2970, 3000));
+        assert_eq!(decision.dropped_fragments, 1);
+        let without = DecisionRule {
+            min_contig_coverage: 0.0,
+            ..by_contig
+        };
+        assert!(
+            !without
+                .decide(3400, fragments(), lengths)
+                .unwrap()
+                .qualifies
+        );
+        let by_identity = DecisionRule {
+            min_contig_identity: 0.9,
+            ..without
+        };
+        let decision = by_identity.decide(3400, fragments(), lengths).unwrap();
+        assert_eq!(decision.dropped_fragments, 1);
+    }
+
+    #[test]
     fn rule_limits_are_checked() {
         assert!(DecisionRule::default().validate().is_ok());
         for coverage in ["0.05", "0.1", "0.4999", "0.5", "0.75", "1", "1bp", "5000bp"] {
@@ -417,6 +454,14 @@ mod tests {
             },
             DecisionRule {
                 min_fragment_identity: 1.5,
+                ..DecisionRule::default()
+            },
+            DecisionRule {
+                min_contig_coverage: 1.5,
+                ..DecisionRule::default()
+            },
+            DecisionRule {
+                min_contig_identity: -0.1,
                 ..DecisionRule::default()
             },
             DecisionRule {
