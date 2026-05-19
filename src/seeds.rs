@@ -329,3 +329,6 @@ impl WindowMinimum {
     }
 }
 
+
+#[cfg(test)]
+mod tests;
