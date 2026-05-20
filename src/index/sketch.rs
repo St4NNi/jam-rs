@@ -472,6 +472,5 @@ impl SketchWriter {
     }
 }
 
-
 #[cfg(test)]
 mod tests;

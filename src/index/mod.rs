@@ -5,6 +5,8 @@
 #[allow(dead_code)]
 mod bits;
 #[allow(dead_code)]
+pub mod positions;
+#[allow(dead_code)]
 pub mod sketch;
 
 use crate::seeds::SeedError;
@@ -12,6 +14,7 @@ use std::io;
 use std::path::Path;
 use thiserror::Error;
 
+pub use positions::{Positions, Posting};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 
 /// Errors of the index module.
