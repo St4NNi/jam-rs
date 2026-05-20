@@ -4,11 +4,15 @@
 // The writers are used by the shard build, which follows.
 #[allow(dead_code)]
 mod bits;
+#[allow(dead_code)]
+pub mod sketch;
 
 use crate::seeds::SeedError;
 use std::io;
 use std::path::Path;
 use thiserror::Error;
+
+pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 
 /// Errors of the index module.
 #[derive(Debug, Error)]
