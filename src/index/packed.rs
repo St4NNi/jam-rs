@@ -396,3 +396,5 @@ fn no_contig(contig: usize) -> IndexError {
     IndexError::Input(format!("contig {contig} is not in this entry"))
 }
 
+#[cfg(test)]
+mod tests;
