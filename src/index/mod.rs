@@ -5,6 +5,8 @@
 #[allow(dead_code)]
 mod bits;
 #[allow(dead_code)]
+pub mod manifest;
+#[allow(dead_code)]
 pub mod packed;
 #[allow(dead_code)]
 pub mod positions;
@@ -16,6 +18,7 @@ use std::io;
 use std::path::Path;
 use thiserror::Error;
 
+pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};
 pub use positions::{Positions, Posting};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
