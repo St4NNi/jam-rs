@@ -440,3 +440,6 @@ impl PositionsWriter {
     }
 }
 
+
+#[cfg(test)]
+mod tests;
