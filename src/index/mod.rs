@@ -102,3 +102,5 @@ impl crate::storage::ReadAt for MappedFile {
         self.bytes().len() as u64
     }
 }
+#[cfg(test)]
+mod tests;
