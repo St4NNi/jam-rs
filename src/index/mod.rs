@@ -1,16 +1,11 @@
 //! The on-disk index of one shard: manifest, sketch, positions and packed sequences, and building
 //! and joining shards.
 
-// The writers are used by the shard build, which follows.
-#[allow(dead_code)]
 mod bits;
-#[allow(dead_code)]
+pub mod build;
 pub mod manifest;
-#[allow(dead_code)]
 pub mod packed;
-#[allow(dead_code)]
 pub mod positions;
-#[allow(dead_code)]
 pub mod sketch;
 
 use crate::seeds::SeedError;
@@ -18,6 +13,7 @@ use std::io;
 use std::path::Path;
 use thiserror::Error;
 
+pub use build::{BuildOptions, EntryInput, build_shard};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};
 pub use positions::{Positions, Posting};
