@@ -8,8 +8,10 @@
 
 #![allow(dead_code)]
 
+mod fill;
 mod geometry;
 mod rebased;
+mod traceback;
 mod waves;
 
 use super::{AlignmentError, EditOperation};
