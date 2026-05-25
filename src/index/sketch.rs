@@ -3,7 +3,10 @@
 //! in RAM.
 //!
 //! A seed's hash selects a bucket by its top `bucket_bits` bits; the next 16 bits are its
-//! fingerprint. Seeds with the same bucket and fingerprint are one stored seed, whose color set is
+//! fingerprint. A build chooses the fewest bucket bits (8 to 28) that hold at most 256 seeds per
+//! bucket on average, counting postings as an upper bound of the seeds (see
+//! `manifest::choose_bucket_bits`), so a query k-mer matches a stored seed by chance about 0.4% of
+//! the time and the directory costs about 0.03 bytes per seed. Seeds with the same bucket and fingerprint are one stored seed, whose color set is
 //! the union of theirs. Color set ids are ranked by frequency: the set of the most seeds is 0.
 //!
 //! Layout, little endian; every section starts at a multiple of 8 bytes:
@@ -12,7 +15,7 @@
 //! | --- | --- |
 //! | 0..16 | magic `jam sketch` padded with zero bytes |
 //! | 16..20 | version (u32, 1) |
-//! | 20 | bucket bits b (u8) |
+//! | 20 | bucket bits b (u8, 1 to 28) |
 //! | 21 | fingerprint bits (u8, 16) |
 //! | 22..24 | zero |
 //! | 24..32 | entries (u64) |

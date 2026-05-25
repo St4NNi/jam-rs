@@ -2,7 +2,7 @@
 //! unchanged; only the sketch is built again, with color sets over all entries.
 
 use super::build::{complete_shard, in_partial_directory};
-use super::manifest::{Manifest, PACKED_DIRECTORY, check_names};
+use super::manifest::{Manifest, PACKED_DIRECTORY, Parameters, check_names};
 use super::positions::{POSITIONS_FILE, Positions};
 use super::{IndexError, MappedFile};
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ pub struct JoinOptions {
     pub threads: usize,
     /// Directory for temporary files.
     pub temp_dir: PathBuf,
+    /// Bucket bits to use instead of the ones chosen from the joined shard's size.
+    pub bucket_bits: Option<u8>,
     /// Link every packed sequence into the new shard's packed directory. Without it, the
     /// joined shard is opened with the directory that holds the packed sequences of all shards.
     pub link_packed: bool,
@@ -34,10 +36,14 @@ pub fn join_shards(
         .first()
         .ok_or_else(|| IndexError::Input("no shard to join".into()))?;
     let parameters = first.parameters;
-    if manifests
-        .iter()
-        .any(|manifest| manifest.parameters != parameters)
-    {
+    // Bucket bits follow each shard's size, and the joined sketch chooses its own.
+    let same = |other: &Parameters| {
+        Parameters {
+            bucket_bits: parameters.bucket_bits,
+            ..*other
+        } == parameters
+    };
+    if manifests.iter().any(|manifest| !same(&manifest.parameters)) {
         return Err(IndexError::Input(
             "shards with different parameters cannot be joined".into(),
         ));
@@ -61,6 +67,7 @@ pub fn join_shards(
                 parameters,
                 entries,
                 &options.temp_dir,
+                options.bucket_bits,
                 |writer| {
                     for input in inputs {
                         let file = MappedFile::open(&input.join(POSITIONS_FILE), false)?;

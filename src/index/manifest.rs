@@ -23,6 +23,8 @@ use std::path::Path;
 pub const MANIFEST_FILE: &str = "manifest.json";
 /// The directory of the packed sequences in a shard directory.
 pub const PACKED_DIRECTORY: &str = "packed";
+/// The fewest bucket bits a shard uses.
+pub const MIN_BUCKET_BITS: u8 = 8;
 /// The format version that this code reads and writes.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -37,7 +39,7 @@ pub struct Parameters {
     pub min_entropy: f64,
     /// Bases per bin, as a power of two.
     pub bin_bits: u8,
-    /// Sketch buckets, as a power of two.
+    /// Sketch buckets, as a power of two; the build chooses them from the shard size.
     pub bucket_bits: u8,
     /// Hash bits after the bucket bits that tell seeds apart.
     pub fingerprint_bits: u8,
@@ -67,20 +69,15 @@ impl Parameters {
         }
     }
 
-    /// Bits of a hash that the index stores per seed.
-    pub fn key_bits(&self) -> u32 {
-        u32::from(self.bucket_bits) + u32::from(self.fingerprint_bits)
-    }
-
     /// Checks that every value lies in its range.
     pub fn validate(&self) -> Result<(), IndexError> {
         self.scheme().validate()?;
         if !(4..=20).contains(&self.bin_bits) {
             return Err(IndexError::Input("bin bits must be 4 to 20".into()));
         }
-        if !(1..=MAX_BUCKET_BITS).contains(&u32::from(self.bucket_bits)) {
+        if !(u32::from(MIN_BUCKET_BITS)..=MAX_BUCKET_BITS).contains(&u32::from(self.bucket_bits)) {
             return Err(IndexError::Input(format!(
-                "bucket bits must be 1 to {MAX_BUCKET_BITS}"
+                "bucket bits must be {MIN_BUCKET_BITS} to {MAX_BUCKET_BITS}"
             )));
         }
         if self.fingerprint_bits != FINGERPRINT_BITS {
@@ -163,6 +160,16 @@ impl Manifest {
         file.sync_all()?;
         Ok(())
     }
+}
+
+/// The fewest bucket bits (8 to 28) that hold at most 256 seeds per bucket on average, given an
+/// upper bound of the distinct seeds (the build uses the posting count). With 16-bit
+/// fingerprints, a query k-mer then matches a stored seed by chance at most about
+/// 256 / 65,536 = 0.4% of the time, and the directory costs at most 8 / 256 bytes per seed.
+pub fn choose_bucket_bits(seeds: u64) -> u8 {
+    (MIN_BUCKET_BITS..MAX_BUCKET_BITS as u8)
+        .find(|bits| seeds <= 256 << bits)
+        .unwrap_or(MAX_BUCKET_BITS as u8)
 }
 
 /// The packed file path of an entry, relative to the packed directory.
@@ -290,7 +297,11 @@ mod tests {
         }
         let parameters = Parameters::default();
         assert!(parameters.validate().is_ok());
-        assert_eq!(parameters.key_bits(), 40);
+        assert_eq!(choose_bucket_bits(0), 8);
+        assert_eq!(choose_bucket_bits(256 << 8), 8);
+        assert_eq!(choose_bucket_bits((256 << 8) + 1), 9);
+        assert_eq!(choose_bucket_bits(17_000_000_000), 26);
+        assert_eq!(choose_bucket_bits(u64::MAX), 28);
         for bad in [
             Parameters {
                 bin_bits: 3,

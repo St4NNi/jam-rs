@@ -56,7 +56,6 @@ fn parameters() -> Parameters {
         k: 21,
         window: 20,
         bin_bits: 6,
-        bucket_bits: 8,
         ..Parameters::default()
     }
 }
@@ -64,6 +63,7 @@ fn parameters() -> Parameters {
 fn options(directory: &Path, threads: usize) -> BuildOptions {
     BuildOptions {
         parameters: parameters(),
+        bucket_bits: None,
         threads,
         temp_dir: directory.to_path_buf(),
         entry_per_record: false,
@@ -187,9 +187,12 @@ fn joined_shards_equal_one_shard_built_at_once() {
     let join_options = JoinOptions {
         threads: 3,
         temp_dir: directory.path().to_path_buf(),
+        bucket_bits: None,
         link_packed: true,
     };
     let manifest = join_shards(&parts, &joined, &join_options).unwrap();
+    let chosen = manifest::choose_bucket_bits(manifest.postings);
+    assert_eq!(manifest.parameters.bucket_bits, chosen);
     assert_eq!(manifest, Manifest::read(&whole).unwrap());
     for file in [sketch::SKETCH_FILE, positions::POSITIONS_FILE] {
         let read = |shard: &PathBuf| std::fs::read(shard.join(file)).unwrap();
@@ -208,6 +211,28 @@ fn joined_shards_equal_one_shard_built_at_once() {
     assert!(Shard::open(&unlinked).unwrap().packed(0).is_err());
     let shard = Shard::open_with_packed(&unlinked, &whole.join("packed")).unwrap();
     check_every_seed(&shard, &entries);
+}
+
+#[test]
+fn bucket_bits_can_be_forced() {
+    let directory = tempfile::tempdir().unwrap();
+    let entries = generated_entries(3);
+    let inputs = inputs(directory.path(), &entries);
+    let output = directory.path().join("shard");
+    let options = BuildOptions {
+        bucket_bits: Some(12),
+        ..options(directory.path(), 2)
+    };
+    let manifest = build_shard(&inputs, &output, &options).unwrap();
+    assert_eq!(manifest.parameters.bucket_bits, 12);
+    let shard = Shard::open(&output).unwrap();
+    assert_eq!(shard.sketch().bucket_bits(), 12);
+    check_every_seed(&shard, &entries);
+    let options = BuildOptions {
+        bucket_bits: Some(29),
+        ..options
+    };
+    assert!(build_shard(&inputs, &directory.path().join("bad"), &options).is_err());
 }
 
 #[test]

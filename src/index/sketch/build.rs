@@ -76,7 +76,7 @@ pub(crate) fn build_sketch(
         paths: (0..1usize << partition_bits)
             .map(|partition| directory.path().join(format!("partition-{partition:04}")))
             .collect(),
-        key_bits: positions.key_bits(),
+        key_bits: bucket_bits + u32::from(crate::index::FINGERPRINT_BITS),
         partition_bits,
     };
     spill_keys(positions, &spill)?;
@@ -131,7 +131,9 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
         .try_for_each(|entry| {
             let bytes = positions.section_bytes(entry)?;
             let mut keys = Vec::new();
+            let shift = positions.key_bits() - spill.key_bits;
             decode_section(positions.section(entry)?, &bytes, |key, _| {
+                let key = key >> shift;
                 if keys.last() != Some(&key) {
                     keys.push(key);
                 }

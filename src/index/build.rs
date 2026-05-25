@@ -5,10 +5,12 @@
 
 use super::manifest::{
     EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters, check_names,
-    packed_file_name, sha256_file, sha256_hex,
+    choose_bucket_bits, packed_file_name, sha256_file, sha256_hex,
 };
 use super::packed::PackedWriter;
-use super::positions::{POSITIONS_FILE, Positions, PositionsWriter, Section, encode_section};
+use super::positions::{
+    POSITION_KEY_BITS, POSITIONS_FILE, Positions, PositionsWriter, Section, encode_section,
+};
 use super::sketch::SKETCH_FILE;
 use super::sketch::build::build_sketch;
 use super::{IndexError, MappedFile, seed_key};
@@ -50,8 +52,11 @@ impl EntryInput {
 /// How a shard is built.
 #[derive(Clone, Debug)]
 pub struct BuildOptions {
-    /// Parameters of the shard.
+    /// Parameters of the shard; the build chooses its bucket bits.
     pub parameters: Parameters,
+    /// Bucket bits to use instead of the ones chosen from the shard size (for tests and
+    /// experiments).
+    pub bucket_bits: Option<u8>,
     /// Threads that index entries and build the sketch.
     pub threads: usize,
     /// Directory for temporary files.
@@ -66,7 +71,7 @@ pub fn build_shard(
     output: &Path,
     options: &BuildOptions,
 ) -> Result<Manifest, IndexError> {
-    options.parameters.validate()?;
+    options.parameters.scheme().validate()?;
     if options.threads == 0 {
         return Err(IndexError::Input("at least one thread is needed".into()));
     }
@@ -101,6 +106,7 @@ pub fn build_shard(
                 options.parameters,
                 entries,
                 &options.temp_dir,
+                options.bucket_bits,
                 |writer| {
                     for entry in &built {
                         let bytes = std::fs::read(&entry.section_path)?;
@@ -152,6 +158,7 @@ pub(crate) fn complete_shard(
     parameters: Parameters,
     entries: Vec<EntryRecord>,
     temp_dir: &Path,
+    bucket_bits: Option<u8>,
     write_sections: impl FnOnce(&mut PositionsWriter) -> Result<(), IndexError>,
 ) -> Result<Manifest, IndexError> {
     if u32::try_from(entries.len()).is_err() {
@@ -160,16 +167,23 @@ pub(crate) fn complete_shard(
         ));
     }
     let positions_path = directory.join(POSITIONS_FILE);
-    let key_bits = parameters.key_bits();
     let mut writer = PositionsWriter::create(
         &positions_path,
-        key_bits,
+        POSITION_KEY_BITS,
         u32::from(parameters.bin_bits),
         entries.len(),
     )?;
     write_sections(&mut writer)?;
     writer.finish()?;
     let positions = Positions::open(Arc::new(MappedFile::open(&positions_path, false)?))?;
+    let postings = (0..positions.entries())
+        .map(|entry| positions.entry_postings(entry))
+        .sum::<Result<u64, IndexError>>()?;
+    let parameters = Parameters {
+        bucket_bits: bucket_bits.unwrap_or_else(|| choose_bucket_bits(postings)),
+        ..parameters
+    };
+    parameters.validate()?;
     let sketch_path = directory.join(SKETCH_FILE);
     let totals = build_sketch(
         &positions,
@@ -177,9 +191,6 @@ pub(crate) fn complete_shard(
         &sketch_path,
         temp_dir,
     )?;
-    let postings = (0..positions.entries())
-        .map(|entry| positions.entry_postings(entry))
-        .sum::<Result<u64, IndexError>>()?;
     let record = |path: &Path, name: &str| -> Result<FileRecord, IndexError> {
         let (bytes, sha256) = sha256_file(path)?;
         Ok(FileRecord {
@@ -237,7 +248,6 @@ impl<'a> EntryBuilder<'a> {
         let start = self.packed.bases();
         self.packed.add_contig(name, sequence)?;
         let bin_bits = self.context.parameters.bin_bits;
-        let key_bits = self.context.parameters.key_bits();
         if self.packed.bases() >> bin_bits >= 1 << 31 {
             return Err(IndexError::Input(
                 "an entry has too many bases for its bins".into(),
@@ -247,7 +257,7 @@ impl<'a> EntryBuilder<'a> {
         self.context.seeder.seeds(sequence, |seed| {
             let bin = ((start + seed.position) >> bin_bits) as u32;
             seeds.push((
-                seed_key(seed.hash, key_bits),
+                seed_key(seed.hash, POSITION_KEY_BITS),
                 (bin << 1) | u32::from(seed.reverse),
             ));
         });
@@ -258,7 +268,7 @@ impl<'a> EntryBuilder<'a> {
     fn finish(mut self, index: usize, name: String) -> Result<BuiltEntry, IndexError> {
         self.seeds.sort_unstable();
         self.seeds.dedup();
-        let (section, bytes) = encode_section(&self.seeds, self.context.parameters.key_bits())?;
+        let (section, bytes) = encode_section(&self.seeds, POSITION_KEY_BITS)?;
         drop(self.seeds);
         let section_path = self.context.temp.join(format!("section-{index:010}"));
         std::fs::write(&section_path, &bytes)?;

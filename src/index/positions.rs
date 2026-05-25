@@ -2,8 +2,9 @@
 //! seed of one candidate entry is found with two small reads. It works memory-mapped from local
 //! disk and as byte ranges from S3.
 //!
-//! A seed is stored by its key: the top `key_bits` bits of its hash (bucket bits and fingerprint,
-//! as in the sketch). A posting is the bin within the entry, shifted left by one, with the low bit
+//! A seed is stored by its key: the top 44 bits of its hash (`POSITION_KEY_BITS`), at least as
+//! many as the sketch keeps (bucket bits and fingerprint), so the sketch of any size is built
+//! from the positions alone. A posting is the bin within the entry, shifted left by one, with the low bit
 //! set when the canonical k-mer is the reverse complement of the contig strand.
 //!
 //! Layout, little endian:
@@ -12,7 +13,7 @@
 //! | --- | --- |
 //! | 0..16 | magic `jam positions` padded with zero bytes |
 //! | 16..20 | version (u32, 1) |
-//! | 20 | key bits (u8) |
+//! | 20 | key bits (u8, 44) |
 //! | 21 | bin bits (u8) |
 //! | 22..24 | zero |
 //! | 24..32 | entries e (u64) |
@@ -56,6 +57,10 @@ use std::sync::Arc;
 
 /// The file name of the positions in a shard directory.
 pub const POSITIONS_FILE: &str = "positions";
+
+/// Bits of a hash that the positions store per seed: enough for the largest bucket bits and the
+/// fingerprint, so shards of any size can be joined without changing their sections.
+pub const POSITION_KEY_BITS: u32 = super::MAX_BUCKET_BITS + super::FINGERPRINT_BITS as u32;
 
 const MAGIC: [u8; 16] = *b"jam positions\0\0\0";
 const VERSION: u32 = 1;

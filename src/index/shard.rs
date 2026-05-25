@@ -3,7 +3,7 @@
 
 use super::manifest::{Manifest, PACKED_DIRECTORY, verify_file};
 use super::packed::PackedSequence;
-use super::positions::{POSITIONS_FILE, Positions};
+use super::positions::{POSITION_KEY_BITS, POSITIONS_FILE, Positions};
 use super::sketch::{SKETCH_FILE, Sketch};
 use super::{IndexError, MappedFile};
 use std::path::{Path, PathBuf};
@@ -63,7 +63,7 @@ impl Shard {
             || sketch.bucket_bits() != u32::from(parameters.bucket_bits)
             || sketch.seeds() != manifest.seeds
             || u64::from(positions.entries()) != entries
-            || positions.key_bits() != parameters.key_bits()
+            || positions.key_bits() != POSITION_KEY_BITS
             || positions.bin_bits() != u32::from(parameters.bin_bits)
             || file_size(SKETCH_FILE)? != manifest.sketch.bytes
             || file_size(POSITIONS_FILE)? != manifest.positions.bytes
