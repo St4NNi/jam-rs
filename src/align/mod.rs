@@ -5,8 +5,10 @@
 //! `I` bases only in the query, `D` bases only in the contig.
 
 mod cigar;
+mod kernel;
 
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
+pub use kernel::{AlignmentConfig, AlignmentInput, DEFAULT_MAX_CELLS};
 
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
@@ -148,6 +150,26 @@ pub enum AlignmentError {
     InvalidCigar,
     #[error("CIGAR does not span the alignment intervals")]
     CigarSpanMismatch,
+    #[error("alignment query is empty")]
+    EmptyQuery,
+    #[error("alignment contig window is empty")]
+    EmptyContig,
+    #[error("alignment scores or limits are invalid")]
+    InvalidConfig,
+    #[error("alignment length overflows")]
+    LengthOverflow,
+    #[error("alignment band holds no cell of the input")]
+    BandExcludesInput,
+    #[error("alignment needs {cells} resident cells, more than {max_cells}")]
+    MatrixTooLarge { cells: usize, max_cells: usize },
+    #[error("no positive-scoring local alignment was found")]
+    NoAlignment,
+    #[error("alignment traceback left the band")]
+    TracebackOutsideBand,
+    #[error("alignment traceback is inconsistent")]
+    InvalidTraceback,
+    #[error("alignment to complete lies outside the given windows")]
+    EndpointOutsideWindow,
 }
 
 #[cfg(test)]
