@@ -9,8 +9,14 @@
 #![allow(dead_code)]
 
 mod geometry;
+mod rebased;
+mod waves;
 
-use super::AlignmentError;
+use super::{AlignmentError, EditOperation};
+use geometry::WaveCarry;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use waves::WaveChunk;
 
 /// The default limit of resident traceback cells of one pass.
 pub const DEFAULT_MAX_CELLS: usize = 4_000_000;
@@ -73,4 +79,48 @@ pub struct AlignmentInput<'a> {
     /// The contig window on the forward strand; the reverse strand reads its reverse complement.
     pub contig: &'a [u8],
     pub contig_offset: u64,
+}
+
+/// Reusable buffers of the kernel. One workspace serves one thread; buffers keep their capacity
+/// between alignments.
+#[derive(Debug, Default)]
+pub struct AlignmentWorkspace {
+    interrupt: Option<Arc<AtomicBool>>,
+    /// Traceback cells of the resident waves, two bytes each.
+    compact_cells: Vec<u16>,
+    /// The score planes of three consecutive waves.
+    waves: [Vec<WaveChunk>; 3],
+    /// First and last wave of each chunk of a checkpointed pass.
+    chunk_waves: Vec<(usize, usize)>,
+    chunk_carries: Vec<WaveCarry>,
+    /// The two score waves before each chunk.
+    checkpoints: Vec<i32>,
+    /// Set by a rebased pass that met a value it cannot represent; the pass reruns on i32.
+    rebase_violation: bool,
+    /// Traceback offset of each laid-out wave, relative to the layout's first wave, plus the
+    /// total; one wave's cells are stored contiguously in query-row order.
+    wave_offsets: Vec<usize>,
+    operations: Vec<EditOperation>,
+    /// The reverse complement of the contig window for the reverse strand.
+    reverse: Vec<u8>,
+    /// The query then the contig in ASCII lowercase, for the rebased kernel's byte compare.
+    folded: Vec<u8>,
+}
+
+impl AlignmentWorkspace {
+    /// Stops running and later alignments with `NoAlignment` once `flag` is set.
+    pub fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
+        self.interrupt = Some(flag);
+    }
+
+    fn check_interrupt(&self) -> Result<(), AlignmentError> {
+        if self
+            .interrupt
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(AlignmentError::NoAlignment);
+        }
+        Ok(())
+    }
 }

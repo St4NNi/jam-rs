@@ -8,7 +8,7 @@ mod cigar;
 mod kernel;
 
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
-pub use kernel::{AlignmentConfig, AlignmentInput, DEFAULT_MAX_CELLS};
+pub use kernel::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, DEFAULT_MAX_CELLS};
 
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
