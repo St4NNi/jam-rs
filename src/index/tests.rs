@@ -230,6 +230,14 @@ fn each_record_can_be_an_entry() {
     assert_eq!(manifest.entries.len(), records.len());
     assert_eq!(manifest.entries[1].name, "entry1_contig0");
     check_every_seed(&Shard::open(&output).unwrap(), &records);
+    let twice = directory.path().join("twice.fa");
+    write_fasta(&twice, &[records[0][0].clone(), records[0][0].clone()]);
+    let error = build_shard(
+        &[EntryInput::from_path(twice)],
+        &output.with_file_name("x"),
+        &options,
+    );
+    assert!(error.unwrap_err().to_string().contains("used twice"));
 }
 
 #[test]

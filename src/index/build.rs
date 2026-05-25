@@ -265,7 +265,13 @@ impl<'a> EntryBuilder<'a> {
         let (contigs, bases) = (self.packed.contigs(), self.packed.bases());
         let (head, packed) = self.packed.finish();
         let file_name = packed_file_name(&name);
-        let mut file = std::fs::File::create_new(self.context.packed.join(&file_name))?;
+        let path = self.context.packed.join(&file_name);
+        let mut file = std::fs::File::create_new(path).map_err(|error| match error.kind() {
+            std::io::ErrorKind::AlreadyExists => {
+                IndexError::Input(format!("the entry name {name} is used twice"))
+            }
+            _ => error.into(),
+        })?;
         file.write_all(&head)?;
         file.write_all(&packed)?;
         let record = EntryRecord {
