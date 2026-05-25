@@ -8,13 +8,14 @@
 
 #![allow(dead_code)]
 
+mod driver;
 mod fill;
 mod geometry;
 mod rebased;
 mod traceback;
 mod waves;
 
-use super::{AlignmentError, EditOperation};
+use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand, complement};
 use geometry::WaveCarry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,10 +84,33 @@ pub struct AlignmentInput<'a> {
     pub contig_offset: u64,
 }
 
+/// The kernels a workspace runs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Backend {
+    /// AVX2 when the host has it, scalar otherwise.
+    #[default]
+    Detected,
+    Scalar,
+}
+
+impl Backend {
+    /// Whether calls run the AVX2 kernels.
+    fn vector(self) -> bool {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            Self::Detected => is_x86_feature_detected!("avx2"),
+            #[cfg(not(target_arch = "x86_64"))]
+            Self::Detected => false,
+            Self::Scalar => false,
+        }
+    }
+}
+
 /// Reusable buffers of the kernel. One workspace serves one thread; buffers keep their capacity
 /// between alignments.
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
+    backend: Backend,
     interrupt: Option<Arc<AtomicBool>>,
     /// Traceback cells of the resident waves, two bytes each.
     compact_cells: Vec<u16>,
@@ -109,7 +133,23 @@ pub struct AlignmentWorkspace {
     folded: Vec<u8>,
 }
 
+/// A local alignment in the positions of the oriented query and contig slices.
+struct RawAlignment {
+    score: i32,
+    query_interval: (usize, usize),
+    contig_interval: (usize, usize),
+    runs: Vec<EditRun>,
+}
+
 impl AlignmentWorkspace {
+    /// A workspace that runs the scalar kernels even on hosts with AVX2.
+    pub fn scalar() -> Self {
+        Self {
+            backend: Backend::Scalar,
+            ..Self::default()
+        }
+    }
+
     /// Stops running and later alignments with `NoAlignment` once `flag` is set.
     pub fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
         self.interrupt = Some(flag);
@@ -125,4 +165,67 @@ impl AlignmentWorkspace {
         }
         Ok(())
     }
+
+    /// The best local alignment of the query window to the contig window on `strand`, within the
+    /// band of `config`. On the reverse strand the band's diagonals count positions in the
+    /// reverse complement of the contig window.
+    pub fn align(
+        &mut self,
+        input: AlignmentInput<'_>,
+        strand: Strand,
+        config: AlignmentConfig,
+    ) -> Result<Alignment, AlignmentError> {
+        let raw = match strand {
+            Strand::Forward => self.align_raw(input.query, input.contig, config)?,
+            Strand::Reverse => {
+                let mut reverse = std::mem::take(&mut self.reverse);
+                reverse_complement_into(input.contig, &mut reverse);
+                let result = self.align_raw(input.query, &reverse, config);
+                self.reverse = reverse;
+                result?
+            }
+        };
+        finish(raw, input, strand)
+    }
+}
+
+/// Writes the reverse complement of `sequence` into `output`.
+fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+    output.reserve(sequence.len());
+    output.extend(sequence.iter().rev().map(|base| complement(*base)));
+}
+
+/// The alignment of `raw` in the positions of `input`: contig positions on the forward strand.
+fn finish(
+    raw: RawAlignment,
+    input: AlignmentInput<'_>,
+    strand: Strand,
+) -> Result<Alignment, AlignmentError> {
+    let (start, end) = raw.contig_interval;
+    let (start, end) = match strand {
+        Strand::Forward => (start, end),
+        Strand::Reverse => (input.contig.len() - end, input.contig.len() - start),
+    };
+    let shift = |offset: u64, position: usize| {
+        u64::try_from(position)
+            .ok()
+            .and_then(|position| offset.checked_add(position))
+            .ok_or(AlignmentError::LengthOverflow)
+    };
+    let alignment = Alignment {
+        score: raw.score,
+        strand,
+        query_interval: Interval::new(
+            shift(input.query_offset, raw.query_interval.0)?,
+            shift(input.query_offset, raw.query_interval.1)?,
+        )?,
+        contig_interval: Interval::new(
+            shift(input.contig_offset, start)?,
+            shift(input.contig_offset, end)?,
+        )?,
+        runs: raw.runs,
+    };
+    alignment.validate()?;
+    Ok(alignment)
 }
