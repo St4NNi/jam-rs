@@ -15,6 +15,8 @@ mod geometry;
 mod rebased;
 #[cfg(target_arch = "x86_64")]
 mod rebased_avx2;
+#[cfg(test)]
+mod tests;
 mod traceback;
 mod waves;
 
