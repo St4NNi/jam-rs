@@ -9,6 +9,7 @@
 #[cfg(target_arch = "x86_64")]
 mod avx2;
 mod driver;
+mod endpoints;
 mod fill;
 mod geometry;
 mod rebased;
@@ -133,6 +134,7 @@ pub struct AlignmentWorkspace {
     reverse: Vec<u8>,
     /// The query then the contig in ASCII lowercase, for the rebased kernel's byte compare.
     folded: Vec<u8>,
+    endpoint: endpoints::EndpointWorkspace,
 }
 
 /// A local alignment in the positions of the oriented query and contig slices.
