@@ -54,6 +54,11 @@ impl AlignmentWorkspace {
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
         self.check_interrupt()?;
+        #[cfg(target_arch = "x86_64")]
+        if self.backend.vector() {
+            // SAFETY: `vector` is true only on hosts with AVX2.
+            return unsafe { self.align_raw_avx2(query, contig, config) };
+        }
         // SAFETY: the scalar instantiation never calls AVX2 code.
         unsafe { self.align_raw_waves::<false>(query, contig, config) }
     }

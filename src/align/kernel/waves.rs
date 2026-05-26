@@ -68,6 +68,29 @@ pub(super) trait WaveScore: bytemuck::Pod {
 
     /// The element that stores `score` under `base`.
     fn write(score: i32, base: i32) -> Self;
+
+    /// Evaluates rows `start..=end` of one wave in vector blocks of LANES cells, and returns the
+    /// first row it did not fill (`start` when the span is shorter than a block). Callers must
+    /// enable AVX2 and prove the block bounds that `fill_wave_avx2` documents.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_blocks<const TRACE: bool, const BEST: bool>(
+        query: &[u8],
+        contig: &[u8],
+        config: AlignmentConfig,
+        gap_open_score: i32,
+        wave: usize,
+        span: (usize, usize),
+        current_range: WaveRange,
+        stride: usize,
+        older: ScoreWave<'_, Self>,
+        previous: ScoreWave<'_, Self>,
+        current: &mut [Self],
+        traceback: &mut [u16],
+        wave_base: usize,
+        best: &mut BestCell,
+        rebase: &mut RebaseState,
+    ) -> usize;
 }
 
 impl WaveScore for i32 {
@@ -79,6 +102,59 @@ impl WaveScore for i32 {
 
     fn write(score: i32, _base: i32) -> Self {
         score
+    }
+
+    /// Blocks of eight, the last one overlapping finished cells (a repeat writes the same
+    /// values).
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn fill_blocks<const TRACE: bool, const BEST: bool>(
+        query: &[u8],
+        contig: &[u8],
+        config: AlignmentConfig,
+        gap_open_score: i32,
+        wave: usize,
+        (start, end): (usize, usize),
+        current_range: WaveRange,
+        stride: usize,
+        older: ScoreWave<'_, Self>,
+        previous: ScoreWave<'_, Self>,
+        current: &mut [Self],
+        traceback: &mut [u16],
+        wave_base: usize,
+        best: &mut BestCell,
+        _rebase: &mut RebaseState,
+    ) -> usize {
+        let block = |row| super::avx2::Block {
+            query,
+            contig,
+            config,
+            gap_open_score,
+            wave,
+            row,
+            current_range,
+            stride,
+            older,
+            previous,
+            wave_base,
+        };
+        let mut row = start;
+        // SAFETY: the caller proves every block is inside the span, as `fill_wave_avx2` requires.
+        unsafe {
+            while row
+                .checked_add(Self::LANES - 1)
+                .is_some_and(|last| last <= end)
+            {
+                super::avx2::fill_wave_avx2::<TRACE>(block(row), current, traceback, best);
+                row += Self::LANES;
+            }
+            if row <= end && end + 1 - start >= Self::LANES {
+                let last = end + 1 - Self::LANES;
+                super::avx2::fill_wave_avx2::<TRACE>(block(last), current, traceback, best);
+                row = end + 1;
+            }
+        }
+        row
     }
 }
 

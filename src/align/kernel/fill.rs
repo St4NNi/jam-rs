@@ -4,7 +4,7 @@
 use super::geometry::{BestCell, WaveCarry, WaveRange, wave_bounds, wave_range};
 #[cfg(test)]
 use super::rebased::REBASE_FORCED_VIOLATION;
-use super::rebased::RebaseState;
+use super::rebased::{RebaseState, SENTINEL_BASE};
 use super::waves::{ScoreWave, WaveScore, fill_wave_scalar};
 use super::{AlignmentConfig, AlignmentWorkspace};
 use crate::align::AlignmentError;
@@ -27,6 +27,22 @@ pub(super) struct Pass<'a> {
 }
 
 impl AlignmentWorkspace {
+    /// Runs `fill_waves` with i32 planes and eight AVX2 lanes in one out-of-line body, so the
+    /// drivers share one inlined copy of the vector kernel.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[inline(never)]
+    unsafe fn fill_waves_avx2<const TRACE: bool, const BEST: bool>(
+        &mut self,
+        pass: Pass<'_>,
+        waves: (usize, usize),
+        carry: &mut WaveCarry,
+        best: &mut BestCell,
+    ) {
+        // SAFETY: this function enables AVX2 for the vector instantiation.
+        unsafe { self.fill_waves::<i32, true, TRACE, BEST>(pass, waves, carry, best) }
+    }
+
     /// Fills waves with the selected kernel. Callers must enable AVX2 when VECTOR is true, and
     /// pass the rebased kernel only when `select_kernel` chose it.
     #[inline(always)]
@@ -42,6 +58,14 @@ impl AlignmentWorkspace {
         carry: &mut WaveCarry,
         best: &mut BestCell,
     ) {
+        #[cfg(target_arch = "x86_64")]
+        if VECTOR {
+            // SAFETY: forwarded from this function's contract.
+            unsafe {
+                self.fill_waves_avx2::<TRACE, BEST>(pass, waves, carry, best);
+            }
+            return;
+        }
         debug_assert_eq!(kernel, LocalKernel::Wide);
         // SAFETY: the scalar instantiation never calls AVX2 code.
         unsafe { self.fill_waves::<i32, false, TRACE, BEST>(pass, waves, carry, best) }
@@ -286,8 +310,76 @@ unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACE: bool, const B
         );
     };
     let mut row = current_range.start;
+    #[cfg(target_arch = "x86_64")]
+    if let Some((start, end, older, previous)) =
+        vector_span::<S, VECTOR>(wave, current_range, older, previous, rebase)
+    {
+        while row < start {
+            scalar(row, current, traceback, best, rebase);
+            row += 1;
+        }
+        // SAFETY: vector_span proves LANES current, diagonal, left, and above cells of every
+        // block are in their wave slices. start>=1 and end<=wave-1 prove the query and
+        // reverse-loaded contig bytes are also in bounds.
+        row = unsafe {
+            S::fill_blocks::<TRACE, BEST>(
+                query,
+                contig,
+                config,
+                gap_open_score,
+                wave,
+                (start, end),
+                current_range,
+                stride,
+                older,
+                previous,
+                current,
+                traceback,
+                wave_base,
+                best,
+                rebase,
+            )
+        };
+    }
     while row <= current_range.end {
         scalar(row, current, traceback, best, rebase);
         row += 1;
     }
+}
+
+/// The rows of a wave whose three neighbours all lie in the two waves before, for vector blocks.
+#[cfg(target_arch = "x86_64")]
+#[inline(always)]
+#[allow(clippy::type_complexity)]
+fn vector_span<'a, S: WaveScore, const VECTOR: bool>(
+    wave: usize,
+    current_range: WaveRange,
+    older: Option<ScoreWave<'a, S>>,
+    previous: Option<ScoreWave<'a, S>>,
+    rebase: &RebaseState,
+) -> Option<(usize, usize, ScoreWave<'a, S>, ScoreWave<'a, S>)> {
+    older
+        .zip(previous)
+        .filter(|_| VECTOR)
+        .and_then(|(older, previous)| {
+            // Rebased planes read a zeroed spare cell one row outside the previous wave. A
+            // sentinel-range base would take it for a low candidate, so those waves keep their
+            // edge cells scalar.
+            let (previous_low, previous_high) = if S::REBASED && rebase.base <= SENTINEL_BASE {
+                (previous.range.start, previous.range.end.saturating_add(1))
+            } else {
+                (previous.range.start.saturating_add(1), previous.range.end)
+            };
+            let start = current_range
+                .start
+                .max(older.range.start.saturating_add(1))
+                .max(previous_low)
+                .max(1);
+            let end = current_range
+                .end
+                .min(older.range.end.saturating_add(1))
+                .min(previous_high)
+                .min(wave.saturating_sub(1));
+            (start <= end).then_some((start, end, older, previous))
+        })
 }

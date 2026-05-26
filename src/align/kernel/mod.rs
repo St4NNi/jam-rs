@@ -8,6 +8,8 @@
 
 #![allow(dead_code)]
 
+#[cfg(target_arch = "x86_64")]
+mod avx2;
 mod driver;
 mod fill;
 mod geometry;
