@@ -6,14 +6,14 @@
 //! alignment. Traceback cells take two bytes; long passes keep only a chunk of them and fill
 //! earlier chunks again from checkpoints during the traceback.
 
-#![allow(dead_code)]
-
 #[cfg(target_arch = "x86_64")]
 mod avx2;
 mod driver;
 mod fill;
 mod geometry;
 mod rebased;
+#[cfg(target_arch = "x86_64")]
+mod rebased_avx2;
 mod traceback;
 mod waves;
 

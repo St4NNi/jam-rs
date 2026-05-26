@@ -40,6 +40,67 @@ const REBASE_LOW: i32 = 4_000;
 #[repr(transparent)]
 pub(super) struct Offset16(pub(super) i16);
 
+impl super::waves::WaveScore for Offset16 {
+    const LANES: usize = 16;
+    const REBASED: bool = true;
+
+    fn read(self, base: i32) -> i32 {
+        if self.0 == OFFSET_FLOOR {
+            0
+        } else {
+            i32::from(self.0) + base
+        }
+    }
+
+    fn write(score: i32, base: i32) -> Self {
+        if score <= 0 {
+            Self(zero_offset(base))
+        } else {
+            Self((score - base).clamp(-32_767, 32_767) as i16)
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn fill_blocks<const TRACE: bool, const BEST: bool>(
+        query: &[u8],
+        contig: &[u8],
+        config: AlignmentConfig,
+        gap_open_score: i32,
+        wave: usize,
+        span: (usize, usize),
+        current_range: WaveRange,
+        stride: usize,
+        older: super::waves::ScoreWave<'_, Self>,
+        previous: super::waves::ScoreWave<'_, Self>,
+        current: &mut [Self],
+        traceback: &mut [u16],
+        wave_base: usize,
+        best: &mut super::geometry::BestCell,
+        rebase: &mut RebaseState,
+    ) -> usize {
+        let blocks = super::rebased_avx2::Span {
+            query,
+            contig,
+            config,
+            gap_open_score,
+            wave,
+            span,
+            current_range,
+            stride,
+            older,
+            previous,
+            wave_base,
+        };
+        // SAFETY: forwarded from this function's contract.
+        unsafe {
+            super::rebased_avx2::fill_span16_rebased::<TRACE, BEST>(
+                blocks, current, traceback, best, rebase,
+            )
+        }
+    }
+}
+
 /// Whether the rebased i16 kernel is exact for this configuration on any window length: the
 /// scoring terms fit i16 and one wave's score spread stays below the bound. Two cells of a wave
 /// join through a gap of at most `2 * band + 1` positions, costing at most

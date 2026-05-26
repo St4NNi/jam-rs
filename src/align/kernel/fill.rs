@@ -4,7 +4,7 @@
 use super::geometry::{BestCell, WaveCarry, WaveRange, wave_bounds, wave_range};
 #[cfg(test)]
 use super::rebased::REBASE_FORCED_VIOLATION;
-use super::rebased::{RebaseState, SENTINEL_BASE};
+use super::rebased::{Offset16, RebaseState, SENTINEL_BASE};
 use super::waves::{ScoreWave, WaveScore, fill_wave_scalar};
 use super::{AlignmentConfig, AlignmentWorkspace};
 use crate::align::AlignmentError;
@@ -43,6 +43,22 @@ impl AlignmentWorkspace {
         unsafe { self.fill_waves::<i32, true, TRACE, BEST>(pass, waves, carry, best) }
     }
 
+    /// Runs `fill_waves` with rebased i16 planes and sixteen AVX2 lanes. Callers must check the
+    /// configuration with `rebased_local_scores`.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[inline(never)]
+    unsafe fn fill_waves16_rebased<const TRACE: bool, const BEST: bool>(
+        &mut self,
+        pass: Pass<'_>,
+        waves: (usize, usize),
+        carry: &mut WaveCarry,
+        best: &mut BestCell,
+    ) {
+        // SAFETY: this function enables AVX2 and the caller checks the configuration.
+        unsafe { self.fill_waves::<Offset16, true, TRACE, BEST>(pass, waves, carry, best) }
+    }
+
     /// Fills waves with the selected kernel. Callers must enable AVX2 when VECTOR is true, and
     /// pass the rebased kernel only when `select_kernel` chose it.
     #[inline(always)]
@@ -62,7 +78,11 @@ impl AlignmentWorkspace {
         if VECTOR {
             // SAFETY: forwarded from this function's contract.
             unsafe {
-                self.fill_waves_avx2::<TRACE, BEST>(pass, waves, carry, best);
+                if kernel == LocalKernel::Rebased {
+                    self.fill_waves16_rebased::<TRACE, BEST>(pass, waves, carry, best);
+                } else {
+                    self.fill_waves_avx2::<TRACE, BEST>(pass, waves, carry, best);
+                }
             }
             return;
         }
