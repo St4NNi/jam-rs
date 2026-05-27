@@ -4,9 +4,11 @@
 //! CIGAR strings follow SAM with the entry contig as the reference: `=` match, `X` substitution,
 //! `I` bases only in the query, `D` bases only in the contig.
 
+mod anchors;
 mod cigar;
 mod kernel;
 
+pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
 pub use kernel::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, DEFAULT_MAX_CELLS};
 
@@ -170,6 +172,10 @@ pub enum AlignmentError {
     InvalidTraceback,
     #[error("alignment to complete lies outside the given windows")]
     EndpointOutsideWindow,
+    #[error("anchor configuration is invalid")]
+    InvalidAnchorConfig,
+    #[error("query is too long for the query table")]
+    QueryTooLong,
 }
 
 #[cfg(test)]
