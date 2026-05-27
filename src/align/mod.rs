@@ -5,10 +5,14 @@
 //! `I` bases only in the query, `D` bases only in the contig.
 
 mod anchors;
+mod chains;
 mod cigar;
 mod kernel;
 
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
+pub use chains::{
+    CHAINING_BYTES, Chain, chain_anchors, forward_extent, split_by_drift, window_chains,
+};
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
 pub use kernel::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, DEFAULT_MAX_CELLS};
 
@@ -176,6 +180,8 @@ pub enum AlignmentError {
     InvalidAnchorConfig,
     #[error("query is too long for the query table")]
     QueryTooLong,
+    #[error("{0} exceed the chaining budget")]
+    ChainingBudget(&'static str),
 }
 
 #[cfg(test)]

@@ -389,3 +389,33 @@ pub fn find_anchors(
     });
     anchors[first..].sort_unstable();
 }
+
+/// The anchors that the looked-up positions of `window` give.
+pub(super) fn count_anchors(table: &QueryTable, window: &[u8]) -> usize {
+    let stride = usize::from(table.config.stride);
+    let mut count = 0usize;
+    kmers(window, table.config.k, |start, forward, _| {
+        if start % stride == 0 {
+            count = count.saturating_add(table.multiplicity(forward));
+        }
+    });
+    count
+}
+
+/// How many looked-up positions of `window` have k-mers of each query occurrence count.
+pub(super) fn occurrence_counts(
+    table: &QueryTable,
+    window: &[u8],
+) -> std::collections::BTreeMap<usize, usize> {
+    let stride = usize::from(table.config.stride);
+    let mut positions = std::collections::BTreeMap::<usize, usize>::new();
+    kmers(window, table.config.k, |start, forward, _| {
+        if start % stride == 0 {
+            let occurrences = table.multiplicity(forward);
+            if occurrences > 0 {
+                *positions.entry(occurrences).or_default() += 1;
+            }
+        }
+    });
+    positions
+}
