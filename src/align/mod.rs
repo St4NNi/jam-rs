@@ -5,6 +5,8 @@
 //! `I` bases only in the query, `D` bases only in the contig.
 
 mod anchors;
+#[cfg(test)]
+mod chain_tests;
 mod chains;
 mod cigar;
 mod kernel;
