@@ -67,6 +67,15 @@ pub fn handle_sketch_command(
             kmer_size
         ));
     }
+    if !min_entropy.is_finite() || !(0.0..=2.0).contains(&min_entropy) {
+        return Err(anyhow::anyhow!(
+            "--complexity must be finite and between 0.0 and 2.0, got {}",
+            min_entropy
+        ));
+    }
+    if fscale == Some(0) {
+        return Err(anyhow::anyhow!("--fscale must be > 0"));
+    }
 
     if !silent {
         let mut settings = format!(
@@ -105,12 +114,11 @@ pub fn handle_sketch_command(
             ));
         }
 
-        let sketch_fscale = fscale.unwrap_or(1000);
-        if table.fscale() != sketch_fscale {
+        if fscale.is_some() {
             return Err(anyhow::anyhow!(
-                "Bias table fscale ({}) does not match sketch fscale ({})",
-                table.fscale(),
-                sketch_fscale
+                "--fscale cannot be used with --bias-table. \
+                 The bias table's stored fscale ({}) is used automatically.",
+                table.fscale()
             ));
         }
 
@@ -122,9 +130,14 @@ pub fn handle_sketch_command(
         None
     };
 
+    let effective_fscale = match &bias_table {
+        Some(table) => table.fscale(),
+        None => fscale.unwrap_or(100),
+    };
+
     let config = BuildConfig {
         kmer_size,
-        fscale: fscale.unwrap_or(1000),
+        fscale: effective_fscale,
         num_threads: threads,
         memory,
         singleton,
@@ -149,13 +162,16 @@ pub fn handle_sketch_command(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_distance_command(
     input_path: PathBuf,
     database_path: PathBuf,
     output_path: Option<PathBuf>,
     cutoff: f64,
     singleton: bool,
+    force: bool,
     silent: bool,
+    memory_gb: usize,
 ) -> Result<()> {
     use std::time::Instant;
 
@@ -171,7 +187,31 @@ pub fn handle_distance_command(
             input_path
         ));
     }
-
+    if !cutoff.is_finite() {
+        return Err(anyhow::anyhow!("--cutoff must be finite, got {}", cutoff));
+    }
+    if !(0.0..=1.0).contains(&cutoff) {
+        return Err(anyhow::anyhow!(
+            "--cutoff must be between 0.0 and 1.0, got {}",
+            cutoff
+        ));
+    }
+    if let Some(ref out) = output_path
+        && out.exists()
+    {
+        if !out.is_file() {
+            return Err(anyhow::anyhow!(
+                "Output path must be a file, not a directory: {:?}",
+                out
+            ));
+        }
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Output file {:?} already exists. Use --force to overwrite.",
+                out
+            ));
+        }
+    }
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
         sp.set_style(
@@ -202,6 +242,9 @@ pub fn handle_distance_command(
         ));
         if engine.has_bias_table() {
             sp.println("      Using embedded bias table from database");
+            sp.println(
+                "      Bias mode reports containment on the retained/weighted k-mer subset; E-values are uniform-hash approximations",
+            );
         }
         sp.set_message("[2/4] Loading query...");
     }
@@ -238,77 +281,22 @@ pub fn handle_distance_command(
         ));
     }
 
-    let phase_start = Instant::now();
-    let results = engine.query_sketch(&sketch);
+    let total_samples = sketch.sample_count();
+    let cutoff = normalize_distance_cutoff(cutoff);
+    let budget_bytes = memory_gb * 1024 * 1024 * 1024 * 7 / 10;
+    let per_sample_bytes = (db_stats.sample_count as usize).max(1) * 40;
+    let chunk_size = compute_distance_chunk_size(total_samples, budget_bytes, per_sample_bytes);
 
     if let Some(ref sp) = spinner {
-        let total_matches: usize = results.iter().map(|r| r.matches.len()).sum();
-        sp.println(format!(
-            "[3/4] Search completed in {:.2?}: {} total matches",
-            phase_start.elapsed(),
-            total_matches
+        sp.set_message(format!(
+            "[3/4] Searching {} query samples against {} db samples (chunk size {})...",
+            total_samples, db_stats.sample_count, chunk_size,
         ));
-        sp.set_message("[4/4] Writing output...");
     }
-
-    let phase_start = Instant::now();
 
     use rayon::prelude::*;
 
-    let formatted_chunks: Vec<String> = results
-        .par_iter()
-        .enumerate()
-        .map(|(query_idx, result)| {
-            let query_name = &sketch.sample_names[query_idx];
-            let query_hashes = result.query_size;
-
-            let mut matches: Vec<_> = result
-                .matches
-                .iter()
-                .filter(|m| m.containment >= cutoff)
-                .collect();
-
-            if matches.is_empty() {
-                return String::new();
-            }
-
-            matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
-
-            let mut chunk = String::with_capacity(matches.len() * 100);
-
-            for m in &matches {
-                let db_name = db_names
-                    .get(m.sample_id as usize)
-                    .map(|s| s.as_str())
-                    .unwrap_or("unknown");
-                let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
-                let shared_hashes = m.hit_count;
-                let query_containment = m.containment;
-                let db_containment = if db_hashes > 0 {
-                    shared_hashes as f64 / db_hashes as f64
-                } else {
-                    0.0
-                };
-
-                use std::fmt::Write;
-                let _ = writeln!(
-                    chunk,
-                    "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}",
-                    query_name,
-                    db_name,
-                    shared_hashes,
-                    query_hashes,
-                    db_hashes,
-                    query_containment,
-                    db_containment
-                );
-            }
-
-            chunk
-        })
-        .collect();
-
-    const WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
+    const WRITE_BUFFER_SIZE: usize = 1024 * 1024;
     let mut writer: Box<dyn Write> = if let Some(ref out) = output_path {
         Box::new(std::io::BufWriter::with_capacity(
             WRITE_BUFFER_SIZE,
@@ -321,16 +309,128 @@ pub fn handle_distance_command(
         ))
     };
 
-    writeln!(
-        writer,
-        "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment"
-    )?;
+    let has_bias = engine.has_bias_table();
+    if has_bias {
+        writeln!(
+            writer,
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\traw_query_containment\tdb_containment_unweighted\tuniform_hash_e_value\tbias_weighted_query_containment"
+        )?;
+    } else {
+        writeln!(
+            writer,
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tquery_containment\tdb_containment\tuniform_hash_e_value"
+        )?;
+    }
 
-    for chunk in &formatted_chunks {
-        if !chunk.is_empty() {
-            writer.write_all(chunk.as_bytes())?;
+    let flush_threshold = (memory_gb * 1024 * 1024 * 1024 / 16).clamp(1024 * 1024, 8 * 1024 * 1024);
+    let mut temp_files: Vec<tempfile::NamedTempFile> = Vec::new();
+    let mut pending: Vec<u8> = Vec::new();
+
+    let phase_start = Instant::now();
+    let mut total_matches: usize = 0;
+
+    for chunk_start in (0..total_samples).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(total_samples);
+
+        let results =
+            engine.query_sketch_chunked(&sketch, chunk_start..chunk_end, cutoff.unwrap_or(0.0));
+
+        let formatted: Vec<String> = results
+            .par_iter()
+            .enumerate()
+            .map(|(local_idx, result)| {
+                let global_idx = chunk_start + local_idx;
+                let query_name = &sketch.sample_names[global_idx];
+                let query_hashes = result.query_size;
+
+                if result.matches.is_empty() {
+                    return String::new();
+                }
+
+                let mut matches: Vec<_> = result.matches.iter().collect();
+                matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
+
+                let mut out = String::with_capacity(matches.len() * 120);
+                for m in &matches {
+                    let db_name = db_names
+                        .get(m.sample_id as usize)
+                        .map(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    let db_hashes = db_sizes.get(m.sample_id as usize).copied().unwrap_or(0);
+                    let db_containment = if db_hashes > 0 {
+                        m.hit_count as f64 / db_hashes as f64
+                    } else {
+                        0.0
+                    };
+                    use std::fmt::Write;
+                    if has_bias && result.total_query_weight > 0.0 {
+                        let raw_query_containment = if query_hashes > 0 {
+                            m.hit_count as f64 / query_hashes as f64
+                        } else {
+                            0.0
+                        };
+                        let _ = writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6e}\t{:.6}",
+                            query_name,
+                            db_name,
+                            m.hit_count,
+                            query_hashes,
+                            db_hashes,
+                            raw_query_containment,
+                            db_containment,
+                            m.e_value,
+                            m.containment,
+                        );
+                    } else {
+                        let _ = writeln!(
+                            out,
+                            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6e}",
+                            query_name,
+                            db_name,
+                            m.hit_count,
+                            query_hashes,
+                            db_hashes,
+                            m.containment,
+                            db_containment,
+                            m.e_value,
+                        );
+                    }
+                }
+                out
+            })
+            .collect();
+
+        for s in &formatted {
+            if !s.is_empty() {
+                total_matches += s.lines().count();
+                pending.extend_from_slice(s.as_bytes());
+            }
+        }
+
+        if pending.len() > flush_threshold {
+            let mut tmp = tempfile::NamedTempFile::new()?;
+            tmp.write_all(&pending)?;
+            temp_files.push(tmp);
+            pending.clear();
         }
     }
+
+    if let Some(ref sp) = spinner {
+        sp.println(format!(
+            "[3/4] Search completed in {:.2?}: {} total matches",
+            phase_start.elapsed(),
+            total_matches,
+        ));
+        sp.set_message("[4/4] Writing output...");
+    }
+
+    let phase_start = Instant::now();
+
+    for tmp in &temp_files {
+        std::io::copy(&mut std::fs::File::open(tmp.path())?, &mut writer)?;
+    }
+    writer.write_all(&pending)?;
 
     if let Some(ref sp) = spinner {
         sp.println(format!(
@@ -343,6 +443,27 @@ pub fn handle_distance_command(
     Ok(())
 }
 
+fn normalize_distance_cutoff(cutoff: f64) -> Option<f64> {
+    if cutoff.is_finite() && cutoff > 0.0 {
+        Some(cutoff)
+    } else {
+        None
+    }
+}
+
+fn compute_distance_chunk_size(
+    total_samples: usize,
+    budget_bytes: usize,
+    per_sample_bytes: usize,
+) -> usize {
+    debug_assert!(total_samples > 0);
+
+    let min_chunk_size = total_samples.clamp(1, 100);
+    let raw_chunk_size = budget_bytes / per_sample_bytes.max(1);
+
+    raw_chunk_size.clamp(min_chunk_size, total_samples)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn handle_bias_create_command(
     positive: Vec<PathBuf>,
@@ -353,10 +474,9 @@ pub fn handle_bias_create_command(
     cms_width: usize,
     cms_depth: usize,
     alpha: f32,
-    positive_fscale: Option<u64>,
-    negative_fscale: Option<String>,
-    unbiased_fscale: Option<u64>,
-    min_positive_retention: f32,
+    target_fscale: Option<u64>,
+    max_fscale: Option<String>,
+    unseen_fscale: Option<u64>,
     threads: Option<usize>,
     force: bool,
     silent: bool,
@@ -386,33 +506,37 @@ pub fn handle_bias_create_command(
     if !alpha.is_finite() || alpha <= 0.0 {
         return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
     }
-
-    if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
+    if !(1..=31).contains(&kmer_size) {
         return Err(anyhow::anyhow!(
-            "--min-positive-retention must be in the range [0, 1]"
+            "K-mer size must be between 1 and 31, got {}",
+            kmer_size
         ));
     }
+    if fscale == 0 {
+        return Err(anyhow::anyhow!("--fscale must be > 0"));
+    }
 
-    // Validate soft-filter fscale pair: both or neither
-    match (positive_fscale.as_ref(), negative_fscale.as_ref()) {
+    match (target_fscale.as_ref(), max_fscale.as_ref()) {
         (Some(_), None) | (None, Some(_)) => {
             return Err(anyhow::anyhow!(
-                "Both --positive-fscale and --negative-fscale must be set together"
+                "Both --target-fscale and --max-fscale must be set together"
             ));
         }
         _ => {}
     }
 
-    let negative_fscale = match negative_fscale.as_deref() {
+    let negative_fscale = match max_fscale.as_deref() {
         Some(value) if value.eq_ignore_ascii_case("drop") => Some(u64::MAX),
         Some(value) => {
             let parsed = value
                 .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("--negative-fscale must be an integer or 'drop'"))?;
+                .map_err(|_| anyhow::anyhow!("--max-fscale must be an integer or 'drop'"))?;
             Some(parsed)
         }
         None => None,
     };
+
+    let unseen_fscale = unseen_fscale.or(target_fscale);
 
     let spinner = if !silent {
         let sp = ProgressBar::new_spinner();
@@ -442,10 +566,9 @@ pub fn handle_bias_create_command(
             fscale,
         },
         alpha,
-        positive_fscale,
+        target_fscale,
         negative_fscale,
-        unbiased_fscale,
-        min_positive_retention,
+        unseen_fscale,
     };
 
     let pos_paths: Vec<&std::path::Path> = positive.iter().map(|p| p.as_path()).collect();
@@ -500,9 +623,8 @@ pub fn handle_bias_create_command(
 
         eprintln!("Calibration:");
         if table.is_soft_filter() {
-            eprintln!("  positive_fscale:     {}", table.positive_fscale);
+            eprintln!("  requested target:    {}", table.target_fscale);
             eprintln!("  negative_fscale:     {}", table.negative_fscale_label());
-            eprintln!("  min_pos_retention:   {:.2}", table.min_positive_retention);
         }
         eprintln!(
             "  positive retention:  {:.2}%",
@@ -514,20 +636,38 @@ pub fn handle_bias_create_command(
         );
         eprintln!("  fold enrichment:     {:.2}x", table.fold_enrichment());
         if table.is_soft_filter() {
+            let target_fs = table.target_fscale as f64;
+            let eff_target = table.effective_fscale_target_prior();
+            let eff_pos = table.effective_fscale_on_population(table.positive_retention);
+            let eff_neg = table.effective_fscale_on_population(table.negative_retention);
+            let delta_pct = |achieved: f64| {
+                if target_fs > 0.0 {
+                    (achieved / target_fs - 1.0) * 100.0
+                } else {
+                    0.0
+                }
+            };
             eprintln!(
-                "  eff. fscale (pos):   {:.0}",
-                table.effective_fscale_on_population(table.positive_retention)
+                "  eff. fscale (target prior): {:.0} ({:+.1}%)",
+                eff_target,
+                delta_pct(eff_target)
             );
             eprintln!(
-                "  eff. fscale (neg):   {:.0}",
-                table.effective_fscale_on_population(table.negative_retention)
+                "  eff. fscale (pos):      {:.0} ({:+.1}%)",
+                eff_pos,
+                delta_pct(eff_pos)
+            );
+            eprintln!(
+                "  eff. fscale (neg):      {:.0} ({:+.1}%)",
+                eff_neg,
+                delta_pct(eff_neg)
             );
             eprintln!(
                 "  eff. fscale (combined): {:.0}",
                 table.effective_fscale_combined()
             );
-            if table.unbiased_fscale > 0 {
-                eprintln!("  unbiased_fscale:     {}", table.unbiased_fscale);
+            if table.unseen_fscale > 0 {
+                eprintln!("  unseen fscale:       {}", table.unseen_fscale);
             }
             eprintln!("  reference points:");
             for p in table.soft_filter_reference_points() {
@@ -624,14 +764,19 @@ pub fn handle_bias_stats_command(
                 "fold_enrichment": table.fold_enrichment(),
                 "effective_fscale_positive": table.effective_fscale_on_population(table.positive_retention),
                 "effective_fscale_negative": table.effective_fscale_on_population(table.negative_retention),
+                "effective_fscale_target_prior": table.effective_fscale_target_prior(),
+                "effective_fscale_target_prior_delta_pct": if table.target_fscale > 0 {
+                    (table.effective_fscale_target_prior() / table.target_fscale as f64 - 1.0) * 100.0
+                } else {
+                    0.0
+                },
                 "effective_fscale_combined": table.effective_fscale_combined(),
             },
             "soft_filter": {
-                "positive_fscale": table.positive_fscale,
+                "target_fscale": table.target_fscale,
                 "negative_fscale": table.negative_fscale,
                 "negative_fscale_drop": table.negative_fscale == u64::MAX,
-                "min_positive_retention": table.min_positive_retention,
-                "unbiased_fscale": table.unbiased_fscale,
+                "unseen_fscale": table.unseen_fscale,
             },
             "weight_stats": {
                 "min": min,
@@ -654,7 +799,7 @@ pub fn handle_bias_stats_command(
                         "weight": w as f64 / 10.0,
                         "weight_q": w,
                         "effective_fscale": eff,
-                        "retention_pct": 100.0 / eff,
+                        "retention_pct": 100.0 * base / eff,
                         "vs_base": base / eff,
                     })
                 })
@@ -754,4 +899,32 @@ pub fn handle_stats_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compute_distance_chunk_size, normalize_distance_cutoff};
+
+    #[test]
+    fn distance_chunk_size_handles_small_query_counts() {
+        let chunk_size = compute_distance_chunk_size(3, 0, 1024);
+        assert_eq!(chunk_size, 3);
+    }
+
+    #[test]
+    fn distance_chunk_size_uses_default_minimum_for_large_queries() {
+        let chunk_size = compute_distance_chunk_size(1000, 0, 1024);
+        assert_eq!(chunk_size, 100);
+    }
+
+    #[test]
+    fn distance_cutoff_non_positive_is_disabled() {
+        assert_eq!(normalize_distance_cutoff(0.0), None);
+        assert_eq!(normalize_distance_cutoff(-0.1), None);
+    }
+
+    #[test]
+    fn distance_cutoff_positive_is_kept() {
+        assert_eq!(normalize_distance_cutoff(0.25), Some(0.25));
+    }
 }

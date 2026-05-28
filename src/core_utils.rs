@@ -29,10 +29,10 @@ mod tests {
 
     #[test]
     fn test_shannon_entropy() {
-        let homopolymer = 0; // All A's
+        let homopolymer = 0;
         assert!(shannon_entropy(homopolymer, 8) < 1.0);
 
-        let mixed = 0b10011100; // ATGC pattern
+        let mixed = 0b10011100;
         assert!(shannon_entropy(mixed, 4) > 1.5);
     }
 
@@ -49,7 +49,7 @@ mod tests {
     fn test_entropy_edge_cases() {
         assert_eq!(shannon_entropy(0, 1), 0.0);
 
-        let all_diff = 0b11100100; // TCGA
+        let all_diff = 0b11100100;
         let max_entropy = shannon_entropy(all_diff, 4);
         assert!((max_entropy - 2.0).abs() < 0.01);
     }

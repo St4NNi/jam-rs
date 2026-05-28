@@ -190,7 +190,7 @@ mod tests {
         header.version = VERSION;
         header.bucket_count = BUCKET_COUNT as u16;
         header.entry_size = ENTRY_SIZE as u8;
-        header.hash_threshold = u64::MAX; // valid non-zero threshold
+        header.hash_threshold = u64::MAX;
         assert!(header.validate().is_ok());
     }
 
@@ -201,7 +201,7 @@ mod tests {
         header.version = VERSION;
         header.bucket_count = BUCKET_COUNT as u16;
         header.entry_size = ENTRY_SIZE as u8;
-        header.hash_threshold = 0; // invalid
+        header.hash_threshold = 0;
         assert!(matches!(
             header.validate(),
             Err(FormatError::InvalidHashThreshold)

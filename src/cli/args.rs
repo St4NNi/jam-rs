@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "jam")]
 #[command(bin_name = "jam")]
-#[command(version = "0.9.10")]
+#[command(version)]
 #[command(
     about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
     long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
@@ -42,7 +42,7 @@ pub enum Commands {
         /// K-mer size, all sketches must have the same size to be compared and below 32
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
-        /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+        /// Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash, default 100)
         #[arg(long)]
         fscale: Option<u64>,
         /// Complexity cut-off, only hash sequences with complexity above this value
@@ -126,7 +126,7 @@ pub enum BiasCommands {
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
         /// FracMinHash scale (must match sketch fscale)
-        #[arg(long, default_value = "1000")]
+        #[arg(long, default_value = "100")]
         fscale: u64,
         /// Count-Min Sketch width (columns, power of 2 recommended)
         #[arg(long, default_value = "1048576")]
@@ -137,24 +137,19 @@ pub enum BiasCommands {
         /// Smoothing parameter for log-ratio computation
         #[arg(long, default_value = "1.0")]
         alpha: f32,
-        /// Effective fscale for positively biased hashes (soft filter).
-        /// Must be >= global fscale. Enables enrichment LUT filtering when
-        /// both positive-fscale and negative-fscale are set.
+        /// Target effective fscale under the empirical CMS weight prior.
+        /// Enables enrichment LUT filtering. Must be >= base fscale.
         #[arg(long)]
-        positive_fscale: Option<u64>,
-        /// Effective fscale for negatively biased hashes (soft filter).
-        /// Must be > positive-fscale. Higher values = lower retention.
-        /// Use "drop" to discard hashes below the threshold.
+        target_fscale: Option<u64>,
+        /// Maximum fscale per bucket (minimum retention). Higher = more suppression.
+        /// Use "drop" to allow complete suppression of negatively biased hashes.
+        /// Required when --target-fscale is set.
         #[arg(long)]
-        negative_fscale: Option<String>,
-        /// Effective fscale at w=0 (unseen/balanced k-mers) for soft filter.
-        /// Default: data-driven from enrichment optimization.
+        max_fscale: Option<String>,
+        /// Fixed fscale for weight=0 (unseen/balanced k-mers).
+        /// Default: same as --target-fscale.
         #[arg(long)]
-        unbiased_fscale: Option<u64>,
-        /// Minimum positive retention floor (0.0–1.0). The optimizer will not
-        /// reduce positive retention below this value. [default: 0.1]
-        #[arg(long, default_value = "0.1")]
-        min_positive_retention: f32,
+        unseen_fscale: Option<u64>,
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,

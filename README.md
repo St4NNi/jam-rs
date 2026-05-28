@@ -31,7 +31,7 @@ Conda, Docker images and python bindings are planned for the future. In the mean
 - **Custom hash function**: [jamhash](https://github.com/St4NNi/jamhash) provides lower collisions, better uniformity and is faster compared to murmur3
 - **Bias-aware sketching**: Count-Min Sketch based compositional filtering with automatic background extraction and optional per-bucket enrichment LUT filtering
 - **Complexity filtering**: Shannon entropy threshold to exclude low-complexity k-mers
-- **Memory-efficient**: External sorting for processing datasets larger than available RAM
+- **Memory-conscious build path**: Bucketed temporary files with bounded writer buffers for processing datasets larger than available RAM
 - **Compact storage**: 256-bucket memory-mapped `.jam` format with binary fuse filters for fast random access
 - **Parallel execution**: File-level parallelization via rayon with configurable thread count
 - **Tuned for speed**: jemalloc allocator, LTO, single codegen unit, `opt-level = 3`
@@ -76,7 +76,7 @@ Arguments:
 Options:
   -o, --output <OUTPUT>          Output file (.jam format)
   -k, --kmer-size <KMER_SIZE>    K-mer size, all sketches must have the same size to be compared and below 32 [default: 21]
-      --fscale <FSCALE>          Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash)
+      --fscale <FSCALE>          Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash) [default: 100]
       --complexity <COMPLEXITY>   Complexity cut-off, only hash sequences with complexity above this value [default: 0.0]
       --singleton                Create a separate sketch for each sequence record
       --temp-dir <TEMP_DIR>      Custom temporary directory for intermediate files during sorting
@@ -90,10 +90,10 @@ Examples:
 jam sketch input.fasta -o sketch.jam
 
 # Sketch a directory with 8 threads and FracMinHash scaling
-jam sketch genomes/ -o db.jam --fscale 1000 -t 8
+jam sketch genomes/ -o db.jam --fscale 100 -t 8
 
 # Filter low-complexity k-mers by Shannon entropy
-jam sketch genomes/ -o db.jam --fscale 1000 --complexity 1.5
+jam sketch genomes/ -o db.jam --fscale 100 --complexity 1.5
 
 # One sketch per sequence record
 jam sketch multi.fasta -o db.jam --singleton
@@ -130,11 +130,13 @@ jam dist -i query.fasta -d db.jam -c 0.1 -o results.tsv
 jam dist -i multi_query.fasta -d db.jam --singleton -c 0.1
 ```
 
-Output is tab-separated: `query`, `sample_id`, `hit_count`, `containment`.
+Output is tab-separated. Unbiased databases report `query`, `db_sample`, `shared_hashes`, `query_hashes`, `db_hashes`, `query_containment`, `db_containment`, and `uniform_hash_e_value`.
+
+For databases built with bias filtering, containment is reported on the retained/weighted k-mer subset rather than as raw genomic FracMinHash containment. E-values in the output are labeled as uniform-hash approximations and should be interpreted cautiously in bias mode.
 
 #### Bias Table Construction
 
-Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set. By default, hashes are filtered with a hard threshold, but you can enable per-bucket enrichment LUT filtering by supplying both `--positive-fscale` and `--negative-fscale`.
+Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set. By default, hashes are filtered with a hard threshold, but you can enable per-bucket enrichment LUT filtering by supplying both `--target-fscale` and `--max-fscale`.
 
 The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic structure that approximates k-mer frequencies using multiple independent hash functions mapped to a fixed-width table. This keeps memory usage constant regardless of the number of distinct k-mers. By default, the CMS uses 1,048,576 columns and 5 hash functions (~5 MB), this should be increased if the expected number of distinct k-mers exceeds ~100 million.
 
@@ -145,8 +147,8 @@ The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic s
 3. A log-ratio weight is computed per CMS cell: `log((pos + alpha) / (adjusted_neg + alpha))`, where `alpha` is a smoothing parameter.
 4. Weights are quantized to `i8` (-127 to +127) for compact storage.
 5. **Threshold calibration**: All 255 possible thresholds are evaluated. The threshold that maximizes fold enrichment (positive retention / negative retention) is selected.
-6. **Enrichment LUT (optional)**: When `--positive-fscale` and `--negative-fscale` are set, each weight bucket independently gets an effective fscale derived from its empirical enrichment ratio (positive/negative hash frequency). The optimizer maximizes `pos_retention² / neg_retention` subject to a minimum positive retention floor (`--min-positive-retention`). The resulting response curve directly reflects the biological data, with no monotonicity or smoothness constraints imposed. Buckets with insufficient observations inherit from the nearest reliable neighbor.
-7. **Unbiased fscale (optional)**: `--unbiased-fscale` sets a fixed effective fscale for weight-zero buckets (k-mers with equal positive and negative frequency), independent of the LUT optimizer.
+6. **Enrichment LUT (optional)**: When `--target-fscale` and `--max-fscale` are set, each weight bucket independently gets an effective fscale derived from empirical positive/negative hash frequencies. Buckets enriched in target sequences are retained more often, while background-enriched buckets can be strongly suppressed or dropped.
+7. **Unseen fscale (optional)**: `--unseen-fscale` sets a fixed effective fscale for weight-zero buckets (unseen/balanced k-mers), independent of the LUT optimizer.
 
 **Effective fscale**: Because the LUT assigns different sampling rates per weight bucket, the overall sampling rate is not uniform. The calibration output reports three derived values:
 - `eff. fscale (pos)`: effective fscale on the positive calibration population (`base_fscale / positive_retention`)
@@ -162,12 +164,12 @@ jam bias create --positive plasmids.fasta --negative host_genome.fasta -o host_f
 
 # Enrichment LUT filtering: base fscale 100, pass plasmid-enriched kmers more, suppress host kmers
 jam bias create --positive plasmids.fasta --negative host.fasta -o filter.bias \
-  --positive-fscale 100 --negative-fscale 10000
+  --target-fscale 100 --max-fscale 10000
 
 # With a stricter positive retention floor and fixed sampling for unbiased kmers
 jam bias create --positive plasmids.fasta --negative host.fasta -o filter.bias \
-  --positive-fscale 100 --negative-fscale 10000 \
-  --min-positive-retention 0.1 --unbiased-fscale 1000
+  --target-fscale 100 --max-fscale 10000 \
+  --unseen-fscale 1000
 
 # Inspect bias table (text or JSON)
 jam bias stats filter.bias

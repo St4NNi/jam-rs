@@ -192,6 +192,28 @@ fn test_expand_input_paths_file_list_with_comments() -> Result<()> {
 }
 
 #[test]
+fn test_expand_input_paths_file_list_relative_to_list_file() -> Result<()> {
+    let env = CoverageTestEnvironment::new()?;
+
+    let list_dir = env.temp_path().join("lists");
+    let data_dir = env.temp_path().join("data");
+    fs::create_dir_all(&list_dir)?;
+    fs::create_dir_all(&data_dir)?;
+
+    let valid_file = data_dir.join("valid.fa");
+    fs::write(&valid_file, ">seq\nACGT\n")?;
+
+    let file_list = list_dir.join("inputs.txt");
+    fs::write(&file_list, "../data/valid.fa\n")?;
+
+    let result = expand_input_paths(&[file_list])?;
+
+    assert_eq!(result, vec![valid_file]);
+
+    Ok(())
+}
+
+#[test]
 fn test_expand_input_paths_duplicate_files() -> Result<()> {
     let env = CoverageTestEnvironment::new()?;
 
@@ -230,14 +252,21 @@ fn test_expand_input_paths_relative_paths() -> Result<()> {
 fn test_expand_input_paths_compressed_files() -> Result<()> {
     let env = CoverageTestEnvironment::new()?;
 
-    let gz_file = env.create_test_fasta("test.fa.gz", ">seq\nACGT\n")?;
-    let fq_gz_file = env.create_test_fasta("test.fq.gz", "@seq\nACGT\n+\nIIII\n")?;
+    let compressed_files = [
+        env.create_test_fasta("test.fa.gz", ">seq\nACGT\n")?,
+        env.create_test_fasta("test.fq.gz", "@seq\nACGT\n+\nIIII\n")?,
+        env.create_test_fasta("test.fa.bz2", ">seq\nACGT\n")?,
+        env.create_test_fasta("test.fasta.xz", ">seq\nACGT\n")?,
+        env.create_test_fasta("test.fastq.zst", "@seq\nACGT\n+\nIIII\n")?,
+        env.create_test_fasta("test.fq.zstd", "@seq\nACGT\n+\nIIII\n")?,
+    ];
 
-    let result = expand_input_paths(&[gz_file.clone(), fq_gz_file.clone()])?;
+    let result = expand_input_paths(&compressed_files)?;
 
-    assert_eq!(result.len(), 2);
-    assert!(result.contains(&gz_file));
-    assert!(result.contains(&fq_gz_file));
+    assert_eq!(result.len(), compressed_files.len());
+    for file in compressed_files {
+        assert!(result.contains(&file));
+    }
 
     Ok(())
 }
@@ -328,9 +357,19 @@ fn test_is_sequence_file_edge_cases() {
     assert!(is_sequence_file(Path::new("file.name.with.dots.fa")));
     assert!(is_sequence_file(Path::new("version.1.0.fasta")));
 
-    assert!(is_sequence_file(Path::new("file.fastq.gz")));
-    assert!(is_sequence_file(Path::new("file.fq.gz")));
-    assert!(!is_sequence_file(Path::new("file.fa.bz2")));
+    for filename in [
+        "file.fastq.gz",
+        "file.fq.gz",
+        "file.fa.bz2",
+        "file.fasta.xz",
+        "file.fastq.zst",
+        "file.fq.zstd",
+    ] {
+        assert!(
+            is_sequence_file(Path::new(filename)),
+            "Failed for {filename}"
+        );
+    }
 
     let mixed_case = vec![
         "File.Fa",
