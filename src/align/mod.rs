@@ -5,6 +5,7 @@
 //! `I` bases only in the query, `D` bases only in the contig.
 
 mod anchors;
+mod chain_alignment;
 #[cfg(test)]
 mod chain_tests;
 mod chains;
@@ -12,6 +13,7 @@ mod cigar;
 mod kernel;
 
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
+pub use chain_alignment::{ChainConfig, align_chain};
 pub use chains::{
     CHAINING_BYTES, Chain, chain_anchors, forward_extent, split_by_drift, window_chains,
 };
