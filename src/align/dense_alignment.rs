@@ -1,0 +1,208 @@
+//! The gapped alignment around a dense walk: a mismatched walk, or one whose end can reach a
+//! conserved block on another diagonal, is aligned again with the banded kernel.
+
+use super::anchors::QueryTable;
+use super::chain_alignment::{ChainConfig, query_window, strand};
+use super::dense::Walk;
+use super::{
+    Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
+};
+
+/// A walk alignment proven to be the best for its query window and contig range, so the next
+/// walk with the same inputs and its diagonals inside its band need not be aligned again.
+#[derive(Clone, Copy, Debug)]
+pub struct DenseOptimum {
+    reverse: bool,
+    query_start: u64,
+    contig: (u64, u64),
+    diagonals: (i64, i64),
+}
+
+/// One walk of a window: the forward window, the contig position where it starts, and the query.
+#[derive(Clone, Copy)]
+struct WalkWindow<'a> {
+    walk: &'a Walk,
+    window: &'a [u8],
+    offset: u64,
+    table: &'a QueryTable,
+}
+
+/// The gapped alignment around `walk` of `window` (the forward contig bases from `offset`). A
+/// linear query is aligned over the walk and the bases around it first, and over more of it while
+/// the alignment runs into an edge of that window: the join that a walk asks for lies within the
+/// drift of its ends. `None` when no positive alignment exists, or when `optimum` already holds
+/// the best alignment of the same inputs.
+pub fn align_dense_walk(
+    walk: &Walk,
+    window: &[u8],
+    offset: u64,
+    table: &QueryTable,
+    config: ChainConfig,
+    workspace: &mut AlignmentWorkspace,
+    optimum: &mut Option<DenseOptimum>,
+) -> Result<Option<Alignment>, AlignmentError> {
+    let input = WalkWindow {
+        walk,
+        window,
+        offset,
+        table,
+    };
+    let length = u64::from(table.query_length());
+    if table.circular() {
+        let whole = (u64::from(walk.query), length);
+        return align_dense_window(input, whole, config, workspace, optimum);
+    }
+    let margin = u64::from(config.max_drift) + 64;
+    let walk_end = u64::from(walk.query) + u64::from(walk.length);
+    let mut extension = 2 * margin;
+    loop {
+        let start = u64::from(walk.query).saturating_sub(extension);
+        let end = (walk_end + extension).min(length);
+        let Some(alignment) =
+            align_dense_window(input, (start, end - start), config, workspace, optimum)?
+        else {
+            return Ok(None);
+        };
+        let (aligned_start, aligned_end) = (
+            alignment.query_interval.start - start,
+            alignment.query_interval.end - start,
+        );
+        let runs_into_edge = (start > 0 && aligned_start <= margin)
+            || (end < length && end - start - aligned_end <= margin);
+        if !runs_into_edge {
+            return Ok(Some(alignment));
+        }
+        extension = extension.saturating_mul(4);
+    }
+}
+
+/// Aligns a dense walk over the query bases `query_start..query_start + window_length`.
+fn align_dense_window(
+    input: WalkWindow<'_>,
+    (query_start, window_length): (u64, u64),
+    config: ChainConfig,
+    workspace: &mut AlignmentWorkspace,
+    optimum: &mut Option<DenseOptimum>,
+) -> Result<Option<Alignment>, AlignmentError> {
+    let WalkWindow {
+        walk,
+        window,
+        offset,
+        table,
+    } = input;
+    let margin = u64::from(config.max_drift) + 64;
+    let diagonal = i64::from(walk.contig) - (u64::from(walk.query) - query_start) as i64;
+    let low = (diagonal - margin as i64).max(0) as u64;
+    let high = (diagonal + window_length as i64 + margin as i64).max(0) as u64;
+    let high = high.min(window.len() as u64);
+    if low >= high {
+        return Ok(None);
+    }
+    let band = i64::from(config.max_band());
+    if optimum.as_ref().is_some_and(|saved| {
+        saved.reverse == walk.reverse
+            && saved.query_start == query_start
+            && saved.contig == (low, high)
+            && saved.diagonals.0 >= diagonal - band
+            && saved.diagonals.1 <= diagonal + band
+    }) {
+        return Ok(None);
+    }
+    let (forward_low, forward_high) = if walk.reverse {
+        (window.len() as u64 - high, window.len() as u64 - low)
+    } else {
+        (low, high)
+    };
+    // Rows before the first and after the last that can meet the contig within the band, and
+    // an endpoint completion's reach, hold no cells: the kernel reads only the rows between.
+    let k = u64::from(table.config().k);
+    let reach = band + k as i64;
+    let first_row = (low as i64 - diagonal - reach).clamp(0, window_length as i64) as u64;
+    let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, window_length as i64);
+    let rows = last_row as u64 - first_row;
+    let bases = query_window(
+        table.query(),
+        query_start + first_row,
+        rows,
+        table.circular(),
+    )?;
+    let scores = AlignmentConfig {
+        band_width: config.max_band(),
+        diagonal_offset: diagonal - low as i64 + first_row as i64,
+        ..config.scores
+    };
+    let aligned = AlignmentInput {
+        query: &bases,
+        query_offset: query_start + first_row,
+        contig: &window[forward_low as usize..forward_high as usize],
+        contig_offset: offset + forward_low,
+    };
+    let alignment = match workspace.align(aligned, strand(walk.reverse), scores) {
+        Ok(alignment) => alignment,
+        Err(AlignmentError::NoAlignment) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let kernel_score = alignment.score;
+    // A completion reaches k rows beyond the alignment, which the window keeps.
+    let alignment = if alignment.query_interval.start - query_start <= k
+        && window_length - (alignment.query_interval.end - query_start) <= k
+    {
+        workspace.complete_endpoints(alignment, aligned, k as usize, scores)?
+    } else {
+        alignment
+    };
+    let diagonals = path_diagonals(&alignment, window.len() as u64, offset, query_start);
+    // Any path outside this band visits a diagonal with at most this many paired bases.
+    // Every other operation scores <= 0. A strictly larger score therefore proves global
+    // optimality for these inputs, independently of the band.
+    let centre = diagonal - low as i64;
+    let contig_length = (high - low) as i64;
+    let left = (window_length as i64 - (band + 1 - centre).max(0))
+        .max(0)
+        .min(contig_length);
+    let right = (contig_length - (centre + band + 1).max(0))
+        .max(0)
+        .min(window_length as i64);
+    let outside = left.max(right) * i64::from(config.scores.match_score);
+    if alignment.score >= kernel_score && i64::from(alignment.score) > outside {
+        *optimum = Some(DenseOptimum {
+            reverse: walk.reverse,
+            query_start,
+            contig: (low, high),
+            diagonals,
+        });
+    }
+    Ok(Some(alignment))
+}
+
+/// The lowest and highest diagonal (oriented window position minus query position from
+/// `query_start`) that the path of `alignment` visits.
+fn path_diagonals(
+    alignment: &Alignment,
+    window_length: u64,
+    offset: u64,
+    query_start: u64,
+) -> (i64, i64) {
+    let mut contig_at = if alignment.strand == super::Strand::Reverse {
+        window_length - (alignment.contig_interval.end - offset)
+    } else {
+        alignment.contig_interval.start - offset
+    };
+    let mut query_at = alignment.query_interval.start - query_start;
+    let first = contig_at as i64 - query_at as i64;
+    let mut diagonals = (first, first);
+    for run in &alignment.runs {
+        let length = u64::from(run.length);
+        match run.operation {
+            EditOperation::Deletion => contig_at += length,
+            EditOperation::Insertion => query_at += length,
+            EditOperation::Match | EditOperation::Substitution => {
+                query_at += length;
+                contig_at += length;
+            }
+        }
+        let diagonal = contig_at as i64 - query_at as i64;
+        diagonals = (diagonals.0.min(diagonal), diagonals.1.max(diagonal));
+    }
+    diagonals
+}

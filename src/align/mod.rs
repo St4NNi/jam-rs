@@ -13,7 +13,9 @@ mod chain_tests;
 mod chains;
 mod cigar;
 mod dense;
+mod dense_alignment;
 mod kernel;
+mod walk_alignment;
 
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
 pub use chain_alignment::{ChainConfig, align_chain};
@@ -22,7 +24,9 @@ pub use chains::{
 };
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
 pub use dense::{Walk, dense_walks, long_enough};
+pub use dense_alignment::{DenseOptimum, align_dense_walk};
 pub use kernel::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, DEFAULT_MAX_CELLS};
+pub use walk_alignment::{contains, gap_continuation, walk_alignment};
 
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
