@@ -5,9 +5,11 @@
 //! aligns the query there and decides each entry. `located` is what stage 2 hands to stage 3.
 
 pub mod align_stage;
+pub mod bound;
 pub mod control;
 pub mod locate_stage;
 pub mod located;
+pub mod query;
 pub mod sketch_stage;
 
 pub use control::{SearchControl, Stopped};
