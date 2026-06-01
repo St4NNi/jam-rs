@@ -19,6 +19,8 @@ pub struct QuerySeed {
 pub struct QueryKmers {
     length: u64,
     circular: bool,
+    /// The minimizer window of the seed scheme, in k-mers.
+    window: u64,
     kmers: u64,
     seeds: Vec<QuerySeed>,
     positions: Vec<u32>,
@@ -53,6 +55,7 @@ impl QueryKmers {
         Self {
             length: query.len() as u64,
             circular,
+            window: u64::from(seeder.scheme().window),
             kmers: kmers.len() as u64,
             seeds,
             positions: kmers.into_iter().map(|(_, position)| position).collect(),
@@ -83,6 +86,16 @@ impl QueryKmers {
     pub fn positions(&self, seed: u32) -> &[u32] {
         let range = &self.seeds[seed as usize].positions;
         &self.positions[range.start as usize..range.end as usize]
+    }
+
+    /// The query starts with a seed hit, divided by the seeds a full exact match would show (query
+    /// k-mers times the seed density 2 / (w + 1)), at most 1.
+    pub fn containment_estimate(&self, hit_positions: u64) -> f64 {
+        let expected = self.kmers as f64 * 2.0 / (self.window as f64 + 1.0);
+        if expected <= 0.0 {
+            return 0.0;
+        }
+        (hit_positions as f64 / expected).min(1.0)
     }
 
     /// The query starts of all the given distinct k-mers, ascending.

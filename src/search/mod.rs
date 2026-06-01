@@ -14,3 +14,8 @@ pub mod sketch_stage;
 
 pub use control::{SearchControl, Stopped};
 pub use located::{ContigWindows, LocatedEntry};
+
+#[cfg(test)]
+mod sketch_stage_tests;
+#[cfg(test)]
+mod test_shard;
