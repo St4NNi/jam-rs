@@ -7,6 +7,8 @@
 pub mod align_stage;
 pub mod bound;
 pub mod control;
+pub mod error;
+pub mod events;
 pub mod locate_stage;
 pub mod located;
 pub mod query;
@@ -15,6 +17,8 @@ pub mod sketch_stage;
 pub use control::{SearchControl, Stopped};
 pub use located::{ContigWindows, LocatedEntry};
 
+#[cfg(test)]
+mod locate_stage_tests;
 #[cfg(test)]
 mod sketch_stage_tests;
 #[cfg(test)]
