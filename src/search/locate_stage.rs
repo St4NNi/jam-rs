@@ -1,1 +1,232 @@
 //! Stage 2: the postings of each candidate entry, the second pruning and the alignment windows.
+//!
+//! The positions keep more hash bits than the sketch's fingerprint, so a seed hit of the sketch
+//! without postings is a false seed hit and disappears here. Frequent seeds, which stage 1 counted
+//! as possibly hit, are looked up too. The coverage bound is computed again from the seed hits
+//! that have postings, and the entry is dropped when it falls below the requested query coverage,
+//! before any sequence is read. The bins of the seed hits, widened by the flank and merged per
+//! contig, become the alignment windows.
+
+use super::bound::CoverageBound;
+use super::control::SearchControl;
+use super::error::SearchError;
+use super::events::DropReason;
+use super::located::{ContigWindows, LocatedEntry};
+use super::query::QueryKmers;
+use super::sketch_stage::PossibleEntry;
+use crate::index::{PackedSequence, Posting, Shard};
+use std::ops::Range;
+use std::time::{Duration, Instant};
+
+/// Seeds looked up between two checks of the search control.
+const LOOKUPS_PER_CHECK: usize = 1024;
+
+/// The work of stage 2.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LocateWork {
+    /// Candidate entries that stage 2 looked at.
+    pub entries: u64,
+    /// Seeds looked up in the positions, over all entries.
+    pub lookups: u64,
+    /// Postings read.
+    pub postings: u64,
+    /// Seed hits of the sketch without postings.
+    pub false_seed_hits: u64,
+    /// Entries dropped by the second pruning or for lack of seed hits.
+    pub dropped_entries: u64,
+    /// Bins with seed hits, over all located entries.
+    pub candidate_bins: u64,
+    /// Alignment windows, over all located entries.
+    pub windows: u64,
+    /// Time spent in the stage, summed over threads.
+    pub time: Duration,
+}
+
+impl LocateWork {
+    /// Adds the work of another part of the search.
+    pub fn add(&mut self, other: &Self) {
+        self.entries += other.entries;
+        self.lookups += other.lookups;
+        self.postings += other.postings;
+        self.false_seed_hits += other.false_seed_hits;
+        self.dropped_entries += other.dropped_entries;
+        self.candidate_bins += other.candidate_bins;
+        self.windows += other.windows;
+        self.time += other.time;
+    }
+}
+
+/// The result of stage 2 for one entry.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LocateOutcome {
+    Located(LocatedEntry),
+    Dropped(DropReason),
+}
+
+/// Buffers of stage 2, reused across the entries of one thread.
+#[derive(Debug, Default)]
+pub struct LocateWorkspace {
+    postings: Vec<Posting>,
+    positions: Vec<u32>,
+    bins: Vec<u32>,
+}
+
+/// The query, bound and settings that every entry of one search shares in stage 2.
+#[derive(Clone, Copy, Debug)]
+pub struct LocateRequest<'a> {
+    pub query: &'a QueryKmers,
+    pub bound: &'a CoverageBound<'a>,
+    /// The frequent seeds of stage 1, looked up in every entry.
+    pub frequent_seeds: &'a [u32],
+    /// Bases added on each side of a candidate bin.
+    pub flank: u64,
+}
+
+/// Runs stage 2 for one candidate entry.
+pub fn locate_entry(
+    shard: &Shard,
+    request: &LocateRequest<'_>,
+    possible: &PossibleEntry,
+    workspace: &mut LocateWorkspace,
+    work: &mut LocateWork,
+    control: SearchControl<'_>,
+) -> Result<LocateOutcome, SearchError> {
+    let started = Instant::now();
+    let outcome = locate(shard, request, possible, workspace, work, control);
+    work.entries += 1;
+    work.time += started.elapsed();
+    match &outcome {
+        Ok(LocateOutcome::Located(located)) => {
+            work.candidate_bins += workspace.bins.len() as u64;
+            work.windows += located
+                .windows
+                .iter()
+                .map(|contig| contig.ranges.len() as u64)
+                .sum::<u64>();
+        }
+        Ok(LocateOutcome::Dropped(_)) => work.dropped_entries += 1,
+        Err(_) => {}
+    }
+    outcome
+}
+
+fn locate(
+    shard: &Shard,
+    request: &LocateRequest<'_>,
+    possible: &PossibleEntry,
+    workspace: &mut LocateWorkspace,
+    work: &mut LocateWork,
+    control: SearchControl<'_>,
+) -> Result<LocateOutcome, SearchError> {
+    read_seed_hits(shard, request, possible, workspace, work, control)?;
+    let LocateWorkspace {
+        positions, bins, ..
+    } = workspace;
+    positions.sort_unstable();
+    let coverage_bound = request.bound.bound(positions);
+    if !request.bound.keeps(coverage_bound) {
+        return Ok(LocateOutcome::Dropped(DropReason::CoverageBound));
+    }
+    if bins.is_empty() {
+        return Ok(LocateOutcome::Dropped(DropReason::NoSeedHits));
+    }
+    bins.sort_unstable();
+    bins.dedup();
+    let packed = shard.packed(possible.entry)?;
+    let bin_bits = shard.positions().bin_bits();
+    Ok(LocateOutcome::Located(LocatedEntry {
+        entry: possible.entry,
+        coverage_bound,
+        containment_estimate: request.query.containment_estimate(positions.len() as u64),
+        windows: alignment_windows(&packed, bins, bin_bits, request.flank)?,
+    }))
+}
+
+/// Reads the postings of the entry's seed hits and of the frequent seeds. Fills the workspace
+/// with the query starts and the bins of the seed hits that have postings.
+fn read_seed_hits(
+    shard: &Shard,
+    request: &LocateRequest<'_>,
+    possible: &PossibleEntry,
+    workspace: &mut LocateWorkspace,
+    work: &mut LocateWork,
+    control: SearchControl<'_>,
+) -> Result<(), SearchError> {
+    workspace.positions.clear();
+    workspace.bins.clear();
+    let expanded = possible.seed_hits.iter().map(|&seed| (seed, true));
+    let frequent = request.frequent_seeds.iter().map(|&seed| (seed, false));
+    for (index, (seed, from_sketch)) in expanded.chain(frequent).enumerate() {
+        if index % LOOKUPS_PER_CHECK == 0 {
+            control.check()?;
+        }
+        let hash = request.query.seeds()[seed as usize].hash;
+        workspace.postings.clear();
+        shard
+            .positions()
+            .postings(possible.entry, hash, &mut workspace.postings)?;
+        work.lookups += 1;
+        work.postings += workspace.postings.len() as u64;
+        if workspace.postings.is_empty() {
+            work.false_seed_hits += u64::from(from_sketch);
+            continue;
+        }
+        workspace
+            .positions
+            .extend_from_slice(request.query.positions(seed));
+        workspace
+            .bins
+            .extend(workspace.postings.iter().map(|posting| posting.bin));
+    }
+    Ok(())
+}
+
+/// The alignment windows of an entry: each candidate bin widened by `flank` on both sides, cut
+/// at the ends of the contigs it touches, and merged per contig. `bins` must be ascending.
+fn alignment_windows(
+    packed: &PackedSequence,
+    bins: &[u32],
+    bin_bits: u32,
+    flank: u64,
+) -> Result<Vec<ContigWindows>, SearchError> {
+    let bases = packed.bases();
+    let mut windows: Vec<ContigWindows> = Vec::new();
+    for &bin in bins {
+        let start = u64::from(bin) << bin_bits;
+        let end = (start + (1u64 << bin_bits)).min(bases);
+        let Some(mut contig) = packed.contig_at(start) else {
+            continue;
+        };
+        // A bin can span the end of one contig and the start of the next.
+        while contig < packed.contig_count() {
+            let range = packed.contig_range(contig)?;
+            if range.start >= end {
+                break;
+            }
+            let window = start.saturating_sub(flank).max(range.start)..(end + flank).min(range.end);
+            if !window.is_empty() {
+                let local = window.start - range.start..window.end - range.start;
+                push_window(&mut windows, contig as u32, local);
+            }
+            contig += 1;
+        }
+    }
+    Ok(windows)
+}
+
+/// Appends a window, merging it with the last window of the same contig when they touch.
+/// Windows arrive by ascending contig, and by ascending start within a contig.
+fn push_window(windows: &mut Vec<ContigWindows>, contig: u32, window: Range<u64>) {
+    match windows.last_mut() {
+        Some(last) if last.contig == contig => match last.ranges.last_mut() {
+            Some(previous) if window.start <= previous.end => {
+                previous.end = previous.end.max(window.end);
+            }
+            _ => last.ranges.push(window),
+        },
+        _ => windows.push(ContigWindows {
+            contig,
+            ranges: vec![window],
+        }),
+    }
+}
