@@ -62,7 +62,7 @@ impl super::waves::WaveScore for Offset16 {
 
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    unsafe fn fill_blocks<const TRACE: bool, const BEST: bool>(
+    unsafe fn fill_blocks<const TRACEBACK: bool, const BEST: bool>(
         query: &[u8],
         contig: &[u8],
         config: AlignmentConfig,
@@ -94,7 +94,7 @@ impl super::waves::WaveScore for Offset16 {
         };
         // SAFETY: forwarded from this function's contract.
         unsafe {
-            super::rebased_avx2::fill_span16_rebased::<TRACE, BEST>(
+            super::rebased_avx2::fill_span16_rebased::<TRACEBACK, BEST>(
                 blocks, current, traceback, best, rebase,
             )
         }

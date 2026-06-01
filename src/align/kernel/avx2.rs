@@ -79,7 +79,7 @@ fn equal_ascii_case(left: __m128i, right: __m128i) -> __m128i {
 /// instantiation of `fill_waves`. Callers must enable AVX2 and prove that rows `row..row + 8`
 /// lie in the current wave, that `row > 0`, and that `row + 7 < wave`.
 #[inline(always)]
-pub(super) unsafe fn fill_wave_avx2<const TRACE: bool>(
+pub(super) unsafe fn fill_wave_avx2<const TRACEBACK: bool>(
     block: Block<'_>,
     current: &mut [i32],
     traceback: &mut [u16],
@@ -184,7 +184,7 @@ pub(super) unsafe fn fill_wave_avx2<const TRACE: bool>(
             insertion_scores,
         );
 
-        if TRACE {
+        if TRACEBACK {
             let mut trace = _mm256_and_si256(match_positive, _mm256_set1_epi32(1));
             trace = _mm256_or_si256(
                 trace,

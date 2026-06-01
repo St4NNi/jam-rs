@@ -84,7 +84,7 @@ unsafe fn choose_state<const SHIFT: i32>(m: __m256i, d: __m256i, i: __m256i) -> 
 /// AVX2, pass lowercase sequences, and prove the bounds that the debug assertions check.
 #[allow(unused_assignments)]
 #[inline(always)]
-pub(super) unsafe fn fill_span16_rebased<const TRACE: bool, const BEST: bool>(
+pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool>(
     blocks: Span<'_>,
     current: &mut [Offset16],
     traceback: &mut [u16],
@@ -182,7 +182,7 @@ pub(super) unsafe fn fill_span16_rebased<const TRACE: bool, const BEST: bool>(
 
                 let (match_raw, match_scores, deletion_raw, deletion_scores);
                 let (insertion_raw, insertion_scores, trace);
-                if TRACE {
+                if TRACEBACK {
                     let (diagonal, diagonal_state) = choose_state::<3>(older_m, older_d, older_i);
                     match_raw = _mm256_adds_epi16(diagonal, substitution);
                     let match_positive = _mm256_cmpgt_epi16(match_raw, floor);
@@ -254,7 +254,7 @@ pub(super) unsafe fn fill_span16_rebased<const TRACE: bool, const BEST: bool>(
                     current_at[INSERTION as usize].wrapping_add(row).cast(),
                     insertion_scores,
                 );
-                if TRACE {
+                if TRACEBACK {
                     _mm256_storeu_si256(trace_at.wrapping_add(row).cast(), trace);
                 }
                 let lane_best =

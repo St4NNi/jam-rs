@@ -74,7 +74,7 @@ pub(super) trait WaveScore: bytemuck::Pod {
     /// enable AVX2 and prove the block bounds that `fill_wave_avx2` documents.
     #[cfg(target_arch = "x86_64")]
     #[allow(clippy::too_many_arguments)]
-    unsafe fn fill_blocks<const TRACE: bool, const BEST: bool>(
+    unsafe fn fill_blocks<const TRACEBACK: bool, const BEST: bool>(
         query: &[u8],
         contig: &[u8],
         config: AlignmentConfig,
@@ -108,7 +108,7 @@ impl WaveScore for i32 {
     /// values).
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
-    unsafe fn fill_blocks<const TRACE: bool, const BEST: bool>(
+    unsafe fn fill_blocks<const TRACEBACK: bool, const BEST: bool>(
         query: &[u8],
         contig: &[u8],
         config: AlignmentConfig,
@@ -145,12 +145,12 @@ impl WaveScore for i32 {
                 .checked_add(Self::LANES - 1)
                 .is_some_and(|last| last <= end)
             {
-                super::avx2::fill_wave_avx2::<TRACE>(block(row), current, traceback, best);
+                super::avx2::fill_wave_avx2::<TRACEBACK>(block(row), current, traceback, best);
                 row += Self::LANES;
             }
             if row <= end && end + 1 - start >= Self::LANES {
                 let last = end + 1 - Self::LANES;
-                super::avx2::fill_wave_avx2::<TRACE>(block(last), current, traceback, best);
+                super::avx2::fill_wave_avx2::<TRACEBACK>(block(last), current, traceback, best);
                 row = end + 1;
             }
         }
@@ -160,7 +160,7 @@ impl WaveScore for i32 {
 
 /// Fills one cell of a wave with the scalar recurrence.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn fill_wave_scalar<S: WaveScore, const TRACE: bool>(
+pub(super) fn fill_wave_scalar<S: WaveScore, const TRACEBACK: bool>(
     query: &[u8],
     contig: &[u8],
     config: AlignmentConfig,
@@ -185,7 +185,7 @@ pub(super) fn fill_wave_scalar<S: WaveScore, const TRACE: bool>(
         current[wave_offset] = S::write(0, base);
         current[stride + wave_offset] = S::write(0, base);
         current[2 * stride + wave_offset] = S::write(0, base);
-        if TRACE {
+        if TRACEBACK {
             traceback[trace_index] = 0;
         }
         return;
@@ -243,7 +243,7 @@ pub(super) fn fill_wave_scalar<S: WaveScore, const TRACE: bool>(
     if S::REBASED {
         rebase.scalar_cell(&cell);
     }
-    if TRACE {
+    if TRACEBACK {
         traceback[trace_index] = encode_traceback(cell);
     }
     best.consider(row, contig_index, cell);

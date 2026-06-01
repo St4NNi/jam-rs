@@ -32,7 +32,7 @@ impl AlignmentWorkspace {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     #[inline(never)]
-    unsafe fn fill_waves_avx2<const TRACE: bool, const BEST: bool>(
+    unsafe fn fill_waves_avx2<const TRACEBACK: bool, const BEST: bool>(
         &mut self,
         pass: Pass<'_>,
         waves: (usize, usize),
@@ -40,7 +40,7 @@ impl AlignmentWorkspace {
         best: &mut BestCell,
     ) {
         // SAFETY: this function enables AVX2 for the vector instantiation.
-        unsafe { self.fill_waves::<i32, true, TRACE, BEST>(pass, waves, carry, best) }
+        unsafe { self.fill_waves::<i32, true, TRACEBACK, BEST>(pass, waves, carry, best) }
     }
 
     /// Runs `fill_waves` with rebased i16 planes and sixteen AVX2 lanes. Callers must check the
@@ -48,7 +48,7 @@ impl AlignmentWorkspace {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     #[inline(never)]
-    unsafe fn fill_waves16_rebased<const TRACE: bool, const BEST: bool>(
+    unsafe fn fill_waves16_rebased<const TRACEBACK: bool, const BEST: bool>(
         &mut self,
         pass: Pass<'_>,
         waves: (usize, usize),
@@ -56,7 +56,7 @@ impl AlignmentWorkspace {
         best: &mut BestCell,
     ) {
         // SAFETY: this function enables AVX2 and the caller checks the configuration.
-        unsafe { self.fill_waves::<Offset16, true, TRACE, BEST>(pass, waves, carry, best) }
+        unsafe { self.fill_waves::<Offset16, true, TRACEBACK, BEST>(pass, waves, carry, best) }
     }
 
     /// Fills waves with the selected kernel. Callers must enable AVX2 when VECTOR is true, and
@@ -64,7 +64,7 @@ impl AlignmentWorkspace {
     #[inline(always)]
     pub(super) unsafe fn fill_waves_selected<
         const VECTOR: bool,
-        const TRACE: bool,
+        const TRACEBACK: bool,
         const BEST: bool,
     >(
         &mut self,
@@ -79,16 +79,16 @@ impl AlignmentWorkspace {
             // SAFETY: forwarded from this function's contract.
             unsafe {
                 if kernel == LocalKernel::Rebased {
-                    self.fill_waves16_rebased::<TRACE, BEST>(pass, waves, carry, best);
+                    self.fill_waves16_rebased::<TRACEBACK, BEST>(pass, waves, carry, best);
                 } else {
-                    self.fill_waves_avx2::<TRACE, BEST>(pass, waves, carry, best);
+                    self.fill_waves_avx2::<TRACEBACK, BEST>(pass, waves, carry, best);
                 }
             }
             return;
         }
         debug_assert_eq!(kernel, LocalKernel::Wide);
         // SAFETY: the scalar instantiation never calls AVX2 code.
-        unsafe { self.fill_waves::<i32, false, TRACE, BEST>(pass, waves, carry, best) }
+        unsafe { self.fill_waves::<i32, false, TRACEBACK, BEST>(pass, waves, carry, best) }
     }
 
     /// Fills waves `first..=last`. The wave buffers and the two predecessor ranges rotate in
@@ -98,7 +98,7 @@ impl AlignmentWorkspace {
     pub(super) unsafe fn fill_waves<
         S: WaveScore,
         const VECTOR: bool,
-        const TRACE: bool,
+        const TRACEBACK: bool,
         const BEST: bool,
     >(
         &mut self,
@@ -150,7 +150,7 @@ impl AlignmentWorkspace {
                         stride,
                     );
                 }
-                let wave_base = if TRACE {
+                let wave_base = if TRACEBACK {
                     self.wave_offsets[wave - first_wave]
                 } else {
                     0
@@ -177,7 +177,7 @@ impl AlignmentWorkspace {
                 };
                 // SAFETY: forwarded from this function's contract.
                 unsafe {
-                    fill_wave::<S, VECTOR, TRACE, BEST>(
+                    fill_wave::<S, VECTOR, TRACEBACK, BEST>(
                         pass,
                         cells,
                         bytemuck::cast_slice_mut(&mut current_buffer[..]),
@@ -284,7 +284,7 @@ struct WaveCells<'a, S> {
 /// Fills the cells of one wave: vector blocks over the rows whose neighbours all lie in the two
 /// waves before, scalar cells at the edges. Callers must enable AVX2 when VECTOR is true.
 #[inline(always)]
-unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACE: bool, const BEST: bool>(
+unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACEBACK: bool, const BEST: bool>(
     pass: Pass<'_>,
     cells: WaveCells<'_, S>,
     current: &mut [S],
@@ -311,7 +311,7 @@ unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACE: bool, const B
                   traceback: &mut [u16],
                   best: &mut BestCell,
                   rebase: &mut RebaseState| {
-        fill_wave_scalar::<S, TRACE>(
+        fill_wave_scalar::<S, TRACEBACK>(
             query,
             contig,
             config,
@@ -342,7 +342,7 @@ unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACE: bool, const B
         // block are in their wave slices. start>=1 and end<=wave-1 prove the query and
         // reverse-loaded contig bytes are also in bounds.
         row = unsafe {
-            S::fill_blocks::<TRACE, BEST>(
+            S::fill_blocks::<TRACEBACK, BEST>(
                 query,
                 contig,
                 config,
