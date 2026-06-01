@@ -14,6 +14,8 @@ mod chains;
 mod cigar;
 mod dense;
 mod dense_alignment;
+#[cfg(test)]
+mod dense_tests;
 mod joins;
 mod kernel;
 mod walk_alignment;
