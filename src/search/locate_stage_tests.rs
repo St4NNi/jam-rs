@@ -120,7 +120,10 @@ fn false_seed_hits_of_the_sketch_have_no_postings() {
     assert_eq!(*outcome, LocateOutcome::Dropped(DropReason::NoSeedHits));
     let (_, outcome, work) = results.iter().find(|(p, ..)| p.entry == 1).unwrap();
     assert_eq!(work.false_seed_hits, 0);
-    assert_eq!(windows(outcome), vec![(0, vec![0..20_000])]);
+    assert_eq!(
+        windows(outcome),
+        [(0, std::iter::once(0..20_000).collect())]
+    );
 }
 
 #[test]
