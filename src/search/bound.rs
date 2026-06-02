@@ -1,5 +1,18 @@
-//! The coverage bound of an entry: the query length minus the stretches without a seed hit that
-//! the loss budget lets count as absent.
+//! The coverage bound of an entry: the most query bases it can still cover, given where its seed
+//! hits lie on the query.
+//!
+//! Rule. The query bases that k-mers with a seed hit (or a possible seed hit) cover may all be
+//! covered. The rest of the query falls into n stretches without a seed hit. A present piece of
+//! `g` bases at the accepted identity shows no seed hit with the chance `P_miss(g)` of the miss
+//! model, which falls as `g` grows. The allowance `a` is the shortest length with
+//! `n * P_miss(a) <= B`, where B is the stage's share of the loss budget (a union bound over the
+//! stretches). Each stretch then keeps at most `a` bases:
+//!
+//! coverage bound = covered bases + sum over the stretches of min(stretch length, a)
+//!
+//! A stretch shorter than `a` is kept whole. Assumption: a stretch holds at most one present
+//! piece. The decision counts only fragments of at least `min_fragment_columns` columns, and in
+//! practice the part of an entry that matches a stretch aligns as one piece.
 
 use crate::loss::{LossBudget, MissModel};
 
@@ -45,16 +58,34 @@ impl<'a> CoverageBound<'a> {
     /// at the query starts `positions`, which must be ascending.
     pub fn bound(&self, positions: &[u32]) -> u64 {
         let stretches = self.stretches(positions);
-        let absent = self
-            .budget
-            .absent_stretches(self.model, self.identity, &stretches);
-        let absent_bases: u64 = stretches
+        let allowance = self.allowance(stretches.len() as u64);
+        let left_out: u64 = stretches
             .iter()
-            .zip(absent)
-            .filter(|(_, absent)| *absent)
-            .map(|(bases, _)| bases)
+            .map(|&bases| bases.saturating_sub(allowance))
             .sum();
-        self.query_length - absent_bases
+        self.query_length - left_out
+    }
+
+    /// The shortest length `a` with `stretches * P_miss(a) <= B`, or the query length when no
+    /// length up to it is short enough.
+    fn allowance(&self, stretches: u64) -> u64 {
+        let fits = |length: u64| {
+            stretches as f64 * self.model.miss_chance(length, self.identity) <= self.budget.chance()
+        };
+        if stretches == 0 || !fits(self.query_length) {
+            return self.query_length;
+        }
+        // The miss chance never rises with the length, so the lengths that fit form a tail.
+        let (mut low, mut high) = (0, self.query_length);
+        while high - low > 1 {
+            let middle = low + (high - low) / 2;
+            if fits(middle) {
+                high = middle;
+            } else {
+                low = middle;
+            }
+        }
+        high
     }
 
     /// Whether an entry with this bound can still reach the required query coverage.
@@ -119,23 +150,42 @@ mod tests {
     }
 
     #[test]
-    fn long_stretches_count_as_absent_and_short_ones_do_not() {
+    fn the_allowance_is_the_shortest_length_within_the_budget() {
         let linear = bound(10_000, false);
-        assert_eq!(linear.bound(&[]), 0);
-        // A stretch of 40 bases may well hold the query without a seed hit; 8,000 bases cannot.
+        let one = linear.allowance(1);
+        assert!(model().miss_chance(one, 0.95) <= 1e-4);
+        assert!(model().miss_chance(one - 1, 0.95) > 1e-4);
+        assert!(linear.allowance(40) > one);
+        assert_eq!(linear.allowance(0), 10_000);
+        assert_eq!(bound(10_000, false).bound(&[]), one);
+    }
+
+    #[test]
+    fn each_stretch_keeps_at_most_the_allowance() {
+        let linear = bound(10_000, false);
+        // 40 k-mers with seed hits, 40 bases apart, then 7,600 bases without one.
         let positions: Vec<u32> = (0..40).map(|i| 61 * i).collect();
-        let end = u64::from(*positions.last().unwrap()) + 21;
-        assert_eq!(linear.bound(&positions), end);
+        let allowance = linear.allowance(40);
+        let covered = 40 * 21;
+        assert_eq!(
+            linear.bound(&positions),
+            covered + 39 * 40 + allowance.min(7_600)
+        );
+        assert!(allowance < 7_600);
     }
 
     #[test]
     fn the_stretch_over_the_end_joins_both_ends() {
-        // Stretches of 250 and 300 bases at the ends: each alone may hold the query without a
-        // seed hit, but not both together.
-        let positions: Vec<u32> = (0..90).map(|i| 250 + 61 * i).collect();
-        assert_eq!(bound(6_000, false).bound(&positions), 6_000);
+        // Stretches of 250 and 300 bases at the ends: each is shorter than the allowance, but
+        // together they are not.
+        let positions: Vec<u32> = (250..=5_679).collect();
+        let linear = bound(6_000, false);
+        assert!(linear.allowance(2) > 300);
+        assert_eq!(linear.bound(&positions), 6_000);
         let circular = bound(6_000, true);
-        assert_eq!(circular.stretches(&positions).last(), Some(&550));
-        assert_eq!(circular.bound(&positions), 6_000 - 550);
+        assert_eq!(circular.stretches(&positions), vec![550]);
+        let allowance = circular.allowance(1);
+        assert!(allowance < 550);
+        assert_eq!(circular.bound(&positions), 6_000 - 550 + allowance);
     }
 }
