@@ -7,6 +7,7 @@
 pub mod align_stage;
 pub mod bound;
 pub mod control;
+pub mod driver;
 pub mod error;
 pub mod events;
 pub mod locate_stage;
@@ -15,6 +16,9 @@ pub mod query;
 pub mod sketch_stage;
 
 pub use control::{SearchControl, Stopped};
+pub use driver::{SearchConfig, SearchSummary, Searcher};
+pub use error::SearchError;
+pub use events::{Completion, DropReason, EntryEvent, SearchStage};
 pub use located::{ContigWindows, LocatedEntry};
 
 #[cfg(test)]
