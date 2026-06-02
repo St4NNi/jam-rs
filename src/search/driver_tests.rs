@@ -214,3 +214,55 @@ fn entries_at_the_accepted_identity_are_never_dropped() {
         }
     }
 }
+
+/// Each entry holds one piece of a long query at exactly the accepted identity, with long
+/// stretches without seed hits around it; none may be dropped by stages 1 and 2. Entries with a
+/// few short scattered pieces of the query must be dropped.
+#[test]
+fn a_present_piece_inside_a_long_stretch_is_never_dropped() {
+    const PIECE: usize = 4_000;
+    let mut random = Random(0x9ece);
+    let directory = tempfile::tempdir().unwrap();
+    let query = random.bases(20_000);
+    let mut entries = Vec::new();
+    for _ in 0..150 {
+        let start = (random.next() % (query.len() - PIECE) as u64) as usize;
+        let piece = diverged(&mut random, &query[start..start + PIECE], 0.95);
+        entries.push(vec![[random.bases(500), piece, random.bases(500)].concat()]);
+    }
+    for _ in 0..20 {
+        let mut sequence = random.bases(500);
+        for _ in 0..3 {
+            let start = (random.next() % (query.len() - 50) as u64) as usize;
+            sequence.extend_from_slice(&query[start..start + 50]);
+            sequence.extend(random.bases(500));
+        }
+        entries.push(vec![sequence]);
+    }
+    let shard = build(directory.path(), &entries, None);
+    for frequent_seed_entries in [None, Some(u64::MAX)] {
+        let mut config = SearchConfig {
+            frequent_seed_entries,
+            ..config(SearchStage::Locate)
+        };
+        config.rule.min_query_coverage = QueryCoverage::Bases(PIECE as u64);
+        let (summary, events) = search(&shard, &query, false, &config, false);
+        assert_eq!(summary.completion, Completion::Complete);
+        for entry in 0..170u32 {
+            let last = events.get(&entry).and_then(|list| list.last());
+            if entry < 150 {
+                assert!(
+                    matches!(last, Some(EntryEvent::Located(_))),
+                    "entry {entry}: {last:?}"
+                );
+            } else {
+                assert!(
+                    last.is_none() || matches!(last, Some(EntryEvent::Dropped { .. })),
+                    "entry {entry}: {last:?}"
+                );
+            }
+        }
+        // The scattered pieces have seed hits, so the bound, not their absence, drops them.
+        assert!(summary.sketch.entries_with_seed_hits >= 160);
+    }
+}
