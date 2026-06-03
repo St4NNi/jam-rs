@@ -124,30 +124,8 @@ fn bad_seeding_is_rejected() {
 }
 
 #[test]
-fn budget_counts_the_longest_stretches_while_the_sum_fits() {
-    let model = MissModel::with_layouts(25, 100, 100).unwrap();
-    let budget = LossBudget::default();
-    assert_eq!(budget.chance(), 0.0001);
-    let stretches = [300, 8000, 2500, 40];
-    let flags = budget.absent_stretches(&model, 0.95, &stretches);
-    assert_eq!(flags.len(), 4);
-    assert!(flags[1] && flags[2]);
-    assert!(!flags[3]);
-    let spent: f64 = stretches
-        .iter()
-        .zip(&flags)
-        .filter(|(_, flag)| **flag)
-        .map(|(&length, _)| model.miss_chance(length, 0.95))
-        .sum();
-    assert!(spent <= budget.chance());
-    // A tiny budget counts nothing at a low identity.
-    let strict = LossBudget::new(1e-12).unwrap();
-    assert!(
-        strict
-            .absent_stretches(&model, 0.9, &stretches)
-            .iter()
-            .all(|f| !f)
-    );
+fn the_default_budget_is_one_in_ten_thousand() {
+    assert_eq!(LossBudget::default().chance(), 0.0001);
 }
 
 #[test]

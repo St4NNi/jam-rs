@@ -257,34 +257,6 @@ impl LossBudget {
     pub fn chance(self) -> f64 {
         self.chance
     }
-
-    /// Tells which stretches without a seed hit may be counted as absent from the entry.
-    ///
-    /// `stretch_bases` are the lengths of the stretches, and `identity` is the lowest identity at
-    /// which the entry still qualifies. Counting a stretch as absent is wrong with the chance
-    /// `model.miss_chance`. The answer picks the longest stretches first, as they are the surest
-    /// absent, and stops when the sum of the chances (a union bound) would pass the budget.
-    /// The result has one flag per stretch, `true` when it may be counted as absent.
-    pub fn absent_stretches(
-        self,
-        model: &MissModel,
-        identity: f64,
-        stretch_bases: &[u64],
-    ) -> Vec<bool> {
-        let mut order: Vec<usize> = (0..stretch_bases.len()).collect();
-        order.sort_by_key(|&index| std::cmp::Reverse(stretch_bases[index]));
-        let mut absent = vec![false; stretch_bases.len()];
-        let mut spent = 0.0;
-        for index in order {
-            spent += model.miss_chance(stretch_bases[index], identity);
-            // Shorter stretches cost more, so none after this one fits either.
-            if spent > self.chance {
-                break;
-            }
-            absent[index] = true;
-        }
-        absent
-    }
 }
 
 #[cfg(test)]
