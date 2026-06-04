@@ -11,24 +11,22 @@
 //! contig, the bytes of its prepared windows, and the bytes of the entry's fragments. The kernel
 //! keeps at most `max_cells` traceback cells resident per pass.
 
+mod chains;
 mod config;
-#[cfg(test)]
+mod contig;
 mod paths;
-#[cfg(test)]
 mod place;
-#[cfg(test)]
 mod query;
-#[cfg(test)]
 mod window;
 
 pub use config::AlignStageConfig;
-#[cfg(test)]
-use query::PreparedQuery;
+pub use query::PreparedQuery;
 
-use super::Stopped;
-use crate::align::AlignmentError;
-use crate::decide::DecideError;
-use crate::index::IndexError;
+use super::{LocatedEntry, SearchControl, Stopped};
+use crate::align::{AlignmentError, AlignmentWorkspace};
+use crate::decide::{DecideError, Decision, DecisionRule};
+use crate::index::{IndexError, PackedSequence, Shard};
+use place::Collected;
 use thiserror::Error;
 
 /// Why stage 3 could not decide an entry.
@@ -54,6 +52,13 @@ pub enum AlignStageError {
         needed: u64,
         limit: u64,
     },
+}
+
+/// Reusable buffers of one worker thread, kept across entries.
+#[derive(Default)]
+pub struct AlignStageWorkspace {
+    alignment: AlignmentWorkspace,
+    windows: window::WindowBuffers,
 }
 
 /// The work stage 3 did for one entry, for the search summary.
@@ -86,4 +91,65 @@ impl AlignWork {
         self.alignments += other.alignments;
         self.widenings += other.widenings;
     }
+}
+
+/// A located entry after stage 3: its decision, with the mosaic of its fragments.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlignedEntry {
+    /// The entry's index in the shard.
+    pub entry: u32,
+    /// Whether the entry is reported, with its mosaic, counts and identity.
+    pub decision: Decision,
+    /// The work stage 3 did for the entry.
+    pub work: AlignWork,
+}
+
+/// Aligns the query in the windows of a located entry of `shard` and decides the entry.
+pub fn align_entry(
+    shard: &Shard,
+    query: &PreparedQuery,
+    located: &LocatedEntry,
+    config: &AlignStageConfig,
+    rule: &DecisionRule,
+    workspace: &mut AlignStageWorkspace,
+    control: SearchControl<'_>,
+) -> Result<AlignedEntry, AlignStageError> {
+    control.check()?;
+    let packed = shard.packed(located.entry)?;
+    align_packed_entry(&packed, query, located, config, rule, workspace, control)
+}
+
+/// `align_entry` on an open packed sequence, which may read from any source, such as S3 or a
+/// block cache.
+pub fn align_packed_entry(
+    packed: &PackedSequence,
+    query: &PreparedQuery,
+    located: &LocatedEntry,
+    config: &AlignStageConfig,
+    rule: &DecisionRule,
+    workspace: &mut AlignStageWorkspace,
+    control: SearchControl<'_>,
+) -> Result<AlignedEntry, AlignStageError> {
+    config.validate()?;
+    rule.validate()?;
+    query.check(config)?;
+    let mut fragments = Collected::new(config.max_fragment_bytes);
+    let mut work = AlignWork::default();
+    for windows in &located.windows {
+        control.check()?;
+        let job = contig::ContigJob::new(packed, windows.contig, query, config, control)?;
+        job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
+    }
+    control.check()?;
+    let contig_length = |contig: u32| {
+        packed
+            .contig_range(contig as usize)
+            .map_or(0, |range| range.end - range.start)
+    };
+    let decision = rule.decide(query.length(), fragments.into_list(), contig_length)?;
+    Ok(AlignedEntry {
+        entry: located.entry,
+        decision,
+        work,
+    })
 }

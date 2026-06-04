@@ -42,6 +42,7 @@ impl PreparedWindow {
     }
 
     /// The window bases on a walk's strand.
+    #[cfg(test)]
     pub fn oriented(&self, walk: &Walk) -> &[u8] {
         if walk.reverse {
             &self.reverse
