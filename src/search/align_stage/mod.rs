@@ -18,6 +18,8 @@ mod paths;
 mod place;
 #[cfg(test)]
 mod query;
+#[cfg(test)]
+mod window;
 
 pub use config::AlignStageConfig;
 #[cfg(test)]
@@ -52,4 +54,36 @@ pub enum AlignStageError {
         needed: u64,
         limit: u64,
     },
+}
+
+/// The work stage 3 did for one entry, for the search summary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AlignWork {
+    /// Alignment windows read, counting every widening round.
+    pub windows: u64,
+    /// Bases read from the packed sequence (about four per byte read).
+    pub bases_read: u64,
+    /// Anchors found in the windows.
+    pub anchors: u64,
+    /// Chains and long dense walks aligned.
+    pub chains: u64,
+    /// Chains and walks not aligned because an earlier alignment already covers them.
+    pub redundant_chains: u64,
+    /// Alignments made, including those of rounds that widened a window.
+    pub alignments: u64,
+    /// Widening rounds: a contig aligned again because a window grew.
+    pub widenings: u64,
+}
+
+impl AlignWork {
+    /// Adds the work of another entry.
+    pub fn add(&mut self, other: &Self) {
+        self.windows += other.windows;
+        self.bases_read += other.bases_read;
+        self.anchors += other.anchors;
+        self.chains += other.chains;
+        self.redundant_chains += other.redundant_chains;
+        self.alignments += other.alignments;
+        self.widenings += other.widenings;
+    }
 }
