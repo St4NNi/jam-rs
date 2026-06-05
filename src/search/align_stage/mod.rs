@@ -17,6 +17,8 @@ mod contig;
 mod paths;
 mod place;
 mod query;
+#[cfg(test)]
+mod tests;
 mod window;
 
 pub use config::AlignStageConfig;
