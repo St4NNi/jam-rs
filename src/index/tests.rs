@@ -88,7 +88,7 @@ fn inputs(directory: &Path, entries: &[Vec<(String, Vec<u8>)>]) -> Vec<EntryInpu
 fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
     let parameters = shard.manifest().parameters;
     let seeder = Seeder::new(parameters.scheme()).unwrap();
-    let mut postings = Vec::new();
+    let mut locations = Vec::new();
     let mut bases = Vec::new();
     for (entry, contigs) in entries.iter().enumerate() {
         let entry = entry as u32;
@@ -106,16 +106,16 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
                 let id = shard.sketch().color_set(seed.hash).expect("seed in sketch");
                 let set = shard.sketch().color_sets().entries(id).unwrap();
                 assert!(set.collect::<Vec<_>>().contains(&entry));
-                postings.clear();
+                locations.clear();
                 shard
                     .positions()
-                    .postings(entry, seed.hash, &mut postings)
+                    .locations(entry, seed.hash, &mut locations)
                     .unwrap();
-                let expected = Posting {
+                let expected = SeedLocation {
                     bin: ((start + seed.position) >> parameters.bin_bits) as u32,
                     reverse: seed.reverse,
                 };
-                assert!(postings.contains(&expected));
+                assert!(locations.contains(&expected));
             });
             assert!(seeds > 100);
             start += sequence.len() as u64;
@@ -137,7 +137,7 @@ fn every_seed_is_found_through_the_sketch_and_the_positions() {
     check_every_seed(&shard, &entries);
     let stats = shard.stats();
     assert_eq!(stats.entries, 7);
-    assert!(stats.color_sets > 7 && stats.seeds > 1000 && stats.postings >= stats.seeds);
+    assert!(stats.color_sets > 7 && stats.seeds > 1000 && stats.seed_locations >= stats.seeds);
     // Seeds of shared stretches have color sets of several entries.
     let sets = shard.sketch().color_sets();
     let largest = (0..stats.color_sets as u32)
@@ -191,7 +191,7 @@ fn joined_shards_equal_one_shard_built_at_once() {
         link_packed: true,
     };
     let manifest = join_shards(&parts, &joined, &join_options).unwrap();
-    let chosen = manifest::choose_bucket_bits(manifest.postings);
+    let chosen = manifest::choose_bucket_bits(manifest.seed_locations);
     assert_eq!(manifest.parameters.bucket_bits, chosen);
     assert_eq!(manifest, Manifest::read(&whole).unwrap());
     for file in [sketch::SKETCH_FILE, positions::POSITIONS_FILE] {

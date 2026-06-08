@@ -11,7 +11,7 @@ fn random(state: &mut u64) -> u64 {
 
 const KEY_BITS: u32 = 30;
 
-/// Random postings per entry: key to sorted posting values. Entry 2 is empty.
+/// Random seed locations per entry: key to sorted seed location values. Entry 2 is empty.
 fn random_entries() -> Vec<BTreeMap<u64, Vec<u32>>> {
     let mut state = 0xfeed_u64;
     [3000usize, 1, 0, 40_000, 20]
@@ -20,12 +20,12 @@ fn random_entries() -> Vec<BTreeMap<u64, Vec<u32>>> {
             let mut entry: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
             for _ in 0..keys {
                 let key = random(&mut state) >> (64 - KEY_BITS);
-                let postings = entry.entry(key).or_default();
+                let locations = entry.entry(key).or_default();
                 for _ in 0..1 + random(&mut state).is_multiple_of(8) as usize * 3 {
-                    postings.push((random(&mut state) % 500_000) as u32);
+                    locations.push((random(&mut state) % 500_000) as u32);
                 }
-                postings.sort_unstable();
-                postings.dedup();
+                locations.sort_unstable();
+                locations.dedup();
             }
             entry
         })
@@ -35,7 +35,7 @@ fn random_entries() -> Vec<BTreeMap<u64, Vec<u32>>> {
 fn records(entry: &BTreeMap<u64, Vec<u32>>) -> Vec<(u64, u32)> {
     entry
         .iter()
-        .flat_map(|(key, postings)| postings.iter().map(|posting| (*key, *posting)))
+        .flat_map(|(key, locations)| locations.iter().map(|location| (*key, *location)))
         .collect()
 }
 
@@ -68,20 +68,20 @@ fn positions_round_trip() {
         let index = index as u32;
         let stored = records(entry);
         assert_eq!(
-            positions.entry_postings(index).unwrap(),
+            positions.entry_locations(index).unwrap(),
             stored.len() as u64
         );
-        for (key, postings) in entry {
+        for (key, locations) in entry {
             let hash = (key << (64 - KEY_BITS)) | (random(&mut state) >> KEY_BITS);
             out.clear();
-            positions.postings(index, hash, &mut out).unwrap();
-            let values: Vec<u32> = out.iter().map(|posting| posting.value()).collect();
-            assert_eq!(&values, postings);
+            positions.locations(index, hash, &mut out).unwrap();
+            let values: Vec<u32> = out.iter().map(|location| location.value()).collect();
+            assert_eq!(&values, locations);
         }
         for _ in 0..2000 {
             let hash = random(&mut state);
             out.clear();
-            positions.postings(index, hash, &mut out).unwrap();
+            positions.locations(index, hash, &mut out).unwrap();
             assert_eq!(
                 out.is_empty(),
                 !entry.contains_key(&(hash >> (64 - KEY_BITS)))
@@ -90,18 +90,18 @@ fn positions_round_trip() {
         let section = *positions.section(index).unwrap();
         let bytes = positions.section_bytes(index).unwrap();
         let mut decoded = Vec::new();
-        decode_section(&section, &bytes, |key, posting| {
-            decoded.push((key, posting))
+        decode_section(&section, &bytes, |key, location| {
+            decoded.push((key, location))
         })
         .unwrap();
         assert_eq!(decoded, stored);
     }
-    assert!(positions.postings(9, 0, &mut out).is_err());
-    let posting = Posting {
+    assert!(positions.locations(9, 0, &mut out).is_err());
+    let location = SeedLocation {
         bin: 12345,
         reverse: true,
     };
-    assert_eq!(Posting::from_value(posting.value()), posting);
+    assert_eq!(SeedLocation::from_value(location.value()), location);
 }
 
 #[test]
@@ -122,12 +122,15 @@ fn sections_copied_into_another_file_read_the_same() {
     writer.finish().unwrap();
     let copied = open(&copy);
     let mut out = Vec::new();
-    for (key, postings) in &entries[0] {
+    for (key, locations) in &entries[0] {
         out.clear();
         copied
-            .postings(1, key << (64 - KEY_BITS), &mut out)
+            .locations(1, key << (64 - KEY_BITS), &mut out)
             .unwrap();
-        assert_eq!(out.iter().map(|p| p.value()).collect::<Vec<_>>(), *postings);
+        assert_eq!(
+            out.iter().map(|p| p.value()).collect::<Vec<_>>(),
+            *locations
+        );
     }
 }
 

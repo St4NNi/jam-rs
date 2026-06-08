@@ -176,11 +176,11 @@ pub(crate) fn complete_shard(
     write_sections(&mut writer)?;
     writer.finish()?;
     let positions = Positions::open(Arc::new(MappedFile::open(&positions_path, false)?))?;
-    let postings = (0..positions.entries())
-        .map(|entry| positions.entry_postings(entry))
+    let locations = (0..positions.entries())
+        .map(|entry| positions.entry_locations(entry))
         .sum::<Result<u64, IndexError>>()?;
     let parameters = Parameters {
-        bucket_bits: bucket_bits.unwrap_or_else(|| choose_bucket_bits(postings)),
+        bucket_bits: bucket_bits.unwrap_or_else(|| choose_bucket_bits(locations)),
         ..parameters
     };
     parameters.validate()?;
@@ -207,7 +207,7 @@ pub(crate) fn complete_shard(
         positions: record(&positions_path, POSITIONS_FILE)?,
         seeds: totals.seeds,
         color_sets: totals.color_sets,
-        postings,
+        seed_locations: locations,
     };
     manifest.write(directory)?;
     Ok(manifest)
@@ -228,7 +228,7 @@ struct BuiltEntry {
     section_path: PathBuf,
 }
 
-/// Collects the contigs of one entry: its packed sequence and its seeds as (key, posting).
+/// Collects the contigs of one entry: its packed sequence and its seeds as (key, seed location).
 struct EntryBuilder<'a> {
     context: &'a Context,
     packed: PackedWriter,

@@ -1,11 +1,12 @@
-//! The positions file (stage 2): for every entry a section with the postings of its seeds, so a
-//! seed of one candidate entry is found with two small reads. It works memory-mapped from local
-//! disk and as byte ranges from S3.
+//! The positions file (stage 2): for every entry a section with its seed locations, so a seed of
+//! one candidate entry is found with two small reads. It works memory-mapped from local disk and
+//! as byte ranges from S3.
 //!
 //! A seed is stored by its key: the top 44 bits of its hash (`POSITION_KEY_BITS`), at least as
 //! many as the sketch keeps (bucket bits and fingerprint), so the sketch of any size is built
-//! from the positions alone. A posting is the bin within the entry, shifted left by one, with the low bit
-//! set when the canonical k-mer is the reverse complement of the contig strand.
+//! from the positions alone. A seed location is stored as the bin within the entry, shifted left
+//! by one, with the low bit set when the canonical k-mer is the reverse complement of the contig
+//! strand.
 //!
 //! Layout, little endian:
 //!
@@ -29,23 +30,23 @@
 //! | --- | --- |
 //! | 0..8 | section offset in the file (u64) |
 //! | 8..16 | section length (u64) |
-//! | 16..24 | postings (u64) |
+//! | 16..24 | seed locations (u64) |
 //! | 24..28 | CRC-32 of the section (u32) |
 //! | 28 | slot bits d (u8) |
 //! | 29 | suffix bits s = key bits - d (u8) |
-//! | 30 | posting bits p (u8) |
+//! | 30 | location bits p (u8) |
 //! | 31 | zero |
 //!
-//! A section with r postings, sorted by key and then posting:
+//! A section with r seed locations, sorted by key and then seed location:
 //!
 //! | Bytes | Field |
 //! | --- | --- |
-//! | 4 (2^d + 1) | slot directory: index of the first posting of each slot (u32); a key's slot is its top d bits |
-//! | ceil(r (s + p) / 8) | one record per posting, bit-packed, first record in the low bits: the low s bits of the key, then the posting in p bits |
+//! | 4 (2^d + 1) | slot directory: index of the first seed location of each slot (u32); a key's slot is its top d bits |
+//! | ceil(r (s + p) / 8) | one record per seed location, bit-packed, first record in the low bits: the low s bits of the key, then the seed location in p bits |
 //! | 8 | zero |
 //!
-//! d is chosen so a slot holds about 16 postings; a lookup reads 8 bytes of the directory and the
-//! records of one slot. A seed that occurs at several bins has one record per bin.
+//! d is chosen so a slot holds about 16 seed locations; a lookup reads 8 bytes of the directory and
+//! the records of one slot. A seed that occurs at several bins has one record per bin.
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, crc32, read_bits, u32_at, u64_at};
 use super::{IndexError, seed_key};
@@ -66,25 +67,25 @@ const MAGIC: [u8; 16] = *b"jam positions\0\0\0";
 const VERSION: u32 = 1;
 const HEADER_BYTES: u64 = 128;
 const ROW_BYTES: usize = 32;
-/// Postings per slot that the slot bits aim for.
-const SLOT_POSTINGS: u64 = 16;
+/// Seed locations per slot that the slot bits aim for.
+const SLOT_LOCATIONS: u64 = 16;
 
 /// One stored bin and strand of a seed occurrence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct Posting {
+pub struct SeedLocation {
     /// Bin within the entry: the seed starts in bases `bin << bin_bits` onward.
     pub bin: u32,
     /// The canonical k-mer is the reverse complement of the contig strand.
     pub reverse: bool,
 }
 
-impl Posting {
+impl SeedLocation {
     /// The stored value: bin shifted left by one, strand in the low bit.
     pub fn value(self) -> u32 {
         (self.bin << 1) | u32::from(self.reverse)
     }
 
-    /// The posting of a stored value.
+    /// The seed location of a stored value.
     pub fn from_value(value: u32) -> Self {
         Self {
             bin: value >> 1,
@@ -100,18 +101,18 @@ pub(crate) struct Section {
     pub(crate) offset: u64,
     /// Bytes of the section.
     pub(crate) length: u64,
-    /// Postings in the section.
-    pub(crate) postings: u64,
+    /// Seed locations in the section.
+    pub(crate) locations: u64,
     /// CRC-32 of the section bytes.
     pub(crate) crc: u32,
     slot_bits: u8,
     suffix_bits: u8,
-    posting_bits: u8,
+    location_bits: u8,
 }
 
 impl Section {
     fn record_bits(&self) -> u64 {
-        u64::from(self.suffix_bits) + u64::from(self.posting_bits)
+        u64::from(self.suffix_bits) + u64::from(self.location_bits)
     }
 
     fn directory_bytes(&self) -> u64 {
@@ -122,9 +123,9 @@ impl Section {
         let mut row = [0u8; ROW_BYTES];
         row[..8].copy_from_slice(&self.offset.to_le_bytes());
         row[8..16].copy_from_slice(&self.length.to_le_bytes());
-        row[16..24].copy_from_slice(&self.postings.to_le_bytes());
+        row[16..24].copy_from_slice(&self.locations.to_le_bytes());
         row[24..28].copy_from_slice(&self.crc.to_le_bytes());
-        row[28..31].copy_from_slice(&[self.slot_bits, self.suffix_bits, self.posting_bits]);
+        row[28..31].copy_from_slice(&[self.slot_bits, self.suffix_bits, self.location_bits]);
         row
     }
 
@@ -132,25 +133,25 @@ impl Section {
         let section = Self {
             offset: u64_at(row, 0)?,
             length: u64_at(row, 8)?,
-            postings: u64_at(row, 16)?,
+            locations: u64_at(row, 16)?,
             crc: u32_at(row, 24)?,
             slot_bits: row[28],
             suffix_bits: row[29],
-            posting_bits: row[30],
+            location_bits: row[30],
         };
         let valid = u32::from(section.slot_bits) + u32::from(section.suffix_bits) == key_bits
-            && section.posting_bits <= 32
+            && section.location_bits <= 32
             && section.slot_bits <= 32
             && row[31] == 0
             && section.length
                 == section.directory_bytes()
-                    + (section.postings * section.record_bits()).div_ceil(8)
+                    + (section.locations * section.record_bits()).div_ceil(8)
                     + BIT_PADDING as u64;
         valid.then_some(section)
     }
 }
 
-/// Encodes one entry's section from its (key, posting value) pairs, sorted and distinct. The
+/// Encodes one entry's section from its (key, seed location value) pairs, sorted and distinct. The
 /// offset of the returned section is 0 until a writer places it.
 pub(crate) fn encode_section(
     records: &[(u64, u32)],
@@ -159,16 +160,16 @@ pub(crate) fn encode_section(
     let count = records.len() as u64;
     if u32::try_from(count).is_err() {
         return Err(IndexError::Input(
-            "an entry has 2^32 postings or more".into(),
+            "an entry has 2^32 seed locations or more".into(),
         ));
     }
-    let slot_bits = if count >= 2 * SLOT_POSTINGS {
-        (count / SLOT_POSTINGS).ilog2().min(key_bits)
+    let slot_bits = if count >= 2 * SLOT_LOCATIONS {
+        (count / SLOT_LOCATIONS).ilog2().min(key_bits)
     } else {
         0
     };
     let suffix_bits = key_bits - slot_bits;
-    let posting_bits = bits_needed(u64::from(records.iter().map(|r| r.1).max().unwrap_or(0)));
+    let location_bits = bits_needed(u64::from(records.iter().map(|r| r.1).max().unwrap_or(0)));
     let mut bytes = Vec::new();
     let mut next = 0usize;
     for slot in 0..=1u64 << slot_bits {
@@ -179,25 +180,25 @@ pub(crate) fn encode_section(
     }
     let mut writer = BitWriter::new(&mut bytes);
     let suffix_mask = (1u64 << suffix_bits) - 1;
-    for &(key, posting) in records {
+    for &(key, location) in records {
         writer.push(key & suffix_mask, suffix_bits);
-        writer.push(u64::from(posting), posting_bits);
+        writer.push(u64::from(location), location_bits);
     }
     writer.finish();
     bytes.resize(bytes.len() + BIT_PADDING, 0);
     let section = Section {
         offset: 0,
         length: bytes.len() as u64,
-        postings: count,
+        locations: count,
         crc: crc32(&bytes),
         slot_bits: slot_bits as u8,
         suffix_bits: suffix_bits as u8,
-        posting_bits: posting_bits as u8,
+        location_bits: location_bits as u8,
     };
     Ok((section, bytes))
 }
 
-/// Decodes all (key, posting value) pairs of a section from its bytes, in stored order.
+/// Decodes all (key, seed location value) pairs of a section from its bytes, in stored order.
 pub(crate) fn decode_section(
     section: &Section,
     bytes: &[u8],
@@ -207,21 +208,21 @@ pub(crate) fn decode_section(
     let records = bytes
         .get(section.directory_bytes() as usize..)
         .ok_or_else(damaged)?;
-    let (suffix_bits, posting_bits) = (
+    let (suffix_bits, location_bits) = (
         u32::from(section.suffix_bits),
-        u32::from(section.posting_bits),
+        u32::from(section.location_bits),
     );
     let mut index = 0u64;
     for slot in 0..1u64 << section.slot_bits {
         let end = u64::from(u32_at(bytes, 4 * (slot as usize + 1)).ok_or_else(damaged)?);
-        if end < index || end > section.postings {
+        if end < index || end > section.locations {
             return Err(damaged());
         }
         while index < end {
             let bit = index * section.record_bits();
             let suffix = read_bits(records, bit, suffix_bits);
-            let posting = read_bits(records, bit + u64::from(suffix_bits), posting_bits);
-            visit((slot << suffix_bits) | suffix, posting as u32);
+            let location = read_bits(records, bit + u64::from(suffix_bits), location_bits);
+            visit((slot << suffix_bits) | suffix, location as u32);
             index += 1;
         }
     }
@@ -278,12 +279,12 @@ impl Positions {
         })
     }
 
-    /// Appends to `out` the postings of the stored seed with this hash's key in one entry.
-    pub fn postings(
+    /// Appends to `out` the seed locations of the stored seed with this hash's key in one entry.
+    pub fn locations(
         &self,
         entry: u32,
         hash: u64,
-        out: &mut Vec<Posting>,
+        out: &mut Vec<SeedLocation>,
     ) -> Result<(), IndexError> {
         let section = self.section(entry)?;
         let key = seed_key(hash, self.key_bits);
@@ -297,7 +298,7 @@ impl Positions {
         if first >= end {
             return Ok(());
         }
-        if end > section.postings {
+        if end > section.locations {
             return Err(IndexError::format("positions slot directory"));
         }
         let record_bits = section.record_bits();
@@ -309,12 +310,12 @@ impl Positions {
             &mut records,
         )?;
         let suffix = key & ((1u64 << suffix_bits) - 1);
-        let posting_bits = u32::from(section.posting_bits);
+        let location_bits = u32::from(section.location_bits);
         for index in first..end {
             let bit = index * record_bits - start_byte * 8;
             if read_bits(&records, bit, suffix_bits) == suffix {
-                let value = read_bits(&records, bit + u64::from(suffix_bits), posting_bits);
-                out.push(Posting::from_value(value as u32));
+                let value = read_bits(&records, bit + u64::from(suffix_bits), location_bits);
+                out.push(SeedLocation::from_value(value as u32));
             }
         }
         Ok(())
@@ -353,9 +354,9 @@ impl Positions {
         self.bin_bits
     }
 
-    /// Postings of one entry.
-    pub fn entry_postings(&self, entry: u32) -> Result<u64, IndexError> {
-        Ok(self.section(entry)?.postings)
+    /// Seed locations of one entry.
+    pub fn entry_locations(&self, entry: u32) -> Result<u64, IndexError> {
+        Ok(self.section(entry)?.locations)
     }
 
     /// Checks the CRC-32 of every section.

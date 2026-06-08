@@ -4,7 +4,7 @@
 //!
 //! A seed's hash selects a bucket by its top `bucket_bits` bits; the next 16 bits are its
 //! fingerprint. A build chooses the fewest bucket bits (8 to 28) that hold at most 256 seeds per
-//! bucket on average, counting postings as an upper bound of the seeds (see
+//! bucket on average, counting seed locations as an upper bound of the seeds (see
 //! `manifest::choose_bucket_bits`), so a query k-mer matches a stored seed by chance about 0.4% of
 //! the time and the directory costs about 0.03 bytes per seed. Seeds with the same bucket and fingerprint are one stored seed, whose color set is
 //! the union of theirs. Color set ids are ranked by frequency: the set of the most seeds is 0.

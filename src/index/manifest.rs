@@ -7,7 +7,7 @@
 //! | `parameters` | `k`, `window`, `min_entropy`, `bin_bits`, `bucket_bits`, `fingerprint_bits` |
 //! | `entries` | in entry id order: `name`, `contigs`, `bases`, `packed` (file) |
 //! | `sketch`, `positions` | files |
-//! | `seeds`, `color_sets`, `postings` | totals of the sketch and the positions |
+//! | `seeds`, `color_sets`, `seed_locations` | totals of the sketch and the positions |
 //!
 //! A file is `path` (relative to the shard directory; packed files to the packed directory),
 //! `bytes` and `sha256` (lower case hex).
@@ -130,8 +130,8 @@ pub struct Manifest {
     pub seeds: u64,
     /// Distinct color sets of the sketch.
     pub color_sets: u64,
-    /// Postings of the positions file.
-    pub postings: u64,
+    /// Seed locations of the positions file.
+    pub seed_locations: u64,
 }
 
 impl Manifest {
@@ -163,7 +163,7 @@ impl Manifest {
 }
 
 /// The fewest bucket bits (8 to 28) that hold at most 256 seeds per bucket on average, given an
-/// upper bound of the distinct seeds (the build uses the posting count). With 16-bit
+/// upper bound of the distinct seeds (the build uses the count of seed locations). With 16-bit
 /// fingerprints, a query k-mer then matches a stored seed by chance at most about
 /// 256 / 65,536 = 0.4% of the time, and the directory costs at most 8 / 256 bytes per seed.
 pub fn choose_bucket_bits(seeds: u64) -> u8 {
@@ -274,7 +274,7 @@ mod tests {
             positions: file("positions"),
             seeds: 10,
             color_sets: 1,
-            postings: 11,
+            seed_locations: 11,
         };
         manifest.write(directory.path()).unwrap();
         assert_eq!(Manifest::read(directory.path()).unwrap(), manifest);

@@ -101,7 +101,7 @@ fn windows(outcome: &LocateOutcome) -> Vec<(u32, Vec<Range<u64>>)> {
 }
 
 #[test]
-fn false_seed_hits_of_the_sketch_have_no_postings() {
+fn false_seed_hits_of_the_sketch_have_no_seed_locations() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0xfa15e);
     let query = random.bases(20_000);
@@ -116,7 +116,7 @@ fn false_seed_hits_of_the_sketch_have_no_postings() {
         "no false seed hit was forced"
     );
     assert_eq!(work.false_seed_hits, possible.seed_hits.len() as u64);
-    assert_eq!(work.postings, 0);
+    assert_eq!(work.seed_locations, 0);
     assert_eq!(*outcome, LocateOutcome::Dropped(DropReason::NoSeedHits));
     let (_, outcome, work) = results.iter().find(|(p, ..)| p.entry == 1).unwrap();
     assert_eq!(work.false_seed_hits, 0);
@@ -127,7 +127,7 @@ fn false_seed_hits_of_the_sketch_have_no_postings() {
 }
 
 #[test]
-fn the_bound_from_the_postings_drops_entries_again() {
+fn the_bound_from_the_seed_locations_drops_entries_again() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0xb0b);
     let query = random.bases(5_000);

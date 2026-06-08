@@ -19,7 +19,7 @@ pub use build::{BuildOptions, EntryInput, build_shard};
 pub use join::{JoinOptions, join_shards};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};
-pub use positions::{Positions, Posting};
+pub use positions::{Positions, SeedLocation};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 

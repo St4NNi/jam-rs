@@ -1,11 +1,12 @@
-//! Stage 2: the postings of each candidate entry, the second pruning and the alignment windows.
+//! Stage 2: the seed locations of each candidate entry, the second pruning and the alignment
+//! windows.
 //!
 //! The positions keep more hash bits than the sketch's fingerprint, so a seed hit of the sketch
-//! without postings is a false seed hit and disappears here. Frequent seeds, which stage 1 counted
-//! as possibly hit, are looked up too. The coverage bound is computed again from the seed hits
-//! that have postings, and the entry is dropped when it falls below the requested query coverage,
-//! before any sequence is read. The bins of the seed hits, widened by the flank and merged per
-//! contig, become the alignment windows.
+//! without seed locations is a false seed hit and disappears here. Frequent seeds, which stage 1
+//! counted as possibly hit, are looked up too. The coverage bound is computed again from the seed
+//! hits that have seed locations, and the entry is dropped when it falls below the requested
+//! query coverage, before any sequence is read. The bins of the seed hits, widened by the flank
+//! and merged per contig, become the alignment windows.
 
 use super::bound::CoverageBound;
 use super::control::SearchControl;
@@ -14,7 +15,7 @@ use super::events::DropReason;
 use super::located::{ContigWindows, LocatedEntry};
 use super::query::QueryKmers;
 use super::sketch_stage::PossibleEntry;
-use crate::index::{PackedSequence, Posting, Shard};
+use crate::index::{PackedSequence, SeedLocation, Shard};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -28,9 +29,9 @@ pub struct LocateWork {
     pub entries: u64,
     /// Seeds looked up in the positions, over all entries.
     pub lookups: u64,
-    /// Postings read.
-    pub postings: u64,
-    /// Seed hits of the sketch without postings.
+    /// Seed locations read.
+    pub seed_locations: u64,
+    /// Seed hits of the sketch without seed locations.
     pub false_seed_hits: u64,
     /// Entries dropped by the second pruning or for lack of seed hits.
     pub dropped_entries: u64,
@@ -47,7 +48,7 @@ impl LocateWork {
     pub fn add(&mut self, other: &Self) {
         self.entries += other.entries;
         self.lookups += other.lookups;
-        self.postings += other.postings;
+        self.seed_locations += other.seed_locations;
         self.false_seed_hits += other.false_seed_hits;
         self.dropped_entries += other.dropped_entries;
         self.candidate_bins += other.candidate_bins;
@@ -66,7 +67,7 @@ pub enum LocateOutcome {
 /// Buffers of stage 2, reused across the entries of one thread.
 #[derive(Debug, Default)]
 pub struct LocateWorkspace {
-    postings: Vec<Posting>,
+    locations: Vec<SeedLocation>,
     positions: Vec<u32>,
     bins: Vec<u32>,
 }
@@ -142,8 +143,8 @@ fn locate(
     }))
 }
 
-/// Reads the postings of the entry's seed hits and of the frequent seeds. Fills the workspace
-/// with the query starts and the bins of the seed hits that have postings.
+/// Reads the seed locations of the entry's seed hits and of the frequent seeds. Fills the workspace
+/// with the query starts and the bins of the seed hits that have seed locations.
 fn read_seed_hits(
     shard: &Shard,
     request: &LocateRequest<'_>,
@@ -161,13 +162,13 @@ fn read_seed_hits(
             control.check()?;
         }
         let hash = request.query.seeds()[seed as usize].hash;
-        workspace.postings.clear();
+        workspace.locations.clear();
         shard
             .positions()
-            .postings(possible.entry, hash, &mut workspace.postings)?;
+            .locations(possible.entry, hash, &mut workspace.locations)?;
         work.lookups += 1;
-        work.postings += workspace.postings.len() as u64;
-        if workspace.postings.is_empty() {
+        work.seed_locations += workspace.locations.len() as u64;
+        if workspace.locations.is_empty() {
             work.false_seed_hits += u64::from(from_sketch);
             continue;
         }
@@ -176,7 +177,7 @@ fn read_seed_hits(
             .extend_from_slice(request.query.positions(seed));
         workspace
             .bins
-            .extend(workspace.postings.iter().map(|posting| posting.bin));
+            .extend(workspace.locations.iter().map(|location| location.bin));
     }
     Ok(())
 }

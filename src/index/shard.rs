@@ -22,8 +22,8 @@ pub struct ShardStats {
     pub seeds: u64,
     /// Distinct color sets of the sketch.
     pub color_sets: u64,
-    /// Postings of the positions file.
-    pub postings: u64,
+    /// Seed locations of the positions file.
+    pub seed_locations: u64,
     /// Bytes of the sketch file.
     pub sketch_bytes: u64,
     /// Bytes of the positions file.
@@ -150,7 +150,7 @@ impl Shard {
             bases: entries.iter().map(|entry| entry.bases).sum(),
             seeds: self.manifest.seeds,
             color_sets: self.manifest.color_sets,
-            postings: self.manifest.postings,
+            seed_locations: self.manifest.seed_locations,
             sketch_bytes: self.manifest.sketch.bytes,
             positions_bytes: self.manifest.positions.bytes,
             packed_bytes: entries.iter().map(|entry| entry.packed.bytes).sum(),

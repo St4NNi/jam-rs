@@ -33,8 +33,8 @@ Every module, type, option, comment and document uses these terms with exactly t
 | loss budget | The largest accepted chance of missing a qualifying entry (for example 0.01%). Every shortcut of a search stays within it. |
 | candidate entry | An entry that stage 1 keeps. |
 | bin | A block of 2^b bases (1,024 by default) of an entry's sequence. Positions in the positional index are bins. |
-| positional index | For each seed, the bins (with strand) where it occurs in each entry. |
-| posting | One stored bin and strand of one seed occurrence. |
+| positional index | For each seed, its seed locations in each entry. |
+| seed location | The bin and strand where a seed occurs in an entry; one is stored per occurrence. |
 | fingerprint | The few bits of a seed's hash that the index stores to tell seeds apart; two seeds can share one (a false seed hit). |
 | candidate bin | A bin with seed hits of a candidate entry. |
 | alignment window | The stretch of a contig that stage 3 reads around a candidate bin. |
@@ -66,7 +66,7 @@ query
   -> query k-mers, hashed
   -> stage 1, sketch     (RAM)      seed hits per entry -> containment estimate, coverage bound
                                     -> candidate entries
-  -> stage 2, locate     (RAM/disk) postings of the candidate entries -> candidate bins
+  -> stage 2, locate     (RAM/disk) seed locations of the candidate entries -> candidate bins
   -> stage 3, align      (S3/disk)  alignment windows from packed sequences -> anchors -> chains
                                     -> alignments (CIGAR) -> fragments -> mosaic -> decision
   -> reported entries, streamed as each one is decided
@@ -87,13 +87,13 @@ fields, aligned arrays, offsets instead of pointers, a version number and a chec
 | --- | --- | --- | --- |
 | `manifest.json` | all | parameters (k, w, bin size, bucket bits, fingerprint bits), entries (name, contigs, bases), file sizes and SHA-256 digests | at open |
 | `sketch` | 1 | a directory of hash buckets; per bucket the sorted fingerprints of its seeds and the color set id of each; then every distinct color set once, entries as sorted ids | memory-mapped and kept in RAM |
-| `positions` | 2 | per entry a section with its seeds' postings, grouped by seed hash, so that one candidate entry needs few reads | memory-mapped from local disk, or byte ranges from S3 |
+| `positions` | 2 | per entry a section with its seed locations, grouped by seed hash, so that one candidate entry needs few reads | memory-mapped from local disk, or byte ranges from S3 |
 | `packed/` | 3 | one packed sequence file per entry | byte ranges from local disk or S3 |
 
 The interfaces the search uses:
 
 - `Sketch::color_set(hash) -> Option<ColorSetId>` and `ColorSets::entries(id)`: stage 1.
-- `Positions::postings(entry, hash)`: stage 2, the bins and strands of one seed in one entry.
+- `Positions::locations(entry, hash)`: stage 2, the seed locations of one seed in one entry.
 - `PackedSequence::read(entry, contig, range)`: stage 3, bases of one contig.
 
 Joining shards keeps every entry's positions and packed sequence as they are and rebuilds only
