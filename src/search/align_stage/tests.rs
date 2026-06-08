@@ -4,12 +4,13 @@
 use super::*;
 use crate::align::{Interval, Strand, complement, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
-use crate::index::{BuildOptions, EntryInput, Parameters, build_shard};
+use crate::index::{BuildOptions, EntryInput, MappedFile, Parameters, build_shard};
 use crate::search::ContigWindows;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(super) fn random_sequence(length: usize, mut state: u64) -> Vec<u8> {
     (0..length)
@@ -435,6 +436,92 @@ fn mixed_identities_qualify_combined() {
 }
 
 #[test]
+fn a_circular_query_aligns_over_its_origin_in_one_fragment() {
+    let fixture = fixture();
+    let ring = align(
+        &fixture.shard,
+        entry("s8"),
+        &fixture.query,
+        true,
+        &rule("0.5"),
+    );
+    let only = fragments(&ring);
+    assert_eq!(only.len(), 1);
+    assert_eq!(
+        only[0].query_segments,
+        [
+            Interval::new(2200, 3000).unwrap(),
+            Interval::new(0, 2200).unwrap()
+        ]
+    );
+    assert_eq!(format_cigar(&only[0].alignment.runs), "3000=");
+    assert_eq!(ring.decision.mosaic.covered_bases, 3000);
+    let linear = align(
+        &fixture.shard,
+        entry("s8"),
+        &fixture.query,
+        false,
+        &rule("0.5"),
+    );
+    assert_eq!(fragments(&linear).len(), 2);
+    assert_eq!(linear.decision.mosaic.covered_bases, 3000);
+}
+
+#[test]
+fn contigs_that_are_mostly_not_the_query_do_not_count() {
+    let fixture = fixture();
+    let with_contig_rule = |coverage: f64| DecisionRule {
+        min_contig_coverage: coverage,
+        ..rule("0.5")
+    };
+    // The contig of s1 is 3,700 bases long and pairs 3,000 of them (81 percent).
+    let s1 = |coverage| {
+        align(
+            &fixture.shard,
+            entry("s1"),
+            &fixture.query,
+            false,
+            &with_contig_rule(coverage),
+        )
+    };
+    assert!(s1(0.5).decision.qualifies);
+    assert!(!s1(0.9).decision.qualifies);
+}
+
+#[test]
+fn a_contig_that_only_shares_a_repeat_is_left_out_by_the_contig_rule() {
+    let directory = tempfile::tempdir().unwrap();
+    let query = random_sequence(3000, 21);
+    // Contig 0 holds the query with a few differences; contig 1 holds 600 query bases in
+    // 10,000 unrelated ones, at a lower identity.
+    let host = [
+        random_sequence(4000, 22),
+        substitute(&query[1000..1600], 100, 23),
+        random_sequence(5400, 24),
+    ]
+    .concat();
+    let entries = vec![(
+        "assembly".to_string(),
+        vec![
+            ("plasmid".to_string(), substitute(&query, 5, 25)),
+            ("chromosome".to_string(), host),
+        ],
+    )];
+    let shard = build(directory.path(), &entries);
+    let all = align(&shard, 0, &query, false, &rule("0.5"));
+    let contigs: HashSet<u32> = fragments(&all).iter().map(|f| f.contig_index).collect();
+    assert_eq!(contigs, HashSet::from([0, 1]));
+    let strict = DecisionRule {
+        min_contig_coverage: 0.5,
+        ..rule("0.5")
+    };
+    let counted = align(&shard, 0, &query, false, &strict);
+    assert!(counted.decision.qualifies);
+    assert!(fragments(&counted).iter().all(|f| f.contig_index == 0));
+    assert!(counted.decision.identity() > all.decision.identity());
+}
+
+#[test]
 fn a_window_widens_while_the_alignment_reaches_its_edge() {
     let directory = tempfile::tempdir().unwrap();
     let query = random_sequence(20_000, 42);
@@ -469,4 +556,130 @@ fn a_window_widens_while_the_alignment_reaches_its_edge() {
         Interval::new(5000, 25_000).unwrap()
     );
     assert_eq!(format_cigar(&only[0].alignment.runs), "20000=");
+}
+
+#[test]
+fn insertions_are_query_bases_and_deletions_are_contig_bases() {
+    let directory = tempfile::tempdir().unwrap();
+    let query = random_sequence(2000, 31);
+    let extra = b"GGGGGGGGGG";
+    // The contig lacks ten query bases, and then has ten bases the query lacks.
+    let contig = [&query[..800], &query[810..1400], extra, &query[1400..]].concat();
+    let reverse = reverse_complement(&contig);
+    let entries = single_contig_entries(&[("forward", &contig), ("reverse", &reverse)]);
+    let shard = build(directory.path(), &entries);
+    for entry in [0, 1] {
+        // Query-only bases are not covered: 1,990 of 2,000.
+        let aligned = align(&shard, entry, &query, false, &rule("0.99"));
+        assert!(aligned.decision.qualifies, "entry {entry}");
+        let only = fragments(&aligned);
+        assert_eq!(only.len(), 1, "entry {entry}");
+        let counts = only[0].alignment.counts();
+        assert_eq!((counts.insertions, counts.deletions), (10, 10));
+        assert_eq!(aligned.decision.mosaic.covered_bases, 1990);
+        assert_eq!(only[0].alignment.contig_interval.len(), 2000);
+        let strand = [Strand::Forward, Strand::Reverse][entry as usize];
+        assert_eq!(only[0].alignment.strand, strand);
+        let cigar = format_cigar(&only[0].alignment.runs);
+        assert!(cigar.contains("10I") && cigar.contains("10D"), "{cigar}");
+    }
+}
+
+/// A packed sequence source that sets the stop flag when it is first read after `armed`.
+struct StopOnRead {
+    file: MappedFile,
+    armed: AtomicBool,
+    stop: Arc<AtomicBool>,
+    reads: AtomicUsize,
+}
+
+impl crate::storage::ReadAt for StopOnRead {
+    fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+        if self.armed.load(Ordering::Relaxed) {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            self.stop.store(true, Ordering::Relaxed);
+        }
+        self.file.read_exact_at(offset, buffer)
+    }
+
+    fn size(&self) -> u64 {
+        self.file.size()
+    }
+}
+
+#[test]
+fn a_stop_flag_stops_between_windows() {
+    use crate::storage::ReadAt;
+    let fixture = fixture();
+    let s3 = entry("s3");
+    let located = located(&fixture.shard, s3, &fixture.query, 300);
+    assert_eq!(located.windows.len(), 2);
+    let stop = Arc::new(AtomicBool::new(false));
+    let source = Arc::new(StopOnRead {
+        file: MappedFile::open(&fixture.shard.packed_path(s3).unwrap(), false).unwrap(),
+        armed: AtomicBool::new(false),
+        stop: stop.clone(),
+        reads: AtomicUsize::new(0),
+    });
+    let packed = PackedSequence::open(source.clone()).unwrap();
+    source.armed.store(true, Ordering::Relaxed);
+    let config = AlignStageConfig::default();
+    let query = PreparedQuery::new(&fixture.query, false, &config).unwrap();
+    let control = SearchControl {
+        deadline: None,
+        stop: &stop,
+    };
+    let result = align_packed_entry(
+        &packed,
+        &query,
+        &located,
+        &config,
+        &rule("0.5"),
+        &mut AlignStageWorkspace::default(),
+        control,
+    );
+    assert!(matches!(
+        result,
+        Err(AlignStageError::Stopped(Stopped::Asked))
+    ));
+    // The first window was read; the second was not.
+    assert_eq!(source.reads.load(Ordering::Relaxed), 1);
+    assert!(source.size() > 0);
+}
+
+#[test]
+fn windows_outside_their_contig_and_other_anchor_settings_are_rejected() {
+    let fixture = fixture();
+    let mut located = located(&fixture.shard, entry("s1"), &fixture.query, 300);
+    let beyond = 0..1_000_000;
+    located.windows[0].ranges = vec![beyond];
+    let config = AlignStageConfig::default();
+    let query = PreparedQuery::new(&fixture.query, false, &config).unwrap();
+    let stop = AtomicBool::new(false);
+    let control = SearchControl {
+        deadline: None,
+        stop: &stop,
+    };
+    let mut workspace = AlignStageWorkspace::default();
+    let run = |config: &AlignStageConfig, workspace: &mut AlignStageWorkspace| {
+        align_entry(
+            &fixture.shard,
+            &query,
+            &located,
+            config,
+            &rule("0.5"),
+            workspace,
+            control,
+        )
+    };
+    assert!(matches!(
+        run(&config, &mut workspace),
+        Err(AlignStageError::WindowOutsideContig { .. })
+    ));
+    let mut other = config;
+    other.anchors.k = 17;
+    assert!(matches!(
+        run(&other, &mut workspace),
+        Err(AlignStageError::InvalidConfig(_))
+    ));
 }
