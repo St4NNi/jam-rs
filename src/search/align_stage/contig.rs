@@ -7,9 +7,10 @@ use super::place::{Collected, place, query_room};
 use super::window::{PreparedWindow, merge_spans, prepare_window, widen};
 use super::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
-    SearchControl, chains,
+    SearchControl, chains, walks,
 };
 use crate::align::Alignment;
+use crate::decide::DecisionRule;
 use crate::index::PackedSequence;
 use std::ops::Range;
 
@@ -26,6 +27,7 @@ pub(super) struct ContigJob<'a> {
     pub contig_length: u64,
     pub query: &'a PreparedQuery,
     pub config: &'a AlignStageConfig,
+    pub rule: &'a DecisionRule,
     pub control: SearchControl<'a>,
 }
 
@@ -37,6 +39,8 @@ pub(super) struct WindowOutput<'a> {
     pub grown: &'a mut bool,
     pub paths: PathIndex,
     pub fragments: &'a mut Collected,
+    /// Where the fragments of this contig start.
+    pub first: super::place::Mark,
     pub work: &'a mut AlignWork,
 }
 
@@ -46,6 +50,7 @@ impl<'a> ContigJob<'a> {
         contig: u32,
         query: &'a PreparedQuery,
         config: &'a AlignStageConfig,
+        rule: &'a DecisionRule,
         control: SearchControl<'a>,
     ) -> Result<Self, AlignStageError> {
         let range = packed.contig_range(contig as usize)?;
@@ -55,6 +60,7 @@ impl<'a> ContigJob<'a> {
             contig_length: range.end - range.start,
             query,
             config,
+            rule,
             control,
         })
     }
@@ -83,6 +89,7 @@ impl<'a> ContigJob<'a> {
                         grown: &mut grown,
                         paths: PathIndex::default(),
                         fragments,
+                        first,
                         work,
                     };
                     self.align_window(window, output, workspace)?;
@@ -165,14 +172,15 @@ impl<'a> ContigJob<'a> {
         Ok((prepared, grown))
     }
 
-    /// Aligns the chains of one window.
+    /// Aligns the chains and then the dense walks of one window.
     fn align_window(
         &self,
         window: &PreparedWindow,
         mut output: WindowOutput<'_>,
         workspace: &mut AlignStageWorkspace,
     ) -> Result<(), AlignStageError> {
-        chains::align_chains(self, window, &mut output, &mut workspace.alignment)
+        chains::align_chains(self, window, &mut output, &mut workspace.alignment)?;
+        walks::align_walks(self, window, &mut output, workspace)
     }
 }
 

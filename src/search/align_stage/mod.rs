@@ -19,13 +19,14 @@ mod place;
 mod query;
 #[cfg(test)]
 mod tests;
+mod walks;
 mod window;
 
 pub use config::AlignStageConfig;
 pub use query::PreparedQuery;
 
 use super::{LocatedEntry, SearchControl, Stopped};
-use crate::align::{AlignmentError, AlignmentWorkspace};
+use crate::align::{AlignmentError, AlignmentWorkspace, JoinScratch};
 use crate::decide::{DecideError, Decision, DecisionRule};
 use crate::index::{IndexError, PackedSequence, Shard};
 use place::Collected;
@@ -61,6 +62,9 @@ pub enum AlignStageError {
 pub struct AlignStageWorkspace {
     alignment: AlignmentWorkspace,
     windows: window::WindowBuffers,
+    /// Query k-mers near the end of a dense walk, for `gap_continuation`.
+    probe: Vec<(u64, u32)>,
+    joins: JoinScratch,
 }
 
 /// The work stage 3 did for one entry, for the search summary.
@@ -139,7 +143,7 @@ pub fn align_packed_entry(
     let mut work = AlignWork::default();
     for windows in &located.windows {
         control.check()?;
-        let job = contig::ContigJob::new(packed, windows.contig, query, config, control)?;
+        let job = contig::ContigJob::new(packed, windows.contig, query, config, rule, control)?;
         job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
     }
     control.check()?;

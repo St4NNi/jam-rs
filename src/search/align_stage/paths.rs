@@ -6,9 +6,7 @@
 //! of a circular query without wrapping. The diagonal of a pair is its window position minus its
 //! query position.
 
-#[cfg(test)]
-use crate::align::Walk;
-use crate::align::{Alignment, Chain, EditOperation, Strand};
+use crate::align::{Alignment, Chain, EditOperation, Strand, Walk};
 use std::collections::HashMap;
 
 /// The paired stretches of one alignment: (query position, oriented window position, length).
@@ -45,7 +43,6 @@ impl AlignedPath {
         Self { reverse, paired }
     }
 
-    #[cfg(test)]
     /// The paired stretches as walks, with query positions wrapped into a query of
     /// `query_length` bases.
     pub(super) fn walks(&self, query_length: u64) -> impl Iterator<Item = Walk> + '_ {
@@ -86,7 +83,6 @@ fn add_segments(segments: &mut Segments, path: &AlignedPath) {
     }
 }
 
-#[cfg(test)]
 /// The bases covered by the union of the half-open spans.
 fn covered_bases(mut spans: Vec<(i64, i64)>) -> u64 {
     spans.sort_unstable();
@@ -101,7 +97,6 @@ fn covered_bases(mut spans: Vec<(i64, i64)>) -> u64 {
     covered
 }
 
-#[cfg(test)]
 /// The query lengths a circular position may be shifted by to meet a stored stretch.
 fn shifts(circular: bool) -> &'static [i64] {
     if circular { &[0, 1, -1] } else { &[0] }
@@ -114,7 +109,6 @@ impl PathIndex {
         add_segments(&mut self.aligned, path);
     }
 
-    #[cfg(test)]
     /// Adds an ungapped dense walk.
     pub(super) fn add_walk(&mut self, walk: &Walk) {
         let path = AlignedPath {
@@ -180,7 +174,6 @@ impl PathIndex {
         })
     }
 
-    #[cfg(test)]
     /// Whether a dense walk lies on stretches of its own diagonal: nine tenths of it for a linear
     /// query, all of it for a circular one, so a shifted copy that adds contig bases stays.
     pub(super) fn covers_walk(&self, walk: &Walk, query_length: u64, circular: bool) -> bool {
@@ -208,7 +201,6 @@ impl PathIndex {
         covered_bases(overlaps).min(length as u64) * 10 >= length as u64 * required
     }
 
-    #[cfg(test)]
     /// Whether kernel alignments within `band` diagonals of a dense walk already pair nine tenths
     /// of its query bases and nine tenths of its window bases. A gapped alignment of such a walk
     /// would only find that region again. Dense walks do not count: the gapped join between them

@@ -95,7 +95,6 @@ impl Collected {
         self.bytes = mark.bytes;
     }
 
-    #[cfg(test)]
     /// The fragments added after `mark`.
     pub(super) fn since(&self, mark: Mark) -> &[Fragment] {
         &self.list[mark.length..]
