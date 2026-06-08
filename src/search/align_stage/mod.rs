@@ -14,6 +14,8 @@
 mod chains;
 mod config;
 mod contig;
+#[cfg(test)]
+mod dense_tests;
 mod paths;
 mod place;
 mod query;
