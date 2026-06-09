@@ -7,13 +7,18 @@
 //! most `max_seed_hits` seed hits, and stages 2 and 3 hold one entry per worker; results leave as
 //! events.
 
+use super::align_stage::{
+    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, PreparedQuery,
+    align_packed_entry,
+};
 use super::bound::CoverageBound;
 use super::control::SearchControl;
 use super::error::SearchError;
-use super::events::{Completion, EntryEvent, SearchStage};
+use super::events::{Completion, DropReason, EntryEvent, SearchStage};
 use super::locate_stage::{
     LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
 };
+use super::located::LocatedEntry;
 use super::query::QueryKmers;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use crate::decide::DecisionRule;
@@ -22,6 +27,7 @@ use crate::loss::{LossBudget, MissModel};
 use crate::seeds::Seeder;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// The settings of one search.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +47,8 @@ pub struct SearchConfig {
     pub flank: u64,
     /// Worker threads; 0 uses the current thread pool.
     pub threads: usize,
+    /// The settings of stage 3.
+    pub align: AlignStageConfig,
 }
 
 /// The least frequent-seed limit that `SearchConfig::frequent_seed_entries` takes by default.
@@ -57,6 +65,7 @@ impl Default for SearchConfig {
             max_seed_hits: 1 << 25,
             flank: 8_192,
             threads: 0,
+            align: AlignStageConfig::default(),
         }
     }
 }
@@ -70,9 +79,7 @@ impl SearchConfig {
         if self.flank == 0 {
             return Err(SearchError::InvalidConfig("the flank must be at least 1"));
         }
-        if self.level == SearchStage::Align {
-            return Err(SearchError::InvalidConfig("stage 3 is not built yet"));
-        }
+        self.align.validate()?;
         Ok(())
     }
 }
@@ -84,6 +91,30 @@ pub struct SearchSummary {
     pub completion: Completion,
     pub sketch: SketchWork,
     pub locate: LocateWork,
+    pub align: AlignStageWork,
+}
+
+/// The work of stage 3, summed over entries.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AlignStageWork {
+    /// Located entries that stage 3 aligned.
+    pub entries: u64,
+    /// Entries that qualify.
+    pub confirmed_entries: u64,
+    /// Windows, bases read, anchors, chains and alignments.
+    pub counts: AlignWork,
+    /// Time spent in the stage, summed over threads.
+    pub time: Duration,
+}
+
+impl AlignStageWork {
+    /// Adds the work of another part of the search.
+    pub fn add(&mut self, other: &Self) {
+        self.entries += other.entries;
+        self.confirmed_entries += other.confirmed_entries;
+        self.counts.add(&other.counts);
+        self.time += other.time;
+    }
 }
 
 /// Searches one shard. The miss model depends only on k and w, so shards share it.
@@ -131,25 +162,39 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = LossBudget::new(config.loss_budget.chance() / 2.0)?;
+        let prepared = match config.level {
+            SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
+            _ => None,
+        };
+        let request = Request {
+            config,
+            prepared: prepared.as_ref(),
+            control,
+            on_event,
+        };
         if config.threads == 0 {
-            return Ok(self.run(query, circular, config, budget, control, on_event));
+            return Ok(self.run(query, circular, budget, &request));
         }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.threads)
             .build()
             .map_err(|_| SearchError::InvalidConfig("the thread pool cannot start"))?;
-        Ok(pool.install(|| self.run(query, circular, config, budget, control, on_event)))
+        Ok(pool.install(|| self.run(query, circular, budget, &request)))
     }
 
     fn run(
         &self,
         query: &[u8],
         circular: bool,
-        config: &SearchConfig,
         budget: LossBudget,
-        control: SearchControl<'_>,
-        on_event: &(dyn Fn(EntryEvent) + Sync),
+        request: &Request<'_>,
     ) -> SearchSummary {
+        let Request {
+            config,
+            control,
+            on_event,
+            ..
+        } = *request;
         let query_kmers = QueryKmers::new(&self.seeder, query, circular);
         let length = query.len() as u64;
         let rule = &config.rule;
@@ -166,6 +211,7 @@ impl<'a> Searcher<'a> {
             completion: Completion::Complete,
             sketch: SketchWork::default(),
             locate: LocateWork::default(),
+            align: AlignStageWork::default(),
         };
         let sketch = match sketch_stage(
             self.shard.sketch(),
@@ -191,17 +237,15 @@ impl<'a> Searcher<'a> {
         if config.level == SearchStage::Sketch {
             return summary;
         }
-        let request = LocateRequest {
+        let locate = LocateRequest {
             query: &query_kmers,
             bound: &bound,
             frequent_seeds: &sketch.frequent_seeds,
             flank: config.flank,
         };
         let queue = EntryQueue::new(&sketch.candidates, control, on_event);
-        queue.run(|possible, workspace, work| {
-            self.finish_entry(possible, &request, workspace, work, control, on_event)
-        });
-        (summary.completion, summary.locate) = queue.finish();
+        queue.run(|possible, worker| self.finish_entry(possible, &locate, request, worker));
+        (summary.completion, summary.locate, summary.align) = queue.finish();
         summary
     }
 
@@ -219,25 +263,95 @@ impl<'a> Searcher<'a> {
     fn finish_entry(
         &self,
         possible: &PossibleEntry,
-        request: &LocateRequest<'_>,
-        workspace: &mut LocateWorkspace,
-        work: &mut LocateWork,
-        control: SearchControl<'_>,
-        on_event: &(dyn Fn(EntryEvent) + Sync),
+        locate: &LocateRequest<'_>,
+        request: &Request<'_>,
+        worker: &mut Worker,
     ) -> Result<(), (SearchStage, SearchError)> {
         let entry = possible.entry;
-        let outcome = locate_entry(self.shard, request, possible, workspace, work, control)
-            .map_err(|error| (SearchStage::Locate, error))?;
-        on_event(match outcome {
-            LocateOutcome::Located(located) => EntryEvent::Located(located),
-            LocateOutcome::Dropped(reason) => EntryEvent::Dropped {
+        let on_event = request.on_event;
+        let outcome = locate_entry(
+            self.shard,
+            locate,
+            possible,
+            &mut worker.locate_workspace,
+            &mut worker.locate,
+            request.control,
+        )
+        .map_err(|error| (SearchStage::Locate, error))?;
+        let located = match outcome {
+            LocateOutcome::Located(located) => located,
+            LocateOutcome::Dropped(reason) => {
+                on_event(EntryEvent::Dropped {
+                    entry,
+                    stage: SearchStage::Locate,
+                    reason,
+                });
+                return Ok(());
+            }
+        };
+        let Some(prepared) = request.prepared else {
+            on_event(EntryEvent::Located(located));
+            return Ok(());
+        };
+        on_event(EntryEvent::Located(located.clone()));
+        let started = Instant::now();
+        let aligned = self.align(prepared, &located, request, worker);
+        worker.align.entries += 1;
+        worker.align.time += started.elapsed();
+        let aligned = aligned.map_err(|error| (SearchStage::Align, error.into()))?;
+        worker.align.counts.add(&aligned.work);
+        if aligned.decision.qualifies {
+            worker.align.confirmed_entries += 1;
+            on_event(EntryEvent::Confirmed(aligned));
+        } else {
+            on_event(EntryEvent::Dropped {
                 entry,
-                stage: SearchStage::Locate,
-                reason,
-            },
-        });
+                stage: SearchStage::Align,
+                reason: DropReason::Decision,
+            });
+        }
         Ok(())
     }
+
+    /// Stage 3 for one located entry. The packed sequence is opened here, so it can later come
+    /// from another source, such as a block cache.
+    fn align(
+        &self,
+        prepared: &PreparedQuery,
+        located: &LocatedEntry,
+        request: &Request<'_>,
+        worker: &mut Worker,
+    ) -> Result<AlignedEntry, AlignStageError> {
+        let packed = self.shard.packed(located.entry)?;
+        align_packed_entry(
+            &packed,
+            prepared,
+            located,
+            &request.config.align,
+            &request.config.rule,
+            &mut worker.align_workspace,
+            request.control,
+        )
+    }
+}
+
+/// What every entry of one search shares besides the stage 2 request.
+#[derive(Clone, Copy)]
+struct Request<'a> {
+    config: &'a SearchConfig,
+    /// The query prepared for stage 3, when the search goes that far.
+    prepared: Option<&'a PreparedQuery>,
+    control: SearchControl<'a>,
+    on_event: &'a (dyn Fn(EntryEvent) + Sync),
+}
+
+/// What one worker thread keeps across entries: its buffers and its share of the work.
+#[derive(Default)]
+struct Worker {
+    locate_workspace: LocateWorkspace,
+    align_workspace: AlignStageWorkspace,
+    locate: LocateWork,
+    align: AlignStageWork,
 }
 
 /// The candidate entries of one search as a work queue: workers take the next entry in order
@@ -249,7 +363,7 @@ struct EntryQueue<'a> {
     next: AtomicUsize,
     halted: AtomicBool,
     completion: Mutex<Completion>,
-    work: Mutex<LocateWork>,
+    work: Mutex<(LocateWork, AlignStageWork)>,
 }
 
 impl<'a> EntryQueue<'a> {
@@ -265,19 +379,14 @@ impl<'a> EntryQueue<'a> {
             next: AtomicUsize::new(0),
             halted: AtomicBool::new(false),
             completion: Mutex::new(Completion::Complete),
-            work: Mutex::new(LocateWork::default()),
+            work: Mutex::default(),
         }
     }
 
     /// Runs `finish` for every entry on the workers of the current thread pool.
     fn run<F>(&self, finish: F)
     where
-        F: Fn(
-                &PossibleEntry,
-                &mut LocateWorkspace,
-                &mut LocateWork,
-            ) -> Result<(), (SearchStage, SearchError)>
-            + Sync,
+        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), (SearchStage, SearchError)> + Sync,
     {
         let workers = rayon::current_num_threads().min(self.candidates.len());
         rayon::scope(|scope| {
@@ -289,14 +398,9 @@ impl<'a> EntryQueue<'a> {
 
     fn work_on<F>(&self, finish: &F)
     where
-        F: Fn(
-            &PossibleEntry,
-            &mut LocateWorkspace,
-            &mut LocateWork,
-        ) -> Result<(), (SearchStage, SearchError)>,
+        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), (SearchStage, SearchError)>,
     {
-        let mut workspace = LocateWorkspace::default();
-        let mut work = LocateWork::default();
+        let mut worker = Worker::default();
         while let Some(possible) = self
             .candidates
             .get(self.next.fetch_add(1, Ordering::Relaxed))
@@ -307,14 +411,16 @@ impl<'a> EntryQueue<'a> {
             }
             let result = match self.control.check() {
                 Err(stopped) => Err((SearchStage::Locate, SearchError::Stopped(stopped))),
-                Ok(()) => finish(possible, &mut workspace, &mut work),
+                Ok(()) => finish(possible, &mut worker),
             };
             if let Err((stage, error)) = result {
                 self.halt(error);
                 self.unfinished(possible.entry, stage);
             }
         }
-        lock(&self.work).add(&work);
+        let mut work = lock(&self.work);
+        work.0.add(&worker.locate);
+        work.1.add(&worker.align);
     }
 
     /// Stops the queue and keeps the first reason.
@@ -323,7 +429,10 @@ impl<'a> EntryQueue<'a> {
         let mut completion = lock(&self.completion);
         if *completion == Completion::Complete {
             *completion = match error {
-                SearchError::Stopped(stopped) => Completion::Stopped(stopped),
+                SearchError::Stopped(stopped)
+                | SearchError::Align(AlignStageError::Stopped(stopped)) => {
+                    Completion::Stopped(stopped)
+                }
                 error => Completion::Failed(error.to_string()),
             };
         }
@@ -333,13 +442,13 @@ impl<'a> EntryQueue<'a> {
         (self.on_event)(EntryEvent::Unfinished { entry, stage });
     }
 
-    fn finish(self) -> (Completion, LocateWork) {
+    fn finish(self) -> (Completion, LocateWork, AlignStageWork) {
         let completion = self
             .completion
             .into_inner()
             .unwrap_or_else(|e| e.into_inner());
-        let work = self.work.into_inner().unwrap_or_else(|e| e.into_inner());
-        (completion, work)
+        let (locate, align) = self.work.into_inner().unwrap_or_else(|e| e.into_inner());
+        (completion, locate, align)
     }
 }
 

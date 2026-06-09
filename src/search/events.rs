@@ -1,6 +1,7 @@
 //! What a search reports while it runs: one event each time an entry changes its state.
 
 use super::LocatedEntry;
+use super::align_stage::AlignedEntry;
 use super::control::Stopped;
 
 /// A stage of the search. As a search level it is the last stage that runs.
@@ -18,10 +19,13 @@ pub enum DropReason {
     CoverageBound,
     /// The positions hold none of the entry's seed hits, so there is nothing to align.
     NoSeedHits,
+    /// The alignments of the entry do not reach the decision rule.
+    Decision,
 }
 
 /// A change of one entry's state. Every possible entry ends with exactly one of `Located` (when
-/// the search stops after stage 2), `Dropped` or `Unfinished`, and its events arrive in order.
+/// the search stops after stage 2), `Confirmed`, `Dropped` or `Unfinished`, and its events arrive
+/// in order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryEvent {
     /// Stage 1 kept the entry.
@@ -32,6 +36,8 @@ pub enum EntryEvent {
     },
     /// Stage 2 found where to align the entry.
     Located(LocatedEntry),
+    /// Stage 3 aligned the entry and it qualifies; the decision holds its mosaic.
+    Confirmed(AlignedEntry),
     /// The entry left the search at `stage`.
     Dropped {
         entry: u32,
@@ -50,6 +56,7 @@ impl EntryEvent {
             | Self::Dropped { entry, .. }
             | Self::Unfinished { entry, .. } => *entry,
             Self::Located(located) => located.entry,
+            Self::Confirmed(aligned) => aligned.entry,
         }
     }
 }

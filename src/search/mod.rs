@@ -16,7 +16,7 @@ pub mod query;
 pub mod sketch_stage;
 
 pub use control::{SearchControl, Stopped};
-pub use driver::{SearchConfig, SearchSummary, Searcher};
+pub use driver::{AlignStageWork, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;
 pub use events::{Completion, DropReason, EntryEvent, SearchStage};
 pub use located::{ContigWindows, LocatedEntry};
