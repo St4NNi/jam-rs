@@ -26,6 +26,8 @@ mod driver_tests;
 #[cfg(test)]
 mod locate_stage_tests;
 #[cfg(test)]
+mod search_tests;
+#[cfg(test)]
 mod sketch_stage_tests;
 #[cfg(test)]
 mod test_shard;

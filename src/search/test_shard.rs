@@ -56,6 +56,15 @@ impl Random {
     }
 }
 
+/// The reverse complement of a sequence of A, C, G and T.
+pub fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
+    sequence
+        .iter()
+        .rev()
+        .map(|&base| crate::align::complement(base))
+        .collect()
+}
+
 /// Builds a shard in `directory/shard` with one entry per item, each a list of contigs.
 pub fn build(directory: &Path, entries: &[Vec<Vec<u8>>], bucket_bits: Option<u8>) -> Shard {
     let inputs: Vec<EntryInput> = entries
