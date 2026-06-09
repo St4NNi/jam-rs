@@ -8,6 +8,7 @@ pub mod cli;
 pub mod decide;
 pub mod index;
 pub mod loss;
+pub mod report;
 pub mod screen;
 pub mod search;
 pub mod seeds;

@@ -112,6 +112,7 @@ A module uses only modules listed above it.
 | `align` | alignment types, CIGAR, the banded alignment kernel, anchors and chains |
 | `decide` | fragments, mosaic, query coverage, identity and the decision |
 | `search` | the three stages for one query against one shard, with memory limits and streaming |
+| `report` | the output records of a search: JSON lines for every entry event and the summary, and PAF lines with the CIGAR in the `cg:Z` tag; the command line and the network use the same records |
 | `screen` | the reverse direction over streamed assemblies |
 | `service` | `serve` and remote search over TCP: protocol, server, client, coordinator |
 | `cli` | the commands: `index`, `search`, `screen`, `serve`, `stats` |
