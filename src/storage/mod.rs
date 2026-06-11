@@ -9,6 +9,7 @@ mod error;
 pub mod limit;
 pub mod local;
 pub mod readahead;
+pub mod s3;
 
 pub use error::StorageError;
 
