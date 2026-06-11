@@ -6,6 +6,7 @@
 
 pub mod cache;
 mod error;
+pub mod limit;
 pub mod local;
 pub mod readahead;
 
