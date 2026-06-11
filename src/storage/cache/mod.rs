@@ -6,6 +6,7 @@
 //! blocks are also kept on local disk, and blocks missing in RAM are looked up there before the
 //! slow source is asked.
 
+mod background;
 mod disk;
 mod fill;
 
@@ -14,9 +15,11 @@ pub use fill::CachedSource;
 
 use super::limit::InFlight;
 use super::{ReadAt, StorageError};
+use background::{DiskWrite, Hint};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// The default block size, 64 KiB.
@@ -27,6 +30,12 @@ const MAX_BLOCK_BYTES: u64 = 1 << 20;
 const SHARDS: u64 = 64;
 /// Most blocks fetched with one request.
 const FILL_BLOCKS: u64 = 16;
+/// Fetched blocks waiting for the disk level; with 64 KiB blocks at most 64 MiB.
+const DISK_QUEUE_BLOCKS: usize = 1024;
+/// Most threads that read hinted ranges ahead.
+const MAX_READ_AHEAD_THREADS: usize = 8;
+/// Most hints that wait for a read-ahead thread; further hints are dropped.
+const MAX_HINT_QUEUE: usize = 256;
 /// Every block counts at least this many bytes against the budget, so that many tiny final
 /// blocks cannot make the index of blocks grow without bound.
 const MIN_CHARGE: u64 = 256;
@@ -136,7 +145,9 @@ pub struct BlockCache {
     max_fetches: usize,
     next_object: AtomicU64,
     counters: Counters,
+    hints: Option<SyncSender<Hint>>,
     disk: Option<DiskLevel>,
+    disk_writes: Option<SyncSender<DiskWrite>>,
 }
 
 impl BlockCache {
@@ -154,6 +165,10 @@ impl BlockCache {
             .as_ref()
             .map(|disk| DiskLevel::create(&disk.directory, disk.bytes, block_bytes))
             .transpose()?;
+        let threads = config.read_ahead_threads.min(MAX_READ_AHEAD_THREADS);
+        let queue = config.read_ahead_queue.min(MAX_HINT_QUEUE);
+        let (hint_sender, hint_receiver) = std::sync::mpsc::sync_channel(queue);
+        let (write_sender, write_receiver) = std::sync::mpsc::sync_channel(DISK_QUEUE_BLOCKS);
         let shards = (config.ram_bytes / block_bytes / SHARDS).clamp(1, SHARDS);
         let cache = Arc::new(Self {
             budget: config.ram_bytes / shards,
@@ -163,8 +178,11 @@ impl BlockCache {
             max_fetches: config.max_fetches.max(1),
             next_object: AtomicU64::new(0),
             counters: Counters::default(),
+            hints: (threads > 0).then_some(hint_sender),
+            disk_writes: disk.is_some().then_some(write_sender),
             disk,
         });
+        background::start(&cache, threads, hint_receiver, write_receiver);
         Ok(cache)
     }
 
@@ -195,13 +213,18 @@ impl BlockCache {
     }
 
     /// A bound for the RAM the cache uses: the block budget, the index of the blocks, the blocks
-    /// of fetches in progress (a fetched run and the blocks cut from it) and the index of the
-    /// disk level.
+    /// of fetches in progress (a fetched run and the blocks cut from it), the blocks queued for
+    /// the disk level and the index of the disk level.
     pub fn memory_bound(&self) -> u64 {
         let blocks = self.budget * self.shards.len() as u64;
         let index = blocks / MIN_CHARGE * INDEX_BYTES_PER_BLOCK;
         let fetching = 2 * self.max_fetches as u64 * FILL_BLOCKS * self.block_bytes;
-        blocks + index + fetching + self.disk.as_ref().map_or(0, DiskLevel::memory_bound)
+        let queued = if self.disk.is_some() {
+            DISK_QUEUE_BLOCKS as u64 * self.block_bytes
+        } else {
+            0
+        };
+        blocks + index + fetching + queued + self.disk.as_ref().map_or(0, DiskLevel::memory_bound)
     }
 
     /// The bytes charged for the blocks held in RAM now; never above the budget.

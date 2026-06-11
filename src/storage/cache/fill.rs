@@ -1,6 +1,7 @@
 //! Reading through the block cache: finding blocks in RAM or on disk and fetching the missing
 //! ones from the slow source.
 
+use super::background::Hint;
 use super::{BlockCache, BlockKey, FILL_BLOCKS};
 use crate::storage::{ReadAt, checked_end};
 use std::io;
@@ -86,7 +87,7 @@ impl BlockCache {
     }
 
     /// Reads the run of missing blocks that starts at block `first` with one request, and fills
-    /// `run` with them.
+    /// `run` with them. Each block is also queued for the disk level.
     fn fetch_run(
         &self,
         source: &dyn ReadAt,
@@ -106,6 +107,11 @@ impl BlockCache {
             let data: Arc<[u8]> = Arc::from(chunk);
             let key = (object, first + at as u64);
             self.counters.misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(writes) = &self.disk_writes
+                && writes.try_send((key, Arc::clone(&data))).is_err()
+            {
+                self.counters.disk_skipped.fetch_add(1, Ordering::Relaxed);
+            }
             self.insert(key, Arc::clone(&data));
             run[at] = Some(data);
         }
@@ -149,5 +155,19 @@ impl ReadAt for CachedSource {
 
     fn size(&self) -> u64 {
         self.inner.size()
+    }
+
+    fn will_need(&self, offset: u64, length: u64) {
+        let length = length.min(FILL_BLOCKS * self.cache.block_bytes);
+        self.inner.will_need(offset, length);
+        if let Some(hints) = &self.cache.hints {
+            // A full queue drops the hint: it never changes what is read.
+            let _ = hints.try_send(Hint {
+                source: Arc::clone(&self.inner),
+                object: self.object,
+                offset,
+                length,
+            });
+        }
     }
 }
