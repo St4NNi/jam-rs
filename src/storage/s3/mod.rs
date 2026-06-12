@@ -8,3 +8,6 @@ mod sign;
 pub use config::{S3Config, S3Limits};
 pub use credentials::Credentials;
 pub use object::S3Object;
+
+#[cfg(test)]
+mod tests;
