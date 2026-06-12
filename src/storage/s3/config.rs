@@ -19,6 +19,9 @@ pub struct S3Limits {
     pub connect_timeout: Duration,
     /// Tries of one request, the first included. A read fails after the last one.
     pub tries: u32,
+    /// The wait after the first failed try. It triples after each further one (0.2 s, 0.6 s,
+    /// 1.8 s), so a busy store gets time to recover.
+    pub backoff: Duration,
     /// Requests in flight at once, over all objects of the config. Some stores answer "another
     /// range or object version" when 128 range reads run in parallel, so callers can set this
     /// lower; tries with backoff cover the rest.
@@ -31,6 +34,7 @@ impl Default for S3Limits {
             request_timeout: Duration::from_secs(60),
             connect_timeout: Duration::from_secs(1),
             tries: 4,
+            backoff: Duration::from_millis(200),
             max_in_flight: 64,
         }
     }
@@ -44,7 +48,7 @@ struct Endpoint {
 }
 
 /// Where one object lives: the URL to call, the `Host` header and the signed path.
-pub struct Target {
+pub(super) struct Target {
     url: String,
     host: String,
     path: String,
@@ -96,16 +100,16 @@ impl S3Config {
         })
     }
 
-    pub fn limits(&self) -> &S3Limits {
+    pub(super) fn limits(&self) -> &S3Limits {
         &self.limits
     }
 
-    pub fn in_flight(&self) -> &InFlight {
+    pub(super) fn in_flight(&self) -> &InFlight {
         &self.in_flight
     }
 
     /// The target of `key` in `bucket`.
-    pub fn target(&self, bucket: &str, key: &str) -> Target {
+    pub(super) fn target(&self, bucket: &str, key: &str) -> Target {
         let encoded = encode_path(key);
         let (scheme, store) = match &self.endpoint {
             Some(endpoint) => (endpoint.scheme.as_str(), endpoint.host.clone()),
@@ -127,7 +131,7 @@ impl S3Config {
     /// once its headers have arrived. An answer with an error status is returned too, so that
     /// the caller can tell a temporary status from a final one. A request that cannot be sent
     /// (connection, timeout) is an `Err`.
-    pub fn get_range(
+    pub(super) fn get_range(
         &self,
         target: &Target,
         (start, last): (u64, u64),
