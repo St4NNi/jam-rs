@@ -1,6 +1,7 @@
 //! The commands: `index`, `search`, `stats`, `screen` and `serve`.
 
 mod index;
+mod search;
 mod stats;
 
 use anyhow::{Result, bail};
@@ -19,6 +20,8 @@ struct Cli {
 enum Command {
     /// Build a shard from FASTA files, or join shards into one
     Index(index::IndexArgs),
+    /// Search query sequences in a shard and align them
+    Search(search::SearchArgs),
     /// Show what a shard holds
     Stats(stats::StatsArgs),
     /// Stream large assemblies past small query sequences (not built yet)
@@ -31,6 +34,7 @@ enum Command {
 pub fn run() -> Result<()> {
     match Cli::parse().command {
         Command::Index(args) => index::run(&args),
+        Command::Search(args) => search::run(&args),
         Command::Stats(args) => stats::run(&args),
         Command::Screen => bail!("jam screen is not built yet"),
         Command::Serve => bail!("jam serve is not built yet"),
