@@ -5,9 +5,13 @@
 //! another process and read back with serde.
 
 mod decision;
+mod event;
 mod paf;
 
 pub use decision::{ContigInfo, DecisionRecord, FragmentRecord, Span, Strand};
+pub use event::{
+    AlignWorkRecord, Ending, LocateWorkRecord, Reason, Record, SketchWorkRecord, Stage,
+};
 pub use paf::paf_lines;
 
 use thiserror::Error;
