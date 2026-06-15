@@ -173,7 +173,7 @@ fn quick() -> S3Limits {
     }
 }
 
-/// A store with one object `bucket/sample.packed` whose ETag is `etag`; after `changed`
+/// A store with one object `bucket/entry.packed` whose ETag is `etag`; after `changed`
 /// requests the ETag is another one.
 fn store(data: Vec<u8>, changed: usize) -> Server {
     serve(move |index, request| {
@@ -181,7 +181,7 @@ fn store(data: Vec<u8>, changed: usize) -> Server {
             request.method, "GET",
             "the size must not come from a HEAD request"
         );
-        assert_eq!(request.path, "/bucket/sample.packed");
+        assert_eq!(request.path, "/bucket/entry.packed");
         let etag = if index >= changed {
             "\"other\""
         } else {
@@ -213,7 +213,7 @@ fn exact_ranges_are_read_signed_and_counted() {
     });
     let object = S3Object::open(
         &config(&server, quick()),
-        "s3://bucket/sample.packed",
+        "s3://bucket/entry.packed",
         Some(50_000),
     )
     .unwrap();
@@ -233,7 +233,7 @@ fn a_cache_in_front_needs_one_request_per_missing_run() {
     let data = pattern(50_000);
     let server = store(data.clone(), usize::MAX);
     let object =
-        S3Object::open(&config(&server, quick()), "s3://bucket/sample.packed", None).unwrap();
+        S3Object::open(&config(&server, quick()), "s3://bucket/entry.packed", None).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096)).unwrap();
     let cached = cache.wrap(object);
     let mut buffer = vec![0; 3000];
@@ -251,10 +251,10 @@ fn a_cache_in_front_needs_one_request_per_missing_run() {
 fn a_changed_object_and_a_wrong_size_fail() {
     let server = store(vec![7u8; 1000], 1);
     let config = config(&server, quick());
-    let object = S3Object::open(&config, "s3://bucket/sample.packed", Some(1000)).unwrap();
+    let object = S3Object::open(&config, "s3://bucket/entry.packed", Some(1000)).unwrap();
     let error = object.read_exact_at(0, &mut [0; 10]).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    assert!(S3Object::open(&config, "s3://bucket/sample.packed", Some(999)).is_err());
+    assert!(S3Object::open(&config, "s3://bucket/entry.packed", Some(999)).is_err());
     for location in [
         "s3:/bucket",
         "s3://bucket",
@@ -302,7 +302,7 @@ fn temporary_errors_are_retried_and_then_given_up() {
     });
     let object = S3Object::open(
         &config(&server, quick()),
-        "s3://bucket/sample.packed",
+        "s3://bucket/entry.packed",
         Some(1000),
     )
     .unwrap();
@@ -333,7 +333,7 @@ fn an_answer_for_another_range_is_not_repeated() {
         _ => Reply::range_of(&data, "\"fixture\"", request),
     });
     let object =
-        S3Object::open(&config(&server, quick()), "s3://bucket/sample.packed", None).unwrap();
+        S3Object::open(&config(&server, quick()), "s3://bucket/entry.packed", None).unwrap();
     let error = object.read_exact_at(0, &mut [0; 10]).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     // Opening, the wrong answer: not repeated.
@@ -359,7 +359,7 @@ fn requests_in_flight_stay_within_the_limit() {
         ..quick()
     };
     let object =
-        S3Object::open(&config(&server, limits), "s3://bucket/sample.packed", None).unwrap();
+        S3Object::open(&config(&server, limits), "s3://bucket/entry.packed", None).unwrap();
     std::thread::scope(|scope| {
         for thread in 0..12usize {
             let (object, data) = (&object, &data);
@@ -396,7 +396,7 @@ fn the_request_timeout_bounds_a_stalled_body() {
             ..quick()
         };
         let object =
-            S3Object::open(&config(&server, limits), "s3://bucket/sample.packed", None).unwrap();
+            S3Object::open(&config(&server, limits), "s3://bucket/entry.packed", None).unwrap();
         let started = Instant::now();
         assert!(object.read_exact_at(0, &mut [0; 10]).is_err());
         assert!(
