@@ -1,0 +1,88 @@
+//! `jam stats`: what a shard holds.
+
+use crate::index::{Parameters, Shard, ShardStats};
+use anyhow::{Context, Result};
+use clap::Args;
+use serde::Serialize;
+use std::path::PathBuf;
+
+/// The options of `jam stats`.
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// The shard directory
+    shard: PathBuf,
+    /// Print JSON instead of a short table
+    #[arg(long)]
+    json: bool,
+}
+
+/// The parameters and the counts of a shard.
+#[derive(Serialize)]
+struct StatsRecord {
+    parameters: Parameters,
+    entries: u64,
+    contigs: u64,
+    bases: u64,
+    seeds: u64,
+    color_sets: u64,
+    seed_locations: u64,
+    sketch_bytes: u64,
+    positions_bytes: u64,
+    packed_bytes: u64,
+}
+
+/// Prints the stats of the shard.
+pub fn run(args: &StatsArgs) -> Result<()> {
+    let shard = Shard::open(&args.shard)
+        .with_context(|| format!("cannot open the shard {}", args.shard.display()))?;
+    let ShardStats {
+        entries,
+        contigs,
+        bases,
+        seeds,
+        color_sets,
+        seed_locations,
+        sketch_bytes,
+        positions_bytes,
+        packed_bytes,
+    } = shard.stats();
+    let record = StatsRecord {
+        parameters: shard.manifest().parameters,
+        entries,
+        contigs,
+        bases,
+        seeds,
+        color_sets,
+        seed_locations,
+        sketch_bytes,
+        positions_bytes,
+        packed_bytes,
+    };
+    if args.json {
+        println!("{}", serde_json::to_string(&record)?);
+    } else {
+        print!("{}", table(&record));
+    }
+    Ok(())
+}
+
+fn table(record: &StatsRecord) -> String {
+    let parameters = &record.parameters;
+    let rows = [
+        ("k", parameters.k.to_string()),
+        ("minimizer window", parameters.window.to_string()),
+        ("bin bases", (1u64 << parameters.bin_bits).to_string()),
+        ("entries", record.entries.to_string()),
+        ("contigs", record.contigs.to_string()),
+        ("bases", record.bases.to_string()),
+        ("seeds", record.seeds.to_string()),
+        ("color sets", record.color_sets.to_string()),
+        ("seed locations", record.seed_locations.to_string()),
+        ("sketch bytes", record.sketch_bytes.to_string()),
+        ("positions bytes", record.positions_bytes.to_string()),
+        ("packed bytes", record.packed_bytes.to_string()),
+    ];
+    rows.iter()
+        .map(|(name, value)| format!("{name:<18}{value}\n"))
+        .collect()
+}
