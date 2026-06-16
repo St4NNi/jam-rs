@@ -5,6 +5,8 @@
 //! they arrive. Every answer is a stream of frames that ends with one summary or failure per shard
 //! and `Complete`.
 
+pub mod admission;
+pub mod connection;
 pub mod frame;
 pub mod records;
 pub mod settings;
@@ -13,6 +15,7 @@ use crate::index::IndexError;
 use crate::search::SearchError;
 use thiserror::Error;
 
+pub use admission::ServerLimits;
 pub use frame::{Frame, MAX_FRAME_BYTES, PROTOCOL_VERSION, SearchRequest, ShardIdentity};
 pub use records::{EventRecord, SummaryRecord};
 pub use settings::SearchSettings;
