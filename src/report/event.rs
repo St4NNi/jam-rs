@@ -69,6 +69,7 @@ pub struct SketchWorkRecord {
     pub expanded_seeds: u64,
     pub seed_hits: u64,
     pub entries_with_seed_hits: u64,
+    pub entries_without_seed_hits: u64,
     pub possible_entries: u64,
     pub seconds: f64,
 }
@@ -230,6 +231,7 @@ impl Record {
                 expanded_seeds: sketch.expanded_seeds,
                 seed_hits: sketch.seed_hits,
                 entries_with_seed_hits: sketch.entries_with_seed_hits,
+                entries_without_seed_hits: sketch.entries_without_seed_hits,
                 possible_entries: sketch.possible_entries,
                 seconds: sketch.time.as_secs_f64(),
             },

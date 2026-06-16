@@ -157,12 +157,11 @@ fn the_sketch_level_names_possible_entries_only() {
     let (summary, possible) = records.split_last().unwrap();
     assert_eq!(summary["kind"], "summary");
     assert!(possible.iter().all(|record| record["kind"] == "possible"));
-    // A shard this small treats every seed as frequent, so unrelated entries stay possible.
-    let planted = possible
-        .iter()
-        .find(|record| record["entry"] == "plasmid_1")
-        .unwrap();
-    assert!(planted["containment_estimate"].as_f64().unwrap() > 0.9);
+    // The unrelated entries share no seed with the query, so only the planted one is possible.
+    assert_eq!(possible.len(), 1);
+    assert_eq!(possible[0]["entry"], "plasmid_1");
+    assert!(possible[0]["containment_estimate"].as_f64().unwrap() > 0.9);
+    assert_eq!(summary["sketch"]["entries_without_seed_hits"], 2);
 }
 
 #[test]

@@ -29,10 +29,14 @@ fn shard(directory: &std::path::Path) -> (Shard, Vec<u8>) {
 }
 
 fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
+    bound_at(length, required_bases, 0.95)
+}
+
+fn bound_at(length: u64, required_bases: u64, identity: f64) -> CoverageBound<'static> {
     CoverageBound::new(
         model(),
         LossBudget::default(),
-        0.95,
+        identity,
         length,
         false,
         required_bases,
@@ -40,6 +44,17 @@ fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
 }
 
 fn run(shard: &Shard, query: &[u8], required: u64, limits: SketchLimits) -> Vec<(u32, u64)> {
+    run_with(shard, query, &bound(query.len() as u64, required), limits).0
+}
+
+/// Runs stage 1 and returns the candidate entries with their bounds, and the entries left out
+/// for lack of any seed hit.
+fn run_with(
+    shard: &Shard,
+    query: &[u8],
+    bound: &CoverageBound,
+    limits: SketchLimits,
+) -> (Vec<(u32, u64)>, u64) {
     let seeder = Seeder::new(parameters().scheme()).unwrap();
     let kmers = QueryKmers::new(&seeder, query, false);
     let stop = AtomicBool::new(false);
@@ -47,17 +62,17 @@ fn run(shard: &Shard, query: &[u8], required: u64, limits: SketchLimits) -> Vec<
         deadline: None,
         stop: &stop,
     };
-    let bound = bound(query.len() as u64, required);
-    let outcome = sketch_stage(shard.sketch(), &kmers, &bound, limits, control).unwrap();
+    let outcome = sketch_stage(shard.sketch(), &kmers, bound, limits, control).unwrap();
     assert_eq!(
         outcome.work.possible_entries,
         outcome.candidates.len() as u64
     );
-    outcome
+    let kept = outcome
         .candidates
         .iter()
         .map(|candidate| (candidate.entry, candidate.coverage_bound))
-        .collect()
+        .collect();
+    (kept, outcome.work.entries_without_seed_hits)
 }
 
 #[test]
@@ -96,32 +111,37 @@ fn the_containment_estimate_follows_the_shared_share() {
             .iter()
             .find(|candidate| candidate.entry == entry)
             .map(|candidate| candidate.containment_estimate)
-            .unwrap()
     };
-    assert!(estimate(0) > 0.8, "{}", estimate(0));
-    assert!(estimate(2) > 0.15 && estimate(2) < 0.45, "{}", estimate(2));
-    assert!(estimate(3) < 0.05, "{}", estimate(3));
+    let (full, partial) = (estimate(0).unwrap(), estimate(2).unwrap());
+    assert!(full > 0.8, "{full}");
+    assert!(partial > 0.15 && partial < 0.45, "{partial}");
+    // The unrelated entry has no seed hit, so it is not a candidate at all.
+    assert_eq!(estimate(3), None);
 }
 
 #[test]
 fn frequent_seeds_count_as_possibly_hit_in_every_entry() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
-    // Seeds held by more than one entry are frequent; they keep every entry possible over the
-    // stretches they cover, so the partial entry and the unrelated one cannot be left out there.
+    // Seeds held by more than one entry are frequent; they keep the entries of their color sets
+    // possible over the stretches they cover.
     let limits = SketchLimits {
         frequent_seed_entries: 1,
         max_seed_hits: u64::MAX,
     };
     let kept = run(&shard, &query, 2_500, limits);
     assert!(kept.iter().any(|(entry, _)| *entry == 0));
-    // With no room for seed hits every seed is frequent, and every entry keeps the full bound.
+    // With no room for seed hits every seed is frequent. The entries in their color sets keep
+    // the full bound; the unrelated entry is in none of them and is left out.
     let limits = SketchLimits {
         frequent_seed_entries: u64::MAX,
         max_seed_hits: 0,
     };
     let kept = run(&shard, &query, 2_500, limits);
-    assert_eq!(kept.len(), 4);
+    assert_eq!(
+        kept.iter().map(|(entry, _)| *entry).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
     assert!(kept.iter().all(|(_, bound)| *bound == 5_000));
 }
 
@@ -138,4 +158,64 @@ fn a_stopped_search_ends_stage_1() {
     };
     let outcome = sketch_stage(shard.sketch(), &kmers, &bound(5_000, 0), UNLIMITED, control);
     assert_eq!(outcome.unwrap_err(), Stopped::Asked);
+}
+
+#[test]
+fn entries_without_any_seed_hit_are_left_out_at_a_low_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = Random(0x10e);
+    let query = random.bases(5_000);
+    let entries = vec![
+        vec![[random.bases(1_000), query.clone()].concat()],
+        // One short piece of the query: a single seed hit or very few.
+        vec![
+            [
+                random.bases(3_000),
+                query[2_000..2_060].to_vec(),
+                random.bases(3_000),
+            ]
+            .concat(),
+        ],
+        vec![random.bases(6_000)],
+    ];
+    let shard = build(directory.path(), &entries, None);
+    // At 80% a stretch without seed hits may hold the query, so every bound is the whole query.
+    let low = bound_at(5_000, 4_500, 0.8);
+    let (kept, without) = run_with(&shard, &query, &low, UNLIMITED);
+    assert_eq!(kept, [(0, 5_000), (1, 5_000)]);
+    assert_eq!(without, 1);
+}
+
+#[test]
+fn entries_outside_every_frequent_color_set_get_no_possible_seed_hits() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = Random(0xf2e);
+    let (first, second) = (random.bases(3_000), random.bases(3_000));
+    let query = [first.clone(), second.clone()].concat();
+    // The first half is in entries 0, 1, 2 and 4, so its seeds are frequent at a limit of 2. The
+    // second half is in entries 3 and 4 only, so its seeds are expanded.
+    let mut entries: Vec<Vec<Vec<u8>>> = (0..3)
+        .map(|_| vec![[random.bases(500), first.clone()].concat()])
+        .collect();
+    entries.push(vec![[random.bases(500), second.clone()].concat()]);
+    entries.push(vec![query.clone()]);
+    // Many buckets, so no seed of entry 3 shares a stored key with a seed of the first half.
+    let shard = build(directory.path(), &entries, Some(20));
+    let limits = SketchLimits {
+        frequent_seed_entries: 2,
+        max_seed_hits: u64::MAX,
+    };
+    let (kept, without) = run_with(&shard, &query, &bound(6_000, 0), limits);
+    let bound_of = |entry: u32| kept.iter().find(|(e, _)| *e == entry).unwrap().1;
+    assert_eq!(without, 0);
+    assert_eq!(bound_of(4), 6_000);
+    for entry in 0..3 {
+        assert!(bound_of(entry) >= 3_000 && bound_of(entry) < 4_000);
+    }
+    // Entry 3 is in no frequent color set: only its own seed hits on the second half count.
+    assert!(
+        bound_of(3) >= 3_000 && bound_of(3) < 4_000,
+        "{}",
+        bound_of(3)
+    );
 }

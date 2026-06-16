@@ -1,11 +1,20 @@
 //! Stage 1: seed hits per entry from the sketch, the containment estimate and the coverage bound.
 //!
 //! Every distinct query k-mer is looked up in the sketch. A k-mer whose color set holds more than
-//! the frequent-seed limit is not expanded: its query starts count as possibly hit in every entry,
-//! which can only raise bounds. The other color sets are expanded rare seeds first, until the
-//! memory limit of seed hits is reached; the seeds left over count as frequent too. Entries whose
-//! coverage bound stays below the requested query coverage are left out; the others become
-//! candidate entries, ordered by coverage bound.
+//! the frequent-seed limit is not expanded. The other color sets are expanded rare seeds first,
+//! until the memory limit of seed hits is reached; the seeds left over count as frequent too.
+//!
+//! Frequent seeds are not expanded into seed hits, but the union of their color sets is marked in
+//! a bitmap over the shard's entries. The cost is the sum of the frequent color sets' sizes, at
+//! most entries times frequent seeds, and the marking stops early once every entry is marked. An
+//! entry in the union counts the query starts of all frequent seeds as possibly hit, which can only
+//! raise its bound; an entry outside it has only its expanded seed hits.
+//!
+//! An entry with neither a seed hit nor a possible seed hit is left out whatever its bound says,
+//! as stage 2 could build no alignment window for it. This matters at low identities, where the
+//! bound of such an entry is the whole query. Entries whose coverage bound stays below the
+//! requested query coverage are left out too; the others become candidate entries, ordered by
+//! coverage bound.
 
 use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
@@ -56,6 +65,8 @@ pub struct SketchWork {
     pub seed_hits: u64,
     /// Entries with at least one expanded seed hit.
     pub entries_with_seed_hits: u64,
+    /// Entries left out as they have no seed hit and are in no frequent seed's color set.
+    pub entries_without_seed_hits: u64,
     /// Candidate entries kept by the coverage bound.
     pub possible_entries: u64,
     /// Wall time of the stage.
@@ -96,19 +107,26 @@ pub fn sketch_stage(
         seeds_found: found.len() as u64,
         ..SketchWork::default()
     };
-    let (expanded, mut frequent_seeds) = split_frequent(found, limits);
+    let (expanded, frequent) = split_frequent(found, limits);
+    let mut frequent_seeds: Vec<u32> = frequent.iter().map(|found| found.seed).collect();
     frequent_seeds.sort_unstable();
     work.frequent_seeds = frequent_seeds.len() as u64;
     work.expanded_seeds = expanded.len() as u64;
     let seed_hits = expand(sketch, &expanded, control)?;
     work.seed_hits = seed_hits.len() as u64;
     control.check()?;
+    let entries = sketch.entries() as u32;
+    let in_frequent = FrequentUnion::new(sketch, &frequent, entries);
     let frequent_positions = query.sorted_positions(&frequent_seeds);
+    let possible_hits = |entry: u32| match in_frequent.holds(entry) {
+        true => frequent_positions.as_slice(),
+        false => &[],
+    };
     let mut candidates: Vec<PossibleEntry> = seed_hits
         .par_chunk_by(|a, b| a.0 == b.0)
         .filter_map(|hits| {
-            let seeds: Vec<u32> = hits.iter().map(|&(_, seed)| seed).collect();
-            possible_entry(hits[0].0, seeds, query, bound, &frequent_positions)
+            let (entry, seeds) = (hits[0].0, hits.iter().map(|&(_, seed)| seed).collect());
+            possible_entry(entry, seeds, query, bound, possible_hits(entry))
         })
         .collect();
     let with_hits: Vec<u32> = seed_hits
@@ -116,17 +134,18 @@ pub fn sketch_stage(
         .map(|h| h[0].0)
         .collect();
     work.entries_with_seed_hits = with_hits.len() as u64;
-    // An entry without an expanded seed hit has only the frequent seeds; their bound is shared.
+    // An entry in the frequent union without an expanded seed hit has only the frequent seeds;
+    // their bound is shared. Entries in neither are left out.
+    let only_frequent: Vec<u32> = (0..entries)
+        .filter(|&entry| in_frequent.holds(entry) && with_hits.binary_search(&entry).is_err())
+        .collect();
+    work.entries_without_seed_hits =
+        u64::from(entries) - with_hits.len() as u64 - only_frequent.len() as u64;
     if let Some(shared) = possible_entry(0, Vec::new(), query, bound, &frequent_positions) {
-        let entries = sketch.entries() as u32;
-        candidates.extend(
-            (0..entries)
-                .filter(|entry| with_hits.binary_search(entry).is_err())
-                .map(|entry| PossibleEntry {
-                    entry,
-                    ..shared.clone()
-                }),
-        );
+        candidates.extend(only_frequent.into_iter().map(|entry| PossibleEntry {
+            entry,
+            ..shared.clone()
+        }));
     }
     candidates.sort_by(|a, b| (b.coverage_bound, a.entry).cmp(&(a.coverage_bound, b.entry)));
     work.possible_entries = candidates.len() as u64;
@@ -171,7 +190,10 @@ fn look_up(
 }
 
 /// Splits the found seeds into those to expand, rarest first, and the frequent ones.
-fn split_frequent(mut found: Vec<FoundSeed>, limits: SketchLimits) -> (Vec<FoundSeed>, Vec<u32>) {
+fn split_frequent(
+    mut found: Vec<FoundSeed>,
+    limits: SketchLimits,
+) -> (Vec<FoundSeed>, Vec<FoundSeed>) {
     found.sort_unstable_by_key(|found| (found.entries, found.seed));
     let mut seed_hits = 0u64;
     let fits = found
@@ -181,9 +203,41 @@ fn split_frequent(mut found: Vec<FoundSeed>, limits: SketchLimits) -> (Vec<Found
             found.entries <= limits.frequent_seed_entries && seed_hits <= limits.max_seed_hits
         })
         .count();
-    let frequent = found[fits..].iter().map(|found| found.seed).collect();
-    found.truncate(fits);
+    let frequent = found.split_off(fits);
     (found, frequent)
+}
+
+/// The union of the frequent seeds' color sets, as a bitmap over the shard's entries.
+struct FrequentUnion {
+    words: Vec<u64>,
+}
+
+impl FrequentUnion {
+    /// Marks the entries of every frequent seed's color set, and stops once all are marked.
+    fn new(sketch: &Sketch, frequent: &[FoundSeed], entries: u32) -> Self {
+        let mut words = vec![0u64; (entries as usize).div_ceil(64)];
+        let mut marked = 0u32;
+        let color_sets = sketch.color_sets();
+        for found in frequent {
+            if marked == entries {
+                break;
+            }
+            for entry in color_sets.entries(found.color_set).into_iter().flatten() {
+                let (word, bit) = (entry as usize / 64, 1u64 << (entry % 64));
+                if let Some(word) = words.get_mut(word).filter(|word| **word & bit == 0) {
+                    *word |= bit;
+                    marked += 1;
+                }
+            }
+        }
+        Self { words }
+    }
+
+    fn holds(&self, entry: u32) -> bool {
+        self.words
+            .get(entry as usize / 64)
+            .is_some_and(|word| word & (1u64 << (entry % 64)) != 0)
+    }
 }
 
 /// Expands the color sets of the seeds into seed hits, sorted by entry and then seed.
@@ -211,19 +265,23 @@ fn expand(
     Ok(hits)
 }
 
-/// The candidate entry for `entry` with seed hits `seeds`, or `None` when its bound is too low.
+/// The candidate entry for `entry` with seed hits `seeds` and possible seed hits at the query
+/// starts `possible_hits`, or `None` when it has neither or its bound is too low.
 fn possible_entry(
     entry: u32,
     seeds: Vec<u32>,
     query: &QueryKmers,
     bound: &CoverageBound,
-    frequent_positions: &[u32],
+    possible_hits: &[u32],
 ) -> Option<PossibleEntry> {
+    if seeds.is_empty() && possible_hits.is_empty() {
+        return None;
+    }
     let hit_positions = query.sorted_positions(&seeds);
     let containment_estimate = query.containment_estimate(hit_positions.len() as u64);
     let mut positions = hit_positions;
-    if !frequent_positions.is_empty() {
-        positions.extend_from_slice(frequent_positions);
+    if !possible_hits.is_empty() {
+        positions.extend_from_slice(possible_hits);
         positions.sort_unstable();
     }
     let coverage_bound = bound.bound(&positions);
