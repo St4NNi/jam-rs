@@ -161,6 +161,7 @@ pub fn summary_of(frames: &[Frame], shard: u32) -> SummaryRecord {
 /// A server that serves on a localhost port until dropped.
 pub struct Running {
     pub address: String,
+    pub server: Arc<Server>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -170,11 +171,12 @@ impl Running {
     pub fn start(server: Server) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap().to_string();
-        let (serving, stop) = (Arc::new(server), Arc::new(AtomicBool::new(false)));
-        let stopping = stop.clone();
+        let (server, stop) = (Arc::new(server), Arc::new(AtomicBool::new(false)));
+        let (serving, stopping) = (server.clone(), stop.clone());
         let thread = std::thread::spawn(move || serving.serve(listener, &stopping).unwrap());
         Self {
             address,
+            server,
             stop,
             thread: Some(thread),
         }

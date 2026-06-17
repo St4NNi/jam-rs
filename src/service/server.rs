@@ -215,3 +215,7 @@ fn refuse(stream: TcpStream, connections: usize) {
     let message = format!("the server has its {connections} connections open");
     let _ = connection.write(&Frame::Refused { message });
 }
+
+#[cfg(test)]
+#[path = "server_tests.rs"]
+mod tests;
