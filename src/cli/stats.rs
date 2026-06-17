@@ -1,7 +1,7 @@
 //! `jam stats`: what a shard holds.
 
+use super::CliError;
 use crate::index::{Parameters, Shard, ShardStats};
-use anyhow::{Context, Result};
 use clap::Args;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -32,9 +32,11 @@ struct StatsRecord {
 }
 
 /// Prints the stats of the shard.
-pub fn run(args: &StatsArgs) -> Result<()> {
-    let shard = Shard::open(&args.shard)
-        .with_context(|| format!("cannot open the shard {}", args.shard.display()))?;
+pub fn run(args: &StatsArgs) -> Result<(), CliError> {
+    let shard = Shard::open(&args.shard).map_err(|source| CliError::Shard {
+        path: args.shard.clone(),
+        source,
+    })?;
     let ShardStats {
         entries,
         contigs,

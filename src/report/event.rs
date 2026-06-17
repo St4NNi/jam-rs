@@ -156,6 +156,16 @@ pub enum Record {
     },
 }
 
+/// A record with the shard it comes from, as `jam search` prints it. Entry names may repeat
+/// across shards, so every line names its shard.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ShardRecord {
+    /// The name of the shard directory.
+    pub shard: String,
+    #[serde(flatten)]
+    pub record: Record,
+}
+
 impl Record {
     /// The record of an entry event. `contigs` gives the contig table of the entry and is only
     /// called for a confirmed entry.
@@ -311,6 +321,30 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_record_with_its_shard_keeps_the_flat_json_line() {
+        let record = Record::Dropped {
+            query: "q1".into(),
+            entry: "e".into(),
+            stage: Stage::Align,
+            reason: Reason::Decision,
+        };
+        let shard_record = ShardRecord {
+            shard: "s1".into(),
+            record,
+        };
+        let text = serde_json::to_string(&shard_record).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            (json["shard"].as_str(), json["kind"].as_str()),
+            (Some("s1"), Some("dropped"))
+        );
+        assert_eq!(
+            serde_json::from_str::<ShardRecord>(&text).unwrap(),
+            shard_record
+        );
     }
 
     #[test]

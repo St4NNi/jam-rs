@@ -1,9 +1,9 @@
 //! `jam index`: build a shard from FASTA files, or join shards.
 
+use super::CliError;
 use crate::index::{
     BuildOptions, EntryInput, JoinOptions, Manifest, Parameters, build_shard, join_shards,
 };
-use anyhow::{Context, Result, bail};
 use clap::Args;
 use std::path::{Path, PathBuf};
 
@@ -39,16 +39,18 @@ pub struct IndexArgs {
 }
 
 /// Builds or joins the shard.
-pub fn run(args: &IndexArgs) -> Result<()> {
+pub fn run(args: &IndexArgs) -> Result<(), CliError> {
     let mut inputs = args.inputs.clone();
     if let Some(list) = &args.list {
         inputs.extend(read_list(list)?);
     }
     if inputs.is_empty() {
-        bail!("give at least one input path or a --list file");
+        return Err(CliError::Usage(
+            "give at least one input path or a --list file".into(),
+        ));
     }
     let threads = match args.threads {
-        Some(0) => bail!("--threads must be at least 1"),
+        Some(0) => return Err(CliError::Usage("--threads must be at least 1".into())),
         Some(threads) => threads,
         None => std::thread::available_parallelism().map_or(1, |n| n.get()),
     };
@@ -99,9 +101,11 @@ fn parent_of(output: &Path) -> PathBuf {
     }
 }
 
-fn read_list(list: &Path) -> Result<Vec<PathBuf>> {
-    let text = std::fs::read_to_string(list)
-        .with_context(|| format!("cannot read the list file {}", list.display()))?;
+fn read_list(list: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let text = std::fs::read_to_string(list).map_err(|source| CliError::File {
+        path: list.to_path_buf(),
+        source,
+    })?;
     Ok(text
         .lines()
         .map(str::trim)

@@ -184,3 +184,67 @@ fn stats_and_errors_are_plain() {
     let output = jam(&["screen".as_ref()]);
     assert!(!output.status.success());
 }
+
+#[test]
+fn several_shards_are_searched_and_every_record_names_its_shard() {
+    let fixture = fixture();
+    let other_input = fixture.directory.path().join("other.fa");
+    write_fasta(&other_input, "other_contig", &random_bases(44, 20_000));
+    let other = fixture.directory.path().join("other_shard");
+    let output = jam(&[
+        "index".as_ref(),
+        "-o".as_ref(),
+        other.as_os_str(),
+        other_input.as_os_str(),
+    ]);
+    assert!(output.status.success());
+    let output = jam(&[
+        "search".as_ref(),
+        fixture.shard.as_os_str(),
+        other.as_os_str(),
+        fixture.query.as_os_str(),
+        "-t".as_ref(),
+        "2".as_ref(),
+    ]);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let records: Vec<_> = text.lines().map(json).collect();
+    assert!(records.iter().all(|record| record["shard"].is_string()));
+    let confirmed: Vec<_> = records
+        .iter()
+        .filter(|record| record["kind"] == "confirmed")
+        .collect();
+    assert_eq!(confirmed.len(), 1);
+    assert_eq!(confirmed[0]["shard"], "shard");
+    let summaries: Vec<_> = records
+        .iter()
+        .filter(|record| record["kind"] == "summary")
+        .map(|record| {
+            (
+                record["shard"].as_str().unwrap(),
+                record["ending"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summaries,
+        [("shard", "complete"), ("other_shard", "complete")]
+    );
+}
+
+#[test]
+fn a_search_that_does_not_complete_fails_after_writing_its_summary() {
+    let fixture = fixture();
+    let output = jam(&[
+        "search".as_ref(),
+        fixture.shard.as_os_str(),
+        fixture.query.as_os_str(),
+        "--deadline".as_ref(),
+        "0.000000001".as_ref(),
+    ]);
+    assert!(!output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(json(text.lines().last().unwrap())["ending"], "deadline");
+    let message = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(message.trim(), "jam: 1 searches did not complete");
+}

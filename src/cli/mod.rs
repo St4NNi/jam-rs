@@ -1,11 +1,12 @@
 //! The commands: `index`, `search`, `stats`, `screen` and `serve`.
 
+mod error;
 mod index;
 mod search;
 mod stats;
 
-use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+pub use error::CliError;
 
 /// jam (just another minimizer) finds small sequences in very large sets of assemblies and aligns
 /// them with CIGAR strings.
@@ -31,12 +32,12 @@ enum Command {
 }
 
 /// Parses the command line and runs the chosen command.
-pub fn run() -> Result<()> {
+pub fn run() -> Result<(), CliError> {
     match Cli::parse().command {
         Command::Index(args) => index::run(&args),
         Command::Search(args) => search::run(&args),
         Command::Stats(args) => stats::run(&args),
-        Command::Screen => bail!("jam screen is not built yet"),
-        Command::Serve => bail!("jam serve is not built yet"),
+        Command::Screen => Err(CliError::Usage("jam screen is not built yet".into())),
+        Command::Serve => Err(CliError::Usage("jam serve is not built yet".into())),
     }
 }

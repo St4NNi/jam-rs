@@ -10,7 +10,7 @@ mod paf;
 
 pub use decision::{ContigInfo, DecisionRecord, FragmentRecord, Span, Strand};
 pub use event::{
-    AlignWorkRecord, Ending, LocateWorkRecord, Reason, Record, SketchWorkRecord, Stage,
+    AlignWorkRecord, Ending, LocateWorkRecord, Reason, Record, ShardRecord, SketchWorkRecord, Stage,
 };
 pub use paf::paf_lines;
 
@@ -22,4 +22,7 @@ pub enum ReportError {
     /// A fragment names a contig that the contig table does not hold.
     #[error("contig {0} is not in the contig table of the entry")]
     UnknownContig(u32),
+    /// An event names an entry that the shard does not hold.
+    #[error("entry {0} is not in the shard")]
+    UnknownEntry(u32),
 }

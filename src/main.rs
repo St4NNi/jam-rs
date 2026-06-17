@@ -8,7 +8,7 @@ fn main() -> ExitCode {
     match jam_rs::run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("jam: {error:#}");
+            eprintln!("jam: {error}");
             ExitCode::FAILURE
         }
     }
