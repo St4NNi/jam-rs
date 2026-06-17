@@ -6,8 +6,10 @@
 //! and `Complete`.
 
 pub mod admission;
+pub mod client;
 pub mod connection;
 pub mod frame;
+pub mod local;
 pub mod records;
 pub mod settings;
 
@@ -16,7 +18,9 @@ use crate::search::SearchError;
 use thiserror::Error;
 
 pub use admission::ServerLimits;
+pub use client::{Client, SearchFrames};
 pub use frame::{Frame, MAX_FRAME_BYTES, PROTOCOL_VERSION, SearchRequest, ShardIdentity};
+pub use local::{ServedShard, ShardOptions};
 pub use records::{EventRecord, SummaryRecord};
 pub use settings::SearchSettings;
 
