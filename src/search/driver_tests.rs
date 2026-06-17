@@ -5,8 +5,8 @@ use super::test_shard::{Random, build, model};
 use crate::decide::QueryCoverage;
 use crate::index::Shard;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
 
 const QUERY_LENGTH: usize = 5_000;
 
@@ -57,18 +57,23 @@ fn search(
         deadline: None,
         stop: &stop,
     };
-    let events = Mutex::new(BTreeMap::<u32, Vec<EntryEvent>>::new());
-    let on_event = |event: EntryEvent| {
-        if stop_at_first_event {
-            stop.store(true, Ordering::Relaxed);
+    let (sender, receiver) = sync_channel(16);
+    let mut events = BTreeMap::<u32, Vec<EntryEvent>>::new();
+    let summary = std::thread::scope(|scope| {
+        let search = scope.spawn(|| {
+            let summary = searcher.search(query, circular, config, control, &sender);
+            drop(sender);
+            summary
+        });
+        for event in receiver {
+            if stop_at_first_event {
+                stop.store(true, Ordering::Relaxed);
+            }
+            events.entry(event.entry()).or_default().push(event);
         }
-        let mut events = events.lock().unwrap();
-        events.entry(event.entry()).or_default().push(event);
-    };
-    let summary = searcher
-        .search(query, circular, config, control, &on_event)
-        .unwrap();
-    (summary, events.into_inner().unwrap())
+        search.join().unwrap().unwrap()
+    });
+    (summary, events)
 }
 
 /// Entries 0 to 3 hold the query at 97% identity, entries 4 to 7 are unrelated.
@@ -146,18 +151,38 @@ fn bad_queries_and_settings_fail_at_once() {
         stop: &stop,
     };
     let config = config(SearchStage::Locate);
+    let (sender, _receiver) = sync_channel(1);
     assert!(
         searcher
-            .search(b"ACGT", false, &config, control, &|_| {})
+            .search(b"ACGT", false, &config, control, &sender)
             .is_err()
     );
     let no_flank = SearchConfig { flank: 0, ..config };
     let query = vec![b'A'; 100];
     assert!(
         searcher
-            .search(&query, false, &no_flank, control, &|_| {})
+            .search(&query, false, &no_flank, control, &sender)
             .is_err()
     );
+}
+
+/// A caller that drops the receiver ends the search as if it asked to stop.
+#[test]
+fn a_dropped_receiver_stops_the_search() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = small_shard(directory.path());
+    let searcher = Searcher::new(&shard, model()).unwrap();
+    let stop = AtomicBool::new(false);
+    let control = SearchControl {
+        deadline: None,
+        stop: &stop,
+    };
+    let (sender, receiver) = sync_channel(1);
+    drop(receiver);
+    let summary = searcher
+        .search(&query, false, &config(SearchStage::Align), control, &sender)
+        .unwrap();
+    assert_eq!(summary.completion, Completion::Stopped(Stopped::Asked));
 }
 
 /// Every entry holds the query at exactly the accepted identity, linear or rotated; none may be

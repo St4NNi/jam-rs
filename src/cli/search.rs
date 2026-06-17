@@ -12,9 +12,12 @@ use clap::{Args, ValueEnum};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
+
+/// Events held between the search and the writer.
+const EVENT_QUEUE: usize = 64;
 
 /// The last stage that runs.
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -92,7 +95,7 @@ pub fn run(args: &SearchArgs) -> Result<()> {
     let parameters = shard.manifest().parameters;
     let model = MissModel::new(usize::from(parameters.k), usize::from(parameters.window))?;
     let searcher = Searcher::new(&shard, &model)?;
-    let sink = Sink::new(args)?;
+    let mut sink = Sink::new(args)?;
     let mut reader = needletail::parse_fastx_file(&args.query)
         .with_context(|| format!("cannot read the query file {}", args.query.display()))?;
     let mut records = 0;
@@ -101,8 +104,10 @@ pub fn run(args: &SearchArgs) -> Result<()> {
         let name = first_word(record.id());
         let sequence = record.seq().to_ascii_uppercase();
         records += 1;
-        let summary = search_one(args, &searcher, &shard, &config, &sink, &name, &sequence)
-            .with_context(|| format!("searching {name} failed"))?;
+        let summary = search_one(
+            args, &searcher, &shard, &config, &mut sink, &name, &sequence,
+        )
+        .with_context(|| format!("searching {name} failed"))?;
         sink.finish_query(args.format, &name, &summary)?;
     }
     if records == 0 {
@@ -116,7 +121,7 @@ fn search_one(
     searcher: &Searcher<'_>,
     shard: &Shard,
     config: &SearchConfig,
-    sink: &Sink,
+    sink: &mut Sink,
     name: &str,
     sequence: &[u8],
 ) -> Result<SearchSummary> {
@@ -127,10 +132,21 @@ fn search_one(
             .map(|seconds| Instant::now() + Duration::from_secs_f64(seconds)),
         stop: &stop,
     };
-    let on_event = |event: EntryEvent| sink.event(args.format, shard, name, &event);
-    let summary = searcher.search(sequence, args.circular, config, control, &on_event)?;
-    sink.take_error()?;
-    Ok(summary)
+    let (sender, receiver) = sync_channel(EVENT_QUEUE);
+    // A write error returns at once; the dropped receiver then stops the search.
+    std::thread::scope(|scope| {
+        let search = scope.spawn(|| {
+            let summary = searcher.search(sequence, args.circular, config, control, &sender);
+            drop(sender);
+            summary
+        });
+        for event in receiver {
+            sink.event(args.format, shard, name, &event)?;
+        }
+        Ok(search
+            .join()
+            .map_err(|_| anyhow!("the search thread panicked"))??)
+    })
 }
 
 fn config_of(args: &SearchArgs) -> Result<SearchConfig> {
@@ -171,40 +187,24 @@ fn first_word(id: &[u8]) -> String {
     id.split_whitespace().next().unwrap_or_default().to_string()
 }
 
-/// The output and the first error that writing or building a record met. Events arrive from many
-/// threads, so each line is written under a lock.
+/// The output of a search.
 struct Sink {
-    writer: Mutex<Box<dyn Write + Send>>,
-    error: Mutex<Option<anyhow::Error>>,
+    writer: Box<dyn Write>,
 }
 
 impl Sink {
     fn new(args: &SearchArgs) -> Result<Self> {
-        let writer: Box<dyn Write + Send> = match &args.output {
+        let writer: Box<dyn Write> = match &args.output {
             Some(path) => Box::new(BufWriter::new(
                 File::create(path).with_context(|| format!("cannot create {}", path.display()))?,
             )),
             None => Box::new(std::io::stdout()),
         };
-        Ok(Self {
-            writer: Mutex::new(writer),
-            error: Mutex::new(None),
-        })
+        Ok(Self { writer })
     }
 
-    fn event(&self, format: Format, shard: &Shard, query: &str, event: &EntryEvent) {
-        if self.error.lock().is_ok_and(|error| error.is_some()) {
-            return;
-        }
-        if let Err(error) = self.write_event(format, shard, query, event)
-            && let Ok(mut slot) = self.error.lock()
-        {
-            slot.get_or_insert(error);
-        }
-    }
-
-    fn write_event(
-        &self,
+    fn event(
+        &mut self,
         format: Format,
         shard: &Shard,
         query: &str,
@@ -225,28 +225,15 @@ impl Sink {
         self.write_lines(&lines)
     }
 
-    fn write_lines(&self, lines: &[String]) -> Result<()> {
-        let mut writer = self.writer.lock().map_err(|_| anyhow!("output lock"))?;
+    fn write_lines(&mut self, lines: &[String]) -> Result<()> {
         for line in lines {
-            writeln!(writer, "{line}")?;
+            writeln!(self.writer, "{line}")?;
         }
         Ok(())
     }
 
-    fn take_error(&self) -> Result<()> {
-        match self
-            .error
-            .lock()
-            .map_err(|_| anyhow!("output lock"))?
-            .take()
-        {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
-    }
-
     /// Writes the summary line of a query (JSON only) and flushes.
-    fn finish_query(&self, format: Format, query: &str, summary: &SearchSummary) -> Result<()> {
+    fn finish_query(&mut self, format: Format, query: &str, summary: &SearchSummary) -> Result<()> {
         if format == Format::Json {
             let line = serde_json::to_string(&Record::summary(query, summary))?;
             self.write_lines(&[line])?;
@@ -254,9 +241,8 @@ impl Sink {
         self.flush()
     }
 
-    fn flush(&self) -> Result<()> {
-        let mut writer = self.writer.lock().map_err(|_| anyhow!("output lock"))?;
-        writer.flush().context("cannot write the output")
+    fn flush(&mut self) -> Result<()> {
+        self.writer.flush().context("cannot write the output")
     }
 }
 

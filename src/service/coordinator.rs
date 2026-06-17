@@ -105,20 +105,16 @@ pub fn search_all(
     let (sender, receiver) = sync_channel(QUEUED_FRAMES);
     // Per shard: `None` while it runs, then whether it completed.
     let mut ended: Vec<Option<bool>> = vec![None; 1 + peers.len()];
-    let mut failure = None;
-    std::thread::scope(|scope| {
+    // Leaving the scope early drops the receiver, which stops every shard thread.
+    std::thread::scope(|scope| -> Result<(), ServiceError> {
         let local_sender = sender.clone();
         scope.spawn(move || {
             let control = SearchControl {
                 deadline,
                 stop: stop.as_ref(),
             };
-            let send = move |frame| {
-                // A closed queue means the client left and `stop` is set.
-                let _ = local_sender.send(frame);
-            };
             let query = request.query.as_bytes();
-            local.search(query, request.circular, config, control, 0, &send);
+            local.search(query, request.circular, config, control, 0, &local_sender);
         });
         for (place, peer) in peers.iter().enumerate() {
             let sender = sender.clone();
@@ -134,16 +130,10 @@ pub fn search_all(
                 Frame::ShardFailed { shard, .. } => ended[*shard as usize] = Some(false),
                 _ => {}
             }
-            if let Err(error) = emit(frame) {
-                stop.store(true, Ordering::Relaxed);
-                failure = Some(error);
-                break;
-            }
+            emit(frame).inspect_err(|_| stop.store(true, Ordering::Relaxed))?;
         }
-    });
-    if let Some(error) = failure {
-        return Err(error);
-    }
+        Ok(())
+    })?;
     // A shard thread that ended without its last frame still gets one.
     for (shard, state) in ended.iter_mut().enumerate() {
         if state.is_none() {

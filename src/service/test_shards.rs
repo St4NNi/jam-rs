@@ -12,7 +12,8 @@ use crate::search::{SearchConfig, SearchControl};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
 /// The query length of the tests.
@@ -115,15 +116,16 @@ pub fn request(deadline_ms: Option<u64>) -> SearchRequest {
 
 /// The frames of a search of `shard` in this process, tagged with `tag`.
 pub fn local_frames(shard: &ServedShard, tag: u32) -> Vec<Frame> {
-    let frames = Mutex::new(Vec::new());
     let stop = AtomicBool::new(false);
     let control = SearchControl {
         deadline: None,
         stop: &stop,
     };
-    let send = |frame| frames.lock().unwrap().push(frame);
-    shard.search(&query(), false, &config(), control, tag, &send);
-    frames.into_inner().unwrap()
+    let (sender, receiver) = sync_channel(16);
+    std::thread::scope(|scope| {
+        scope.spawn(move || shard.search(&query(), false, &config(), control, tag, &sender));
+        receiver.into_iter().collect()
+    })
 }
 
 /// The event records of `shard` as sorted JSON text, as the order between entries may change.

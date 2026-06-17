@@ -8,8 +8,8 @@ use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
 use crate::index::Shard;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::sync_channel;
 
 const QUERY_LENGTH: usize = 5_000;
 
@@ -38,16 +38,21 @@ fn search(
         deadline: None,
         stop: &stop,
     };
-    let events = Mutex::new(BTreeMap::<u32, Vec<EntryEvent>>::new());
-    let on_event = |event: EntryEvent| {
-        let mut events = events.lock().unwrap();
-        events.entry(event.entry()).or_default().push(event);
-    };
-    let summary = searcher
-        .search(query, circular, config, control, &on_event)
-        .unwrap();
+    let (sender, receiver) = sync_channel(16);
+    let mut events = BTreeMap::<u32, Vec<EntryEvent>>::new();
+    let summary = std::thread::scope(|scope| {
+        let search = scope.spawn(|| {
+            let summary = searcher.search(query, circular, config, control, &sender);
+            drop(sender);
+            summary
+        });
+        for event in receiver {
+            events.entry(event.entry()).or_default().push(event);
+        }
+        search.join().unwrap().unwrap()
+    });
     assert_eq!(summary.completion, Completion::Complete);
-    (summary, events.into_inner().unwrap())
+    (summary, events)
 }
 
 /// Checks that the events of an entry run possible, located, then the last one, and returns it.

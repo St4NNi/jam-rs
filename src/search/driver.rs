@@ -12,7 +12,7 @@ use super::align_stage::{
     align_packed_entry,
 };
 use super::bound::CoverageBound;
-use super::control::SearchControl;
+use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
 use super::locate_stage::{
@@ -27,6 +27,7 @@ use crate::loss::{LossBudget, MissModel};
 use crate::seeds::Seeder;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 /// The settings of one search.
@@ -144,16 +145,17 @@ impl<'a> Searcher<'a> {
         })
     }
 
-    /// Searches `query` and calls `on_event` each time an entry changes its state, from any
-    /// worker thread. Bad input fails at once; a stop or a read failure ends the search early,
-    /// which the summary's completion tells.
+    /// Searches `query` and sends an event into `events` each time an entry changes its state.
+    /// The caller must read the receiver on another thread while the search runs. When the
+    /// receiver is dropped the search stops as if asked. Bad input fails at once; a stop or a
+    /// read failure ends the search early, which the summary's completion tells.
     pub fn search(
         &self,
         query: &[u8],
         circular: bool,
         config: &SearchConfig,
         control: SearchControl<'_>,
-        on_event: &(dyn Fn(EntryEvent) + Sync),
+        events: &SyncSender<EntryEvent>,
     ) -> Result<SearchSummary, SearchError> {
         config.validate()?;
         if query.len() < usize::from(self.seeder.scheme().k) || query.len() >= u32::MAX as usize {
@@ -170,7 +172,7 @@ impl<'a> Searcher<'a> {
             config,
             prepared: prepared.as_ref(),
             control,
-            on_event,
+            events,
         };
         if config.threads == 0 {
             return Ok(self.run(query, circular, budget, &request));
@@ -192,7 +194,7 @@ impl<'a> Searcher<'a> {
         let Request {
             config,
             control,
-            on_event,
+            events,
             ..
         } = *request;
         let query_kmers = QueryKmers::new(&self.seeder, query, circular);
@@ -228,11 +230,15 @@ impl<'a> Searcher<'a> {
         };
         summary.sketch = sketch.work;
         for candidate in &sketch.candidates {
-            on_event(EntryEvent::Possible {
+            let possible = EntryEvent::Possible {
                 entry: candidate.entry,
                 coverage_bound: candidate.coverage_bound,
                 containment_estimate: candidate.containment_estimate,
-            });
+            };
+            if events.send(possible).is_err() {
+                summary.completion = Completion::Stopped(Stopped::Asked);
+                return summary;
+            }
         }
         if config.level == SearchStage::Sketch {
             return summary;
@@ -243,7 +249,7 @@ impl<'a> Searcher<'a> {
             frequent_seeds: &sketch.frequent_seeds,
             flank: config.flank,
         };
-        let queue = EntryQueue::new(&sketch.candidates, control, on_event);
+        let queue = EntryQueue::new(&sketch.candidates, control, events);
         queue.run(|possible, worker| self.finish_entry(possible, &locate, request, worker));
         (summary.completion, summary.locate, summary.align) = queue.finish();
         summary
@@ -268,7 +274,7 @@ impl<'a> Searcher<'a> {
         worker: &mut Worker,
     ) -> Result<(), (SearchStage, SearchError)> {
         let entry = possible.entry;
-        let on_event = request.on_event;
+        let events = request.events;
         let outcome = locate_entry(
             self.shard,
             locate,
@@ -281,19 +287,22 @@ impl<'a> Searcher<'a> {
         let located = match outcome {
             LocateOutcome::Located(located) => located,
             LocateOutcome::Dropped(reason) => {
-                on_event(EntryEvent::Dropped {
+                let dropped = EntryEvent::Dropped {
                     entry,
                     stage: SearchStage::Locate,
                     reason,
-                });
-                return Ok(());
+                };
+                return emit(events, dropped, SearchStage::Locate);
             }
         };
         let Some(prepared) = request.prepared else {
-            on_event(EntryEvent::Located(located));
-            return Ok(());
+            return emit(events, EntryEvent::Located(located), SearchStage::Locate);
         };
-        on_event(EntryEvent::Located(located.clone()));
+        emit(
+            events,
+            EntryEvent::Located(located.clone()),
+            SearchStage::Locate,
+        )?;
         let started = Instant::now();
         let aligned = self.align(prepared, &located, request, worker);
         worker.align.entries += 1;
@@ -302,15 +311,15 @@ impl<'a> Searcher<'a> {
         worker.align.counts.add(&aligned.work);
         if aligned.decision.qualifies {
             worker.align.confirmed_entries += 1;
-            on_event(EntryEvent::Confirmed(aligned));
+            emit(events, EntryEvent::Confirmed(aligned), SearchStage::Align)
         } else {
-            on_event(EntryEvent::Dropped {
+            let dropped = EntryEvent::Dropped {
                 entry,
                 stage: SearchStage::Align,
                 reason: DropReason::Decision,
-            });
+            };
+            emit(events, dropped, SearchStage::Align)
         }
-        Ok(())
     }
 
     /// Stage 3 for one located entry. The packed sequence is opened here, so it can later come
@@ -342,7 +351,7 @@ struct Request<'a> {
     /// The query prepared for stage 3, when the search goes that far.
     prepared: Option<&'a PreparedQuery>,
     control: SearchControl<'a>,
-    on_event: &'a (dyn Fn(EntryEvent) + Sync),
+    events: &'a SyncSender<EntryEvent>,
 }
 
 /// What one worker thread keeps across entries: its buffers and its share of the work.
@@ -359,7 +368,7 @@ struct Worker {
 struct EntryQueue<'a> {
     candidates: &'a [PossibleEntry],
     control: SearchControl<'a>,
-    on_event: &'a (dyn Fn(EntryEvent) + Sync),
+    events: &'a SyncSender<EntryEvent>,
     next: AtomicUsize,
     halted: AtomicBool,
     completion: Mutex<Completion>,
@@ -370,12 +379,12 @@ impl<'a> EntryQueue<'a> {
     fn new(
         candidates: &'a [PossibleEntry],
         control: SearchControl<'a>,
-        on_event: &'a (dyn Fn(EntryEvent) + Sync),
+        events: &'a SyncSender<EntryEvent>,
     ) -> Self {
         Self {
             candidates,
             control,
-            on_event,
+            events,
             next: AtomicUsize::new(0),
             halted: AtomicBool::new(false),
             completion: Mutex::new(Completion::Complete),
@@ -439,7 +448,8 @@ impl<'a> EntryQueue<'a> {
     }
 
     fn unfinished(&self, entry: u32, stage: SearchStage) {
-        (self.on_event)(EntryEvent::Unfinished { entry, stage });
+        // A dropped receiver means nobody listens any more.
+        let _ = self.events.send(EntryEvent::Unfinished { entry, stage });
     }
 
     fn finish(self) -> (Completion, LocateWork, AlignStageWork) {
@@ -450,6 +460,17 @@ impl<'a> EntryQueue<'a> {
         let (locate, align) = self.work.into_inner().unwrap_or_else(|e| e.into_inner());
         (completion, locate, align)
     }
+}
+
+/// Sends one event; a dropped receiver stops the search as if asked.
+fn emit(
+    events: &SyncSender<EntryEvent>,
+    event: EntryEvent,
+    stage: SearchStage,
+) -> Result<(), (SearchStage, SearchError)> {
+    events
+        .send(event)
+        .map_err(|_| (stage, SearchError::Stopped(Stopped::Asked)))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
