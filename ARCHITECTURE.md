@@ -123,10 +123,15 @@ A module uses only modules listed above it.
 - One job per module. Files stay under about 800 lines and functions under about 80; split by
   step, not by helper type.
 - Every public item has a doc comment of one or two plain sentences.
-- One error type per module; bad input never panics; `unwrap` only in tests.
+- One error type per module; bad input never panics; `unwrap` only in tests. No anyhow. Errors
+  travel with `?` and are never stored as values; work on several threads sends its results
+  through one channel, and the receiving thread handles errors.
+- No wrappers that only rename or forward; no builders, traits or generics with one use.
 - No dead code, no experiment flags, no counters that nothing reads.
-- Tests sit next to the code they test. Every file format has a round-trip test; the search has
-  end-to-end tests on small generated entries.
+- Tests sit next to the code they test and share one test-support module; random test data
+  comes from the `rand` crate with fixed seeds. Every file format has a round-trip test; the
+  search has end-to-end tests on small generated entries.
+- Comments describe the code as it is, never its history.
 - Moves and renames are separate commits from changes of behaviour or format.
 
 ## 6. Plan
