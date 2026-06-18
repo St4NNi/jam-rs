@@ -57,7 +57,9 @@ fn search(
         deadline: None,
         stop: &stop,
     };
-    let (sender, receiver) = sync_channel(16);
+    // Without a buffer each event is handed over only when it is read, so a stop set at the first
+    // event is seen before stage 2 starts.
+    let (sender, receiver) = sync_channel(if stop_at_first_event { 0 } else { 16 });
     let mut events = BTreeMap::<u32, Vec<EntryEvent>>::new();
     let summary = std::thread::scope(|scope| {
         let search = scope.spawn(|| {
