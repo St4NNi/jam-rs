@@ -16,3 +16,6 @@ pub mod service;
 pub mod storage;
 
 pub use cli::run;
+
+#[cfg(test)]
+mod test_support;
