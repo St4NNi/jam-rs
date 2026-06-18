@@ -3,6 +3,7 @@
 
 mod bits;
 pub mod build;
+pub mod index_file;
 pub mod join;
 pub mod manifest;
 pub mod packed;
@@ -16,6 +17,7 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use build::{BuildOptions, EntryInput, build_shard};
+pub use index_file::{IndexFile, ShardRecord};
 pub use join::{JoinOptions, join_shards};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};

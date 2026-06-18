@@ -1,0 +1,157 @@
+//! The index file of a resharded index: `index.json` in the index directory, listing its shards
+//! in order with the entries each one holds, so a search or a server can open the whole index.
+//!
+//! | Field | Meaning |
+//! | --- | --- |
+//! | `format_version` | 1 |
+//! | `shards` | in order: `directory` (relative to the index directory), `first_entry`, `entries`, `seed_locations`, `manifest_sha256` |
+//!
+//! The entries of a shard are `first_entry..first_entry + entries` in index order; entry `i` of
+//! the shard is entry `first_entry + i` of the index. `manifest_sha256` is the SHA-256 digest of
+//! the shard's `manifest.json`, so a replaced shard is noticed.
+
+use super::IndexError;
+use super::manifest::{MANIFEST_FILE, sha256_file};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// The file name of the index file in an index directory.
+pub const INDEX_FILE: &str = "index.json";
+/// The format version of the index file that this code reads and writes.
+pub const INDEX_FORMAT_VERSION: u32 = 1;
+
+/// One shard of an index.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardRecord {
+    /// The shard directory, relative to the index directory.
+    pub directory: String,
+    /// Index entry id of the shard's first entry.
+    pub first_entry: u64,
+    /// Entries of the shard.
+    pub entries: u64,
+    /// Seed locations of the shard, which its sketch RAM follows.
+    pub seed_locations: u64,
+    /// SHA-256 digest of the shard's manifest, lower case hex.
+    pub manifest_sha256: String,
+}
+
+/// The index file: the shards of an index, in order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexFile {
+    /// Format version of the index file.
+    pub format_version: u32,
+    /// Shards in index order.
+    pub shards: Vec<ShardRecord>,
+}
+
+impl IndexFile {
+    /// Reads the index file of the index in `directory` and checks that its entry ranges follow
+    /// each other without gaps.
+    pub fn read(directory: &Path) -> Result<Self, IndexError> {
+        let bytes = std::fs::read(directory.join(INDEX_FILE))?;
+        let index: Self = serde_json::from_slice(&bytes)
+            .map_err(|error| IndexError::format(format!("index file: {error}")))?;
+        if index.format_version != INDEX_FORMAT_VERSION {
+            return Err(IndexError::format(format!(
+                "index file format version {} is not {INDEX_FORMAT_VERSION}",
+                index.format_version
+            )));
+        }
+        let mut next = 0u64;
+        for shard in &index.shards {
+            let plain = Path::new(&shard.directory)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)));
+            if shard.first_entry != next || shard.entries == 0 || !plain {
+                return Err(IndexError::format("index file shard list"));
+            }
+            next += shard.entries;
+        }
+        Ok(index)
+    }
+
+    /// Writes the index file into `directory`.
+    pub fn write(&self, directory: &Path) -> Result<(), IndexError> {
+        let bytes = serde_json::to_vec_pretty(self)
+            .map_err(|error| IndexError::format(format!("index file: {error}")))?;
+        let mut file = std::fs::File::create_new(directory.join(INDEX_FILE))?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.sync_all()?;
+        Ok(())
+    }
+
+    /// The shard directories of the index in `directory`, in order.
+    pub fn shard_directories(&self, directory: &Path) -> Vec<PathBuf> {
+        let join = |shard: &ShardRecord| directory.join(&shard.directory);
+        self.shards.iter().map(join).collect()
+    }
+
+    /// Checks that every shard's manifest still has its recorded digest.
+    pub fn verify(&self, directory: &Path) -> Result<(), IndexError> {
+        for shard in &self.shards {
+            let path = directory.join(&shard.directory).join(MANIFEST_FILE);
+            if sha256_file(&path)?.1 != shard.manifest_sha256 {
+                return Err(IndexError::Checksum(format!(
+                    "the manifest of {} differs from the index file",
+                    shard.directory
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Entries of the whole index.
+    pub fn entries(&self) -> u64 {
+        self.shards.iter().map(|shard| shard.entries).sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(directory: &str, first_entry: u64, entries: u64) -> ShardRecord {
+        ShardRecord {
+            directory: directory.into(),
+            first_entry,
+            entries,
+            seed_locations: 10 * entries,
+            manifest_sha256: "00".into(),
+        }
+    }
+
+    #[test]
+    fn index_file_round_trip() {
+        let directory = tempfile::tempdir().unwrap();
+        let index = IndexFile {
+            format_version: INDEX_FORMAT_VERSION,
+            shards: vec![record("shard-0000", 0, 3), record("shard-0001", 3, 2)],
+        };
+        index.write(directory.path()).unwrap();
+        assert_eq!(IndexFile::read(directory.path()).unwrap(), index);
+        assert_eq!(index.entries(), 5);
+        assert_eq!(
+            index.shard_directories(Path::new("/x"))[1],
+            Path::new("/x/shard-0001")
+        );
+        assert!(index.verify(directory.path()).is_err());
+    }
+
+    #[test]
+    fn gaps_and_outside_paths_are_rejected() {
+        for shards in [
+            vec![record("a", 0, 3), record("b", 4, 2)],
+            vec![record("a", 0, 0)],
+            vec![record("../a", 0, 1)],
+            vec![record("/a", 0, 1)],
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let index = IndexFile {
+                format_version: INDEX_FORMAT_VERSION,
+                shards,
+            };
+            index.write(directory.path()).unwrap();
+            assert!(IndexFile::read(directory.path()).is_err());
+        }
+    }
+}
