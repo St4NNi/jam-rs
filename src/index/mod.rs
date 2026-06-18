@@ -8,6 +8,7 @@ pub mod join;
 pub mod manifest;
 pub mod packed;
 pub mod positions;
+pub mod reshard;
 pub mod shard;
 pub mod sketch;
 
@@ -22,6 +23,7 @@ pub use join::{JoinOptions, join_shards};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};
 pub use positions::{Positions, SeedLocation};
+pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 

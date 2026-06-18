@@ -122,10 +122,10 @@ pub fn build_shard(
 
 /// Runs `build` on a fresh partial directory next to `output`, and moves it to `output` when
 /// it succeeds; a failed build leaves nothing behind.
-pub(crate) fn in_partial_directory(
+pub(crate) fn in_partial_directory<T>(
     output: &Path,
-    build: impl FnOnce(&Path) -> Result<Manifest, IndexError>,
-) -> Result<Manifest, IndexError> {
+    build: impl FnOnce(&Path) -> Result<T, IndexError>,
+) -> Result<T, IndexError> {
     if output.exists() {
         return Err(IndexError::Input(format!(
             "{} already exists: remove it or choose another output",
@@ -140,9 +140,9 @@ pub(crate) fn in_partial_directory(
     let partial = output.with_file_name(format!("{name}.partial-{}", std::process::id()));
     std::fs::create_dir(&partial)?;
     match build(&partial) {
-        Ok(manifest) => {
+        Ok(built) => {
             std::fs::rename(&partial, output)?;
-            Ok(manifest)
+            Ok(built)
         }
         Err(error) => {
             let _ = std::fs::remove_dir_all(&partial);

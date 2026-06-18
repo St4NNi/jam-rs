@@ -1,4 +1,4 @@
-//! End-to-end tests: build shards from generated entries, find every seed, join shards.
+//! End-to-end tests: build shards from generated entries, find every seed, reshard.
 
 use super::*;
 use crate::seeds::Seeder;
@@ -166,8 +166,27 @@ fn output_does_not_depend_on_the_thread_count() {
     }
 }
 
+fn reshard_options(directory: &Path, split: Split, packed: PackedOutput) -> ReshardOptions {
+    ReshardOptions {
+        split,
+        packed,
+        threads: 3,
+        temp_dir: directory.to_path_buf(),
+        bucket_bits: None,
+    }
+}
+
+/// Checks that two shards hold the same manifest, sketch and positions.
+fn assert_same_shard(one: &Path, other: &Path) {
+    assert_eq!(Manifest::read(one).unwrap(), Manifest::read(other).unwrap());
+    for file in [sketch::SKETCH_FILE, positions::POSITIONS_FILE] {
+        let read = |shard: &Path| std::fs::read(shard.join(file)).unwrap();
+        assert!(read(one) == read(other), "{file}");
+    }
+}
+
 #[test]
-fn joined_shards_equal_one_shard_built_at_once() {
+fn merged_shards_equal_one_shard_built_at_once() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(6);
     let inputs = inputs(directory.path(), &entries);
@@ -183,34 +202,84 @@ fn joined_shards_equal_one_shard_built_at_once() {
             part
         })
         .collect();
-    let joined = directory.path().join("joined");
-    let join_options = JoinOptions {
-        threads: 3,
-        temp_dir: directory.path().to_path_buf(),
-        bucket_bits: None,
-        link_packed: true,
-    };
-    let manifest = join_shards(&parts, &joined, &join_options).unwrap();
-    let chosen = manifest::choose_bucket_bits(manifest.seed_locations);
-    assert_eq!(manifest.parameters.bucket_bits, chosen);
-    assert_eq!(manifest, Manifest::read(&whole).unwrap());
-    for file in [sketch::SKETCH_FILE, positions::POSITIONS_FILE] {
-        let read = |shard: &PathBuf| std::fs::read(shard.join(file)).unwrap();
-        assert!(read(&whole) == read(&joined), "{file}");
+    for packed in [PackedOutput::Link, PackedOutput::Copy] {
+        let merged = directory.path().join(format!("merged-{packed:?}"));
+        let split = Split::Shards(1);
+        let index = reshard(
+            &parts,
+            &merged,
+            &reshard_options(directory.path(), split, packed),
+        );
+        let index = index.unwrap();
+        assert_eq!(index, IndexFile::read(&merged).unwrap());
+        assert_eq!(index.shards.len(), 1);
+        assert_eq!(index.shards[0].entries, 6);
+        let shard_directory = merged.join(&index.shards[0].directory);
+        assert_same_shard(&whole, &shard_directory);
+        let link = shard_directory.join("packed/genome0.packed");
+        let is_link = std::fs::symlink_metadata(link).unwrap().is_symlink();
+        assert_eq!(is_link, packed == PackedOutput::Link);
+        let shard = Shard::open(&shard_directory).unwrap();
+        shard.verify().unwrap();
+        check_every_seed(&shard, &entries);
     }
-    let shard = Shard::open(&joined).unwrap();
-    shard.verify().unwrap();
-    check_every_seed(&shard, &entries);
-    // Without links, the joined shard reads the packed sequences from a given directory.
-    let unlinked = directory.path().join("unlinked");
-    let join_options = JoinOptions {
-        link_packed: false,
-        ..join_options
-    };
-    join_shards(&parts, &unlinked, &join_options).unwrap();
-    assert!(Shard::open(&unlinked).unwrap().packed(0).is_err());
-    let shard = Shard::open_with_packed(&unlinked, &whole.join("packed")).unwrap();
-    check_every_seed(&shard, &entries);
+    // A shard can read its packed sequences from another directory.
+    let shard = Shard::open_with_packed(&parts[0], &whole.join("packed")).unwrap();
+    check_every_seed(&shard, &entries[..2]);
+}
+
+#[test]
+fn split_shards_equal_direct_builds_of_their_entries() {
+    let directory = tempfile::tempdir().unwrap();
+    let entries = generated_entries(7);
+    let inputs = inputs(directory.path(), &entries);
+    let options = options(directory.path(), 2);
+    let whole = directory.path().join("whole");
+    build_shard(&inputs, &whole, &options).unwrap();
+    let link = PackedOutput::Link;
+    let merged = directory.path().join("merged");
+    reshard(
+        std::slice::from_ref(&whole),
+        &merged,
+        &reshard_options(directory.path(), Split::Shards(1), link),
+    )
+    .unwrap();
+    let total = Manifest::read(&whole).unwrap().seed_locations;
+    for split in [Split::Shards(3), Split::MaxSeedLocations(total / 4)] {
+        let output = directory.path().join(format!("split-{split:?}"));
+        // The merged index is given as an index directory, so its shards are read in order.
+        let options_of = reshard_options(directory.path(), split, link);
+        let index = reshard(std::slice::from_ref(&merged), &output, &options_of).unwrap();
+        let mut names = Vec::new();
+        for (number, record) in index.shards.iter().enumerate() {
+            let range = record.first_entry as usize..(record.first_entry + record.entries) as usize;
+            let direct = directory.path().join(format!("direct-{split:?}-{number}"));
+            build_shard(&inputs[range.clone()], &direct, &options).unwrap();
+            let shard_directory = output.join(&record.directory);
+            assert_same_shard(&direct, &shard_directory);
+            let shard = Shard::open(&shard_directory).unwrap();
+            check_every_seed(&shard, &entries[range]);
+            let manifest = shard.manifest();
+            assert_eq!(manifest.seed_locations, record.seed_locations);
+            names.extend(manifest.entries.iter().map(|entry| entry.name.clone()));
+            if let Split::MaxSeedLocations(limit) = split {
+                assert!(record.seed_locations <= limit || record.entries == 1);
+            }
+        }
+        let expected: Vec<_> = (0..7).map(|index| format!("genome{index}")).collect();
+        assert_eq!(names, expected);
+        if split == Split::Shards(3) {
+            assert_eq!(index.shards.len(), 3);
+            let most = index.shards.iter().map(|shard| shard.seed_locations).max();
+            assert!(most.unwrap() < total / 2, "groups are balanced");
+        }
+    }
+    let error = reshard(
+        &[whole.clone(), whole.clone()],
+        &directory.path().join("twice"),
+        &reshard_options(directory.path(), Split::Shards(1), link),
+    );
+    assert!(error.unwrap_err().to_string().contains("used twice"));
 }
 
 #[test]
