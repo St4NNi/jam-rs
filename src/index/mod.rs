@@ -1,10 +1,9 @@
-//! The on-disk index of one shard: manifest, sketch, positions and packed sequences, and building
-//! and joining shards.
+//! The on-disk index: per shard its manifest, sketch, positions and packed sequences; building
+//! shards, and resharding them into an index of several shards.
 
 mod bits;
 pub mod build;
 pub mod index_file;
-pub mod join;
 pub mod manifest;
 pub mod packed;
 pub mod positions;
@@ -19,7 +18,6 @@ use thiserror::Error;
 
 pub use build::{BuildOptions, EntryInput, build_shard};
 pub use index_file::{IndexFile, ShardRecord};
-pub use join::{JoinOptions, join_shards};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};
 pub use positions::{Positions, SeedLocation};

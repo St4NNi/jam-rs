@@ -19,7 +19,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Build a shard from FASTA files, or join shards into one
+    /// Build a shard from FASTA files, or merge and split shards
     Index(index::IndexArgs),
     /// Search query sequences in a shard and align them
     Search(search::SearchArgs),
