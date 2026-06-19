@@ -59,6 +59,7 @@ fn fixture() -> Fixture {
     let shard = directory.path().join("shard");
     let mut arguments: Vec<&std::ffi::OsStr> = vec![
         "index".as_ref(),
+        "build".as_ref(),
         "-o".as_ref(),
         shard.as_os_str(),
         "-t".as_ref(),
