@@ -14,6 +14,7 @@
 
 use super::{FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS};
 use crate::seeds::SeedScheme;
+use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -234,6 +235,27 @@ pub fn verify_file(path: &Path, record: &FileRecord) -> Result<(), IndexError> {
         return Err(IndexError::Checksum(format!(
             "{} differs from its manifest record",
             path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Checks a file read from `source` against its record, for files that may not be local.
+pub fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let size = source.size();
+    let mut offset = 0u64;
+    while offset < size {
+        let length = (size - offset).min(buffer.len() as u64) as usize;
+        source.read_exact_at(offset, &mut buffer[..length])?;
+        digest.update(&buffer[..length]);
+        offset += length as u64;
+    }
+    if size != record.bytes || hex(&digest.finalize()) != record.sha256 {
+        return Err(IndexError::Checksum(format!(
+            "{} differs from its manifest record",
+            record.path
         )));
     }
     Ok(())

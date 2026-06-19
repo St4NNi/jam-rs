@@ -6,12 +6,14 @@ pub mod build;
 pub mod index_file;
 pub mod manifest;
 pub mod packed;
+pub mod packed_source;
 pub mod positions;
 pub mod reshard;
 pub mod shard;
 pub mod sketch;
 
 use crate::seeds::SeedError;
+use crate::storage::StorageError;
 use std::io;
 use std::path::Path;
 use thiserror::Error;
@@ -20,6 +22,7 @@ pub use build::{BuildOptions, EntryInput, build_shard};
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{PackedSequence, PackedWriter};
+pub use packed_source::{PackedLocation, PackedOptions};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
 pub use shard::{Shard, ShardStats};
@@ -43,6 +46,9 @@ pub enum IndexError {
     /// The seed scheme is not valid.
     #[error(transparent)]
     Seeds(#[from] SeedError),
+    /// A packed sequence source could not be opened.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 }
 
 impl IndexError {

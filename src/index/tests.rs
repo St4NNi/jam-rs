@@ -3,6 +3,7 @@
 use super::*;
 use crate::seeds::Seeder;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 fn random(state: &mut u64) -> u64 {
     *state ^= *state << 13;
@@ -350,4 +351,81 @@ fn bad_builds_leave_nothing_behind() {
         EntryInput::from_path("x/GCF_1.2.fna.gz".into()).name,
         "GCF_1.2"
     );
+}
+
+#[test]
+fn packed_sequences_open_from_another_directory_and_through_a_cache() {
+    use crate::storage::cache::{BlockCache, CacheConfig};
+    let directory = tempfile::tempdir().unwrap();
+    let entries = generated_entries(4);
+    let inputs = inputs(directory.path(), &entries);
+    let output = directory.path().join("shard");
+    build_shard(&inputs, &output, &options(directory.path(), 2)).unwrap();
+    let elsewhere = directory.path().join("elsewhere");
+    std::fs::rename(output.join("packed"), &elsewhere).unwrap();
+    assert!(Shard::open(&output).unwrap().packed(0).is_err());
+    let location = PackedLocation::Directory(elsewhere.clone());
+    let options = PackedOptions {
+        location,
+        cache: None,
+    };
+    let shard = Shard::open_with(&output, &options).unwrap();
+    shard.verify().unwrap();
+    check_every_seed(&shard, &entries);
+    assert_eq!(
+        shard.packed_path(1).unwrap(),
+        elsewhere.join("genome1.packed")
+    );
+    let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096)).unwrap();
+    let options = PackedOptions {
+        cache: Some(Arc::clone(&cache)),
+        ..options
+    };
+    let shard = Shard::open_with(&output, &options).unwrap();
+    check_every_seed(&shard, &entries);
+    let misses = cache.stats().misses;
+    check_every_seed(&shard, &entries);
+    assert_eq!(
+        cache.stats().misses,
+        misses,
+        "the second pass reads the cache"
+    );
+    assert!(cache.stats().hits > 0);
+}
+
+#[test]
+fn packed_sequences_on_s3_need_a_prefix_and_a_store() {
+    use crate::storage::s3::{Credentials, S3Config, S3Limits};
+    let directory = tempfile::tempdir().unwrap();
+    let inputs = inputs(directory.path(), &generated_entries(1));
+    let output = directory.path().join("shard");
+    build_shard(&inputs, &output, &options(directory.path(), 1)).unwrap();
+    let credentials = Credentials {
+        access_key: "access".into(),
+        secret_key: "secret".into(),
+        session_token: None,
+    };
+    let limits = S3Limits {
+        tries: 1,
+        ..S3Limits::default()
+    };
+    // Port 9 (discard) is closed on test machines, so the store cannot be reached.
+    let endpoint = Some("http://127.0.0.1:9");
+    let config = S3Config::new("local", endpoint, true, credentials, limits).unwrap();
+    let open = |prefix: &str| {
+        let location = PackedLocation::S3 {
+            prefix: prefix.into(),
+            config: Box::new(config.clone()),
+        };
+        let options = PackedOptions {
+            location,
+            cache: None,
+        };
+        Shard::open_with(&output, &options)
+    };
+    assert!(open("s3:///packed/").is_err());
+    assert!(open("/local/packed/").is_err());
+    let shard = open("s3://bucket/packed").unwrap();
+    assert!(shard.packed_path(0).is_err());
+    assert!(shard.packed(0).is_err());
 }

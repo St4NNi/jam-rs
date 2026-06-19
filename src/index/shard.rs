@@ -1,8 +1,9 @@
 //! An open shard: its manifest, the sketch in RAM, the positions, and the packed sequences on
 //! request.
 
-use super::manifest::{Manifest, PACKED_DIRECTORY, verify_file};
+use super::manifest::{EntryRecord, Manifest, verify_file, verify_source};
 use super::packed::PackedSequence;
+use super::packed_source::{PackedLocation, PackedOptions, PackedSources};
 use super::positions::{POSITION_KEY_BITS, POSITIONS_FILE, Positions};
 use super::sketch::{SKETCH_FILE, Sketch};
 use super::{IndexError, MappedFile};
@@ -32,10 +33,10 @@ pub struct ShardStats {
     pub packed_bytes: u64,
 }
 
-/// A shard opened from local files.
+/// A shard opened from local files, with its packed sequences local or on S3.
 pub struct Shard {
     directory: PathBuf,
-    packed_directory: PathBuf,
+    packed: PackedSources,
     manifest: Manifest,
     sketch: Sketch,
     positions: Positions,
@@ -44,12 +45,23 @@ pub struct Shard {
 impl Shard {
     /// Opens the shard in `directory`, with its packed sequences in `directory/packed`.
     pub fn open(directory: &Path) -> Result<Self, IndexError> {
-        Self::open_with_packed(directory, &directory.join(PACKED_DIRECTORY))
+        Self::open_with(directory, &PackedOptions::default())
     }
 
     /// Opens the shard in `directory`, with its packed sequences in `packed_directory`, which
-    /// joined shards may share. Only headers and sizes are checked; `verify` reads everything.
+    /// several shards may share.
     pub fn open_with_packed(directory: &Path, packed_directory: &Path) -> Result<Self, IndexError> {
+        let location = PackedLocation::Directory(packed_directory.to_path_buf());
+        let options = PackedOptions {
+            location,
+            cache: None,
+        };
+        Self::open_with(directory, &options)
+    }
+
+    /// Opens the shard in `directory`, with its packed sequences where `packed` says. Only
+    /// headers and sizes are checked; `verify` reads everything.
+    pub fn open_with(directory: &Path, packed: &PackedOptions) -> Result<Self, IndexError> {
         let manifest = Manifest::read(directory)?;
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;
@@ -72,9 +84,10 @@ impl Shard {
                 "the sketch or positions differ from the manifest",
             ));
         }
+        let packed = PackedSources::new(packed, directory, manifest.entries.len())?;
         Ok(Self {
             directory: directory.to_path_buf(),
-            packed_directory: packed_directory.to_path_buf(),
+            packed,
             manifest,
             sketch,
             positions,
@@ -96,34 +109,39 @@ impl Shard {
         &self.positions
     }
 
-    /// The local path of an entry's packed sequence.
+    /// The local path of an entry's packed sequence; an error when it lies on S3.
     pub fn packed_path(&self, entry: u32) -> Result<PathBuf, IndexError> {
-        let record = self
-            .manifest
-            .entries
-            .get(entry as usize)
-            .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))?;
-        Ok(self.packed_directory.join(&record.packed.path))
+        let record = self.entry_record(entry)?;
+        self.packed.local_path(&record.packed).ok_or_else(|| {
+            IndexError::Input(format!("the packed sequence of {} is on S3", record.name))
+        })
     }
 
     /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
-        let file = MappedFile::open(&self.packed_path(entry)?, false)?;
-        let record = &self.manifest.entries[entry as usize];
-        if file.bytes().len() as u64 != record.packed.bytes {
-            return Err(IndexError::format(format!(
+        let record = self.entry_record(entry)?;
+        let differs = || {
+            IndexError::format(format!(
                 "the packed sequence of {} differs from the manifest",
                 record.name
-            )));
+            ))
+        };
+        let source = self.packed.open(entry as usize, &record.packed)?;
+        if source.size() != record.packed.bytes {
+            return Err(differs());
         }
-        let packed = PackedSequence::open(Arc::new(file))?;
+        let packed = PackedSequence::open(source)?;
         if packed.bases() != record.bases || packed.contig_count() as u64 != record.contigs {
-            return Err(IndexError::format(format!(
-                "the packed sequence of {} differs from the manifest",
-                record.name
-            )));
+            return Err(differs());
         }
         Ok(packed)
+    }
+
+    fn entry_record(&self, entry: u32) -> Result<&EntryRecord, IndexError> {
+        self.manifest
+            .entries
+            .get(entry as usize)
+            .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))
     }
 
     /// Checks the SHA-256 digest of every file and the checksum of every section.
@@ -135,8 +153,9 @@ impl Shard {
         )?;
         self.sketch.verify_checksums()?;
         self.positions.verify_checksums()?;
-        for (entry, record) in self.manifest.entries.iter().enumerate() {
-            verify_file(&self.packed_path(entry as u32)?, &record.packed)?;
+        for record in &self.manifest.entries {
+            let source = self.packed.open_uncached(&record.packed)?;
+            verify_source(source.as_ref(), &record.packed)?;
         }
         Ok(())
     }
