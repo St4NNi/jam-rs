@@ -194,6 +194,7 @@ fn several_shards_are_searched_and_every_record_names_its_shard() {
     let other = fixture.directory.path().join("other_shard");
     let output = jam(&[
         "index".as_ref(),
+        "build".as_ref(),
         "-o".as_ref(),
         other.as_os_str(),
         other_input.as_os_str(),
