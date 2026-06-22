@@ -576,6 +576,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "crc32fast",
+ "flate2",
  "hmac",
  "jamhash",
  "libc",
