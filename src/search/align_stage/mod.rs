@@ -29,7 +29,7 @@ pub use query::PreparedQuery;
 
 use super::{LocatedEntry, SearchControl, Stopped};
 use crate::align::{AlignmentError, AlignmentWorkspace, JoinScratch};
-use crate::decide::{DecideError, Decision, DecisionRule};
+use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
 use crate::index::{IndexError, PackedSequence, Shard};
 use place::Collected;
 use thiserror::Error;
@@ -138,6 +138,34 @@ pub fn align_packed_entry(
     workspace: &mut AlignStageWorkspace,
     control: SearchControl<'_>,
 ) -> Result<AlignedEntry, AlignStageError> {
+    let (fragments, work) =
+        entry_fragments(packed, query, located, config, rule, workspace, control)?;
+    control.check()?;
+    let contig_length = |contig: u32| {
+        packed
+            .contig_range(contig as usize)
+            .map_or(0, |range| range.end - range.start)
+    };
+    let decision = rule.decide(query.length(), fragments, contig_length)?;
+    Ok(AlignedEntry {
+        entry: located.entry,
+        decision,
+        work,
+    })
+}
+
+/// Aligns the query in the windows of a located entry and returns the fragments without a
+/// decision, for callers that decide over other units, such as the screen. The fragment limits
+/// of `rule` still apply to dense walks.
+pub fn entry_fragments(
+    packed: &PackedSequence,
+    query: &PreparedQuery,
+    located: &LocatedEntry,
+    config: &AlignStageConfig,
+    rule: &DecisionRule,
+    workspace: &mut AlignStageWorkspace,
+    control: SearchControl<'_>,
+) -> Result<(Vec<Fragment>, AlignWork), AlignStageError> {
     config.validate()?;
     rule.validate()?;
     query.check(config)?;
@@ -148,16 +176,5 @@ pub fn align_packed_entry(
         let job = contig::ContigJob::new(packed, windows.contig, query, config, rule, control)?;
         job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
     }
-    control.check()?;
-    let contig_length = |contig: u32| {
-        packed
-            .contig_range(contig as usize)
-            .map_or(0, |range| range.end - range.start)
-    };
-    let decision = rule.decide(query.length(), fragments.into_list(), contig_length)?;
-    Ok(AlignedEntry {
-        entry: located.entry,
-        decision,
-        work,
-    })
+    Ok((fragments.into_list(), work))
 }
