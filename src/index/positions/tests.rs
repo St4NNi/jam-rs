@@ -1,5 +1,5 @@
 use super::*;
-use crate::index::MappedFile;
+use crate::storage::MappedFile;
 use std::collections::BTreeMap;
 
 fn random(state: &mut u64) -> u64 {

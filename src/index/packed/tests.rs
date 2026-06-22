@@ -1,5 +1,5 @@
 use super::*;
-use crate::index::MappedFile;
+use crate::storage::MappedFile;
 use std::path::Path;
 
 fn random(state: &mut u64) -> u64 {

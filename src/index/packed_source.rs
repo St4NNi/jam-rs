@@ -2,8 +2,9 @@
 //! directory, or an S3 prefix, optionally through a block cache shared by all entries. Each
 //! entry's file is found by the file name in the manifest.
 
+use super::IndexError;
 use super::manifest::{FileRecord, PACKED_DIRECTORY};
-use super::{IndexError, MappedFile};
+use crate::storage::MappedFile;
 use crate::storage::ReadAt;
 use crate::storage::cache::BlockCache;
 use crate::storage::local::LocalFile;

@@ -13,8 +13,9 @@ use super::positions::{
 };
 use super::sketch::SKETCH_FILE;
 use super::sketch::build::build_sketch;
-use super::{IndexError, MappedFile, seed_key};
+use super::{IndexError, seed_key};
 use crate::seeds::Seeder;
+use crate::storage::MappedFile;
 use rayon::prelude::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};

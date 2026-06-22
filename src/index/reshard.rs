@@ -5,11 +5,12 @@
 //! own seed locations. One output shard joins the inputs; one input into several splits it. The
 //! groups depend only on the inputs and the split, never on the thread count.
 
+use super::IndexError;
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
 use super::manifest::{MANIFEST_FILE, Manifest, PACKED_DIRECTORY, Parameters, check_names};
 use super::positions::{POSITIONS_FILE, Positions};
-use super::{IndexError, MappedFile};
+use crate::storage::MappedFile;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

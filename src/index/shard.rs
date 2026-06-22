@@ -1,12 +1,13 @@
 //! An open shard: its manifest, the sketch in RAM, the positions, and the packed sequences on
 //! request.
 
+use super::IndexError;
 use super::manifest::{EntryRecord, Manifest, verify_file, verify_source};
 use super::packed::PackedSequence;
 use super::packed_source::{PackedLocation, PackedOptions, PackedSources};
 use super::positions::{POSITION_KEY_BITS, POSITIONS_FILE, Positions};
 use super::sketch::{SKETCH_FILE, Sketch};
-use super::{IndexError, MappedFile};
+use crate::storage::MappedFile;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

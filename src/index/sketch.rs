@@ -49,7 +49,8 @@ use super::bits::{
     BIT_PADDING, BitWriter, bits_needed, crc32, put_varint, read_bits, read_varint, u16_at, u32_at,
     u64_at,
 };
-use super::{FINGERPRINT_BITS, IndexError, MappedFile, seed_key};
+use super::{FINGERPRINT_BITS, IndexError, seed_key};
+use crate::storage::MappedFile;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;

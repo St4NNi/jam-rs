@@ -4,8 +4,9 @@
 use super::*;
 use crate::align::{Interval, Strand, complement, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
-use crate::index::{BuildOptions, EntryInput, MappedFile, Parameters, build_shard};
+use crate::index::{BuildOptions, EntryInput, Parameters, build_shard};
 use crate::search::ContigWindows;
+use crate::storage::MappedFile;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::path::Path;

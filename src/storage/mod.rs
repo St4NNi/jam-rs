@@ -8,10 +8,12 @@ pub mod cache;
 mod error;
 pub mod limit;
 pub mod local;
+pub mod mapped;
 pub mod readahead;
 pub mod s3;
 
 pub use error::StorageError;
+pub use mapped::MappedFile;
 
 use std::io;
 
