@@ -39,10 +39,16 @@ fn records(entry: &BTreeMap<u64, Vec<u32>>) -> Vec<(u64, u32)> {
         .collect()
 }
 
+/// The contig starts and bases of entry `index`: `index + 1` contigs of growing length.
+fn contig_bounds(index: usize) -> Vec<u64> {
+    (0..=index as u64 + 1).map(|c| c * 1_000 + c * c).collect()
+}
+
 fn write(path: &Path, entries: &[BTreeMap<u64, Vec<u32>>]) {
     let mut writer = PositionsWriter::create(path, KEY_BITS, 10, entries.len()).unwrap();
-    for entry in entries {
-        let (section, bytes) = encode_section(&records(entry), KEY_BITS).unwrap();
+    for (index, entry) in entries.iter().enumerate() {
+        let bounds = contig_bounds(index);
+        let (section, bytes) = encode_section(&records(entry), &bounds, KEY_BITS).unwrap();
         writer.push_section(&section, &bytes).unwrap();
     }
     writer.finish().unwrap();
@@ -95,8 +101,14 @@ fn positions_round_trip() {
         })
         .unwrap();
         assert_eq!(decoded, stored);
+        let bounds = positions.contig_starts(index).unwrap();
+        assert_eq!(bounds, contig_bounds(index as usize));
     }
     assert!(positions.locations(9, 0, &mut out).is_err());
+    assert!(positions.contig_starts(9).is_err());
+    for bad in [&[][..], &[1, 2], &[0, 5, 4]] {
+        assert!(encode_section(&[], bad, KEY_BITS).is_err());
+    }
     let location = SeedLocation {
         bin: 12345,
         reverse: true,
@@ -121,6 +133,7 @@ fn sections_copied_into_another_file_read_the_same() {
     }
     writer.finish().unwrap();
     let copied = open(&copy);
+    assert_eq!(copied.contig_starts(0).unwrap(), contig_bounds(3));
     let mut out = Vec::new();
     for (key, locations) in &entries[0] {
         out.clear();

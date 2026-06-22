@@ -80,6 +80,13 @@ impl Shard {
             || positions.bin_bits() != u32::from(parameters.bin_bits)
             || file_size(SKETCH_FILE)? != manifest.sketch.bytes
             || file_size(POSITIONS_FILE)? != manifest.positions.bytes
+            || (manifest.entries.iter().enumerate()).any(|(entry, record)| {
+                positions
+                    .section(entry as u32)
+                    .map(|section| section.contigs)
+                    .ok()
+                    != Some(record.contigs)
+            })
         {
             return Err(IndexError::format(
                 "the sketch or positions differ from the manifest",

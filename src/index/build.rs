@@ -234,6 +234,7 @@ struct EntryBuilder<'a> {
     context: &'a Context,
     packed: PackedWriter,
     seeds: Vec<(u64, u32)>,
+    contig_starts: Vec<u64>,
 }
 
 impl<'a> EntryBuilder<'a> {
@@ -242,12 +243,14 @@ impl<'a> EntryBuilder<'a> {
             context,
             packed: PackedWriter::new(),
             seeds: Vec::new(),
+            contig_starts: Vec::new(),
         }
     }
 
     fn add_contig(&mut self, name: &[u8], sequence: &[u8]) -> Result<(), IndexError> {
         let start = self.packed.bases();
         self.packed.add_contig(name, sequence)?;
+        self.contig_starts.push(start);
         let bin_bits = self.context.parameters.bin_bits;
         if self.packed.bases() >> bin_bits >= 1 << 31 {
             return Err(IndexError::Input(
@@ -269,7 +272,8 @@ impl<'a> EntryBuilder<'a> {
     fn finish(mut self, index: usize, name: String) -> Result<BuiltEntry, IndexError> {
         self.seeds.sort_unstable();
         self.seeds.dedup();
-        let (section, bytes) = encode_section(&self.seeds, POSITION_KEY_BITS)?;
+        self.contig_starts.push(self.packed.bases());
+        let (section, bytes) = encode_section(&self.seeds, &self.contig_starts, POSITION_KEY_BITS)?;
         drop(self.seeds);
         let section_path = self.context.temp.join(format!("section-{index:010}"));
         std::fs::write(&section_path, &bytes)?;

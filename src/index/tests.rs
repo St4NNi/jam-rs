@@ -121,6 +121,14 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
             assert!(seeds > 100);
             start += sequence.len() as u64;
         }
+        let lengths = contigs.iter().map(|(_, sequence)| sequence.len() as u64);
+        let bounds: Vec<u64> = std::iter::once(0)
+            .chain(lengths.scan(0, |end, length| {
+                *end += length;
+                Some(*end)
+            }))
+            .collect();
+        assert_eq!(shard.positions().contig_starts(entry).unwrap(), bounds);
     }
 }
 

@@ -1,6 +1,7 @@
 //! The positions file (stage 2): for every entry a section with its seed locations, so a seed of
-//! one candidate entry is found with two small reads. It works memory-mapped from local disk and
-//! as byte ranges from S3.
+//! one candidate entry is found with two small reads, and the contig starts of the entry, so
+//! alignment windows can be cut at contig ends without the packed sequence. It works
+//! memory-mapped from local disk and as byte ranges from S3.
 //!
 //! A seed is stored by its key: the top 44 bits of its hash (`POSITION_KEY_BITS`), at least as
 //! many as the sketch keeps (bucket bits and fingerprint), so the sketch of any size is built
@@ -13,7 +14,7 @@
 //! | Bytes | Field |
 //! | --- | --- |
 //! | 0..16 | magic `jam positions` padded with zero bytes |
-//! | 16..20 | version (u32, 1) |
+//! | 16..20 | version (u32, 2) |
 //! | 20 | key bits (u8, 44) |
 //! | 21 | bin bits (u8) |
 //! | 22..24 | zero |
@@ -21,7 +22,7 @@
 //! | 32..36 | CRC-32 of the section table (u32) |
 //! | 36..124 | zero |
 //! | 124..128 | CRC-32 of bytes 0..124 (u32) |
-//! | 128.. | section table: e rows of 32 bytes, see below |
+//! | 128.. | section table: e rows of 40 bytes, see below |
 //! | sections | one per entry, in entry order, each at a multiple of 8 |
 //!
 //! A section table row:
@@ -36,11 +37,13 @@
 //! | 29 | suffix bits s = key bits - d (u8) |
 //! | 30 | location bits p (u8) |
 //! | 31 | zero |
+//! | 32..40 | contigs c (u64) |
 //!
-//! A section with r seed locations, sorted by key and then seed location:
+//! A section with c contigs and r seed locations, sorted by key and then seed location:
 //!
 //! | Bytes | Field |
 //! | --- | --- |
+//! | 8 (c + 1) | contig starts in entry coordinates, then the entry's bases (u64 each) |
 //! | 4 (2^d + 1) | slot directory: index of the first seed location of each slot (u32); a key's slot is its top d bits |
 //! | ceil(r (s + p) / 8) | one record per seed location, bit-packed, first record in the low bits: the low s bits of the key, then the seed location in p bits |
 //! | 8 | zero |
@@ -64,9 +67,9 @@ pub const POSITIONS_FILE: &str = "positions";
 pub const POSITION_KEY_BITS: u32 = super::MAX_BUCKET_BITS + super::FINGERPRINT_BITS as u32;
 
 const MAGIC: [u8; 16] = *b"jam positions\0\0\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_BYTES: u64 = 128;
-const ROW_BYTES: usize = 32;
+const ROW_BYTES: usize = 40;
 /// Seed locations per slot that the slot bits aim for.
 const SLOT_LOCATIONS: u64 = 16;
 
@@ -105,6 +108,8 @@ pub(crate) struct Section {
     pub(crate) locations: u64,
     /// CRC-32 of the section bytes.
     pub(crate) crc: u32,
+    /// Contigs of the entry.
+    pub(crate) contigs: u64,
     slot_bits: u8,
     suffix_bits: u8,
     location_bits: u8,
@@ -119,6 +124,11 @@ impl Section {
         4 * ((1u64 << self.slot_bits) + 1)
     }
 
+    /// Bytes of the contig starts and the entry's bases, before the slot directory.
+    fn contig_bytes(&self) -> u64 {
+        8 * (self.contigs + 1)
+    }
+
     fn to_row(self) -> [u8; ROW_BYTES] {
         let mut row = [0u8; ROW_BYTES];
         row[..8].copy_from_slice(&self.offset.to_le_bytes());
@@ -126,6 +136,7 @@ impl Section {
         row[16..24].copy_from_slice(&self.locations.to_le_bytes());
         row[24..28].copy_from_slice(&self.crc.to_le_bytes());
         row[28..31].copy_from_slice(&[self.slot_bits, self.suffix_bits, self.location_bits]);
+        row[32..40].copy_from_slice(&self.contigs.to_le_bytes());
         row
     }
 
@@ -138,25 +149,33 @@ impl Section {
             slot_bits: row[28],
             suffix_bits: row[29],
             location_bits: row[30],
+            contigs: u64_at(row, 32)?,
         };
         let valid = u32::from(section.slot_bits) + u32::from(section.suffix_bits) == key_bits
             && section.location_bits <= 32
             && section.slot_bits <= 32
             && row[31] == 0
+            && section.contigs < 1 << 40
             && section.length
-                == section.directory_bytes()
+                == section.contig_bytes()
+                    + section.directory_bytes()
                     + (section.locations * section.record_bits()).div_ceil(8)
                     + BIT_PADDING as u64;
         valid.then_some(section)
     }
 }
 
-/// Encodes one entry's section from its (key, seed location value) pairs, sorted and distinct. The
-/// offset of the returned section is 0 until a writer places it.
+/// Encodes one entry's section from its (key, seed location value) pairs, sorted and distinct,
+/// and its contig starts followed by its bases. The offset of the returned section is 0 until a
+/// writer places it.
 pub(crate) fn encode_section(
     records: &[(u64, u32)],
+    contig_bounds: &[u64],
     key_bits: u32,
 ) -> Result<(Section, Vec<u8>), IndexError> {
+    if contig_bounds.first() != Some(&0) || !contig_bounds.is_sorted() {
+        return Err(IndexError::Input("contig starts must ascend from 0".into()));
+    }
     let count = records.len() as u64;
     if u32::try_from(count).is_err() {
         return Err(IndexError::Input(
@@ -170,7 +189,7 @@ pub(crate) fn encode_section(
     };
     let suffix_bits = key_bits - slot_bits;
     let location_bits = bits_needed(u64::from(records.iter().map(|r| r.1).max().unwrap_or(0)));
-    let mut bytes = Vec::new();
+    let mut bytes: Vec<u8> = contig_bounds.iter().flat_map(|v| v.to_le_bytes()).collect();
     let mut next = 0usize;
     for slot in 0..=1u64 << slot_bits {
         while next < records.len() && records[next].0 >> suffix_bits < slot {
@@ -194,6 +213,7 @@ pub(crate) fn encode_section(
         slot_bits: slot_bits as u8,
         suffix_bits: suffix_bits as u8,
         location_bits: location_bits as u8,
+        contigs: contig_bounds.len() as u64 - 1,
     };
     Ok((section, bytes))
 }
@@ -205,7 +225,10 @@ pub(crate) fn decode_section(
     mut visit: impl FnMut(u64, u32),
 ) -> Result<(), IndexError> {
     let damaged = || IndexError::format("positions section");
-    let records = bytes
+    let directory = bytes
+        .get(section.contig_bytes() as usize..)
+        .ok_or_else(damaged)?;
+    let records = directory
         .get(section.directory_bytes() as usize..)
         .ok_or_else(damaged)?;
     let (suffix_bits, location_bits) = (
@@ -214,7 +237,7 @@ pub(crate) fn decode_section(
     );
     let mut index = 0u64;
     for slot in 0..1u64 << section.slot_bits {
-        let end = u64::from(u32_at(bytes, 4 * (slot as usize + 1)).ok_or_else(damaged)?);
+        let end = u64::from(u32_at(directory, 4 * (slot as usize + 1)).ok_or_else(damaged)?);
         if end < index || end > section.locations {
             return Err(damaged());
         }
@@ -290,9 +313,10 @@ impl Positions {
         let key = seed_key(hash, self.key_bits);
         let suffix_bits = u32::from(section.suffix_bits);
         let slot = key >> suffix_bits;
+        let directory = section.offset + section.contig_bytes();
         let mut slot_range = [0u8; 8];
         self.source
-            .read_exact_at(section.offset + 4 * slot, &mut slot_range)?;
+            .read_exact_at(directory + 4 * slot, &mut slot_range)?;
         let first = u64::from(u32_at(&slot_range, 0).unwrap_or_default());
         let end = u64::from(u32_at(&slot_range, 4).unwrap_or_default());
         if first >= end {
@@ -306,7 +330,7 @@ impl Positions {
         let end_byte = (end * record_bits).div_ceil(8) + BIT_PADDING as u64;
         let mut records = vec![0u8; (end_byte - start_byte) as usize];
         self.source.read_exact_at(
-            section.offset + section.directory_bytes() + start_byte,
+            directory + section.directory_bytes() + start_byte,
             &mut records,
         )?;
         let suffix = key & ((1u64 << suffix_bits) - 1);
@@ -319,6 +343,24 @@ impl Positions {
             }
         }
         Ok(())
+    }
+
+    /// The start of each contig of an entry in entry coordinates, followed by the entry's bases,
+    /// so contig `i` spans `bounds[i]..bounds[i + 1]`.
+    pub fn contig_starts(&self, entry: u32) -> Result<Vec<u64>, IndexError> {
+        let section = self.section(entry)?;
+        let mut bytes = vec![0u8; section.contig_bytes() as usize];
+        self.source.read_exact_at(section.offset, &mut bytes)?;
+        let bounds: Vec<u64> = bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|v| u64::from_le_bytes(*v))
+            .collect();
+        if bounds.first() != Some(&0) || !bounds.is_sorted() {
+            return Err(IndexError::format("positions contig starts"));
+        }
+        Ok(bounds)
     }
 
     /// The section of an entry.
