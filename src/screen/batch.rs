@@ -19,6 +19,13 @@ pub(super) struct Piece {
     pub contig: u32,
 }
 
+impl Piece {
+    /// The position after the last base of the piece in the batch.
+    pub fn end(&self) -> u64 {
+        self.start + self.length
+    }
+}
+
 /// The bases of a batch, with spacers of N between the pieces, and the pieces.
 #[derive(Debug, Default)]
 pub(super) struct Batch {

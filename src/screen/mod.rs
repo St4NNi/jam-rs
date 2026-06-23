@@ -11,6 +11,7 @@
 mod assembly;
 mod batch;
 mod records;
+mod survey;
 
 pub use assembly::Screener;
 pub use records::AssemblySummary;
