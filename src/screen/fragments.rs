@@ -1,8 +1,10 @@
 //! Stages 2 and 3 of the screen for one batch: the kept entries are located and aligned with the
-//! batch as the query.
+//! batch as the query, and their fragments are cut at the contig borders and turned around.
 
 use super::ScreenError;
 use super::batch::Batch;
+use super::turn::{slice_alignment, swap_roles};
+use crate::align::{Alignment, AlignmentConfig, Interval};
 use crate::decide::{DecisionRule, Fragment};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
@@ -21,13 +23,13 @@ use rayon::prelude::*;
 /// An entry contig, the query of the screen: the entry and the contig within it.
 pub(super) type EntryContig = (u32, u32);
 
-/// A fragment of an entry contig, found with a batch as the query.
+/// A fragment of an entry contig (the query of the screen) on an assembly contig.
 #[derive(Clone, Debug)]
 pub(super) struct ScreenFragment {
     pub entry: u32,
     /// The contig of the entry.
     pub entry_contig: u32,
-    /// Its query is the batch.
+    /// Its `contig_index` is the assembly contig; its query is the entry contig.
     pub fragment: Fragment,
 }
 
@@ -59,7 +61,7 @@ impl FragmentWork {
 }
 
 impl BatchAlignment<'_> {
-    /// Locates and aligns each entry with its seed hits in the batch.
+    /// Locates and aligns each entry with its seed hits in the batch, and turns its fragments.
     pub fn fragments(
         &self,
         batch: &Batch,
@@ -94,7 +96,7 @@ impl BatchAlignment<'_> {
                         containment_estimate: 0.0,
                         seed_hits,
                     };
-                    self.entry(&request, &query, &possible, locate, align)
+                    self.entry(batch, &request, &query, &possible, locate, align)
                 },
             )
             .collect::<Result<Vec<_>, ScreenError>>()?;
@@ -109,6 +111,7 @@ impl BatchAlignment<'_> {
 
     fn entry(
         &self,
+        batch: &Batch,
         request: &LocateRequest<'_>,
         query: &PreparedQuery,
         possible: &PossibleEntry,
@@ -139,14 +142,57 @@ impl BatchAlignment<'_> {
         )?;
         work.align = align_work;
         work.aligned_entries = 1;
-        let turned = fragments
-            .into_iter()
-            .map(|fragment| ScreenFragment {
-                entry: possible.entry,
-                entry_contig: fragment.contig_index,
-                fragment,
-            })
-            .collect();
+        let scores = &self.align.chain.scores;
+        let mut turned = Vec::new();
+        for fragment in fragments {
+            for (contig, alignment) in cut_at_contigs(batch, &fragment.alignment, scores)? {
+                turned.push(ScreenFragment {
+                    entry: possible.entry,
+                    entry_contig: fragment.contig_index,
+                    fragment: Fragment {
+                        contig_index: contig,
+                        query_segments: vec![alignment.query_interval],
+                        alignment,
+                    },
+                });
+            }
+        }
         Ok((turned, work))
     }
+}
+
+/// The parts of a batch alignment on each piece of the batch, in the coordinates of the assembly
+/// contig, turned around so that the entry contig is the query. Returns the assembly contig of
+/// each part.
+pub(super) fn cut_at_contigs(
+    batch: &Batch,
+    alignment: &Alignment,
+    scores: &AlignmentConfig,
+) -> Result<Vec<(u32, Alignment)>, ScreenError> {
+    let interval = alignment.query_interval;
+    let first = batch
+        .pieces
+        .partition_point(|piece| piece.end() <= interval.start);
+    let mut parts = Vec::new();
+    for piece in batch.pieces[first..]
+        .iter()
+        .take_while(|piece| piece.start < interval.end)
+    {
+        let inside = interval.start >= piece.start && interval.end <= piece.end();
+        let part = if inside {
+            Some(alignment.clone())
+        } else {
+            slice_alignment(alignment, piece.start, piece.end(), scores)?
+        };
+        let Some(mut part) = part else {
+            continue;
+        };
+        let shift = |position: u64| position - piece.start + piece.offset;
+        part.query_interval = Interval::new(
+            shift(part.query_interval.start),
+            shift(part.query_interval.end),
+        )?;
+        parts.push((piece.contig, swap_roles(&part)));
+    }
+    Ok(parts)
 }

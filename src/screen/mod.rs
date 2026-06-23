@@ -14,6 +14,7 @@ mod contig_output;
 mod fragments;
 mod records;
 mod survey;
+mod turn;
 
 pub use assembly::Screener;
 pub use records::AssemblySummary;

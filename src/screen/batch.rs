@@ -11,12 +11,14 @@ pub(super) const SPACER: usize = 64;
 /// very slow on a network file system.
 const READ_BUFFER: usize = 1 << 20;
 
-/// One piece of a contig inside a batch: its start in the batch, its length and the contig.
+/// One piece of a contig inside a batch: its start in the batch, its length, the contig and the
+/// position of the piece in the contig.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Piece {
     pub start: u64,
     pub length: u64,
     pub contig: u32,
+    pub offset: u64,
 }
 
 impl Piece {
@@ -34,7 +36,7 @@ pub(super) struct Batch {
 }
 
 impl Batch {
-    fn add(&mut self, contig: u32, sequence: &[u8]) {
+    fn add(&mut self, contig: u32, offset: u64, sequence: &[u8]) {
         if !self.bases.is_empty() {
             self.bases.extend(std::iter::repeat_n(b'N', SPACER));
         }
@@ -42,6 +44,7 @@ impl Batch {
             start: self.bases.len() as u64,
             length: sequence.len() as u64,
             contig,
+            offset,
         });
         self.bases.extend_from_slice(sequence);
     }
@@ -52,7 +55,7 @@ impl Batch {
         for &index in pieces {
             let piece = self.pieces[index as usize];
             let bases = &self.bases[piece.start as usize..piece.end() as usize];
-            subset.add(piece.contig, bases);
+            subset.add(piece.contig, piece.offset, bases);
         }
         subset
     }
@@ -122,13 +125,13 @@ pub(super) fn read_batches(
             length: sequence.len() as u64,
         });
         contigs.bases += sequence.len() as u64;
-        for piece in sequence.chunks(batch_bases) {
+        for (part, piece) in sequence.chunks(batch_bases).enumerate() {
             if !batch.bases.is_empty() && batch.bases.len() + SPACER + piece.len() > batch_bases {
                 visit(index, &batch)?;
                 index += 1;
                 batch = Batch::default();
             }
-            batch.add(contig, piece);
+            batch.add(contig, (part * batch_bases) as u64, piece);
         }
     }
     if !batch.bases.is_empty() {
@@ -212,6 +215,7 @@ mod tests {
                 start: 0,
                 length: 88,
                 contig: 2,
+                offset: 0
             }]
         );
         let (seen, _) = batches(&fasta, 50);
@@ -219,21 +223,21 @@ mod tests {
         assert_eq!(
             last[2..]
                 .iter()
-                .map(|p| (p.contig, p.length))
+                .map(|p| (p.offset, p.length))
                 .collect::<Vec<_>>(),
-            [(2, 50), (2, 38)]
+            [(0, 50), (50, 38)]
         );
     }
 
     #[test]
-    fn a_subset_keeps_the_contigs_of_its_pieces() {
+    fn a_subset_keeps_the_contigs_and_offsets_of_its_pieces() {
         let mut batch = Batch::default();
-        batch.add(0, b"ACGT");
-        batch.add(1, b"ACGT");
-        batch.add(2, b"GGCC");
+        batch.add(0, 0, b"ACGT");
+        batch.add(1, 0, b"ACGT");
+        batch.add(2, 7, b"GGCC");
         let subset = batch.subset(&[0, 2]);
         assert_eq!(subset.bases.len(), 8 + SPACER);
         assert_eq!(&subset.bases[4 + SPACER..], b"GGCC");
-        assert_eq!(subset.pieces[1].contig, 2);
+        assert_eq!((subset.pieces[1].contig, subset.pieces[1].offset), (2, 7));
     }
 }
