@@ -1,11 +1,18 @@
-//! The screen of one assembly: the survey of all its batches and the entries it keeps.
+//! The screen of one assembly: the survey of all its batches and the alignments of the batches
+//! that reached a kept entry.
 
-use super::batch::{AssemblyContigs, read_batches};
+use super::batch::{AssemblyContigs, Batch, read_batches};
+use super::fragments::{BatchAlignment, EntryContig, FragmentWork};
 use super::records::AssemblySummary;
-use super::survey::{SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, survey};
+use super::survey::{
+    SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, kept_seed_hits, survey,
+};
 use super::{ScreenConfig, ScreenError, write_contigs};
+use crate::decide::Fragment;
 use crate::index::Shard;
+use crate::loss::MissModel;
 use crate::search::SearchControl;
+use crate::search::query::QueryKmers;
 use crate::seeds::Seeder;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -18,6 +25,8 @@ pub struct Screener<'a> {
     shard: &'a Shard,
     config: ScreenConfig,
     seeder: Seeder,
+    /// The miss model of stage 2, whose bound keeps every entry in the screen.
+    model: MissModel,
     /// The shortest contig of each entry with more than one contig, once read.
     shortest: Mutex<HashMap<u32, u64>>,
 }
@@ -34,16 +43,19 @@ impl<'a> Screener<'a> {
         config.validate()?;
         let scheme = shard.manifest().parameters.scheme();
         let seeder = Seeder::new(scheme).map_err(crate::index::IndexError::from)?;
+        let model = MissModel::with_layouts(usize::from(scheme.k), usize::from(scheme.window), 1)
+            .map_err(crate::search::SearchError::from)?;
         Ok(Self {
             shard,
             config,
             seeder,
+            model,
             shortest: Mutex::new(HashMap::new()),
         })
     }
 
-    /// Reads the assembly at `path` (plain or gzip FASTA) and surveys it. `name` names the
-    /// assembly in the records.
+    /// Reads the assembly at `path` (plain or gzip FASTA), surveys it and aligns the kept
+    /// entries. `name` names the assembly in the records and the contig output.
     pub fn screen_assembly(
         &self,
         path: &Path,
@@ -81,6 +93,9 @@ impl<'a> Screener<'a> {
             }
             return Ok(summary);
         }
+        let started = Instant::now();
+        self.align_assembly(path, &surveyed, &kept, control, &mut summary)?;
+        summary.align_seconds = started.elapsed().as_secs_f64();
         Ok(summary)
     }
 
@@ -145,6 +160,97 @@ impl<'a> Screener<'a> {
             }
         }
         Ok(kept)
+    }
+
+    /// Reads the batches again and aligns those that reached a kept entry. Returns the fragments
+    /// of each entry contig.
+    fn align_assembly(
+        &self,
+        path: &Path,
+        surveyed: &[Vec<Surveyed>],
+        kept: &HashSet<u32>,
+        control: SearchControl<'_>,
+        summary: &mut AssemblySummary,
+    ) -> Result<HashMap<EntryContig, Vec<Fragment>>, ScreenError> {
+        let pieces: Vec<HashMap<u32, Vec<u32>>> = surveyed
+            .iter()
+            .map(|batch| {
+                let mut pieces: HashMap<u32, Vec<u32>> = HashMap::new();
+                for found in batch.iter().filter(|found| kept.contains(&found.entry)) {
+                    pieces.entry(found.entry).or_default().push(found.piece);
+                }
+                pieces
+            })
+            .collect();
+        let mut found: HashMap<EntryContig, Vec<Fragment>> = HashMap::new();
+        if pieces.iter().all(HashMap::is_empty) {
+            return Ok(found);
+        }
+        let aligner = BatchAlignment {
+            shard: self.shard,
+            model: &self.model,
+            rule: &self.config.rule,
+            align: &self.config.align,
+            flank: self.config.flank,
+            control,
+        };
+        let mut work = FragmentWork::default();
+        read_batches(
+            path,
+            self.config.batch_bases,
+            self.config.rule.min_fragment_columns as usize,
+            &mut |index, batch| {
+                let Some(kept) = pieces.get(index).filter(|kept| !kept.is_empty()) else {
+                    return Ok(());
+                };
+                self.align_batch(&aligner, batch, kept, &mut found, &mut work)
+            },
+            None,
+        )?;
+        summary.aligned_entries = work.aligned_entries;
+        summary.alignments = work.align.alignments;
+        summary.fragments = found.values().map(|list| list.len() as u64).sum();
+        Ok(found)
+    }
+
+    /// Aligns the pieces of a batch that are kept for some entry, joined into a smaller batch, as
+    /// preparing the query of stage 3 costs time in proportion to its length.
+    fn align_batch(
+        &self,
+        aligner: &BatchAlignment<'_>,
+        batch: &Batch,
+        kept: &HashMap<u32, Vec<u32>>,
+        found: &mut HashMap<EntryContig, Vec<Fragment>>,
+        work: &mut FragmentWork,
+    ) -> Result<(), ScreenError> {
+        let mut pieces: Vec<u32> = kept.values().flatten().copied().collect();
+        pieces.sort_unstable();
+        pieces.dedup();
+        let batch = batch.subset(&pieces);
+        let kept: HashMap<u32, Vec<u32>> = kept
+            .iter()
+            .map(|(&entry, old)| {
+                let new = old
+                    .iter()
+                    .filter_map(|piece| pieces.binary_search(piece).ok())
+                    .map(|piece| piece as u32)
+                    .collect();
+                (entry, new)
+            })
+            .collect();
+        let sketch = self.shard.sketch();
+        let kmers = QueryKmers::new(&self.seeder, &batch.bases, false);
+        let seeds = found_seeds(sketch, &self.seeder, &batch, aligner.control)?;
+        let seed_hits = kept_seed_hits(sketch, &kmers, &seeds, &kept);
+        let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits)?;
+        work.add(&part);
+        for turned in turned {
+            found
+                .entry((turned.entry, turned.entry_contig))
+                .or_default()
+                .push(turned.fragment);
+        }
+        Ok(())
     }
 
     /// The length the survey compares an entry with: its bases, or for an entry with more than

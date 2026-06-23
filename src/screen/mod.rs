@@ -11,6 +11,7 @@
 mod assembly;
 mod batch;
 mod contig_output;
+mod fragments;
 mod records;
 mod survey;
 

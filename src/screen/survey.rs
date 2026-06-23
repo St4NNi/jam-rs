@@ -13,6 +13,7 @@ use super::batch::Batch;
 use crate::index::{ColorSetId, SeedLocation, Shard, Sketch};
 use crate::search::SearchControl;
 use crate::search::Stopped;
+use crate::search::query::QueryKmers;
 use crate::seeds::Seeder;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -183,4 +184,51 @@ fn counted_entries(
     }
     counted.sort_unstable();
     counted
+}
+
+/// The seed hits (indices into `QueryKmers::seeds` of the batch) of each kept entry, from the
+/// pieces it is kept for. `kept` maps an entry to its kept pieces, ascending.
+pub(super) fn kept_seed_hits(
+    sketch: &Sketch,
+    kmers: &QueryKmers,
+    found: &[PieceSeed],
+    kept: &HashMap<u32, Vec<u32>>,
+) -> Vec<(u32, Vec<u32>)> {
+    let color_sets = sketch.color_sets();
+    let seed_of = |hash: u64| {
+        kmers
+            .seeds()
+            .binary_search_by_key(&hash, |seed| seed.hash)
+            .ok()
+            .map(|seed| seed as u32)
+    };
+    let mut by_color_set: Vec<&PieceSeed> = found.iter().collect();
+    by_color_set.sort_unstable_by_key(|seed| seed.color_set.0);
+    let mut seed_hits: HashMap<u32, Vec<u32>> = HashMap::new();
+    for same in by_color_set.chunk_by(|a, b| a.color_set == b.color_set) {
+        let entries: Vec<u32> = color_sets
+            .entries(same[0].color_set)
+            .into_iter()
+            .flatten()
+            .filter(|entry| kept.contains_key(entry))
+            .collect();
+        for entry in entries {
+            let pieces = &kept[&entry];
+            seed_hits.entry(entry).or_default().extend(
+                same.iter()
+                    .filter(|seed| pieces.binary_search(&seed.piece).is_ok())
+                    .filter_map(|seed| seed_of(seed.hash)),
+            );
+        }
+    }
+    let mut seed_hits: Vec<(u32, Vec<u32>)> = seed_hits
+        .into_iter()
+        .filter(|(_, seeds)| !seeds.is_empty())
+        .collect();
+    for (_, seeds) in &mut seed_hits {
+        seeds.sort_unstable();
+        seeds.dedup();
+    }
+    seed_hits.sort_unstable_by_key(|(entry, _)| *entry);
+    seed_hits
 }

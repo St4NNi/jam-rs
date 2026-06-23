@@ -45,6 +45,17 @@ impl Batch {
         });
         self.bases.extend_from_slice(sequence);
     }
+
+    /// A batch of only the pieces with the given indices, ascending, joined again with spacers.
+    pub fn subset(&self, pieces: &[u32]) -> Batch {
+        let mut subset = Batch::default();
+        for &index in pieces {
+            let piece = self.pieces[index as usize];
+            let bases = &self.bases[piece.start as usize..piece.end() as usize];
+            subset.add(piece.contig, bases);
+        }
+        subset
+    }
 }
 
 /// A contig of the assembly that was searched: its name (the first word of the header) and its
@@ -212,5 +223,17 @@ mod tests {
                 .collect::<Vec<_>>(),
             [(2, 50), (2, 38)]
         );
+    }
+
+    #[test]
+    fn a_subset_keeps_the_contigs_of_its_pieces() {
+        let mut batch = Batch::default();
+        batch.add(0, b"ACGT");
+        batch.add(1, b"ACGT");
+        batch.add(2, b"GGCC");
+        let subset = batch.subset(&[0, 2]);
+        assert_eq!(subset.bases.len(), 8 + SPACER);
+        assert_eq!(&subset.bases[4 + SPACER..], b"GGCC");
+        assert_eq!(subset.pieces[1].contig, 2);
     }
 }
