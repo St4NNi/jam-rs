@@ -11,13 +11,14 @@
 mod assembly;
 mod batch;
 mod contig_output;
+mod decision;
 mod fragments;
 mod records;
 mod survey;
 mod turn;
 
-pub use assembly::Screener;
-pub use records::AssemblySummary;
+pub use assembly::{EntrySink, Screener};
+pub use records::{AssemblySummary, ScreenContig, ScreenEntry};
 
 use crate::align::AlignmentError;
 use crate::decide::{DecideError, DecisionRule};

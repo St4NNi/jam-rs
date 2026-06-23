@@ -1,9 +1,10 @@
-//! The screen of one assembly: the survey of all its batches and the alignments of the batches
-//! that reached a kept entry.
+//! The screen of one assembly: the survey of all its batches, the alignments of the batches that
+//! reached a kept entry, the decisions, and the contig output.
 
 use super::batch::{AssemblyContigs, Batch, read_batches};
+use super::decision::decide_entries;
 use super::fragments::{BatchAlignment, EntryContig, FragmentWork};
-use super::records::AssemblySummary;
+use super::records::{AssemblySummary, ScreenEntry};
 use super::survey::{
     SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, kept_seed_hits, survey,
 };
@@ -37,6 +38,9 @@ struct SurveyedAssembly {
     surveyed: Vec<Vec<Surveyed>>,
 }
 
+/// Receives every entry contig found in an assembly.
+pub type EntrySink<'a> = dyn FnMut(ScreenEntry) -> Result<(), ScreenError> + 'a;
+
 impl<'a> Screener<'a> {
     /// A screener of `shard` with `config`.
     pub fn new(shard: &'a Shard, config: ScreenConfig) -> Result<Self, ScreenError> {
@@ -54,13 +58,14 @@ impl<'a> Screener<'a> {
         })
     }
 
-    /// Reads the assembly at `path` (plain or gzip FASTA), surveys it and aligns the kept
-    /// entries. `name` names the assembly in the records and the contig output.
+    /// Reads the assembly at `path` (plain or gzip FASTA), screens it and passes every entry
+    /// contig found to `emit`. `name` names the assembly in the records and the contig output.
     pub fn screen_assembly(
         &self,
         path: &Path,
         name: &str,
         control: SearchControl<'_>,
+        emit: &mut EntrySink<'_>,
     ) -> Result<AssemblySummary, ScreenError> {
         let mut summary = AssemblySummary {
             kind: "assembly",
@@ -94,7 +99,30 @@ impl<'a> Screener<'a> {
             return Ok(summary);
         }
         let started = Instant::now();
-        self.align_assembly(path, &surveyed, &kept, control, &mut summary)?;
+        let found = self.align_assembly(path, &surveyed, &kept, control, &mut summary)?;
+        let entry_contig = |key: EntryContig| self.entry_contig(key);
+        let reported = decide_entries(
+            found,
+            &contigs.list,
+            &self.config.rule,
+            self.config.closest_margin,
+            name,
+            &entry_contig,
+        )?;
+        let mut reported_contigs = HashSet::new();
+        for found in reported {
+            reported_contigs.extend(found.contigs.iter().map(|contig| contig.id));
+            summary.reported_entries += 1;
+            emit(found)?;
+        }
+        summary.reported_contigs = reported_contigs.len() as u64;
+        summary.reported_bases = reported_contigs
+            .iter()
+            .map(|&contig| contigs.list[contig as usize].length)
+            .sum();
+        if let Some(directory) = &self.config.contig_dir {
+            write_contigs(path, name, &self.config, directory, &reported_contigs)?;
+        }
         summary.align_seconds = started.elapsed().as_secs_f64();
         Ok(summary)
     }
@@ -275,5 +303,20 @@ impl<'a> Screener<'a> {
         }
         shortest.insert(entry, length);
         Ok(length)
+    }
+
+    /// The name and length of an entry contig: the entry name, with the contig name when the
+    /// entry has more than one contig.
+    fn entry_contig(&self, (entry, contig): EntryContig) -> Result<(String, u64), ScreenError> {
+        let record = &self.shard.manifest().entries[entry as usize];
+        let packed = self.shard.packed(entry)?;
+        let range = packed.contig_range(contig as usize)?;
+        let length = range.end - range.start;
+        if record.contigs <= 1 {
+            return Ok((record.name.clone(), length));
+        }
+        let contig_name = packed.contig_name(contig as usize)?;
+        let contig_name = String::from_utf8_lossy(&contig_name);
+        Ok((format!("{}/{contig_name}", record.name), length))
     }
 }
