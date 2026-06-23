@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::align::{Strand, complement, format_cigar};
-use crate::decide::Fragment;
+use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use crate::search::SearchControl;
 use std::path::Path;
@@ -25,6 +25,28 @@ pub(super) fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
         .iter()
         .rev()
         .map(|&base| complement(base))
+        .collect()
+}
+
+/// A copy with about one base in `one_in` changed.
+pub(super) fn diverged(sequence: &[u8], one_in: u64, mut state: u64) -> Vec<u8> {
+    sequence
+        .iter()
+        .map(|&base| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if state.is_multiple_of(one_in) {
+                match base {
+                    b'A' => b'C',
+                    b'C' => b'G',
+                    b'G' => b'T',
+                    _ => b'A',
+                }
+            } else {
+                base
+            }
+        })
         .collect()
 }
 
@@ -387,5 +409,277 @@ fn an_entry_with_several_contigs_is_screened_contig_by_contig() {
     assert_eq!(
         (reported[0].entry_length, reported[0].covered_bases),
         (2_000, 2_000)
+    );
+}
+
+#[test]
+fn an_entry_that_shares_only_a_sliver_is_not_aligned() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = random_sequence(3_000, 5);
+    let second = random_sequence(3_000, 6);
+    let shard = plasmids(directory.path(), &[("first", &first), ("second", &second)]);
+    let contigs = [
+        ("most", first[..2_500].to_vec()),
+        ("sliver", second[..300].to_vec()),
+    ];
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &close_lineage());
+    assert_eq!(names(&reported), ["first"]);
+    assert_eq!(summary.surveyed_entries, 1);
+}
+
+#[test]
+fn a_relative_far_below_the_identity_is_not_aligned() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(6_000, 11);
+    let relative = diverged(&plasmid, 16, 12);
+    let shard = plasmids(
+        directory.path(),
+        &[("plasmid", &plasmid), ("relative", &relative)],
+    );
+    let contigs = [("contig", plasmid.clone())];
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &ScreenConfig::default());
+    assert_eq!(reported.len(), 2);
+    assert_eq!(summary.surveyed_entries, 2);
+    // At 0.99 the seeds that it shares are too few for it to be aligned at all.
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &close_lineage());
+    assert_eq!(names(&reported), ["plasmid"]);
+    assert_eq!(summary.surveyed_entries, 1);
+}
+
+#[test]
+fn a_contig_belongs_to_the_closest_plasmids_when_a_margin_is_set() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(6_000, 21);
+    let cousin = diverged(&plasmid, 250, 22);
+    let shard = plasmids(
+        directory.path(),
+        &[("plasmid", &plasmid), ("cousin", &cousin)],
+    );
+    let contigs = [("contig", plasmid.clone())];
+    let both = close_lineage();
+    let reported = screen(&shard, directory.path(), &contigs, &both).0;
+    assert_eq!(names(&reported), ["plasmid", "cousin"]);
+    let (plasmid, cousin) = (&reported[0].contigs[0], &reported[1].contigs[0]);
+    assert_eq!(plasmid.score, plasmid.best_score);
+    assert_eq!(cousin.best_score, plasmid.score);
+    assert!(
+        cousin.score < plasmid.score - 0.001,
+        "{cousin:?} {plasmid:?}"
+    );
+    assert!(plasmid.identity > cousin.identity);
+    assert_eq!((plasmid.entries, cousin.entries), (2, 2));
+    let margin = ScreenConfig {
+        closest_margin: Some(0.001),
+        ..close_lineage()
+    };
+    let reported = screen(&shard, directory.path(), &contigs, &margin).0;
+    assert_eq!(names(&reported), ["plasmid"]);
+    assert_eq!(reported[0].contigs[0].entries, 1);
+    let wide = ScreenConfig {
+        closest_margin: Some(0.05),
+        ..close_lineage()
+    };
+    let reported = screen(&shard, directory.path(), &contigs, &wide).0;
+    assert_eq!(names(&reported), ["plasmid", "cousin"]);
+}
+
+#[test]
+fn a_plasmid_is_found_when_the_index_also_holds_its_multimer() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(3_000, 51);
+    let double = [&plasmid[..], &plasmid[..]].concat();
+    let shard = plasmids(
+        directory.path(),
+        &[("single", &plasmid), ("double", &double)],
+    );
+    let contigs = [("contig", plasmid.clone())];
+    let config = ScreenConfig {
+        closest_margin: Some(0.001),
+        ..close_lineage()
+    };
+    let reported = screen(&shard, directory.path(), &contigs, &config).0;
+    assert!(names(&reported).contains(&"single".to_string()));
+}
+
+#[test]
+fn contigs_that_share_single_genes_do_not_add_up_to_a_plasmid() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(6_000, 41);
+    let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
+    // Four chromosome contigs of 20 kb, each with a different quarter of the plasmid in it.
+    let contigs: Vec<(String, Vec<u8>)> = (0..4)
+        .map(|quarter| {
+            let gene = &plasmid[quarter * 1_500..(quarter + 1) * 1_500];
+            let chromosome = random_sequence(20_000, 42 + quarter as u64);
+            (
+                format!("chromosome{quarter}"),
+                [&chromosome[..8_000], gene, &chromosome[8_000..]].concat(),
+            )
+        })
+        .collect();
+    let contigs: Vec<(&str, Vec<u8>)> = contigs
+        .iter()
+        .map(|(name, sequence)| (name.as_str(), sequence.clone()))
+        .collect();
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &close_lineage());
+    assert!(reported.is_empty());
+    assert_eq!(summary.surveyed_entries, 0);
+    // The plasmid does come out when the contigs only have to cover it.
+    let reported = screen(&shard, directory.path(), &contigs, &ScreenConfig::default()).0;
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].contigs.len(), 4);
+}
+
+#[test]
+fn a_contig_with_a_long_rest_counts_only_when_the_contig_rule_allows() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(3_000, 5);
+    let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
+    let carrier = [&plasmid[2_000..], &random_sequence(9_000, 8)[..]].concat();
+    let contigs = [("pure", plasmid[..2_000].to_vec()), ("carrier", carrier)];
+    let spans = |report: &ScreenEntry| -> Vec<(String, u64, u64)> {
+        report
+            .contigs
+            .iter()
+            .map(|c| (c.name.clone(), c.length, c.aligned))
+            .collect()
+    };
+    let reported = screen(&shard, directory.path(), &contigs, &ScreenConfig::default()).0;
+    assert_eq!(reported.len(), 1);
+    assert_eq!(
+        spans(&reported[0]),
+        [
+            ("pure".into(), 2_000, 2_000),
+            ("carrier".into(), 10_000, 1_000)
+        ]
+    );
+    let strict = ScreenConfig::new(DecisionRule {
+        min_contig_coverage: 0.5,
+        ..DecisionRule::default()
+    });
+    let reported = screen(&shard, directory.path(), &contigs, &strict).0;
+    assert_eq!(reported.len(), 1);
+    assert_eq!(spans(&reported[0]), [("pure".into(), 2_000, 2_000)]);
+    let mut more = strict.clone();
+    more.rule.min_query_coverage = QueryCoverage::Bases(2_700);
+    assert!(
+        screen(&shard, directory.path(), &contigs, &more)
+            .0
+            .is_empty()
+    );
+}
+
+#[test]
+fn matched_contigs_are_written_for_a_smaller_set_of_assemblies() {
+    use std::io::Read;
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(3_000, 61);
+    let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
+    let read = |path: &Path| {
+        let mut text = String::new();
+        flate2::read::MultiGzDecoder::new(std::fs::File::open(path).unwrap())
+            .read_to_string(&mut text)
+            .unwrap();
+        text
+    };
+    let atlas = directory.path().join("atlas");
+    let config = ScreenConfig {
+        contig_dir: Some(atlas.clone()),
+        survey_only: true,
+        ..close_lineage()
+    };
+    let contigs = [
+        ("copy", plasmid[200..2_800].to_vec()),
+        ("other", random_sequence(2_000, 62)),
+    ];
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &config);
+    assert!(reported.is_empty());
+    assert_eq!(summary.alignments, 0);
+    assert_eq!((summary.matched_contigs, summary.matched_bases), (1, 2_600));
+    let text = read(&atlas.join("assembly.gz"));
+    assert!(text.starts_with(">copy extra words\n"), "{text}");
+    assert!(!text.contains("other"));
+    assert_eq!(
+        text.lines().nth(1).unwrap().as_bytes(),
+        &plasmid[200..2_800]
+    );
+    // Without survey only, the file holds the contigs of the reported.
+    let hits_only = directory.path().join("reported");
+    let config = ScreenConfig {
+        contig_dir: Some(hits_only.clone()),
+        survey_only: false,
+        ..config
+    };
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &config);
+    assert_eq!(reported.len(), 1);
+    assert_eq!(
+        (summary.reported_contigs, summary.reported_bases),
+        (1, 2_600)
+    );
+    let text = read(&hits_only.join("assembly.gz"));
+    assert!(text.starts_with(">copy extra words\n") && !text.contains("other"));
+    // An assembly without a matching contig leaves no file.
+    let empty = directory.path().join("empty");
+    let config = ScreenConfig {
+        contig_dir: Some(empty.clone()),
+        ..config
+    };
+    let unrelated = [("other", random_sequence(2_000, 63))];
+    let (_, summary) = screen(&shard, directory.path(), &unrelated, &config);
+    assert_eq!(summary.matched_contigs, 0);
+    assert!(!empty.exists());
+}
+
+#[test]
+fn contigs_of_unknown_bases_are_skipped_and_gzip_and_empty_files_are_read() {
+    use std::io::Write;
+    let directory = tempfile::tempdir().unwrap();
+    let first = random_sequence(3_000, 5);
+    let shard = plasmids(directory.path(), &[("first", &first)]);
+    let fasta = [
+        b">gap\n".as_slice(),
+        &[b'N'; 5_000],
+        b"\n>c1 words\n",
+        &first[200..1_800],
+        b"\n>short\nACGT\n",
+    ]
+    .concat();
+    let compressed = directory.path().join("assembly.fa.gz");
+    let mut encoder = flate2::write::GzEncoder::new(
+        std::fs::File::create(&compressed).unwrap(),
+        flate2::Compression::fast(),
+    );
+    encoder.write_all(&fasta).unwrap();
+    encoder.finish().unwrap();
+    let (reported, summary) = screen_path(&shard, &compressed, &ScreenConfig::default());
+    assert_eq!((summary.contigs, summary.skipped_contigs), (1, 2));
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].contigs[0].name, "c1");
+    let empty = directory.path().join("empty.fa");
+    std::fs::write(&empty, b"").unwrap();
+    let (reported, summary) = screen_path(&shard, &empty, &ScreenConfig::default());
+    assert!(reported.is_empty());
+    assert_eq!(summary.contigs, 0);
+}
+
+#[test]
+fn records_are_plain_json() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_sequence(3_000, 71);
+    let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
+    let contigs = [("copy", reverse_complement(&plasmid))];
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &ScreenConfig::default());
+    let report = serde_json::to_value(&reported[0]).unwrap();
+    assert_eq!(report["type"], "entry");
+    assert_eq!(report["entry"], "plasmid");
+    assert_eq!(report["contigs"][0]["name"], "copy");
+    let fragment = &report["primary"][0]["fragment"];
+    assert_eq!(fragment["contig_index"], 0);
+    assert_eq!(fragment["alignment"]["cigar"], "3000=");
+    assert_eq!(fragment["alignment"]["strand"], "reverse");
+    let summary = serde_json::to_value(&summary).unwrap();
+    assert_eq!(
+        (summary["type"].clone(), summary["reported_entries"].clone()),
+        ("assembly".into(), 1.into())
     );
 }
