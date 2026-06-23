@@ -15,6 +15,8 @@ mod decision;
 mod fragments;
 mod records;
 mod survey;
+#[cfg(test)]
+mod tests;
 mod turn;
 
 pub use assembly::{EntrySink, Screener};
