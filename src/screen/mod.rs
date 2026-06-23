@@ -10,6 +10,7 @@
 
 mod assembly;
 mod batch;
+mod contig_output;
 mod records;
 mod survey;
 
@@ -21,6 +22,7 @@ use crate::decide::{DecideError, DecisionRule};
 use crate::index::IndexError;
 use crate::search::align_stage::{AlignStageConfig, AlignStageError};
 use crate::search::{SearchError, Stopped};
+use contig_output::write_contigs;
 use std::path::PathBuf;
 use thiserror::Error;
 

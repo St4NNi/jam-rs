@@ -3,7 +3,7 @@
 use super::batch::{AssemblyContigs, read_batches};
 use super::records::AssemblySummary;
 use super::survey::{SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, survey};
-use super::{ScreenConfig, ScreenError};
+use super::{ScreenConfig, ScreenError, write_contigs};
 use crate::index::Shard;
 use crate::search::SearchControl;
 use crate::seeds::Seeder;
@@ -75,6 +75,12 @@ impl<'a> Screener<'a> {
             .map(|&contig| contigs.list[contig as usize].length)
             .sum();
         summary.survey_seconds = started.elapsed().as_secs_f64();
+        if self.config.survey_only {
+            if let Some(directory) = &self.config.contig_dir {
+                write_contigs(path, name, &self.config, directory, &matched)?;
+            }
+            return Ok(summary);
+        }
         Ok(summary)
     }
 
