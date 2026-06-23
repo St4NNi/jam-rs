@@ -12,6 +12,8 @@ mod assembly;
 mod batch;
 mod contig_output;
 mod decision;
+#[cfg(test)]
+mod forward_tests;
 mod fragments;
 mod records;
 mod survey;
