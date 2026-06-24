@@ -1,2 +1,5 @@
+# Settings of grcov for the coverage workflow.
+# Copyright (c) 2023-2026 Sebastian Beyvers
+# SPDX-License-Identifier: MIT
 output-type: lcov
 output-file: ./lcov.info

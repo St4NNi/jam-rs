@@ -1,3 +1,6 @@
+# Builds the jam binary into a small container image.
+# Copyright (c) 2023-2026 Sebastian Beyvers
+# SPDX-License-Identifier: MIT
 FROM rust:1-slim AS builder
 WORKDIR /app
 COPY . .

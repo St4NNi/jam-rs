@@ -1,3 +1,6 @@
+# Measures test coverage and uploads it to Codecov.
+# Copyright (c) 2023-2026 Sebastian Beyvers
+# SPDX-License-Identifier: MIT
 on:
   push:
     branches: [main]

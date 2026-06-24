@@ -1,3 +1,6 @@
+# Tests, builds and publishes the crate when a release is created.
+# Copyright (c) 2023-2026 Sebastian Beyvers
+# SPDX-License-Identifier: MIT
 name: automatic_test_build_publish
 on: 
   release:

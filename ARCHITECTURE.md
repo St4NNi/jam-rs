@@ -1,3 +1,7 @@
+<!-- The design of jam: terms, stages, formats, modules and code rules. -->
+<!-- Copyright (c) 2023-2026 Sebastian Beyvers -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # jam architecture
 
 jam (just another minimizer) finds small sequences (genes, plasmids, contigs; 1 kb to a few Mb)
@@ -47,7 +51,9 @@ Every module, type, option, comment and document uses these terms with exactly t
 | query coverage | The share of query bases covered by an entry's mosaic. |
 | identity | Matches divided by alignment columns, over the fragments of the mosaic together. |
 | decision | The rule that reports an entry: query coverage, identity, and the optional contig rule (a contig counts only when a set share of its bases aligns to the query at a set identity, so a contig that only shares a gene or a repeat is left out). |
+| index | All shards of one collection: a directory of shards with `index.json`, or a single shard. |
 | shard | A part of an index (a set of entries) that one process opens. An index has one or more shards. |
+| frequent seed | A seed whose color set holds more entries than a limit; stage 1 does not expand it per entry. |
 | coordinator | The server that sends a query to every shard and merges their results. |
 | screen | The reverse direction: the small sequences form the index and large assemblies stream past it once. Results use the same decision. |
 | manifest | The JSON file of a shard: parameters, entries, files and their SHA-256 digests. |
@@ -64,19 +70,34 @@ All hashing uses jamhash (`jamhash_u64` of the 2-bit canonical k-mer, k at most 
 ```
 query
   -> query k-mers, hashed
-  -> stage 1, sketch     (RAM)      seed hits per entry -> containment estimate, coverage bound
-                                    -> candidate entries
-  -> stage 2, locate     (RAM/disk) seed locations of the candidate entries -> candidate bins
-  -> stage 3, align      (S3/disk)  alignment windows from packed sequences -> anchors -> chains
-                                    -> alignments (CIGAR) -> fragments -> mosaic -> decision
-  -> reported entries, streamed as each one is decided
+  -> stage 1, sketch  (RAM)         seed hits per entry -> containment estimate, coverage bound
+                                    -> possible entries
+  -> stage 2, locate  (local disk   seed locations of the possible entries: false seed hits
+                       or S3)       drop out, the coverage bound is computed again
+                                    -> alignment windows
+  -> stage 3, align   (S3 or local  packed sequences of the windows -> anchors -> chains
+                       disk)        -> alignments (CIGAR) -> fragments -> mosaic -> decision
+  -> entry events, sent through one channel as they happen
 ```
 
-Each entry moves through three states and is streamed to the caller as it changes: possible
-(after stage 1, with its containment estimate and coverage bound), located (after stage 2) and
-confirmed (after stage 3, with alignments). Entries whose coverage bound falls below the
-requested query coverage are dropped at once. Rare seeds are looked up first, so the bounds
-tighten early.
+Every entry that stage 1 keeps gets its events in order: possible (with the containment estimate
+and the coverage bound), located (with its alignment windows), and at the end exactly one of
+confirmed (with the decision and its alignments), dropped (with the stage and the reason) or
+unfinished (the search stopped first). Entries without any seed hit are counted, not reported.
+`--level sketch|locate|align` ends a search after that stage.
+
+The coverage bound: a stretch of the query without seed hits may still hide one present piece of
+up to `a` bases, where `a` is the shortest length whose miss chance, summed over all such
+stretches, fits half of the loss budget. Stage 2 computes the bound again from the confirmed seed
+locations with the other half. An entry whose bound is below the requested query coverage is
+dropped before any sequence is read.
+
+Frequent seeds: a seed whose color set holds more entries than a limit is not expanded per entry;
+its query positions count as possibly hit for the entries of its color set. This can only raise
+their bounds, so no entry is lost by it.
+
+The containment estimate is one-way: the share of the query that the entry holds, estimated from
+the seed hits alone. It counts seeds that survived unchanged, so mutations lower it.
 
 ## 3. Index on disk
 
@@ -87,17 +108,15 @@ fields, aligned arrays, offsets instead of pointers, a version number and a chec
 | --- | --- | --- | --- |
 | `manifest.json` | all | parameters (k, w, bin size, bucket bits, fingerprint bits), entries (name, contigs, bases), file sizes and SHA-256 digests | at open |
 | `sketch` | 1 | a directory of hash buckets; per bucket the sorted fingerprints of its seeds and the color set id of each; then every distinct color set once, entries as sorted ids | memory-mapped and kept in RAM |
-| `positions` | 2 | per entry a section with its seed locations, grouped by seed hash, so that one candidate entry needs few reads | memory-mapped from local disk, or byte ranges from S3 |
-| `packed/` | 3 | one packed sequence file per entry | byte ranges from local disk or S3 |
+| `positions` | 2 | per entry a section with its contig starts and its seed locations, grouped by seed hash, so that one candidate entry needs few reads | memory-mapped from local disk, or byte ranges from S3 |
+| `packed/` | 3 | one packed sequence file per entry (or the same files in another directory or under an S3 prefix) | byte ranges, through the block cache |
 
-The interfaces the search uses:
+`FORMATS.md` gives the byte layout of every file.
 
-- `Sketch::color_set(hash) -> Option<ColorSetId>` and `ColorSets::entries(id)`: stage 1.
-- `Positions::locations(entry, hash)`: stage 2, the seed locations of one seed in one entry.
-- `PackedSequence::read(entry, contig, range)`: stage 3, bases of one contig.
-
-Joining shards keeps every entry's positions and packed sequence as they are and rebuilds only
-the sketch, whose color sets gain the entries of all joined shards.
+An index is a directory of shards with `index.json`, which lists the shards in order with their
+entry ranges. Resharding (`jam index reshard`) turns any shards into any number of new shards,
+balanced by seed locations: every entry keeps its positions section and packed sequence, and each
+new shard rebuilds only its sketch. Merging and splitting are the two directions of it.
 
 ## 4. Source layout
 
@@ -136,14 +155,10 @@ A module uses only modules listed above it.
 
 ## 6. Plan
 
-jam 0.11 is built new in this layout, from the first commit with jamhash and the formats of
-section 3. Code of jam 0.10 is reused only where it fits (the alignment kernel, the S3 reader,
-the packed sequence format), and is cleaned while it moves. Results are compared with jam 0.10 on
-test sets: the reported entries must agree, except where the different seeds explain it.
-
-1. **Foundations, in parallel**: `seeds` and `index`; `storage`; `align`; `decide` and `loss`.
-2. **Search**: the three stages, the coverage bound with a loss budget, rare seeds first, entry
-   states streamed as they change.
-3. **Screen, service and commands**; the coordinator spreads stage 3 work over idle shards
-   (every shard can read every packed sequence from S3).
+1. **Cleanup**: the Aruna style policy, the review findings, and established libraries instead of
+   hand-written infrastructure (OpenDAL for S3, foyer for the block cache, iroh for the service).
+2. **Across machines**: the coordinator spreads stage 3 work over idle shards (every shard can
+   read every packed sequence from S3).
+3. **Validation**: accuracy and speed against jam 0.10, LexicMap and BLAST on the same test sets.
 4. **Speed**: faster than LexicMap on every query length, on local disk and on network storage.
+5. **PlasmidTracker** moves to jam 0.11.

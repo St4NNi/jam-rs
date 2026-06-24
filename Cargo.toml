@@ -1,3 +1,6 @@
+# The jam-rs package: dependencies, the jam binary and build profiles.
+# Copyright (c) 2023-2026 Sebastian Beyvers
+# SPDX-License-Identifier: MIT
 [package]
 name = "jam-rs"
 version = "0.11.0"

@@ -1,3 +1,6 @@
+# Checks formatting, lints and tests on every push.
+# Copyright (c) 2023-2026 Sebastian Beyvers
+# SPDX-License-Identifier: MIT
 name: test_build_push
 on: push
 jobs:

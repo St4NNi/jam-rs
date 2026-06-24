@@ -1,3 +1,7 @@
+<!-- What jam does and how to use its commands. -->
+<!-- Copyright (c) 2023-2026 Sebastian Beyvers -->
+<!-- SPDX-License-Identifier: MIT -->
+
 # jam
 
 jam (just another minimizer) finds small sequences (genes, plasmids, contigs; 1 kb to a few Mb)
