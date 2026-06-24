@@ -315,7 +315,7 @@ impl Sink {
         let record = Record::from_event(query, &entry.name, event, || contigs_of(shard, index))?;
         let lines = match (format, &record) {
             (Format::Json, _) => vec![json_line(&open.name, record)?],
-            (Format::Paf, Record::Confirmed { decision, .. }) => paf_lines(query, decision),
+            (Format::Paf, Record::Confirmed(confirmed)) => paf_lines(query, &confirmed.decision),
             (Format::Paf, _) => return Ok(()),
         };
         self.write_lines(&lines)

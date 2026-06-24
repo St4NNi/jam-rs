@@ -102,58 +102,76 @@ pub struct AlignWorkRecord {
     pub seconds: f64,
 }
 
+/// Stage 1 kept the entry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Possible {
+    pub query: String,
+    pub entry: String,
+    pub coverage_bound: u64,
+    pub containment_estimate: f64,
+}
+
+/// Stage 2 found where to align the entry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Located {
+    pub query: String,
+    pub entry: String,
+    pub coverage_bound: u64,
+    pub containment_estimate: f64,
+    /// Alignment windows and their bases together.
+    pub windows: u64,
+    pub window_bases: u64,
+}
+
+/// Stage 3 aligned the entry and it qualifies.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Confirmed {
+    pub query: String,
+    pub entry: String,
+    pub decision: DecisionRecord,
+}
+
+/// The entry left the search at `stage`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Dropped {
+    pub query: String,
+    pub entry: String,
+    pub stage: Stage,
+    pub reason: Reason,
+}
+
+/// The search ended before `stage` finished for the entry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Unfinished {
+    pub query: String,
+    pub entry: String,
+    pub stage: Stage,
+}
+
+/// The last line of a search.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Summary {
+    pub query: String,
+    pub query_length: u64,
+    pub ending: Ending,
+    /// The cause when the ending is `failed`.
+    pub error: Option<String>,
+    pub sketch: SketchWorkRecord,
+    pub locate: LocateWorkRecord,
+    pub align: AlignWorkRecord,
+}
+
 /// One line of output. `kind` names the record; `query` is the name of the query record and
 /// `entry` the name of the entry.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Record {
-    /// Stage 1 kept the entry.
-    Possible {
-        query: String,
-        entry: String,
-        coverage_bound: u64,
-        containment_estimate: f64,
-    },
-    /// Stage 2 found where to align the entry.
-    Located {
-        query: String,
-        entry: String,
-        coverage_bound: u64,
-        containment_estimate: f64,
-        /// Alignment windows and their bases together.
-        windows: u64,
-        window_bases: u64,
-    },
-    /// Stage 3 aligned the entry and it qualifies.
-    Confirmed {
-        query: String,
-        entry: String,
-        decision: DecisionRecord,
-    },
-    /// The entry left the search at `stage`.
-    Dropped {
-        query: String,
-        entry: String,
-        stage: Stage,
-        reason: Reason,
-    },
-    /// The search ended before `stage` finished for the entry.
-    Unfinished {
-        query: String,
-        entry: String,
-        stage: Stage,
-    },
-    /// The last line of a search.
-    Summary {
-        query: String,
-        query_length: u64,
-        ending: Ending,
-        /// The cause when the ending is `failed`.
-        error: Option<String>,
-        sketch: SketchWorkRecord,
-        locate: LocateWorkRecord,
-        align: AlignWorkRecord,
-    },
+    Possible(Possible),
+    Located(Located),
+    Confirmed(Confirmed),
+    Dropped(Dropped),
+    Unfinished(Unfinished),
+    Summary(Summary),
 }
 
 /// A record with the shard it comes from, as `jam search` prints it. Entry names may repeat
@@ -181,13 +199,13 @@ impl Record {
                 coverage_bound,
                 containment_estimate,
                 ..
-            } => Self::Possible {
+            } => Self::Possible(Possible {
                 query,
                 entry,
                 coverage_bound: *coverage_bound,
                 containment_estimate: *containment_estimate,
-            },
-            EntryEvent::Located(located) => Self::Located {
+            }),
+            EntryEvent::Located(located) => Self::Located(Located {
                 query,
                 entry,
                 coverage_bound: located.coverage_bound,
@@ -199,23 +217,23 @@ impl Record {
                     .flat_map(|c| &c.ranges)
                     .map(|range| range.end - range.start)
                     .sum(),
-            },
-            EntryEvent::Confirmed(AlignedEntry { decision, .. }) => Self::Confirmed {
+            }),
+            EntryEvent::Confirmed(AlignedEntry { decision, .. }) => Self::Confirmed(Confirmed {
                 query,
                 entry,
                 decision: DecisionRecord::new(decision.mosaic.query_length, decision, &contigs()?)?,
-            },
-            EntryEvent::Dropped { stage, reason, .. } => Self::Dropped {
+            }),
+            EntryEvent::Dropped { stage, reason, .. } => Self::Dropped(Dropped {
                 query,
                 entry,
                 stage: (*stage).into(),
                 reason: (*reason).into(),
-            },
-            EntryEvent::Unfinished { stage, .. } => Self::Unfinished {
+            }),
+            EntryEvent::Unfinished { stage, .. } => Self::Unfinished(Unfinished {
                 query,
                 entry,
                 stage: (*stage).into(),
-            },
+            }),
         })
     }
 
@@ -228,7 +246,7 @@ impl Record {
             Completion::Failed(message) => (Ending::Failed, Some(message.clone())),
         };
         let (sketch, locate, align) = (&summary.sketch, &summary.locate, &summary.align);
-        Self::Summary {
+        Self::Summary(Summary {
             query: query.to_string(),
             query_length: summary.query_length,
             ending,
@@ -265,7 +283,7 @@ impl Record {
                 alignments: align.counts.alignments,
                 seconds: align.time.as_secs_f64(),
             },
-        }
+        })
     }
 }
 
@@ -315,22 +333,22 @@ mod tests {
         let located = Record::from_event::<ReportError>("q1", "e", &events[1], || Ok(vec![]));
         assert!(matches!(
             located,
-            Ok(Record::Located {
+            Ok(Record::Located(Located {
                 windows: 2,
                 window_bases: 15,
                 ..
-            })
+            }))
         ));
     }
 
     #[test]
     fn a_record_with_its_shard_keeps_the_flat_json_line() {
-        let record = Record::Dropped {
+        let record = Record::Dropped(Dropped {
             query: "q1".into(),
             entry: "e".into(),
             stage: Stage::Align,
             reason: Reason::Decision,
-        };
+        });
         let shard_record = ShardRecord {
             shard: "s1".into(),
             record,
