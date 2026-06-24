@@ -25,13 +25,14 @@ the largest accepted chance of missing a qualifying entry.
 
 Build a shard from FASTA files (one entry per file; `--entry-per-record` makes one per record):
 
-    jam index -o plasmids.shard -t 8 plasmids/*.fa
+    jam index build -o plasmids.shard -t 8 plasmids/*.fa
 
-Join shards into one:
+Merge or split shards into an index of new shards, balanced by seed locations:
 
-    jam index --join -o all.shard part1.shard part2.shard
+    jam index reshard -o all.index --shards 4 part1.shard part2.shard
 
-Search every record of a query file (linear by default, `--circular` for circular queries):
+Search every record of a query file in one or more shards (linear by default, `--circular` for
+circular queries):
 
     jam search plasmids.shard query.fa --coverage 0.8 --identity 0.95
 
@@ -39,8 +40,8 @@ Show what a shard holds (`--json` for JSON):
 
     jam stats plasmids.shard
 
-`jam screen` (large assemblies streamed past small queries) and `jam serve` (a shard over TCP)
-are not built yet.
+`jam screen` streams large assemblies past an index of small sequences, and `jam serve` serves a
+shard to other machines; both are being finished.
 
 ## Output
 
