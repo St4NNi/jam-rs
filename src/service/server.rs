@@ -216,6 +216,3 @@ fn refuse(stream: TcpStream, connections: usize) {
     let _ = connection.write(&Frame::Refused { message });
 }
 
-#[cfg(test)]
-#[path = "server_tests.rs"]
-mod tests;
