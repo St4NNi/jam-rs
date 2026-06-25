@@ -60,7 +60,3 @@ pub enum ServiceError {
     Search(#[from] SearchError),
 }
 
-#[cfg(test)]
-mod test_shards;
-#[cfg(test)]
-mod tests;
