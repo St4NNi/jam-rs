@@ -5,14 +5,12 @@
 //! they arrive. Every answer is a stream of frames that ends with one summary or failure per shard
 //! and `Complete`.
 
-pub mod records;
 pub mod settings;
 
 use crate::index::IndexError;
 use crate::search::SearchError;
 use thiserror::Error;
 
-pub use records::{EventRecord, SummaryRecord};
 pub use settings::SearchSettings;
 
 /// Errors of serving and of remote searches.

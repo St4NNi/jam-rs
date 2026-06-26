@@ -2,17 +2,17 @@
 //! among them: they belong to the server.
 
 use super::ServiceError;
-use super::records::StageName;
 use crate::decide::QueryCoverage;
 use crate::loss::LossBudget;
-use crate::search::SearchConfig;
+use crate::report::Stage;
+use crate::search::{SearchConfig, SearchStage};
 use serde::{Deserialize, Serialize};
 
 /// The settings of one search that a client may choose.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SearchSettings {
     /// The last stage that runs.
-    pub level: StageName,
+    pub level: Stage,
     pub min_query_coverage: CoverageSetting,
     pub min_identity: f64,
     pub min_fragment_identity: f64,
@@ -90,7 +90,11 @@ impl SearchSettings {
     /// The server's `base` configuration with these settings in place, checked.
     pub fn apply(&self, base: &SearchConfig) -> Result<SearchConfig, ServiceError> {
         let mut config = *base;
-        config.level = self.level.into();
+        config.level = match self.level {
+            Stage::Sketch => SearchStage::Sketch,
+            Stage::Locate => SearchStage::Locate,
+            Stage::Align => SearchStage::Align,
+        };
         let rule = &mut config.rule;
         rule.min_query_coverage = self.min_query_coverage.into();
         rule.min_identity = self.min_identity;
@@ -116,7 +120,6 @@ impl SearchSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::SearchStage;
 
     #[test]
     fn settings_carry_the_client_choices_and_keep_the_server_limits() {
