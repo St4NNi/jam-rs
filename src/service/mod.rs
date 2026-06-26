@@ -1,47 +1,85 @@
-//! Serving a shard over TCP and searching remote shards: protocol, server, client and coordinator.
-//!
-//! A server opens one shard and answers searches on it. A coordinator is a server that also knows
-//! its peers: it sends each search to every peer and to its own shard, and merges their frames as
-//! they arrive. Every answer is a stream of frames that ends with one summary or failure per shard
-//! and `Complete`.
+//! Serving a shard over iroh (QUIC) and searching remote shards: messages, server, coordinator and
+//! client.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
-pub mod settings;
+mod client;
+mod endpoint;
+mod protocol;
+mod settings;
 
 use crate::index::IndexError;
+use crate::loss::LossError;
+use crate::report::ReportError;
 use crate::search::SearchError;
+use iroh::EndpointId;
+use iroh::endpoint::{BindError, ClosedStream, ConnectError, ConnectionError, InvalidSocketAddr};
 use thiserror::Error;
 
-pub use settings::SearchSettings;
+pub use client::{Answer, search};
+pub use endpoint::{bind, parse_address};
+pub use protocol::{ALPN, MAX_MESSAGE_BYTES, Reply, SearchRequest};
+pub use settings::{CoverageSetting, SearchSettings};
 
 /// Errors of serving and of remote searches.
 #[derive(Debug, Error)]
 pub enum ServiceError {
-    /// Reading or writing a connection failed.
-    #[error("{0}")]
+    /// Reading or writing a stream failed.
+    #[error("reading or writing a stream failed: {0}")]
     Io(#[from] std::io::Error),
-    /// A frame could not be read or written.
-    #[error("bad frame: {0}")]
-    Frame(String),
-    /// The other side speaks another protocol version.
-    #[error("protocol version {theirs} differs from version {ours} of this jam")]
-    Version { ours: u32, theirs: u32 },
-    /// A frame came that does not fit the conversation.
-    #[error("unexpected frame: {0}")]
-    Unexpected(String),
-    /// A search setting is invalid.
-    #[error("invalid search setting: {0}")]
-    Settings(String),
-    /// The server refused the search.
+    /// A message cannot be encoded or decoded.
+    #[error("bad message: {0}")]
+    Message(#[from] postcard::Error),
+    /// The endpoint cannot be bound.
+    #[error("cannot bind the endpoint: {0}")]
+    Bind(#[from] BindError),
+    /// A bind address is not usable.
+    #[error("invalid bind address: {0}")]
+    BindAddress(#[from] InvalidSocketAddr),
+    /// The server cannot be reached.
+    #[error("cannot connect: {0}")]
+    Connect(#[from] ConnectError),
+    /// The connection was lost.
+    #[error("the connection failed: {0}")]
+    Connection(#[from] ConnectionError),
+    /// A stream was used after it was closed.
+    #[error("the stream is already closed")]
+    Closed(#[from] ClosedStream),
+    /// The other side finished its stream before the last message.
+    #[error("the answer ended without its end message")]
+    EndedEarly,
+    /// The server did not run the search.
     #[error("the server refused the search: {0}")]
     Refused(String),
-    /// A peer does not fit the shards of this coordinator.
-    #[error("peer {address}: {message}")]
-    Peer { address: String, message: String },
-    /// Opening the shard failed.
+    /// A peer or server address is not `NODE_ID@ADDRESS`.
+    #[error("{0} is not NODE_ID@ADDRESS")]
+    Address(String),
+    /// The server stops and takes no more searches.
+    #[error("the server is stopping")]
+    Stopping(#[from] tokio::sync::AcquireError),
+    /// A peer passed the deadline and its grace.
+    #[error("no answer before the deadline")]
+    Timeout(#[from] tokio::time::error::Elapsed),
+    /// A peer failed; its shard gets a failed summary.
+    #[error("peer {peer}: {source}")]
+    Peer {
+        peer: EndpointId,
+        source: Box<ServiceError>,
+    },
+    /// The search thread panicked.
+    #[error("the search thread panicked")]
+    Panic,
+    /// Reading the shard failed.
     #[error(transparent)]
     Index(#[from] IndexError),
-    /// The search could not start.
+    /// The loss budget of a request is invalid.
+    #[error(transparent)]
+    Loss(#[from] LossError),
+    /// The search could not run, or its settings are invalid.
     #[error(transparent)]
     Search(#[from] SearchError),
+    /// A record cannot be built.
+    #[error(transparent)]
+    Report(#[from] ReportError),
 }
 

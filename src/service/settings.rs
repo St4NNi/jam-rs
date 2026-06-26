@@ -1,5 +1,7 @@
-//! The search settings that a client sends with a search. Limits on threads and memory are not
-//! among them: they belong to the server.
+//! The search settings a client sends with a search; threads and memory limits belong to the
+//! server.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::ServiceError;
 use crate::decide::QueryCoverage;
@@ -103,16 +105,13 @@ impl SearchSettings {
         rule.min_contig_coverage = self.min_contig_coverage;
         rule.min_contig_identity = self.min_contig_identity;
         config.align.min_chain_identity = self.min_chain_identity;
-        config.loss_budget = LossBudget::new(self.loss_budget)
-            .map_err(|error| ServiceError::Settings(error.to_string()))?;
+        config.loss_budget = LossBudget::new(self.loss_budget)?;
         let scores = &mut config.align.chain.scores;
         scores.match_score = self.match_score;
         scores.mismatch_score = self.mismatch_score;
         scores.gap_open_score = self.gap_open_score;
         scores.gap_extend_score = self.gap_extend_score;
-        config
-            .validate()
-            .map_err(|error| ServiceError::Settings(error.to_string()))?;
+        config.validate()?;
         Ok(config)
     }
 }
@@ -122,7 +121,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settings_carry_the_client_choices_and_keep_the_server_limits() {
+    fn settings_keep_limits() {
         let mut client = SearchConfig {
             level: SearchStage::Locate,
             threads: 3,
@@ -150,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_are_rejected() {
+    fn invalid_settings_fail() {
         let mut settings = SearchSettings::of(&SearchConfig::default());
         settings.loss_budget = 0.0;
         assert!(settings.apply(&SearchConfig::default()).is_err());
