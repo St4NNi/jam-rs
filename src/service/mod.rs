@@ -4,9 +4,12 @@
 // SPDX-License-Identifier: MIT
 
 mod client;
+mod coordinator;
 mod endpoint;
 mod protocol;
+mod server;
 mod settings;
+mod shard;
 
 use crate::index::IndexError;
 use crate::loss::LossError;
@@ -17,9 +20,12 @@ use iroh::endpoint::{BindError, ClosedStream, ConnectError, ConnectionError, Inv
 use thiserror::Error;
 
 pub use client::{Answer, search};
+pub use coordinator::PEER_GRACE;
 pub use endpoint::{bind, parse_address};
 pub use protocol::{ALPN, MAX_MESSAGE_BYTES, Reply, SearchRequest};
+pub use server::{Server, ServerLimits};
 pub use settings::{CoverageSetting, SearchSettings};
+pub use shard::ServedShard;
 
 /// Errors of serving and of remote searches.
 #[derive(Debug, Error)]
