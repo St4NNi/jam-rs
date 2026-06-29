@@ -1,14 +1,19 @@
-//! `jam search`: search every record of a query file in one or more shards and write the records.
+//! `jam search`: search every record of a query file in one or more shards, or on a server, and
+//! write the records.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::CliError;
 use crate::decide::QueryCoverage;
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
-use crate::report::{ContigInfo, Record, ReportError, ShardRecord, paf_lines};
+use crate::report::{ContigInfo, Ending, Record, ReportError, ShardRecord, paf_lines};
 use crate::search::{
     Completion, EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
 };
+use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
+use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -43,9 +48,12 @@ enum Format {
 #[derive(Debug, Args)]
 pub struct SearchArgs {
     /// One or more shard directories, then a FASTA file with the query records; each record is
-    /// searched on its own, in every shard
-    #[arg(required = true, num_args = 2.., value_name = "SHARD... QUERY")]
+    /// searched on its own, in every shard. With --server only the query file
+    #[arg(required = true, num_args = 1.., value_name = "SHARD... QUERY")]
     paths: Vec<PathBuf>,
+    /// Search on the server at NODE_ID@ADDRESS, as `jam serve` prints it, instead of local shards
+    #[arg(long, value_parser = parse_address)]
+    server: Option<EndpointAddr>,
     /// Treat the queries as circular instead of linear
     #[arg(long)]
     circular: bool,
@@ -98,6 +106,7 @@ impl SearchArgs {
         let (query, places) = self
             .paths
             .split_last()
+            .filter(|(_, places)| !places.is_empty())
             .ok_or_else(|| CliError::Usage("give a shard and a query file".into()))?;
         let mut shards = Vec::new();
         for place in places {
@@ -143,6 +152,9 @@ fn open_shards(directories: &[PathBuf]) -> Result<Vec<NamedShard>, CliError> {
 /// Searches every query record in every shard and writes the records. Fails when a search did
 /// not complete, after all records are written.
 pub fn run(args: &SearchArgs) -> Result<(), CliError> {
+    if let Some(server) = &args.server {
+        return run_remote(args, server);
+    }
     let config = config_of(args)?;
     let inputs = args.inputs()?;
     let shards = open_shards(&inputs.shards)?;
@@ -161,39 +173,104 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         .map(|open| Searcher::new(&open.shard, &model))
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = Sink::new(args)?;
-    let mut reader =
-        needletail::parse_fastx_file(inputs.query).map_err(|error| CliError::Query {
-            path: inputs.query.to_path_buf(),
-            message: error.to_string(),
-        })?;
-    let (mut records, mut incomplete) = (0, 0);
-    while let Some(record) = reader.next() {
-        let record = record.map_err(|error| CliError::Query {
-            path: inputs.query.to_path_buf(),
-            message: error.to_string(),
-        })?;
-        let name = first_word(record.id());
-        let sequence = record.seq().to_ascii_uppercase();
-        records += 1;
+    let incomplete = each_query(inputs.query, |name, sequence| {
+        let mut incomplete = 0;
         for (open, searcher) in shards.iter().zip(&searchers) {
-            let query = Query {
-                name: &name,
-                sequence: &sequence,
-            };
+            let query = Query { name, sequence };
             let summary = search_one(args, searcher, open, &config, &mut sink, &query)?;
-            sink.finish_query(args.format, &open.name, &name, &summary)?;
+            sink.finish_query(args.format, &open.name, name, &summary)?;
             incomplete += usize::from(summary.completion != Completion::Complete);
         }
-    }
-    if records == 0 {
-        return Err(CliError::Query {
-            path: inputs.query.to_path_buf(),
-            message: "it holds no records".into(),
-        });
-    }
+        Ok(incomplete)
+    })?;
     match incomplete {
         0 => Ok(()),
         count => Err(CliError::Incomplete(count)),
+    }
+}
+
+/// Searches every query record on the server and writes its records as a local search does.
+/// Fails when a shard did not complete, after all records are written.
+fn run_remote(args: &SearchArgs, server: &EndpointAddr) -> Result<(), CliError> {
+    let [query] = args.paths.as_slice() else {
+        return Err(CliError::Usage(
+            "with --server give only the query file".into(),
+        ));
+    };
+    let config = config_of(args)?;
+    let settings = SearchSettings::of(&config);
+    let deadline_ms = args
+        .deadline
+        .map(|seconds| (seconds * 1_000.0).ceil() as u64);
+    let mut sink = Sink::new(args)?;
+    let runtime = tokio::runtime::Runtime::new().map_err(ServiceError::from)?;
+    let endpoint = runtime.block_on(bind(SecretKey::generate(), &[]))?;
+    let incomplete = each_query(query, |name, sequence| {
+        let request = SearchRequest {
+            query_name: name.to_string(),
+            bases: sequence.to_vec(),
+            circular: args.circular,
+            settings: settings.clone(),
+            deadline_ms,
+            local_only: false,
+        };
+        runtime.block_on(search_remote(
+            &endpoint,
+            server,
+            &request,
+            args.format,
+            &mut sink,
+        ))
+    })?;
+    match incomplete {
+        0 => Ok(()),
+        count => Err(CliError::Incomplete(count)),
+    }
+}
+
+/// Writes the records of one remote search as they arrive; returns how many shards did not
+/// complete.
+async fn search_remote(
+    endpoint: &Endpoint,
+    server: &EndpointAddr,
+    request: &SearchRequest,
+    format: Format,
+    sink: &mut Sink,
+) -> Result<usize, CliError> {
+    let mut answer = search(endpoint, server.clone(), request).await?;
+    let mut incomplete = 0;
+    while let Some(record) = answer.next().await?.and_then(|reply| reply.into_record()) {
+        if let Record::Summary(summary) = &record.record {
+            incomplete += usize::from(summary.ending != Ending::Complete);
+        }
+        sink.write_lines(&record_lines(format, &record)?)?;
+    }
+    sink.writer.flush()?;
+    Ok(incomplete)
+}
+
+/// Calls `search` with the name (first word of the id) and the upper-case bases of every record
+/// of the query file, and sums the incomplete searches it returns. Fails on a file without
+/// records.
+fn each_query(
+    path: &Path,
+    mut search: impl FnMut(&str, &[u8]) -> Result<usize, CliError>,
+) -> Result<usize, CliError> {
+    let query_error = |message: String| CliError::Query {
+        path: path.to_path_buf(),
+        message,
+    };
+    let mut reader =
+        needletail::parse_fastx_file(path).map_err(|error| query_error(error.to_string()))?;
+    let (mut records, mut incomplete) = (0, 0);
+    while let Some(record) = reader.next() {
+        let record = record.map_err(|error| query_error(error.to_string()))?;
+        records += 1;
+        incomplete += search(&first_word(record.id()), &record.seq().to_ascii_uppercase())?;
+    }
+    match records {
+        0 => Err(query_error("it holds no records".into())),
+        _ => Ok(incomplete),
     }
 }
 
@@ -312,13 +389,11 @@ impl Sink {
             .entries
             .get(index as usize)
             .ok_or(ReportError::UnknownEntry(index))?;
-        let record = Record::from_event(query, &entry.name, event, || contigs_of(shard, index))?;
-        let lines = match (format, &record) {
-            (Format::Json, _) => vec![json_line(&open.name, record)?],
-            (Format::Paf, Record::Confirmed(confirmed)) => paf_lines(query, &confirmed.decision),
-            (Format::Paf, _) => return Ok(()),
+        let record = ShardRecord {
+            shard: open.name.clone(),
+            record: Record::from_event(query, &entry.name, event, || contigs_of(shard, index))?,
         };
-        self.write_lines(&lines)
+        self.write_lines(&record_lines(format, &record)?)
     }
 
     fn write_lines(&mut self, lines: &[String]) -> Result<(), CliError> {
@@ -343,6 +418,17 @@ impl Sink {
         self.writer.flush()?;
         Ok(())
     }
+}
+
+/// The output lines of one record: its JSON line, or the PAF lines of a confirmed entry.
+fn record_lines(format: Format, record: &ShardRecord) -> Result<Vec<String>, CliError> {
+    Ok(match (format, &record.record) {
+        (Format::Json, _) => vec![serde_json::to_string(record)?],
+        (Format::Paf, Record::Confirmed(confirmed)) => {
+            paf_lines(&confirmed.query, &confirmed.decision)
+        }
+        (Format::Paf, _) => Vec::new(),
+    })
 }
 
 fn json_line(shard: &str, record: Record) -> Result<String, CliError> {
