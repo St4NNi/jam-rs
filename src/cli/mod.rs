@@ -1,8 +1,11 @@
 //! The commands: `index`, `search`, `stats`, `screen` and `serve`.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod error;
 mod index;
 mod search;
+mod serve;
 mod stats;
 
 use clap::{Parser, Subcommand};
@@ -27,8 +30,8 @@ enum Command {
     Stats(stats::StatsArgs),
     /// Stream large assemblies past small query sequences (not built yet)
     Screen,
-    /// Serve a shard over TCP (not built yet)
-    Serve,
+    /// Serve a shard over iroh, as the coordinator of its peers when it has some
+    Serve(serve::ServeArgs),
 }
 
 /// Parses the command line and runs the chosen command.
@@ -38,6 +41,6 @@ pub fn run() -> Result<(), CliError> {
         Command::Search(args) => search::run(&args),
         Command::Stats(args) => stats::run(&args),
         Command::Screen => Err(CliError::Usage("jam screen is not built yet".into())),
-        Command::Serve => Err(CliError::Usage("jam serve is not built yet".into())),
+        Command::Serve(args) => serve::run(&args),
     }
 }

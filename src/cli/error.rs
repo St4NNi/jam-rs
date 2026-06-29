@@ -1,9 +1,12 @@
 //! The errors of the commands, printed by `main` in one plain line.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::index::IndexError;
 use crate::loss::LossError;
 use crate::report::ReportError;
 use crate::search::SearchError;
+use crate::service::ServiceError;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -49,6 +52,9 @@ pub enum CliError {
     /// Searches ended before every possible entry was decided (a deadline passed).
     #[error("{0} searches did not complete")]
     Incomplete(usize),
+    /// Serving or a remote search failed.
+    #[error(transparent)]
+    Service(#[from] ServiceError),
     /// The search thread panicked.
     #[error("the search thread panicked")]
     Panic,
