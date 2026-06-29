@@ -1,6 +1,5 @@
-//! The coordinator: one search on the own shard and on every peer at once, their messages
-//! forwarded as they arrive. A failed or slow peer becomes a failed summary of its shard and
-//! never holds back the others.
+//! The coordinator: one search on the own shard and on every peer at once, messages forwarded
+//! as they arrive; a failed or slow peer becomes a failed summary of its shard alone.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -18,6 +17,9 @@ use tokio::sync::mpsc;
 
 /// How long a peer may answer past the deadline before its shard counts as failed.
 pub const PEER_GRACE: Duration = Duration::from_secs(5);
+
+/// How long connecting to a peer may take; inside one cluster it takes milliseconds.
+pub const PEER_CONNECT: Duration = Duration::from_secs(5);
 
 /// One search as a server runs it.
 pub struct ShardSearch {
@@ -87,7 +89,7 @@ async fn forward_peer(
 }
 
 /// Sends the search to `peer` and passes its messages on. Each wait is bounded by the deadline
-/// plus `PEER_GRACE`. An error after the peer's summary changes nothing, so it is dropped.
+/// plus `PEER_GRACE`, and connecting also by `PEER_CONNECT`. An error after the peer's summary changes nothing, so it is dropped.
 async fn relay(
     endpoint: &Endpoint,
     peer: EndpointAddr,
@@ -101,7 +103,10 @@ async fn relay(
         let left = deadline.saturating_duration_since(Instant::now());
         u64::try_from(left.as_millis()).unwrap_or(u64::MAX)
     });
-    let mut answer = within(limit, client::search(endpoint, peer, &request)).await?;
+    let connected = Instant::now() + PEER_CONNECT;
+    let connect_limit = limit.map_or(connected, |limit| limit.min(connected));
+    let connect = client::search(endpoint, peer, &request);
+    let mut answer = within(Some(connect_limit), connect).await?;
     let mut summarized = false;
     loop {
         let reply = match within(limit, answer.next()).await {

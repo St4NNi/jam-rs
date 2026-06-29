@@ -20,7 +20,7 @@ use iroh::endpoint::{BindError, ClosedStream, ConnectError, ConnectionError, Inv
 use thiserror::Error;
 
 pub use client::{Answer, search};
-pub use coordinator::PEER_GRACE;
+pub use coordinator::{PEER_CONNECT, PEER_GRACE};
 pub use endpoint::{bind, parse_address};
 pub use protocol::{ALPN, MAX_MESSAGE_BYTES, Reply, SearchRequest};
 pub use server::{Server, ServerLimits};
