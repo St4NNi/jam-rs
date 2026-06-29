@@ -89,3 +89,5 @@ pub enum ServiceError {
     Report(#[from] ReportError),
 }
 
+#[cfg(test)]
+mod tests;
