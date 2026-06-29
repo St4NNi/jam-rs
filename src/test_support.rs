@@ -44,15 +44,6 @@ pub fn with_substitutions(rng: &mut StdRng, bases: &[u8], identity: f64) -> Vec<
         .collect()
 }
 
-/// The reverse complement of `bases`.
-pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
-    bases
-        .iter()
-        .rev()
-        .map(|&base| crate::align::complement(base))
-        .collect()
-}
-
 /// The FASTA text of the contigs of entry `entry`, named `entry{entry}_contig{index}`.
 pub fn fasta_text(entry: usize, contigs: &[Vec<u8>]) -> Vec<u8> {
     let mut text = Vec::new();
@@ -107,23 +98,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_same_seed_gives_the_same_bases() {
+    fn seeds_repeat_bases() {
         assert_eq!(random_bases(&mut rng(7), 50), random_bases(&mut rng(7), 50));
         assert_ne!(random_bases(&mut rng(7), 50), random_bases(&mut rng(8), 50));
     }
 
     #[test]
-    fn substitutions_follow_the_identity() {
+    fn substitutions_follow_identity() {
         let mut rng = rng(1);
         let bases = random_bases(&mut rng, 100_000);
         let copy = with_substitutions(&mut rng, &bases, 0.9);
         let same = bases.iter().zip(&copy).filter(|(a, b)| a == b).count();
         assert!((89_000..91_000).contains(&same), "{same}");
         assert_eq!(with_substitutions(&mut rng, &bases, 1.0), bases);
-    }
-
-    #[test]
-    fn reverse_complement_reverses_and_complements() {
-        assert_eq!(reverse_complement(b"AACGTN"), b"NACGTT");
     }
 }

@@ -27,6 +27,7 @@
 
 use super::IndexError;
 use super::bits::{crc32, u32_at, u64_at};
+use crate::seeds::base_code;
 use crate::storage::ReadAt;
 use std::ops::Range;
 use std::sync::Arc;
@@ -37,18 +38,6 @@ const HEADER_BYTES: u64 = 128;
 /// Packed bytes per checksum block, so 16,384 bases.
 const BLOCK_BYTES: u64 = 4096;
 const RUN_BYTES: u64 = 16;
-const OTHER: u8 = 4;
-
-const CODE: [u8; 256] = {
-    let mut code = [OTHER; 256];
-    let mut index = 0;
-    while index < 4 {
-        code[b"ACGT"[index] as usize] = index as u8;
-        code[b"acgt"[index] as usize] = index as u8;
-        index += 1;
-    }
-    code
-};
 
 /// A run of one byte other than A, C, G or T, at entry coordinates `start..start + length`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,11 +85,13 @@ impl PackedWriter {
             if slot == 0 {
                 self.packed.push(0);
             }
-            let code = CODE[byte as usize];
-            if code == OTHER {
-                self.push_run(byte.to_ascii_uppercase());
-            } else if let Some(last) = self.packed.last_mut() {
-                *last |= code << (2 * slot);
+            match base_code(byte) {
+                None => self.push_run(byte.to_ascii_uppercase()),
+                Some(code) => {
+                    if let Some(last) = self.packed.last_mut() {
+                        *last |= code << (2 * slot);
+                    }
+                }
             }
             self.bases += 1;
         }
@@ -266,7 +257,7 @@ impl PackedSequence {
             let valid = run.length > 0
                 && run.start >= previous_end
                 && end <= bases
-                && CODE[run.byte as usize] == OTHER
+                && base_code(run.byte).is_none()
                 && !run.byte.is_ascii_lowercase();
             previous_end = end;
             valid

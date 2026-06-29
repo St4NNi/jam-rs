@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::test_support::{random_bases, reverse_complement, rng};
+use crate::test_support::{random_bases, rng};
 
 fn scheme(k: u8, window: u16, min_entropy: f64) -> SeedScheme {
     SeedScheme {
@@ -23,10 +23,10 @@ fn collect(sequence: &[u8], scheme: SeedScheme) -> Vec<Kmer> {
 
 fn encode(kmer: &[u8]) -> (u64, u64) {
     let forward = kmer.iter().fold(0u64, |value, byte| {
-        (value << 2) | u64::from(CODE[*byte as usize])
+        (value << 2) | u64::from(base_code(*byte).unwrap())
     });
     let reverse = kmer.iter().rev().fold(0u64, |value, byte| {
-        (value << 2) | (3 - u64::from(CODE[*byte as usize]))
+        (value << 2) | (3 - u64::from(base_code(*byte).unwrap()))
     });
     (forward, reverse)
 }
@@ -34,7 +34,7 @@ fn encode(kmer: &[u8]) -> (u64, u64) {
 fn entropy_of(kmer: &[u8]) -> f64 {
     let mut counts = [0usize; 4];
     for byte in kmer {
-        counts[usize::from(CODE[*byte as usize])] += 1;
+        counts[usize::from(base_code(*byte).unwrap())] += 1;
     }
     shannon_entropy(counts, kmer.len())
 }
@@ -63,7 +63,7 @@ fn window_minima(hashes: &[u64], offset: usize, window: usize, selected: &mut Ve
 /// Clean runs of `sequence` with the offset of their first base.
 fn clean_runs(sequence: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     sequence
-        .split(|byte| CODE[*byte as usize] == BREAK)
+        .split(|byte| base_code(*byte).is_none())
         .map(move |run| (run.as_ptr() as usize - sequence.as_ptr() as usize, run))
 }
 
@@ -114,7 +114,7 @@ fn single_kmer_windows() {
     let mut expected = Vec::new();
     for start in 0..=sequence.len() - 25 {
         let kmer = &sequence[start..start + 25];
-        if kmer.iter().any(|byte| CODE[*byte as usize] == BREAK) || entropy_of(kmer) < 1.0 {
+        if kmer.iter().any(|byte| base_code(*byte).is_none()) || entropy_of(kmer) < 1.0 {
             continue;
         }
         let (forward, reverse) = encode(kmer);
@@ -329,4 +329,21 @@ fn entropy_counts_match() {
             );
         }
     }
+}
+
+#[test]
+fn base_helpers_agree() {
+    assert_eq!(base_code(b'g'), Some(2));
+    assert_eq!(base_code(b'N'), None);
+    assert_eq!(complement(b'a'), b'T');
+    assert_eq!(reverse_complement(b"AACGTNr"), b"YNACGTT");
+    let mut found = Vec::new();
+    kmers(b"ACGTNacgta", 3, |code| found.push(code));
+    let starts: Vec<usize> = found.iter().map(|code| code.position).collect();
+    assert_eq!(starts, [0, 1, 5, 6, 7]);
+    assert_eq!(
+        (found[0].forward, found[0].reverse),
+        (0b00_01_10, 0b01_10_11)
+    );
+    assert_eq!(found[0].canonical(), 0b00_01_10);
 }

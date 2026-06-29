@@ -74,19 +74,6 @@ pub fn kmer_hash(canonical: u64) -> u64 {
     jamhash::jamhash_u64(canonical)
 }
 
-const BREAK: u8 = 4;
-
-const CODE: [u8; 256] = {
-    let mut code = [BREAK; 256];
-    let mut index = 0;
-    while index < 4 {
-        code[b"ACGT"[index] as usize] = index as u8;
-        code[b"acgt"[index] as usize] = index as u8;
-        index += 1;
-    }
-    code
-};
-
 /// Chooses seeds and query k-mers with one seed scheme.
 pub struct Seeder {
     scheme: SeedScheme,
@@ -157,18 +144,14 @@ impl Seeder {
                 emit_all(all.finish());
                 keep_low(low.finish());
             }
-            Step::Kmer {
-                position,
-                canonical,
-                reverse,
-            } => {
+            Step::Kmer(code) => {
                 let candidate = Candidate {
                     kmer: Kmer {
-                        hash: kmer_hash(canonical),
-                        position,
-                        reverse,
+                        hash: kmer_hash(code.canonical()),
+                        position: code.position as u64,
+                        reverse: code.reverse < code.forward,
                     },
-                    passes: self.passes_entropy(canonical),
+                    passes: self.passes_entropy(code.canonical()),
                 };
                 emit_all(all.push(candidate));
                 if candidate.passes {
@@ -186,26 +169,92 @@ impl Seeder {
     /// Calls `emit` for every k-mer of a query, in order. A k-mer below the entropy limit gets the
     /// salted hash, as the seeds of low-complexity runs do.
     pub fn query_kmers(&self, query: &[u8], mut emit: impl FnMut(Kmer)) {
-        scan(query, self.scheme.k, |step| {
-            if let Step::Kmer {
-                position,
-                canonical,
-                reverse,
-            } = step
-            {
-                let mut hash = kmer_hash(canonical);
-                if !self.passes_entropy(canonical) {
-                    hash ^= LOW_COMPLEXITY_SALT;
-                }
-                emit(Kmer {
-                    hash,
-                    position,
-                    reverse,
-                });
+        kmers(query, self.scheme.k, |code| {
+            let mut hash = kmer_hash(code.canonical());
+            if !self.passes_entropy(code.canonical()) {
+                hash ^= LOW_COMPLEXITY_SALT;
             }
+            emit(Kmer {
+                hash,
+                position: code.position as u64,
+                reverse: code.reverse < code.forward,
+            });
         });
     }
 }
+
+/// A k-mer of a sequence in 2-bit code (A 0, C 1, G 2, T 3), read on both strands.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct KmerCode {
+    /// Start of the k-mer in the sequence.
+    pub position: usize,
+    /// The k-mer as read on the sequence, its first base in the highest bits.
+    pub forward: u64,
+    /// The reverse complement of the k-mer in the same code.
+    pub reverse: u64,
+}
+
+impl KmerCode {
+    /// The canonical k-mer: the smaller of the k-mer and its reverse complement.
+    pub fn canonical(self) -> u64 {
+        self.forward.min(self.reverse)
+    }
+}
+
+/// Calls `visit` for every k-mer of `sequence` that holds only A, C, G and T (either case).
+/// `k` is 1 to 32.
+pub fn kmers(sequence: &[u8], k: u8, mut visit: impl FnMut(KmerCode)) {
+    scan(sequence, k, |step| {
+        if let Step::Kmer(code) = step {
+            visit(code);
+        }
+    });
+}
+
+/// The 2-bit code of a base (A 0, C 1, G 2, T 3, either case), `None` for any other byte.
+pub fn base_code(byte: u8) -> Option<u8> {
+    let code = CODE[usize::from(byte)];
+    (code != OTHER).then_some(code)
+}
+
+/// The complement of an IUPAC base, in upper case; other bytes stay as they are.
+pub fn complement(base: u8) -> u8 {
+    match base.to_ascii_uppercase() {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' | b'U' => b'A',
+        b'R' => b'Y',
+        b'Y' => b'R',
+        b'K' => b'M',
+        b'M' => b'K',
+        b'B' => b'V',
+        b'V' => b'B',
+        b'D' => b'H',
+        b'H' => b'D',
+        other => other,
+    }
+}
+
+/// The reverse complement of `bases`.
+pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
+    bases.iter().rev().map(|&base| complement(base)).collect()
+}
+
+/// The code of every byte that is not A, C, G or T.
+const OTHER: u8 = 4;
+
+/// The 2-bit code of every byte, `OTHER` for bytes other than A, C, G and T.
+const CODE: [u8; 256] = {
+    let mut code = [OTHER; 256];
+    let mut index = 0;
+    while index < 4 {
+        code[b"ACGT"[index] as usize] = index as u8;
+        code[b"acgt"[index] as usize] = index as u8;
+        index += 1;
+    }
+    code
+};
 
 /// Shannon entropy in bits of a k-mer with the given base counts.
 fn shannon_entropy(counts: [usize; 4], k: usize) -> f64 {
@@ -229,22 +278,18 @@ fn kmer_mask(k: u32) -> u64 {
 
 /// One step of a scan: a k-mer, or a byte other than A, C, G or T that ends a clean run.
 enum Step {
-    Kmer {
-        position: u64,
-        canonical: u64,
-        reverse: bool,
-    },
+    Kmer(KmerCode),
     Break,
 }
 
-/// Calls `visit` for every canonical k-mer of `sequence` and for every byte that breaks a run.
+/// Calls `visit` for every k-mer of `sequence` and for every byte that breaks a run.
 fn scan(sequence: &[u8], k: u8, mut visit: impl FnMut(Step)) {
     let k = u32::from(k);
     let mask = kmer_mask(k);
     let (mut forward, mut reverse, mut bases) = (0u64, 0u64, 0u32);
     for (index, &byte) in sequence.iter().enumerate() {
-        let code = CODE[byte as usize];
-        if code == BREAK {
+        let code = CODE[usize::from(byte)];
+        if code == OTHER {
             bases = 0;
             visit(Step::Break);
             continue;
@@ -254,11 +299,11 @@ fn scan(sequence: &[u8], k: u8, mut visit: impl FnMut(Step)) {
         reverse = (reverse >> 2) | ((3 - code) << (2 * (k - 1)));
         bases = (bases + 1).min(k);
         if bases == k {
-            visit(Step::Kmer {
-                position: (index + 1 - k as usize) as u64,
-                canonical: forward.min(reverse),
-                reverse: reverse < forward,
-            });
+            visit(Step::Kmer(KmerCode {
+                position: index + 1 - k as usize,
+                forward,
+                reverse,
+            }));
         }
     }
 }
