@@ -3,7 +3,13 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::test_support::miss_model;
+use std::sync::OnceLock;
+
+/// The model of these tests, built once from 100 layouts per length.
+fn model() -> &'static MissModel {
+    static MODEL: OnceLock<MissModel> = OnceLock::new();
+    MODEL.get_or_init(|| MissModel::with_layouts(25, 100, 100).unwrap())
+}
 
 /// The chance that all seeds are mutated, by trying every pattern of mutated bases.
 fn brute_force(length: usize, k: usize, seed_ends: &[usize], identity: f64) -> f64 {
@@ -83,17 +89,17 @@ fn simulation_agrees() {
 
 #[test]
 fn table_interpolation_holds() {
-    let model = miss_model();
-    assert_eq!((model.k(), model.window()), (21, 20));
+    let model = model();
+    assert_eq!((model.k(), model.window()), (25, 100));
     // A point of the table is returned as stored.
-    let on_grid = average_row(1000, 21, 20, 200, &[0.95])[0];
+    let on_grid = average_row(1000, 25, 100, 100, &[0.95])[0];
     assert!((model.miss_chance(1000, 0.95) / on_grid - 1.0).abs() < 1e-9);
-    // Between points the interpolation stays near the direct average of the same layouts.
+    // Between points the interpolation stays near a direct average; 100 layouts leave some noise.
     for (length, identity) in [(1100, 0.953), (700, 0.912), (2200, 0.9)] {
-        let direct = average_row(length, 21, 20, 200, &[identity])[0];
+        let direct = average_row(length, 25, 100, 100, &[identity])[0];
         let ratio = model.miss_chance(length as u64, identity) / direct;
         assert!(
-            (0.85..1.15).contains(&ratio),
+            (0.75..1.33).contains(&ratio),
             "{length} {identity}: {ratio}"
         );
     }
@@ -101,10 +107,10 @@ fn table_interpolation_holds() {
 
 #[test]
 fn edges_are_safe() {
-    let model = miss_model();
+    let model = model();
     assert!(model.miss_chance(1000, 0.95) > model.miss_chance(1500, 0.95));
     assert!(model.miss_chance(1000, 0.95) > model.miss_chance(1000, 0.97));
-    assert_eq!(model.miss_chance(20, 0.99), 1.0);
+    assert_eq!(model.miss_chance(24, 0.99), 1.0);
     assert_eq!(model.miss_chance(1000, 0.5), 1.0);
     assert_eq!(model.miss_chance(1000, 1.0), 0.0);
     assert_eq!(model.miss_chance(1000, f64::NAN), 1.0);

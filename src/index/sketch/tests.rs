@@ -1,20 +1,19 @@
-use super::*;
-use std::collections::BTreeMap;
+//! Round-trip, encoding and damage tests of the sketch format.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
+use super::*;
+use crate::test_support::rng;
+use rand::RngExt;
+use std::collections::BTreeMap;
 
 /// Writes a sketch of random seeds (key to color set id) and random color sets.
 fn write_random(path: &Path, bucket_bits: u32) -> (BTreeMap<u64, u32>, Vec<Vec<u32>>) {
-    let mut state = 0x5eed_u64 + u64::from(bucket_bits);
+    let mut rng = rng(0x5eed + u64::from(bucket_bits));
     let sets: Vec<Vec<u32>> = (0..300)
         .map(|_| {
-            let mut set: Vec<u32> = (0..1 + random(&mut state) % 20)
-                .map(|_| (random(&mut state) % 5000) as u32)
+            let mut set: Vec<u32> = (0..rng.random_range(1..21))
+                .map(|_| rng.random_range(0..5000))
                 .collect();
             set.sort_unstable();
             set.dedup();
@@ -24,13 +23,13 @@ fn write_random(path: &Path, bucket_bits: u32) -> (BTreeMap<u64, u32>, Vec<Vec<u
     let key_bits = bucket_bits + 16;
     let mut seeds = BTreeMap::new();
     for _ in 0..20_000 {
-        let key = random(&mut state) >> (64 - key_bits);
+        let key = rng.random::<u64>() >> (64 - key_bits);
         // Mostly small ids, a few rare ones, as frequency ranking gives.
-        let id = match random(&mut state) % 10 {
-            0 => random(&mut state) % 300,
-            _ => random(&mut state) % 4,
+        let id = match rng.random_range(0..10) {
+            0 => rng.random_range(0..300),
+            _ => rng.random_range(0..4),
         };
-        seeds.insert(key, id as u32);
+        seeds.insert(key, id);
     }
     let mut writer = SketchWriter::create(path, bucket_bits, 5000).unwrap();
     let mut block = Vec::new();
@@ -71,14 +70,14 @@ fn sketch_round_trip() {
         assert_eq!(sketch.entries(), 5000);
         assert_eq!(sketch.color_set_count(), sets.len() as u64);
         let key_bits = bucket_bits + 16;
-        let mut state = 99u64;
+        let mut rng = rng(99);
         for (key, id) in &seeds {
             // Any hash with the stored key finds it, whatever its lower bits.
-            let hash = (key << (64 - key_bits)) | (random(&mut state) >> key_bits);
+            let hash = (key << (64 - key_bits)) | (rng.random::<u64>() >> key_bits);
             assert_eq!(sketch.color_set(hash), Some(ColorSetId(*id)));
         }
         for _ in 0..20_000 {
-            let hash = random(&mut state);
+            let hash = rng.random::<u64>();
             let stored = seeds.get(&(hash >> (64 - key_bits)));
             assert_eq!(sketch.color_set(hash), stored.map(|id| ColorSetId(*id)));
         }
@@ -93,7 +92,7 @@ fn sketch_round_trip() {
 }
 
 #[test]
-fn rare_ids_are_escaped_instead_of_widening_every_value() {
+fn rare_ids_escaped() {
     let mut ids = vec![1u32; 100];
     ids[17] = 70_000_000;
     ids[60] = 3;

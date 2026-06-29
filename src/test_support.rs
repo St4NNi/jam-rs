@@ -1,11 +1,11 @@
-//! Test data shared by all tests: seeded random bases, copies with substitutions, the test miss model.
+//! Test data shared by all tests: seeded random bases and bytes, mutated copies, test shards.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use crate::loss::MissModel;
+use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
-use std::sync::OnceLock;
+use std::path::Path;
 
 /// A random generator that gives the same values for the same seed on every run.
 pub fn rng(seed: u64) -> StdRng {
@@ -17,6 +17,13 @@ pub fn random_bases(rng: &mut StdRng, length: usize) -> Vec<u8> {
     (0..length)
         .map(|_| b"ACGT"[rng.random_range(0..4)])
         .collect()
+}
+
+/// `length` random bytes.
+pub fn random_bytes(rng: &mut StdRng, length: usize) -> Vec<u8> {
+    let mut bytes = vec![0; length];
+    rng.fill(&mut bytes[..]);
+    bytes
 }
 
 /// A copy of `bases` in which each base becomes another base with chance `1 - identity`.
@@ -46,10 +53,53 @@ pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-/// The miss model of the test shards (k 21, w 20), built once from 200 layouts per length.
-pub fn miss_model() -> &'static MissModel {
-    static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(21, 20, 200).unwrap())
+/// The FASTA text of the contigs of entry `entry`, named `entry{entry}_contig{index}`.
+pub fn fasta_text(entry: usize, contigs: &[Vec<u8>]) -> Vec<u8> {
+    let mut text = Vec::new();
+    for (index, bases) in contigs.iter().enumerate() {
+        text.extend_from_slice(format!(">entry{entry}_contig{index} description\n").as_bytes());
+        for line in bases.chunks(70) {
+            text.extend_from_slice(line);
+            text.push(b'\n');
+        }
+    }
+    text
+}
+
+/// Writes each entry (a list of contigs) to `directory/entry{index}.fa` and returns the inputs,
+/// named `entry{index}`.
+pub fn write_entries(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Vec<EntryInput> {
+    let inputs = entries.iter().enumerate().map(|(index, contigs)| {
+        let path = directory.join(format!("entry{index}.fa"));
+        std::fs::write(&path, fasta_text(index, contigs)).unwrap();
+        EntryInput::from_path(path)
+    });
+    inputs.collect()
+}
+
+/// The build options of the test shards: k 21, w 20 and bins of 256 bases, so short queries have
+/// enough seeds.
+pub fn build_options(directory: &Path, threads: usize) -> BuildOptions {
+    BuildOptions {
+        parameters: Parameters {
+            k: 21,
+            window: 20,
+            bin_bits: 8,
+            ..Parameters::default()
+        },
+        bucket_bits: None,
+        threads,
+        temp_dir: directory.to_path_buf(),
+        entry_per_record: false,
+    }
+}
+
+/// Builds and opens the shard `directory/shard` of `entries`, each a list of contigs.
+pub fn test_shard(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Shard {
+    let inputs = write_entries(directory, entries);
+    let output = directory.join("shard");
+    build_shard(&inputs, &output, &build_options(directory, 2)).unwrap();
+    Shard::open(&output).unwrap()
 }
 
 #[cfg(test)]

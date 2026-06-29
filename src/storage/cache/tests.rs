@@ -1,18 +1,9 @@
 use super::*;
+use crate::test_support::{random_bytes, rng};
+use rand::RngExt;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-
-fn bytes(length: usize, mut state: u64) -> Vec<u8> {
-    (0..length)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state as u8
-        })
-        .collect()
-}
 
 fn cache(ram_bytes: u64, block_bytes: u64) -> Arc<BlockCache> {
     BlockCache::open(&CacheConfig::new(ram_bytes, block_bytes)).unwrap()
@@ -67,7 +58,7 @@ impl ReadAt for Watched {
 
 #[test]
 fn large_range_is_fetched_in_bounded_batches() {
-    let data = bytes(2 << 20, 7);
+    let data = random_bytes(&mut rng(7), 2 << 20);
     let source = Watched::new(data.clone(), Duration::ZERO);
     let largest = Arc::clone(&source.largest);
     let cache = cache(4096, 4096);
@@ -81,7 +72,7 @@ fn large_range_is_fetched_in_bounded_batches() {
 
 #[test]
 fn reads_equal_the_source_and_count_requests() {
-    let data = bytes(100_000, 1);
+    let data = random_bytes(&mut rng(1), 100_000);
     let cache = cache(1 << 20, 4096);
     let source = cache.wrap(data.clone());
     let mut buffer = vec![0; 9000];
@@ -92,29 +83,26 @@ fn reads_equal_the_source_and_count_requests() {
     source.read_exact_at(4096, &mut buffer[..100]).unwrap();
     assert_eq!(buffer[..100], data[4096..4196]);
     assert_eq!((cache.stats().requests, cache.stats().hits), (1, 1));
-    let mut state = 7u64;
+    let mut draws = rng(7);
     for _ in 0..300 {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        let start = (state % 100_000) as usize;
-        let length = ((state >> 20) % 10_000) as usize % (100_000 - start + 1);
+        let start = draws.random_range(0..100_000);
+        let length = draws.random_range(0..10_000usize).min(100_000 - start);
         let mut out = vec![0; length];
         source.read_exact_at(start as u64, &mut out).unwrap();
         assert_eq!(out, data[start..start + length]);
     }
     assert!(source.read_exact_at(99_999, &mut [0; 2]).is_err());
     assert_eq!(source.size(), 100_000);
-    let other = cache.wrap(bytes(100_000, 2));
+    let other = cache.wrap(random_bytes(&mut rng(2), 100_000));
     let mut out = vec![0; 10];
     other.read_exact_at(0, &mut out).unwrap();
-    assert_eq!(out, bytes(100_000, 2)[..10]);
+    assert_eq!(out, random_bytes(&mut rng(2), 100_000)[..10]);
 }
 
 #[test]
 fn a_repeated_read_is_a_hit() {
     let cache = cache(1 << 20, 4096);
-    let source = cache.wrap(bytes(50_000, 3));
+    let source = cache.wrap(random_bytes(&mut rng(3), 50_000));
     let mut out = vec![0; 3000];
     for _ in 0..2 {
         source.read_exact_at(20_000, &mut out).unwrap();
@@ -131,7 +119,7 @@ fn short_final_blocks_stay_within_the_budget() {
     assert_eq!(cache.shards.len(), 1);
     let mut out = [0u8; 1];
     for object in 0..600 {
-        let source = cache.wrap(bytes(10, object));
+        let source = cache.wrap(random_bytes(&mut rng(object), 10));
         source.read_exact_at(0, &mut out).unwrap();
         assert!(cache.held_bytes() <= 2 * 4096);
     }
@@ -140,7 +128,7 @@ fn short_final_blocks_stay_within_the_budget() {
 
 #[test]
 fn budget_evicts_the_least_recently_used_block() {
-    let data = bytes(40_960, 3);
+    let data = random_bytes(&mut rng(3), 40_960);
     let cache = cache(2 * 4096, 4096);
     let source = cache.wrap(data);
     let mut out = vec![0; 1];
@@ -160,7 +148,7 @@ fn budget_evicts_the_least_recently_used_block() {
 #[test]
 fn parallel_misses_reach_the_fetch_limit_and_not_beyond() {
     let readers = 32;
-    let data = bytes(readers * 4096, 8);
+    let data = random_bytes(&mut rng(8), readers * 4096);
     let source = Watched::new(data.clone(), Duration::from_millis(50));
     let peak = Arc::clone(&source.peak);
     let mut config = CacheConfig::new(1 << 20, 4096);
@@ -187,7 +175,7 @@ fn parallel_misses_reach_the_fetch_limit_and_not_beyond() {
 
 #[test]
 fn read_ahead_fills_before_reads() {
-    let data = bytes(1 << 20, 9);
+    let data = random_bytes(&mut rng(9), 1 << 20);
     let mut config = CacheConfig::new(1 << 20, 4096);
     config.read_ahead_threads = 2;
     config.read_ahead_queue = 64;
@@ -206,7 +194,7 @@ fn read_ahead_fills_before_reads() {
 
 #[test]
 fn disk_level_serves_blocks_evicted_from_memory() {
-    let data = bytes(40_960, 4);
+    let data = random_bytes(&mut rng(4), 40_960);
     let directory = tempfile::tempdir().unwrap();
     let mut config = CacheConfig::new(2 * 4096, 4096);
     config.disk = Some(DiskConfig {
@@ -236,7 +224,7 @@ fn disk_level_serves_blocks_evicted_from_memory() {
 
 #[test]
 fn shards_share_the_budget() {
-    let data = bytes(1 << 22, 6);
+    let data = random_bytes(&mut rng(6), 1 << 22);
     let cache = cache(1 << 20, 1024);
     assert_eq!(cache.shards.len(), 16);
     let source = cache.wrap(data.clone());
@@ -247,7 +235,7 @@ fn shards_share_the_budget() {
 
 #[test]
 fn parallel_readers_agree() {
-    let data = bytes(1 << 20, 5);
+    let data = random_bytes(&mut rng(5), 1 << 20);
     let cache = cache(256 << 10, 4096);
     let source = cache.wrap(data.clone());
     read_in_parallel(&source, &data, 2000, 5000);

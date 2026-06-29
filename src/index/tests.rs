@@ -1,92 +1,47 @@
 //! End-to-end tests: build shards from generated entries, find every seed, reshard.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::*;
 use crate::seeds::Seeder;
+use crate::test_support::{
+    build_options, fasta_text, random_bases, rng, test_shard, write_entries,
+};
+use rand::RngExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
-
-fn random_bases(length: usize, state: &mut u64) -> Vec<u8> {
-    (0..length)
-        .map(|_| b"ACGT"[(random(state) % 4) as usize])
-        .collect()
-}
-
 /// Entries of a few contigs each. They share stretches of one common sequence, so many seeds
 /// belong to several entries, and hold runs of N, lower case bases and a low-complexity run.
-fn generated_entries(count: usize) -> Vec<Vec<(String, Vec<u8>)>> {
-    let mut state = 0x1dea_u64;
-    let shared = random_bases(30_000, &mut state);
+fn generated_entries(count: usize) -> Vec<Vec<Vec<u8>>> {
+    let mut rng = rng(0x1dea);
+    let shared = random_bases(&mut rng, 30_000);
     (0..count)
         .map(|entry| {
             (0..1 + entry % 3)
                 .map(|contig| {
-                    let mut sequence = random_bases(2_000 + 3_000 * contig, &mut state);
-                    let from = (random(&mut state) % 20_000) as usize;
+                    let mut sequence = random_bases(&mut rng, 2_000 + 3_000 * contig);
+                    let from = rng.random_range(0..20_000);
                     sequence.extend_from_slice(&shared[from..from + 5_000]);
                     sequence.extend(std::iter::repeat_n(b'A', 300));
                     sequence[100..140].fill(b'N');
                     sequence[500..600].make_ascii_lowercase();
-                    (format!("entry{entry}_contig{contig}"), sequence)
+                    sequence
                 })
                 .collect()
         })
         .collect()
 }
 
-fn write_fasta(path: &Path, contigs: &[(String, Vec<u8>)]) {
-    let mut text = Vec::new();
-    for (name, sequence) in contigs {
-        text.extend_from_slice(format!(">{name} some description\n").as_bytes());
-        for line in sequence.chunks(70) {
-            text.extend_from_slice(line);
-            text.push(b'\n');
-        }
-    }
-    std::fs::write(path, text).unwrap();
-}
-
-fn parameters() -> Parameters {
-    Parameters {
-        k: 21,
-        window: 20,
-        bin_bits: 6,
-        ..Parameters::default()
-    }
-}
-
 fn options(directory: &Path, threads: usize) -> BuildOptions {
-    BuildOptions {
-        parameters: parameters(),
-        bucket_bits: None,
-        threads,
-        temp_dir: directory.to_path_buf(),
-        entry_per_record: false,
-    }
-}
-
-/// Writes one FASTA file per entry and returns the inputs.
-fn inputs(directory: &Path, entries: &[Vec<(String, Vec<u8>)>]) -> Vec<EntryInput> {
-    entries
-        .iter()
-        .enumerate()
-        .map(|(index, contigs)| {
-            let path = directory.join(format!("genome{index}.fa"));
-            write_fasta(&path, contigs);
-            EntryInput::from_path(path)
-        })
-        .collect()
+    let mut options = build_options(directory, threads);
+    options.parameters.bin_bits = 6;
+    options
 }
 
 /// Checks that every seed of every entry is found through the sketch and the positions, and
 /// that the packed sequences give back the contigs.
-fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
+fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
     let parameters = shard.manifest().parameters;
     let seeder = Seeder::new(parameters.scheme()).unwrap();
     let mut locations = Vec::new();
@@ -95,8 +50,7 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
         let entry = entry as u32;
         let packed = shard.packed(entry).unwrap();
         let mut start = 0u64;
-        for (index, (name, sequence)) in contigs.iter().enumerate() {
-            assert_eq!(packed.contig_name(index).unwrap(), name.as_bytes());
+        for (index, sequence) in contigs.iter().enumerate() {
             packed
                 .read(index, 0..sequence.len() as u64, &mut bases)
                 .unwrap();
@@ -121,7 +75,7 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
             assert!(seeds > 100);
             start += sequence.len() as u64;
         }
-        let lengths = contigs.iter().map(|(_, sequence)| sequence.len() as u64);
+        let lengths = contigs.iter().map(|sequence| sequence.len() as u64);
         let bounds: Vec<u64> = std::iter::once(0)
             .chain(lengths.scan(0, |end, length| {
                 *end += length;
@@ -133,15 +87,17 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<(String, Vec<u8>)>]) {
 }
 
 #[test]
-fn every_seed_is_found_through_the_sketch_and_the_positions() {
+fn every_seed_found() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(7);
-    let inputs = inputs(directory.path(), &entries);
+    let inputs = write_entries(directory.path(), &entries);
     let output = directory.path().join("shard");
     let manifest = build_shard(&inputs, &output, &options(directory.path(), 3)).unwrap();
-    assert_eq!(manifest.entries[2].name, "genome2");
+    assert_eq!(manifest.entries[2].name, "entry2");
     assert_eq!(manifest.entries[2].contigs, 3);
     let shard = Shard::open(&output).unwrap();
+    let packed = shard.packed(2).unwrap();
+    assert_eq!(packed.contig_name(1).unwrap(), b"entry2_contig1");
     shard.verify().unwrap();
     check_every_seed(&shard, &entries);
     let stats = shard.stats();
@@ -156,10 +112,10 @@ fn every_seed_is_found_through_the_sketch_and_the_positions() {
 }
 
 #[test]
-fn output_does_not_depend_on_the_thread_count() {
+fn threads_keep_output() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(5);
-    let inputs = inputs(directory.path(), &entries);
+    let inputs = write_entries(directory.path(), &entries);
     let one = directory.path().join("one");
     let four = directory.path().join("four");
     build_shard(&inputs, &one, &options(directory.path(), 1)).unwrap();
@@ -168,7 +124,7 @@ fn output_does_not_depend_on_the_thread_count() {
         manifest::MANIFEST_FILE,
         sketch::SKETCH_FILE,
         positions::POSITIONS_FILE,
-        "packed/genome3.packed",
+        "packed/entry3.packed",
     ] {
         let read = |shard: &PathBuf| std::fs::read(shard.join(file)).unwrap();
         assert!(read(&one) == read(&four), "{file}");
@@ -195,10 +151,10 @@ fn assert_same_shard(one: &Path, other: &Path) {
 }
 
 #[test]
-fn merged_shards_equal_one_shard_built_at_once() {
+fn merged_equals_whole() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(6);
-    let inputs = inputs(directory.path(), &entries);
+    let inputs = write_entries(directory.path(), &entries);
     let options = options(directory.path(), 2);
     let whole = directory.path().join("whole");
     build_shard(&inputs, &whole, &options).unwrap();
@@ -225,7 +181,7 @@ fn merged_shards_equal_one_shard_built_at_once() {
         assert_eq!(index.shards[0].entries, 6);
         let shard_directory = merged.join(&index.shards[0].directory);
         assert_same_shard(&whole, &shard_directory);
-        let link = shard_directory.join("packed/genome0.packed");
+        let link = shard_directory.join("packed/entry0.packed");
         let is_link = std::fs::symlink_metadata(link).unwrap().is_symlink();
         assert_eq!(is_link, packed == PackedOutput::Link);
         let shard = Shard::open(&shard_directory).unwrap();
@@ -238,10 +194,10 @@ fn merged_shards_equal_one_shard_built_at_once() {
 }
 
 #[test]
-fn split_shards_equal_direct_builds_of_their_entries() {
+fn splits_equal_direct() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(7);
-    let inputs = inputs(directory.path(), &entries);
+    let inputs = write_entries(directory.path(), &entries);
     let options = options(directory.path(), 2);
     let whole = directory.path().join("whole");
     build_shard(&inputs, &whole, &options).unwrap();
@@ -275,7 +231,7 @@ fn split_shards_equal_direct_builds_of_their_entries() {
                 assert!(record.seed_locations <= limit || record.entries == 1);
             }
         }
-        let expected: Vec<_> = (0..7).map(|index| format!("genome{index}")).collect();
+        let expected: Vec<_> = (0..7).map(|index| format!("entry{index}")).collect();
         assert_eq!(names, expected);
         if split == Split::Shards(3) {
             assert_eq!(index.shards.len(), 3);
@@ -292,10 +248,10 @@ fn split_shards_equal_direct_builds_of_their_entries() {
 }
 
 #[test]
-fn bucket_bits_can_be_forced() {
+fn forced_bucket_bits() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(3);
-    let inputs = inputs(directory.path(), &entries);
+    let inputs = write_entries(directory.path(), &entries);
     let output = directory.path().join("shard");
     let options = BuildOptions {
         bucket_bits: Some(12),
@@ -314,16 +270,20 @@ fn bucket_bits_can_be_forced() {
 }
 
 #[test]
-fn each_record_can_be_an_entry() {
+fn records_as_entries() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
-    let records: Vec<Vec<(String, Vec<u8>)>> = entries
+    let records: Vec<Vec<Vec<u8>>> = entries
         .iter()
         .flatten()
         .map(|contig| vec![contig.clone()])
         .collect();
     let path = directory.path().join("all.fa");
-    write_fasta(&path, &records.concat());
+    let text = entries
+        .iter()
+        .enumerate()
+        .map(|(entry, contigs)| fasta_text(entry, contigs));
+    std::fs::write(&path, text.collect::<Vec<_>>().concat()).unwrap();
     let output = directory.path().join("shard");
     let options = BuildOptions {
         entry_per_record: true,
@@ -334,7 +294,7 @@ fn each_record_can_be_an_entry() {
     assert_eq!(manifest.entries[1].name, "entry1_contig0");
     check_every_seed(&Shard::open(&output).unwrap(), &records);
     let twice = directory.path().join("twice.fa");
-    write_fasta(&twice, &[records[0][0].clone(), records[0][0].clone()]);
+    std::fs::write(&twice, fasta_text(0, &[records[0][0].clone()]).repeat(2)).unwrap();
     let error = build_shard(
         &[EntryInput::from_path(twice)],
         &output.with_file_name("x"),
@@ -344,10 +304,10 @@ fn each_record_can_be_an_entry() {
 }
 
 #[test]
-fn bad_builds_leave_nothing_behind() {
+fn bad_builds_cleaned() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(2);
-    let mut inputs = inputs(directory.path(), &entries);
+    let mut inputs = write_entries(directory.path(), &entries);
     let output = directory.path().join("shard");
     inputs[1].name = inputs[0].name.clone();
     assert!(build_shard(&inputs, &output, &options(directory.path(), 2)).is_err());
@@ -362,13 +322,12 @@ fn bad_builds_leave_nothing_behind() {
 }
 
 #[test]
-fn packed_sequences_open_from_another_directory_and_through_a_cache() {
+fn packed_elsewhere_cached() {
     use crate::storage::cache::{BlockCache, CacheConfig};
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
-    let inputs = inputs(directory.path(), &entries);
+    test_shard(directory.path(), &entries);
     let output = directory.path().join("shard");
-    build_shard(&inputs, &output, &options(directory.path(), 2)).unwrap();
     let elsewhere = directory.path().join("elsewhere");
     std::fs::rename(output.join("packed"), &elsewhere).unwrap();
     assert!(Shard::open(&output).unwrap().packed(0).is_err());
@@ -382,7 +341,7 @@ fn packed_sequences_open_from_another_directory_and_through_a_cache() {
     check_every_seed(&shard, &entries);
     assert_eq!(
         shard.packed_path(1).unwrap(),
-        elsewhere.join("genome1.packed")
+        elsewhere.join("entry1.packed")
     );
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096)).unwrap();
     let options = PackedOptions {
@@ -402,10 +361,10 @@ fn packed_sequences_open_from_another_directory_and_through_a_cache() {
 }
 
 #[test]
-fn packed_sequences_on_s3_need_a_prefix_and_a_store() {
+fn packed_on_s3() {
     use crate::storage::s3::{Credentials, S3Config, S3Limits};
     let directory = tempfile::tempdir().unwrap();
-    let inputs = inputs(directory.path(), &generated_entries(1));
+    let inputs = write_entries(directory.path(), &generated_entries(1));
     let output = directory.path().join("shard");
     build_shard(&inputs, &output, &options(directory.path(), 1)).unwrap();
     let credentials = Credentials {

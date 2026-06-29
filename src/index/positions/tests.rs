@@ -1,28 +1,27 @@
+//! Round-trip, copy and damage tests of the positions format.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use crate::storage::MappedFile;
+use crate::test_support::rng;
+use rand::RngExt;
 use std::collections::BTreeMap;
-
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
 
 const KEY_BITS: u32 = 30;
 
 /// Random seed locations per entry: key to sorted seed location values. Entry 2 is empty.
 fn random_entries() -> Vec<BTreeMap<u64, Vec<u32>>> {
-    let mut state = 0xfeed_u64;
+    let mut rng = rng(0xfeed);
     [3000usize, 1, 0, 40_000, 20]
         .iter()
         .map(|&keys| {
             let mut entry: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
             for _ in 0..keys {
-                let key = random(&mut state) >> (64 - KEY_BITS);
+                let key = rng.random::<u64>() >> (64 - KEY_BITS);
                 let locations = entry.entry(key).or_default();
-                for _ in 0..1 + random(&mut state).is_multiple_of(8) as usize * 3 {
-                    locations.push((random(&mut state) % 500_000) as u32);
+                for _ in 0..1 + usize::from(rng.random_range(0..8) == 0) * 3 {
+                    locations.push(rng.random_range(0..500_000));
                 }
                 locations.sort_unstable();
                 locations.dedup();
@@ -68,7 +67,7 @@ fn positions_round_trip() {
     positions.verify_checksums().unwrap();
     assert_eq!(positions.entries(), entries.len() as u32);
     assert_eq!((positions.key_bits(), positions.bin_bits()), (KEY_BITS, 10));
-    let mut state = 7u64;
+    let mut rng = rng(7);
     let mut out = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
         let index = index as u32;
@@ -78,14 +77,14 @@ fn positions_round_trip() {
             stored.len() as u64
         );
         for (key, locations) in entry {
-            let hash = (key << (64 - KEY_BITS)) | (random(&mut state) >> KEY_BITS);
+            let hash = (key << (64 - KEY_BITS)) | (rng.random::<u64>() >> KEY_BITS);
             out.clear();
             positions.locations(index, hash, &mut out).unwrap();
             let values: Vec<u32> = out.iter().map(|location| location.value()).collect();
             assert_eq!(&values, locations);
         }
         for _ in 0..2000 {
-            let hash = random(&mut state);
+            let hash = rng.random::<u64>();
             out.clear();
             positions.locations(index, hash, &mut out).unwrap();
             assert_eq!(
@@ -117,7 +116,7 @@ fn positions_round_trip() {
 }
 
 #[test]
-fn sections_copied_into_another_file_read_the_same() {
+fn copied_sections_agree() {
     let directory = tempfile::tempdir().unwrap();
     let entries = random_entries();
     let first = directory.path().join("first");

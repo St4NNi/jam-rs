@@ -125,12 +125,15 @@ pub(crate) fn crc32(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::rng;
+    use rand::RngExt;
 
     #[test]
     fn bit_arrays_round_trip() {
+        let mut draws = rng(3);
         for width in [0u32, 1, 5, 13, 32, 41, 57] {
-            let values: Vec<u64> = (0..200u64)
-                .map(|i| i.wrapping_mul(0x9e37_79b9_7f4a_7c15) & ((1u64 << width) - 1))
+            let values: Vec<u64> = (0..200)
+                .map(|_| draws.random::<u64>() & ((1u64 << width) - 1))
                 .collect();
             let mut out = vec![0xaa];
             let mut writer = BitWriter::new(&mut out);

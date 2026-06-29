@@ -1,23 +1,22 @@
+//! Round-trip and damage tests of the packed sequence format.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use crate::storage::MappedFile;
+use crate::test_support::rng;
+use rand::RngExt;
 use std::path::Path;
-
-fn random(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
 
 /// Contigs of random bases with runs of N, lower case bases and other bytes.
 fn contigs(seed: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let mut state = seed;
+    let mut rng = rng(seed);
     [0usize, 1, 70_000, 5, 33_000]
         .iter()
         .enumerate()
         .map(|(index, &length)| {
             let mut sequence: Vec<u8> = (0..length)
-                .map(|_| b"ACGTacgt"[(random(&mut state) % 8) as usize])
+                .map(|_| b"ACGTacgt"[rng.random_range(0..8)])
                 .collect();
             if length > 1000 {
                 sequence[100..400].fill(b'N');
@@ -76,7 +75,7 @@ fn packed_round_trip() {
 }
 
 #[test]
-fn empty_entries_and_bad_names() {
+fn empty_and_bad_names() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("empty.packed");
     write(&path, &[]);
