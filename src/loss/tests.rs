@@ -1,4 +1,9 @@
+//! Tests of the exact layout chance, the averages and the table of the miss model.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::*;
+use crate::test_support::miss_model;
 
 /// The chance that all seeds are mutated, by trying every pattern of mutated bases.
 fn brute_force(length: usize, k: usize, seed_ends: &[usize], identity: f64) -> f64 {
@@ -18,7 +23,7 @@ fn brute_force(length: usize, k: usize, seed_ends: &[usize], identity: f64) -> f
 }
 
 #[test]
-fn layout_chance_is_exact() {
+fn layout_chance_exact() {
     for (length, k, seeds) in [
         (12, 3, vec![2, 5, 6, 11]),
         (10, 4, vec![3, 9]),
@@ -34,7 +39,7 @@ fn layout_chance_is_exact() {
 }
 
 #[test]
-fn layouts_follow_the_window_rule() {
+fn layouts_follow_windows() {
     let mut random = Random(7);
     let short = random_layout(60, 25, 100, &mut random);
     assert_eq!(short.len(), 1);
@@ -46,8 +51,8 @@ fn layouts_follow_the_window_rule() {
     assert!((density - 2.0 / 101.0).abs() < 0.004, "{density}");
 }
 
-/// Values of the simulation in `design/sim/RESULTS.md` (k 25, window 100): length, identity,
-/// chance, standard error.
+/// Values of an independent simulation that mutates random sequences (k 25, w 100): length,
+/// identity, chance, standard error.
 const SIMULATION: [(usize, f64, f64, f64); 7] = [
     (1000, 0.93, 5.19e-2, 1.1e-4),
     (1000, 0.95, 5.08e-3, 3.6e-5),
@@ -59,26 +64,33 @@ const SIMULATION: [(usize, f64, f64, f64); 7] = [
 ];
 
 #[test]
-fn averages_agree_with_the_simulation() {
-    for (length, identity, chance, error) in SIMULATION {
-        let mine = average_row(length, 25, 100, 20_000, &[identity])[0];
-        assert!(
-            (mine - chance).abs() < 2.0 * error,
-            "{length} {identity}: {mine:e} against {chance:e}"
-        );
-    }
+fn simulation_agrees() {
+    [1000, 2000].into_par_iter().for_each(|length| {
+        let points: Vec<_> = SIMULATION
+            .iter()
+            .filter(|point| point.0 == length)
+            .collect();
+        let identities: Vec<f64> = points.iter().map(|point| point.1).collect();
+        let row = average_row(length, 25, 100, 5000, &identities);
+        for (&&(_, identity, chance, error), mine) in points.iter().zip(row) {
+            assert!(
+                (mine - chance).abs() < 2.0 * error,
+                "{length} {identity}: {mine:e} against {chance:e}"
+            );
+        }
+    });
 }
 
 #[test]
-fn table_values_and_interpolation_match_direct_averages() {
-    let model = MissModel::with_layouts(25, 100, 300).unwrap();
-    assert_eq!((model.k(), model.window()), (25, 100));
+fn table_interpolation_holds() {
+    let model = miss_model();
+    assert_eq!((model.k(), model.window()), (21, 20));
     // A point of the table is returned as stored.
-    let on_grid = average_row(1000, 25, 100, 300, &[0.95])[0];
+    let on_grid = average_row(1000, 21, 20, 200, &[0.95])[0];
     assert!((model.miss_chance(1000, 0.95) / on_grid - 1.0).abs() < 1e-9);
     // Between points the interpolation stays near the direct average of the same layouts.
     for (length, identity) in [(1100, 0.953), (700, 0.912), (2200, 0.9)] {
-        let direct = average_row(length, 25, 100, 300, &[identity])[0];
+        let direct = average_row(length, 21, 20, 200, &[identity])[0];
         let ratio = model.miss_chance(length as u64, identity) / direct;
         assert!(
             (0.85..1.15).contains(&ratio),
@@ -88,11 +100,11 @@ fn table_values_and_interpolation_match_direct_averages() {
 }
 
 #[test]
-fn chance_falls_with_length_and_identity_and_edges_are_safe() {
-    let model = MissModel::with_layouts(25, 100, 100).unwrap();
+fn edges_are_safe() {
+    let model = miss_model();
     assert!(model.miss_chance(1000, 0.95) > model.miss_chance(1500, 0.95));
     assert!(model.miss_chance(1000, 0.95) > model.miss_chance(1000, 0.97));
-    assert_eq!(model.miss_chance(24, 0.99), 1.0);
+    assert_eq!(model.miss_chance(20, 0.99), 1.0);
     assert_eq!(model.miss_chance(1000, 0.5), 1.0);
     assert_eq!(model.miss_chance(1000, 1.0), 0.0);
     assert_eq!(model.miss_chance(1000, f64::NAN), 1.0);
@@ -108,7 +120,7 @@ fn chance_falls_with_length_and_identity_and_edges_are_safe() {
 }
 
 #[test]
-fn bad_seeding_is_rejected() {
+fn bad_seeding_rejected() {
     assert_eq!(
         MissModel::new(0, 100).unwrap_err(),
         LossError::InvalidSeeding
@@ -124,12 +136,12 @@ fn bad_seeding_is_rejected() {
 }
 
 #[test]
-fn the_default_budget_is_one_in_ten_thousand() {
+fn default_budget() {
     assert_eq!(LossBudget::default().chance(), 0.0001);
 }
 
 #[test]
-fn budget_must_be_a_chance() {
+fn budget_is_chance() {
     for bad in [0.0, 1.0, -0.1, f64::NAN, 2.0] {
         assert_eq!(LossBudget::new(bad).unwrap_err(), LossError::InvalidBudget);
     }

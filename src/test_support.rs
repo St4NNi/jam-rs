@@ -1,8 +1,11 @@
-//! Test data shared by all tests: seeded random bases, copies with substitutions, and reverse
-//! complements. Every test that needs random data uses these, with a fixed seed.
+//! Test data shared by all tests: seeded random bases, copies with substitutions, the test miss model.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
+use crate::loss::MissModel;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use std::sync::OnceLock;
 
 /// A random generator that gives the same values for the same seed on every run.
 pub fn rng(seed: u64) -> StdRng {
@@ -41,6 +44,12 @@ pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
         .rev()
         .map(|&base| crate::align::complement(base))
         .collect()
+}
+
+/// The miss model of the test shards (k 21, w 20), built once from 200 layouts per length.
+pub fn miss_model() -> &'static MissModel {
+    static MODEL: OnceLock<MissModel> = OnceLock::new();
+    MODEL.get_or_init(|| MissModel::with_layouts(21, 20, 200).unwrap())
 }
 
 #[cfg(test)]

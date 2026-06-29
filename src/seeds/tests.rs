@@ -1,25 +1,9 @@
+//! Tests of seed selection, query k-mers and the entropy filter against direct computations.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::*;
-
-fn random_sequence(length: usize, mut state: u64) -> Vec<u8> {
-    (0..length)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            b"ACGT"[(state % 4) as usize]
-        })
-        .collect()
-}
-
-fn complement(base: u8) -> u8 {
-    match base {
-        b'A' => b'T',
-        b'C' => b'G',
-        b'G' => b'C',
-        b'T' => b'A',
-        other => other,
-    }
-}
+use crate::test_support::{random_bases, reverse_complement, rng};
 
 fn scheme(k: u8, window: u16, min_entropy: f64) -> SeedScheme {
     SeedScheme {
@@ -99,12 +83,12 @@ fn reference(sequence: &[u8], k: usize, window: usize) -> Vec<u64> {
 }
 
 #[test]
-fn matches_reference() {
+fn seeds_match_minima() {
     for (round, (k, window)) in [(5, 1), (7, 4), (15, 10), (21, 50), (25, 100), (32, 7)]
         .into_iter()
         .enumerate()
     {
-        let mut sequence = random_sequence(5000, 0x1234_5678 + round as u64);
+        let mut sequence = random_bases(&mut rng(0x1234_5678 + round as u64), 5000);
         for at in [700, 701, 2500, 4990] {
             sequence[at] = b'N';
         }
@@ -122,8 +106,8 @@ fn matches_reference() {
 }
 
 #[test]
-fn single_kmer_windows_seed_every_kmer_within_the_entropy_limit() {
-    let mut sequence = random_sequence(3000, 0x9e37_79b9);
+fn single_kmer_windows() {
+    let mut sequence = random_bases(&mut rng(0x9e37_79b9), 3000);
     sequence[1000..1060].fill(b'A');
     sequence[1500] = b'N';
     sequence[2000..2004].copy_from_slice(b"acgt");
@@ -150,12 +134,8 @@ fn single_kmer_windows_seed_every_kmer_within_the_entropy_limit() {
 
 #[test]
 fn strands_agree() {
-    let sequence = random_sequence(20_000, 99);
-    let reverse: Vec<u8> = sequence
-        .iter()
-        .rev()
-        .map(|base| complement(*base))
-        .collect();
+    let sequence = random_bases(&mut rng(99), 20_000);
+    let reverse = reverse_complement(&sequence);
     let scheme = scheme(25, 100, 0.0);
     let forward = collect(&sequence, scheme);
     let mut mirrored: Vec<Kmer> = collect(&reverse, scheme)
@@ -177,9 +157,9 @@ fn strands_agree() {
 }
 
 #[test]
-fn shared_windows_share_seeds() {
-    let left = random_sequence(3000, 5);
-    let mut right = random_sequence(2000, 6);
+fn shared_windows_agree() {
+    let left = random_bases(&mut rng(5), 3000);
+    let mut right = random_bases(&mut rng(6), 2000);
     right.extend_from_slice(&left[1000..2000]);
     let scheme = scheme(21, 50, 1.0);
     let hashes = |seeds: Vec<Kmer>, from: u64, to: u64| -> Vec<u64> {
@@ -197,7 +177,7 @@ fn shared_windows_share_seeds() {
 }
 
 #[test]
-fn low_entropy_gives_no_ordinary_seed() {
+fn low_entropy_skipped() {
     let low = scheme(21, 10, 1.0);
     let ordinary = |sequence: &[u8], scheme| {
         collect(sequence, scheme)
@@ -215,22 +195,26 @@ fn low_entropy_gives_no_ordinary_seed() {
     assert_eq!(ordinary(&repeat, low), 0);
     assert!(ordinary(&repeat, scheme(21, 10, 0.9)) > 0);
     assert!(ordinary(&[b'A'; 500], scheme(21, 10, 0.0)) > 0);
+}
+
+#[test]
+fn scheme_ranges_checked() {
     assert!(scheme(0, 10, 1.0).validate().is_err());
     assert!(scheme(33, 10, 1.0).validate().is_err());
     assert!(scheme(21, 0, 1.0).validate().is_err());
     assert!(scheme(21, 10, 2.5).validate().is_err());
     assert!(scheme(21, 10, f64::NAN).validate().is_err());
-    assert!(low.validate().is_ok());
+    assert!(scheme(21, 10, 1.0).validate().is_ok());
 }
 
 #[test]
-fn low_complexity_runs_get_salted_seeds_of_their_own() {
+fn salted_run_seeds() {
     let scheme = scheme(21, 100, 1.0);
-    let flank = random_sequence(500, 3);
+    let flank = random_bases(&mut rng(3), 500);
     let with_run = |length: usize| {
         let mut sequence = flank.clone();
         sequence.extend(std::iter::repeat_n(b'A', length));
-        sequence.extend(random_sequence(500, 4));
+        sequence.extend(random_bases(&mut rng(4), 500));
         sequence
     };
     let salted = |sequence: &[u8]| -> Vec<Kmer> {
@@ -239,7 +223,7 @@ fn low_complexity_runs_get_salted_seeds_of_their_own() {
             .filter(|seed| seed.hash == kmer_hash(0) ^ LOW_COMPLEXITY_SALT)
             .collect()
     };
-    // A short conserved span can join across a change in a longer original contig.
+    // A run shorter than a minimizer window still gets one salted seed.
     assert!(!salted(&with_run(50)).is_empty());
     let sequence = with_run(1200);
     let seeds = salted(&sequence);
@@ -265,16 +249,16 @@ fn low_complexity_runs_get_salted_seeds_of_their_own() {
 }
 
 #[test]
-fn salted_seeds_are_the_window_minima_of_each_low_complexity_run() {
+fn salted_seed_minima() {
     // Random sequence, homopolymers, skewed two-base repeats and breaks, against every k-mer's
     // entropy computed alone.
-    let mut sequence = random_sequence(3000, 7);
+    let mut sequence = random_bases(&mut rng(7), 3000);
     sequence.extend(std::iter::repeat_n(b'T', 400));
     sequence.extend(b"AAAT".repeat(150));
-    sequence.extend(random_sequence(50, 8));
+    sequence.extend(random_bases(&mut rng(8), 50));
     sequence.push(b'N');
     sequence.extend(b"CCCG".repeat(60));
-    sequence.extend(random_sequence(2000, 9));
+    sequence.extend(random_bases(&mut rng(9), 2000));
     for (k, min_entropy) in [(21u8, 1.0), (25, 1.0), (15, 1.2)] {
         let k_bases = usize::from(k);
         let mut expected = Vec::new();
@@ -310,8 +294,8 @@ fn salted_seeds_are_the_window_minima_of_each_low_complexity_run() {
 }
 
 #[test]
-fn query_kmers_cover_every_kmer_with_its_strand() {
-    let mut query = random_sequence(400, 11);
+fn query_kmers_complete() {
+    let mut query = random_bases(&mut rng(11), 400);
     query[200] = b'N';
     let seeder = Seeder::new(scheme(15, 10, 1.0)).unwrap();
     let mut kmers = Vec::new();
@@ -333,8 +317,8 @@ fn query_kmers_cover_every_kmer_with_its_strand() {
 }
 
 #[test]
-fn entropy_counts_match_a_direct_count() {
-    let sequence = random_sequence(2000, 13);
+fn entropy_counts_match() {
+    let sequence = random_bases(&mut rng(13), 2000);
     for k in [1u8, 7, 25, 32] {
         let seeder = Seeder::new(scheme(k, 10, 1.3)).unwrap();
         for kmer in sequence.windows(usize::from(k)).step_by(7) {
