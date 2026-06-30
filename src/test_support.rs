@@ -6,6 +6,8 @@ use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::path::Path;
+use std::sync::OnceLock;
+use tokio::runtime::{Handle, Runtime};
 
 /// A random generator that gives the same values for the same seed on every run.
 pub fn rng(seed: u64) -> StdRng {
@@ -24,6 +26,15 @@ pub fn random_bytes(rng: &mut StdRng, length: usize) -> Vec<u8> {
     let mut bytes = vec![0; length];
     rng.fill(&mut bytes[..]);
     bytes
+}
+
+/// The handle of one tokio runtime shared by all tests.
+pub fn runtime() -> Handle {
+    static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| Runtime::new().unwrap())
+        .handle()
+        .clone()
 }
 
 /// A copy of `bases` in which each base becomes another base with chance `1 - identity`.

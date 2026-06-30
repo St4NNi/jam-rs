@@ -49,6 +49,9 @@ pub struct S3Config {
     runtime: Handle,
     /// One operator per bucket, built at the first open.
     operators: Arc<Mutex<HashMap<String, Operator>>>,
+    /// Sends requests without signing them (tests against a local store).
+    #[cfg(test)]
+    unsigned: bool,
 }
 
 impl S3Config {
@@ -85,7 +88,16 @@ impl S3Config {
             in_flight: ConcurrentLimitLayer::new(limits.max_in_flight.max(1)),
             runtime,
             operators: Arc::default(),
+            #[cfg(test)]
+            unsigned: false,
         })
+    }
+
+    /// The same config, sending requests without signatures.
+    #[cfg(test)]
+    pub(crate) fn unsigned(mut self) -> Self {
+        self.unsigned = true;
+        self
     }
 
     /// The operator of `bucket`, built once.
@@ -106,6 +118,10 @@ impl S3Config {
         }
         if !self.path_style {
             service = service.enable_virtual_host_style();
+        }
+        #[cfg(test)]
+        if self.unsigned {
+            service = service.skip_signature();
         }
         let limits = self.limits;
         let retry = RetryLayer::new()
@@ -225,3 +241,7 @@ impl ReadAt for S3Object {
 fn invalid(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, reason.to_string())
 }
+
+#[cfg(test)]
+#[path = "s3_store_tests.rs"]
+mod tests;
