@@ -16,12 +16,13 @@ pub enum StorageError {
     /// The S3 settings are not valid, for example an empty endpoint.
     #[error("invalid S3 setting: {0}")]
     Config(String),
-    /// The object does not answer as expected: another size, no strong ETag or no ranges.
-    #[error("S3 object {location} cannot be used: {reason}")]
+    /// The object cannot be read, or does not answer as expected: another size, no strong ETag.
+    #[error("S3 object {location} cannot be used: {source}")]
     Object {
         /// The `s3://` location that was opened.
         location: String,
-        /// What is wrong, in plain words.
-        reason: String,
+        /// What went wrong.
+        #[source]
+        source: io::Error,
     },
 }

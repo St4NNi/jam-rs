@@ -11,6 +11,7 @@ pub mod local;
 pub mod mapped;
 pub mod readahead;
 pub mod s3;
+pub mod s3_store;
 
 pub use error::StorageError;
 pub use mapped::MappedFile;

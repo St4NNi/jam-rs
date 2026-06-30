@@ -52,7 +52,7 @@ impl S3Object {
         let target = config.target(bucket, key);
         let unusable = |reason: String| StorageError::Object {
             location: location.to_string(),
-            reason,
+            source: io::Error::other(reason),
         };
         let (size, etag) = with_tries(config, || first_byte(config, &target))
             .map_err(|error| unusable(error.to_string()))?;
