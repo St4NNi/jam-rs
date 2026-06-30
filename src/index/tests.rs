@@ -5,7 +5,7 @@
 use super::*;
 use crate::seeds::Seeder;
 use crate::test_support::{
-    build_options, fasta_text, random_bases, rng, test_shard, write_entries,
+    build_options, fasta_text, random_bases, rng, runtime, test_shard, write_entries,
 };
 use rand::RngExt;
 use std::path::{Path, PathBuf};
@@ -362,23 +362,19 @@ fn packed_elsewhere_cached() {
 
 #[test]
 fn packed_on_s3() {
-    use crate::storage::s3::{Credentials, S3Config, S3Limits};
+    use crate::storage::s3_store::{S3Config, S3Limits};
     let directory = tempfile::tempdir().unwrap();
     let inputs = write_entries(directory.path(), &generated_entries(1));
     let output = directory.path().join("shard");
     build_shard(&inputs, &output, &options(directory.path(), 1)).unwrap();
-    let credentials = Credentials {
-        access_key: "access".into(),
-        secret_key: "secret".into(),
-        session_token: None,
-    };
     let limits = S3Limits {
         tries: 1,
         ..S3Limits::default()
     };
     // Port 9 (discard) is closed on test machines, so the store cannot be reached.
     let endpoint = Some("http://127.0.0.1:9");
-    let config = S3Config::new("local", endpoint, true, credentials, limits).unwrap();
+    let config = S3Config::new("local", endpoint, true, limits, runtime()).unwrap();
+    let config = config.unsigned();
     let open = |prefix: &str| {
         let location = PackedLocation::S3 {
             prefix: prefix.into(),
