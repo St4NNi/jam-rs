@@ -10,9 +10,6 @@ pub enum StorageError {
     /// The location is not `s3://bucket/key`, or the bucket or key is empty.
     #[error("not a usable S3 location: {0}")]
     Location(String),
-    /// No usable static credentials were found; roles, SSO and processes are not supported.
-    #[error("no usable S3 credentials: {0}")]
-    Credentials(String),
     /// The S3 settings are not valid, for example an empty endpoint.
     #[error("invalid S3 setting: {0}")]
     Config(String),
