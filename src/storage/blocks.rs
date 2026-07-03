@@ -282,3 +282,7 @@ impl ReadAt for CachedSource {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "blocks_tests.rs"]
+mod tests;
