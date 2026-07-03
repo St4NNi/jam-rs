@@ -10,6 +10,9 @@ pub enum StorageError {
     /// The location is not `s3://bucket/key`, or the bucket or key is empty.
     #[error("not a usable S3 location: {0}")]
     Location(String),
+    /// The block cache could not be built.
+    #[error("block cache: {0}")]
+    Cache(#[from] foyer::Error),
     /// The S3 settings are not valid, for example an empty endpoint.
     #[error("invalid S3 setting: {0}")]
     Config(String),

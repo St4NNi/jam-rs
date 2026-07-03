@@ -4,6 +4,7 @@
 //! about searches: a search checks for cancellation between reads. A read on a remote source has
 //! a timeout per request and a bounded number of tries, set in [`s3::S3Config`].
 
+pub mod blocks;
 pub mod cache;
 mod error;
 pub mod limit;
