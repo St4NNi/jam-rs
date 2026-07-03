@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::storage::cache::{BlockCache, CacheConfig};
+use crate::storage::blocks::{BlockCache, CacheConfig};
 use crate::test_support::runtime;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -203,7 +203,7 @@ fn cache_merges_runs() {
     let server = store(data.clone(), usize::MAX);
     let location = "s3://bucket/entry.packed";
     let object = S3Object::open(&config(&server, quick()), location, None).unwrap();
-    let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096)).unwrap();
+    let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let cached = cache.wrap(object);
     let mut buffer = vec![0; 3000];
     for _ in 0..2 {
