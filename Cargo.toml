@@ -56,6 +56,7 @@ opendal = { version = "~0.59.5", default-features = false, features = [
     "layers-retry",
     "layers-timeout",
 ] }
+foyer = "~0.22.6"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
