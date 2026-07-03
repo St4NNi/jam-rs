@@ -362,7 +362,7 @@ fn packed_elsewhere_cached() {
 
 #[test]
 fn packed_on_s3() {
-    use crate::storage::s3_store::{S3Config, S3Limits};
+    use crate::storage::s3::{S3Config, S3Limits};
     let directory = tempfile::tempdir().unwrap();
     let inputs = write_entries(directory.path(), &generated_entries(1));
     let output = directory.path().join("shard");

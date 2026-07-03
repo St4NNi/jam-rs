@@ -243,5 +243,5 @@ fn invalid(reason: &str) -> io::Error {
 }
 
 #[cfg(test)]
-#[path = "s3_store_tests.rs"]
+#[path = "s3_tests.rs"]
 mod tests;

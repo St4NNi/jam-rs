@@ -8,7 +8,7 @@ use crate::storage::MappedFile;
 use crate::storage::ReadAt;
 use crate::storage::cache::BlockCache;
 use crate::storage::local::LocalFile;
-use crate::storage::s3_store::{S3Config, S3Object};
+use crate::storage::s3::{S3Config, S3Object};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
