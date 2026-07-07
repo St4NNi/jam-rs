@@ -6,7 +6,6 @@
 
 pub mod blocks;
 mod error;
-pub mod limit;
 pub mod local;
 pub mod mapped;
 pub mod readahead;
