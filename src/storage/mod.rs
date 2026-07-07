@@ -5,7 +5,6 @@
 //! a timeout per request and a bounded number of tries, set in [`s3::S3Config`].
 
 pub mod blocks;
-pub mod cache;
 mod error;
 pub mod limit;
 pub mod local;
