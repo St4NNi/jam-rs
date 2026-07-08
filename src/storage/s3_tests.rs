@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::storage::blocks::{BlockCache, CacheConfig};
+use crate::storage::cache::{BlockCache, CacheConfig};
 use crate::test_support::runtime;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};

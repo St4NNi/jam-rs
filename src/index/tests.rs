@@ -323,7 +323,7 @@ fn bad_builds_cleaned() {
 
 #[test]
 fn packed_elsewhere_cached() {
-    use crate::storage::blocks::{BlockCache, CacheConfig};
+    use crate::storage::cache::{BlockCache, CacheConfig};
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
     test_shard(directory.path(), &entries);

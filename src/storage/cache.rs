@@ -284,5 +284,5 @@ impl ReadAt for CachedSource {
 }
 
 #[cfg(test)]
-#[path = "blocks_tests.rs"]
+#[path = "cache_tests.rs"]
 mod tests;
