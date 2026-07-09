@@ -1,12 +1,12 @@
 //! An open shard: its manifest, the sketch in RAM, the positions, and the packed sequences on
 //! request.
 
-use super::IndexError;
 use super::manifest::{EntryRecord, Manifest, verify_file, verify_source};
 use super::packed::PackedSequence;
 use super::packed_source::{PackedLocation, PackedOptions, PackedSources};
 use super::positions::{POSITIONS_FILE, Positions};
 use super::sketch::{SKETCH_FILE, Sketch};
+use super::{AtPath, IndexError};
 use crate::storage::MappedFile;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,7 +71,10 @@ impl Shard {
             &directory.join(POSITIONS_FILE),
             false,
         )?))?;
-        let file_size = |name: &str| std::fs::metadata(directory.join(name)).map(|m| m.len());
+        let file_size = |name: &str| {
+            let path = directory.join(name);
+            std::fs::metadata(&path).map(|m| m.len()).at(&path)
+        };
         if sketch.entries() != entries
             || sketch.bucket_bits() != u32::from(parameters.bucket_bits)
             || sketch.seeds() != manifest.seeds
@@ -127,19 +130,17 @@ impl Shard {
     /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
         let record = self.entry_record(entry)?;
-        let differs = || {
-            IndexError::format(format!(
+        let source = self.packed.open(entry as usize, &record.packed)?;
+        let size = source.size();
+        let packed = PackedSequence::open(source)?;
+        if size != record.packed.bytes
+            || packed.bases() != record.bases
+            || packed.contig_count() as u64 != record.contigs
+        {
+            return Err(IndexError::format(format!(
                 "the packed sequence of {} differs from the manifest",
                 record.name
-            ))
-        };
-        let source = self.packed.open(entry as usize, &record.packed)?;
-        if source.size() != record.packed.bytes {
-            return Err(differs());
-        }
-        let packed = PackedSequence::open(source)?;
-        if packed.bases() != record.bases || packed.contig_count() as u64 != record.contigs {
-            return Err(differs());
+            )));
         }
         Ok(packed)
     }

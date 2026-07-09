@@ -52,11 +52,11 @@
 //! the records of one slot. A seed that occurs at several bins has one record per bin.
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, crc32, read_bits, u32_at, u64_at};
-use super::{IndexError, seed_key};
+use super::{AtPath, IndexError, seed_key};
 use crate::storage::ReadAt;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The file name of the positions in a shard directory.
@@ -406,6 +406,7 @@ impl Positions {
 /// Writes a positions file section by section, in entry order.
 pub(crate) struct PositionsWriter {
     file: BufWriter<File>,
+    path: PathBuf,
     bin_bits: u32,
     entries: usize,
     sections: Vec<Section>,
@@ -415,11 +416,12 @@ pub(crate) struct PositionsWriter {
 impl PositionsWriter {
     /// Creates the file at `path` for `entries` sections.
     pub(crate) fn create(path: &Path, bin_bits: u32, entries: usize) -> Result<Self, IndexError> {
-        let mut file = File::create_new(path)?;
+        let mut file = File::create_new(path).at(path)?;
         let start = HEADER_BYTES + (entries * ROW_BYTES) as u64;
-        file.seek(SeekFrom::Start(start))?;
+        file.seek(SeekFrom::Start(start)).at(path)?;
         Ok(Self {
             file: BufWriter::with_capacity(1 << 20, file),
+            path: path.to_path_buf(),
             bin_bits,
             entries,
             sections: Vec::with_capacity(entries),
@@ -442,13 +444,14 @@ impl PositionsWriter {
             ));
         }
         let padding = self.written.next_multiple_of(8) - self.written;
-        self.file.write_all(&vec![0u8; padding as usize])?;
+        let path = &self.path;
+        self.file.write_all(&vec![0u8; padding as usize]).at(path)?;
         self.written += padding;
         self.sections.push(Section {
             offset: self.written,
             ..*section
         });
-        self.file.write_all(bytes)?;
+        self.file.write_all(bytes).at(path)?;
         self.written += section.length;
         Ok(())
     }
@@ -468,11 +471,16 @@ impl PositionsWriter {
         header[32..36].copy_from_slice(&crc32(&table).to_le_bytes());
         let header_crc = crc32(&header[..124]);
         header[124..].copy_from_slice(&header_crc.to_le_bytes());
-        let mut file = self.file.into_inner().map_err(|error| error.into_error())?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header)?;
-        file.write_all(&table)?;
-        file.sync_all()?;
+        let path = &self.path;
+        let mut file = self
+            .file
+            .into_inner()
+            .map_err(|error| error.into_error())
+            .at(path)?;
+        file.seek(SeekFrom::Start(0)).at(path)?;
+        file.write_all(&header).at(path)?;
+        file.write_all(&table).at(path)?;
+        file.sync_all().at(path)?;
         Ok(())
     }
 }

@@ -5,11 +5,11 @@
 //! own seed locations. One output shard joins the inputs; one input into several splits it. The
 //! groups depend only on the inputs and the split, never on the thread count.
 
-use super::IndexError;
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
 use super::manifest::{MANIFEST_FILE, Manifest, PACKED_DIRECTORY, Parameters, check_names};
 use super::positions::{POSITIONS_FILE, Positions};
+use super::{AtPath, IndexError};
 use crate::storage::MappedFile;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -73,15 +73,14 @@ pub fn reshard(
     let groups = split_groups(&weights, options.split)?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(options.threads.max(1))
-        .build()
-        .map_err(|error| IndexError::Input(format!("thread pool: {error}")))?;
+        .build()?;
     in_partial_directory(output, |directory| {
         let mut records = Vec::with_capacity(groups.len());
         for (number, group) in groups.iter().enumerate() {
             let name = format!("shard-{number:04}");
             let part = &sources[group.clone()];
             let shard_directory = directory.join(&name);
-            std::fs::create_dir(&shard_directory)?;
+            std::fs::create_dir(&shard_directory).at(&shard_directory)?;
             let manifest =
                 pool.install(|| write_shard(&shards, part, &shard_directory, options))?;
             records.push(ShardRecord {
@@ -169,7 +168,7 @@ fn write_shard(
     options: &ReshardOptions,
 ) -> Result<Manifest, IndexError> {
     let packed = directory.join(PACKED_DIRECTORY);
-    std::fs::create_dir(&packed)?;
+    std::fs::create_dir(&packed).at(&packed)?;
     let mut entries = Vec::with_capacity(part.len());
     for &(shard, entry) in part {
         let input = &shards[shard];
@@ -183,9 +182,10 @@ fn write_shard(
             // Links point at the original file, so they stay valid when the inputs are removed
             // after an earlier reshard that linked them.
             PackedOutput::Link => {
-                std::os::unix::fs::symlink(std::fs::canonicalize(&source)?, &target)?
+                let original = std::fs::canonicalize(&source).at(&source)?;
+                std::os::unix::fs::symlink(original, &target).at(&target)?
             }
-            PackedOutput::Copy => drop(std::fs::copy(&source, &target)?),
+            PackedOutput::Copy => drop(std::fs::copy(&source, &target).at(&target)?),
         }
         entries.push(record);
     }

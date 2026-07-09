@@ -12,7 +12,7 @@
 //! A file is `path` (relative to the shard directory; packed files to the packed directory),
 //! `bytes` and `sha256` (lower case hex).
 
-use super::{IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS};
+use super::{AtPath, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::seeds::SeedScheme;
 use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
@@ -113,7 +113,8 @@ pub struct Manifest {
 impl Manifest {
     /// Reads and checks the manifest of the shard in `directory`.
     pub fn read(directory: &Path) -> Result<Self, IndexError> {
-        let bytes = std::fs::read(directory.join(MANIFEST_FILE))?;
+        let path = directory.join(MANIFEST_FILE);
+        let bytes = std::fs::read(&path).at(&path)?;
         let manifest: Self = serde_json::from_slice(&bytes)
             .map_err(|error| IndexError::format(format!("manifest: {error}")))?;
         if manifest.format_version != FORMAT_VERSION {
@@ -131,9 +132,10 @@ impl Manifest {
     pub fn write(&self, directory: &Path) -> Result<(), IndexError> {
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| IndexError::format(format!("manifest: {error}")))?;
-        let mut file = std::fs::File::create_new(directory.join(MANIFEST_FILE))?;
-        std::io::Write::write_all(&mut file, &bytes)?;
-        file.sync_all()?;
+        let path = directory.join(MANIFEST_FILE);
+        let mut file = std::fs::File::create_new(&path).at(&path)?;
+        std::io::Write::write_all(&mut file, &bytes).at(&path)?;
+        file.sync_all().at(&path)?;
         Ok(())
     }
 }
@@ -188,12 +190,12 @@ pub fn sha256_hex(parts: &[&[u8]]) -> String {
 
 /// The size and SHA-256 digest of a file.
 pub fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
-    let mut file = std::fs::File::open(path)?;
+    let mut file = std::fs::File::open(path).at(path)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
     let mut bytes = 0u64;
     loop {
-        let read = file.read(&mut buffer)?;
+        let read = file.read(&mut buffer).at(path)?;
         if read == 0 {
             break;
         }

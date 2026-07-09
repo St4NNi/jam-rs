@@ -10,8 +10,8 @@
 //! the shard is entry `first_entry + i` of the index. `manifest_sha256` is the SHA-256 digest of
 //! the shard's `manifest.json`, so a replaced shard is noticed.
 
-use super::IndexError;
 use super::manifest::{MANIFEST_FILE, sha256_file};
+use super::{AtPath, IndexError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -48,7 +48,8 @@ impl IndexFile {
     /// Reads the index file of the index in `directory` and checks that its entry ranges follow
     /// each other without gaps.
     pub fn read(directory: &Path) -> Result<Self, IndexError> {
-        let bytes = std::fs::read(directory.join(INDEX_FILE))?;
+        let path = directory.join(INDEX_FILE);
+        let bytes = std::fs::read(&path).at(&path)?;
         let index: Self = serde_json::from_slice(&bytes)
             .map_err(|error| IndexError::format(format!("index file: {error}")))?;
         if index.format_version != INDEX_FORMAT_VERSION {
@@ -74,9 +75,10 @@ impl IndexFile {
     pub fn write(&self, directory: &Path) -> Result<(), IndexError> {
         let bytes = serde_json::to_vec_pretty(self)
             .map_err(|error| IndexError::format(format!("index file: {error}")))?;
-        let mut file = std::fs::File::create_new(directory.join(INDEX_FILE))?;
-        std::io::Write::write_all(&mut file, &bytes)?;
-        file.sync_all()?;
+        let path = directory.join(INDEX_FILE);
+        let mut file = std::fs::File::create_new(&path).at(&path)?;
+        std::io::Write::write_all(&mut file, &bytes).at(&path)?;
+        file.sync_all().at(&path)?;
         Ok(())
     }
 

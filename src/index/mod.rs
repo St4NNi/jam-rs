@@ -15,6 +15,7 @@ pub mod sketch;
 use crate::seeds::SeedError;
 use crate::storage::StorageError;
 use std::io;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use build::{BuildOptions, EntryInput, build_shard};
@@ -30,9 +31,21 @@ pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 /// Errors of the index module.
 #[derive(Debug, Error)]
 pub enum IndexError {
-    /// Reading or writing a file failed.
-    #[error("{0}")]
+    /// Reading a shard file through its source failed.
+    #[error("reading the index failed: {0}")]
     Io(#[from] io::Error),
+    /// A file or directory of the index could not be read, written or created.
+    #[error("{}: {source}", path.display())]
+    File {
+        /// The file or directory.
+        path: PathBuf,
+        /// What went wrong.
+        #[source]
+        source: io::Error,
+    },
+    /// The thread pool of a build could not start.
+    #[error("cannot start the build threads: {0}")]
+    Threads(#[from] rayon::ThreadPoolBuildError),
     /// A file is not in the expected format, or is damaged.
     #[error("bad index file: {0}")]
     Format(String),
@@ -53,6 +66,21 @@ pub enum IndexError {
 impl IndexError {
     fn format(message: impl Into<String>) -> Self {
         Self::Format(message.into())
+    }
+}
+
+/// Names the file of a failed file operation.
+pub(crate) trait AtPath<T> {
+    /// The result, with an error that names `path`.
+    fn at(self, path: &Path) -> Result<T, IndexError>;
+}
+
+impl<T> AtPath<T> for io::Result<T> {
+    fn at(self, path: &Path) -> Result<T, IndexError> {
+        self.map_err(|source| IndexError::File {
+            path: path.to_path_buf(),
+            source,
+        })
     }
 }
 

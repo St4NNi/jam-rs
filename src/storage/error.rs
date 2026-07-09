@@ -1,12 +1,19 @@
 use std::io;
+use std::path::PathBuf;
 use thiserror::Error;
 
 /// Why a source could not be opened or configured. Reads themselves fail with `io::Error`.
 #[derive(Debug, Error)]
 pub enum StorageError {
-    /// A local file or the local disk level failed.
-    #[error("storage I/O failed: {0}")]
-    Io(#[from] io::Error),
+    /// A local file could not be opened or mapped.
+    #[error("{}: {source}", path.display())]
+    File {
+        /// The file.
+        path: PathBuf,
+        /// What went wrong.
+        #[source]
+        source: io::Error,
+    },
     /// The location is not `s3://bucket/key`, or the bucket or key is empty.
     #[error("not a usable S3 location: {0}")]
     Location(String),

@@ -49,11 +49,11 @@ use super::bits::{
     BIT_PADDING, BitWriter, bits_needed, crc32, put_varint, read_bits, read_varint, u16_at, u32_at,
     u64_at,
 };
-use super::{FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
+use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
 use crate::storage::MappedFile;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The file name of the sketch in a shard directory.
 pub const SKETCH_FILE: &str = "sketch";
@@ -377,6 +377,7 @@ fn choose_width(ids: &[u32]) -> (u32, usize) {
 /// Writes a sketch file bucket by bucket.
 pub(crate) struct SketchWriter {
     file: BufWriter<File>,
+    path: PathBuf,
     bucket_bits: u32,
     entries: u64,
     directory: Vec<u64>,
@@ -388,11 +389,13 @@ pub(crate) struct SketchWriter {
 impl SketchWriter {
     /// Creates the file at `path` for a shard of `entries` entries.
     pub(crate) fn create(path: &Path, bucket_bits: u32, entries: u64) -> Result<Self, IndexError> {
-        let mut file = File::create_new(path)?;
+        let mut file = File::create_new(path).at(path)?;
         let buckets = 1usize << bucket_bits;
-        file.seek(SeekFrom::Start((HEADER_BYTES + 8 * (buckets + 1)) as u64))?;
+        let start = (HEADER_BYTES + 8 * (buckets + 1)) as u64;
+        file.seek(SeekFrom::Start(start)).at(path)?;
         Ok(Self {
             file: BufWriter::with_capacity(1 << 20, file),
+            path: path.to_path_buf(),
             bucket_bits,
             entries,
             directory: Vec::with_capacity(buckets + 1),
@@ -409,7 +412,7 @@ impl SketchWriter {
         }
         self.directory.resize(bucket + 1, self.written);
         self.seeds += u64::from(u32_at(block, 0).unwrap_or_default());
-        self.file.write_all(block)?;
+        self.file.write_all(block).at(&self.path)?;
         self.crc.update(block);
         self.written += block.len() as u64;
         Ok(())
@@ -424,7 +427,8 @@ impl SketchWriter {
             (self.written as usize + BIT_PADDING).next_multiple_of(8)
                 - self.written as usize
         ];
-        self.file.write_all(&padding)?;
+        let path = self.path.clone();
+        self.file.write_all(&padding).at(&path)?;
         self.crc.update(&padding);
         let mut offsets = Vec::with_capacity(8 * (sets.len() + 1));
         let mut set_bytes = 0u64;
@@ -433,10 +437,10 @@ impl SketchWriter {
             set_bytes += set.as_ref().len() as u64;
             offsets.extend_from_slice(&set_bytes.to_le_bytes());
         }
-        self.file.write_all(&offsets)?;
+        self.file.write_all(&offsets).at(&path)?;
         let mut set_crc = crc32fast::Hasher::new();
         for set in sets {
-            self.file.write_all(set.as_ref())?;
+            self.file.write_all(set.as_ref()).at(&path)?;
             set_crc.update(set.as_ref());
         }
         let directory: Vec<u8> = self
@@ -470,11 +474,15 @@ impl SketchWriter {
         }
         let header_crc = crc32(&header[..124]);
         header[124..].copy_from_slice(&header_crc.to_le_bytes());
-        let mut file = self.file.into_inner().map_err(|error| error.into_error())?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(&header)?;
-        file.write_all(&directory)?;
-        file.sync_all()?;
+        let mut file = self
+            .file
+            .into_inner()
+            .map_err(|error| error.into_error())
+            .at(&path)?;
+        file.seek(SeekFrom::Start(0)).at(&path)?;
+        file.write_all(&header).at(&path)?;
+        file.write_all(&directory).at(&path)?;
+        file.sync_all().at(&path)?;
         Ok(())
     }
 }

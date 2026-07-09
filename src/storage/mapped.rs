@@ -13,8 +13,12 @@ pub struct MappedFile {
 impl MappedFile {
     /// Maps the file at `path`; `populate` reads it into RAM at once.
     pub fn open(path: &Path, populate: bool) -> Result<Self, StorageError> {
-        let file = std::fs::File::open(path)?;
-        if file.metadata()?.len() == 0 {
+        let failed = |source| StorageError::File {
+            path: path.to_path_buf(),
+            source,
+        };
+        let file = std::fs::File::open(path).map_err(failed)?;
+        if file.metadata().map_err(failed)?.len() == 0 {
             return Ok(Self { map: None });
         }
         let mut options = memmap2::MmapOptions::new();
@@ -22,7 +26,7 @@ impl MappedFile {
             options.populate();
         }
         // SAFETY: the files are written once and never changed while a shard is open.
-        let map = unsafe { options.map(&file)? };
+        let map = unsafe { options.map(&file).map_err(failed)? };
         Ok(Self { map: Some(map) })
     }
 

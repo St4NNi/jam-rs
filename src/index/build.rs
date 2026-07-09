@@ -14,7 +14,7 @@ use super::positions::{
 };
 use super::sketch::SKETCH_FILE;
 use super::sketch::build::build_sketch;
-use super::{IndexError, seed_key};
+use super::{AtPath, IndexError, seed_key};
 use crate::seeds::Seeder;
 use crate::storage::MappedFile;
 use rayon::prelude::*;
@@ -82,13 +82,14 @@ pub fn build_shard(
     }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(options.threads)
-        .build()
-        .map_err(|error| IndexError::Input(format!("thread pool: {error}")))?;
+        .build()?;
     in_partial_directory(output, |directory| {
-        std::fs::create_dir(directory.join(PACKED_DIRECTORY))?;
+        let packed = directory.join(PACKED_DIRECTORY);
+        std::fs::create_dir(&packed).at(&packed)?;
         let temp = tempfile::Builder::new()
             .prefix("jam-build")
-            .tempdir_in(&options.temp_dir)?;
+            .tempdir_in(&options.temp_dir)
+            .at(&options.temp_dir)?;
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
@@ -111,9 +112,10 @@ pub fn build_shard(
                 options.bucket_bits,
                 |writer| {
                     for entry in &built {
-                        let bytes = std::fs::read(&entry.section_path)?;
+                        let path = &entry.section_path;
+                        let bytes = std::fs::read(path).at(path)?;
                         writer.push_section(&entry.section, &bytes)?;
-                        std::fs::remove_file(&entry.section_path)?;
+                        std::fs::remove_file(path).at(path)?;
                     }
                     Ok(())
                 },
@@ -140,10 +142,10 @@ pub(crate) fn in_partial_directory<T>(
         .to_string_lossy()
         .into_owned();
     let partial = output.with_file_name(format!("{name}.partial-{}", std::process::id()));
-    std::fs::create_dir(&partial)?;
+    std::fs::create_dir(&partial).at(&partial)?;
     match build(&partial) {
         Ok(built) => {
-            std::fs::rename(&partial, output)?;
+            std::fs::rename(&partial, output).at(output)?;
             Ok(built)
         }
         Err(error) => {
@@ -165,7 +167,7 @@ pub(crate) fn complete_shard(
 ) -> Result<Manifest, IndexError> {
     if u32::try_from(entries.len()).is_err() {
         return Err(IndexError::Input(
-            "a shard holds fewer than 2^32 entries".into(),
+            "a shard holds at most 2^32 - 1 entries".into(),
         ));
     }
     let positions_path = directory.join(POSITIONS_FILE);
@@ -277,19 +279,22 @@ impl<'a> EntryBuilder<'a> {
         let (section, bytes) = encode_section(&self.seeds, &self.contig_starts)?;
         drop(self.seeds);
         let section_path = self.context.temp.join(format!("section-{index:010}"));
-        std::fs::write(&section_path, &bytes)?;
+        std::fs::write(&section_path, &bytes).at(&section_path)?;
         let (contigs, bases) = (self.packed.contigs(), self.packed.bases());
         let (head, packed) = self.packed.finish();
         let file_name = packed_file_name(&name);
         let path = self.context.packed.join(&file_name);
-        let mut file = std::fs::File::create_new(path).map_err(|error| match error.kind() {
+        let mut file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
             std::io::ErrorKind::AlreadyExists => {
                 IndexError::Input(format!("the entry name {name} is used twice"))
             }
-            _ => error.into(),
+            _ => IndexError::File {
+                path: path.clone(),
+                source: error,
+            },
         })?;
-        file.write_all(&head)?;
-        file.write_all(&packed)?;
+        file.write_all(&head).at(&path)?;
+        file.write_all(&packed).at(&path)?;
         let record = EntryRecord {
             name,
             contigs,
@@ -335,7 +340,7 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntr
     let mut order: Vec<(u64, usize)> = inputs
         .iter()
         .enumerate()
-        .map(|(index, input)| Ok((std::fs::metadata(&input.path)?.len(), index)))
+        .map(|(index, input)| Ok((std::fs::metadata(&input.path).at(&input.path)?.len(), index)))
         .collect::<Result<_, IndexError>>()?;
     order.sort_unstable_by(|a, b| b.cmp(a));
     let mut built = order
@@ -368,6 +373,7 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEn
             .map(|(offset, (name, sequence))| {
                 let mut entry = EntryBuilder::new(context);
                 entry.add_contig(name, sequence)?;
+                // The name becomes a file name, so it is checked before the file is made.
                 let name = String::from_utf8_lossy(name).into_owned();
                 check_names(std::iter::once(name.as_str()))?;
                 entry.finish(first + offset, name)

@@ -16,8 +16,13 @@ pub struct LocalFile {
 impl LocalFile {
     /// Opens the file at `path` for reading.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let file = File::open(path)?;
-        let size = file.metadata()?.len();
+        let path = path.as_ref();
+        let failed = |source| StorageError::File {
+            path: path.to_path_buf(),
+            source,
+        };
+        let file = File::open(path).map_err(failed)?;
+        let size = file.metadata().map_err(failed)?.len();
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;

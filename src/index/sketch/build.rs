@@ -4,8 +4,8 @@
 //! ranked by frequency, and a second pass over the partitions writes the bucket blocks.
 
 use super::{SketchWriter, encode_bucket, encode_color_set};
-use crate::index::IndexError;
 use crate::index::positions::{POSITION_KEY_BITS, Positions, decode_section};
+use crate::index::{AtPath, IndexError};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -49,7 +49,10 @@ impl Spill {
 
     fn read(&self, partition: usize) -> Result<Vec<u64>, IndexError> {
         let mut bytes = Vec::new();
-        File::open(&self.paths[partition])?.read_to_end(&mut bytes)?;
+        let path = &self.paths[partition];
+        File::open(path)
+            .and_then(|mut file| file.read_to_end(&mut bytes))
+            .at(path)?;
         let mut records: Vec<u64> = bytes
             .as_chunks::<8>()
             .0
@@ -70,7 +73,8 @@ pub(crate) fn build_sketch(
 ) -> Result<SketchTotals, IndexError> {
     let directory = tempfile::Builder::new()
         .prefix("jam-sketch")
-        .tempdir_in(temp_dir)?;
+        .tempdir_in(temp_dir)
+        .at(temp_dir)?;
     let partition_bits = PARTITION_BITS.min(bucket_bits);
     let spill = Spill {
         paths: (0..1usize << partition_bits)
@@ -119,7 +123,7 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
         .map(|path| {
             Ok(Mutex::new(BufWriter::with_capacity(
                 1 << 16,
-                File::create_new(path)?,
+                File::create_new(path).at(path)?,
             )))
         })
         .collect::<Result<Vec<_>, IndexError>>()?;
@@ -148,13 +152,16 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
                 }
                 let partition = (group[0] >> low_bits) as usize;
                 let mut writer = writers[partition].lock().unwrap_or_else(|e| e.into_inner());
-                writer.write_all(&records)?;
+                writer.write_all(&records).at(&spill.paths[partition])?;
             }
             Ok::<_, IndexError>(())
         })?;
-    for writer in writers {
+    for (writer, path) in writers.into_iter().zip(&spill.paths) {
         let writer = writer.into_inner().unwrap_or_else(|e| e.into_inner());
-        writer.into_inner().map_err(|error| error.into_error())?;
+        writer
+            .into_inner()
+            .map_err(|error| error.into_error())
+            .at(path)?;
     }
     Ok(())
 }
