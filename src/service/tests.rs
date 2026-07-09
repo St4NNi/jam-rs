@@ -48,7 +48,7 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
     let options = BuildOptions {
         parameters: Parameters {
             k: 21,
-            window: 20,
+            w: 20,
             bin_bits: 8,
             ..Parameters::default()
         },

@@ -26,8 +26,8 @@ pub const LOW_COMPLEXITY_SALT: u64 = 0x6c6f_7720_636f_6d70;
 pub struct SeedScheme {
     /// Bases per k-mer, 1 to 32.
     pub k: u8,
-    /// K-mers per minimizer window, at least 1.
-    pub window: u16,
+    /// K-mers per minimizer window (w), at least 1.
+    pub w: u16,
     /// The lowest Shannon entropy (bits, 0 to 2) of an ordinary seed.
     pub min_entropy: f64,
 }
@@ -36,7 +36,7 @@ impl Default for SeedScheme {
     fn default() -> Self {
         Self {
             k: 25,
-            window: 100,
+            w: 100,
             min_entropy: 1.0,
         }
     }
@@ -48,8 +48,10 @@ impl SeedScheme {
         if !(1..=32).contains(&self.k) {
             return Err(SeedError::Scheme("k must be 1 to 32"));
         }
-        if self.window == 0 {
-            return Err(SeedError::Scheme("the minimizer window must be at least 1"));
+        if self.w == 0 {
+            return Err(SeedError::Scheme(
+                "w (k-mers per minimizer window) must be at least 1",
+            ));
         }
         if !(0.0..=2.0).contains(&self.min_entropy) {
             return Err(SeedError::Scheme("the entropy limit must be 0 to 2"));
@@ -117,14 +119,13 @@ impl Seeder {
         self.passes[(a as usize * side + c as usize) * side + g as usize]
     }
 
-    /// Calls `emit` for every seed of a contig. Every minimizer window of a clean run (only A, C,
-    /// G and T) selects its smallest hash, the leftmost on ties; a clean run shorter than a full
-    /// window selects its smallest. A selected k-mer below the entropy limit gives no seed;
-    /// runs of such k-mers select seeds of their own, with salted hashes.
+    /// Calls `emit` for every seed of a contig: the smallest hash (leftmost on ties) of each
+    /// minimizer window of a clean run, or of a whole clean run shorter than one. Selected k-mers
+    /// below the entropy limit give no seed; their runs select salted seeds of their own.
     pub fn seeds(&self, contig: &[u8], mut emit: impl FnMut(Kmer)) {
-        let window = usize::from(self.scheme.window);
-        let mut all = WindowMinimum::new(window);
-        let mut low = WindowMinimum::new(window);
+        let w = usize::from(self.scheme.w);
+        let mut all = SlidingMinimum::new(w);
+        let mut low = SlidingMinimum::new(w);
         let mut emit_all = |selected: Option<Candidate>| {
             if let Some(selected) = selected.filter(|selected| selected.passes) {
                 emit(selected.kmer);
@@ -315,24 +316,24 @@ struct Candidate {
 }
 
 /// The sliding minimum over the k-mers of one clean run.
-struct WindowMinimum {
-    window: usize,
+struct SlidingMinimum {
+    w: usize,
     queue: VecDeque<Candidate>,
     kmers: usize,
     last: Option<u64>,
 }
 
-impl WindowMinimum {
-    fn new(window: usize) -> Self {
+impl SlidingMinimum {
+    fn new(w: usize) -> Self {
         Self {
-            window,
-            queue: VecDeque::with_capacity(window + 1),
+            w,
+            queue: VecDeque::with_capacity(w + 1),
             kmers: 0,
             last: None,
         }
     }
 
-    /// Adds the next k-mer of the run, and returns the minimum of a full window when it is new.
+    /// Adds the next k-mer of the run, and returns the minimum of a full minimizer window when it is new.
     fn push(&mut self, candidate: Candidate) -> Option<Candidate> {
         while self
             .queue
@@ -343,14 +344,14 @@ impl WindowMinimum {
         }
         self.queue.push_back(candidate);
         self.kmers += 1;
-        if self.kmers < self.window {
+        if self.kmers < self.w {
             return None;
         }
-        let window_start = candidate.kmer.position + 1 - self.window as u64;
+        let first_start = candidate.kmer.position + 1 - self.w as u64;
         while self
             .queue
             .front()
-            .is_some_and(|front| front.kmer.position < window_start)
+            .is_some_and(|front| front.kmer.position < first_start)
         {
             self.queue.pop_front();
         }
@@ -362,9 +363,9 @@ impl WindowMinimum {
         Some(best)
     }
 
-    /// Ends the run: a run shorter than a full window returns its minimum.
+    /// Ends the run: a run shorter than a minimizer window returns its minimum.
     fn finish(&mut self) -> Option<Candidate> {
-        let short = (self.kmers < self.window)
+        let short = (self.kmers < self.w)
             .then(|| self.queue.front().copied())
             .flatten();
         self.queue.clear();

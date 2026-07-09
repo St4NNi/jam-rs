@@ -72,7 +72,7 @@ pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard 
     let options = BuildOptions {
         parameters: Parameters {
             k: 21,
-            window: 20,
+            w: 20,
             bin_bits: 8,
             ..Parameters::default()
         },

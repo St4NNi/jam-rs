@@ -32,7 +32,7 @@ const CLOSE_SLACK: f64 = 0.075;
 /// 2 / (w + 1) times the chance that a k-mer has no difference.
 pub(super) fn expected_seeds(seeder: &Seeder, bases: f64, identity: f64) -> f64 {
     let scheme = seeder.scheme();
-    bases * 2.0 / (f64::from(scheme.window) + 1.0) * identity.powi(i32::from(scheme.k))
+    bases * 2.0 / (f64::from(scheme.w) + 1.0) * identity.powi(i32::from(scheme.k))
 }
 
 /// A distinct k-mer of one piece of a batch that the sketch holds.

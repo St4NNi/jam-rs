@@ -161,13 +161,13 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     let parameters = shards[0].shard.manifest().parameters;
     if shards.iter().any(|open| {
         let other = open.shard.manifest().parameters;
-        (other.k, other.window) != (parameters.k, parameters.window)
+        (other.k, other.w) != (parameters.k, parameters.w)
     }) {
         return Err(CliError::Usage(
             "the shards differ in k or minimizer window".into(),
         ));
     }
-    let model = MissModel::new(usize::from(parameters.k), usize::from(parameters.window))?;
+    let model = MissModel::new(usize::from(parameters.k), usize::from(parameters.w))?;
     let searchers = shards
         .iter()
         .map(|open| Searcher::new(&open.shard, &model))

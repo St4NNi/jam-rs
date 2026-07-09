@@ -35,7 +35,8 @@ pub struct Parameters {
     /// Bases per k-mer.
     pub k: u8,
     /// K-mers per minimizer window.
-    pub window: u16,
+    #[serde(rename = "window")]
+    pub w: u16,
     /// The entropy limit of an ordinary seed.
     pub min_entropy: f64,
     /// Bases per bin, as a power of two.
@@ -51,7 +52,7 @@ impl Default for Parameters {
         let scheme = SeedScheme::default();
         Self {
             k: scheme.k,
-            window: scheme.window,
+            w: scheme.w,
             min_entropy: scheme.min_entropy,
             bin_bits: 10,
             bucket_bits: 24,
@@ -65,7 +66,7 @@ impl Parameters {
     pub fn scheme(&self) -> SeedScheme {
         SeedScheme {
             k: self.k,
-            window: self.window,
+            w: self.w,
             min_entropy: self.min_entropy,
         }
     }

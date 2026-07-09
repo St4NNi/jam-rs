@@ -2,7 +2,7 @@
 //! bounds every shortcut of a search.
 //!
 //! Model. Only the entry side selects seeds: the smallest k-mer of each minimizer window, and the
-//! smallest k-mer of a stretch shorter than one window. The query side uses all its k-mers.
+//! smallest k-mer of a stretch shorter than one minimizer window. The query side uses all its k-mers.
 //! Mutations are independent substitutions at rate `1 - identity`. A stretch shows no seed hit when
 //! every seed in it has at least one mutated base.
 //!
@@ -33,7 +33,7 @@ const MAX_K: usize = 32;
 /// Bad input to the loss model.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum LossError {
-    #[error("k must be from 1 to {MAX_K}, and the window at least 1")]
+    #[error("k must be from 1 to {MAX_K}, and w (k-mers per minimizer window) at least 1")]
     InvalidSeeding,
     #[error("the loss budget must be a chance above 0 and below 1")]
     InvalidBudget,
@@ -43,7 +43,7 @@ pub enum LossError {
 #[derive(Clone, Debug)]
 pub struct MissModel {
     k: usize,
-    window: usize,
+    w: usize,
     lengths: Vec<f64>,
     identities: Vec<f64>,
     /// Natural logarithm of the chance, row by length, column by identity.
@@ -65,16 +65,16 @@ impl Random {
 
 /// The base positions where the seeds of a random stretch end (the last base of the seed k-mer),
 /// in increasing order. The hashes of the k-mers of a random sequence are independent and uniform.
-fn random_layout(length: usize, k: usize, window: usize, random: &mut Random) -> Vec<usize> {
+fn random_layout(length: usize, k: usize, w: usize, random: &mut Random) -> Vec<usize> {
     let kmers = length + 1 - k;
     let hashes: Vec<u64> = (0..kmers).map(|_| random.next()).collect();
     let mut seeds = Vec::new();
-    if kmers < window {
+    if kmers < w {
         let smallest = (0..kmers).min_by_key(|&i| hashes[i]).unwrap_or(0);
         seeds.push(smallest + k - 1);
         return seeds;
     }
-    // A monotone queue of k-mer positions with rising hashes gives the minimum of each window.
+    // A monotone queue of k-mer positions with rising hashes gives the minimum of each minimizer window.
     let mut queue = std::collections::VecDeque::new();
     for position in 0..kmers {
         while queue
@@ -84,10 +84,10 @@ fn random_layout(length: usize, k: usize, window: usize, random: &mut Random) ->
             queue.pop_back();
         }
         queue.push_back(position);
-        if queue[0] + window <= position {
+        if queue[0] + w <= position {
             queue.pop_front();
         }
-        if position + 1 >= window && seeds.last() != Some(&(queue[0] + k - 1)) {
+        if position + 1 >= w && seeds.last() != Some(&(queue[0] + k - 1)) {
             seeds.push(queue[0] + k - 1);
         }
     }
@@ -128,13 +128,13 @@ fn layout_miss_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
 impl MissModel {
     /// The model for k-mers of size `k` and minimizer windows of `window` k-mers, with the table
     /// averaged over 1,000 layouts per length.
-    pub fn new(k: usize, window: usize) -> Result<Self, LossError> {
-        Self::with_layouts(k, window, 1000)
+    pub fn new(k: usize, w: usize) -> Result<Self, LossError> {
+        Self::with_layouts(k, w, 1000)
     }
 
     /// As `new`, averaging over `layouts` random layouts per stretch length.
-    pub fn with_layouts(k: usize, window: usize, layouts: usize) -> Result<Self, LossError> {
-        if !(1..=MAX_K).contains(&k) || window == 0 || layouts == 0 {
+    pub fn with_layouts(k: usize, w: usize, layouts: usize) -> Result<Self, LossError> {
+        if !(1..=MAX_K).contains(&k) || w == 0 || layouts == 0 {
             return Err(LossError::InvalidSeeding);
         }
         let lengths: Vec<f64> = LENGTHS
@@ -145,7 +145,7 @@ impl MissModel {
         let identities = identity_grid();
         let rows: Vec<Vec<f64>> = lengths
             .par_iter()
-            .map(|&length| average_row(length as usize, k, window, layouts, &identities))
+            .map(|&length| average_row(length as usize, k, w, layouts, &identities))
             .collect();
         let ln_miss = rows
             .into_iter()
@@ -154,7 +154,7 @@ impl MissModel {
             .collect();
         Ok(Self {
             k,
-            window,
+            w,
             lengths,
             identities,
             ln_miss,
@@ -193,8 +193,8 @@ impl MissModel {
     }
 
     /// The minimizer window of the model, in k-mers.
-    pub fn window(&self) -> usize {
-        self.window
+    pub fn w(&self) -> usize {
+        self.w
     }
 }
 
@@ -213,17 +213,11 @@ fn locate(grid: &[f64], value: f64) -> (usize, f64) {
 }
 
 /// The average miss chance over random layouts of one stretch length, for every identity.
-fn average_row(
-    length: usize,
-    k: usize,
-    window: usize,
-    layouts: usize,
-    identities: &[f64],
-) -> Vec<f64> {
+fn average_row(length: usize, k: usize, w: usize, layouts: usize, identities: &[f64]) -> Vec<f64> {
     let mut random = Random(0x6A09_E667_F3BC_C908 ^ length as u64);
     let mut sums = vec![0.0f64; identities.len()];
     for _ in 0..layouts {
-        let seeds = random_layout(length, k, window, &mut random);
+        let seeds = random_layout(length, k, w, &mut random);
         for (sum, &identity) in sums.iter_mut().zip(identities) {
             *sum += layout_miss_chance(&seeds, k, identity);
         }

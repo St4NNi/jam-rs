@@ -129,9 +129,7 @@ impl<'a> Searcher<'a> {
     /// A searcher of `shard`, with a miss model of the shard's k and minimizer window.
     pub fn new(shard: &'a Shard, model: &'a MissModel) -> Result<Self, SearchError> {
         let parameters = shard.manifest().parameters;
-        if model.k() != usize::from(parameters.k)
-            || model.window() != usize::from(parameters.window)
-        {
+        if model.k() != usize::from(parameters.k) || model.w() != usize::from(parameters.w) {
             return Err(SearchError::InvalidConfig(
                 "the miss model has another k or minimizer window than the shard",
             ));

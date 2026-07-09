@@ -72,7 +72,7 @@ fn table(record: &StatsRecord) -> String {
     let parameters = &record.parameters;
     let rows = [
         ("k", parameters.k.to_string()),
-        ("minimizer window", parameters.window.to_string()),
+        ("minimizer window", parameters.w.to_string()),
         ("bin bases", (1u64 << parameters.bin_bits).to_string()),
         ("entries", record.entries.to_string()),
         ("contigs", record.contigs.to_string()),

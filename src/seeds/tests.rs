@@ -5,12 +5,8 @@
 use super::*;
 use crate::test_support::{random_bases, rng};
 
-fn scheme(k: u8, window: u16, min_entropy: f64) -> SeedScheme {
-    SeedScheme {
-        k,
-        window,
-        min_entropy,
-    }
+fn scheme(k: u8, w: u16, min_entropy: f64) -> SeedScheme {
+    SeedScheme { k, w, min_entropy }
 }
 
 fn collect(sequence: &[u8], scheme: SeedScheme) -> Vec<Kmer> {
@@ -39,22 +35,22 @@ fn entropy_of(kmer: &[u8]) -> f64 {
     shannon_entropy(counts, kmer.len())
 }
 
-/// The leftmost minimum of every full window of `hashes` (one clean run starting at `offset`),
-/// or of the whole run when it is shorter than a window.
-fn window_minima(hashes: &[u64], offset: usize, window: usize, selected: &mut Vec<u64>) {
+/// The leftmost minimum of every full minimizer window of `hashes` (one clean run starting at `offset`),
+/// or of the whole run when it is shorter than one.
+fn sliding_minima(hashes: &[u64], offset: usize, w: usize, selected: &mut Vec<u64>) {
     if hashes.is_empty() {
         return;
     }
     let first = selected.len();
-    for end in window..=hashes.len() {
-        let slice = &hashes[end - window..end];
-        let best = (0..window).min_by_key(|i| (slice[*i], *i)).unwrap();
-        let position = (offset + end - window + best) as u64;
+    for end in w..=hashes.len() {
+        let slice = &hashes[end - w..end];
+        let best = (0..w).min_by_key(|i| (slice[*i], *i)).unwrap();
+        let position = (offset + end - w + best) as u64;
         if selected[first..].last() != Some(&position) {
             selected.push(position);
         }
     }
-    if hashes.len() < window {
+    if hashes.len() < w {
         let best = (0..hashes.len()).min_by_key(|i| (hashes[*i], *i)).unwrap();
         selected.push((offset + best) as u64);
     }
@@ -67,7 +63,7 @@ fn clean_runs(sequence: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
         .map(move |run| (run.as_ptr() as usize - sequence.as_ptr() as usize, run))
 }
 
-fn reference(sequence: &[u8], k: usize, window: usize) -> Vec<u64> {
+fn reference(sequence: &[u8], k: usize, w: usize) -> Vec<u64> {
     let mut selected = Vec::new();
     for (offset, run) in clean_runs(sequence).filter(|(_, run)| run.len() >= k) {
         let hashes: Vec<u64> = run
@@ -77,14 +73,14 @@ fn reference(sequence: &[u8], k: usize, window: usize) -> Vec<u64> {
                 kmer_hash(forward.min(reverse))
             })
             .collect();
-        window_minima(&hashes, offset, window, &mut selected);
+        sliding_minima(&hashes, offset, w, &mut selected);
     }
     selected
 }
 
 #[test]
 fn seeds_match_minima() {
-    for (round, (k, window)) in [(5, 1), (7, 4), (15, 10), (21, 50), (25, 100), (32, 7)]
+    for (round, (k, w)) in [(5, 1), (7, 4), (15, 10), (21, 50), (25, 100), (32, 7)]
         .into_iter()
         .enumerate()
     {
@@ -93,13 +89,13 @@ fn seeds_match_minima() {
             sequence[at] = b'N';
         }
         sequence[3000..3010].copy_from_slice(b"acgtRYacgt");
-        let positions: Vec<u64> = collect(&sequence, scheme(k, window, 0.0))
+        let positions: Vec<u64> = collect(&sequence, scheme(k, w, 0.0))
             .iter()
             .map(|seed| seed.position)
             .collect();
         assert_eq!(
             positions,
-            reference(&sequence, k as usize, window as usize),
+            reference(&sequence, k as usize, w as usize),
             "k {k}"
         );
     }
@@ -169,7 +165,7 @@ fn shared_windows_agree() {
             .map(|seed| seed.hash)
             .collect()
     };
-    // Seeds whose whole window lies in the shared stretch are selected in both sequences.
+    // Seeds whose whole minimizer window lies in the shared stretch are selected in both sequences.
     let inner = hashes(collect(&left, scheme), 1070, 1930);
     let other = hashes(collect(&right, scheme), 2000, 3000);
     assert!(!inner.is_empty());
@@ -277,7 +273,7 @@ fn salted_seed_minima() {
                 let start = (group.as_ptr() as usize - kmers.as_ptr() as usize)
                     / std::mem::size_of::<(bool, u64)>();
                 let hashes: Vec<u64> = group.iter().map(|(_, hash)| *hash).collect();
-                window_minima(&hashes, offset + start, 100, &mut expected);
+                sliding_minima(&hashes, offset + start, 100, &mut expected);
             }
         }
         let seeder = Seeder::new(scheme(k, 100, min_entropy)).unwrap();

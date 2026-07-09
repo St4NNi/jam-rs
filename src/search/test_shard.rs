@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 pub fn parameters() -> Parameters {
     Parameters {
         k: 21,
-        window: 20,
+        w: 20,
         bin_bits: 8,
         ..Parameters::default()
     }

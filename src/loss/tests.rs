@@ -90,7 +90,7 @@ fn simulation_agrees() {
 #[test]
 fn table_interpolation_holds() {
     let model = model();
-    assert_eq!((model.k(), model.window()), (25, 100));
+    assert_eq!((model.k(), model.w()), (25, 100));
     // A point of the table is returned as stored.
     let on_grid = average_row(1000, 25, 100, 100, &[0.95])[0];
     assert!((model.miss_chance(1000, 0.95) / on_grid - 1.0).abs() < 1e-9);

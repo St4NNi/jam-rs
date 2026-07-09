@@ -154,7 +154,7 @@ fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
 fn build_options(args: &BuildArgs, threads: usize, temp_dir: PathBuf) -> BuildOptions {
     let mut parameters = Parameters::default();
     parameters.k = args.k.unwrap_or(parameters.k);
-    parameters.window = args.window.unwrap_or(parameters.window);
+    parameters.w = args.window.unwrap_or(parameters.w);
     BuildOptions {
         parameters,
         bucket_bits: None,

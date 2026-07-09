@@ -55,7 +55,7 @@ impl QueryKmers {
         Self {
             length: query.len() as u64,
             circular,
-            window: u64::from(seeder.scheme().window),
+            window: u64::from(seeder.scheme().w),
             kmers: kmers.len() as u64,
             seeds,
             positions: kmers.into_iter().map(|(_, position)| position).collect(),
@@ -118,7 +118,7 @@ mod tests {
     fn seeder() -> Seeder {
         Seeder::new(SeedScheme {
             k: 5,
-            window: 3,
+            w: 3,
             min_entropy: 0.0,
         })
         .unwrap()
