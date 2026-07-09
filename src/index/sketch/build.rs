@@ -5,7 +5,7 @@
 
 use super::{SketchWriter, encode_bucket, encode_color_set};
 use crate::index::IndexError;
-use crate::index::positions::{Positions, decode_section};
+use crate::index::positions::{POSITION_KEY_BITS, Positions, decode_section};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -131,7 +131,7 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
         .try_for_each(|entry| {
             let bytes = positions.section_bytes(entry)?;
             let mut keys = Vec::new();
-            let shift = positions.key_bits() - spill.key_bits;
+            let shift = POSITION_KEY_BITS - spill.key_bits;
             decode_section(positions.section(entry)?, &bytes, |key, _| {
                 let key = key >> shift;
                 if keys.last() != Some(&key) {

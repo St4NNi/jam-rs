@@ -60,7 +60,10 @@ impl IndexError {
 pub const FINGERPRINT_BITS: u8 = 16;
 
 /// The most bucket bits a shard may use, so a stored seed key fits the build's spill records.
-pub const MAX_BUCKET_BITS: u32 = 28;
+pub const MAX_BUCKET_BITS: u8 = 28;
+
+/// The fewest bucket bits a shard uses.
+pub const MIN_BUCKET_BITS: u8 = 8;
 
 /// The bits of a hash that the index keeps: the bucket bits followed by the fingerprint.
 pub(crate) fn seed_key(hash: u64, key_bits: u32) -> u64 {

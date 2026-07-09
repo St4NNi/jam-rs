@@ -45,8 +45,6 @@ pub struct ReshardOptions {
     pub threads: usize,
     /// Directory for temporary files.
     pub temp_dir: PathBuf,
-    /// Bucket bits to use instead of the ones chosen from each output shard's size.
-    pub bucket_bits: Option<u8>,
 }
 
 /// One input shard, opened for copying its entries.
@@ -197,7 +195,7 @@ fn write_shard(
         parameters,
         entries,
         &options.temp_dir,
-        options.bucket_bits,
+        None,
         |writer| {
             for &(shard, entry) in part {
                 let positions = &shards[shard].positions;

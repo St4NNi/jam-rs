@@ -15,7 +15,7 @@
 //! | --- | --- |
 //! | 0..16 | magic `jam sketch` padded with zero bytes |
 //! | 16..20 | version (u32, 1) |
-//! | 20 | bucket bits b (u8, 1 to 28) |
+//! | 20 | bucket bits b (u8, 8 to 28) |
 //! | 21 | fingerprint bits (u8, 16) |
 //! | 22..24 | zero |
 //! | 24..32 | entries (u64) |
@@ -49,7 +49,7 @@ use super::bits::{
     BIT_PADDING, BitWriter, bits_needed, crc32, put_varint, read_bits, read_varint, u16_at, u32_at,
     u64_at,
 };
-use super::{FINGERPRINT_BITS, IndexError, seed_key};
+use super::{FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
 use crate::storage::MappedFile;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -141,7 +141,8 @@ impl Sketch {
             return Err(IndexError::Checksum("sketch header".into()));
         }
         let bucket_bits = u32::from(header[20]);
-        if !(1..=super::MAX_BUCKET_BITS).contains(&bucket_bits) || header[21] != FINGERPRINT_BITS {
+        let bucket_range = u32::from(MIN_BUCKET_BITS)..=u32::from(MAX_BUCKET_BITS);
+        if !bucket_range.contains(&bucket_bits) || header[21] != FINGERPRINT_BITS {
             return Err(IndexError::format("sketch parameters"));
         }
         let (entries, seeds, color_sets) = (field(24), field(32), field(40));

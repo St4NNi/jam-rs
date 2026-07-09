@@ -8,8 +8,6 @@ use crate::test_support::rng;
 use rand::RngExt;
 use std::collections::BTreeMap;
 
-const KEY_BITS: u32 = 30;
-
 /// Random seed locations per entry: key to sorted seed location values. Entry 2 is empty.
 fn random_entries() -> Vec<BTreeMap<u64, Vec<u32>>> {
     let mut rng = rng(0xfeed);
@@ -18,7 +16,7 @@ fn random_entries() -> Vec<BTreeMap<u64, Vec<u32>>> {
         .map(|&keys| {
             let mut entry: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
             for _ in 0..keys {
-                let key = rng.random::<u64>() >> (64 - KEY_BITS);
+                let key = rng.random::<u64>() >> (64 - POSITION_KEY_BITS);
                 let locations = entry.entry(key).or_default();
                 for _ in 0..1 + usize::from(rng.random_range(0..8) == 0) * 3 {
                     locations.push(rng.random_range(0..500_000));
@@ -44,10 +42,10 @@ fn contig_bounds(index: usize) -> Vec<u64> {
 }
 
 fn write(path: &Path, entries: &[BTreeMap<u64, Vec<u32>>]) {
-    let mut writer = PositionsWriter::create(path, KEY_BITS, 10, entries.len()).unwrap();
+    let mut writer = PositionsWriter::create(path, 10, entries.len()).unwrap();
     for (index, entry) in entries.iter().enumerate() {
         let bounds = contig_bounds(index);
-        let (section, bytes) = encode_section(&records(entry), &bounds, KEY_BITS).unwrap();
+        let (section, bytes) = encode_section(&records(entry), &bounds).unwrap();
         writer.push_section(&section, &bytes).unwrap();
     }
     writer.finish().unwrap();
@@ -66,7 +64,7 @@ fn positions_round_trip() {
     let positions = open(&path);
     positions.verify_checksums().unwrap();
     assert_eq!(positions.entries(), entries.len() as u32);
-    assert_eq!((positions.key_bits(), positions.bin_bits()), (KEY_BITS, 10));
+    assert_eq!(positions.bin_bits(), 10);
     let mut rng = rng(7);
     let mut out = Vec::new();
     for (index, entry) in entries.iter().enumerate() {
@@ -77,7 +75,8 @@ fn positions_round_trip() {
             stored.len() as u64
         );
         for (key, locations) in entry {
-            let hash = (key << (64 - KEY_BITS)) | (rng.random::<u64>() >> KEY_BITS);
+            let hash =
+                (key << (64 - POSITION_KEY_BITS)) | (rng.random::<u64>() >> POSITION_KEY_BITS);
             out.clear();
             positions.locations(index, hash, &mut out).unwrap();
             let values: Vec<u32> = out.iter().map(|location| location.value()).collect();
@@ -89,7 +88,7 @@ fn positions_round_trip() {
             positions.locations(index, hash, &mut out).unwrap();
             assert_eq!(
                 out.is_empty(),
-                !entry.contains_key(&(hash >> (64 - KEY_BITS)))
+                !entry.contains_key(&(hash >> (64 - POSITION_KEY_BITS)))
             );
         }
         let section = *positions.section(index).unwrap();
@@ -106,7 +105,7 @@ fn positions_round_trip() {
     assert!(positions.locations(9, 0, &mut out).is_err());
     assert!(positions.contig_starts(9).is_err());
     for bad in [&[][..], &[1, 2], &[0, 5, 4]] {
-        assert!(encode_section(&[], bad, KEY_BITS).is_err());
+        assert!(encode_section(&[], bad).is_err());
     }
     let location = SeedLocation {
         bin: 12345,
@@ -123,7 +122,7 @@ fn copied_sections_agree() {
     write(&first, &entries);
     let source = open(&first);
     let copy = directory.path().join("copy");
-    let mut writer = PositionsWriter::create(&copy, KEY_BITS, 10, 2).unwrap();
+    let mut writer = PositionsWriter::create(&copy, 10, 2).unwrap();
     for entry in [3, 0] {
         let bytes = source.section_bytes(entry).unwrap();
         writer
@@ -137,7 +136,7 @@ fn copied_sections_agree() {
     for (key, locations) in &entries[0] {
         out.clear();
         copied
-            .locations(1, key << (64 - KEY_BITS), &mut out)
+            .locations(1, key << (64 - POSITION_KEY_BITS), &mut out)
             .unwrap();
         assert_eq!(
             out.iter().map(|p| p.value()).collect::<Vec<_>>(),

@@ -61,7 +61,7 @@ fn write_random(path: &Path, bucket_bits: u32) -> (BTreeMap<u64, u32>, Vec<Vec<u
 #[test]
 fn sketch_round_trip() {
     let directory = tempfile::tempdir().unwrap();
-    for bucket_bits in [1, 6, 12] {
+    for bucket_bits in [8, 10, 12] {
         let path = directory.path().join(format!("sketch-{bucket_bits}"));
         let (seeds, sets) = write_random(&path, bucket_bits);
         let sketch = Sketch::open(&path).unwrap();
@@ -118,7 +118,7 @@ fn rare_ids_escaped() {
 fn damage_is_detected() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("sketch");
-    write_random(&path, 6);
+    write_random(&path, 8);
     let original = std::fs::read(&path).unwrap();
     let damaged = directory.path().join("damaged");
     for (at, expect_open) in [

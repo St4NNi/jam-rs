@@ -12,7 +12,7 @@
 //! A file is `path` (relative to the shard directory; packed files to the packed directory),
 //! `bytes` and `sha256` (lower case hex).
 
-use super::{IndexError, MAX_BUCKET_BITS};
+use super::{IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::seeds::SeedScheme;
 use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
@@ -24,8 +24,6 @@ use std::path::Path;
 pub const MANIFEST_FILE: &str = "manifest.json";
 /// The directory of the packed sequences in a shard directory.
 pub const PACKED_DIRECTORY: &str = "packed";
-/// The fewest bucket bits a shard uses.
-pub const MIN_BUCKET_BITS: u8 = 8;
 /// The format version that this code reads and writes.
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -58,7 +56,7 @@ impl Parameters {
         if !(4..=20).contains(&self.bin_bits) {
             return Err(IndexError::Input("bin bits must be 4 to 20".into()));
         }
-        if !(u32::from(MIN_BUCKET_BITS)..=MAX_BUCKET_BITS).contains(&u32::from(self.bucket_bits)) {
+        if !(MIN_BUCKET_BITS..=MAX_BUCKET_BITS).contains(&self.bucket_bits) {
             return Err(IndexError::Input(format!(
                 "bucket bits must be {MIN_BUCKET_BITS} to {MAX_BUCKET_BITS}"
             )));
@@ -145,9 +143,9 @@ impl Manifest {
 /// fingerprints, a query k-mer then matches a stored seed by chance at most about
 /// 256 / 65,536 = 0.4% of the time, and the directory costs at most 8 / 256 bytes per seed.
 pub fn choose_bucket_bits(seeds: u64) -> u8 {
-    (MIN_BUCKET_BITS..MAX_BUCKET_BITS as u8)
+    (MIN_BUCKET_BITS..MAX_BUCKET_BITS)
         .find(|bits| seeds <= 256 << bits)
-        .unwrap_or(MAX_BUCKET_BITS as u8)
+        .unwrap_or(MAX_BUCKET_BITS)
 }
 
 /// The packed file path of an entry, relative to the packed directory.

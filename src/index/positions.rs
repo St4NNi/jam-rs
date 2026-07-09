@@ -64,7 +64,7 @@ pub const POSITIONS_FILE: &str = "positions";
 
 /// Bits of a hash that the positions store per seed: enough for the largest bucket bits and the
 /// fingerprint, so shards of any size can be joined without changing their sections.
-pub const POSITION_KEY_BITS: u32 = super::MAX_BUCKET_BITS + super::FINGERPRINT_BITS as u32;
+pub const POSITION_KEY_BITS: u32 = super::MAX_BUCKET_BITS as u32 + super::FINGERPRINT_BITS as u32;
 
 const MAGIC: [u8; 16] = *b"jam positions\0\0\0";
 const VERSION: u32 = 2;
@@ -140,7 +140,7 @@ impl Section {
         row
     }
 
-    fn from_row(row: &[u8], key_bits: u32) -> Option<Self> {
+    fn from_row(row: &[u8]) -> Option<Self> {
         let section = Self {
             offset: u64_at(row, 0)?,
             length: u64_at(row, 8)?,
@@ -151,7 +151,8 @@ impl Section {
             location_bits: row[30],
             contigs: u64_at(row, 32)?,
         };
-        let valid = u32::from(section.slot_bits) + u32::from(section.suffix_bits) == key_bits
+        let valid = u32::from(section.slot_bits) + u32::from(section.suffix_bits)
+            == POSITION_KEY_BITS
             && section.location_bits <= 32
             && section.slot_bits <= 32
             && row[31] == 0
@@ -171,7 +172,6 @@ impl Section {
 pub(crate) fn encode_section(
     records: &[(u64, u32)],
     contig_bounds: &[u64],
-    key_bits: u32,
 ) -> Result<(Section, Vec<u8>), IndexError> {
     if contig_bounds.first() != Some(&0) || !contig_bounds.is_sorted() {
         return Err(IndexError::Input("contig starts must ascend from 0".into()));
@@ -183,11 +183,11 @@ pub(crate) fn encode_section(
         ));
     }
     let slot_bits = if count >= 2 * SLOT_LOCATIONS {
-        (count / SLOT_LOCATIONS).ilog2().min(key_bits)
+        (count / SLOT_LOCATIONS).ilog2().min(POSITION_KEY_BITS)
     } else {
         0
     };
-    let suffix_bits = key_bits - slot_bits;
+    let suffix_bits = POSITION_KEY_BITS - slot_bits;
     let location_bits = bits_needed(u64::from(records.iter().map(|r| r.1).max().unwrap_or(0)));
     let mut bytes: Vec<u8> = contig_bounds.iter().flat_map(|v| v.to_le_bytes()).collect();
     let mut next = 0usize;
@@ -255,7 +255,6 @@ pub(crate) fn decode_section(
 /// The positions of a shard, read by offset from a local file or S3.
 pub struct Positions {
     source: Arc<dyn ReadAt>,
-    key_bits: u32,
     bin_bits: u32,
     sections: Vec<Section>,
 }
@@ -271,7 +270,10 @@ impl Positions {
         if u32_at(&header, 124) != Some(crc32(&header[..124])) {
             return Err(IndexError::Checksum("positions header".into()));
         }
-        let (key_bits, bin_bits) = (u32::from(header[20]), u32::from(header[21]));
+        if u32::from(header[20]) != POSITION_KEY_BITS {
+            return Err(IndexError::format("positions key bits"));
+        }
+        let bin_bits = u32::from(header[21]);
         let entries = u64_at(&header, 24).unwrap_or_default();
         let table_bytes = entries
             .checked_mul(ROW_BYTES as u64)
@@ -285,7 +287,7 @@ impl Positions {
         let mut sections = Vec::with_capacity(entries as usize);
         let mut end = HEADER_BYTES + table_bytes;
         for row in table.as_chunks::<ROW_BYTES>().0 {
-            let section = Section::from_row(row, key_bits)
+            let section = Section::from_row(row)
                 .filter(|section| section.offset >= end)
                 .ok_or_else(|| IndexError::format("positions section table"))?;
             end = section.offset + section.length;
@@ -296,7 +298,6 @@ impl Positions {
         }
         Ok(Self {
             source,
-            key_bits,
             bin_bits,
             sections,
         })
@@ -310,7 +311,7 @@ impl Positions {
         out: &mut Vec<SeedLocation>,
     ) -> Result<(), IndexError> {
         let section = self.section(entry)?;
-        let key = seed_key(hash, self.key_bits);
+        let key = seed_key(hash, POSITION_KEY_BITS);
         let suffix_bits = u32::from(section.suffix_bits);
         let slot = key >> suffix_bits;
         let directory = section.offset + section.contig_bytes();
@@ -386,11 +387,6 @@ impl Positions {
         self.sections.len() as u32
     }
 
-    /// Bits of a hash stored as a seed key.
-    pub fn key_bits(&self) -> u32 {
-        self.key_bits
-    }
-
     /// Bases per bin, as a power of two.
     pub fn bin_bits(&self) -> u32 {
         self.bin_bits
@@ -410,7 +406,6 @@ impl Positions {
 /// Writes a positions file section by section, in entry order.
 pub(crate) struct PositionsWriter {
     file: BufWriter<File>,
-    key_bits: u32,
     bin_bits: u32,
     entries: usize,
     sections: Vec<Section>,
@@ -419,18 +414,12 @@ pub(crate) struct PositionsWriter {
 
 impl PositionsWriter {
     /// Creates the file at `path` for `entries` sections.
-    pub(crate) fn create(
-        path: &Path,
-        key_bits: u32,
-        bin_bits: u32,
-        entries: usize,
-    ) -> Result<Self, IndexError> {
+    pub(crate) fn create(path: &Path, bin_bits: u32, entries: usize) -> Result<Self, IndexError> {
         let mut file = File::create_new(path)?;
         let start = HEADER_BYTES + (entries * ROW_BYTES) as u64;
         file.seek(SeekFrom::Start(start))?;
         Ok(Self {
             file: BufWriter::with_capacity(1 << 20, file),
-            key_bits,
             bin_bits,
             entries,
             sections: Vec::with_capacity(entries),
@@ -446,7 +435,7 @@ impl PositionsWriter {
     ) -> Result<(), IndexError> {
         if self.sections.len() == self.entries
             || bytes.len() as u64 != section.length
-            || u32::from(section.slot_bits) + u32::from(section.suffix_bits) != self.key_bits
+            || u32::from(section.slot_bits) + u32::from(section.suffix_bits) != POSITION_KEY_BITS
         {
             return Err(IndexError::format(
                 "positions section does not fit the file",
@@ -473,7 +462,7 @@ impl PositionsWriter {
         let mut header = [0u8; HEADER_BYTES as usize];
         header[..16].copy_from_slice(&MAGIC);
         header[16..20].copy_from_slice(&VERSION.to_le_bytes());
-        header[20] = self.key_bits as u8;
+        header[20] = POSITION_KEY_BITS as u8;
         header[21] = self.bin_bits as u8;
         header[24..32].copy_from_slice(&(self.entries as u64).to_le_bytes());
         header[32..36].copy_from_slice(&crc32(&table).to_le_bytes());

@@ -9,7 +9,8 @@ use super::manifest::{
 };
 use super::packed::PackedWriter;
 use super::positions::{
-    POSITION_KEY_BITS, POSITIONS_FILE, Positions, PositionsWriter, Section, encode_section,
+    POSITION_KEY_BITS, POSITIONS_FILE, Positions, PositionsWriter, Section, SeedLocation,
+    encode_section,
 };
 use super::sketch::SKETCH_FILE;
 use super::sketch::build::build_sketch;
@@ -170,7 +171,6 @@ pub(crate) fn complete_shard(
     let positions_path = directory.join(POSITIONS_FILE);
     let mut writer = PositionsWriter::create(
         &positions_path,
-        POSITION_KEY_BITS,
         u32::from(parameters.bin_bits),
         entries.len(),
     )?;
@@ -260,10 +260,11 @@ impl<'a> EntryBuilder<'a> {
         let seeds = &mut self.seeds;
         self.context.seeder.seeds(sequence, |seed| {
             let bin = ((start + seed.position) >> bin_bits) as u32;
-            seeds.push((
-                seed_key(seed.hash, POSITION_KEY_BITS),
-                (bin << 1) | u32::from(seed.reverse),
-            ));
+            let location = SeedLocation {
+                bin,
+                reverse: seed.reverse,
+            };
+            seeds.push((seed_key(seed.hash, POSITION_KEY_BITS), location.value()));
         });
         Ok(())
     }
@@ -273,7 +274,7 @@ impl<'a> EntryBuilder<'a> {
         self.seeds.sort_unstable();
         self.seeds.dedup();
         self.contig_starts.push(self.packed.bases());
-        let (section, bytes) = encode_section(&self.seeds, &self.contig_starts, POSITION_KEY_BITS)?;
+        let (section, bytes) = encode_section(&self.seeds, &self.contig_starts)?;
         drop(self.seeds);
         let section_path = self.context.temp.join(format!("section-{index:010}"));
         std::fs::write(&section_path, &bytes)?;

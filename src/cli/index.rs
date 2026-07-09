@@ -139,7 +139,6 @@ fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
         },
         threads,
         temp_dir,
-        bucket_bits: None,
     };
     let index = reshard(&args.inputs, &args.output, &options)?;
     println!(
