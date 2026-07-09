@@ -23,8 +23,8 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
         stop: &stop,
     };
     let parameters = shard.manifest().parameters;
-    let seeder = Seeder::new(parameters.scheme()).unwrap();
-    let model = MissModel::with_layouts(21, 20, 20).unwrap();
+    let seeder = Seeder::new(parameters.scheme).unwrap();
+    let model = MissModel::with_layouts(parameters.scheme, 20).unwrap();
     let rule = &config.rule;
     let length = query.len() as u64;
     let kmers = QueryKmers::new(&seeder, query, false);

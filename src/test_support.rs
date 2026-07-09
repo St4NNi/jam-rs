@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
+use crate::seeds::SeedScheme;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::path::Path;
@@ -84,8 +85,11 @@ pub fn write_entries(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Vec<EntryInp
 pub fn build_options(directory: &Path, threads: usize) -> BuildOptions {
     BuildOptions {
         parameters: Parameters {
-            k: 21,
-            w: 20,
+            scheme: SeedScheme {
+                k: 21,
+                w: 20,
+                ..SeedScheme::default()
+            },
             bin_bits: 8,
             ..Parameters::default()
         },

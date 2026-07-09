@@ -9,6 +9,7 @@
 //! For one seed layout this chance is computed exactly. The model averages it over the layouts of
 //! random sequences, and caches the average in a table over stretch length and identity.
 
+use crate::seeds::{SeedError, SeedScheme};
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -27,14 +28,19 @@ fn identity_grid() -> Vec<f64> {
     grid
 }
 
-/// The most k-mer size the model supports.
+/// The largest k the model supports, as the seed scheme does.
 const MAX_K: usize = 32;
 
 /// Bad input to the loss model.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum LossError {
-    #[error("k must be from 1 to {MAX_K}, and w (k-mers per minimizer window) at least 1")]
-    InvalidSeeding,
+    /// The seed scheme has a value outside its range.
+    #[error(transparent)]
+    Seeds(#[from] SeedError),
+    /// The model was asked to average over no layouts.
+    #[error("the miss model needs at least one layout per stretch length")]
+    NoLayouts,
+    /// The loss budget is not a chance above 0 and below 1.
     #[error("the loss budget must be a chance above 0 and below 1")]
     InvalidBudget,
 }
@@ -126,17 +132,19 @@ fn layout_miss_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
 }
 
 impl MissModel {
-    /// The model for k-mers of size `k` and minimizer windows of `window` k-mers, with the table
-    /// averaged over 1,000 layouts per length.
-    pub fn new(k: usize, w: usize) -> Result<Self, LossError> {
-        Self::with_layouts(k, w, 1000)
+    /// The model for the k and w of a seed scheme, with the table averaged over 1,000 layouts
+    /// per length.
+    pub fn new(scheme: SeedScheme) -> Result<Self, LossError> {
+        Self::with_layouts(scheme, 1000)
     }
 
     /// As `new`, averaging over `layouts` random layouts per stretch length.
-    pub fn with_layouts(k: usize, w: usize, layouts: usize) -> Result<Self, LossError> {
-        if !(1..=MAX_K).contains(&k) || w == 0 || layouts == 0 {
-            return Err(LossError::InvalidSeeding);
+    pub fn with_layouts(scheme: SeedScheme, layouts: usize) -> Result<Self, LossError> {
+        scheme.validate()?;
+        if layouts == 0 {
+            return Err(LossError::NoLayouts);
         }
+        let (k, w) = (usize::from(scheme.k), usize::from(scheme.w));
         let lengths: Vec<f64> = LENGTHS
             .into_iter()
             .filter(|&length| length >= k as u64)

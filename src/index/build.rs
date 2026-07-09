@@ -72,7 +72,7 @@ pub fn build_shard(
     output: &Path,
     options: &BuildOptions,
 ) -> Result<Manifest, IndexError> {
-    options.parameters.scheme().validate()?;
+    options.parameters.validate()?;
     if options.threads == 0 {
         return Err(IndexError::Input("at least one thread is needed".into()));
     }
@@ -89,7 +89,7 @@ pub fn build_shard(
             .prefix("jam-build")
             .tempdir_in(&options.temp_dir)?;
         let context = Context {
-            seeder: Seeder::new(options.parameters.scheme())?,
+            seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
             packed: directory.join(PACKED_DIRECTORY),
             temp: temp.path().to_path_buf(),

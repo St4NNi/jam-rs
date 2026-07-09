@@ -55,7 +55,7 @@ fn run_with(
     bound: &CoverageBound,
     limits: SketchLimits,
 ) -> (Vec<(u32, u64)>, u64) {
-    let seeder = Seeder::new(parameters().scheme()).unwrap();
+    let seeder = Seeder::new(parameters().scheme).unwrap();
     let kmers = QueryKmers::new(&seeder, query, false);
     let stop = AtomicBool::new(false);
     let control = SearchControl {
@@ -96,7 +96,7 @@ fn entries_below_the_coverage_limit_are_left_out() {
 fn the_containment_estimate_follows_the_shared_share() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
-    let seeder = Seeder::new(parameters().scheme()).unwrap();
+    let seeder = Seeder::new(parameters().scheme).unwrap();
     let kmers = QueryKmers::new(&seeder, &query, false);
     let stop = AtomicBool::new(false);
     let control = SearchControl {
@@ -149,7 +149,7 @@ fn frequent_seeds_count_as_possibly_hit_in_every_entry() {
 fn a_stopped_search_ends_stage_1() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
-    let seeder = Seeder::new(parameters().scheme()).unwrap();
+    let seeder = Seeder::new(parameters().scheme).unwrap();
     let kmers = QueryKmers::new(&seeder, &query, false);
     let stop = AtomicBool::new(true);
     let control = SearchControl {

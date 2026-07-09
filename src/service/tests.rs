@@ -47,8 +47,11 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
         .collect();
     let options = BuildOptions {
         parameters: Parameters {
-            k: 21,
-            w: 20,
+            scheme: crate::seeds::SeedScheme {
+                k: 21,
+                w: 20,
+                ..Default::default()
+            },
             bin_bits: 8,
             ..Parameters::default()
         },
@@ -60,7 +63,17 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
     let output = directory.join(name);
     build_shard(&inputs, &output, &options).unwrap();
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    let model = MODEL.get_or_init(|| MissModel::with_layouts(21, 20, 200).unwrap());
+    let model = MODEL.get_or_init(|| {
+        MissModel::with_layouts(
+            crate::seeds::SeedScheme {
+                k: 21,
+                w: 20,
+                ..Default::default()
+            },
+            200,
+        )
+        .unwrap()
+    });
     ServedShard::new(name.into(), Shard::open(&output).unwrap(), model.clone()).unwrap()
 }
 

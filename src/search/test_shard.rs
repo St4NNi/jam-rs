@@ -9,8 +9,11 @@ use std::sync::OnceLock;
 /// enough seeds.
 pub fn parameters() -> Parameters {
     Parameters {
-        k: 21,
-        w: 20,
+        scheme: crate::seeds::SeedScheme {
+            k: 21,
+            w: 20,
+            ..Default::default()
+        },
         bin_bits: 8,
         ..Parameters::default()
     }
@@ -19,7 +22,7 @@ pub fn parameters() -> Parameters {
 /// The miss model of `parameters`, built once.
 pub fn model() -> &'static MissModel {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(21, 20, 200).unwrap())
+    MODEL.get_or_init(|| MissModel::with_layouts(parameters().scheme, 200).unwrap())
 }
 
 /// A small xorshift generator.

@@ -71,8 +71,11 @@ pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard 
         .collect();
     let options = BuildOptions {
         parameters: Parameters {
-            k: 21,
-            w: 20,
+            scheme: crate::seeds::SeedScheme {
+                k: 21,
+                w: 20,
+                ..Default::default()
+            },
             bin_bits: 8,
             ..Parameters::default()
         },

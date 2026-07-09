@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 /// The model of these tests, built once from 100 layouts per length.
 fn model() -> &'static MissModel {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(25, 100, 100).unwrap())
+    MODEL.get_or_init(|| MissModel::with_layouts(SeedScheme::default(), 100).unwrap())
 }
 
 /// The chance that all seeds are mutated, by trying every pattern of mutated bases.
@@ -127,18 +127,17 @@ fn edges_are_safe() {
 
 #[test]
 fn bad_seeding_rejected() {
-    assert_eq!(
-        MissModel::new(0, 100).unwrap_err(),
-        LossError::InvalidSeeding
-    );
-    assert_eq!(
-        MissModel::new(33, 100).unwrap_err(),
-        LossError::InvalidSeeding
-    );
-    assert_eq!(
-        MissModel::new(25, 0).unwrap_err(),
-        LossError::InvalidSeeding
-    );
+    for (k, w) in [(0, 100), (33, 100), (25, 0)] {
+        let scheme = SeedScheme {
+            k,
+            w,
+            ..SeedScheme::default()
+        };
+        let error = MissModel::new(scheme).unwrap_err();
+        assert!(matches!(error, LossError::Seeds(_)), "{k} {w}");
+    }
+    let error = MissModel::with_layouts(SeedScheme::default(), 0);
+    assert_eq!(error.unwrap_err(), LossError::NoLayouts);
 }
 
 #[test]

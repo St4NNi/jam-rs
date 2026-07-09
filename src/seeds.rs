@@ -6,11 +6,12 @@
 //! chosen the same way inside the run, with a salted hash. The query side salts the hash of every
 //! query k-mer below the limit, so both sides meet.
 
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use thiserror::Error;
 
 /// Errors of the seeds module.
-#[derive(Debug, Error, PartialEq)]
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum SeedError {
     /// The seed scheme has a value outside its range.
     #[error("invalid seed scheme: {0}")]
@@ -22,7 +23,7 @@ pub enum SeedError {
 pub const LOW_COMPLEXITY_SALT: u64 = 0x6c6f_7720_636f_6d70;
 
 /// How seeds are chosen: k-mer size, minimizer window and entropy limit.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SeedScheme {
     /// Bases per k-mer, 1 to 32.
     pub k: u8,

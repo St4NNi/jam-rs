@@ -4,7 +4,7 @@
 //! | Field | Meaning |
 //! | --- | --- |
 //! | `format_version` | 1 |
-//! | `parameters` | `k`, `window`, `min_entropy`, `bin_bits`, `bucket_bits`, `fingerprint_bits` |
+//! | `parameters` | `k`, `w`, `min_entropy`, `bin_bits`, `bucket_bits` |
 //! | `entries` | in entry id order: `name`, `contigs`, `bases`, `packed` (file) |
 //! | `sketch`, `positions` | files |
 //! | `seeds`, `color_sets`, `seed_locations` | totals of the sketch and the positions |
@@ -12,7 +12,7 @@
 //! A file is `path` (relative to the shard directory; packed files to the packed directory),
 //! `bytes` and `sha256` (lower case hex).
 
-use super::{FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS};
+use super::{IndexError, MAX_BUCKET_BITS};
 use crate::seeds::SeedScheme;
 use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
@@ -32,59 +32,35 @@ pub const FORMAT_VERSION: u32 = 1;
 /// The parameters of a shard.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Parameters {
-    /// Bases per k-mer.
-    pub k: u8,
-    /// K-mers per minimizer window.
-    #[serde(rename = "window")]
-    pub w: u16,
-    /// The entropy limit of an ordinary seed.
-    pub min_entropy: f64,
+    /// How seeds are chosen: k, w and the entropy limit.
+    #[serde(flatten)]
+    pub scheme: SeedScheme,
     /// Bases per bin, as a power of two.
     pub bin_bits: u8,
     /// Sketch buckets, as a power of two; the build chooses them from the shard size.
     pub bucket_bits: u8,
-    /// Hash bits after the bucket bits that tell seeds apart.
-    pub fingerprint_bits: u8,
 }
 
 impl Default for Parameters {
     fn default() -> Self {
-        let scheme = SeedScheme::default();
         Self {
-            k: scheme.k,
-            w: scheme.w,
-            min_entropy: scheme.min_entropy,
+            scheme: SeedScheme::default(),
             bin_bits: 10,
             bucket_bits: 24,
-            fingerprint_bits: FINGERPRINT_BITS,
         }
     }
 }
 
 impl Parameters {
-    /// The seed scheme of these parameters.
-    pub fn scheme(&self) -> SeedScheme {
-        SeedScheme {
-            k: self.k,
-            w: self.w,
-            min_entropy: self.min_entropy,
-        }
-    }
-
     /// Checks that every value lies in its range.
     pub fn validate(&self) -> Result<(), IndexError> {
-        self.scheme().validate()?;
+        self.scheme.validate()?;
         if !(4..=20).contains(&self.bin_bits) {
             return Err(IndexError::Input("bin bits must be 4 to 20".into()));
         }
         if !(u32::from(MIN_BUCKET_BITS)..=MAX_BUCKET_BITS).contains(&u32::from(self.bucket_bits)) {
             return Err(IndexError::Input(format!(
                 "bucket bits must be {MIN_BUCKET_BITS} to {MAX_BUCKET_BITS}"
-            )));
-        }
-        if self.fingerprint_bits != FINGERPRINT_BITS {
-            return Err(IndexError::Input(format!(
-                "fingerprint bits must be {FINGERPRINT_BITS}"
             )));
         }
         Ok(())
@@ -284,7 +260,10 @@ mod tests {
         let manifest = Manifest {
             format_version: FORMAT_VERSION,
             parameters: Parameters {
-                min_entropy: 1.1,
+                scheme: SeedScheme {
+                    min_entropy: 1.1,
+                    ..SeedScheme::default()
+                },
                 ..Parameters::default()
             },
             entries: vec![EntryRecord {
@@ -335,11 +314,10 @@ mod tests {
                 ..parameters
             },
             Parameters {
-                fingerprint_bits: 8,
-                ..parameters
-            },
-            Parameters {
-                k: 33,
+                scheme: SeedScheme {
+                    k: 33,
+                    ..parameters.scheme
+                },
                 ..parameters
             },
         ] {

@@ -125,7 +125,9 @@ mod tests {
 
     fn model() -> &'static MissModel {
         static MODEL: OnceLock<MissModel> = OnceLock::new();
-        MODEL.get_or_init(|| MissModel::with_layouts(21, 20, 50).unwrap())
+        MODEL.get_or_init(|| {
+            MissModel::with_layouts(crate::search::test_shard::parameters().scheme, 50).unwrap()
+        })
     }
 
     fn bound(length: u64, circular: bool) -> CoverageBound<'static> {

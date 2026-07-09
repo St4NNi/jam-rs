@@ -71,8 +71,8 @@ pub fn run(args: &StatsArgs) -> Result<(), CliError> {
 fn table(record: &StatsRecord) -> String {
     let parameters = &record.parameters;
     let rows = [
-        ("k", parameters.k.to_string()),
-        ("minimizer window", parameters.w.to_string()),
+        ("k", parameters.scheme.k.to_string()),
+        ("minimizer window", parameters.scheme.w.to_string()),
         ("bin bases", (1u64 << parameters.bin_bits).to_string()),
         ("entries", record.entries.to_string()),
         ("contigs", record.contigs.to_string()),

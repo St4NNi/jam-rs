@@ -56,7 +56,7 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         source,
     })?;
     let parameters = shard.manifest().parameters;
-    let model = MissModel::new(usize::from(parameters.k), usize::from(parameters.w))?;
+    let model = MissModel::new(parameters.scheme)?;
     let name = args.shard.file_name().map_or_else(
         || args.shard.display().to_string(),
         |name| name.to_string_lossy().into_owned(),

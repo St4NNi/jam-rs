@@ -45,10 +45,9 @@ impl<'a> Screener<'a> {
     /// A screener of `shard` with `config`.
     pub fn new(shard: &'a Shard, config: ScreenConfig) -> Result<Self, ScreenError> {
         config.validate()?;
-        let scheme = shard.manifest().parameters.scheme();
+        let scheme = shard.manifest().parameters.scheme;
         let seeder = Seeder::new(scheme).map_err(crate::index::IndexError::from)?;
-        let model = MissModel::with_layouts(usize::from(scheme.k), usize::from(scheme.w), 1)
-            .map_err(crate::search::SearchError::from)?;
+        let model = MissModel::with_layouts(scheme, 1).map_err(crate::search::SearchError::from)?;
         Ok(Self {
             shard,
             config,

@@ -43,7 +43,7 @@ fn options(directory: &Path, threads: usize) -> BuildOptions {
 /// that the packed sequences give back the contigs.
 fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
     let parameters = shard.manifest().parameters;
-    let seeder = Seeder::new(parameters.scheme()).unwrap();
+    let seeder = Seeder::new(parameters.scheme).unwrap();
     let mut locations = Vec::new();
     let mut bases = Vec::new();
     for (entry, contigs) in entries.iter().enumerate() {
