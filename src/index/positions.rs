@@ -51,7 +51,7 @@
 //! d is chosen so a slot holds about 16 seed locations; a lookup reads 8 bytes of the directory and
 //! the records of one slot. A seed that occurs at several bins has one record per bin.
 
-use super::bits::{BIT_PADDING, BitWriter, bits_needed, crc32, read_bits, u32_at, u64_at};
+use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u32_at, u64_at};
 use super::{AtPath, IndexError, seed_key};
 use crate::storage::ReadAt;
 use std::fs::File;
@@ -209,7 +209,7 @@ pub(crate) fn encode_section(
         offset: 0,
         length: bytes.len() as u64,
         locations: count,
-        crc: crc32(&bytes),
+        crc: crc32fast::hash(&bytes),
         slot_bits: slot_bits as u8,
         suffix_bits: suffix_bits as u8,
         location_bits: location_bits as u8,
@@ -267,7 +267,7 @@ impl Positions {
         if header[..16] != MAGIC || u32_at(&header, 16) != Some(VERSION) {
             return Err(IndexError::format("not a positions file of this version"));
         }
-        if u32_at(&header, 124) != Some(crc32(&header[..124])) {
+        if u32_at(&header, 124) != Some(crc32fast::hash(&header[..124])) {
             return Err(IndexError::Checksum("positions header".into()));
         }
         if u32::from(header[20]) != POSITION_KEY_BITS {
@@ -281,7 +281,7 @@ impl Positions {
             .ok_or_else(|| IndexError::format("positions table is cut off"))?;
         let mut table = vec![0u8; table_bytes as usize];
         source.read_exact_at(HEADER_BYTES, &mut table)?;
-        if u32_at(&header, 32) != Some(crc32(&table)) {
+        if u32_at(&header, 32) != Some(crc32fast::hash(&table)) {
             return Err(IndexError::Checksum("positions table".into()));
         }
         let mut sections = Vec::with_capacity(entries as usize);
@@ -376,7 +376,7 @@ impl Positions {
         let section = self.section(entry)?;
         let mut bytes = vec![0u8; section.length as usize];
         self.source.read_exact_at(section.offset, &mut bytes)?;
-        if crc32(&bytes) != section.crc {
+        if crc32fast::hash(&bytes) != section.crc {
             return Err(IndexError::Checksum(format!("positions of entry {entry}")));
         }
         Ok(bytes)
@@ -468,8 +468,8 @@ impl PositionsWriter {
         header[20] = POSITION_KEY_BITS as u8;
         header[21] = self.bin_bits as u8;
         header[24..32].copy_from_slice(&(self.entries as u64).to_le_bytes());
-        header[32..36].copy_from_slice(&crc32(&table).to_le_bytes());
-        let header_crc = crc32(&header[..124]);
+        header[32..36].copy_from_slice(&crc32fast::hash(&table).to_le_bytes());
+        let header_crc = crc32fast::hash(&header[..124]);
         header[124..].copy_from_slice(&header_crc.to_le_bytes());
         let path = &self.path;
         let mut file = self

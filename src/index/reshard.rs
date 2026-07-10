@@ -7,7 +7,9 @@
 
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
-use super::manifest::{MANIFEST_FILE, Manifest, PACKED_DIRECTORY, Parameters, check_names};
+use super::manifest::{
+    MANIFEST_FILE, Manifest, PACKED_DIRECTORY, Parameters, check_names, sha256_file,
+};
 use super::positions::{POSITIONS_FILE, Positions};
 use super::{AtPath, IndexError};
 use crate::storage::MappedFile;
@@ -75,31 +77,50 @@ pub fn reshard(
         .num_threads(options.threads.max(1))
         .build()?;
     in_partial_directory(output, |directory| {
-        let mut records = Vec::with_capacity(groups.len());
-        for (number, group) in groups.iter().enumerate() {
-            let name = format!("shard-{number:04}");
-            let part = &sources[group.clone()];
-            let shard_directory = directory.join(&name);
-            std::fs::create_dir(&shard_directory).at(&shard_directory)?;
-            let manifest =
-                pool.install(|| write_shard(&shards, part, &shard_directory, options))?;
-            records.push(ShardRecord {
-                directory: name,
-                first_entry: group.start as u64,
-                entries: group.len() as u64,
-                seed_locations: manifest.seed_locations,
-                manifest_sha256: super::manifest::sha256_file(
-                    &shard_directory.join(MANIFEST_FILE),
-                )?
-                .1,
-            });
-        }
+        let records = (groups.iter().enumerate())
+            .map(|(number, group)| {
+                let part = Part {
+                    number,
+                    first_entry: group.start,
+                    sources: &sources[group.clone()],
+                };
+                pool.install(|| output_shard(&shards, &part, directory, options))
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
         let index = IndexFile {
             format_version: INDEX_FORMAT_VERSION,
             shards: records,
         };
         index.write(directory)?;
         Ok(index)
+    })
+}
+
+/// The entries of one output shard: (input shard, entry) pairs, in index order.
+struct Part<'a> {
+    number: usize,
+    first_entry: usize,
+    sources: &'a [(usize, u32)],
+}
+
+/// Writes output shard `part` into its directory under `directory` and returns its record.
+fn output_shard(
+    shards: &[InputShard],
+    part: &Part<'_>,
+    directory: &Path,
+    options: &ReshardOptions,
+) -> Result<ShardRecord, IndexError> {
+    let name = format!("shard-{:04}", part.number);
+    let shard_directory = directory.join(&name);
+    std::fs::create_dir(&shard_directory).at(&shard_directory)?;
+    let manifest = write_shard(shards, part.sources, &shard_directory, options)?;
+    let (_, manifest_sha256) = sha256_file(&shard_directory.join(MANIFEST_FILE))?;
+    Ok(ShardRecord {
+        directory: name,
+        first_entry: part.first_entry as u64,
+        entries: part.sources.len() as u64,
+        seed_locations: manifest.seed_locations,
+        manifest_sha256,
     })
 }
 

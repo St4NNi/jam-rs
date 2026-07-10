@@ -117,11 +117,6 @@ pub(crate) fn read_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
     None
 }
 
-/// CRC-32 of `bytes`.
-pub(crate) fn crc32(bytes: &[u8]) -> u32 {
-    crc32fast::hash(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

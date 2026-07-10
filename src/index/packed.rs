@@ -26,7 +26,7 @@
 //! | ceil(n / 4) | the bases, four per byte, the first base in the low bits |
 
 use super::IndexError;
-use super::bits::{crc32, u32_at, u64_at};
+use super::bits::{u32_at, u64_at};
 use crate::seeds::base_code;
 use crate::storage::ReadAt;
 use std::ops::Range;
@@ -141,10 +141,10 @@ impl PackedWriter {
             file.extend_from_slice(&[run.byte, 0, 0, 0]);
         }
         for block in self.packed.chunks(BLOCK_BYTES as usize) {
-            file.extend_from_slice(&crc32(block).to_le_bytes());
+            file.extend_from_slice(&crc32fast::hash(block).to_le_bytes());
         }
         let packed_offset = file.len() as u64;
-        let tables_crc = crc32(&file[HEADER_BYTES as usize..]);
+        let tables_crc = crc32fast::hash(&file[HEADER_BYTES as usize..]);
         file[..16].copy_from_slice(&MAGIC);
         file[16..20].copy_from_slice(&VERSION.to_le_bytes());
         let fields = [
@@ -158,7 +158,7 @@ impl PackedWriter {
             file[24 + 8 * index..32 + 8 * index].copy_from_slice(&value.to_le_bytes());
         }
         file[64..68].copy_from_slice(&tables_crc.to_le_bytes());
-        let header_crc = crc32(&file[..68]);
+        let header_crc = crc32fast::hash(&file[..68]);
         file[68..72].copy_from_slice(&header_crc.to_le_bytes());
         (file, self.packed)
     }
@@ -185,7 +185,8 @@ impl PackedSequence {
         {
             return Err(IndexError::format("not a packed sequence of this version"));
         }
-        if u32_at(&header, 68) != Some(crc32(&header[..68])) || header[72..].iter().any(|b| *b != 0)
+        if u32_at(&header, 68) != Some(crc32fast::hash(&header[..68]))
+            || header[72..].iter().any(|b| *b != 0)
         {
             return Err(IndexError::Checksum("packed sequence header".into()));
         }
@@ -208,7 +209,7 @@ impl PackedSequence {
         }
         let mut tables = vec![0u8; (packed_offset - HEADER_BYTES) as usize];
         source.read_exact_at(HEADER_BYTES, &mut tables)?;
-        if u32_at(&header, 64) != Some(crc32(&tables)) {
+        if u32_at(&header, 64) != Some(crc32fast::hash(&tables)) {
             return Err(IndexError::Checksum("packed sequence tables".into()));
         }
         Self::from_tables(
@@ -359,7 +360,7 @@ impl PackedSequence {
         self.source
             .read_exact_at(self.packed_offset + read_start, &mut packed)?;
         for (index, block) in packed.chunks(BLOCK_BYTES as usize).enumerate() {
-            if self.block_crcs.get(first_block as usize + index) != Some(&crc32(block)) {
+            if self.block_crcs.get(first_block as usize + index) != Some(&crc32fast::hash(block)) {
                 return Err(IndexError::Checksum("packed bases".into()));
             }
         }

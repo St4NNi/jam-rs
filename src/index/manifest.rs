@@ -179,13 +179,13 @@ pub fn check_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), Index
     Ok(())
 }
 
-/// The SHA-256 digest of `bytes`, lower case hex.
+/// The SHA-256 digest of `parts` one after the other, lower case hex.
 pub fn sha256_hex(parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
     for part in parts {
         digest.update(part);
     }
-    hex(&digest.finalize())
+    format!("{:x}", digest.finalize())
 }
 
 /// The size and SHA-256 digest of a file.
@@ -202,7 +202,7 @@ pub fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
         digest.update(&buffer[..read]);
         bytes += read as u64;
     }
-    Ok((bytes, hex(&digest.finalize())))
+    Ok((bytes, format!("{:x}", digest.finalize())))
 }
 
 /// Checks a file against its record.
@@ -229,17 +229,13 @@ pub fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), Ind
         digest.update(&buffer[..length]);
         offset += length as u64;
     }
-    if size != record.bytes || hex(&digest.finalize()) != record.sha256 {
+    if size != record.bytes || format!("{:x}", digest.finalize()) != record.sha256 {
         return Err(IndexError::Checksum(format!(
             "{} differs from its manifest record",
             record.path
         )));
     }
     Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]

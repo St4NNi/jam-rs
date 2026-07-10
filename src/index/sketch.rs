@@ -46,8 +46,7 @@
 //! widen every value.
 
 use super::bits::{
-    BIT_PADDING, BitWriter, bits_needed, crc32, put_varint, read_bits, read_varint, u16_at, u32_at,
-    u64_at,
+    BIT_PADDING, BitWriter, bits_needed, put_varint, read_bits, read_varint, u16_at, u32_at, u64_at,
 };
 use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
 use crate::storage::MappedFile;
@@ -137,7 +136,7 @@ impl Sketch {
         if header[..16] != MAGIC || u32_at(header, 16) != Some(VERSION) {
             return Err(IndexError::format("not a sketch file of this version"));
         }
-        if u32_at(header, 124) != Some(crc32(&header[..124])) {
+        if u32_at(header, 124) != Some(crc32fast::hash(&header[..124])) {
             return Err(IndexError::Checksum("sketch header".into()));
         }
         let bucket_bits = u32::from(header[20]);
@@ -209,7 +208,7 @@ impl Sketch {
     pub fn verify_checksums(&self) -> Result<(), IndexError> {
         let bytes = self.file.bytes();
         for (range, crc) in self.layout.sections().into_iter().zip(self.crcs) {
-            if crc32(&bytes[range]) != crc {
+            if crc32fast::hash(&bytes[range]) != crc {
                 return Err(IndexError::Checksum("sketch section".into()));
             }
         }
@@ -464,15 +463,15 @@ impl SketchWriter {
             header[24 + 8 * index..32 + 8 * index].copy_from_slice(&value.to_le_bytes());
         }
         let crcs = [
-            crc32(&directory),
+            crc32fast::hash(&directory),
             self.crc.finalize(),
-            crc32(&offsets),
+            crc32fast::hash(&offsets),
             set_crc.finalize(),
         ];
         for (index, crc) in crcs.into_iter().enumerate() {
             header[64 + 4 * index..68 + 4 * index].copy_from_slice(&crc.to_le_bytes());
         }
-        let header_crc = crc32(&header[..124]);
+        let header_crc = crc32fast::hash(&header[..124]);
         header[124..].copy_from_slice(&header_crc.to_le_bytes());
         let mut file = self
             .file
