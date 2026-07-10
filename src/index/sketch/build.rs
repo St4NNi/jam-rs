@@ -6,26 +6,36 @@
 use super::{SketchWriter, encode_bucket, encode_color_set};
 use crate::index::positions::{POSITION_KEY_BITS, Positions, decode_section};
 use crate::index::{AtPath, IndexError};
+use crate::storage::lock;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 /// Partitions of the key space are 2^PARTITION_BITS (fewer when there are fewer buckets).
 const PARTITION_BITS: u32 = 12;
-/// Shards of the color set counts, so threads rarely wait for each other.
-const COUNT_SHARDS: usize = 64;
+/// Lock stripes of the color set counts, so threads rarely wait for each other.
+const COUNT_STRIPES: usize = 64;
 /// Partitions written per parallel round, so encoded blocks wait in memory only briefly.
 const WRITE_ROUND: usize = 64;
 
-/// Keys per distinct color set (encoded), in shards.
+/// Keys per distinct color set (encoded), in lock stripes.
 type SetCounts = Vec<HashMap<Box<[u8]>, u64>>;
 
-/// The bucket blocks of one partition: the block bytes, and for each non-empty bucket its index,
-/// block length and seed count.
-type EncodedPartition = (Vec<u8>, Vec<(usize, usize, u64)>);
+/// The bucket blocks of one partition, one after the other.
+struct EncodedPartition {
+    bytes: Vec<u8>,
+    blocks: Vec<EncodedBucket>,
+}
+
+/// One non-empty bucket of an encoded partition.
+struct EncodedBucket {
+    bucket: usize,
+    length: usize,
+    seeds: u64,
+}
 
 /// Totals of a written sketch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -99,12 +109,13 @@ pub(crate) fn build_sketch(
             .par_iter()
             .map(|&partition| encode_partition(&spill, partition, &ids))
             .collect::<Result<Vec<_>, IndexError>>()?;
-        for (bytes, blocks) in encoded {
+        for partition in encoded {
             let mut at = 0;
-            for (bucket, length, count) in blocks {
-                writer.push_bucket(bucket, &bytes[at..at + length])?;
-                at += length;
-                seeds += count;
+            for block in partition.blocks {
+                let end = at + block.length;
+                writer.push_bucket(block.bucket, &partition.bytes[at..end])?;
+                at = end;
+                seeds += block.seeds;
             }
         }
     }
@@ -151,13 +162,13 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
                     records.extend_from_slice(&record.to_le_bytes());
                 }
                 let partition = (group[0] >> low_bits) as usize;
-                let mut writer = writers[partition].lock().unwrap_or_else(|e| e.into_inner());
+                let mut writer = lock(&writers[partition]);
                 writer.write_all(&records).at(&spill.paths[partition])?;
             }
             Ok::<_, IndexError>(())
         })?;
     for (writer, path) in writers.into_iter().zip(&spill.paths) {
-        let writer = writer.into_inner().unwrap_or_else(|e| e.into_inner());
+        let writer = writer.into_inner().unwrap_or_else(PoisonError::into_inner);
         writer
             .into_inner()
             .map_err(|error| error.into_error())
@@ -167,7 +178,10 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
 }
 
 /// Calls `visit(key low bits, encoded color set)` for every key of a sorted partition.
-fn for_each_key(records: &[u64], mut visit: impl FnMut(u64, &[u8])) {
+fn for_each_key(
+    records: &[u64],
+    mut visit: impl FnMut(u64, &[u8]) -> Result<(), IndexError>,
+) -> Result<(), IndexError> {
     let mut entries = Vec::new();
     let mut encoded = Vec::new();
     for group in records.chunk_by(|a, b| a >> 32 == b >> 32) {
@@ -175,36 +189,37 @@ fn for_each_key(records: &[u64], mut visit: impl FnMut(u64, &[u8])) {
         entries.extend(group.iter().map(|record| *record as u32));
         encoded.clear();
         encode_color_set(&entries, &mut encoded);
-        visit(group[0] >> 32, &encoded);
+        visit(group[0] >> 32, &encoded)?;
     }
+    Ok(())
 }
 
 /// Counts the keys of every distinct color set.
 fn count_color_sets(spill: &Spill) -> Result<SetCounts, IndexError> {
-    let shards: Vec<Mutex<HashMap<Box<[u8]>, u64>>> =
-        (0..COUNT_SHARDS).map(|_| Mutex::default()).collect();
+    let stripes: Vec<Mutex<HashMap<Box<[u8]>, u64>>> =
+        (0..COUNT_STRIPES).map(|_| Mutex::default()).collect();
     (0..spill.paths.len())
         .into_par_iter()
         .with_max_len(1)
         .try_for_each(|partition| {
             let records = spill.read(partition)?;
             let mut local: HashMap<Box<[u8]>, u64> = HashMap::new();
-            for_each_key(&records, |_, set| match local.get_mut(set) {
-                Some(count) => *count += 1,
-                None => {
-                    local.insert(set.into(), 1);
+            for_each_key(&records, |_, set| {
+                match local.get_mut(set) {
+                    Some(count) => *count += 1,
+                    None => drop(local.insert(set.into(), 1)),
                 }
-            });
+                Ok(())
+            })?;
             for (set, count) in local {
-                let shard = jamhash::jamhash_bytes(&set) as usize % COUNT_SHARDS;
-                let mut shard = shards[shard].lock().unwrap_or_else(|e| e.into_inner());
-                *shard.entry(set).or_default() += count;
+                let stripe = jamhash::jamhash_bytes(&set) as usize % COUNT_STRIPES;
+                *lock(&stripes[stripe]).entry(set).or_default() += count;
             }
             Ok::<_, IndexError>(())
         })?;
-    Ok(shards
+    Ok(stripes
         .into_iter()
-        .map(|shard| shard.into_inner().unwrap_or_else(|e| e.into_inner()))
+        .map(|stripe| stripe.into_inner().unwrap_or_else(PoisonError::into_inner))
         .collect())
 }
 
@@ -213,7 +228,7 @@ fn count_color_sets(spill: &Spill) -> Result<SetCounts, IndexError> {
 fn rank(counts: SetCounts) -> Vec<Box<[u8]>> {
     let mut sets: Vec<(u64, Box<[u8]>)> = counts
         .into_iter()
-        .flat_map(|shard| shard.into_iter().map(|(set, count)| (count, set)))
+        .flat_map(|stripe| stripe.into_iter().map(|(set, count)| (count, set)))
         .collect();
     sets.par_sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     sets.into_iter().map(|(_, set)| set).collect()
@@ -227,14 +242,13 @@ fn encode_partition(
 ) -> Result<EncodedPartition, IndexError> {
     let records = spill.read(partition)?;
     let mut seeds: Vec<(u64, u32)> = Vec::new();
-    let mut missing = false;
-    for_each_key(&records, |low, set| match ids.get(set) {
-        Some(id) => seeds.push((low, *id)),
-        None => missing = true,
-    });
-    if missing {
-        return Err(IndexError::format("a color set changed between two reads"));
-    }
+    for_each_key(&records, |low, set| {
+        let id = ids
+            .get(set)
+            .ok_or_else(|| IndexError::format("a color set changed between two reads"))?;
+        seeds.push((low, *id));
+        Ok(())
+    })?;
     let first_key = (partition as u64) << spill.low_bits();
     let fingerprint_bits = u32::from(crate::index::FINGERPRINT_BITS);
     let mut bytes = Vec::new();
@@ -246,7 +260,11 @@ fn encode_partition(
         bucket_seeds.extend(group.iter().map(|(low, id)| (*low as u16, *id)));
         encode_bucket(&bucket_seeds, &mut bytes);
         let bucket = ((first_key + group[0].0) >> fingerprint_bits) as usize;
-        blocks.push((bucket, bytes.len() - start, group.len() as u64));
+        blocks.push(EncodedBucket {
+            bucket,
+            length: bytes.len() - start,
+            seeds: group.len() as u64,
+        });
     }
-    Ok((bytes, blocks))
+    Ok(EncodedPartition { bytes, blocks })
 }

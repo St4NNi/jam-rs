@@ -2,13 +2,13 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{ReadAt, StorageError, checked_end};
+use super::{ReadAt, StorageError, checked_end, lock};
 use opendal::layers::{ConcurrentLimitLayer, RetryLayer, TimeoutLayer};
 use opendal::services::S3;
 use opendal::{ErrorKind, Operator};
 use std::collections::HashMap;
 use std::io;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
 
@@ -102,10 +102,7 @@ impl S3Config {
 
     /// The operator of `bucket`, built once.
     fn operator(&self, bucket: &str) -> Result<Operator, StorageError> {
-        let mut operators = self
-            .operators
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut operators = lock(&self.operators);
         if let Some(operator) = operators.get(bucket) {
             return Ok(operator.clone());
         }

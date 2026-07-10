@@ -15,6 +15,7 @@ pub use error::StorageError;
 pub use mapped::MappedFile;
 
 use std::io;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Positional reads from an immutable file or object, shared by many threads.
 pub trait ReadAt: Send + Sync {
@@ -56,6 +57,12 @@ impl ReadAt for Vec<u8> {
     fn size(&self) -> u64 {
         self.len() as u64
     }
+}
+
+/// Locks `mutex`. A thread that panicked while holding it leaves data that is still whole here,
+/// so the lock is taken anyway.
+pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The error of a read that starts or ends after the last byte.
