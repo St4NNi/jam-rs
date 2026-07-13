@@ -2,15 +2,15 @@
 //! shards, and resharding them into an index of several shards.
 
 mod bits;
-pub mod build;
-pub mod index_file;
-pub mod manifest;
-pub mod packed;
-pub mod packed_source;
-pub mod positions;
-pub mod reshard;
-pub mod shard;
-pub mod sketch;
+mod build;
+mod index_file;
+mod manifest;
+mod packed;
+mod packed_source;
+mod positions;
+mod reshard;
+mod shard;
+mod sketch;
 
 use crate::seeds::SeedError;
 use crate::storage::StorageError;
@@ -21,7 +21,7 @@ use thiserror::Error;
 pub use build::{BuildOptions, EntryInput, build_shard};
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
-pub use packed::{PackedSequence, PackedWriter};
+pub use packed::PackedSequence;
 pub use packed_source::{PackedLocation, PackedOptions};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};

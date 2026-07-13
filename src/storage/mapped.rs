@@ -1,6 +1,6 @@
 //! A local file mapped into memory and read by offset.
 
-use super::{ReadAt, StorageError};
+use super::{ReadAt, StorageError, read_slice};
 use std::io;
 use std::path::Path;
 
@@ -38,12 +38,7 @@ impl MappedFile {
 
 impl ReadAt for MappedFile {
     fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
-        let bytes = usize::try_from(offset)
-            .ok()
-            .and_then(|start| self.bytes().get(start..start.checked_add(buffer.len())?))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "read past the end"))?;
-        buffer.copy_from_slice(bytes);
-        Ok(())
+        read_slice(self.bytes(), offset, buffer)
     }
 
     fn size(&self) -> u64 {

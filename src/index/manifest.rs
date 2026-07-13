@@ -21,11 +21,11 @@ use std::io::Read;
 use std::path::Path;
 
 /// The file name of the manifest in a shard directory.
-pub const MANIFEST_FILE: &str = "manifest.json";
+pub(crate) const MANIFEST_FILE: &str = "manifest.json";
 /// The directory of the packed sequences in a shard directory.
-pub const PACKED_DIRECTORY: &str = "packed";
+pub(crate) const PACKED_DIRECTORY: &str = "packed";
 /// The format version that this code reads and writes.
-pub const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 1;
 
 /// The parameters of a shard.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,19 +144,19 @@ impl Manifest {
 /// upper bound of the distinct seeds (the build uses the count of seed locations). With 16-bit
 /// fingerprints, a query k-mer then matches a stored seed by chance at most about
 /// 256 / 65,536 = 0.4% of the time, and the directory costs at most 8 / 256 bytes per seed.
-pub fn choose_bucket_bits(seeds: u64) -> u8 {
+pub(crate) fn choose_bucket_bits(seeds: u64) -> u8 {
     (MIN_BUCKET_BITS..MAX_BUCKET_BITS)
         .find(|bits| seeds <= 256 << bits)
         .unwrap_or(MAX_BUCKET_BITS)
 }
 
 /// The packed file path of an entry, relative to the packed directory.
-pub fn packed_file_name(entry: &str) -> String {
+pub(crate) fn packed_file_name(entry: &str) -> String {
     format!("{entry}.packed")
 }
 
 /// Checks that entry names are valid file names and distinct.
-pub fn check_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), IndexError> {
+pub(crate) fn check_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), IndexError> {
     let mut seen = std::collections::HashSet::new();
     for name in names {
         let valid = !name.is_empty()
@@ -180,7 +180,7 @@ pub fn check_names<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), Index
 }
 
 /// The SHA-256 digest of `parts` one after the other, lower case hex.
-pub fn sha256_hex(parts: &[&[u8]]) -> String {
+pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
     let mut digest = Sha256::new();
     for part in parts {
         digest.update(part);
@@ -189,7 +189,7 @@ pub fn sha256_hex(parts: &[&[u8]]) -> String {
 }
 
 /// The size and SHA-256 digest of a file.
-pub fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
+pub(crate) fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
     let mut file = std::fs::File::open(path).at(path)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
@@ -206,7 +206,7 @@ pub fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
 }
 
 /// Checks a file against its record.
-pub fn verify_file(path: &Path, record: &FileRecord) -> Result<(), IndexError> {
+pub(crate) fn verify_file(path: &Path, record: &FileRecord) -> Result<(), IndexError> {
     let (bytes, sha256) = sha256_file(path)?;
     if bytes != record.bytes || sha256 != record.sha256 {
         return Err(IndexError::Checksum(format!(
@@ -218,7 +218,7 @@ pub fn verify_file(path: &Path, record: &FileRecord) -> Result<(), IndexError> {
 }
 
 /// Checks a file read from `source` against its record, for files that may not be local.
-pub fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
+pub(crate) fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
     let size = source.size();

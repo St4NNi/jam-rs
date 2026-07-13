@@ -1,18 +1,19 @@
 //! Reading bytes by offset from local files, S3 byte ranges and the block cache.
-//!
-//! Every source implements [`ReadAt`] and is safe for many threads at once. Storage knows nothing
-//! about searches: a search checks for cancellation between reads. A read on a remote source has
-//! a timeout per request and a bounded number of tries, set in [`s3::S3Config`].
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
-pub mod cache;
+mod cache;
 mod error;
-pub mod local;
-pub mod mapped;
-pub mod readahead;
-pub mod s3;
+mod local;
+mod mapped;
+mod readahead;
+mod s3;
 
+pub use cache::{BlockCache, CacheConfig, CachedSource, DiskConfig};
 pub use error::StorageError;
+pub use local::LocalFile;
 pub use mapped::MappedFile;
+pub use s3::{S3Config, S3Limits, S3Object};
 
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -45,13 +46,7 @@ impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
 
 impl ReadAt for Vec<u8> {
     fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
-        let bytes = usize::try_from(offset)
-            .ok()
-            .and_then(|start| Some(start..start.checked_add(buffer.len())?))
-            .and_then(|range| self.get(range))
-            .ok_or_else(past_the_end)?;
-        buffer.copy_from_slice(bytes);
-        Ok(())
+        read_slice(self, offset, buffer)
     }
 
     fn size(&self) -> u64 {
@@ -63,6 +58,16 @@ impl ReadAt for Vec<u8> {
 /// so the lock is taken anyway.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Fills `buffer` with the bytes of `bytes` that start at `offset`, or fails past the end.
+pub(crate) fn read_slice(bytes: &[u8], offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+    let part = usize::try_from(offset)
+        .ok()
+        .and_then(|start| bytes.get(start..start.checked_add(buffer.len())?))
+        .ok_or_else(past_the_end)?;
+    buffer.copy_from_slice(part);
+    Ok(())
 }
 
 /// The error of a read that starts or ends after the last byte.

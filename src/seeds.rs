@@ -20,7 +20,7 @@ pub enum SeedError {
 
 /// Mixed into the hash of a seed of a low-complexity run, so it differs from the hash of the same
 /// k-mer as an ordinary seed.
-pub const LOW_COMPLEXITY_SALT: u64 = 0x6c6f_7720_636f_6d70;
+const LOW_COMPLEXITY_SALT: u64 = 0x6c6f_7720_636f_6d70;
 
 /// How seeds are chosen: k-mer size, minimizer window and entropy limit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -73,7 +73,7 @@ pub struct Kmer {
 }
 
 /// The hash of a canonical 2-bit k-mer.
-pub fn kmer_hash(canonical: u64) -> u64 {
+fn kmer_hash(canonical: u64) -> u64 {
     jamhash::jamhash_u64(canonical)
 }
 
@@ -108,7 +108,7 @@ impl Seeder {
     }
 
     /// Whether a 2-bit k-mer reaches the entropy limit.
-    pub fn passes_entropy(&self, kmer: u64) -> bool {
+    fn passes_entropy(&self, kmer: u64) -> bool {
         let k = u32::from(self.scheme.k);
         let mask = kmer_mask(k) & 0x5555_5555_5555_5555;
         let (high, low) = ((kmer >> 1) & mask, kmer & mask);
