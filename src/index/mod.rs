@@ -3,14 +3,15 @@
 
 mod bits;
 mod build;
+mod color_sets;
 mod index_file;
 mod manifest;
 mod packed;
-mod packed_source;
 mod positions;
 mod reshard;
 mod shard;
 mod sketch;
+mod sources;
 
 use crate::seeds::SeedError;
 use crate::storage::StorageError;
@@ -22,11 +23,11 @@ pub use build::{BuildOptions, EntryInput, build_shard};
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::PackedSequence;
-pub use packed_source::{PackedLocation, PackedOptions};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
+pub use sources::{PackedLocation, PackedOptions};
 
 /// Errors of the index module.
 #[derive(Debug, Error)]

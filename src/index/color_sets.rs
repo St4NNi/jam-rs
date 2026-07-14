@@ -3,7 +3,7 @@
 //! partition is then sorted, which gives the color set of every key. Color sets are counted and
 //! ranked by frequency, and a second pass over the partitions writes the bucket blocks.
 
-use super::{SketchWriter, encode_bucket, encode_color_set};
+use super::sketch::{SketchWriter, encode_bucket, encode_color_set};
 use crate::index::positions::{POSITION_KEY_BITS, Positions, decode_section};
 use crate::index::{AtPath, IndexError};
 use crate::storage::lock;

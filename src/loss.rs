@@ -262,4 +262,5 @@ impl LossBudget {
 }
 
 #[cfg(test)]
+#[path = "loss_tests.rs"]
 mod tests;

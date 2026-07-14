@@ -377,4 +377,5 @@ impl SlidingMinimum {
 }
 
 #[cfg(test)]
+#[path = "seeds_tests.rs"]
 mod tests;

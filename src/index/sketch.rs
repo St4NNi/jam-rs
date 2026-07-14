@@ -57,8 +57,6 @@ use std::path::{Path, PathBuf};
 /// The file name of the sketch in a shard directory.
 pub const SKETCH_FILE: &str = "sketch";
 
-pub(crate) mod build;
-
 const MAGIC: [u8; 16] = *b"jam sketch\0\0\0\0\0\0";
 const VERSION: u32 = 1;
 const HEADER_BYTES: usize = 128;
@@ -487,4 +485,5 @@ impl SketchWriter {
 }
 
 #[cfg(test)]
+#[path = "sketch_tests.rs"]
 mod tests;

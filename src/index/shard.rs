@@ -3,9 +3,9 @@
 
 use super::manifest::{EntryRecord, Manifest, verify_file, verify_source};
 use super::packed::PackedSequence;
-use super::packed_source::{PackedLocation, PackedOptions, PackedSources};
 use super::positions::{POSITIONS_FILE, Positions};
 use super::sketch::{SKETCH_FILE, Sketch};
+use super::sources::{PackedLocation, PackedOptions, PackedSources};
 use super::{AtPath, IndexError};
 use crate::storage::MappedFile;
 use std::path::{Path, PathBuf};

@@ -3,6 +3,7 @@
 //! The positions file then takes the sections in entry order, and the sketch is built from it.
 //! The output never depends on the thread count, and entries keep the input order.
 
+use super::color_sets::build_sketch;
 use super::manifest::{
     EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters, check_names,
     choose_bucket_bits, packed_file_name, sha256_file, sha256_hex,
@@ -13,7 +14,6 @@ use super::positions::{
     encode_section,
 };
 use super::sketch::SKETCH_FILE;
-use super::sketch::build::build_sketch;
 use super::{AtPath, IndexError, seed_key};
 use crate::seeds::Seeder;
 use crate::storage::MappedFile;

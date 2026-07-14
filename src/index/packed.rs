@@ -389,4 +389,5 @@ fn no_contig(contig: usize) -> IndexError {
 }
 
 #[cfg(test)]
+#[path = "packed_tests.rs"]
 mod tests;

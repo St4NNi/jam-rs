@@ -486,4 +486,5 @@ impl PositionsWriter {
 }
 
 #[cfg(test)]
+#[path = "positions_tests.rs"]
 mod tests;
