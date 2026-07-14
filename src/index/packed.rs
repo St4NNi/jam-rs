@@ -120,7 +120,7 @@ impl PackedWriter {
     }
 
     /// Contigs added so far.
-    pub fn contigs(&self) -> u64 {
+    pub fn contig_count(&self) -> u64 {
         self.name_ends.len() as u64
     }
 

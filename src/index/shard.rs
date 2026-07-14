@@ -75,10 +75,10 @@ impl Shard {
             let path = directory.join(name);
             std::fs::metadata(&path).map(|m| m.len()).at(&path)
         };
-        if sketch.entries() != entries
+        if sketch.entry_count() != entries
             || sketch.bucket_bits() != u32::from(parameters.bucket_bits)
-            || sketch.seeds() != manifest.seeds
-            || u64::from(positions.entries()) != entries
+            || sketch.seed_count() != manifest.seeds
+            || u64::from(positions.entry_count()) != entries
             || positions.bin_bits() != u32::from(parameters.bin_bits)
             || file_size(SKETCH_FILE)? != manifest.sketch.bytes
             || file_size(POSITIONS_FILE)? != manifest.positions.bytes

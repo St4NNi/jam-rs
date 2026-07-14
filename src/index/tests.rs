@@ -136,7 +136,7 @@ fn reshard_options(directory: &Path, split: Split, packed: PackedOutput) -> Resh
         split,
         packed,
         threads: 3,
-        temp_dir: directory.to_path_buf(),
+        temporary_directory: directory.to_path_buf(),
     }
 }
 

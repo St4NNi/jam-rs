@@ -138,7 +138,7 @@ fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
             PackedOutput::Link
         },
         threads,
-        temp_dir,
+        temporary_directory: temp_dir,
     };
     let index = reshard(&args.inputs, &args.output, &options)?;
     println!(
@@ -158,7 +158,7 @@ fn build_options(args: &BuildArgs, threads: usize, temp_dir: PathBuf) -> BuildOp
         parameters,
         bucket_bits: None,
         threads,
-        temp_dir,
+        temporary_directory: temp_dir,
         entry_per_record: args.entry_per_record,
     }
 }

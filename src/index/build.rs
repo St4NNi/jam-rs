@@ -62,7 +62,7 @@ pub struct BuildOptions {
     /// Threads that index entries and build the sketch.
     pub threads: usize,
     /// Directory for temporary files.
-    pub temp_dir: PathBuf,
+    pub temporary_directory: PathBuf,
     /// Make each FASTA record an entry, named by its first word, instead of each file.
     pub entry_per_record: bool,
 }
@@ -86,15 +86,15 @@ pub fn build_shard(
     in_partial_directory(output, |directory| {
         let packed = directory.join(PACKED_DIRECTORY);
         std::fs::create_dir(&packed).at(&packed)?;
-        let temp = tempfile::Builder::new()
+        let temporary = tempfile::Builder::new()
             .prefix("jam-build")
-            .tempdir_in(&options.temp_dir)
-            .at(&options.temp_dir)?;
+            .tempdir_in(&options.temporary_directory)
+            .at(&options.temporary_directory)?;
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
             packed: directory.join(PACKED_DIRECTORY),
-            temp: temp.path().to_path_buf(),
+            temporary: temporary.path().to_path_buf(),
         };
         pool.install(|| {
             let built = if options.entry_per_record {
@@ -108,7 +108,7 @@ pub fn build_shard(
                 directory,
                 options.parameters,
                 entries,
-                &options.temp_dir,
+                &options.temporary_directory,
                 options.bucket_bits,
                 |writer| {
                     for entry in &built {
@@ -161,7 +161,7 @@ pub(crate) fn complete_shard(
     directory: &Path,
     parameters: Parameters,
     entries: Vec<EntryRecord>,
-    temp_dir: &Path,
+    temporary_directory: &Path,
     bucket_bits: Option<u8>,
     write_sections: impl FnOnce(&mut PositionsWriter) -> Result<(), IndexError>,
 ) -> Result<Manifest, IndexError> {
@@ -179,7 +179,7 @@ pub(crate) fn complete_shard(
     write_sections(&mut writer)?;
     writer.finish()?;
     let positions = Positions::open(Arc::new(MappedFile::open(&positions_path, false)?))?;
-    let locations = (0..positions.entries())
+    let locations = (0..positions.entry_count())
         .map(|entry| positions.entry_locations(entry))
         .sum::<Result<u64, IndexError>>()?;
     let parameters = Parameters {
@@ -192,7 +192,7 @@ pub(crate) fn complete_shard(
         &positions,
         u32::from(parameters.bucket_bits),
         &sketch_path,
-        temp_dir,
+        temporary_directory,
     )?;
     let record = |path: &Path, name: &str| -> Result<FileRecord, IndexError> {
         let (bytes, sha256) = sha256_file(path)?;
@@ -221,7 +221,7 @@ struct Context {
     seeder: Seeder,
     parameters: Parameters,
     packed: PathBuf,
-    temp: PathBuf,
+    temporary: PathBuf,
 }
 
 /// An indexed entry whose positions section waits in a temporary file.
@@ -278,9 +278,9 @@ impl<'a> EntryBuilder<'a> {
         self.contig_starts.push(self.packed.bases());
         let (section, bytes) = encode_section(&self.seeds, &self.contig_starts)?;
         drop(self.seeds);
-        let section_path = self.context.temp.join(format!("section-{index:010}"));
+        let section_path = self.context.temporary.join(format!("section-{index:010}"));
         std::fs::write(&section_path, &bytes).at(&section_path)?;
-        let (contigs, bases) = (self.packed.contigs(), self.packed.bases());
+        let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
         let (head, packed) = self.packed.finish();
         let file_name = packed_file_name(&name);
         let path = self.context.packed.join(&file_name);

@@ -63,7 +63,7 @@ fn positions_round_trip() {
     write(&path, &entries);
     let positions = open(&path);
     positions.verify_checksums().unwrap();
-    assert_eq!(positions.entries(), entries.len() as u32);
+    assert_eq!(positions.entry_count(), entries.len() as u32);
     assert_eq!(positions.bin_bits(), 10);
     let mut rng = rng(7);
     let mut out = Vec::new();

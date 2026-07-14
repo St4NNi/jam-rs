@@ -81,7 +81,7 @@ pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard 
         },
         bucket_bits: None,
         threads: 2,
-        temp_dir: directory.to_path_buf(),
+        temporary_directory: directory.to_path_buf(),
         entry_per_record: false,
     };
     let output = directory.join("index");

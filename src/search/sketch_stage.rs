@@ -115,7 +115,7 @@ pub fn sketch_stage(
     let seed_hits = expand(sketch, &expanded, control)?;
     work.seed_hits = seed_hits.len() as u64;
     control.check()?;
-    let entries = sketch.entries() as u32;
+    let entries = sketch.entry_count() as u32;
     let in_frequent = FrequentUnion::new(sketch, &frequent, entries);
     let frequent_positions = query.sorted_positions(&frequent_seeds);
     let possible_hits = |entry: u32| match in_frequent.holds(entry) {

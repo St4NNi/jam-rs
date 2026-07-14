@@ -46,7 +46,7 @@ pub struct ReshardOptions {
     /// Threads that build each sketch.
     pub threads: usize,
     /// Directory for temporary files.
-    pub temp_dir: PathBuf,
+    pub temporary_directory: PathBuf,
 }
 
 /// One input shard, opened for copying its entries.
@@ -66,7 +66,7 @@ pub fn reshard(
     let shards = open_inputs(inputs)?;
     let mut sources = Vec::new();
     for (shard, input) in shards.iter().enumerate() {
-        sources.extend((0..input.positions.entries()).map(|entry| (shard, entry)));
+        sources.extend((0..input.positions.entry_count()).map(|entry| (shard, entry)));
     }
     let weights = sources
         .iter()
@@ -142,7 +142,7 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
             let manifest = Manifest::read(&directory)?;
             let file = MappedFile::open(&directory.join(POSITIONS_FILE), false)?;
             let positions = Positions::open(Arc::new(file))?;
-            if positions.entries() as usize != manifest.entries.len() {
+            if positions.entry_count() as usize != manifest.entries.len() {
                 return Err(IndexError::format(format!(
                     "the positions of {} differ from its manifest",
                     directory.display()
@@ -215,7 +215,7 @@ fn write_shard(
         directory,
         parameters,
         entries,
-        &options.temp_dir,
+        &options.temporary_directory,
         None,
         |writer| {
             for &(shard, entry) in part {

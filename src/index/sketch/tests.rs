@@ -66,8 +66,8 @@ fn sketch_round_trip() {
         let (seeds, sets) = write_random(&path, bucket_bits);
         let sketch = Sketch::open(&path).unwrap();
         sketch.verify_checksums().unwrap();
-        assert_eq!(sketch.seeds(), seeds.len() as u64);
-        assert_eq!(sketch.entries(), 5000);
+        assert_eq!(sketch.seed_count(), seeds.len() as u64);
+        assert_eq!(sketch.entry_count(), 5000);
         assert_eq!(sketch.color_set_count(), sets.len() as u64);
         let key_bits = bucket_bits + 16;
         let mut rng = rng(99);

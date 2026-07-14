@@ -74,17 +74,17 @@ impl Spill {
     }
 }
 
-/// Writes the sketch at `path` from `positions`, with temporary files in `temp_dir`.
+/// Writes the sketch at `path` from `positions`, with temporary files in `temporary_directory`.
 pub(crate) fn build_sketch(
     positions: &Positions,
     bucket_bits: u32,
     path: &Path,
-    temp_dir: &Path,
+    temporary_directory: &Path,
 ) -> Result<SketchTotals, IndexError> {
     let directory = tempfile::Builder::new()
         .prefix("jam-sketch")
-        .tempdir_in(temp_dir)
-        .at(temp_dir)?;
+        .tempdir_in(temporary_directory)
+        .at(temporary_directory)?;
     let partition_bits = PARTITION_BITS.min(bucket_bits);
     let spill = Spill {
         paths: (0..1usize << partition_bits)
@@ -101,7 +101,7 @@ pub(crate) fn build_sketch(
         .enumerate()
         .map(|(id, set)| (&set[..], id as u32))
         .collect();
-    let mut writer = SketchWriter::create(path, bucket_bits, u64::from(positions.entries()))?;
+    let mut writer = SketchWriter::create(path, bucket_bits, u64::from(positions.entry_count()))?;
     let mut seeds = 0u64;
     let partitions: Vec<usize> = (0..spill.paths.len()).collect();
     for round in partitions.chunks(WRITE_ROUND) {
@@ -140,7 +140,7 @@ fn spill_keys(positions: &Positions, spill: &Spill) -> Result<(), IndexError> {
         .collect::<Result<Vec<_>, IndexError>>()?;
     let low_bits = spill.low_bits();
     let low_mask = (1u64 << low_bits) - 1;
-    (0..positions.entries())
+    (0..positions.entry_count())
         .into_par_iter()
         .with_max_len(1)
         .try_for_each(|entry| {

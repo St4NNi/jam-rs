@@ -383,7 +383,7 @@ impl Positions {
     }
 
     /// Entries in the file.
-    pub fn entries(&self) -> u32 {
+    pub fn entry_count(&self) -> u32 {
         self.sections.len() as u32
     }
 
@@ -399,7 +399,7 @@ impl Positions {
 
     /// Checks the CRC-32 of every section.
     pub fn verify_checksums(&self) -> Result<(), IndexError> {
-        (0..self.entries()).try_for_each(|entry| self.section_bytes(entry).map(drop))
+        (0..self.entry_count()).try_for_each(|entry| self.section_bytes(entry).map(drop))
     }
 }
 

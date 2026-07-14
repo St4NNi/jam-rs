@@ -93,7 +93,7 @@ pub fn build(directory: &Path, entries: &[Vec<Vec<u8>>], bucket_bits: Option<u8>
         parameters: parameters(),
         bucket_bits,
         threads: 2,
-        temp_dir: directory.to_path_buf(),
+        temporary_directory: directory.to_path_buf(),
         entry_per_record: false,
     };
     build_shard(&inputs, &output, &options).unwrap();

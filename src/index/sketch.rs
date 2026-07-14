@@ -190,12 +190,12 @@ impl Sketch {
     }
 
     /// Entries of the shard.
-    pub fn entries(&self) -> u64 {
+    pub fn entry_count(&self) -> u64 {
         self.entries
     }
 
     /// Stored seeds; seeds that share bucket and fingerprint count once.
-    pub fn seeds(&self) -> u64 {
+    pub fn seed_count(&self) -> u64 {
         self.seeds
     }
 
