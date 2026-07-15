@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn names_and_parameters_are_checked() {
+    fn names_parameters_checked() {
         assert!(check_names(["a", "b"].into_iter()).is_ok());
         for bad in [&["a", "a"][..], &[""], &["a b"], &["a/b"], &[".."]] {
             assert!(check_names(bad.iter().copied()).is_err(), "{bad:?}");

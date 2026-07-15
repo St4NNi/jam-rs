@@ -75,7 +75,7 @@ fn packed_round_trip() {
 }
 
 #[test]
-fn empty_and_bad_names() {
+fn empty_bad_names() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("empty.packed");
     write(&path, &[]);

@@ -53,7 +53,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_ranges_and_rejects_reads_past_the_end() {
+    fn reads_stop_at_end() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("data");
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn many_threads_read_one_file() {
+    fn threads_share_file() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("data");
         let data: Vec<u8> = (0..=250).cycle().take(100_000).collect();

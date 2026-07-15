@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_are_contiguous_and_balanced() {
+    fn groups_stay_balanced() {
         let weights = [5, 1, 1, 1, 1, 1, 9, 2, 2, 2, 3, 1];
         for count in 1..=weights.len() {
             let groups = split_groups(&weights, Split::Shards(count)).unwrap();

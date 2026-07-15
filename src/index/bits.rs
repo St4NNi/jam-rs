@@ -124,7 +124,7 @@ mod tests {
     use rand::RngExt;
 
     #[test]
-    fn bit_arrays_round_trip() {
+    fn bits_round_trip() {
         let mut draws = rng(3);
         for width in [0u32, 1, 5, 13, 32, 41, 57] {
             let values: Vec<u64> = (0..200)

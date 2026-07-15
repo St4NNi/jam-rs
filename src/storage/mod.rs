@@ -88,7 +88,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bytes_in_memory_are_read_by_offset() {
+    fn vec_reads_offsets() {
         let data: Vec<u8> = (0..100).collect();
         let mut buffer = [0; 10];
         data.read_exact_at(90, &mut buffer).unwrap();

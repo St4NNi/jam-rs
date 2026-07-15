@@ -23,7 +23,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hint_ignores_bad_ranges() {
+    fn bad_hints_ignored() {
         let file = tempfile::tempfile().unwrap();
         will_need(&file, 0, 4096);
         will_need(&file, u64::MAX, u64::MAX);

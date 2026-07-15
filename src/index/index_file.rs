@@ -123,7 +123,7 @@ mod tests {
     }
 
     #[test]
-    fn index_file_round_trip() {
+    fn index_round_trip() {
         let directory = tempfile::tempdir().unwrap();
         let index = IndexFile {
             format_version: INDEX_FORMAT_VERSION,
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn gaps_and_outside_paths_are_rejected() {
+    fn bad_shard_lists() {
         for shards in [
             vec![record("a", 0, 3), record("b", 4, 2)],
             vec![record("a", 0, 0)],
