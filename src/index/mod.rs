@@ -1,5 +1,7 @@
 //! The on-disk index: per shard its manifest, sketch, positions and packed sequences; building
 //! shards, and resharding them into an index of several shards.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod bits;
 mod build;

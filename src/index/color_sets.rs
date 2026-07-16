@@ -1,7 +1,7 @@
-//! Builds the sketch of a shard from its positions file, so building and joining shards share
-//! one path. The seed keys of every entry are spilled into partitions of the key space; each
-//! partition is then sorted, which gives the color set of every key. Color sets are counted and
-//! ranked by frequency, and a second pass over the partitions writes the bucket blocks.
+//! Builds the sketch of a shard from its positions file: seed keys are spilled into partitions,
+//! sorted into color sets, ranked by frequency and written as bucket blocks.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::sketch::{SketchWriter, encode_bucket, encode_color_set};
 use crate::index::positions::{POSITION_KEY_BITS, Positions, decode_section};

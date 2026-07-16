@@ -1,13 +1,10 @@
 //! The chance that a query stretch present in an entry shows no seed hit, and the loss budget that
 //! bounds every shortcut of a search.
-//!
-//! Model. Only the entry side selects seeds: the smallest k-mer of each minimizer window, and the
-//! smallest k-mer of a stretch shorter than one minimizer window. The query side uses all its k-mers.
-//! Mutations are independent substitutions at rate `1 - identity`. A stretch shows no seed hit when
-//! every seed in it has at least one mutated base.
-//!
-//! For one seed layout this chance is computed exactly. The model averages it over the layouts of
-//! random sequences, and caches the average in a table over stretch length and identity.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+//! The chance is exact for one seed layout under independent substitutions at rate `1 - identity`;
+//! the model averages it over the layouts of random sequences in a table over length and identity.
 
 use crate::seeds::{SeedError, SeedScheme};
 use rayon::prelude::*;
@@ -100,10 +97,9 @@ fn random_layout(length: usize, k: usize, w: usize, random: &mut Random) -> Vec<
     seeds
 }
 
-/// The exact chance that every seed has a mutated base, for seeds ending at `seed_ends`.
-///
-/// The state is the number of unmutated bases just before the current seed end. A seed is hit when
-/// that number reaches `k`, so only states below `k` are kept.
+/// The exact chance that every seed has a mutated base, for seeds ending at `seed_ends`. The state
+/// is the number of unmutated bases before the current seed end; a seed is hit when it reaches
+/// `k`, so only states below `k` are kept.
 fn layout_miss_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
     let mut powers = [1.0f64; MAX_K + 1];
     for t in 1..=k {
@@ -169,12 +165,9 @@ impl MissModel {
         })
     }
 
-    /// The chance that a stretch of `stretch_bases` bases present at `identity` shows no seed hit.
-    ///
-    /// Between table points the logarithm of the chance is interpolated. Outside the table the
-    /// answer errs on the safe side: a longer stretch than the table has gets the chance of the
-    /// longest, and an identity above the table gets the chance of the highest identity. An
-    /// identity below the table gives 1.
+    /// The chance that a stretch of `stretch_bases` bases present at `identity` shows no seed hit,
+    /// interpolated in the logarithm between table points. Beyond the table the answer errs on the
+    /// safe side: the longest length and highest identity hold, and a lower identity gives 1.
     pub fn miss_chance(&self, stretch_bases: u64, identity: f64) -> f64 {
         if stretch_bases < self.k as u64 || identity.is_nan() || identity < self.identities[0] {
             return 1.0;

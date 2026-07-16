@@ -1,3 +1,7 @@
+//! Why a storage source could not be opened or configured.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use std::io;
 use std::path::PathBuf;
 use thiserror::Error;

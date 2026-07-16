@@ -1,5 +1,7 @@
-//! Hints that ask the kernel to read file ranges into the page cache before they are used. A hint
+//! Hints that ask the kernel to read file ranges into the page cache before they are used; a hint
 //! never changes what is read, and its errors are ignored.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use std::fs::File;
 

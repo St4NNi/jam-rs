@@ -1,4 +1,6 @@
 //! A local file mapped into memory and read by offset.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{ReadAt, StorageError, read_slice};
 use std::io;

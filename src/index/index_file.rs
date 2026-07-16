@@ -1,14 +1,7 @@
-//! The index file of a resharded index: `index.json` in the index directory, listing its shards
-//! in order with the entries each one holds, so a search or a server can open the whole index.
-//!
-//! | Field | Meaning |
-//! | --- | --- |
-//! | `format_version` | 1 |
-//! | `shards` | in order: `directory` (relative to the index directory), `first_entry`, `entries`, `seed_locations`, `manifest_sha256` |
-//!
-//! The entries of a shard are `first_entry..first_entry + entries` in index order; entry `i` of
-//! the shard is entry `first_entry + i` of the index. `manifest_sha256` is the SHA-256 digest of
-//! the shard's `manifest.json`, so a replaced shard is noticed.
+//! The index file `index.json` of a resharded index, which lists its shards in order (layout in
+//! FORMATS.md).
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::manifest::{MANIFEST_FILE, sha256_file};
 use super::{AtPath, IndexError};

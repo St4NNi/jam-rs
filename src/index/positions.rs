@@ -1,55 +1,7 @@
-//! The positions file (stage 2): for every entry a section with its seed locations, so a seed of
-//! one candidate entry is found with two small reads, and the contig starts of the entry, so
-//! alignment windows can be cut at contig ends without the packed sequence. It works
-//! memory-mapped from local disk and as byte ranges from S3.
-//!
-//! A seed is stored by its key: the top 44 bits of its hash (`POSITION_KEY_BITS`), at least as
-//! many as the sketch keeps (bucket bits and fingerprint), so the sketch of any size is built
-//! from the positions alone. A seed location is stored as the bin within the entry, shifted left
-//! by one, with the low bit set when the canonical k-mer is the reverse complement of the contig
-//! strand.
-//!
-//! Layout, little endian:
-//!
-//! | Bytes | Field |
-//! | --- | --- |
-//! | 0..16 | magic `jam positions` padded with zero bytes |
-//! | 16..20 | version (u32, 2) |
-//! | 20 | key bits (u8, 44) |
-//! | 21 | bin bits (u8) |
-//! | 22..24 | zero |
-//! | 24..32 | entries e (u64) |
-//! | 32..36 | CRC-32 of the section table (u32) |
-//! | 36..124 | zero |
-//! | 124..128 | CRC-32 of bytes 0..124 (u32) |
-//! | 128.. | section table: e rows of 40 bytes, see below |
-//! | sections | one per entry, in entry order, each at a multiple of 8 |
-//!
-//! A section table row:
-//!
-//! | Bytes | Field |
-//! | --- | --- |
-//! | 0..8 | section offset in the file (u64) |
-//! | 8..16 | section length (u64) |
-//! | 16..24 | seed locations (u64) |
-//! | 24..28 | CRC-32 of the section (u32) |
-//! | 28 | slot bits d (u8) |
-//! | 29 | suffix bits s = key bits - d (u8) |
-//! | 30 | location bits p (u8) |
-//! | 31 | zero |
-//! | 32..40 | contigs c (u64) |
-//!
-//! A section with c contigs and r seed locations, sorted by key and then seed location:
-//!
-//! | Bytes | Field |
-//! | --- | --- |
-//! | 8 (c + 1) | contig starts in entry coordinates, then the entry's bases (u64 each) |
-//! | 4 (2^d + 1) | slot directory: index of the first seed location of each slot (u32); a key's slot is its top d bits |
-//! | ceil(r (s + p) / 8) | one record per seed location, bit-packed, first record in the low bits: the low s bits of the key, then the seed location in p bits |
-//! | 8 | zero |
-//!
-//! d is chosen so a slot holds about 16 seed locations; a lookup reads 8 bytes of the directory and
-//! the records of one slot. A seed that occurs at several bins has one record per bin.
+//! The positions file (stage 2): per entry its seed locations and contig starts, read memory-mapped
+//! or as byte ranges (layout in FORMATS.md).
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u32_at, u64_at};
 use super::{AtPath, IndexError, seed_key};

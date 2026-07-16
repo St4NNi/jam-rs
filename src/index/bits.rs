@@ -1,4 +1,6 @@
 //! Little-endian fields, bit-packed arrays and varints shared by the index files.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 /// Zero bytes after every bit-packed array, so a value is always read with one 8-byte load.
 pub(crate) const BIT_PADDING: usize = 8;

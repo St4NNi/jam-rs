@@ -1,49 +1,7 @@
-//! The sketch file (stage 1): for every stored seed its color set, found from the seed's hash
-//! with a few memory reads, and every distinct color set once. The file is memory-mapped and kept
-//! in RAM.
-//!
-//! A seed's hash selects a bucket by its top `bucket_bits` bits; the next 16 bits are its
-//! fingerprint. A build chooses the fewest bucket bits (8 to 28) that hold at most 256 seeds per
-//! bucket on average, counting seed locations as an upper bound of the seeds (see
-//! `manifest::choose_bucket_bits`), so a query k-mer matches a stored seed by chance about 0.4% of
-//! the time and the directory costs about 0.03 bytes per seed. Seeds with the same bucket and fingerprint are one stored seed, whose color set is
-//! the union of theirs. Color set ids are ranked by frequency: the set of the most seeds is 0.
-//!
-//! Layout, little endian; every section starts at a multiple of 8 bytes:
-//!
-//! | Bytes | Field |
-//! | --- | --- |
-//! | 0..16 | magic `jam sketch` padded with zero bytes |
-//! | 16..20 | version (u32, 1) |
-//! | 20 | bucket bits b (u8, 8 to 28) |
-//! | 21 | fingerprint bits (u8, 16) |
-//! | 22..24 | zero |
-//! | 24..32 | entries (u64) |
-//! | 32..40 | stored seeds (u64) |
-//! | 40..48 | color sets s (u64) |
-//! | 48..56 | bucket block bytes (u64) |
-//! | 56..64 | color set bytes (u64) |
-//! | 64..80 | CRC-32 of the four sections below, in order (u32 each) |
-//! | 80..124 | zero |
-//! | 124..128 | CRC-32 of bytes 0..124 (u32) |
-//! | directory | 2^b + 1 offsets (u64) of the bucket blocks, relative to the first block |
-//! | bucket blocks | one block per non-empty bucket, then zero bytes to a multiple of 8, at least 8 |
-//! | color set offsets | s + 1 offsets (u64), relative to the first color set |
-//! | color sets | per set: entry count, first entry, then each gap minus one, all varints |
-//!
-//! A bucket block of n seeds:
-//!
-//! | Bytes | Field |
-//! | --- | --- |
-//! | 0..4 | n (u32) |
-//! | 4..8 | escape count x (low 24 bits) and id width w (high 8 bits, 0 to 32) |
-//! | 2n | the fingerprints (u16), ascending |
-//! | 4x | escaped color set ids (u32) |
-//! | ceil(n w / 8) | one w-bit value per seed, bit-packed, first value in the low bits |
-//!
-//! A value v below 2^w - x is the color set id itself; a larger v names escaped id
-//! v - (2^w - x). Each bucket chooses w and x for the fewest bits, so a few rare color sets do not
-//! widen every value.
+//! The sketch file (stage 1): the color set of every stored seed, found from its hash, and every
+//! distinct color set once (layout in FORMATS.md).
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::bits::{
     BIT_PADDING, BitWriter, bits_needed, put_varint, read_bits, read_varint, u16_at, u32_at, u64_at,

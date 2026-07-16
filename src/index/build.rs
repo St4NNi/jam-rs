@@ -1,6 +1,8 @@
-//! Builds a shard from FASTA files: one entry per file, or one entry per record. Entries are
-//! indexed in parallel; each one writes its packed sequence and its positions section at once.
-//! The positions file then takes the sections in entry order, and the sketch is built from it.
+//! Builds a shard from FASTA files, one entry per file or per record, with entries indexed in
+//! parallel.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 //! The output never depends on the thread count, and entries keep the input order.
 
 use super::color_sets::build_sketch;

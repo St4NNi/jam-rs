@@ -1,5 +1,7 @@
 //! An open shard: its manifest, the sketch in RAM, the positions, and the packed sequences on
 //! request.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::manifest::{EntryRecord, Manifest, verify_file, verify_source};
 use super::packed::PackedSequence;

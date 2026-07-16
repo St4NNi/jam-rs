@@ -1,10 +1,10 @@
 //! Canonical k-mers, their jamhash values, and the seeds of a contig: the smallest k-mer of each
 //! minimizer window, with the low-complexity filter.
-//!
-//! The entry side keeps seeds only; the query side looks up every query k-mer. A k-mer below the
-//! entropy limit never becomes an ordinary seed. Runs of such k-mers get seeds of their own,
-//! chosen the same way inside the run, with a salted hash. The query side salts the hash of every
-//! query k-mer below the limit, so both sides meet.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+//! A k-mer below the entropy limit is never an ordinary seed; its runs get salted seeds of their
+//! own, and the query side salts such query k-mers too, so both sides meet.
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

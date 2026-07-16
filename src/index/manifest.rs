@@ -1,16 +1,7 @@
-//! The manifest of a shard: `manifest.json` with the parameters, the entries, and the size and
-//! SHA-256 digest of every file.
-//!
-//! | Field | Meaning |
-//! | --- | --- |
-//! | `format_version` | 1 |
-//! | `parameters` | `k`, `w`, `min_entropy`, `bin_bits`, `bucket_bits` |
-//! | `entries` | in entry id order: `name`, `contigs`, `bases`, `packed` (file) |
-//! | `sketch`, `positions` | files |
-//! | `seeds`, `color_sets`, `seed_locations` | totals of the sketch and the positions |
-//!
-//! A file is `path` (relative to the shard directory; packed files to the packed directory),
-//! `bytes` and `sha256` (lower case hex).
+//! The manifest `manifest.json` of a shard: parameters, entries, and the size and SHA-256 digest of
+//! every file (layout in FORMATS.md).
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{AtPath, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::seeds::SeedScheme;
@@ -141,9 +132,8 @@ impl Manifest {
 }
 
 /// The fewest bucket bits (8 to 28) that hold at most 256 seeds per bucket on average, given an
-/// upper bound of the distinct seeds (the build uses the count of seed locations). With 16-bit
-/// fingerprints, a query k-mer then matches a stored seed by chance at most about
-/// 256 / 65,536 = 0.4% of the time, and the directory costs at most 8 / 256 bytes per seed.
+/// upper bound of the distinct seeds. A query k-mer then matches a stored seed by chance at most
+/// about 256 / 65,536 = 0.4% of the time, and the directory costs at most 8 / 256 bytes per seed.
 pub(crate) fn choose_bucket_bits(seeds: u64) -> u8 {
     (MIN_BUCKET_BITS..MAX_BUCKET_BITS)
         .find(|bits| seeds <= 256 << bits)

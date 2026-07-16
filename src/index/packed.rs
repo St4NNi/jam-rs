@@ -1,29 +1,7 @@
-//! The packed sequence of one entry (stage 3): its contigs at 2 bits per base, with contig names
-//! and the runs of bytes other than A, C, G and T. The format is the one of jam 0.10, so packed
-//! files built by it are read unchanged. Lower case a, c, g and t are stored as upper case; other
-//! bytes keep their value, in upper case.
-//!
-//! Layout, little endian ("entry coordinates" count bases over all contigs in order):
-//!
-//! | Bytes | Field |
-//! | --- | --- |
-//! | 0..16 | magic `jam-rs 2bit seq` and a zero byte |
-//! | 16..20 | version (u32, 1) |
-//! | 20..24 | zero |
-//! | 24..32 | contigs c (u64) |
-//! | 32..40 | bases n (u64) |
-//! | 40..48 | runs r of other bytes (u64) |
-//! | 48..56 | name bytes m (u64) |
-//! | 56..64 | offset of the packed bases (u64) |
-//! | 64..68 | CRC-32 of the tables, from byte 128 to the packed bases (u32) |
-//! | 68..72 | CRC-32 of bytes 0..68 (u32) |
-//! | 72..128 | zero |
-//! | 8 (c + 1) | contig starts in entry coordinates, then n (u64 each) |
-//! | 8 c | end of each contig name in the name bytes (u64 each) |
-//! | m, padded to 8 | contig names, the first word of each FASTA header |
-//! | 16 r | runs: start (u64), length (u32), byte (u8), three zero bytes |
-//! | 4 ceil(n / 16384) | CRC-32 of every block of 4,096 packed bytes |
-//! | ceil(n / 4) | the bases, four per byte, the first base in the low bits |
+//! The packed sequence of one entry (stage 3): contigs at 2 bits per base with their names and the
+//! runs of other bytes (layout in FORMATS.md).
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::IndexError;
 use super::bits::{u32_at, u64_at};

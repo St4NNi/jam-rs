@@ -1,9 +1,10 @@
-//! Reshards an index: any number of input shards into any number of output shards. Entries keep
-//! the input order and are cut into contiguous groups, balanced by their seed locations (a
-//! shard's sketch RAM follows them). Every entry keeps its positions section and its packed
-//! sequence unchanged; each output shard builds only its sketch, with bucket bits chosen from its
-//! own seed locations. One output shard joins the inputs; one input into several splits it. The
-//! groups depend only on the inputs and the split, never on the thread count.
+//! Reshards an index: input shards into output shards of contiguous entry groups, balanced by their
+//! seed locations.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+//! Entries keep their positions sections and packed sequences; each output shard builds only its
+//! sketch. The groups depend only on the inputs and the split, never on the thread count.
 
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};

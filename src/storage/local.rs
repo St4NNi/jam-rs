@@ -1,4 +1,6 @@
 //! A local file read by offset.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{ReadAt, StorageError, checked_end, readahead};
 use std::fs::File;
@@ -53,7 +55,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_stop_at_end() {
+    fn reads_stop_end() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("data");
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();

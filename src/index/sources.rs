@@ -1,6 +1,7 @@
-//! Where an open shard reads its packed sequences: its own `packed/` directory, another local
-//! directory, or an S3 prefix, optionally through a block cache shared by all entries. Each
-//! entry's file is found by the file name in the manifest.
+//! Where an open shard reads its packed sequences: its own directory, another directory or an S3
+//! prefix, optionally through a block cache shared by all entries.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::IndexError;
 use super::manifest::{FileRecord, PACKED_DIRECTORY};
