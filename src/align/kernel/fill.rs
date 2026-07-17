@@ -330,14 +330,18 @@ unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACEBACK: bool, con
     };
     let mut row = current_range.start;
     #[cfg(target_arch = "x86_64")]
-    if let Some((start, end, older, previous)) =
-        vector_span::<S, VECTOR>(wave, current_range, older, previous, rebase)
+    if let Some(VectorRows {
+        start,
+        end,
+        older,
+        previous,
+    }) = vector_rows::<S, VECTOR>(wave, current_range, older, previous, rebase)
     {
         while row < start {
             scalar(row, current, traceback, best, rebase);
             row += 1;
         }
-        // SAFETY: vector_span proves LANES current, diagonal, left, and above cells of every
+        // SAFETY: vector_rows proves LANES current, diagonal, left, and above cells of every
         // block are in their wave slices. start>=1 and end<=wave-1 prove the query and
         // reverse-loaded contig bytes are also in bounds.
         row = unsafe {
@@ -366,17 +370,25 @@ unsafe fn fill_wave<S: WaveScore, const VECTOR: bool, const TRACEBACK: bool, con
     }
 }
 
-/// The rows of a wave whose three neighbours all lie in the two waves before, for vector blocks.
+/// The rows `start..=end` of a wave whose three neighbours all lie in `older` and `previous`.
+#[cfg(target_arch = "x86_64")]
+struct VectorRows<'a, S> {
+    start: usize,
+    end: usize,
+    older: ScoreWave<'a, S>,
+    previous: ScoreWave<'a, S>,
+}
+
+/// The rows of a wave that vector blocks can fill.
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
-#[allow(clippy::type_complexity)]
-fn vector_span<'a, S: WaveScore, const VECTOR: bool>(
+fn vector_rows<'a, S: WaveScore, const VECTOR: bool>(
     wave: usize,
     current_range: WaveRange,
     older: Option<ScoreWave<'a, S>>,
     previous: Option<ScoreWave<'a, S>>,
     rebase: &RebaseState,
-) -> Option<(usize, usize, ScoreWave<'a, S>, ScoreWave<'a, S>)> {
+) -> Option<VectorRows<'a, S>> {
     older
         .zip(previous)
         .filter(|_| VECTOR)
@@ -399,6 +411,11 @@ fn vector_span<'a, S: WaveScore, const VECTOR: bool>(
                 .min(older.range.end.saturating_add(1))
                 .min(previous_high)
                 .min(wave.saturating_sub(1));
-            (start <= end).then_some((start, end, older, previous))
+            (start <= end).then_some(VectorRows {
+                start,
+                end,
+                older,
+                previous,
+            })
         })
 }
