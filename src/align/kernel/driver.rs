@@ -53,7 +53,6 @@ impl AlignmentWorkspace {
         contig: &[u8],
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
-        self.check_interrupt()?;
         #[cfg(target_arch = "x86_64")]
         if self.backend.vector() {
             // SAFETY: `vector` is true only on hosts with AVX2.
@@ -223,7 +222,6 @@ impl AlignmentWorkspace {
                 );
             }
         }
-        self.check_interrupt()?;
         if self.rebase_violation || best.score <= 0 {
             return Err(AlignmentError::NoAlignment);
         }
@@ -264,7 +262,6 @@ impl AlignmentWorkspace {
         let mut carry = WaveCarry::default();
         let mut first = 0;
         while first <= last_wave {
-            self.check_interrupt()?;
             let mut last = first;
             let mut cells = width(first);
             if last < active_first {

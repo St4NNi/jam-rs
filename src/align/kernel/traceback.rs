@@ -92,9 +92,6 @@ impl AlignmentWorkspace {
     ) -> Result<bool, AlignmentError> {
         let (mut query_index, mut contig_index, mut state) = *position;
         let complete = loop {
-            if self.operations.len().is_multiple_of(1024) {
-                self.check_interrupt()?;
-            }
             if query_index == 0 && contig_index == 0 {
                 break true;
             }

@@ -24,8 +24,6 @@ mod waves;
 
 use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand, complement};
 use geometry::WaveCarry;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use waves::WaveChunk;
 
 /// The default limit of resident traceback cells of one pass.
@@ -118,7 +116,6 @@ impl Backend {
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
     backend: Backend,
-    interrupt: Option<Arc<AtomicBool>>,
     /// Traceback cells of the resident waves, two bytes each.
     compact_cells: Vec<u16>,
     /// The score planes of three consecutive waves.
@@ -156,22 +153,6 @@ impl AlignmentWorkspace {
             backend: Backend::Scalar,
             ..Self::default()
         }
-    }
-
-    /// Stops running and later alignments with `NoAlignment` once `flag` is set.
-    pub fn set_interrupt(&mut self, flag: Arc<AtomicBool>) {
-        self.interrupt = Some(flag);
-    }
-
-    fn check_interrupt(&self) -> Result<(), AlignmentError> {
-        if self
-            .interrupt
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
-        {
-            return Err(AlignmentError::NoAlignment);
-        }
-        Ok(())
     }
 
     /// The best local alignment of the query window to the contig window on `strand`, within the

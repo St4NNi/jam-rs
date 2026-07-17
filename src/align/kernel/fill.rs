@@ -124,20 +124,12 @@ impl AlignmentWorkspace {
         let mut rebase = RebaseState::new(carry.base);
         #[cfg(test)]
         let forced_violation = REBASE_FORCED_VIOLATION.get();
-        let interrupt = &self.interrupt;
         let [first_buffer, second_buffer, third_buffer] = &mut self.waves;
         let (mut older_buffer, mut previous_buffer, mut current_buffer) =
             (first_buffer, second_buffer, third_buffer);
         let mut older_range = carry.older;
         let mut previous_range = carry.previous;
         for wave in active_first..=active_last {
-            if wave % 64 == 0
-                && interrupt
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
-            {
-                return;
-            }
             let current_range = wave_range(query_len, contig_len, pass.config, wave);
             if let Some(current_range) = current_range {
                 if S::REBASED {
