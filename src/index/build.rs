@@ -30,7 +30,7 @@ const RECORD_ROUND_BYTES: usize = 256 << 20;
 /// One input file and the name of its entry.
 #[derive(Clone, Debug)]
 pub struct EntryInput {
-    /// Entry name (unused when each record is an entry).
+    /// Entry name.
     pub name: String,
     /// FASTA or FASTQ file, plain or compressed.
     pub path: PathBuf,
@@ -58,14 +58,15 @@ impl EntryInput {
 pub struct BuildOptions {
     /// Parameters of the shard; the build chooses its bucket bits.
     pub parameters: Parameters,
-    /// Bucket bits to use instead of the ones chosen from the shard size (for tests and
-    /// experiments).
+    /// Bucket bits to use instead of the ones chosen from the shard size, so that tests can give a
+    /// small shard the buckets of a large one.
     pub bucket_bits: Option<u8>,
     /// Threads that index entries and build the sketch.
     pub threads: usize,
     /// Directory for temporary files.
     pub temporary_directory: PathBuf,
-    /// Make each FASTA record an entry, named by its first word, instead of each file.
+    /// Make each FASTA record an entry, named by its first word, instead of each file; the names
+    /// of the inputs are then not used.
     pub entry_per_record: bool,
 }
 
