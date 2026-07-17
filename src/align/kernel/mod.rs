@@ -95,6 +95,7 @@ enum Backend {
     /// AVX2 when the host has it, scalar otherwise.
     #[default]
     Detected,
+    /// Scalar even on hosts with AVX2, so tests can compare both.
     Scalar,
 }
 
@@ -125,8 +126,6 @@ pub struct AlignmentWorkspace {
     chunk_carries: Vec<WaveCarry>,
     /// The two score waves before each chunk.
     checkpoints: Vec<i32>,
-    /// Set by a rebased pass that met a value it cannot represent; the pass reruns on i32.
-    rebase_violation: bool,
     /// Traceback offset of each laid-out wave, relative to the layout's first wave, plus the
     /// total; one wave's cells are stored contiguously in query-row order.
     wave_offsets: Vec<usize>,

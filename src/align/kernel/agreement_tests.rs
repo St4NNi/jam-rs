@@ -1,9 +1,8 @@
 //! The kernel paths agree: AVX2 and scalar, resident and checkpointed traceback, rebased i16
 //! and i32 scores.
 
-use super::driver::WIDE_LOCAL_KERNEL;
 use super::rebased::{
-    REBASE_FORCED_VIOLATION, REBASE_REACHED, REBASE_THRESHOLDS, SENTINEL_BASE, rebased_local_scores,
+    RebaseLimits, SENTINEL_BASE, TEST_HOOKS, TestHooks, rebased_local_scores, update_hooks,
 };
 use super::tests::{test_dna, test_mutate};
 use super::*;
@@ -46,9 +45,9 @@ fn assert_paths_agree(
     let case = format!("{config:?} {strand:?} {} {}", query.len(), contig.len());
     let vector = align(AlignmentWorkspace::default(), query, contig, strand, config);
     assert_eq!(vector, scalar, "{case}");
-    WIDE_LOCAL_KERNEL.set(true);
+    update_hooks(|hooks| hooks.force_i32 = true);
     let wide = align(AlignmentWorkspace::default(), query, contig, strand, config);
-    WIDE_LOCAL_KERNEL.set(false);
+    update_hooks(|hooks| hooks.force_i32 = false);
     assert_eq!(wide, scalar, "{case}");
     scalar
 }
@@ -132,8 +131,14 @@ fn rebased_base_shifts_match_i32() {
     let mut state = 0x7777_1111_9999_3333u64;
     // Thresholds this low move the base every few waves, so short inputs cover shifts up,
     // shifts down, zero states stored below the base, and chunk restarts from a saved base.
-    REBASE_THRESHOLDS.set(Some((150, 60, 30)));
-    REBASE_REACHED.set((0, 0, 0, 0));
+    TEST_HOOKS.set(TestHooks {
+        limits: Some(RebaseLimits {
+            high: 150,
+            settle: 60,
+            low: 30,
+        }),
+        ..TestHooks::NONE
+    });
     for round in 0..14u64 {
         let length = 200 + 37 * round as usize;
         let query = test_dna(&mut state, length);
@@ -153,8 +158,8 @@ fn rebased_base_shifts_match_i32() {
             }
         }
     }
-    REBASE_THRESHOLDS.set(None);
-    let (_, up, down, _) = REBASE_REACHED.get();
+    let hooks = TEST_HOOKS.replace(TestHooks::NONE);
+    let (up, down) = (hooks.shifts_up, hooks.shifts_down);
     assert!(up > 100 && down > 20, "shifts up {up} and down {down}");
 }
 
@@ -171,11 +176,12 @@ fn rebased_reaches_sentinel_bases() {
         band_width: 16,
         ..AlignmentConfig::default()
     };
-    REBASE_REACHED.set((0, 0, 0, 0));
+    TEST_HOOKS.set(TestHooks::NONE);
     let alignment = assert_paths_agree(&query, &contig, Strand::Forward, config).unwrap();
-    let (highest, up, _, fallbacks) = REBASE_REACHED.get();
+    let hooks = TEST_HOOKS.get();
+    let (highest, up) = (hooks.highest_base, hooks.shifts_up);
     assert!(highest > SENTINEL_BASE && up > 0, "{highest} {up}");
-    assert_eq!(fallbacks, 0);
+    assert_eq!(hooks.reruns, 0);
     assert!(alignment.score > 40_000);
 }
 
@@ -198,8 +204,10 @@ fn violation_reruns_on_i32() {
         Strand::Forward,
         config,
     );
-    REBASE_REACHED.set((0, 0, 0, 0));
-    REBASE_FORCED_VIOLATION.set(Some(500));
+    TEST_HOOKS.set(TestHooks {
+        violation_wave: Some(500),
+        ..TestHooks::NONE
+    });
     let rebased = align(
         AlignmentWorkspace::default(),
         &query,
@@ -207,9 +215,9 @@ fn violation_reruns_on_i32() {
         Strand::Forward,
         config,
     );
-    REBASE_FORCED_VIOLATION.set(None);
+    let hooks = TEST_HOOKS.replace(TestHooks::NONE);
     assert_eq!(rebased, expected);
-    assert_eq!(REBASE_REACHED.get().3, 1);
+    assert_eq!(hooks.reruns, 1);
 }
 
 #[test]

@@ -5,17 +5,48 @@ use super::AlignmentConfig;
 use super::geometry::{Cell, WaveRange};
 use super::waves::WAVE_PAD;
 
+/// Switches and counters that let tests reach the rare paths of the rebased kernel.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TestHooks {
+    /// Runs every pass with i32 scores, so tests can compare both widths.
+    pub(super) force_i32: bool,
+    /// Replaces the rebase limits, so short inputs rebase often.
+    pub(super) limits: Option<RebaseLimits>,
+    /// Makes a rebased pass report a violation from this wave on.
+    pub(super) violation_wave: Option<usize>,
+    /// The largest base, shifts and i32 reruns of the passes on this thread.
+    pub(super) highest_base: i32,
+    pub(super) shifts_up: usize,
+    pub(super) shifts_down: usize,
+    pub(super) reruns: usize,
+}
+
+#[cfg(test)]
+impl TestHooks {
+    pub(super) const NONE: Self = Self {
+        force_i32: false,
+        limits: None,
+        violation_wave: None,
+        highest_base: 0,
+        shifts_up: 0,
+        shifts_down: 0,
+        reruns: 0,
+    };
+}
+
 #[cfg(test)]
 thread_local! {
-    /// Replaces the rebase thresholds (high, settle, low), so short inputs rebase often.
-    pub(super) static REBASE_THRESHOLDS: std::cell::Cell<Option<(i32, i32, i32)>> =
-        const { std::cell::Cell::new(None) };
-    /// Makes the rebased pass report a violation after this many waves.
-    pub(super) static REBASE_FORCED_VIOLATION: std::cell::Cell<Option<usize>> =
-        const { std::cell::Cell::new(None) };
-    /// Largest base, shifts up, shifts down and i32 reruns of the rebased passes on this thread.
-    pub(super) static REBASE_REACHED: std::cell::Cell<(i32, usize, usize, usize)> =
-        const { std::cell::Cell::new((0, 0, 0, 0)) };
+    pub(super) static TEST_HOOKS: std::cell::Cell<TestHooks> =
+        const { std::cell::Cell::new(TestHooks::NONE) };
+}
+
+/// Changes the test hooks of this thread.
+#[cfg(test)]
+pub(super) fn update_hooks(change: impl FnOnce(&mut TestHooks)) {
+    let mut hooks = TEST_HOOKS.get();
+    change(&mut hooks);
+    TEST_HOOKS.set(hooks);
 }
 
 /// Largest per-wave score spread the rebased kernel accepts a configuration for.
@@ -27,15 +58,24 @@ pub(super) const OFFSET_FLOOR: i16 = i16::MIN;
 pub(super) const SENTINEL_BASE: i32 = 32_768;
 /// A winning candidate below this offset, under a sentinel-range base, is not representable.
 const LOW_VIOLATION: i32 = -30_000;
-/// Wave maxima above `REBASE_HIGH` move the base up so the maximum lands on `REBASE_SETTLE`;
-/// with a nonzero base, maxima below `REBASE_LOW` move it down.
-const REBASE_HIGH: i32 = 24_000;
-const REBASE_SETTLE: i32 = 8_000;
-const REBASE_LOW: i32 = 4_000;
+/// Wave maxima above `high` move the base up so the maximum lands on `settle`; with a nonzero
+/// base, maxima below `low` move it down.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct RebaseLimits {
+    pub(super) high: i32,
+    pub(super) settle: i32,
+    pub(super) low: i32,
+}
 
-/// i16 offsets from a per-pass base; a wave's best scores lie within the spread that `rebased_local_scores` bounds.
-/// A stored zero is `-base` or `OFFSET_FLOOR`; only band-edge gap states are zero next to large scores,
-/// and another candidate wins there. An unrepresentable winner sets `RebaseState::violation` (rerun on i32).
+const LIMITS: RebaseLimits = RebaseLimits {
+    high: 24_000,
+    settle: 8_000,
+    low: 4_000,
+};
+
+/// An i16 offset from a per-pass base. The best scores of a wave lie within the spread that
+/// `rebased_local_scores` bounds; a winner outside it sets `RebaseState::violation`.
+/// A stored zero is `-base` or `OFFSET_FLOOR`; near high scores only band-edge gap states are zero.
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(transparent)]
 pub(super) struct Offset16(pub(super) i16);
@@ -147,20 +187,15 @@ pub(super) struct RebaseState {
     /// Whether the current wave tracks its smallest winning candidate: only a base in the
     /// sentinel range can meet an unrepresentable one.
     pub(super) check_low: bool,
-    high: i32,
-    settle: i32,
-    low: i32,
+    limits: RebaseLimits,
 }
 
 impl RebaseState {
     pub(super) fn new(base: i32) -> Self {
         #[cfg(test)]
-        let (high, settle, low) =
-            REBASE_THRESHOLDS
-                .get()
-                .unwrap_or((REBASE_HIGH, REBASE_SETTLE, REBASE_LOW));
+        let limits = TEST_HOOKS.get().limits.unwrap_or(LIMITS);
         #[cfg(not(test))]
-        let (high, settle, low) = (REBASE_HIGH, REBASE_SETTLE, REBASE_LOW);
+        let limits = LIMITS;
         Self {
             base,
             vector_max: i32::from(i16::MIN),
@@ -168,9 +203,7 @@ impl RebaseState {
             scalar_max: i32::MIN,
             violation: false,
             check_low: false,
-            high,
-            settle,
-            low,
+            limits,
         }
     }
 
@@ -221,43 +254,30 @@ impl RebaseState {
         if self.violation || wave_max == i32::MIN {
             return;
         }
-        if wave_max > self.high {
-            let delta = wave_max - self.settle;
-            self.shift(
-                current,
-                current_range,
-                previous,
-                previous_range,
-                stride,
-                delta,
-                true,
-            );
-            self.base += delta;
-            self.write_pads(current, current_range, stride);
-            #[cfg(test)]
-            REBASE_REACHED.set({
-                let (base, up, down, fallbacks) = REBASE_REACHED.get();
-                (base.max(self.base), up + 1, down, fallbacks)
-            });
-        } else if self.base > 0 && wave_max < self.low {
-            let delta = (self.settle - wave_max).min(self.base);
-            self.shift(
-                current,
-                current_range,
-                previous,
-                previous_range,
-                stride,
-                delta,
-                false,
-            );
-            self.base -= delta;
-            self.write_pads(current, current_range, stride);
-            #[cfg(test)]
-            REBASE_REACHED.set({
-                let (base, up, down, fallbacks) = REBASE_REACHED.get();
-                (base, up, down + 1, fallbacks)
-            });
-        }
+        let limits = self.limits;
+        let delta = if wave_max > limits.high {
+            wave_max - limits.settle
+        } else if self.base > 0 && wave_max < limits.low {
+            -(limits.settle - wave_max).min(self.base)
+        } else {
+            return;
+        };
+        self.shift(
+            current,
+            current_range,
+            previous,
+            previous_range,
+            stride,
+            delta,
+        );
+        self.base += delta;
+        self.write_pads(current, current_range, stride);
+        #[cfg(test)]
+        update_hooks(|hooks| {
+            hooks.highest_base = hooks.highest_base.max(self.base);
+            hooks.shifts_up += usize::from(delta > 0);
+            hooks.shifts_down += usize::from(delta < 0);
+        });
     }
 
     /// Sets the spare cells around each plane of `wave` to zero under the current base. The next
@@ -271,8 +291,9 @@ impl RebaseState {
         }
     }
 
-    /// Re-expresses both waves under a base moved by `delta` (up: scores stay, offsets fall).
-    #[allow(clippy::too_many_arguments)]
+    /// Re-expresses both waves under a base moved by `delta`: scores stay, offsets move by
+    /// `-delta`. Rebases are rare, so this stays out of the inlined wave loop.
+    #[cold]
     fn shift(
         &self,
         current: &mut [Offset16],
@@ -281,28 +302,24 @@ impl RebaseState {
         previous_range: Option<WaveRange>,
         stride: usize,
         delta: i32,
-        up: bool,
     ) {
-        let new_base = if up {
-            self.base + delta
+        // A zero stored at the floor stays there while the base rises.
+        let floor = if delta > 0 {
+            OFFSET_FLOOR
         } else {
-            self.base - delta
+            zero_offset(self.base + delta)
         };
         for (wave, range) in [(current, Some(current_range)), (previous, previous_range)] {
             let Some(range) = range else { continue };
             for state in 0..3 {
                 let first = state * stride + WAVE_PAD;
                 for element in &mut wave[first..first + range.width()] {
-                    element.0 = if up {
-                        if element.0 == OFFSET_FLOOR {
-                            OFFSET_FLOOR
-                        } else {
-                            (i32::from(element.0) - delta).max(i32::from(i16::MIN)) as i16
-                        }
-                    } else if element.0 == OFFSET_FLOOR {
-                        zero_offset(new_base)
+                    element.0 = if element.0 == OFFSET_FLOOR {
+                        floor
                     } else {
-                        (i32::from(element.0) + delta).min(i32::from(i16::MAX)) as i16
+                        (i32::from(element.0) - delta)
+                            .clamp(i32::from(i16::MIN), i32::from(i16::MAX))
+                            as i16
                     };
                 }
             }

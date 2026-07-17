@@ -1,11 +1,11 @@
 //! The pass driver: picks the kernel, plans how a pass keeps its traceback (all resident, or in
 //! chunks of at most `max_cells` cells refilled from checkpoints), and runs the pass.
 
-use super::fill::{LocalKernel, Pass};
+use super::fill::{Pass, RebaseViolation, ScoreWidth};
 use super::geometry::{BestCell, WaveCarry, WaveRange, wave_bounds, wave_range};
-#[cfg(test)]
-use super::rebased::REBASE_REACHED;
 use super::rebased::rebased_local_scores;
+#[cfg(test)]
+use super::rebased::{TEST_HOOKS, update_hooks};
 use super::waves::{WAVE_PAD, prepare_wave};
 use super::{AlignmentConfig, AlignmentWorkspace, RawAlignment};
 use crate::align::AlignmentError;
@@ -15,23 +15,22 @@ use crate::align::AlignmentError;
 /// traceback twice; passes within `max_cells` keep their traceback resident in one pass.
 const FINE_CHECKPOINT_CELLS: usize = 65_536;
 
-#[cfg(test)]
-thread_local! {
-    /// Keeps the rebased kernel off, so tests can compare it with the i32 kernel.
-    pub(super) static WIDE_LOCAL_KERNEL: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
+/// Why a pass ended without an alignment: its i16 offsets met a value they cannot hold, or it
+/// failed.
+enum PassStop {
+    Rebase,
+    Failed(AlignmentError),
 }
 
-/// Rebased i16 offsets for every vector pass the configuration allows, i32 scores otherwise.
-fn select_kernel<const VECTOR: bool>(config: AlignmentConfig, allow_rebased: bool) -> LocalKernel {
-    #[cfg(test)]
-    let wide = WIDE_LOCAL_KERNEL.get();
-    #[cfg(not(test))]
-    let wide = false;
-    if VECTOR && !wide && allow_rebased && rebased_local_scores(config) {
-        LocalKernel::Rebased
-    } else {
-        LocalKernel::Wide
+impl From<AlignmentError> for PassStop {
+    fn from(error: AlignmentError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<RebaseViolation> for PassStop {
+    fn from(_: RebaseViolation) -> Self {
+        Self::Rebase
     }
 }
 
@@ -59,7 +58,7 @@ impl AlignmentWorkspace {
             return unsafe { self.align_raw_avx2(query, contig, config) };
         }
         // SAFETY: the scalar instantiation never calls AVX2 code.
-        unsafe { self.align_raw_waves::<false>(query, contig, config) }
+        unsafe { self.align_waves::<false>(query, contig, config) }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -71,57 +70,47 @@ impl AlignmentWorkspace {
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
         // SAFETY: this function enables AVX2 for the inlined wave driver.
-        unsafe { self.align_raw_waves::<true>(query, contig, config) }
+        unsafe { self.align_waves::<true>(query, contig, config) }
     }
 
-    /// Aligns with the wave kernels. A rebased pass that meets an unrepresentable value stops, and
-    /// the whole window reruns on the i32 kernel, so the result is always that of the i32 kernel.
+    /// Aligns with i16 offsets when a vector pass allows them. A pass that meets a value they
+    /// cannot hold reruns with i32 scores, so the result is always that of the i32 kernel.
     /// Callers must enable AVX2 when VECTOR is true.
     #[inline(always)]
-    unsafe fn align_raw_waves<const VECTOR: bool>(
+    unsafe fn align_waves<const VECTOR: bool>(
         &mut self,
         query: &[u8],
         contig: &[u8],
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
-        self.rebase_violation = false;
-        // SAFETY: forwarded from this function's contract.
-        let result = unsafe { self.align_waves_with::<VECTOR>(query, contig, config, true) };
-        if !self.rebase_violation {
-            return result;
-        }
-        self.rebase_violation = false;
         #[cfg(test)]
-        REBASE_REACHED.set({
-            let (base, up, down, fallbacks) = REBASE_REACHED.get();
-            (base, up, down, fallbacks + 1)
-        });
-        // SAFETY: forwarded from this function's contract.
-        unsafe { self.align_waves_with::<VECTOR>(query, contig, config, false) }
-    }
-
-    #[inline(always)]
-    unsafe fn align_waves_with<const VECTOR: bool>(
-        &mut self,
-        query: &[u8],
-        contig: &[u8],
-        config: AlignmentConfig,
-        allow_rebased: bool,
-    ) -> Result<RawAlignment, AlignmentError> {
-        let kernel = select_kernel::<VECTOR>(config, allow_rebased);
-        if kernel == LocalKernel::Wide {
+        let force_i32 = TEST_HOOKS.get().force_i32;
+        #[cfg(not(test))]
+        let force_i32 = false;
+        if VECTOR && !force_i32 && rebased_local_scores(config) {
+            // The i16 kernel compares bytes directly, so it reads lowercase copies of both.
+            let mut folded = std::mem::take(&mut self.folded);
+            folded.clear();
+            folded.extend(query.iter().chain(contig).map(u8::to_ascii_lowercase));
+            let (query, contig) = folded.split_at(query.len());
             // SAFETY: forwarded from this function's contract.
-            return unsafe { self.align_waves_kernel::<VECTOR>(query, contig, config, kernel) };
+            let result = unsafe { self.run_pass::<VECTOR>(query, contig, config, ScoreWidth::I16) };
+            self.folded = folded;
+            match result {
+                Ok(raw) => return Ok(raw),
+                Err(PassStop::Failed(error)) => return Err(error),
+                Err(PassStop::Rebase) => {}
+            }
+            #[cfg(test)]
+            update_hooks(|hooks| hooks.reruns += 1);
         }
-        // The rebased kernel compares bytes directly, so it reads lowercase copies of both.
-        let mut folded = std::mem::take(&mut self.folded);
-        folded.clear();
-        folded.extend(query.iter().chain(contig).map(u8::to_ascii_lowercase));
-        let (query, contig) = folded.split_at(query.len());
         // SAFETY: forwarded from this function's contract.
-        let result = unsafe { self.align_waves_kernel::<VECTOR>(query, contig, config, kernel) };
-        self.folded = folded;
-        result
+        match unsafe { self.run_pass::<VECTOR>(query, contig, config, ScoreWidth::I32) } {
+            Ok(raw) => Ok(raw),
+            Err(PassStop::Failed(error)) => Err(error),
+            // i32 scores hold every value, so this pass cannot stop for a rebase.
+            Err(PassStop::Rebase) => Err(AlignmentError::InvalidTraceback),
+        }
     }
 
     /// Decides how a pass keeps its traceback and sizes the wave buffers.
@@ -188,14 +177,16 @@ impl AlignmentWorkspace {
         })
     }
 
+    /// Runs one pass with scores of `width` and traces the best cell back. Callers must enable
+    /// AVX2 when VECTOR is true.
     #[inline(always)]
-    unsafe fn align_waves_kernel<const VECTOR: bool>(
+    unsafe fn run_pass<const VECTOR: bool>(
         &mut self,
         query: &[u8],
         contig: &[u8],
         config: AlignmentConfig,
-        kernel: LocalKernel,
-    ) -> Result<RawAlignment, AlignmentError> {
+        width: ScoreWidth,
+    ) -> Result<RawAlignment, PassStop> {
         let layout = self.plan_pass::<VECTOR>(query, contig, config)?;
         let last_wave = query.len() + contig.len();
         let pass = Pass {
@@ -208,26 +199,26 @@ impl AlignmentWorkspace {
         let mut carry = WaveCarry::default();
         if layout.checkpointed {
             // SAFETY: forwarded from this function's contract.
-            unsafe { self.fill_checkpointed::<VECTOR>(pass, kernel, &layout, &mut best)? };
+            unsafe { self.fill_checkpointed::<VECTOR>(pass, width, &layout, &mut best)? };
         } else {
             self.layout_chunk(query.len(), contig.len(), config, 0, last_wave)?;
             // SAFETY: forwarded from this function's contract.
             unsafe {
                 self.fill_waves_selected::<VECTOR, true, true>(
                     pass,
-                    kernel,
+                    width,
                     (0, last_wave),
                     &mut carry,
                     &mut best,
-                );
+                )?;
             }
         }
-        if self.rebase_violation || best.score <= 0 {
-            return Err(AlignmentError::NoAlignment);
+        if best.score <= 0 {
+            return Err(AlignmentError::NoAlignment.into());
         }
         let (query_start, contig_start) = if layout.checkpointed {
             // SAFETY: forwarded from this function's contract.
-            unsafe { self.traceback_chunked::<VECTOR>(pass, kernel, best)? }
+            unsafe { self.traceback_chunked::<VECTOR>(pass, width, best)? }
         } else {
             self.traceback_compact(query, contig, config, best)?
         };
@@ -245,10 +236,10 @@ impl AlignmentWorkspace {
     unsafe fn fill_checkpointed<const VECTOR: bool>(
         &mut self,
         pass: Pass<'_>,
-        kernel: LocalKernel,
+        width: ScoreWidth,
         layout: &PassLayout,
         best: &mut BestCell,
-    ) -> Result<(), AlignmentError> {
+    ) -> Result<(), PassStop> {
         let (query_len, contig_len) = (pass.query.len(), pass.contig.len());
         let config = pass.config;
         let last_wave = query_len + contig_len;
@@ -257,19 +248,19 @@ impl AlignmentWorkspace {
         self.chunk_waves.clear();
         self.chunk_carries.clear();
         self.checkpoints.clear();
-        let width =
+        let wave_cells =
             |wave| wave_range(query_len, contig_len, config, wave).map_or(0, WaveRange::width);
         let mut carry = WaveCarry::default();
         let mut first = 0;
         while first <= last_wave {
             let mut last = first;
-            let mut cells = width(first);
+            let mut cells = wave_cells(first);
             if last < active_first {
                 last = active_first - 1;
             }
-            while last < last_wave && cells + width(last + 1) <= layout.checkpoint_limit {
+            while last < last_wave && cells + wave_cells(last + 1) <= layout.checkpoint_limit {
                 last += 1;
-                cells += width(last);
+                cells += wave_cells(last);
                 if last >= active_last {
                     last = last_wave;
                     break;
@@ -282,24 +273,21 @@ impl AlignmentWorkspace {
                 if layout.score_first {
                     self.fill_waves_selected::<VECTOR, false, true>(
                         pass,
-                        kernel,
+                        width,
                         (first, last),
                         &mut carry,
                         best,
-                    );
+                    )?;
                 } else {
                     self.layout_chunk(query_len, contig_len, config, first, last)?;
                     self.fill_waves_selected::<VECTOR, true, true>(
                         pass,
-                        kernel,
+                        width,
                         (first, last),
                         &mut carry,
                         best,
-                    );
+                    )?;
                 }
-            }
-            if self.rebase_violation {
-                return Ok(());
             }
             first = last + 1;
         }

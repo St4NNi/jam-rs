@@ -82,7 +82,10 @@ unsafe fn choose_state<const SHIFT: i32>(m: __m256i, d: __m256i, i: __m256i) -> 
 /// `rebase.base`, the floor offset as local zero and saturating adds. It equals the i32 kernel
 /// while `rebase.violation` is clear. Returns the first row it did not fill. Callers must enable
 /// AVX2, pass lowercase sequences, and prove the bounds that the debug assertions check.
-#[allow(unused_assignments)]
+#[allow(
+    unused_assignments,
+    reason = "the last block's threshold update is never read"
+)]
 #[inline(always)]
 pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool>(
     blocks: Span<'_>,
@@ -275,15 +278,7 @@ pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool
                 // block whose lanes all lie at or below `threshold` cannot change it. The threshold
                 // is that bound as an i16 offset, clamped, which can only loosen the test.
                 if BEST && _mm256_movemask_epi8(_mm256_cmpgt_epi16(lane_best, threshold)) != 0 {
-                    // Offsets can be negative, so flip the low 15 bits: the unsigned minimum of
-                    // the flipped halves is the signed maximum.
-                    let halves = _mm_max_epi16(
-                        _mm256_castsi256_si128(lane_best),
-                        _mm256_extracti128_si256::<1>(lane_best),
-                    );
-                    let flipped = _mm_xor_si128(halves, _mm_set1_epi16(0x7FFF));
-                    let minimum = (_mm_cvtsi128_si32(_mm_minpos_epu16(flipped)) & 0xffff) as u16;
-                    let block_offset = (minimum ^ 0x7FFF) as i16;
+                    let block_offset = horizontal_max(lane_best) as i16;
                     let block_score = i32::from(block_offset) + base;
                     if block_score > 0 && block_score >= best.score {
                         let mut matches = [0i16; 16];

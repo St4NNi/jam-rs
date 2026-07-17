@@ -3,19 +3,23 @@
 
 use super::geometry::{BestCell, WaveCarry, WaveRange, wave_bounds, wave_range};
 #[cfg(test)]
-use super::rebased::REBASE_FORCED_VIOLATION;
+use super::rebased::TEST_HOOKS;
 use super::rebased::{Offset16, RebaseState, SENTINEL_BASE};
 use super::waves::{ScoreWave, WaveScore, fill_wave_scalar};
 use super::{AlignmentConfig, AlignmentWorkspace};
 use crate::align::AlignmentError;
 
-/// The element type of a vector pass: rebased i16 offsets when the configuration allows them,
-/// i32 scores otherwise.
+/// The score element of a pass: i16 offsets from a moving base, which only vector passes use
+/// and only when the configuration allows them, or plain i32 scores.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LocalKernel {
-    Wide,
-    Rebased,
+pub(super) enum ScoreWidth {
+    I32,
+    I16,
 }
+
+/// A pass with i16 offsets met a value they cannot hold; the pass reruns with i32 scores.
+#[derive(Debug)]
+pub(super) struct RebaseViolation;
 
 /// The constants of one pass over the band.
 #[derive(Clone, Copy)]
@@ -32,13 +36,13 @@ impl AlignmentWorkspace {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     #[inline(never)]
-    unsafe fn fill_waves_avx2<const TRACEBACK: bool, const BEST: bool>(
+    unsafe fn fill_i32_avx2<const TRACEBACK: bool, const BEST: bool>(
         &mut self,
         pass: Pass<'_>,
         waves: (usize, usize),
         carry: &mut WaveCarry,
         best: &mut BestCell,
-    ) {
+    ) -> Result<(), RebaseViolation> {
         // SAFETY: this function enables AVX2 for the vector instantiation.
         unsafe { self.fill_waves::<i32, true, TRACEBACK, BEST>(pass, waves, carry, best) }
     }
@@ -48,19 +52,20 @@ impl AlignmentWorkspace {
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2")]
     #[inline(never)]
-    unsafe fn fill_waves16_rebased<const TRACEBACK: bool, const BEST: bool>(
+    unsafe fn fill_i16_avx2<const TRACEBACK: bool, const BEST: bool>(
         &mut self,
         pass: Pass<'_>,
         waves: (usize, usize),
         carry: &mut WaveCarry,
         best: &mut BestCell,
-    ) {
+    ) -> Result<(), RebaseViolation> {
         // SAFETY: this function enables AVX2 and the caller checks the configuration.
         unsafe { self.fill_waves::<Offset16, true, TRACEBACK, BEST>(pass, waves, carry, best) }
     }
 
-    /// Fills waves with the selected kernel. Callers must enable AVX2 when VECTOR is true, and
-    /// pass the rebased kernel only when `select_kernel` chose it.
+    /// Fills waves with scores of `width`; BEST false lets the i16 kernel skip the best cell,
+    /// which the others always track. Callers must enable AVX2 when VECTOR is true, and pass
+    /// `I16` only for a vector pass whose configuration `rebased_local_scores` accepts.
     #[inline(always)]
     pub(super) unsafe fn fill_waves_selected<
         const VECTOR: bool,
@@ -69,24 +74,26 @@ impl AlignmentWorkspace {
     >(
         &mut self,
         pass: Pass<'_>,
-        kernel: LocalKernel,
+        width: ScoreWidth,
         waves: (usize, usize),
         carry: &mut WaveCarry,
         best: &mut BestCell,
-    ) {
+    ) -> Result<(), RebaseViolation> {
         #[cfg(target_arch = "x86_64")]
         if VECTOR {
             // SAFETY: forwarded from this function's contract.
-            unsafe {
-                if kernel == LocalKernel::Rebased {
-                    self.fill_waves16_rebased::<TRACEBACK, BEST>(pass, waves, carry, best);
-                } else {
-                    self.fill_waves_avx2::<TRACEBACK, BEST>(pass, waves, carry, best);
+            return unsafe {
+                match width {
+                    ScoreWidth::I16 => {
+                        self.fill_i16_avx2::<TRACEBACK, BEST>(pass, waves, carry, best)
+                    }
+                    ScoreWidth::I32 => {
+                        self.fill_i32_avx2::<TRACEBACK, BEST>(pass, waves, carry, best)
+                    }
                 }
-            }
-            return;
+            };
         }
-        debug_assert_eq!(kernel, LocalKernel::Wide);
+        debug_assert_eq!(width, ScoreWidth::I32);
         // SAFETY: the scalar instantiation never calls AVX2 code.
         unsafe { self.fill_waves::<i32, false, TRACEBACK, BEST>(pass, waves, carry, best) }
     }
@@ -106,9 +113,9 @@ impl AlignmentWorkspace {
         (first_wave, last_wave): (usize, usize),
         carry: &mut WaveCarry,
         best: &mut BestCell,
-    ) {
+    ) -> Result<(), RebaseViolation> {
         if first_wave > last_wave {
-            return;
+            return Ok(());
         }
         let (query_len, contig_len, stride) = (pass.query.len(), pass.contig.len(), pass.stride);
         let active = wave_bounds(query_len, contig_len, pass.config).and_then(|(first, last)| {
@@ -118,12 +125,12 @@ impl AlignmentWorkspace {
         });
         let Some((active_first, active_last)) = active else {
             self.skip_empty_waves(last_wave - first_wave + 1, carry);
-            return;
+            return Ok(());
         };
         self.skip_empty_waves(active_first - first_wave, carry);
         let mut rebase = RebaseState::new(carry.base);
         #[cfg(test)]
-        let forced_violation = REBASE_FORCED_VIOLATION.get();
+        let forced_violation = TEST_HOOKS.get().violation_wave;
         let [first_buffer, second_buffer, third_buffer] = &mut self.waves;
         let (mut older_buffer, mut previous_buffer, mut current_buffer) =
             (first_buffer, second_buffer, third_buffer);
@@ -191,9 +198,8 @@ impl AlignmentWorkspace {
                         rebase.violation = true;
                     }
                     if rebase.violation {
-                        self.rebase_violation = true;
                         carry.base = rebase.base;
-                        return;
+                        return Err(RebaseViolation);
                     }
                 }
             }
@@ -207,6 +213,7 @@ impl AlignmentWorkspace {
         self.waves.rotate_left((active_last - active_first + 1) % 3);
         carry.base = rebase.base;
         self.skip_empty_waves(last_wave - active_last, carry);
+        Ok(())
     }
 
     /// Empty waves still rotate score buffers and age the two predecessor ranges.

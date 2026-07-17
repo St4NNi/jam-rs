@@ -1,7 +1,7 @@
 //! The traceback from the best cell back to the start of the local alignment, over resident
 //! traceback cells or chunk by chunk from checkpoints.
 
-use super::fill::{LocalKernel, Pass};
+use super::fill::{Pass, ScoreWidth};
 use super::geometry::{
     BestCell, DELETION, INSERTION, MATCH, START, WaveCarry, traceback_positive, traceback_previous,
     wave_range,
@@ -31,7 +31,7 @@ impl AlignmentWorkspace {
     pub(super) unsafe fn traceback_chunked<const VECTOR: bool>(
         &mut self,
         pass: Pass<'_>,
-        kernel: LocalKernel,
+        width: ScoreWidth,
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
         let (query, contig, config, stride) = (pass.query, pass.contig, pass.config, pass.stride);
@@ -56,19 +56,18 @@ impl AlignmentWorkspace {
             }
             self.layout_chunk(query.len(), contig.len(), config, first, stop)?;
             let mut ignored = BestCell::default();
+            // The first fill of these waves held every value, so a refill cannot stop.
             // SAFETY: forwarded from this function's contract.
             unsafe {
                 self.fill_waves_selected::<VECTOR, true, false>(
                     pass,
-                    kernel,
+                    width,
                     (first, stop),
                     &mut carry,
                     &mut ignored,
-                );
+                )
             }
-            if self.rebase_violation {
-                return Err(AlignmentError::InvalidTraceback);
-            }
+            .map_err(|_| AlignmentError::InvalidTraceback)?;
             if self.trace_operations(query, contig, config, &mut position, first)? {
                 break;
             }
