@@ -74,7 +74,8 @@ pub(super) fn wave_range(
     config: AlignmentConfig,
     wave: usize,
 ) -> Option<WaveRange> {
-    // Below this every intermediate value fits i64; larger inputs take the wide path.
+    // Below this every intermediate value fits i64. No slice in memory comes near it, and a
+    // diagonal this far off holds no cell of a slice that does fit.
     const SMALL: u64 = 1 << 60;
     let diagonal = config.diagonal_offset;
     if (query_len as u64) >= SMALL
@@ -82,7 +83,7 @@ pub(super) fn wave_range(
         || (wave as u64) >= SMALL
         || diagonal.unsigned_abs() >= SMALL
     {
-        return wave_range_wide(query_len, contig_len, config, wave);
+        return None;
     }
     let (query_len, contig_len, wave) = (query_len as i64, contig_len as i64, wave as i64);
     let band = i64::from(config.band_width);
@@ -95,37 +96,6 @@ pub(super) fn wave_range(
         start: lower as usize,
         end: upper as usize,
     })
-}
-
-/// `wave_range` in i128, for inputs too large for the i64 path.
-pub(super) fn wave_range_wide(
-    query_len: usize,
-    contig_len: usize,
-    config: AlignmentConfig,
-    wave: usize,
-) -> Option<WaveRange> {
-    let query_len = i128::try_from(query_len).ok()?;
-    let contig_len = i128::try_from(contig_len).ok()?;
-    let wave = i128::try_from(wave).ok()?;
-    let diagonal = i128::from(config.diagonal_offset);
-    let band = i128::from(config.band_width);
-    let lower = 0
-        .max(wave - contig_len)
-        .max(ceil_div2(wave - (diagonal + band)));
-    let upper = query_len
-        .min(wave)
-        .min((wave - (diagonal - band)).div_euclid(2));
-    if lower > upper {
-        return None;
-    }
-    Some(WaveRange {
-        start: usize::try_from(lower).ok()?,
-        end: usize::try_from(upper).ok()?,
-    })
-}
-
-fn ceil_div2(value: i128) -> i128 {
-    -(-value).div_euclid(2)
 }
 
 /// The three state scores of one cell and the state each came from.
