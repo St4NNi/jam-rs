@@ -1,7 +1,7 @@
 //! The AVX2 recurrence of the rebased i16 planes: sixteen cells of one wave per block.
 
 use super::AlignmentConfig;
-use super::geometry::{BestCell, Cell, DELETION, INSERTION, MATCH, START, WaveRange};
+use super::geometry::{BestCell, START, WaveRange};
 use super::rebased::{Offset16, RebaseState, zero_offset};
 use super::waves::{ScoreWave, WAVE_PAD, WaveScore};
 use std::arch::x86_64::*;
@@ -82,10 +82,6 @@ unsafe fn choose_state<const SHIFT: i32>(m: __m256i, d: __m256i, i: __m256i) -> 
 /// `rebase.base`, the floor offset as local zero and saturating adds. It equals the i32 kernel
 /// while `rebase.violation` is clear. Returns the first row it did not fill. Callers must enable
 /// AVX2, pass lowercase sequences, and prove the bounds that the debug assertions check.
-#[allow(
-    unused_assignments,
-    reason = "the last block's threshold update is never read"
-)]
 #[inline(always)]
 pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool>(
     blocks: Span<'_>,
@@ -119,18 +115,6 @@ pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool
         debug_assert!(current.len() >= 3 * stride);
         debug_assert!(wave - end >= 1 && wave - start <= contig.len() + 15);
         let base = rebase.base;
-        let check_low = rebase.check_low;
-        let floor = _mm256_set1_epi16(zero_offset(base));
-        let gap_open = _mm256_set1_epi16(gap_open_score as i16);
-        let gap_extend = _mm256_set1_epi16(config.gap_extend_score as i16);
-        // The rebased configuration bounds every scoring term to i16.
-        let match_score = _mm256_set1_epi16(config.match_score as i16);
-        let mismatch_score = _mm256_set1_epi16(config.mismatch_score as i16);
-        let reverse = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-
-        // Row `r` of a plane is `plane.add(r)`; the pointers carry the range starts.
-        let query_at = query.as_ptr().wrapping_sub(1);
-        let contig_at = contig.as_ptr().wrapping_add(wave).wrapping_sub(16);
         let planes = |scores: ScoreWave<'_, Offset16>, shift: usize| {
             let first = scores.scores.as_ptr().cast::<i16>();
             [0, 1, 2].map(|state| {
@@ -139,194 +123,255 @@ pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool
                     .wrapping_sub(scores.range.start + shift)
             })
         };
-        let older_at = planes(older, 1);
-        let previous_at = planes(previous, 0);
         let current_first = current.as_mut_ptr().cast::<i16>();
-        let current_at = [0, 1, 2].map(|state| {
-            current_first
-                .wrapping_add(state * stride + WAVE_PAD)
-                .wrapping_sub(current_range.start)
-        });
-        let trace_at = traceback
-            .as_mut_ptr()
-            .wrapping_add(wave_base)
-            .wrapping_sub(current_range.start);
-
-        let mut wave_max = _mm256_set1_epi16(i16::MIN);
-        let mut wave_low = _mm256_set1_epi16(i16::MAX);
-        let mut threshold = if BEST {
-            threshold_vector(best.score, base)
-        } else {
-            _mm256_setzero_si256()
+        // The rebased configuration bounds every scoring term to i16.
+        let span = SpanPlanes {
+            query: query.as_ptr().wrapping_sub(1),
+            contig: contig.as_ptr().wrapping_add(wave).wrapping_sub(16),
+            older: planes(older, 1),
+            previous: planes(previous, 0),
+            current: [0, 1, 2].map(|state| {
+                current_first
+                    .wrapping_add(state * stride + WAVE_PAD)
+                    .wrapping_sub(current_range.start)
+            }),
+            trace: traceback
+                .as_mut_ptr()
+                .wrapping_add(wave_base)
+                .wrapping_sub(current_range.start),
+            wave,
+            base,
+            floor: _mm256_set1_epi16(zero_offset(base)),
+            gap_open: _mm256_set1_epi16(gap_open_score as i16),
+            gap_extend: _mm256_set1_epi16(config.gap_extend_score as i16),
+            match_score: _mm256_set1_epi16(config.match_score as i16),
+            mismatch_score: _mm256_set1_epi16(config.mismatch_score as i16),
+            reverse: _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0),
         };
-
-        macro_rules! block {
-            ($row:expr) => {{
-                let row: usize = $row;
-                let query_bytes = _mm_loadu_si128(query_at.wrapping_add(row).cast());
-                let contig_bytes =
-                    _mm_loadu_si128(contig_at.wrapping_sub(row).cast());
-                let contig_bytes = _mm_shuffle_epi8(contig_bytes, reverse);
-                // The caller folded both sequences to lowercase, so a plain compare is a case-blind one.
-                let equal = _mm256_cvtepi8_epi16(_mm_cmpeq_epi8(query_bytes, contig_bytes));
-                let substitution = _mm256_blendv_epi8(mismatch_score, match_score, equal);
-                let load = |plane: *const i16, at: usize| {
-                    _mm256_loadu_si256(plane.wrapping_add(at).cast::<__m256i>())
-                };
-                let older_m = load(older_at[MATCH as usize], row);
-                let older_d = load(older_at[DELETION as usize], row);
-                let older_i = load(older_at[INSERTION as usize], row);
-                let left_m = load(previous_at[MATCH as usize], row);
-                let left_d = load(previous_at[DELETION as usize], row);
-                let left_i = load(previous_at[INSERTION as usize], row);
-                let above_m = load(previous_at[MATCH as usize].wrapping_sub(1), row);
-                let above_d = load(previous_at[DELETION as usize].wrapping_sub(1), row);
-                let above_i = load(previous_at[INSERTION as usize].wrapping_sub(1), row);
-
-                let (match_raw, match_scores, deletion_raw, deletion_scores);
-                let (insertion_raw, insertion_scores, trace);
-                if TRACEBACK {
-                    let (diagonal, diagonal_state) = choose_state::<3>(older_m, older_d, older_i);
-                    match_raw = _mm256_adds_epi16(diagonal, substitution);
-                    let match_positive = _mm256_cmpgt_epi16(match_raw, floor);
-                    match_scores = _mm256_max_epi16(match_raw, floor);
-                    // The diagonal cell scored zero: a new alignment starts here.
-                    let match_start = _mm256_cmpeq_epi16(diagonal, floor);
-                    let match_previous = _mm256_blendv_epi8(
-                        diagonal_state,
-                        _mm256_set1_epi16(i16::from(START) << 3),
-                        match_start,
-                    );
-                    let (raw, deletion_previous) = choose_state::<5>(
-                        _mm256_adds_epi16(left_m, gap_open),
-                        _mm256_adds_epi16(left_d, gap_extend),
-                        _mm256_adds_epi16(left_i, gap_open),
-                    );
-                    deletion_raw = raw;
-                    let deletion_positive = _mm256_cmpgt_epi16(deletion_raw, floor);
-                    deletion_scores = _mm256_max_epi16(deletion_raw, floor);
-                    let (raw, insertion_previous) = choose_state::<7>(
-                        _mm256_adds_epi16(above_m, gap_open),
-                        _mm256_adds_epi16(above_d, gap_open),
-                        _mm256_adds_epi16(above_i, gap_extend),
-                    );
-                    insertion_raw = raw;
-                    let insertion_positive = _mm256_cmpgt_epi16(insertion_raw, floor);
-                    insertion_scores = _mm256_max_epi16(insertion_raw, floor);
-
-                    // Each state contributes its positive bit and its shifted previous state,
-                    // both only when the state is positive.
-                    let match_bits = _mm256_and_si256(
-                        match_positive,
-                        _mm256_or_si256(match_previous, _mm256_set1_epi16(1)),
-                    );
-                    let deletion_bits = _mm256_and_si256(
-                        deletion_positive,
-                        _mm256_or_si256(deletion_previous, _mm256_set1_epi16(2)),
-                    );
-                    let insertion_bits = _mm256_and_si256(
-                        insertion_positive,
-                        _mm256_or_si256(insertion_previous, _mm256_set1_epi16(4)),
-                    );
-                    let bits = _mm256_or_si256(_mm256_or_si256(match_bits, deletion_bits), insertion_bits);
-                    trace = bits;
-                } else {
-                    // Without a traceback only scores matter, and adding one constant keeps the
-                    // maximum: the two candidates that share a gap penalty meet before the add.
-                    let diagonal = _mm256_max_epi16(_mm256_max_epi16(older_m, older_d), older_i);
-                    match_raw = _mm256_adds_epi16(diagonal, substitution);
-                    match_scores = _mm256_max_epi16(match_raw, floor);
-                    deletion_raw = _mm256_max_epi16(
-                        _mm256_adds_epi16(_mm256_max_epi16(left_m, left_i), gap_open),
-                        _mm256_adds_epi16(left_d, gap_extend),
-                    );
-                    deletion_scores = _mm256_max_epi16(deletion_raw, floor);
-                    insertion_raw = _mm256_max_epi16(
-                        _mm256_adds_epi16(_mm256_max_epi16(above_m, above_d), gap_open),
-                        _mm256_adds_epi16(above_i, gap_extend),
-                    );
-                    insertion_scores = _mm256_max_epi16(insertion_raw, floor);
-                    trace = _mm256_setzero_si256();
-                }
-                _mm256_storeu_si256(current_at[MATCH as usize].wrapping_add(row).cast(), match_scores);
-                _mm256_storeu_si256(
-                    current_at[DELETION as usize].wrapping_add(row).cast(),
-                    deletion_scores,
-                );
-                _mm256_storeu_si256(
-                    current_at[INSERTION as usize].wrapping_add(row).cast(),
-                    insertion_scores,
-                );
-                if TRACEBACK {
-                    _mm256_storeu_si256(trace_at.wrapping_add(row).cast(), trace);
-                }
-                let lane_best =
-                    _mm256_max_epi16(match_scores, _mm256_max_epi16(deletion_scores, insertion_scores));
-
-                // Wave statistics for the base policy: the largest best-state offset, and the
-                // smallest winning candidate (which reveals unrepresentable values under a
-                // sentinel-range base).
-                wave_max = _mm256_max_epi16(wave_max, lane_best);
-                if check_low {
-                    wave_low = _mm256_min_epi16(
-                        wave_low,
-                        _mm256_min_epi16(match_raw, _mm256_min_epi16(deletion_raw, insertion_raw)),
-                    );
-                }
-
-                // BestCell only changes for a positive score at or above the current best, so a
-                // block whose lanes all lie at or below `threshold` cannot change it. The threshold
-                // is that bound as an i16 offset, clamped, which can only loosen the test.
-                if BEST && _mm256_movemask_epi8(_mm256_cmpgt_epi16(lane_best, threshold)) != 0 {
-                    let block_offset = horizontal_max(lane_best) as i16;
-                    let block_score = i32::from(block_offset) + base;
-                    if block_score > 0 && block_score >= best.score {
-                        let mut matches = [0i16; 16];
-                        let mut deletions = [0i16; 16];
-                        let mut insertions = [0i16; 16];
-                        _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
-                        _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
-                        _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
-                        let best_lanes = _mm256_movemask_epi8(_mm256_cmpeq_epi16(
-                            lane_best,
-                            _mm256_set1_epi16(block_offset),
-                        )) as u32;
-                        // Each lane sets two mask bits. As in `fill_wave_avx2`, the first lane
-                        // with the block maximum is the lexicographically earliest candidate.
-                        let block_lane = best_lanes.trailing_zeros() as usize / 2;
-                        let query_index = row + block_lane;
-                        let contig_index = wave - query_index;
-                        best.consider(
-                            query_index,
-                            contig_index,
-                            Cell {
-                                scores: [
-                                    Offset16(matches[block_lane]).read(base),
-                                    Offset16(deletions[block_lane]).read(base),
-                                    Offset16(insertions[block_lane]).read(base),
-                                ],
-                                previous: [0; 3],
-                            },
-                        );
-                        threshold = threshold_vector(best.score, base);
-                    }
-                }
-            }};
-        }
-
+        let mut stats = SpanStats {
+            wave_max: _mm256_set1_epi16(i16::MIN),
+            wave_low: _mm256_set1_epi16(i16::MAX),
+            threshold: if BEST {
+                threshold_vector(best.score, base)
+            } else {
+                _mm256_setzero_si256()
+            },
+            check_low: rebase.check_low,
+        };
         let last_block = end + 1 - 16;
         let mut row = start;
         while row <= last_block {
-            block!(row);
+            fill_block::<TRACEBACK, BEST>(&span, row, &mut stats, best);
             row += 16;
         }
         if row <= end {
-            block!(last_block);
+            fill_block::<TRACEBACK, BEST>(&span, last_block, &mut stats, best);
         }
-        rebase.vector_max = rebase.vector_max.max(horizontal_max(wave_max));
-        if check_low {
-            rebase.vector_low = rebase.vector_low.min(horizontal_min(wave_low));
+        rebase.vector_max = rebase.vector_max.max(horizontal_max(stats.wave_max));
+        if stats.check_low {
+            rebase.vector_low = rebase.vector_low.min(horizontal_min(stats.wave_low));
         }
         end + 1
+    }
+}
+
+/// What every block of one span reads: the sequences and planes, where row `r` of a plane is
+/// `plane.wrapping_add(r)`, and the scores as vectors.
+struct SpanPlanes {
+    query: *const u8,
+    contig: *const u8,
+    older: [*const i16; 3],
+    previous: [*const i16; 3],
+    current: [*mut i16; 3],
+    trace: *mut u16,
+    wave: usize,
+    base: i32,
+    floor: __m256i,
+    gap_open: __m256i,
+    gap_extend: __m256i,
+    match_score: __m256i,
+    mismatch_score: __m256i,
+    reverse: __m128i,
+}
+
+/// What the blocks of a span collect for the base policy and the best cell: the largest
+/// best-state offset, the smallest winning candidate, and the offset a block must pass.
+struct SpanStats {
+    wave_max: __m256i,
+    wave_low: __m256i,
+    threshold: __m256i,
+    check_low: bool,
+}
+
+/// The three states of one block: the winning candidates, the offsets kept after the floor, and
+/// the traceback cells.
+struct BlockStates {
+    raw: [__m256i; 3],
+    scores: [__m256i; 3],
+    trace: __m256i,
+}
+
+/// Fills the sixteen cells from `row` on. Callers must enable AVX2 and keep the block inside
+/// the span that `fill_span16_rebased` checks.
+#[inline(always)]
+unsafe fn fill_block<const TRACEBACK: bool, const BEST: bool>(
+    span: &SpanPlanes,
+    row: usize,
+    stats: &mut SpanStats,
+    best: &mut BestCell,
+) {
+    unsafe {
+        let query_bytes = _mm_loadu_si128(span.query.wrapping_add(row).cast());
+        let contig_bytes = _mm_loadu_si128(span.contig.wrapping_sub(row).cast());
+        let contig_bytes = _mm_shuffle_epi8(contig_bytes, span.reverse);
+        // The caller folded both sequences to lowercase, so a plain compare ignores case.
+        let equal = _mm256_cvtepi8_epi16(_mm_cmpeq_epi8(query_bytes, contig_bytes));
+        let substitution = _mm256_blendv_epi8(span.mismatch_score, span.match_score, equal);
+        let load = |plane: *const i16| _mm256_loadu_si256(plane.wrapping_add(row).cast());
+        let older = span.older.map(load);
+        let left = span.previous.map(load);
+        let above = span.previous.map(|plane| load(plane.wrapping_sub(1)));
+        let states = if TRACEBACK {
+            traced_states(span, substitution, older, left, above)
+        } else {
+            plain_states(span, substitution, older, left, above)
+        };
+        for (plane, scores) in span.current.iter().zip(states.scores) {
+            _mm256_storeu_si256(plane.wrapping_add(row).cast(), scores);
+        }
+        if TRACEBACK {
+            _mm256_storeu_si256(span.trace.wrapping_add(row).cast(), states.trace);
+        }
+        let [matched, deleted, inserted] = states.scores;
+        let lane_best = _mm256_max_epi16(matched, _mm256_max_epi16(deleted, inserted));
+        stats.wave_max = _mm256_max_epi16(stats.wave_max, lane_best);
+        // Under a sentinel-range base the smallest winning candidate reveals values that the
+        // offsets cannot hold.
+        if stats.check_low {
+            let [matched, deleted, inserted] = states.raw;
+            let low = _mm256_min_epi16(matched, _mm256_min_epi16(deleted, inserted));
+            stats.wave_low = _mm256_min_epi16(stats.wave_low, low);
+        }
+        // A block whose lanes all lie at or below the threshold, the best score as a clamped
+        // offset, cannot change the best cell.
+        if BEST && _mm256_movemask_epi8(_mm256_cmpgt_epi16(lane_best, stats.threshold)) != 0 {
+            consider_block(span, row, lane_best, states.scores, stats, best);
+        }
+    }
+}
+
+/// The states of a block with the state each came from, packed into traceback cells.
+#[inline(always)]
+unsafe fn traced_states(
+    span: &SpanPlanes,
+    substitution: __m256i,
+    [older_m, older_d, older_i]: [__m256i; 3],
+    [left_m, left_d, left_i]: [__m256i; 3],
+    [above_m, above_d, above_i]: [__m256i; 3],
+) -> BlockStates {
+    unsafe {
+        let (floor, open, extend) = (span.floor, span.gap_open, span.gap_extend);
+        let (diagonal, diagonal_state) = choose_state::<3>(older_m, older_d, older_i);
+        let matched = _mm256_adds_epi16(diagonal, substitution);
+        // The diagonal cell scored zero: a new alignment starts here.
+        let match_previous = _mm256_blendv_epi8(
+            diagonal_state,
+            _mm256_set1_epi16(i16::from(START) << 3),
+            _mm256_cmpeq_epi16(diagonal, floor),
+        );
+        let (deleted, deletion_previous) = choose_state::<5>(
+            _mm256_adds_epi16(left_m, open),
+            _mm256_adds_epi16(left_d, extend),
+            _mm256_adds_epi16(left_i, open),
+        );
+        let (inserted, insertion_previous) = choose_state::<7>(
+            _mm256_adds_epi16(above_m, open),
+            _mm256_adds_epi16(above_d, open),
+            _mm256_adds_epi16(above_i, extend),
+        );
+        // A positive state sets its own bit and the shifted state it came from.
+        let bits = |raw: __m256i, previous: __m256i, bit: i16| {
+            _mm256_and_si256(
+                _mm256_cmpgt_epi16(raw, floor),
+                _mm256_or_si256(previous, _mm256_set1_epi16(bit)),
+            )
+        };
+        let trace = _mm256_or_si256(
+            _mm256_or_si256(
+                bits(matched, match_previous, 1),
+                bits(deleted, deletion_previous, 2),
+            ),
+            bits(inserted, insertion_previous, 4),
+        );
+        let raw = [matched, deleted, inserted];
+        BlockStates {
+            raw,
+            scores: raw.map(|state| _mm256_max_epi16(state, floor)),
+            trace,
+        }
+    }
+}
+
+/// The states of a block without traceback. Adding one constant keeps the maximum, so the two
+/// candidates that share a gap score meet before the add.
+#[inline(always)]
+unsafe fn plain_states(
+    span: &SpanPlanes,
+    substitution: __m256i,
+    [older_m, older_d, older_i]: [__m256i; 3],
+    [left_m, left_d, left_i]: [__m256i; 3],
+    [above_m, above_d, above_i]: [__m256i; 3],
+) -> BlockStates {
+    unsafe {
+        let (floor, open, extend) = (span.floor, span.gap_open, span.gap_extend);
+        let diagonal = _mm256_max_epi16(_mm256_max_epi16(older_m, older_d), older_i);
+        let matched = _mm256_adds_epi16(diagonal, substitution);
+        let deleted = _mm256_max_epi16(
+            _mm256_adds_epi16(_mm256_max_epi16(left_m, left_i), open),
+            _mm256_adds_epi16(left_d, extend),
+        );
+        let inserted = _mm256_max_epi16(
+            _mm256_adds_epi16(_mm256_max_epi16(above_m, above_d), open),
+            _mm256_adds_epi16(above_i, extend),
+        );
+        let raw = [matched, deleted, inserted];
+        BlockStates {
+            raw,
+            scores: raw.map(|state| _mm256_max_epi16(state, floor)),
+            trace: _mm256_setzero_si256(),
+        }
+    }
+}
+
+/// Offers the best lane of a block that passed the threshold to the best cell, and raises the
+/// threshold when the best cell changes.
+#[inline(always)]
+unsafe fn consider_block(
+    span: &SpanPlanes,
+    row: usize,
+    lane_best: __m256i,
+    scores: [__m256i; 3],
+    stats: &mut SpanStats,
+    best: &mut BestCell,
+) {
+    unsafe {
+        let block_offset = horizontal_max(lane_best) as i16;
+        let block_score = i32::from(block_offset) + span.base;
+        if block_score <= 0 || block_score < best.score {
+            return;
+        }
+        let mut lanes = [[0i16; 16]; 3];
+        for (lane, state) in lanes.iter_mut().zip(scores) {
+            _mm256_storeu_si256(lane.as_mut_ptr().cast(), state);
+        }
+        let best_lanes = _mm256_movemask_epi8(_mm256_cmpeq_epi16(
+            lane_best,
+            _mm256_set1_epi16(block_offset),
+        )) as u32;
+        // Each lane sets two mask bits.
+        let lane = best_lanes.trailing_zeros() as usize / 2;
+        let lane_scores = lanes.map(|state| Offset16(state[lane]).read(span.base));
+        best.consider_lane(span.wave, row, lane, lane_scores);
+        stats.threshold = threshold_vector(best.score, span.base);
     }
 }

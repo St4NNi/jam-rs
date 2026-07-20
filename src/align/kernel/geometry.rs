@@ -122,6 +122,18 @@ pub(super) struct BestCell {
 }
 
 impl BestCell {
+    /// Offers lane `lane` of a vector block that starts at `row` of `wave`. Lanes run in query
+    /// order, so the first lane with the block maximum is the earliest cell; later ones lose.
+    #[inline(always)]
+    pub(super) fn consider_lane(&mut self, wave: usize, row: usize, lane: usize, scores: [i32; 3]) {
+        let query_index = row + lane;
+        let cell = Cell {
+            scores,
+            previous: [0; 3],
+        };
+        self.consider(query_index, wave - query_index, cell);
+    }
+
     pub(super) fn consider(&mut self, query_index: usize, contig_index: usize, cell: Cell) {
         let (score, state) = cell.best_score();
         if score > self.score
