@@ -40,8 +40,8 @@ pub fn dense_walks(
     config: BandConfig,
     budget: usize,
 ) -> Result<(Vec<Walk>, Vec<u8>), AlignmentError> {
-    let k = usize::from(table.config().k);
-    if window.len() < k || window.len() >= 1 << 32 {
+    let a = usize::from(table.anchors().a);
+    if window.len() < a || window.len() >= 1 << 32 {
         return Ok((Vec::new(), Vec::new()));
     }
     if table.circular()
@@ -142,7 +142,7 @@ fn match_starts(
     above: usize,
     visit: &mut dyn FnMut(u32, u32),
 ) {
-    kmers(oriented, table.config().k, |start, code, _| {
+    kmers(oriented, table.anchors().a, |start, code, _| {
         if table.multiplicity(code) <= above {
             return;
         }
@@ -166,7 +166,7 @@ fn walk_line(
     config: BandConfig,
     walks: &mut Vec<Walk>,
 ) {
-    let k = usize::from(table.config().k);
+    let a = usize::from(table.anchors().a);
     let mut end = 0u32;
     for start in group {
         if start.contig < end {
@@ -182,7 +182,7 @@ fn walk_line(
                 break;
             }
             let (contig, query) = (end as usize, found.query as usize);
-            if sequence.get(contig..contig + k) != table.scanned().get(query..query + k) {
+            if sequence.get(contig..contig + a) != table.scanned().get(query..query + a) {
                 break;
             }
             next = Start {
@@ -213,7 +213,7 @@ impl Extension {
         Self {
             matched,
             mismatched: i64::from(config.alignment.mismatch_score),
-            drop: i64::from(table.config().max_gap) * matched,
+            drop: i64::from(table.chains().max_gap) * matched,
             score: 0,
             best: 0,
             best_length: 0,
@@ -324,8 +324,5 @@ pub fn long_enough(walk: &Walk, table: &QueryTable) -> bool {
 }
 
 fn minimum_length(table: &QueryTable) -> u64 {
-    let anchors = table.config();
-    u64::from(anchors.k)
-        .max(anchors.min_score.max(1) as u64)
-        .max(u64::from(anchors.k) + u64::from(anchors.min_anchors) - 1)
+    table.chains().min_length(table.anchors().a)
 }

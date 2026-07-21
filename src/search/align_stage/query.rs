@@ -26,8 +26,8 @@ impl PreparedQuery {
             return Err(AlignStageError::EmptyQuery);
         }
         let bases = query.to_ascii_uppercase();
-        let table = QueryTable::new(&bases, circular, config.anchors)?;
-        let low = QueryTable::low_complexity(&bases, circular, config.anchors)?;
+        let table = QueryTable::new(&bases, circular, config.anchors, config.chains)?;
+        let low = QueryTable::low_complexity(&bases, circular, config.anchors, config.chains)?;
         Ok(Self {
             table,
             low: (low.max_entries() > 0).then_some(low),
@@ -51,7 +51,7 @@ impl PreparedQuery {
 
     /// Checks that the query was prepared with the anchor settings of `config`.
     pub(super) fn check(&self, config: &AlignStageConfig) -> Result<(), AlignStageError> {
-        if self.table.config() != config.anchors {
+        if self.table.anchors() != config.anchors || self.table.chains() != config.chains {
             return Err(AlignStageError::InvalidConfig(
                 "the query was prepared with other anchor settings",
             ));
@@ -77,7 +77,7 @@ mod tests {
         assert!(homopolymer.low.is_some());
         homopolymer.check(&config).unwrap();
         let mut other = config;
-        other.anchors.k = 17;
+        other.anchors.a = 17;
         assert!(homopolymer.check(&other).is_err());
     }
 }

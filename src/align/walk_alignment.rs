@@ -121,8 +121,8 @@ pub fn gap_continuation(
     codes: &mut Vec<(u64, u32)>,
 ) -> Result<bool, AlignmentError> {
     let query = table.query();
-    let k = usize::from(table.config().k);
-    let reach = config.max_drift as usize + k;
+    let a = usize::from(table.anchors().a);
+    let reach = config.max_drift as usize + a;
     for right in [false, true] {
         let contig = walk.contig as usize + if right { walk.length as usize } else { 0 };
         let edge = walk.query as usize + if right { walk.length as usize } else { 0 };
@@ -140,7 +140,7 @@ pub fn gap_continuation(
             contig
         }
         .min(reach);
-        if query_bases < k || contig_bases < k {
+        if query_bases < a || contig_bases < a {
             continue;
         }
         // The bases beyond the end, in query order; a k-mer's distance from the end counts the
@@ -161,20 +161,20 @@ pub fn gap_continuation(
         } else {
             &oriented[contig - contig_bases..contig]
         };
-        let distance = |at: usize, bases: usize| if right { at } else { bases - k - at };
+        let distance = |at: usize, bases: usize| if right { at } else { bases - a - at };
         // The end continues on its own diagonal, as at a circular query's whole length.
-        if query_side[distance(0, query_bases)..][..k]
-            == contig_side[distance(0, contig_bases)..][..k]
+        if query_side[distance(0, query_bases)..][..a]
+            == contig_side[distance(0, contig_bases)..][..a]
         {
             continue;
         }
         codes.clear();
-        kmers(&query_side, table.config().k, |at, code, _| {
+        kmers(&query_side, table.anchors().a, |at, code, _| {
             codes.push((code, distance(at, query_bases) as u32))
         });
         codes.sort_unstable();
         let mut found = false;
-        kmers(contig_side, table.config().k, |at, code, _| {
+        kmers(contig_side, table.anchors().a, |at, code, _| {
             let at = distance(at, contig_bases) as u32;
             // Entries of one code are ordered by distance, so another distance is at an end.
             let first = codes.partition_point(|entry| entry.0 < code);

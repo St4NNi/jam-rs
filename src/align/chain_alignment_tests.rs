@@ -1,3 +1,4 @@
+use super::ChainConfig;
 use super::chain_alignment::{BandConfig, align_chain};
 use super::chain_tests::{random_sequence, reverse_complement};
 use super::{
@@ -26,7 +27,13 @@ fn substitute(sequence: &mut [u8], per_thousand: u64, mut state: u64) {
 /// position 0.
 fn alignments(query: &[u8], window: &[u8], circular: bool) -> Vec<Alignment> {
     let config = BandConfig::default();
-    let table = QueryTable::new(query, circular, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        query,
+        circular,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     let mut workspace = AlignmentWorkspace::default();
     let (chains, _) = window_chains(&table, window, &mut Vec::new()).unwrap();
     let mut found = Vec::new();
@@ -170,7 +177,13 @@ fn wide_band_and_drift_align_a_long_deletion() {
         offsets: anchors.iter().map(|&(_, q)| q).collect(),
         score: 100,
     };
-    let table = QueryTable::new(&query, false, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     let mut workspace = AlignmentWorkspace::default();
     let alignment = align_chain(&chain, &window, 0, &table, config, &mut workspace, 3000)
         .unwrap()

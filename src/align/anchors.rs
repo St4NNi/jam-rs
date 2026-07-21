@@ -1,48 +1,40 @@
 //! Exact anchors between the query and one alignment window. The query table holds every k-mer
 //! position of both query strands, and for a circular query also the k-mers across its origin.
 //! The window is looked up at every `stride`-th position, so an identical stretch of
-//! k + stride - 1 bases always gives an anchor.
+//! a + stride - 1 bases always gives an anchor.
 
+use super::chains::ChainConfig;
 use super::{AlignmentError, complement};
 use jamhash::jamhash_u64;
 
-/// How anchors are found and chained.
+/// How anchors are found.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchorConfig {
     /// The anchor length a.
-    pub k: u8,
+    pub a: u8,
     /// Window positions looked up: every `stride`-th, a power of two.
     pub stride: u8,
     /// Query k-mers whose base entropy (bits) is lower give no anchors; dense walks cover them.
     pub min_entropy: f64,
-    /// Largest contig and query distance between consecutive anchors of a chain.
-    pub max_gap: u32,
-    pub min_anchors: u32,
-    pub min_score: i64,
 }
 
 impl Default for AnchorConfig {
     fn default() -> Self {
         Self {
-            k: 15,
+            a: 15,
             stride: 4,
             min_entropy: 1.0,
-            max_gap: 5_000,
-            min_anchors: 3,
-            min_score: 40,
         }
     }
 }
 
 impl AnchorConfig {
-    /// Checks k (8 to 31), a power-of-two stride and positive limits.
+    /// Checks a (8 to 31), a power-of-two stride and a finite entropy limit.
     pub fn validate(self) -> Result<(), AlignmentError> {
-        if !(8..=31).contains(&self.k)
+        if !(8..=31).contains(&self.a)
             || self.stride == 0
             || !self.stride.is_power_of_two()
             || !self.min_entropy.is_finite()
-            || self.max_gap == 0
-            || self.min_anchors == 0
         {
             return Err(AlignmentError::InvalidAnchorConfig);
         }
@@ -54,7 +46,8 @@ impl AnchorConfig {
 /// hold its forward occurrences first, ordered by the code of the query base before them (4 for
 /// none or another byte), then its reverse occurrences.
 pub struct QueryTable {
-    config: AnchorConfig,
+    anchors: AnchorConfig,
+    chains: ChainConfig,
     query_length: u32,
     circular: bool,
     period: Option<usize>,
@@ -128,9 +121,14 @@ fn base_entropy(kmer: u64, k: u8) -> f64 {
 
 impl QueryTable {
     /// The table of the query k-mers that pass the entropy limit.
-    pub fn new(query: &[u8], circular: bool, config: AnchorConfig) -> Result<Self, AlignmentError> {
-        Self::with_kmers(query, circular, config, |forward| {
-            base_entropy(forward, config.k) >= config.min_entropy
+    pub fn new(
+        query: &[u8],
+        circular: bool,
+        anchors: AnchorConfig,
+        chains: ChainConfig,
+    ) -> Result<Self, AlignmentError> {
+        Self::with_kmers(query, circular, anchors, chains, |forward| {
+            base_entropy(forward, anchors.a) >= anchors.min_entropy
         })
     }
 
@@ -139,29 +137,32 @@ impl QueryTable {
     pub fn low_complexity(
         query: &[u8],
         circular: bool,
-        config: AnchorConfig,
+        anchors: AnchorConfig,
+        chains: ChainConfig,
     ) -> Result<Self, AlignmentError> {
-        Self::with_kmers(query, circular, config, |forward| {
-            base_entropy(forward, config.k) < config.min_entropy
+        Self::with_kmers(query, circular, anchors, chains, |forward| {
+            base_entropy(forward, anchors.a) < anchors.min_entropy
         })
     }
 
     fn with_kmers(
         query: &[u8],
         circular: bool,
-        config: AnchorConfig,
+        anchors: AnchorConfig,
+        chains: ChainConfig,
         keep: impl Fn(u64) -> bool,
     ) -> Result<Self, AlignmentError> {
-        config.validate()?;
+        anchors.validate()?;
+        chains.validate()?;
         let query_length = u32::try_from(query.len())
             .ok()
             .filter(|&length| length < REVERSE)
             .ok_or(AlignmentError::QueryTooLong)?;
-        let period = period(query, circular, usize::from(config.k));
-        let k = usize::from(config.k);
+        let a = usize::from(anchors.a);
+        let period = period(query, circular, a);
         let mut scanned = query.to_vec();
-        if circular && query.len() >= k {
-            scanned.extend_from_slice(&query[..k - 1]);
+        if circular && query.len() >= a {
+            scanned.extend_from_slice(&query[..a - 1]);
         }
         let before = |start: usize| match start.checked_sub(1) {
             Some(at) => query[at],
@@ -169,7 +170,7 @@ impl QueryTable {
             None => b'N',
         };
         let mut pairs: Vec<(u64, u8, u32)> = Vec::new();
-        kmers(&scanned, config.k, |start, forward, reverse| {
+        kmers(&scanned, anchors.a, |start, forward, reverse| {
             if start < query.len() && keep(forward) {
                 let left = base_code(before(start)).map_or(4, |code| code as u8);
                 pairs.push((forward, left, start as u32));
@@ -201,7 +202,8 @@ impl QueryTable {
             left.extend(group.iter().map(|pair| pair.1));
         }
         Ok(Self {
-            config,
+            anchors,
+            chains,
             query_length,
             circular,
             period,
@@ -267,7 +269,7 @@ impl QueryTable {
             .copied()
     }
 
-    /// The query as scanned: for a circular query, followed by its first k - 1 bases.
+    /// The query as scanned: for a circular query, followed by its first a - 1 bases.
     pub fn scanned(&self) -> &[u8] {
         &self.query
     }
@@ -285,8 +287,12 @@ impl QueryTable {
         self.circular
     }
 
-    pub fn config(&self) -> AnchorConfig {
-        self.config
+    pub fn anchors(&self) -> AnchorConfig {
+        self.anchors
+    }
+
+    pub fn chains(&self) -> ChainConfig {
+        self.chains
     }
 
     /// The most entries of any one k-mer.
@@ -294,7 +300,7 @@ impl QueryTable {
         self.max_entries
     }
 
-    /// When the query is a repeat of a period of at most k bases and `window` is a copy of the
+    /// When the query is a repeat of a period of at most a bases and `window` is a copy of the
     /// same repeat: the period and, per strand, the diagonal of one exact copy.
     #[allow(clippy::type_complexity)]
     pub fn periodic_pair(&self, window: &[u8]) -> Option<(usize, Vec<(bool, i64)>)> {
@@ -328,13 +334,13 @@ impl QueryTable {
     }
 }
 
-/// The shortest period of at most k bases of a query of plain bases; a circular query must hold
+/// The shortest period of at most a bases of a query of plain bases; a circular query must hold
 /// a whole number of periods.
-fn period(query: &[u8], circular: bool, k: usize) -> Option<usize> {
+fn period(query: &[u8], circular: bool, a: usize) -> Option<usize> {
     if query.iter().any(|base| base_code(*base).is_none()) {
         return None;
     }
-    (1..=k.min(query.len())).find(|&p| {
+    (1..=a.min(query.len())).find(|&p| {
         (!circular || query.len().is_multiple_of(p))
             && query
                 .iter()
@@ -362,14 +368,14 @@ pub fn find_anchors(
     above: Option<usize>,
     expected: usize,
 ) {
-    let k = u32::from(table.config.k);
-    let stride = u32::from(table.config.stride);
+    let a = u32::from(table.anchors.a);
+    let stride = u32::from(table.anchors.stride);
     let length = window.len() as u32;
     let first = anchors.len();
     if anchors.capacity() < first + expected {
         anchors.reserve_exact(expected);
     }
-    kmers(window, table.config.k, |start, forward, _| {
+    kmers(window, table.anchors.a, |start, forward, _| {
         let start = start as u32;
         if !start.is_multiple_of(stride) {
             return;
@@ -382,7 +388,7 @@ pub fn find_anchors(
             let reverse = entry & REVERSE != 0;
             anchors.push(Anchor {
                 reverse,
-                contig: if reverse { length - k - start } else { start },
+                contig: if reverse { length - a - start } else { start },
                 query: entry & !REVERSE,
             });
         }
@@ -392,9 +398,9 @@ pub fn find_anchors(
 
 /// The anchors that the looked-up positions of `window` give.
 pub(super) fn count_anchors(table: &QueryTable, window: &[u8]) -> usize {
-    let stride = usize::from(table.config.stride);
+    let stride = usize::from(table.anchors.stride);
     let mut count = 0usize;
-    kmers(window, table.config.k, |start, forward, _| {
+    kmers(window, table.anchors.a, |start, forward, _| {
         if start % stride == 0 {
             count = count.saturating_add(table.multiplicity(forward));
         }
@@ -407,9 +413,9 @@ pub(super) fn occurrence_counts(
     table: &QueryTable,
     window: &[u8],
 ) -> std::collections::BTreeMap<usize, usize> {
-    let stride = usize::from(table.config.stride);
+    let stride = usize::from(table.anchors.stride);
     let mut positions = std::collections::BTreeMap::<usize, usize>::new();
-    kmers(window, table.config.k, |start, forward, _| {
+    kmers(window, table.anchors.a, |start, forward, _| {
         if start % stride == 0 {
             let occurrences = table.multiplicity(forward);
             if occurrences > 0 {

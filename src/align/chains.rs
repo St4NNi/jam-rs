@@ -14,6 +14,44 @@ pub struct Chain {
     pub score: i64,
 }
 
+/// How anchors are chained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChainConfig {
+    /// Largest contig and query distance between consecutive anchors of a chain.
+    pub max_gap: u32,
+    /// The fewest anchors of a chain.
+    pub min_anchors: u32,
+    /// The lowest chain score.
+    pub min_score: i64,
+}
+
+impl Default for ChainConfig {
+    fn default() -> Self {
+        Self {
+            max_gap: 5_000,
+            min_anchors: 3,
+            min_score: 40,
+        }
+    }
+}
+
+impl ChainConfig {
+    /// Checks that the gap and the anchor count are positive.
+    pub fn validate(self) -> Result<(), AlignmentError> {
+        if self.max_gap == 0 || self.min_anchors == 0 {
+            return Err(AlignmentError::InvalidChainConfig);
+        }
+        Ok(())
+    }
+
+    /// The shortest stretch a chain of anchors of length `a` can span; walks must reach it too.
+    pub fn min_length(self, a: u8) -> u64 {
+        let a = u64::from(a);
+        a.max(self.min_score.max(1) as u64)
+            .max(a + u64::from(self.min_anchors) - 1)
+    }
+}
+
 /// Bytes of anchors and chaining arrays of one window.
 pub const CHAINING_BYTES: usize = 64 << 20;
 
@@ -51,7 +89,7 @@ pub fn window_chains(
 fn anchor_budget(table: &QueryTable, window: &[u8], capacity: usize) -> (usize, Option<usize>) {
     let price = |count: usize| anchor_bytes(capacity, count, table);
     // The most anchors a window can give, before its k-mers are looked up.
-    let stride = usize::from(table.config().stride);
+    let stride = usize::from(table.anchors().stride);
     let bound = (window.len() / stride + 1).saturating_mul(table.max_entries());
     if price(bound) <= CHAINING_BYTES {
         // Even a window of the most frequent k-mers fits, so the lookups need not be counted.
@@ -86,7 +124,7 @@ fn anchor_bytes(capacity: usize, count: usize, table: &QueryTable) -> usize {
                 + 3 * size_of::<u32>(),
         ))
         .saturating_add(
-            (2 * count / table.config().min_anchors as usize + 4)
+            (2 * count / table.chains().min_anchors as usize + 4)
                 .saturating_mul(size_of::<Chain>()),
         )
 }
@@ -103,12 +141,9 @@ fn periodic_chains(
     let Some((period, phases)) = table.periodic_pair(window) else {
         return Ok(None);
     };
-    let config = table.config();
-    let k = u64::from(config.k);
-    let anchors = config.min_anchors as usize;
-    let minimum = k
-        .max(config.min_score.max(1) as u64)
-        .max(k + anchors as u64 - 1);
+    let a = u64::from(table.anchors().a);
+    let anchors = table.chains().min_anchors as usize;
+    let minimum = table.chains().min_length(table.anchors().a);
     let low = minimum as i64 - i64::from(table.query_length());
     let high = window.len() as i64 - minimum as i64;
     let mut total = 0usize;
@@ -135,7 +170,7 @@ fn periodic_chains(
             let mut positions = Vec::with_capacity(anchors);
             let mut offsets = Vec::with_capacity(anchors);
             for at in 0..anchors {
-                let step = (length - k) * at as u64 / anchors.saturating_sub(1).max(1) as u64;
+                let step = (length - a) * at as u64 / anchors.saturating_sub(1).max(1) as u64;
                 positions.push(((t + step) as u32, (q + step) as u32));
                 offsets.push(step as u32);
             }
@@ -156,7 +191,7 @@ fn periodic_chains(
 /// Every anchor joins at most one chain. A chain of a circular query may cross the origin but
 /// never covers more than the query length.
 pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
-    let config = table.config();
+    let config = table.chains();
     let (score, previous, span) = chain_scores(table, anchors);
     let n = anchors.len();
     let mut order: Vec<usize> = (0..n).collect();
@@ -202,15 +237,15 @@ pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain
 /// For every anchor: the best chain score ending in it, its predecessor (`usize::MAX` for none)
 /// and the query span from the chain start.
 fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>, Vec<i64>) {
-    let config = table.config();
-    let (k, max_gap) = (i64::from(config.k), i64::from(config.max_gap));
+    let a = i64::from(table.anchors().a);
+    let max_gap = i64::from(table.chains().max_gap);
     let length = i64::from(table.query_length());
     let n = anchors.len();
     let mut score = vec![0i64; n];
     let mut previous = vec![usize::MAX; n];
     let mut span = vec![0i64; n];
     for j in 0..n {
-        let (mut best, mut from, mut best_span) = (k, usize::MAX, 0);
+        let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
         let end = anchors[..j].partition_point(|anchor| anchor.contig < anchors[j].contig);
         let mut eligible = 0;
         for i in (0..end).rev() {
@@ -222,7 +257,7 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
             if table.circular() && dq <= 0 {
                 dq += length;
             }
-            if dt <= 0 || dq <= 0 || dq > max_gap || span[i] + dq + k > length {
+            if dt <= 0 || dq <= 0 || dq > max_gap || span[i] + dq + a > length {
                 continue;
             }
             let drift = (dt - dq).abs();
@@ -235,7 +270,7 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
             } else {
                 drift / 10 + 1 + (64 - i64::from((drift as u64).leading_zeros())) / 2
             };
-            let gained = score[i] + dt.min(dq).min(k) - gap_cost;
+            let gained = score[i] + dt.min(dq).min(a) - gap_cost;
             if gained > best {
                 (best, from, best_span) = (gained, i, span[i] + dq);
             }
@@ -249,9 +284,9 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
 }
 
 /// Forward window positions `start..end` covered by the anchors of a chain.
-pub fn forward_extent(chain: &Chain, window: u64, k: u64) -> (u64, u64) {
+pub fn forward_extent(chain: &Chain, window: u64, a: u64) -> (u64, u64) {
     let first = u64::from(chain.anchors[0].0);
-    let last = u64::from(chain.anchors[chain.anchors.len() - 1].0) + k;
+    let last = u64::from(chain.anchors[chain.anchors.len() - 1].0) + a;
     if chain.reverse {
         (window - last, window - first)
     } else {

@@ -24,7 +24,7 @@ pub(super) fn align_chains(
     let config = job.config;
     let length = job.query.length();
     for chain in &window.chains {
-        let parts = split_by_drift(chain, config.band.max_drift, config.anchors.min_anchors);
+        let parts = split_by_drift(chain, config.band.max_drift, config.chains.min_anchors);
         // The parts in chain order, each allowed to reach the whole query.
         let mut pending: Vec<(Chain, u64)> =
             parts.into_iter().rev().map(|part| (part, length)).collect();
@@ -54,7 +54,7 @@ fn chain_too_sparse(config: &AlignStageConfig, chain: &Chain) -> bool {
     if config.min_chain_identity <= 0.0 || chain.anchors.len() < MIN_ANCHORS {
         return false;
     }
-    let k = u64::from(config.anchors.k);
+    let k = u64::from(config.anchors.a);
     let stride = u64::from(config.anchors.stride);
     let first = u64::from(chain.anchors[0].0);
     let last = u64::from(chain.anchors[chain.anchors.len() - 1].0);
@@ -94,7 +94,7 @@ fn align_part(
     output.paths.add(&path);
     Ok(output
         .paths
-        .uncovered(part, job.query.length(), config.anchors.min_anchors))
+        .uncovered(part, job.query.length(), config.chains.min_anchors))
 }
 
 #[cfg(test)]

@@ -53,7 +53,7 @@ pub struct JoinScratch {
 
 /// The query and contig bases a link may cross, as for `gap_continuation`.
 fn reach(table: &QueryTable, config: BandConfig) -> u64 {
-    u64::from(config.max_drift) + u64::from(table.config().k)
+    u64::from(config.max_drift) + u64::from(table.anchors().a)
 }
 
 impl JoinScratch {

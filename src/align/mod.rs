@@ -23,7 +23,8 @@ mod walk_alignment;
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
 pub use chain_alignment::{BandConfig, align_chain};
 pub use chains::{
-    CHAINING_BYTES, Chain, chain_anchors, forward_extent, split_by_drift, window_chains,
+    CHAINING_BYTES, Chain, ChainConfig, chain_anchors, forward_extent, split_by_drift,
+    window_chains,
 };
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
 pub use dense::{Walk, dense_walks, long_enough};
@@ -194,6 +195,8 @@ pub enum AlignmentError {
     EndpointOutsideWindow,
     #[error("anchor configuration is invalid")]
     InvalidAnchorConfig,
+    #[error("chain configuration is invalid")]
+    InvalidChainConfig,
     #[error("query is too long for the query table")]
     QueryTooLong,
     #[error("{0} exceed the chaining budget")]

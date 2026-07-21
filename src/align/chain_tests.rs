@@ -1,3 +1,4 @@
+use super::ChainConfig;
 use super::anchors::{AnchorConfig, QueryTable, find_anchors};
 use super::chains::{Chain, split_by_drift, window_chains};
 use super::complement;
@@ -22,7 +23,13 @@ pub(super) fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
 }
 
 fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
-    let table = QueryTable::new(query, circular, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        query,
+        circular,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     window_chains(&table, window, &mut Vec::new()).unwrap().0
 }
 
@@ -41,14 +48,37 @@ fn diagonals(chain: &Chain) -> Vec<i64> {
 fn cyclic_periods_require_a_whole_number_of_repeats() {
     let mut query = b"ACGT".repeat(300);
     let window = query.clone();
-    let whole = QueryTable::new(&query, true, AnchorConfig::default()).unwrap();
+    let whole = QueryTable::new(
+        &query,
+        true,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     assert!(whole.periodic_pair(&window).is_some());
     query.push(b'A');
-    let linear = QueryTable::new(&query, false, AnchorConfig::default()).unwrap();
+    let linear = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     assert_eq!(linear.periodic_pair(&window).map(|pair| pair.0), Some(4));
-    let circular = QueryTable::new(&query, true, AnchorConfig::default()).unwrap();
+    let circular = QueryTable::new(
+        &query,
+        true,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     assert!(circular.periodic_pair(&window).is_none());
-    let random = QueryTable::new(&random_sequence(20_000, 91), true, AnchorConfig::default());
+    let random = QueryTable::new(
+        &random_sequence(20_000, 91),
+        true,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    );
     assert!(random.unwrap().periodic_pair(&window).is_none());
 }
 
@@ -65,7 +95,13 @@ fn exact_periodic_copy_chains_past_repeated_positions() {
 fn dense_anchor_product_is_left_to_dense_walks() {
     let mut query = b"ACGT".repeat(25_000);
     query[50_000] = b'N';
-    let table = QueryTable::new(&query, false, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     let mut scratch = Vec::new();
     // Every k-mer occurs about 25,000 times per strand: none gives anchors, all are left to
     // dense walks, and nothing of the 1.25 billion anchor product is held.
@@ -78,7 +114,13 @@ fn dense_anchor_product_is_left_to_dense_walks() {
 #[test]
 fn periodic_locations_are_enumerated_without_dense_anchor_storage() {
     let query = b"ACGT".repeat(25_000);
-    let table = QueryTable::new(&query, false, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     let mut scratch = Vec::new();
     let found = window_chains(&table, &query, &mut scratch).unwrap();
     assert!(found.0.len() > 99_000);
@@ -170,11 +212,23 @@ fn mutations_keep_one_chain_and_low_complexity_skipped() {
     assert_eq!(found.len(), 1);
     assert!(found[0].anchors.len() > 100);
     let poly = [vec![b'A'; 300], random_sequence(100, 10)].concat();
-    let table = QueryTable::new(&poly, false, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        &poly,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     let mut anchors = Vec::new();
     find_anchors(&table, &[b'A'; 500], &mut anchors, None, 0);
     assert!(anchors.is_empty());
-    let low = QueryTable::low_complexity(&poly, false, AnchorConfig::default()).unwrap();
+    let low = QueryTable::low_complexity(
+        &poly,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     find_anchors(&low, &[b'A'; 500], &mut anchors, None, 0);
     assert!(!anchors.is_empty());
     assert!(

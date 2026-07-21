@@ -17,7 +17,7 @@ use std::ops::Range;
 /// Bases from a cut window edge within which a chain asks for a wider window: the chaining gap,
 /// the extension and one anchor.
 fn edge_reach(config: &AlignStageConfig) -> u64 {
-    u64::from(config.anchors.max_gap) + u64::from(config.extension) + u64::from(config.anchors.k)
+    u64::from(config.chains.max_gap) + u64::from(config.extension) + u64::from(config.anchors.a)
 }
 
 /// One contig of an entry and everything its windows are aligned with.
@@ -143,7 +143,7 @@ impl<'a> ContigJob<'a> {
                 limit: config.max_window_bases,
             });
         }
-        let (k, reach) = (u64::from(config.anchors.k), edge_reach(config));
+        let (k, reach) = (u64::from(config.anchors.a), edge_reach(config));
         let mut prepared = Vec::with_capacity(spans.len());
         let (mut bytes, mut grown) = (0usize, false);
         for span in spans.iter_mut() {
@@ -195,7 +195,7 @@ impl WindowOutput<'_> {
         room: (bool, bool),
     ) -> bool {
         let read = window.range();
-        let k = u64::from(job.config.anchors.k);
+        let k = u64::from(job.config.anchors.a);
         let contig = alignment.contig_interval;
         // On the reverse strand the query runs from the window end to its start.
         let (before, after) = if alignment.strand == crate::align::Strand::Reverse {

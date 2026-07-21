@@ -115,8 +115,8 @@ fn align_dense_window(
     };
     // Rows before the first and after the last that can meet the contig within the band, and
     // an endpoint completion's reach, hold no cells: the kernel reads only the rows between.
-    let k = u64::from(table.config().k);
-    let reach = band + k as i64;
+    let a = u64::from(table.anchors().a);
+    let reach = band + a as i64;
     let first_row = (low as i64 - diagonal - reach).clamp(0, window_length as i64) as u64;
     let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, window_length as i64);
     let rows = last_row as u64 - first_row;
@@ -143,11 +143,11 @@ fn align_dense_window(
         Err(error) => return Err(error),
     };
     let kernel_score = alignment.score;
-    // A completion reaches k rows beyond the alignment, which the window keeps.
-    let alignment = if alignment.query_interval.start - query_start <= k
-        && window_length - (alignment.query_interval.end - query_start) <= k
+    // A completion reaches a rows beyond the alignment, which the window keeps.
+    let alignment = if alignment.query_interval.start - query_start <= a
+        && window_length - (alignment.query_interval.end - query_start) <= a
     {
-        workspace.complete_endpoints(alignment, aligned, k as usize, scores)?
+        workspace.complete_endpoints(alignment, aligned, a as usize, scores)?
     } else {
         alignment
     };

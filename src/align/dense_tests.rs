@@ -1,3 +1,4 @@
+use super::ChainConfig;
 use super::chain_tests::random_sequence;
 use super::{
     AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinLimits,
@@ -6,7 +7,13 @@ use super::{
 };
 
 fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>, QueryTable) {
-    let table = QueryTable::new(query, circular, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        query,
+        circular,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     let (walks, reverse) = dense_walks(&table, window, 0, BandConfig::default(), 64 << 20).unwrap();
     (walks, reverse, table)
 }
@@ -85,12 +92,24 @@ fn walks_end_where_the_copy_ends_and_skip_repeated_starts() {
 #[test]
 fn match_starts_exceeding_the_budget_fail_before_allocation() {
     let query = b"ACGT".repeat(2500);
-    let table = QueryTable::new(&query, false, AnchorConfig::default()).unwrap();
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
     assert!(dense_walks(&table, &query, 0, BandConfig::default(), 1 << 10).is_err());
 }
 
 fn linear(query: &[u8]) -> QueryTable {
-    QueryTable::new(query, false, AnchorConfig::default()).unwrap()
+    QueryTable::new(
+        query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap()
 }
 
 #[test]

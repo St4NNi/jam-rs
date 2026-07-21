@@ -84,7 +84,7 @@ pub fn align_chain(
         return Ok(Some(exact));
     }
     let geometry = ChainGeometry::new(chain, window.len() as u64, table, config, reach);
-    let k = u64::from(table.config().k);
+    let a = u64::from(table.anchors().a);
     let length = u64::from(table.query_length());
     let (_, widest_left, widest_span, _, _) = geometry.window_at(geometry.extension);
     let widest_right = widest_span - widest_left - geometry.span.min(widest_span);
@@ -136,9 +136,9 @@ pub fn align_chain(
         }
         // An alignment of the whole query that stops within an anchor length of both ends is
         // completed through them.
-        if query_span == length && aligned_start <= k && query_span - aligned_end <= k {
+        if query_span == length && aligned_start <= a && query_span - aligned_end <= a {
             return workspace
-                .complete_endpoints(alignment, input, k as usize, scores)
+                .complete_endpoints(alignment, input, a as usize, scores)
                 .map(Some);
         }
         return Ok(Some(alignment));
@@ -214,7 +214,7 @@ pub(super) fn strand(reverse: bool) -> Strand {
 struct ChainGeometry {
     circular: bool,
     length: u64,
-    k: u64,
+    a: u64,
     window_length: u64,
     first_contig: u64,
     first_query: u64,
@@ -237,7 +237,7 @@ impl ChainGeometry {
         reach: u64,
     ) -> Self {
         let length = u64::from(table.query_length());
-        let k = u64::from(table.config().k);
+        let a = u64::from(table.anchors().a);
         let (first_contig, first_query) = chain.anchors[0];
         let first_contig = u64::from(first_contig);
         // The lowest and highest diagonal of the anchors, counted from the first anchor's.
@@ -263,12 +263,12 @@ impl ChainGeometry {
         Self {
             circular: table.circular(),
             length,
-            k,
+            a,
             window_length,
             first_contig,
             first_query: u64::from(first_query),
             last_contig: u64::from(chain.anchors[chain.anchors.len() - 1].0),
-            span: u64::from(*chain.offsets.last().unwrap_or(&0)) + k,
+            span: u64::from(*chain.offsets.last().unwrap_or(&0)) + a,
             slack: u64::from(config.max_drift) + 64,
             margin,
             centre,
@@ -280,8 +280,8 @@ impl ChainGeometry {
     /// The query start, the query bases before the chain, the query length and the contig range
     /// of an alignment that may extend by `extension` query bases beyond the chain.
     fn window_at(&self, extension: u64) -> (u64, u64, u64, u64, u64) {
-        let (length, k, span) = (self.length, self.k, self.span);
-        let after = self.window_length.saturating_sub(self.last_contig + k);
+        let (length, a, span) = (self.length, self.a, self.span);
+        let after = self.window_length.saturating_sub(self.last_contig + a);
         let (query_start, left, query_span) = if self.circular {
             // The query bases beyond the chain are split between its sides, but a side without
             // window bases gives its share to the other, so a whole linear copy is not cut short.
@@ -314,7 +314,7 @@ impl ChainGeometry {
         };
         let contig_low = self.first_contig.saturating_sub(left + self.margin);
         let contig_high =
-            (self.last_contig + k + (query_span - left - span.min(query_span)) + self.margin)
+            (self.last_contig + a + (query_span - left - span.min(query_span)) + self.margin)
                 .min(self.window_length);
         (query_start, left, query_span, contig_low, contig_high)
     }

@@ -678,7 +678,7 @@ fn windows_outside_their_contig_and_other_anchor_settings_are_rejected() {
         Err(AlignStageError::WindowOutsideContig { .. })
     ));
     let mut other = config;
-    other.anchors.k = 17;
+    other.anchors.a = 17;
     assert!(matches!(
         run(&other, &mut workspace),
         Err(AlignStageError::InvalidConfig(_))

@@ -1,14 +1,16 @@
 //! The settings of stage 3 and the memory limits of one entry.
 
 use super::AlignStageError;
-use crate::align::{AlignmentConfig, AnchorConfig, BandConfig};
+use crate::align::{AlignmentConfig, AnchorConfig, BandConfig, ChainConfig};
 
 /// How stage 3 finds anchors, chains them, aligns them and widens alignment windows, and how
 /// much memory one entry may use.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AlignStageConfig {
-    /// Anchor length a (15), lookup stride, entropy limit and chaining limits.
+    /// Anchor length a (15), lookup stride and entropy limit.
     pub anchors: AnchorConfig,
+    /// Chaining limits: the largest gap, the fewest anchors and the lowest score.
+    pub chains: ChainConfig,
     /// Alignment scores (2, -3, -5, -1), the resident cell limit and the drift limit (1,024).
     pub band: BandConfig,
     /// Query bases an alignment may reach beyond the outermost anchors of its chain. A window is
@@ -33,6 +35,7 @@ impl Default for AlignStageConfig {
     fn default() -> Self {
         Self {
             anchors: AnchorConfig::default(),
+            chains: ChainConfig::default(),
             band: BandConfig {
                 alignment: AlignmentConfig {
                     max_cells: 1 << 22,
@@ -54,6 +57,7 @@ impl AlignStageConfig {
     /// Checks the anchors, the scores and the limits.
     pub fn validate(&self) -> Result<(), AlignStageError> {
         self.anchors.validate()?;
+        self.chains.validate()?;
         self.band.alignment.validate()?;
         let identity = self.min_chain_identity;
         if !identity.is_finite() || !(0.0..=1.0).contains(&identity) {
@@ -82,7 +86,7 @@ mod tests {
     fn the_defaults_are_those_of_jam_0_10() {
         let config = AlignStageConfig::default();
         config.validate().unwrap();
-        assert_eq!(config.anchors.k, 15);
+        assert_eq!(config.anchors.a, 15);
         assert_eq!((config.extension, config.band.max_drift), (2_000, 1_024));
         let scores = config.band.alignment;
         let terms = (
