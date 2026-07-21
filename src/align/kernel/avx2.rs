@@ -2,7 +2,7 @@
 //! i16 kernel cannot represent.
 
 use super::AlignmentConfig;
-use super::geometry::{BestCell, Cell, DELETION, INSERTION, MATCH, START, WaveRange};
+use super::geometry::{BestCell, DELETION, INSERTION, MATCH, START, WaveRange};
 use super::waves::{ScoreWave, WAVE_PAD};
 use std::arch::x86_64::*;
 
@@ -89,14 +89,12 @@ pub(super) unsafe fn fill_wave_avx2<const TRACEBACK: bool>(
         query,
         contig,
         config,
-        gap_open_score,
         wave,
         row,
         current_range,
         stride,
-        older,
-        previous,
         wave_base,
+        ..
     } = block;
     unsafe {
         debug_assert!(row > 0);
@@ -112,151 +110,159 @@ pub(super) unsafe fn fill_wave_avx2<const TRACEBACK: bool>(
         let contig_bytes = _mm_loadl_epi64(contig.as_ptr().add(first_contig - 8).cast());
         let reverse = _mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, -1, -1, -1, -1, -1, -1, -1, -1);
         let contig_bytes = _mm_shuffle_epi8(contig_bytes, reverse);
-        let equal = equal_ascii_case(query_bytes, contig_bytes);
-        let equal = _mm256_cvtepi8_epi32(equal);
+        let equal = _mm256_cvtepi8_epi32(equal_ascii_case(query_bytes, contig_bytes));
         let substitution = _mm256_blendv_epi8(
             _mm256_set1_epi32(config.mismatch_score),
             _mm256_set1_epi32(config.match_score),
             equal,
         );
+        let states = block_states(&block, substitution);
 
+        let wave_offset = row - current_range.start;
+        let cell_offset = WAVE_PAD + wave_offset;
+        let [matched, deleted, inserted] = states.scores;
+        let cells = current.as_mut_ptr().add(cell_offset);
+        _mm256_storeu_si256(cells.cast(), matched);
+        _mm256_storeu_si256(cells.add(stride).cast(), deleted);
+        _mm256_storeu_si256(cells.add(2 * stride).cast(), inserted);
+        if TRACEBACK {
+            debug_assert!(wave_base + wave_offset + 8 <= traceback.len());
+            // SAFETY: the wave layout stores this wave's cells contiguously, and rows row..=row+7
+            // lie inside current_range, so the eight cells are inside the laid-out traceback.
+            let cells = traceback.as_mut_ptr().add(wave_base + wave_offset);
+            _mm_storeu_si128(cells.cast(), pack_traceback(&states));
+        }
+        consider_block(&block, states.scores, best);
+    }
+}
+
+/// The three states of eight cells: the scores kept after the zero floor, which states are
+/// positive, and the state each came from.
+struct BlockStates {
+    scores: [__m256i; 3],
+    positive: [__m256i; 3],
+    previous: [__m256i; 3],
+}
+
+/// The states of the eight cells of `block` with the substitution scores of their bases.
+#[inline(always)]
+unsafe fn block_states(block: &Block<'_>, substitution: __m256i) -> BlockStates {
+    let Block {
+        config,
+        gap_open_score,
+        row,
+        older,
+        previous,
+        ..
+    } = *block;
+    unsafe {
+        let zero = _mm256_setzero_si256();
+        let (open, extend) = (
+            _mm256_set1_epi32(gap_open_score),
+            _mm256_set1_epi32(config.gap_extend_score),
+        );
         let (diagonal, diagonal_state) = choose_avx2(
             load_wave(older, MATCH as usize, row - 1),
             load_wave(older, DELETION as usize, row - 1),
             load_wave(older, INSERTION as usize, row - 1),
         );
         let match_raw = saturating_add_avx2(diagonal, substitution);
-        let zero = _mm256_setzero_si256();
-        let match_positive = _mm256_cmpgt_epi32(match_raw, zero);
-        let match_scores = _mm256_and_si256(match_raw, match_positive);
         let match_start = _mm256_cmpeq_epi32(match_raw, substitution);
         let match_previous = _mm256_blendv_epi8(
             diagonal_state,
             _mm256_set1_epi32(i32::from(START)),
             match_start,
         );
-
         // The cell to the left (one contig base back, same query row) opens or extends a
         // deletion.
-        let left_m = _mm256_add_epi32(
-            load_wave(previous, MATCH as usize, row),
-            _mm256_set1_epi32(gap_open_score),
+        let (deletion_raw, deletion_previous) = choose_avx2(
+            _mm256_add_epi32(load_wave(previous, MATCH as usize, row), open),
+            _mm256_add_epi32(load_wave(previous, DELETION as usize, row), extend),
+            _mm256_add_epi32(load_wave(previous, INSERTION as usize, row), open),
         );
-        let left_d = _mm256_add_epi32(
-            load_wave(previous, DELETION as usize, row),
-            _mm256_set1_epi32(config.gap_extend_score),
-        );
-        let left_i = _mm256_add_epi32(
-            load_wave(previous, INSERTION as usize, row),
-            _mm256_set1_epi32(gap_open_score),
-        );
-        let (deletion_raw, deletion_previous) = choose_avx2(left_m, left_d, left_i);
-        let deletion_positive = _mm256_cmpgt_epi32(deletion_raw, zero);
-        let deletion_scores = _mm256_and_si256(deletion_raw, deletion_positive);
-
         // The cell above (one query base back, same contig column) opens or extends an
         // insertion.
-        let above_m = _mm256_add_epi32(
-            load_wave(previous, MATCH as usize, row - 1),
-            _mm256_set1_epi32(gap_open_score),
+        let (insertion_raw, insertion_previous) = choose_avx2(
+            _mm256_add_epi32(load_wave(previous, MATCH as usize, row - 1), open),
+            _mm256_add_epi32(load_wave(previous, DELETION as usize, row - 1), open),
+            _mm256_add_epi32(load_wave(previous, INSERTION as usize, row - 1), extend),
         );
-        let above_d = _mm256_add_epi32(
-            load_wave(previous, DELETION as usize, row - 1),
-            _mm256_set1_epi32(gap_open_score),
-        );
-        let above_i = _mm256_add_epi32(
-            load_wave(previous, INSERTION as usize, row - 1),
-            _mm256_set1_epi32(config.gap_extend_score),
-        );
-        let (insertion_raw, insertion_previous) = choose_avx2(above_m, above_d, above_i);
+        let match_positive = _mm256_cmpgt_epi32(match_raw, zero);
+        let deletion_positive = _mm256_cmpgt_epi32(deletion_raw, zero);
         let insertion_positive = _mm256_cmpgt_epi32(insertion_raw, zero);
-        let insertion_scores = _mm256_and_si256(insertion_raw, insertion_positive);
-
-        let wave_offset = row - current_range.start;
-        let cell_offset = WAVE_PAD + wave_offset;
-        _mm256_storeu_si256(current.as_mut_ptr().add(cell_offset).cast(), match_scores);
-        _mm256_storeu_si256(
-            current.as_mut_ptr().add(stride + cell_offset).cast(),
-            deletion_scores,
-        );
-        _mm256_storeu_si256(
-            current.as_mut_ptr().add(2 * stride + cell_offset).cast(),
-            insertion_scores,
-        );
-
-        if TRACEBACK {
-            let mut trace = _mm256_and_si256(match_positive, _mm256_set1_epi32(1));
-            trace = _mm256_or_si256(
-                trace,
-                _mm256_slli_epi32::<3>(_mm256_and_si256(match_previous, match_positive)),
-            );
-            trace = _mm256_or_si256(
-                trace,
-                _mm256_and_si256(deletion_positive, _mm256_set1_epi32(2)),
-            );
-            trace = _mm256_or_si256(
-                trace,
-                _mm256_slli_epi32::<5>(_mm256_and_si256(deletion_previous, deletion_positive)),
-            );
-            trace = _mm256_or_si256(
-                trace,
-                _mm256_and_si256(insertion_positive, _mm256_set1_epi32(4)),
-            );
-            trace = _mm256_or_si256(
-                trace,
-                _mm256_slli_epi32::<7>(_mm256_and_si256(insertion_previous, insertion_positive)),
-            );
-            // Traces use nine bits, so unsigned saturation to 16 bits is exact. Packing places
-            // lanes 0..3 and 4..7 in separate 128-bit halves; the permutation joins them in lane
-            // order.
-            let packed = _mm256_permute4x64_epi64::<0xD8>(_mm256_packus_epi32(trace, zero));
-            debug_assert!(wave_base + wave_offset + 8 <= traceback.len());
-            // SAFETY: the wave layout stores this wave's cells contiguously, and rows row..=row+7
-            // lie inside current_range, so the eight cells are inside the laid-out traceback.
-            _mm_storeu_si128(
-                traceback.as_mut_ptr().add(wave_base + wave_offset).cast(),
-                _mm256_castsi256_si128(packed),
-            );
+        BlockStates {
+            scores: [
+                _mm256_and_si256(match_raw, match_positive),
+                _mm256_and_si256(deletion_raw, deletion_positive),
+                _mm256_and_si256(insertion_raw, insertion_positive),
+            ],
+            positive: [match_positive, deletion_positive, insertion_positive],
+            previous: [match_previous, deletion_previous, insertion_previous],
         }
-        let (lane_best_scores, _) = choose_avx2(match_scores, deletion_scores, insertion_scores);
+    }
+}
+
+/// The traceback cells of eight states: bit `s` marks a positive state `s`, and bits `3 + 2s`
+/// and `4 + 2s` hold the state it came from.
+#[inline(always)]
+unsafe fn pack_traceback(states: &BlockStates) -> __m128i {
+    let [match_positive, deletion_positive, insertion_positive] = states.positive;
+    let [match_previous, deletion_previous, insertion_previous] = states.previous;
+    unsafe {
+        let mut trace = _mm256_and_si256(match_positive, _mm256_set1_epi32(1));
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi32::<3>(_mm256_and_si256(match_previous, match_positive)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_and_si256(deletion_positive, _mm256_set1_epi32(2)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi32::<5>(_mm256_and_si256(deletion_previous, deletion_positive)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_and_si256(insertion_positive, _mm256_set1_epi32(4)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi32::<7>(_mm256_and_si256(insertion_previous, insertion_positive)),
+        );
+        // Traces use nine bits, so unsigned saturation to 16 bits is exact. Packing places
+        // lanes 0..3 and 4..7 in separate 128-bit halves; the permutation joins them in order.
+        let zero = _mm256_setzero_si256();
+        let packed = _mm256_permute4x64_epi64::<0xD8>(_mm256_packus_epi32(trace, zero));
+        _mm256_castsi256_si128(packed)
+    }
+}
+
+/// Offers the best lane of a block to the best cell. A block below the current best score
+/// cannot change it, as the best cell only changes for a higher score or an equal, earlier cell.
+#[inline(always)]
+unsafe fn consider_block(block: &Block<'_>, scores: [__m256i; 3], best: &mut BestCell) {
+    unsafe {
+        let [matched, deleted, inserted] = scores;
+        let (lane_best, _) = choose_avx2(matched, deleted, inserted);
         let mut block_best = _mm256_max_epi32(
-            lane_best_scores,
-            _mm256_permute2x128_si256::<0x01>(lane_best_scores, lane_best_scores),
+            lane_best,
+            _mm256_permute2x128_si256::<0x01>(lane_best, lane_best),
         );
         block_best = _mm256_max_epi32(block_best, _mm256_shuffle_epi32::<0x4e>(block_best));
         block_best = _mm256_max_epi32(block_best, _mm256_shuffle_epi32::<0xb1>(block_best));
         let block_score = _mm256_extract_epi32::<0>(block_best);
-        // BestCell only changes for a higher score or an equal, earlier cell, so a block below
-        // the current best cannot change it.
         if block_score > 0 && block_score >= best.score {
-            let mut matches = [0i32; 8];
-            let mut deletions = [0i32; 8];
-            let mut insertions = [0i32; 8];
-            _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
-            _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
-            _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
+            let mut lanes = [[0i32; 8]; 3];
+            _mm256_storeu_si256(lanes[0].as_mut_ptr().cast(), matched);
+            _mm256_storeu_si256(lanes[1].as_mut_ptr().cast(), deleted);
+            _mm256_storeu_si256(lanes[2].as_mut_ptr().cast(), inserted);
             let best_lanes = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(
-                lane_best_scores,
-                block_best,
+                lane_best, block_best,
             )));
-            let block_lane = best_lanes.trailing_zeros() as usize;
-            // Lanes are in ascending query-index order. The first lane with the block maximum
-            // is therefore lexicographically earliest; every lesser or later equal lane loses
-            // after this unchanged BestCell comparison.
-            let query_index = row + block_lane;
-            let contig_index = wave - query_index;
-            best.consider(
-                query_index,
-                contig_index,
-                Cell {
-                    scores: [
-                        matches[block_lane],
-                        deletions[block_lane],
-                        insertions[block_lane],
-                    ],
-                    previous: [0; 3],
-                },
-            );
+            let lane = best_lanes.trailing_zeros() as usize;
+            let scores = [lanes[0][lane], lanes[1][lane], lanes[2][lane]];
+            best.consider_lane(block.wave, block.row, lane, scores);
         }
     }
 }
