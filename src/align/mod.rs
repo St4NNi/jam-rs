@@ -21,7 +21,7 @@ mod kernel;
 mod walk_alignment;
 
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
-pub use chain_alignment::{ChainConfig, align_chain};
+pub use chain_alignment::{BandConfig, align_chain};
 pub use chains::{
     CHAINING_BYTES, Chain, chain_anchors, forward_extent, split_by_drift, window_chains,
 };

@@ -114,11 +114,11 @@ pub(super) fn prepare_window(
     // K-mers too frequent for anchors, and those of low-complexity runs: their copies are
     // walked along their diagonals.
     let (mut walks, mut reverse) = match above {
-        Some(above) => dense_walks(&query.table, &bases, above, config.chain, CHAINING_BYTES)?,
+        Some(above) => dense_walks(&query.table, &bases, above, config.band, CHAINING_BYTES)?,
         None => Default::default(),
     };
     if let Some(low) = &query.low {
-        let (more, copy) = dense_walks(low, &bases, 0, config.chain, CHAINING_BYTES)?;
+        let (more, copy) = dense_walks(low, &bases, 0, config.band, CHAINING_BYTES)?;
         walks.extend(more);
         if reverse.is_empty() {
             reverse = copy;

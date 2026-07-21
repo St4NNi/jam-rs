@@ -24,7 +24,7 @@ pub(super) fn align_chains(
     let config = job.config;
     let length = job.query.length();
     for chain in &window.chains {
-        let parts = split_by_drift(chain, config.chain.max_drift, config.anchors.min_anchors);
+        let parts = split_by_drift(chain, config.band.max_drift, config.anchors.min_anchors);
         // The parts in chain order, each allowed to reach the whole query.
         let mut pending: Vec<(Chain, u64)> =
             parts.into_iter().rev().map(|part| (part, length)).collect();
@@ -79,7 +79,7 @@ fn align_part(
         &window.bases,
         window.start,
         &job.query.table,
-        config.chain,
+        config.band,
         workspace,
         reach,
     )?;

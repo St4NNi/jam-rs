@@ -2,7 +2,7 @@
 //! whether a walk is aligned again with gaps or lies inside an alignment already made.
 
 use super::anchors::{QueryTable, kmers};
-use super::chain_alignment::{ChainConfig, query_window, strand};
+use super::chain_alignment::{BandConfig, query_window, strand};
 use super::dense::Walk;
 use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
 
@@ -13,7 +13,7 @@ pub fn walk_alignment(
     oriented: &[u8],
     offset: u64,
     table: &QueryTable,
-    config: ChainConfig,
+    config: BandConfig,
 ) -> Result<Alignment, AlignmentError> {
     let query = table.query();
     let length = query.len();
@@ -51,8 +51,8 @@ pub fn walk_alignment(
         }
         at += piece;
     }
-    let score = i64::from(config.scores.match_score) * matches
-        + i64::from(config.scores.mismatch_score) * substitutions;
+    let score = i64::from(config.alignment.match_score) * matches
+        + i64::from(config.alignment.mismatch_score) * substitutions;
     oriented_alignment(runs, score, walk, oriented.len(), offset)
 }
 
@@ -117,7 +117,7 @@ pub fn gap_continuation(
     walk: &Walk,
     oriented: &[u8],
     table: &QueryTable,
-    config: ChainConfig,
+    config: BandConfig,
     codes: &mut Vec<(u64, u32)>,
 ) -> Result<bool, AlignmentError> {
     let query = table.query();

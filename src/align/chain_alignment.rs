@@ -13,28 +13,28 @@ use super::{
     EditRun, Interval, Strand, complement,
 };
 
-/// How chains and dense walks are aligned.
+/// The band that aligns chains and walks: scores, width and the drift of anchors it follows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ChainConfig {
+pub struct BandConfig {
     /// Scores, the narrowest band and the resident cell limit; the diagonal is set per chain.
-    pub scores: AlignmentConfig,
+    pub alignment: AlignmentConfig,
     /// Largest drift of a chain's anchors off its first diagonal; drifting chains are split.
     pub max_drift: u32,
 }
 
-impl Default for ChainConfig {
+impl Default for BandConfig {
     fn default() -> Self {
         Self {
-            scores: AlignmentConfig::default(),
+            alignment: AlignmentConfig::default(),
             max_drift: 1_024,
         }
     }
 }
 
-impl ChainConfig {
+impl BandConfig {
     /// The widest band a chain or walk alignment uses: the configured band or the drift margin.
     pub fn max_band(self) -> u32 {
-        self.scores.band_width.max(self.max_drift + 64)
+        self.alignment.band_width.max(self.max_drift + 64)
     }
 }
 
@@ -76,7 +76,7 @@ pub fn align_chain(
     window: &[u8],
     offset: u64,
     table: &QueryTable,
-    config: ChainConfig,
+    config: BandConfig,
     workspace: &mut AlignmentWorkspace,
     reach: u64,
 ) -> Result<Option<Alignment>, AlignmentError> {
@@ -109,7 +109,7 @@ pub fn align_chain(
             band_width: geometry.band,
             diagonal_offset: (geometry.first_contig - contig_low) as i64 - left as i64
                 + geometry.centre,
-            ..config.scores
+            ..config.alignment
         };
         let bases = query_window(table.query(), query_start, query_span, table.circular())?;
         let input = AlignmentInput {
@@ -153,7 +153,7 @@ fn exact_alignment(
     window: &[u8],
     offset: u64,
     table: &QueryTable,
-    config: ChainConfig,
+    config: BandConfig,
 ) -> Result<Option<Alignment>, AlignmentError> {
     let query = table.query();
     let length = query.len() as u64;
@@ -187,7 +187,7 @@ fn exact_alignment(
     };
     let alignment = Alignment {
         score: config
-            .scores
+            .alignment
             .match_score
             .checked_mul(paired as i32)
             .ok_or(AlignmentError::LengthOverflow)?,
@@ -233,7 +233,7 @@ impl ChainGeometry {
         chain: &Chain,
         window_length: u64,
         table: &QueryTable,
-        config: ChainConfig,
+        config: BandConfig,
         reach: u64,
     ) -> Self {
         let length = u64::from(table.query_length());
@@ -250,7 +250,7 @@ impl ChainGeometry {
         );
         let drift = low.unsigned_abs().max(high.unsigned_abs());
         let margin = drift + 64;
-        let band_width = config.scores.band_width;
+        let band_width = config.alignment.band_width;
         // A band wider than the configured one follows the middle of the anchor diagonals: a
         // chain that drifts to one side needs half its drift range on each side, not all of it.
         let (centre, band) = if margin > u64::from(band_width) {

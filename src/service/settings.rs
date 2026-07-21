@@ -71,7 +71,7 @@ impl From<CoverageSetting> for QueryCoverage {
 impl SearchSettings {
     /// The settings a client chose in `config`.
     pub fn of(config: &SearchConfig) -> Self {
-        let (rule, scores) = (&config.rule, &config.align.chain.scores);
+        let (rule, scores) = (&config.rule, &config.align.band.alignment);
         Self {
             level: config.level.into(),
             min_query_coverage: rule.min_query_coverage.into(),
@@ -106,7 +106,7 @@ impl SearchSettings {
         rule.min_contig_identity = self.min_contig_identity;
         config.align.min_chain_identity = self.min_chain_identity;
         config.loss_budget = LossBudget::new(self.loss_budget)?;
-        let scores = &mut config.align.chain.scores;
+        let scores = &mut config.align.band.alignment;
         scores.match_score = self.match_score;
         scores.mismatch_score = self.mismatch_score;
         scores.gap_open_score = self.gap_open_score;
@@ -130,7 +130,7 @@ mod tests {
         client.rule.min_query_coverage = "0.7".parse().unwrap();
         client.rule.min_identity = 0.9;
         client.loss_budget = LossBudget::new(0.001).unwrap();
-        client.align.chain.scores.mismatch_score = -4;
+        client.align.band.alignment.mismatch_score = -4;
         let settings = SearchSettings::of(&client);
         let text = serde_json::to_string(&settings).unwrap();
         let read: SearchSettings = serde_json::from_str(&text).unwrap();
@@ -145,7 +145,7 @@ mod tests {
         assert_eq!(applied.level, SearchStage::Locate);
         assert_eq!(applied.rule, client.rule);
         assert_eq!(applied.loss_budget, client.loss_budget);
-        assert_eq!(applied.align.chain.scores, client.align.chain.scores);
+        assert_eq!(applied.align.band.alignment, client.align.band.alignment);
     }
 
     #[test]

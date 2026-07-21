@@ -59,7 +59,7 @@ fn walk_fragments(
             output.work.alignments += 1;
         }
         let oriented = window.oriented(walk);
-        let alignment = walk_alignment(walk, oriented, window.start, &query.table, config.chain)?;
+        let alignment = walk_alignment(walk, oriented, window.start, &query.table, config.band)?;
         let walked = WalkAlignment {
             walk,
             alignment: &alignment,
@@ -136,10 +136,10 @@ fn gapped_alignment(
                 walk,
                 oriented,
                 &query.table,
-                config.chain,
+                config.band,
                 &mut workspace.probe,
             )?);
-    let band = i64::from(config.chain.max_band());
+    let band = i64::from(config.band.max_band());
     if !asks
         || output
             .paths
@@ -152,7 +152,7 @@ fn gapped_alignment(
         &window.bases,
         window.start,
         &query.table,
-        config.chain,
+        config.band,
         &mut workspace.alignment,
         optimum,
     )?;
@@ -238,7 +238,7 @@ fn join_short_walks(
     if short.is_empty() {
         return Ok(());
     }
-    let bytes = JoinScratch::bytes(walks.len(), &query.table, job.config.chain);
+    let bytes = JoinScratch::bytes(walks.len(), &query.table, job.config.band);
     if bytes > job.config.max_prepared_bytes {
         return Err(AlignStageError::TooLarge {
             what: "the joins of one window",
@@ -250,7 +250,7 @@ fn join_short_walks(
         min_columns: rule.min_fragment_columns,
         min_identity: rule.min_fragment_identity,
     };
-    scratch.prepare(walks, &query.table, job.config.chain, limits);
+    scratch.prepare(walks, &query.table, job.config.band, limits);
     // Longer walks first, so shifted copies inside a kept join are not joined again.
     short.sort_unstable_by_key(|&index| (Reverse(walks[index].length), index));
     for index in short {
@@ -265,7 +265,7 @@ fn join_short_walks(
             oriented,
             window.start,
             &query.table,
-            job.config.chain,
+            job.config.band,
         )?;
         if let Some(joined) = joined {
             output.work.alignments += 1;

@@ -6,7 +6,7 @@
 //! the walk is kept.
 
 use super::anchors::QueryTable;
-use super::chain_alignment::ChainConfig;
+use super::chain_alignment::BandConfig;
 use super::dense::Walk;
 use super::walk_alignment::{append, oriented_alignment, walk_alignment};
 use super::{Alignment, AlignmentError, EditOperation, EditRun};
@@ -52,14 +52,14 @@ pub struct JoinScratch {
 }
 
 /// The query and contig bases a link may cross, as for `gap_continuation`.
-fn reach(table: &QueryTable, config: ChainConfig) -> u64 {
+fn reach(table: &QueryTable, config: BandConfig) -> u64 {
     u64::from(config.max_drift) + u64::from(table.config().k)
 }
 
 impl JoinScratch {
     /// The bytes `prepare` holds for `walks` walks: walk orders, one chain, and one piece
     /// alignment of at most the reach on each side with its operations.
-    pub fn bytes(walks: usize, table: &QueryTable, config: ChainConfig) -> usize {
+    pub fn bytes(walks: usize, table: &QueryTable, config: BandConfig) -> usize {
         let reach = reach(table, config) as usize;
         walks * (3 * size_of::<u32>() + size_of::<[Part; 2]>())
             + (reach + 1) * (reach + 1)
@@ -73,7 +73,7 @@ impl JoinScratch {
         &mut self,
         walks: &[Walk],
         table: &QueryTable,
-        config: ChainConfig,
+        config: BandConfig,
         limits: JoinLimits,
     ) {
         let reach = reach(table, config) as usize;
@@ -102,7 +102,7 @@ impl JoinScratch {
         at: usize,
         after: bool,
         table: &QueryTable,
-        config: ChainConfig,
+        config: BandConfig,
     ) -> Option<(usize, u64)> {
         let reach = reach(table, config);
         let length = u64::from(table.query_length());
@@ -159,7 +159,7 @@ impl JoinScratch {
         oriented: &[u8],
         offset: u64,
         table: &QueryTable,
-        config: ChainConfig,
+        config: BandConfig,
     ) -> Result<Option<Alignment>, AlignmentError> {
         self.link_chain(walks, at, table, config);
         if self.chain.len() < 2 {
@@ -189,7 +189,7 @@ impl JoinScratch {
     }
 
     /// Links walks to walk `at` on both sides; a circular join covers the query at most once.
-    fn link_chain(&mut self, walks: &[Walk], at: usize, table: &QueryTable, config: ChainConfig) {
+    fn link_chain(&mut self, walks: &[Walk], at: usize, table: &QueryTable, config: BandConfig) {
         let length = u64::from(table.query_length());
         self.chain.clear();
         self.chain.push(at as u32);
@@ -216,7 +216,7 @@ impl JoinScratch {
         walks: &[Walk],
         oriented: &[u8],
         table: &QueryTable,
-        config: ChainConfig,
+        config: BandConfig,
     ) {
         let query = table.query();
         self.parts.clear();
@@ -229,9 +229,9 @@ impl JoinScratch {
                 part = part
                     + Part {
                         score: i64::from(if same {
-                            config.scores.match_score
+                            config.alignment.match_score
                         } else {
-                            config.scores.mismatch_score
+                            config.alignment.mismatch_score
                         }),
                         columns: 1,
                         matches: u64::from(same),
@@ -285,7 +285,7 @@ impl JoinScratch {
         next: Walk,
         oriented: &[u8],
         table: &QueryTable,
-        config: ChainConfig,
+        config: BandConfig,
         runs: Option<&mut Vec<EditRun>>,
     ) -> Part {
         let query = table.query();
@@ -302,8 +302,8 @@ impl JoinScratch {
     /// Fills the global piece matrix of `self.piece` against `contig` and returns the end score
     /// and state. States: 0 paired, 1 contig base only (deletion), 2 query base only (insertion).
     /// Each cell keeps the state before each of its states, two bits each.
-    fn fill_piece(&mut self, contig: &[u8], config: ChainConfig) -> (i64, u8) {
-        let scoring = config.scores;
+    fn fill_piece(&mut self, contig: &[u8], config: BandConfig) -> (i64, u8) {
+        let scoring = config.alignment;
         let (rows, columns) = (self.piece.len() + 1, contig.len() + 1);
         let (open, extend) = (
             i64::from(scoring.gap_open_score),

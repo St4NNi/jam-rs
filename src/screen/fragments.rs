@@ -142,7 +142,7 @@ impl BatchAlignment<'_> {
         )?;
         work.align = align_work;
         work.aligned_entries = 1;
-        let scores = &self.align.chain.scores;
+        let scores = &self.align.band.alignment;
         let mut turned = Vec::new();
         for fragment in fragments {
             for (contig, alignment) in cut_at_contigs(batch, &fragment.alignment, scores)? {

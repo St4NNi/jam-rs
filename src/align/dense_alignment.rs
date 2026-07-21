@@ -2,7 +2,7 @@
 //! conserved block on another diagonal, is aligned again with the banded kernel.
 
 use super::anchors::QueryTable;
-use super::chain_alignment::{ChainConfig, query_window, strand};
+use super::chain_alignment::{BandConfig, query_window, strand};
 use super::dense::Walk;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
@@ -37,7 +37,7 @@ pub fn align_dense_walk(
     window: &[u8],
     offset: u64,
     table: &QueryTable,
-    config: ChainConfig,
+    config: BandConfig,
     workspace: &mut AlignmentWorkspace,
     optimum: &mut Option<DenseOptimum>,
 ) -> Result<Option<Alignment>, AlignmentError> {
@@ -80,7 +80,7 @@ pub fn align_dense_walk(
 fn align_dense_window(
     input: WalkWindow<'_>,
     (query_start, window_length): (u64, u64),
-    config: ChainConfig,
+    config: BandConfig,
     workspace: &mut AlignmentWorkspace,
     optimum: &mut Option<DenseOptimum>,
 ) -> Result<Option<Alignment>, AlignmentError> {
@@ -129,7 +129,7 @@ fn align_dense_window(
     let scores = AlignmentConfig {
         band_width: config.max_band(),
         diagonal_offset: diagonal - low as i64 + first_row as i64,
-        ..config.scores
+        ..config.alignment
     };
     let aligned = AlignmentInput {
         query: &bases,
@@ -163,7 +163,7 @@ fn align_dense_window(
     let right = (contig_length - (centre + band + 1).max(0))
         .max(0)
         .min(window_length as i64);
-    let outside = left.max(right) * i64::from(config.scores.match_score);
+    let outside = left.max(right) * i64::from(config.alignment.match_score);
     if alignment.score >= kernel_score && i64::from(alignment.score) > outside {
         *optimum = Some(DenseOptimum {
             reverse: walk.reverse,

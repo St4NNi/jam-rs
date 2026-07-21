@@ -1,14 +1,13 @@
 use super::chain_tests::random_sequence;
 use super::{
-    AlignmentConfig, AlignmentWorkspace, AnchorConfig, ChainConfig, DenseOptimum, JoinLimits,
+    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinLimits,
     JoinScratch, QueryTable, Walk, align_dense_walk, contains, dense_walks, format_cigar,
     walk_alignment,
 };
 
 fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>, QueryTable) {
     let table = QueryTable::new(query, circular, AnchorConfig::default()).unwrap();
-    let (walks, reverse) =
-        dense_walks(&table, window, 0, ChainConfig::default(), 64 << 20).unwrap();
+    let (walks, reverse) = dense_walks(&table, window, 0, BandConfig::default(), 64 << 20).unwrap();
     (walks, reverse, table)
 }
 
@@ -31,7 +30,7 @@ fn imperfect_periodic_pair_walks_every_diagonal_once() {
         let overlap = 10_000 - diagonal.unsigned_abs();
         assert!(overlap - u64::from(walk.length) <= 2, "{walk:?}");
         let oriented = if walk.reverse { &reverse } else { &query };
-        let alignment = walk_alignment(walk, oriented, 0, &table, ChainConfig::default()).unwrap();
+        let alignment = walk_alignment(walk, oriented, 0, &table, BandConfig::default()).unwrap();
         alignment.validate().unwrap();
         assert!(alignment.counts().substitutions <= 2);
         let cigar = format_cigar(&alignment.runs);
@@ -55,7 +54,7 @@ fn circular_walks_cover_the_query_at_most_once() {
     assert!(walks.iter().any(|walk| walk.length == 2000));
     for walk in &walks {
         let oriented = if walk.reverse { &reverse } else { &window };
-        let alignment = walk_alignment(walk, oriented, 0, &table, ChainConfig::default()).unwrap();
+        let alignment = walk_alignment(walk, oriented, 0, &table, BandConfig::default()).unwrap();
         alignment.validate().unwrap();
         assert_eq!(alignment.query_interval.len(), u64::from(walk.length));
         assert!(contains(&alignment, walk, window.len(), 0, 2000));
@@ -87,7 +86,7 @@ fn walks_end_where_the_copy_ends_and_skip_repeated_starts() {
 fn match_starts_exceeding_the_budget_fail_before_allocation() {
     let query = b"ACGT".repeat(2500);
     let table = QueryTable::new(&query, false, AnchorConfig::default()).unwrap();
-    assert!(dense_walks(&table, &query, 0, ChainConfig::default(), 1 << 10).is_err());
+    assert!(dense_walks(&table, &query, 0, BandConfig::default(), 1 << 10).is_err());
 }
 
 fn linear(query: &[u8]) -> QueryTable {
@@ -104,7 +103,7 @@ fn dense_optimum_is_reused_only_for_matching_inputs_and_bands() {
     let mut align = |walk: &Walk, config, saved: &mut Option<DenseOptimum>| {
         align_dense_walk(walk, &contig, 0, &table, config, &mut workspace, saved).unwrap()
     };
-    let config = ChainConfig::default();
+    let config = BandConfig::default();
     let walk = Walk {
         reverse: false,
         contig: 0,
@@ -122,11 +121,11 @@ fn dense_optimum_is_reused_only_for_matching_inputs_and_bands() {
         ..walk
     };
     assert!(align(&reverse, config, &mut saved).is_some());
-    let narrow = ChainConfig {
+    let narrow = BandConfig {
         max_drift: 1,
-        scores: AlignmentConfig {
+        alignment: AlignmentConfig {
             band_width: 1,
-            ..config.scores
+            ..config.alignment
         },
     };
     let shifted = Walk {
@@ -151,9 +150,9 @@ fn dense_walk_of_a_long_query_aligns_the_bases_around_it() {
         length: 300,
     };
     // The first window, 300 bases and twice the margin on each side, holds only a part of it.
-    let config = ChainConfig {
+    let config = BandConfig {
         max_drift: 128,
-        ..ChainConfig::default()
+        ..BandConfig::default()
     };
     let table = linear(&query);
     let mut workspace = AlignmentWorkspace::default();
@@ -182,7 +181,7 @@ fn short_blocks_join_across_a_divergent_piece() {
         *base = if *base == b'A' { b'C' } else { b'A' };
     }
     let table = linear(&query);
-    let config = ChainConfig::default();
+    let config = BandConfig::default();
     let walks = [
         Walk {
             reverse: false,

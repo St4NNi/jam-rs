@@ -7,7 +7,7 @@
 
 use super::AlignmentError;
 use super::anchors::{QueryTable, base_code, kmers};
-use super::chain_alignment::ChainConfig;
+use super::chain_alignment::BandConfig;
 use super::complement;
 use std::mem::size_of;
 
@@ -37,7 +37,7 @@ pub fn dense_walks(
     table: &QueryTable,
     window: &[u8],
     above: usize,
-    config: ChainConfig,
+    config: BandConfig,
     budget: usize,
 ) -> Result<(Vec<Walk>, Vec<u8>), AlignmentError> {
     let k = usize::from(table.config().k);
@@ -163,7 +163,7 @@ fn walk_line(
     sequence: &[u8],
     reverse: bool,
     group: &[Start],
-    config: ChainConfig,
+    config: BandConfig,
     walks: &mut Vec<Walk>,
 ) {
     let k = usize::from(table.config().k);
@@ -208,11 +208,11 @@ struct Extension {
 }
 
 impl Extension {
-    fn new(table: &QueryTable, config: ChainConfig) -> Self {
-        let matched = i64::from(config.scores.match_score);
+    fn new(table: &QueryTable, config: BandConfig) -> Self {
+        let matched = i64::from(config.alignment.match_score);
         Self {
             matched,
-            mismatched: i64::from(config.scores.mismatch_score),
+            mismatched: i64::from(config.alignment.mismatch_score),
             drop: i64::from(table.config().max_gap) * matched,
             score: 0,
             best: 0,
@@ -276,7 +276,7 @@ fn walk(
     reverse: bool,
     start: Start,
     previous_end: u32,
-    config: ChainConfig,
+    config: BandConfig,
 ) -> Walk {
     let query = table.query();
     let length = query.len();

@@ -1,4 +1,4 @@
-use super::chain_alignment::{ChainConfig, align_chain};
+use super::chain_alignment::{BandConfig, align_chain};
 use super::chain_tests::{random_sequence, reverse_complement};
 use super::{
     Alignment, AlignmentConfig, AlignmentWorkspace, AnchorConfig, Chain, EditOperation, Interval,
@@ -25,7 +25,7 @@ fn substitute(sequence: &mut [u8], per_thousand: u64, mut state: u64) {
 /// The alignments of every chain part of `window`, best chains first. Windows start at contig
 /// position 0.
 fn alignments(query: &[u8], window: &[u8], circular: bool) -> Vec<Alignment> {
-    let config = ChainConfig::default();
+    let config = BandConfig::default();
     let table = QueryTable::new(query, circular, AnchorConfig::default()).unwrap();
     let mut workspace = AlignmentWorkspace::default();
     let (chains, _) = window_chains(&table, window, &mut Vec::new()).unwrap();
@@ -155,12 +155,12 @@ fn wide_band_and_drift_align_a_long_deletion() {
         random_sequence(2000, 24),
     ]
     .concat();
-    let config = ChainConfig {
-        scores: AlignmentConfig {
+    let config = BandConfig {
+        alignment: AlignmentConfig {
             band_width: 3000,
             ..AlignmentConfig::default()
         },
-        ..ChainConfig::default()
+        ..BandConfig::default()
     };
     let anchors = [0u32, 500, 1000, 1500, 2000, 2500]
         .map(|q| (if q < 1500 { 2000 + q } else { 3000 + q }, q));
