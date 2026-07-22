@@ -1,7 +1,7 @@
 //! The contig rule: which contigs of an entry count for the decision.
 
 use super::Fragment;
-use crate::align::Interval;
+use crate::align::{EditCounts, Interval};
 use std::collections::{HashMap, HashSet};
 
 /// The fragments of the contigs that count. A contig counts when at least `min_coverage` of its
@@ -15,26 +15,22 @@ pub(super) fn counted_contig_fragments(
     contig_length: impl Fn(u32) -> u64,
 ) -> Vec<Fragment> {
     let mut spans: HashMap<u32, Vec<Interval>> = HashMap::new();
-    let mut pairing: HashMap<u32, (u64, u64)> = HashMap::new();
+    let mut pairing: HashMap<u32, EditCounts> = HashMap::new();
     for fragment in &fragments {
         let contig = fragment.contig_index;
         spans
             .entry(contig)
             .or_default()
             .push(fragment.alignment.contig_interval);
-        let counts = fragment.alignment.counts();
-        let total = pairing.entry(contig).or_default();
-        total.0 += counts.matches;
-        total.1 += counts.columns();
+        *pairing.entry(contig).or_default() += fragment.alignment.counts();
     }
     let counted: HashSet<u32> = pairing
         .into_iter()
-        .filter(|&(contig, (matches, columns))| {
+        .filter(|&(contig, counts)| {
             let union = Interval::union(spans.remove(&contig).unwrap_or_default());
             let aligned = Interval::total_length(&union);
-            let identity = matches as f64 / columns.max(1) as f64;
             aligned as f64 >= min_coverage * contig_length(contig) as f64
-                && identity >= min_identity
+                && counts.reaches_identity(min_identity)
         })
         .map(|(contig, _)| contig)
         .collect();
