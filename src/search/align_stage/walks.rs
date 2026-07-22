@@ -7,13 +7,14 @@
 
 use super::contig::{ContigJob, WindowOutput};
 use super::paths::{AlignedPath, PathIndex};
-use super::place::{place, query_room};
+use super::place::query_room;
 use super::window::PreparedWindow;
 use super::{AlignStageError, AlignStageWorkspace};
 use crate::align::{
     Alignment, DenseOptimum, EditOperation, JoinLimits, JoinScratch, Walk, align_dense_walk,
     base_code, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
+use crate::decide::Fragment;
 use std::cmp::Reverse;
 
 /// Aligns the walks of `window`, keeps their gapped alignments once per copy, and joins short
@@ -196,9 +197,12 @@ fn keep_gapped(
         }
         runs.iter().for_each(|run| kept.add_walk(run));
         output.work.alignments += 1;
-        output
-            .fragments
-            .push(place(job.contig, alignment, job.query)?)?;
+        output.fragments.push(Fragment::place(
+            job.contig,
+            alignment,
+            job.query.length(),
+            job.query.circular(),
+        )?)?;
     }
     Ok(())
 }
@@ -269,7 +273,12 @@ fn join_short_walks(
         )?;
         if let Some(joined) = joined {
             output.work.alignments += 1;
-            output.fragments.push(place(job.contig, joined, query)?)?;
+            output.fragments.push(Fragment::place(
+                job.contig,
+                joined,
+                query.length(),
+                query.circular(),
+            )?)?;
         }
     }
     Ok(())

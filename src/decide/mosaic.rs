@@ -48,7 +48,7 @@ pub fn build_mosaic(query_length: u64, fragments: &[Fragment]) -> Result<Mosaic,
             let support = covered_intervals(query_length, fragment)?;
             Ok(Prepared {
                 fragment: fragment.clone(),
-                support_bases: interval_bases(&support),
+                support_bases: Interval::total_length(&support),
                 support,
             })
         })
@@ -60,11 +60,11 @@ pub fn build_mosaic(query_length: u64, fragments: &[Fragment]) -> Result<Mosaic,
     let mut primary = Vec::new();
     let mut alternatives = Vec::new();
     for item in prepared {
-        let before = interval_bases(&covered);
+        let before = Interval::total_length(&covered);
         let mut combined = covered.clone();
         combined.extend_from_slice(&item.support);
-        let next = union_intervals(combined);
-        let new_bases = interval_bases(&next) - before;
+        let next = Interval::union(combined);
+        let new_bases = Interval::total_length(&next) - before;
         if new_bases == 0 {
             alternatives.push(item.fragment);
         } else {
@@ -77,7 +77,7 @@ pub fn build_mosaic(query_length: u64, fragments: &[Fragment]) -> Result<Mosaic,
     }
     Ok(Mosaic {
         query_length,
-        covered_bases: interval_bases(&covered),
+        covered_bases: Interval::total_length(&covered),
         gaps: gaps_between(&covered, query_length),
         covered_intervals: covered,
         primary,
@@ -131,7 +131,7 @@ fn covered_intervals(query_length: u64, fragment: &Fragment) -> Result<Vec<Inter
     if ordered.windows(2).any(|pair| pair[0].end > pair[1].start) {
         return Err(DecideError::InvalidQuerySegments);
     }
-    let segment_bases = interval_bases(segments);
+    let segment_bases = Interval::total_length(segments);
     if segment_bases != fragment.alignment.query_interval.len() {
         return Err(DecideError::QuerySpanMismatch);
     }
@@ -152,7 +152,7 @@ fn covered_intervals(query_length: u64, fragment: &Fragment) -> Result<Vec<Inter
     if offset != segment_bases {
         return Err(DecideError::QuerySpanMismatch);
     }
-    Ok(union_intervals(support))
+    Ok(Interval::union(support))
 }
 
 /// Maps `length` fragment query positions from `offset` on to intervals of the query segments.
@@ -177,22 +177,6 @@ fn project_segments(
         }
     }
     Err(DecideError::QuerySpanMismatch)
-}
-
-fn union_intervals(mut intervals: Vec<Interval>) -> Vec<Interval> {
-    intervals.sort_unstable();
-    let mut union: Vec<Interval> = Vec::new();
-    for interval in intervals {
-        match union.last_mut() {
-            Some(last) if interval.start <= last.end => last.end = last.end.max(interval.end),
-            _ => union.push(interval),
-        }
-    }
-    union
-}
-
-fn interval_bases(intervals: &[Interval]) -> u64 {
-    intervals.iter().map(|interval| interval.len()).sum()
 }
 
 fn gaps_between(covered: &[Interval], query_length: u64) -> Vec<Interval> {

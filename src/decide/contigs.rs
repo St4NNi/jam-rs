@@ -1,6 +1,7 @@
 //! The contig rule: which contigs of an entry count for the decision.
 
 use super::Fragment;
+use crate::align::Interval;
 use std::collections::{HashMap, HashSet};
 
 /// The fragments of the contigs that count. A contig counts when at least `min_coverage` of its
@@ -13,15 +14,14 @@ pub(super) fn counted_contig_fragments(
     min_identity: f64,
     contig_length: impl Fn(u32) -> u64,
 ) -> Vec<Fragment> {
-    let mut spans: HashMap<u32, Vec<(u64, u64)>> = HashMap::new();
+    let mut spans: HashMap<u32, Vec<Interval>> = HashMap::new();
     let mut pairing: HashMap<u32, (u64, u64)> = HashMap::new();
     for fragment in &fragments {
-        let interval = fragment.alignment.contig_interval;
         let contig = fragment.contig_index;
         spans
             .entry(contig)
             .or_default()
-            .push((interval.start, interval.end));
+            .push(fragment.alignment.contig_interval);
         let counts = fragment.alignment.counts();
         let total = pairing.entry(contig).or_default();
         total.0 += counts.matches;
@@ -30,7 +30,8 @@ pub(super) fn counted_contig_fragments(
     let counted: HashSet<u32> = pairing
         .into_iter()
         .filter(|&(contig, (matches, columns))| {
-            let aligned = union_length(spans.remove(&contig).unwrap_or_default());
+            let union = Interval::union(spans.remove(&contig).unwrap_or_default());
+            let aligned = Interval::total_length(&union);
             let identity = matches as f64 / columns.max(1) as f64;
             aligned as f64 >= min_coverage * contig_length(contig) as f64
                 && identity >= min_identity
@@ -41,21 +42,6 @@ pub(super) fn counted_contig_fragments(
         .into_iter()
         .filter(|fragment| counted.contains(&fragment.contig_index))
         .collect()
-}
-
-/// The number of bases in the union of the half-open spans.
-fn union_length(mut spans: Vec<(u64, u64)>) -> u64 {
-    spans.sort_unstable();
-    let mut total = 0;
-    let mut reached = 0;
-    for (start, end) in spans {
-        let start = start.max(reached);
-        if end > start {
-            total += end - start;
-            reached = end;
-        }
-    }
-    total
 }
 
 #[cfg(test)]

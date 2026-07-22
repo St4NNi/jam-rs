@@ -3,7 +3,7 @@
 //! the contig is aligned again. The growth step doubles every round.
 
 use super::paths::PathIndex;
-use super::place::{Collected, place, query_room};
+use super::place::{Collected, query_room};
 use super::window::{PreparedWindow, merge_spans, prepare_window, widen};
 use super::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
@@ -11,6 +11,7 @@ use super::{
 };
 use crate::align::Alignment;
 use crate::decide::DecisionRule;
+use crate::decide::Fragment;
 use crate::index::PackedSequence;
 use std::ops::Range;
 
@@ -230,8 +231,12 @@ impl WindowOutput<'_> {
         if self.widen_at_edges(job, window, &alignment, room) {
             return Ok(false);
         }
-        self.fragments
-            .push(place(job.contig, alignment, job.query)?)?;
+        self.fragments.push(Fragment::place(
+            job.contig,
+            alignment,
+            job.query.length(),
+            job.query.circular(),
+        )?)?;
         Ok(true)
     }
 

@@ -1,31 +1,9 @@
 //! Alignments placed as fragments, and the fragments one entry collects within its limit.
 
 use super::{AlignStageError, PreparedQuery};
-use crate::align::{Alignment, EditRun, Interval};
-use crate::decide::{Fragment, QueryWindow};
+use crate::align::{EditRun, Interval};
+use crate::decide::Fragment;
 use std::mem::size_of;
-
-/// The fragment of an alignment on a contig. Query positions of an alignment over the origin of
-/// a circular query run past the query length; its query segments are split at the origin.
-pub(super) fn place(
-    contig: u32,
-    mut alignment: Alignment,
-    query: &PreparedQuery,
-) -> Result<Fragment, AlignStageError> {
-    let length = query.length();
-    let interval = alignment.query_interval;
-    // A circular alignment may start one query length on; it is moved back to start inside.
-    let shift = interval.start / length * length;
-    alignment.query_interval = Interval::new(interval.start - shift, interval.end - shift)?;
-    let start = alignment.query_interval.start;
-    let span = alignment.query_interval.len();
-    let window = QueryWindow::new(start, span, length, query.circular())?;
-    Ok(Fragment {
-        contig_index: contig,
-        query_segments: window.segments(Interval::new(0, span)?)?,
-        alignment,
-    })
-}
 
 /// Whether the query has bases before and after an alignment with this query interval. A
 /// circular query has room on both sides until an alignment spans all of it.
@@ -109,7 +87,7 @@ impl Collected {
 mod tests {
     use super::super::AlignStageConfig;
     use super::*;
-    use crate::align::{Strand, parse_cigar};
+    use crate::align::{Alignment, Strand, parse_cigar};
 
     fn alignment(query: (u64, u64)) -> Alignment {
         let length = query.1 - query.0;
@@ -127,18 +105,11 @@ mod tests {
     }
 
     #[test]
-    fn circular_alignments_are_split_at_the_origin() {
+    fn query_room_on_both_sides() {
         let bases = b"ACGTTGCAAC".repeat(10);
         let config = AlignStageConfig::default();
         let circular = PreparedQuery::new(&bases, true, &config).unwrap();
-        let over = place(3, alignment((90, 120)), &circular).unwrap();
-        assert_eq!(over.query_segments, [interval(90, 100), interval(0, 20)]);
-        assert_eq!(over.contig_index, 3);
-        let moved = place(0, alignment((110, 150)), &circular).unwrap();
-        assert_eq!(moved.alignment.query_interval, interval(10, 50));
-        assert_eq!(moved.query_segments, [interval(10, 50)]);
         let linear = PreparedQuery::new(&bases, false, &config).unwrap();
-        assert!(place(0, alignment((90, 120)), &linear).is_err());
         assert_eq!(query_room(interval(0, 100), &linear), (false, false));
         assert_eq!(query_room(interval(5, 50), &linear), (true, true));
         assert_eq!(query_room(interval(0, 50), &circular), (true, true));
@@ -149,7 +120,7 @@ mod tests {
     fn fragments_stay_within_their_limit_and_rounds_go_back() {
         let bases = b"ACGTTGCAAC".repeat(10);
         let query = PreparedQuery::new(&bases, false, &AlignStageConfig::default()).unwrap();
-        let fragment = place(0, alignment((0, 50)), &query).unwrap();
+        let fragment = Fragment::place(0, alignment((0, 50)), query.length(), false).unwrap();
         let one = fragment_bytes(&fragment);
         let mut collected = Collected::new(2 * one);
         collected.push(fragment.clone()).unwrap();

@@ -8,7 +8,7 @@ mod mosaic;
 mod policy;
 
 pub use coverage::QueryCoverage;
-pub use fragment::{Fragment, QueryWindow};
+pub use fragment::Fragment;
 pub use mosaic::{Mosaic, SelectedFragment, build_mosaic};
 pub use policy::{Decision, DecisionRule};
 
@@ -20,8 +20,8 @@ use thiserror::Error;
 pub enum DecideError {
     #[error("the query is empty")]
     EmptyQuery,
-    #[error("the query window does not fit the query")]
-    InvalidQueryWindow,
+    #[error("the alignment does not fit the query")]
+    QueryOutside,
     #[error("the query segments of a fragment are invalid")]
     InvalidQuerySegments,
     #[error("the query segments of a fragment do not match its CIGAR")]

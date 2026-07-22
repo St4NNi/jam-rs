@@ -195,33 +195,15 @@ pub fn holds_walk(
     if offset + low < contig.start || offset + high > contig.end {
         return false;
     }
-    // The query positions of the alignment, which may run on over the origin, as pieces inside
-    // the query.
-    let (aligned_start, aligned_end) =
-        (alignment.query_interval.start, alignment.query_interval.end);
-    let segments = if aligned_end <= query_length {
-        [(aligned_start, aligned_end), (0, 0)]
-    } else if aligned_start >= query_length {
-        [
-            (aligned_start - query_length, aligned_end - query_length),
-            (0, 0),
-        ]
-    } else {
-        [
-            (aligned_start, query_length),
-            (0, aligned_end - query_length),
-        ]
+    // The query positions of the alignment may run on over the origin.
+    let walk_query = Interval {
+        start: u64::from(walk.query),
+        end: u64::from(walk.query + walk.length),
     };
-    let (start, end) = (u64::from(walk.query), u64::from(walk.query + walk.length));
-    [
-        (start, end.min(query_length)),
-        (0, end.saturating_sub(query_length)),
-    ]
-    .iter()
-    .filter(|(from, to)| from < to)
-    .all(|&(from, to)| {
-        segments
-            .iter()
-            .any(|&(segment_start, segment_end)| segment_start <= from && to <= segment_end)
+    walk_query.wrap(query_length).all(|piece| {
+        alignment
+            .query_interval
+            .wrap(query_length)
+            .any(|segment| segment.start <= piece.start && piece.end <= segment.end)
     })
 }

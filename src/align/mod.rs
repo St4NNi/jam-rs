@@ -59,6 +59,46 @@ impl Interval {
     pub fn is_empty(self) -> bool {
         self.start == self.end
     }
+
+    /// The union of `intervals`: sorted, with overlapping and touching intervals joined.
+    pub fn union(mut intervals: Vec<Interval>) -> Vec<Interval> {
+        intervals.sort_unstable();
+        let mut union: Vec<Interval> = Vec::new();
+        for interval in intervals {
+            match union.last_mut() {
+                Some(last) if interval.start <= last.end => last.end = last.end.max(interval.end),
+                _ => union.push(interval),
+            }
+        }
+        union
+    }
+
+    /// The summed length of `intervals`.
+    pub fn total_length(intervals: &[Interval]) -> u64 {
+        intervals.iter().map(|interval| interval.len()).sum()
+    }
+
+    /// This interval of positions on a circular sequence of `length` bases, which may run once
+    /// past its end, as one or two intervals inside `0..length`.
+    pub fn wrap(self, length: u64) -> impl Iterator<Item = Interval> {
+        let (first, second) = if self.end <= length {
+            (self, None)
+        } else if self.start >= length {
+            let (start, end) = (self.start - length, self.end - length);
+            (Interval { start, end }, None)
+        } else {
+            let end = self.end - length;
+            let second = Interval { start: 0, end };
+            (
+                Interval {
+                    end: length,
+                    ..self
+                },
+                Some(second),
+            )
+        };
+        std::iter::once(first).chain(second)
+    }
 }
 
 /// The contig strand that the query aligns to.
