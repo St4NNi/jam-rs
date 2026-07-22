@@ -112,7 +112,7 @@ pub(super) fn oriented_alignment(
 /// exact k-mer within `max_drift` bases beyond the end of the query pairs with one within
 /// `max_drift` bases beyond the end of the contig at another distance from the end. Differences
 /// next to the end, such as a substitution beside an insertion, do not hide the block. `codes`
-/// is reused scratch of at most `max_drift + 1` entries.
+/// is reused scratch of at most `max_drift + 1` codes.
 pub fn gap_continuation(
     walk: &Walk,
     oriented: &[u8],
@@ -176,9 +176,9 @@ pub fn gap_continuation(
         let mut found = false;
         kmers(contig_side, table.anchors().a, |at, code, _| {
             let at = distance(at, contig_bases) as u32;
-            // Entries of one code are ordered by distance, so another distance is at an end.
-            let first = codes.partition_point(|entry| entry.0 < code);
-            let last = codes.partition_point(|entry| entry.0 <= code);
+            // Pairs of one code are ordered by distance, so another distance is at an end.
+            let first = codes.partition_point(|pair| pair.0 < code);
+            let last = codes.partition_point(|pair| pair.0 <= code);
             found |= first < last && (codes[first].1 != at || codes[last - 1].1 != at);
         });
         if found {
@@ -189,9 +189,9 @@ pub fn gap_continuation(
 }
 
 /// Whether `alignment` pairs the query positions of `walk` within its contig positions, on its
-/// strand. `window_length` is the length of the window the walk was read from, which starts
-/// `offset` bases into the contig; `query_length` is the length of the query.
-pub fn contains(
+/// strand. The walk comes from an alignment window of `window_length` bases that starts `offset`
+/// bases into the contig.
+pub fn holds_walk(
     alignment: &Alignment,
     walk: &Walk,
     window_length: usize,

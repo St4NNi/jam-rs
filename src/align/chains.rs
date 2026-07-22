@@ -90,7 +90,7 @@ fn anchor_budget(table: &QueryTable, window: &[u8], capacity: usize) -> (usize, 
     let price = |count: usize| anchor_bytes(capacity, count, table);
     // The most anchors a window can give, before its k-mers are looked up.
     let stride = usize::from(table.anchors().stride);
-    let bound = (window.len() / stride + 1).saturating_mul(table.max_entries());
+    let bound = (window.len() / stride + 1).saturating_mul(table.max_occurrences());
     if price(bound) <= CHAINING_BYTES {
         // Even a window of the most frequent k-mers fits, so the lookups need not be counted.
         return (bound, None);

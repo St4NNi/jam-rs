@@ -42,9 +42,9 @@ impl AnchorConfig {
     }
 }
 
-/// Every k-mer of the query on both strands, keyed by its 2-bit code. The entries of one k-mer
-/// hold its forward occurrences first, ordered by the code of the query base before them (4 for
-/// none or another byte), then its reverse occurrences.
+/// Every k-mer of the query on both strands, keyed by its 2-bit code. The forward occurrences of
+/// a k-mer come first, ordered by the code of the query base before them (4 for none or another
+/// byte), then its reverse occurrences.
 pub struct QueryTable {
     anchors: AnchorConfig,
     chains: ChainConfig,
@@ -55,10 +55,10 @@ pub struct QueryTable {
     /// One bit for each key, so that most window k-mers that the query lacks are rejected without
     /// a probe into `slots`, which is many times larger. It never rejects a key of the table.
     filter: Vec<u64>,
-    /// The most entries of any one k-mer.
-    max_entries: usize,
-    entries: Vec<u32>,
-    /// For each entry: the code of the base before a forward occurrence, 5 for a reverse one.
+    /// The most occurrences of any one k-mer.
+    max_occurrences: usize,
+    occurrences: Vec<u32>,
+    /// For each occurrence: the code of the base before a forward occurrence, 5 for a reverse one.
     left: Vec<u8>,
     query: Vec<u8>,
 }
@@ -179,7 +179,7 @@ impl QueryTable {
         });
         pairs.sort_unstable();
         let distinct = pairs.chunk_by(|a, b| a.0 == b.0).count();
-        let max_entries = pairs
+        let max_occurrences = pairs
             .chunk_by(|a, b| a.0 == b.0)
             .map(<[_]>::len)
             .max()
@@ -187,7 +187,7 @@ impl QueryTable {
         let slots = (distinct * 2).next_power_of_two().max(16);
         let mut table = vec![(EMPTY, 0u32, 0u32); slots];
         let mut filter = vec![0u64; ((distinct * 8).next_power_of_two().max(1024)) / 64];
-        let mut entries = Vec::with_capacity(pairs.len());
+        let mut occurrences = Vec::with_capacity(pairs.len());
         let mut left = Vec::with_capacity(pairs.len());
         for group in pairs.chunk_by(|a, b| a.0 == b.0) {
             let hash = jamhash_u64(group[0].0);
@@ -195,10 +195,10 @@ impl QueryTable {
             while table[slot].0 != EMPTY {
                 slot = (slot + 1) & (slots - 1);
             }
-            table[slot] = (group[0].0, entries.len() as u32, group.len() as u32);
+            table[slot] = (group[0].0, occurrences.len() as u32, group.len() as u32);
             let bit = filter_bit(hash, filter.len());
             filter[bit / 64] |= 1 << (bit % 64);
-            entries.extend(group.iter().map(|pair| pair.2));
+            occurrences.extend(group.iter().map(|pair| pair.2));
             left.extend(group.iter().map(|pair| pair.1));
         }
         Ok(Self {
@@ -209,17 +209,17 @@ impl QueryTable {
             period,
             slots: table,
             filter,
-            max_entries,
-            entries,
+            max_occurrences,
+            occurrences,
             left,
             query: scanned,
         })
     }
 
-    /// The entries of `key`: query positions, with `REVERSE` set for the reverse strand.
+    /// The occurrences of `key`: query positions, with `REVERSE` set for the reverse strand.
     fn get(&self, key: u64) -> &[u32] {
         let (start, count) = self.slot(key);
-        &self.entries[start..start + count]
+        &self.occurrences[start..start + count]
     }
 
     fn slot(&self, key: u64) -> (usize, usize) {
@@ -262,10 +262,10 @@ impl QueryTable {
         } else {
             (forward, forward)
         };
-        let entries = &self.entries[start..start + count];
-        entries[..low]
+        let occurrences = &self.occurrences[start..start + count];
+        occurrences[..low]
             .iter()
-            .chain(&entries[high..forward])
+            .chain(&occurrences[high..forward])
             .copied()
     }
 
@@ -295,16 +295,16 @@ impl QueryTable {
         self.chains
     }
 
-    /// The most entries of any one k-mer.
-    pub fn max_entries(&self) -> usize {
-        self.max_entries
+    /// The most occurrences of any one k-mer.
+    pub fn max_occurrences(&self) -> usize {
+        self.max_occurrences
     }
 
     /// When the query is a repeat of a period of at most a bases and `window` is a copy of the
     /// same repeat: the period and, per strand, the diagonal of one exact copy.
     #[allow(clippy::type_complexity)]
     pub fn periodic_pair(&self, window: &[u8]) -> Option<(usize, Vec<(bool, i64)>)> {
-        if self.entries.is_empty() || self.query.is_empty() || window.is_empty() {
+        if self.occurrences.is_empty() || self.query.is_empty() || window.is_empty() {
             return None;
         }
         let p = self.period?;
@@ -380,16 +380,16 @@ pub fn find_anchors(
         if !start.is_multiple_of(stride) {
             return;
         }
-        let entries = table.get(forward);
-        if above.is_some_and(|threshold| entries.len() > threshold) {
+        let occurrences = table.get(forward);
+        if above.is_some_and(|threshold| occurrences.len() > threshold) {
             return;
         }
-        for &entry in entries {
-            let reverse = entry & REVERSE != 0;
+        for &occurrence in occurrences {
+            let reverse = occurrence & REVERSE != 0;
             anchors.push(Anchor {
                 reverse,
                 contig: if reverse { length - a - start } else { start },
-                query: entry & !REVERSE,
+                query: occurrence & !REVERSE,
             });
         }
     });

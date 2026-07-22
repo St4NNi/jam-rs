@@ -25,7 +25,7 @@ pub struct Walk {
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct Start {
     /// Oriented window position minus query position; modulo the query length when circular.
-    line: i64,
+    diagonal: i64,
     contig: u32,
     query: u32,
 }
@@ -71,12 +71,12 @@ pub fn dense_walks(
         return Err(AlignmentError::ChainingBudget("dense match starts"));
     }
     let length = i64::from(table.query_length());
-    let line = |contig: u32, query: u32| {
-        let line = i64::from(contig) - i64::from(query);
+    let diagonal = |contig: u32, query: u32| {
+        let diagonal = i64::from(contig) - i64::from(query);
         if table.circular() {
-            line.rem_euclid(length)
+            diagonal.rem_euclid(length)
         } else {
-            line
+            diagonal
         }
     };
     let mut walks = Vec::with_capacity(count.saturating_mul(copies));
@@ -85,14 +85,14 @@ pub fn dense_walks(
         starts.clear();
         match_starts(table, sequence, above, &mut |contig, query| {
             starts.push(Start {
-                line: line(contig, query),
+                diagonal: diagonal(contig, query),
                 contig,
                 query,
             })
         });
         starts.sort_unstable();
-        for group in starts.chunk_by(|a, b| a.line == b.line) {
-            walk_line(table, sequence, reverse_strand, group, config, &mut walks);
+        for group in starts.chunk_by(|a, b| a.diagonal == b.diagonal) {
+            walk_diagonal(table, sequence, reverse_strand, group, config, &mut walks);
         }
     }
     Ok((walks, reverse))
@@ -158,7 +158,7 @@ fn match_starts(
 
 /// Walks the starts of one diagonal; a start inside the previous walk gives none. A circular
 /// walk over the whole query continues with the next copy when it is exact there.
-fn walk_line(
+fn walk_diagonal(
     table: &QueryTable,
     sequence: &[u8],
     reverse: bool,
@@ -176,7 +176,7 @@ fn walk_line(
         loop {
             let found = walk(table, sequence, reverse, next, end, config);
             end = found.contig + found.length;
-            // Shorter walks are kept as seeds of gapped joins.
+            // Short walks are kept too: joins link them across divergent pieces.
             walks.push(found);
             if !table.circular() || found.length != table.query_length() {
                 break;
@@ -186,7 +186,7 @@ fn walk_line(
                 break;
             }
             next = Start {
-                line: start.line,
+                diagonal: start.diagonal,
                 contig: end,
                 query: found.query,
             };

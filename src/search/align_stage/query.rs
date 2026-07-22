@@ -30,7 +30,7 @@ impl PreparedQuery {
         let low = QueryTable::low_complexity(&bases, circular, config.anchors, config.chains)?;
         Ok(Self {
             table,
-            low: (low.max_entries() > 0).then_some(low),
+            low: (low.max_occurrences() > 0).then_some(low),
         })
     }
 

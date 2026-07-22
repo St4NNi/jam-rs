@@ -12,7 +12,7 @@ use super::window::PreparedWindow;
 use super::{AlignStageError, AlignStageWorkspace};
 use crate::align::{
     Alignment, DenseOptimum, EditOperation, JoinLimits, JoinScratch, Walk, align_dense_walk,
-    base_code, contains, gap_continuation, long_enough, walk_alignment,
+    base_code, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 use std::cmp::Reverse;
 
@@ -45,16 +45,16 @@ fn walk_fragments(
     let mut gapped = Vec::new();
     for (index, walk) in window.walks.iter().enumerate() {
         job.control.check()?;
-        // A walk shorter than a chain is only a seed of a gapped alignment or a join.
-        let seed = !long_enough(walk, &query.table);
+        // A walk shorter than a chain only starts a gapped alignment or a join.
+        let short = !long_enough(walk, &query.table);
         if output
             .paths
             .covers_walk(walk, query.length(), query.circular())
         {
-            output.work.redundant_chains += u64::from(!seed);
+            output.work.redundant_chains += u64::from(!short);
             continue;
         }
-        if !seed {
+        if !short {
             output.work.chains += 1;
             output.work.alignments += 1;
         }
@@ -69,7 +69,7 @@ fn walk_fragments(
         {
             gapped.push((joined, index));
         }
-        if seed {
+        if short {
             continue;
         }
         let room = walk_room(walk, job);
@@ -220,7 +220,7 @@ fn join_short_walks(
     let held = |output: &WindowOutput<'_>, walk: &Walk| {
         output.fragments.since(output.first).iter().any(|fragment| {
             rule.counts_fragment(&fragment.alignment)
-                && contains(
+                && holds_walk(
                     &fragment.alignment,
                     walk,
                     window.bases.len(),

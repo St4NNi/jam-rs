@@ -31,7 +31,7 @@ pub use dense::{Walk, dense_walks, long_enough};
 pub use dense_alignment::{DenseOptimum, align_dense_walk};
 pub use joins::{JoinLimits, JoinScratch};
 pub use kernel::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, DEFAULT_MAX_CELLS};
-pub use walk_alignment::{contains, gap_continuation, walk_alignment};
+pub use walk_alignment::{gap_continuation, holds_walk, walk_alignment};
 
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};

@@ -46,7 +46,7 @@ pub struct JoinScratch {
     ends: Vec<u32>,
     chain: Vec<u32>,
     parts: Vec<[Part; 2]>,
-    trace: Vec<u8>,
+    traceback: Vec<u8>,
     scores: Vec<[i64; 3]>,
     piece: Vec<u8>,
 }
@@ -89,7 +89,7 @@ impl JoinScratch {
         self.ends.sort_unstable_by_key(|&index| key(index, true));
         self.chain = Vec::with_capacity(walks.len());
         self.parts = Vec::with_capacity(walks.len());
-        self.trace = Vec::with_capacity((reach + 1) * (reach + 1));
+        self.traceback = Vec::with_capacity((reach + 1) * (reach + 1));
         self.scores = Vec::with_capacity(2 * (reach + 1));
         self.piece = Vec::with_capacity(reach);
     }
@@ -319,19 +319,19 @@ impl JoinScratch {
                 }
             })
         };
-        self.trace.clear();
-        self.trace.resize(rows * columns, 0);
+        self.traceback.clear();
+        self.traceback.resize(rows * columns, 0);
         self.scores.clear();
         self.scores.resize(2 * columns, [NONE; 3]);
         let (previous, current) = self.scores.split_at_mut(columns);
         previous[0] = [0, NONE, NONE];
         for (column, cell) in previous.iter_mut().enumerate().skip(1) {
             *cell = [NONE, open + extend * column as i64, NONE];
-            self.trace[column] = u8::from(column > 1) << 2;
+            self.traceback[column] = u8::from(column > 1) << 2;
         }
         for row in 1..rows {
             current[0] = [NONE, NONE, open + extend * row as i64];
-            self.trace[row * columns] = (if row > 1 { 2 } else { 0 }) << 4;
+            self.traceback[row * columns] = (if row > 1 { 2 } else { 0 }) << 4;
             for column in 1..columns {
                 let (paired, from) = best(previous[column - 1]);
                 let paired = paired
@@ -350,7 +350,8 @@ impl JoinScratch {
                 let (inserted, inserted_from) =
                     best([up[0] + open + extend, up[1] + open + extend, up[2] + extend]);
                 current[column] = [paired, deleted, inserted];
-                self.trace[row * columns + column] = from | deleted_from << 2 | inserted_from << 4;
+                self.traceback[row * columns + column] =
+                    from | deleted_from << 2 | inserted_from << 4;
             }
             previous.copy_from_slice(current);
         }
@@ -376,7 +377,7 @@ impl JoinScratch {
         let (mut row, mut column) = (self.piece.len(), contig.len());
         let mut operations = Vec::new();
         while row > 0 || column > 0 {
-            let before = self.trace[row * columns + column] >> (2 * state) & 3;
+            let before = self.traceback[row * columns + column] >> (2 * state) & 3;
             let operation = match state {
                 0 => {
                     let same = self.piece[row - 1] == contig[column - 1];

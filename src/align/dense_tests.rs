@@ -2,7 +2,7 @@ use super::ChainConfig;
 use super::chain_tests::random_sequence;
 use super::{
     AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinLimits,
-    JoinScratch, QueryTable, Walk, align_dense_walk, contains, dense_walks, format_cigar,
+    JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar, holds_walk,
     walk_alignment,
 };
 
@@ -64,7 +64,7 @@ fn circular_walks_cover_the_query_at_most_once() {
         let alignment = walk_alignment(walk, oriented, 0, &table, BandConfig::default()).unwrap();
         alignment.validate().unwrap();
         assert_eq!(alignment.query_interval.len(), u64::from(walk.length));
-        assert!(contains(&alignment, walk, window.len(), 0, 2000));
+        assert!(holds_walk(&alignment, walk, window.len(), 0, 2000));
     }
 }
 
