@@ -77,6 +77,36 @@ pub fn parse_cigar(cigar: &str) -> Result<Vec<EditRun>, AlignmentError> {
     Ok(runs)
 }
 
+/// Appends `more` to `runs`, joining neighbouring runs of one operation.
+pub(super) fn append_runs(
+    runs: &mut Vec<EditRun>,
+    more: impl IntoIterator<Item = EditRun>,
+) -> Result<(), AlignmentError> {
+    for run in more {
+        match runs.last_mut() {
+            Some(last) if last.operation == run.operation => {
+                last.length = last
+                    .length
+                    .checked_add(run.length)
+                    .ok_or(AlignmentError::RunTooLong)?;
+            }
+            _ => runs.push(run),
+        }
+    }
+    Ok(())
+}
+
+/// The runs of single operations in order.
+pub(super) fn runs_of(operations: &[EditOperation]) -> Result<Vec<EditRun>, AlignmentError> {
+    let mut runs = Vec::new();
+    let single = |&operation| EditRun {
+        operation,
+        length: 1,
+    };
+    append_runs(&mut runs, operations.iter().map(single))?;
+    Ok(runs)
+}
+
 /// The base counts of `runs`.
 pub(super) fn counts(runs: &[EditRun]) -> EditCounts {
     let mut counts = EditCounts::default();

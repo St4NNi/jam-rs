@@ -7,9 +7,10 @@
 
 use super::anchors::QueryTable;
 use super::chain_alignment::BandConfig;
+use super::cigar::append_runs;
 use super::dense::Walk;
-use super::walk_alignment::{append, oriented_alignment, walk_alignment};
-use super::{Alignment, AlignmentError, EditOperation, EditRun};
+use super::walk_alignment::{oriented_alignment, walk_alignment};
+use super::{Alignment, AlignmentError, EditCounts, EditOperation, EditRun};
 use std::mem::size_of;
 
 /// The least columns and identity a join must reach to be kept.
@@ -19,22 +20,19 @@ pub struct JoinLimits {
     pub min_identity: f64,
 }
 
-/// Columns, matches and score of a walk or of the piece between two linked walks.
+/// Score and base counts of a walk or of the piece between two linked walks.
 #[derive(Clone, Copy, Default)]
 struct Part {
     score: i64,
-    columns: u64,
-    matches: u64,
+    counts: EditCounts,
 }
 
 impl std::ops::Add for Part {
     type Output = Self;
-    fn add(self, other: Self) -> Self {
-        Self {
-            score: self.score + other.score,
-            columns: self.columns + other.columns,
-            matches: self.matches + other.matches,
-        }
+    fn add(mut self, other: Self) -> Self {
+        self.score += other.score;
+        self.counts += other.counts;
+        self
     }
 }
 
@@ -170,7 +168,7 @@ impl JoinScratch {
             .iter()
             .position(|&index| index as usize == at)
             .unwrap_or(0);
-        self.score_parts(walks, oriented, table, config);
+        self.score_parts(walks, oriented, table, config)?;
         let Some((score, first, last)) = self.best_run(middle) else {
             return Ok(None);
         };
@@ -178,10 +176,10 @@ impl JoinScratch {
         for position in first..=last {
             let walk = walks[self.chain[position] as usize];
             let alignment = walk_alignment(&walk, oriented, offset, table, config)?;
-            append(&mut runs, &alignment.runs);
+            append_runs(&mut runs, alignment.runs)?;
             if position < last {
                 let next = walks[self.chain[position + 1] as usize];
-                self.piece(walk, next, oriented, table, config, Some(&mut runs));
+                self.piece(walk, next, oriented, table, config, Some(&mut runs))?;
             }
         }
         let first = walks[self.chain[first] as usize];
@@ -217,7 +215,7 @@ impl JoinScratch {
         oriented: &[u8],
         table: &QueryTable,
         config: BandConfig,
-    ) {
+    ) -> Result<(), AlignmentError> {
         let query = table.query();
         self.parts.clear();
         for position in 0..self.chain.len() {
@@ -226,25 +224,23 @@ impl JoinScratch {
             for step in 0..walk.length as usize {
                 let same = oriented[walk.contig as usize + step]
                     == query[(walk.query as usize + step) % query.len()];
-                part = part
-                    + Part {
-                        score: i64::from(if same {
-                            config.alignment.match_score
-                        } else {
-                            config.alignment.mismatch_score
-                        }),
-                        columns: 1,
-                        matches: u64::from(same),
-                    };
+                part.score += i64::from(if same {
+                    config.alignment.match_score
+                } else {
+                    config.alignment.mismatch_score
+                });
+                part.counts.matches += u64::from(same);
+                part.counts.substitutions += u64::from(!same);
             }
             let piece = match self.chain.get(position + 1) {
                 Some(&next) => {
-                    self.piece(walk, walks[next as usize], oriented, table, config, None)
+                    self.piece(walk, walks[next as usize], oriented, table, config, None)?
                 }
                 None => Part::default(),
             };
             self.parts.push([part, piece]);
         }
+        Ok(())
     }
 
     /// The best run of walks `first..=last` around position `middle` that meets the limits, by
@@ -266,8 +262,8 @@ impl JoinScratch {
                 if last > middle {
                     whole = whole + self.parts[last - 1][1] + self.parts[last][0];
                 }
-                let qualifies = whole.columns >= limits.min_columns
-                    && whole.matches as f64 >= limits.min_identity * whole.columns as f64;
+                let qualifies = whole.counts.columns() >= limits.min_columns
+                    && whole.counts.reaches_identity(limits.min_identity);
                 if first < last && qualifies && best.is_none_or(|(score, _, _)| whole.score > score)
                 {
                     best = Some((whole.score, first, last));
@@ -287,7 +283,7 @@ impl JoinScratch {
         table: &QueryTable,
         config: BandConfig,
         runs: Option<&mut Vec<EditRun>>,
-    ) -> Part {
+    ) -> Result<Part, AlignmentError> {
         let query = table.query();
         let end = before.query as usize + before.length as usize;
         let query_gap = (next.query as usize + query.len() - end % query.len()) % query.len();
@@ -368,7 +364,7 @@ impl JoinScratch {
         contig: &[u8],
         (score, mut state): (i64, u8),
         runs: Option<&mut Vec<EditRun>>,
-    ) -> Part {
+    ) -> Result<Part, AlignmentError> {
         let columns = contig.len() + 1;
         let mut part = Part {
             score,
@@ -381,24 +377,26 @@ impl JoinScratch {
             let operation = match state {
                 0 => {
                     let same = self.piece[row - 1] == contig[column - 1];
-                    part.matches += u64::from(same);
                     (row, column) = (row - 1, column - 1);
                     if same {
+                        part.counts.matches += 1;
                         EditOperation::Match
                     } else {
+                        part.counts.substitutions += 1;
                         EditOperation::Substitution
                     }
                 }
                 1 => {
                     column -= 1;
+                    part.counts.deletions += 1;
                     EditOperation::Deletion
                 }
                 _ => {
                     row -= 1;
+                    part.counts.insertions += 1;
                     EditOperation::Insertion
                 }
             };
-            part.columns += 1;
             if runs.is_some() {
                 operations.push(EditRun {
                     operation,
@@ -409,8 +407,8 @@ impl JoinScratch {
         }
         if let Some(runs) = runs {
             operations.reverse();
-            append(runs, &operations);
+            append_runs(runs, operations)?;
         }
-        part
+        Ok(part)
     }
 }

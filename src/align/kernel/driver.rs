@@ -226,7 +226,7 @@ impl AlignmentWorkspace {
             score: best.score,
             query_interval: (query_start, best.query_index),
             contig_interval: (contig_start, best.contig_index),
-            runs: super::traceback::runs_from_operations(&self.operations)?,
+            runs: crate::align::cigar::runs_of(&self.operations)?,
         })
     }
 

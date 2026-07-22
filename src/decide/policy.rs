@@ -111,7 +111,7 @@ impl DecisionRule {
     pub fn counts_fragment(&self, alignment: &Alignment) -> bool {
         let counts = alignment.counts();
         counts.columns() >= self.min_fragment_columns
-            && counts.matches as f64 >= self.min_fragment_identity * counts.columns() as f64
+            && counts.reaches_identity(self.min_fragment_identity)
     }
 
     /// Builds the mosaic of the counted fragments of one entry and decides. `contig_length` gives
@@ -146,14 +146,10 @@ impl DecisionRule {
             .map(|selected| &selected.fragment)
             .chain(&mosaic.alternatives);
         for fragment in used {
-            let part = fragment.alignment.counts();
-            counts.matches += part.matches;
-            counts.substitutions += part.substitutions;
-            counts.insertions += part.insertions;
-            counts.deletions += part.deletions;
+            counts += fragment.alignment.counts();
         }
         let qualifies = counts.columns() > 0
-            && counts.matches as f64 >= self.min_identity * counts.columns() as f64
+            && counts.reaches_identity(self.min_identity)
             && self
                 .min_query_coverage
                 .accepts(mosaic.covered_bases, query_length);

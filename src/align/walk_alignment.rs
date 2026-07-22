@@ -3,6 +3,7 @@
 
 use super::anchors::{QueryTable, kmers};
 use super::chain_alignment::{BandConfig, query_window, strand};
+use super::cigar::{append_runs, counts};
 use super::dense::Walk;
 use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
 
@@ -41,11 +42,11 @@ pub fn walk_alignment(
                 }
             }
             if step > equal {
-                append(&mut runs, &[run(EditOperation::Match, step - equal)]);
+                append_runs(&mut runs, [run(EditOperation::Match, step - equal)])?;
                 matches += (step - equal) as i64;
             }
             if step < piece {
-                append(&mut runs, &[run(EditOperation::Substitution, 1)]);
+                append_runs(&mut runs, [run(EditOperation::Substitution, 1)])?;
                 (substitutions, step) = (substitutions + 1, step + 1);
             }
         }
@@ -63,16 +64,6 @@ fn run(operation: EditOperation, length: usize) -> EditRun {
     }
 }
 
-/// Appends `more` to `runs`, merging runs of one operation.
-pub(super) fn append(runs: &mut Vec<EditRun>, more: &[EditRun]) {
-    for run in more {
-        match runs.last_mut() {
-            Some(last) if last.operation == run.operation => last.length += run.length,
-            _ => runs.push(*run),
-        }
-    }
-}
-
 /// The alignment of `runs` starting at the oriented window and query positions of `first`, in
 /// contig positions. Query positions run on over the origin of a circular query.
 pub(super) fn oriented_alignment(
@@ -82,15 +73,8 @@ pub(super) fn oriented_alignment(
     window_length: usize,
     offset: u64,
 ) -> Result<Alignment, AlignmentError> {
-    let count = |operations: &[EditOperation]| {
-        runs.iter()
-            .filter(|run| operations.contains(&run.operation))
-            .map(|run| u64::from(run.length))
-            .sum::<u64>()
-    };
-    let paired = [EditOperation::Match, EditOperation::Substitution];
-    let contig_span = count(&paired) + count(&[EditOperation::Deletion]);
-    let query_span = count(&paired) + count(&[EditOperation::Insertion]);
+    let counts = counts(&runs);
+    let (contig_span, query_span) = (counts.contig_bases(), counts.query_bases());
     let low = u64::from(first.contig);
     let (start, end) = if first.reverse {
         let window_length = window_length as u64;

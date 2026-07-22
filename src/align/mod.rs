@@ -103,6 +103,31 @@ impl EditCounts {
             columns => self.matches as f64 / columns as f64,
         }
     }
+
+    /// Whether the identity reaches `limit`, tested as `matches >= limit * columns` so that
+    /// every caller agrees at the boundary.
+    pub fn reaches_identity(self, limit: f64) -> bool {
+        self.matches as f64 >= limit * self.columns() as f64
+    }
+
+    /// The query bases the alignment spans: matches, substitutions and insertions.
+    pub fn query_bases(self) -> u64 {
+        self.matches + self.substitutions + self.insertions
+    }
+
+    /// The contig bases the alignment spans: matches, substitutions and deletions.
+    pub fn contig_bases(self) -> u64 {
+        self.matches + self.substitutions + self.deletions
+    }
+}
+
+impl std::ops::AddAssign for EditCounts {
+    fn add_assign(&mut self, other: Self) {
+        self.matches += other.matches;
+        self.substitutions += other.substitutions;
+        self.insertions += other.insertions;
+        self.deletions += other.deletions;
+    }
 }
 
 impl Alignment {
@@ -117,9 +142,9 @@ impl Alignment {
     /// Checks that the runs are valid and span exactly both intervals.
     pub fn validate(&self) -> Result<(), AlignmentError> {
         let counts = cigar::checked_counts(&self.runs)?;
-        let query_bases = counts.matches + counts.substitutions + counts.insertions;
-        let contig_bases = counts.matches + counts.substitutions + counts.deletions;
-        if query_bases != self.query_interval.len() || contig_bases != self.contig_interval.len() {
+        if counts.query_bases() != self.query_interval.len()
+            || counts.contig_bases() != self.contig_interval.len()
+        {
             return Err(AlignmentError::CigarSpanMismatch);
         }
         Ok(())

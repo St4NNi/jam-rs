@@ -2,8 +2,8 @@
 //! with an anchored semi-global alignment, so a short divergent end is not cut off.
 
 use super::geometry::{DELETION, INSERTION, MATCH, START};
-use super::traceback::runs_from_operations;
 use super::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, reverse_complement_into};
+use crate::align::cigar::{append_runs, runs_of};
 use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand};
 
 /// A score no path reaches; adding scoring terms to it cannot overflow.
@@ -359,27 +359,10 @@ fn trace_endpoint(
     }
     operations.reverse();
     Ok(EndpointResult {
-        runs: runs_from_operations(operations)?,
+        runs: runs_of(operations)?,
         query_bases: best.1,
         contig_bases: best.2,
     })
-}
-
-/// Appends `runs` to `output`, joining runs of one operation.
-fn append_runs(output: &mut Vec<EditRun>, runs: Vec<EditRun>) -> Result<(), AlignmentError> {
-    for run in runs {
-        if let Some(last) = output.last_mut()
-            && last.operation == run.operation
-        {
-            last.length = last
-                .length
-                .checked_add(run.length)
-                .ok_or(AlignmentError::RunTooLong)?;
-        } else {
-            output.push(run);
-        }
-    }
-    Ok(())
 }
 
 /// The affine score of `runs`.

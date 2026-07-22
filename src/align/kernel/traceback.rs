@@ -7,7 +7,7 @@ use super::geometry::{
     wave_range,
 };
 use super::{AlignmentConfig, AlignmentWorkspace};
-use crate::align::{AlignmentError, EditOperation, EditRun};
+use crate::align::{AlignmentError, EditOperation};
 
 impl AlignmentWorkspace {
     /// Traces back over a pass whose traceback cells are all resident. Returns the start cell.
@@ -141,27 +141,4 @@ impl AlignmentWorkspace {
         *position = (query_index, contig_index, state);
         Ok(complete)
     }
-}
-
-/// Joins single operations into runs.
-pub(super) fn runs_from_operations(
-    operations: &[EditOperation],
-) -> Result<Vec<EditRun>, AlignmentError> {
-    let mut runs: Vec<EditRun> = Vec::new();
-    for &operation in operations {
-        if let Some(run) = runs.last_mut()
-            && run.operation == operation
-        {
-            run.length = run
-                .length
-                .checked_add(1)
-                .ok_or(AlignmentError::RunTooLong)?;
-        } else {
-            runs.push(EditRun {
-                operation,
-                length: 1,
-            });
-        }
-    }
-    Ok(runs)
 }
