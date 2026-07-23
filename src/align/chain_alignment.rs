@@ -41,33 +41,6 @@ impl BandConfig {
 /// The query bases beyond a chain that its first alignment may use on each side.
 const FIRST_EXTENSION: u64 = 128;
 
-/// `span` query bases from `start` on; a circular query wraps around its origin.
-pub(super) fn query_window(
-    query: &[u8],
-    start: u64,
-    span: u64,
-    circular: bool,
-) -> Result<Vec<u8>, AlignmentError> {
-    let (start, span) = (start as usize, span as usize);
-    if !circular {
-        return query
-            .get(start..start + span)
-            .map(<[u8]>::to_vec)
-            .ok_or(AlignmentError::EndpointOutsideWindow);
-    }
-    if query.is_empty() {
-        return Err(AlignmentError::EmptyQuery);
-    }
-    let mut window = Vec::with_capacity(span);
-    let mut position = start % query.len();
-    while window.len() < span {
-        let count = (span - window.len()).min(query.len() - position);
-        window.extend_from_slice(&query[position..position + count]);
-        position = 0;
-    }
-    Ok(window)
-}
-
 /// Aligns one chain of `window` (the contig bases `offset..offset + window.len()`), allowing the
 /// alignment to reach `reach` query bases beyond the chain on each side. `None` when no positive
 /// alignment exists.
@@ -111,7 +84,8 @@ pub fn align_chain(
                 + geometry.centre,
             ..config.alignment
         };
-        let bases = query_window(table.query(), query_start, query_span, table.circular())?;
+        let mut bases = Vec::new();
+        table.copy_bases(query_start, query_span, &mut bases)?;
         let input = AlignmentInput {
             query: &bases,
             query_offset: query_start,

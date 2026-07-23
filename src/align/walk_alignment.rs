@@ -2,7 +2,7 @@
 //! whether a walk is aligned again with gaps or lies inside an alignment already made.
 
 use super::anchors::{QueryTable, kmers};
-use super::chain_alignment::{BandConfig, query_window, strand};
+use super::chain_alignment::{BandConfig, strand};
 use super::cigar::{append_runs, counts};
 use super::dense::Walk;
 use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
@@ -134,12 +134,9 @@ pub fn gap_continuation(
         } else {
             edge + query.len() - query_bases
         };
-        let query_side = query_window(
-            query,
-            (query_from % query.len()) as u64,
-            query_bases as u64,
-            table.circular(),
-        )?;
+        let mut query_side = Vec::with_capacity(query_bases);
+        let from = (query_from % query.len()) as u64;
+        table.copy_bases(from, query_bases as u64, &mut query_side)?;
         let contig_side = if right {
             &oriented[contig..contig + contig_bases]
         } else {

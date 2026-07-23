@@ -2,7 +2,7 @@
 //! conserved block on another diagonal, is aligned again with the banded kernel.
 
 use super::anchors::QueryTable;
-use super::chain_alignment::{BandConfig, query_window, strand};
+use super::chain_alignment::{BandConfig, strand};
 use super::dense::Walk;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
@@ -120,12 +120,8 @@ fn align_dense_window(
     let first_row = (low as i64 - diagonal - reach).clamp(0, window_length as i64) as u64;
     let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, window_length as i64);
     let rows = last_row as u64 - first_row;
-    let bases = query_window(
-        table.query(),
-        query_start + first_row,
-        rows,
-        table.circular(),
-    )?;
+    let mut bases = Vec::new();
+    table.copy_bases(query_start + first_row, rows, &mut bases)?;
     let scores = AlignmentConfig {
         band_width: config.max_band(),
         diagonal_offset: diagonal - low as i64 + first_row as i64,

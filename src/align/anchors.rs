@@ -274,6 +274,33 @@ impl QueryTable {
         &self.query
     }
 
+    /// Appends `span` query bases from `start` on to `bases`; on a circular query they run on
+    /// over the origin.
+    pub(super) fn copy_bases(
+        &self,
+        start: u64,
+        span: u64,
+        bases: &mut Vec<u8>,
+    ) -> Result<(), AlignmentError> {
+        let query = self.query();
+        let (start, span) = (start as usize, span as usize);
+        if !self.circular {
+            let piece = query.get(start..start + span);
+            bases.extend_from_slice(piece.ok_or(AlignmentError::EndpointOutsideWindow)?);
+            return Ok(());
+        }
+        if query.is_empty() {
+            return Err(AlignmentError::EmptyQuery);
+        }
+        let (mut position, mut left) = (start % query.len(), span);
+        while left > 0 {
+            let count = left.min(query.len() - position);
+            bases.extend_from_slice(&query[position..position + count]);
+            (position, left) = (0, left - count);
+        }
+        Ok(())
+    }
+
     /// The query bases, without the bases a circular query repeats.
     pub fn query(&self) -> &[u8] {
         &self.query[..self.query_length as usize]

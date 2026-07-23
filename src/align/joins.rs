@@ -288,8 +288,7 @@ impl JoinScratch {
         let end = before.query as usize + before.length as usize;
         let query_gap = (next.query as usize + query.len() - end % query.len()) % query.len();
         self.piece.clear();
-        self.piece
-            .extend((0..query_gap).map(|step| query[(end + step) % query.len()]));
+        table.copy_bases(end as u64, query_gap as u64, &mut self.piece)?;
         let contig = &oriented[(before.contig + before.length) as usize..next.contig as usize];
         let score = self.fill_piece(contig, config);
         self.trace_piece(contig, score, runs)
