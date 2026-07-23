@@ -22,7 +22,9 @@ mod tests;
 mod traceback;
 mod waves;
 
-use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand, complement};
+use super::{
+    Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand, reverse_complement_into,
+};
 use geometry::WaveCarry;
 use waves::WaveChunk;
 
@@ -175,13 +177,6 @@ impl AlignmentWorkspace {
         };
         finish(raw, input, strand)
     }
-}
-
-/// Writes the reverse complement of `sequence` into `output`.
-fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
-    output.clear();
-    output.reserve(sequence.len());
-    output.extend(sequence.iter().rev().map(|base| complement(*base)));
 }
 
 /// The alignment of `raw` in the positions of `input`: contig positions on the forward strand.

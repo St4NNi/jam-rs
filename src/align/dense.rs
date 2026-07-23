@@ -8,7 +8,7 @@
 use super::AlignmentError;
 use super::anchors::{QueryTable, base_code, kmers};
 use super::chain_alignment::BandConfig;
-use super::complement;
+use super::reverse_complement_into;
 use std::mem::size_of;
 
 /// The best-scoring ungapped stretch around one or more match starts of a diagonal. `contig` is
@@ -65,7 +65,8 @@ pub fn dense_walks(
     if price(count) > budget {
         return Err(AlignmentError::ChainingBudget("dense match starts"));
     }
-    let reverse: Vec<u8> = window.iter().rev().map(|base| complement(*base)).collect();
+    let mut reverse = Vec::new();
+    reverse_complement_into(window, &mut reverse);
     match_starts(table, &reverse, above, &mut |_, _| count += 1);
     if price(count) > budget {
         return Err(AlignmentError::ChainingBudget("dense match starts"));
@@ -130,7 +131,8 @@ fn periodic_walks(
             });
         }
     }
-    let reverse = window.iter().rev().map(|base| complement(*base)).collect();
+    let mut reverse = Vec::new();
+    reverse_complement_into(window, &mut reverse);
     Ok(Some((walks, reverse)))
 }
 

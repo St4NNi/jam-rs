@@ -228,6 +228,13 @@ pub fn complement(base: u8) -> u8 {
     }
 }
 
+/// Writes the reverse complement of `sequence` into `output`.
+fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+    output.reserve(sequence.len());
+    output.extend(sequence.iter().rev().map(|base| complement(*base)));
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AlignmentError {
     #[error("interval is reversed: {start}..{end}")]
