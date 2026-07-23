@@ -31,10 +31,20 @@ impl Default for BandConfig {
     }
 }
 
+/// Diagonals and bases kept beyond a drift, so that an alignment that follows the drift still
+/// has room for the indels around it.
+const DRIFT_MARGIN: u32 = 64;
+
 impl BandConfig {
     /// The widest band a chain or walk alignment uses: the configured band or the drift margin.
     pub fn max_band(self) -> u32 {
-        self.alignment.band_width.max(self.max_drift + 64)
+        self.alignment.band_width.max(self.max_drift + DRIFT_MARGIN)
+    }
+
+    /// The largest drift and its margin: how far an alignment may leave the diagonal of the
+    /// anchors or walk it follows.
+    pub(super) fn drift_margin(self) -> u64 {
+        u64::from(self.max_drift + DRIFT_MARGIN)
     }
 }
 
@@ -223,13 +233,13 @@ impl ChainGeometry {
             },
         );
         let drift = low.unsigned_abs().max(high.unsigned_abs());
-        let margin = drift + 64;
+        let margin = drift + u64::from(DRIFT_MARGIN);
         let band_width = config.alignment.band_width;
         // A band wider than the configured one follows the middle of the anchor diagonals: a
         // chain that drifts to one side needs half its drift range on each side, not all of it.
         let (centre, band) = if margin > u64::from(band_width) {
             let centre = low + (high - low) / 2;
-            let half = (high - centre).max(centre - low).unsigned_abs() + 64;
+            let half = (high - centre).max(centre - low).unsigned_abs() + u64::from(DRIFT_MARGIN);
             (centre, band_width.max(half as u32))
         } else {
             (0, band_width.max(margin as u32))
@@ -243,7 +253,7 @@ impl ChainGeometry {
             first_query: u64::from(first_query),
             last_contig: u64::from(chain.anchors[chain.anchors.len() - 1].0),
             span: u64::from(*chain.offsets.last().unwrap_or(&0)) + a,
-            slack: u64::from(config.max_drift) + 64,
+            slack: config.drift_margin(),
             margin,
             centre,
             band,

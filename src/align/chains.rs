@@ -58,6 +58,14 @@ pub const CHAINING_BYTES: usize = 64 << 20;
 /// Predecessors with a valid link that one anchor considers at most.
 const LOOKBACK: usize = 64;
 
+/// A link may leave the diagonal by this many bases plus one part in `DRIFT_SHARE` of its length.
+const DRIFT_BASES: i64 = 50;
+const DRIFT_SHARE: i64 = 5;
+
+/// A link that leaves the diagonal costs one per this many drifted bases, plus one, plus half
+/// the bits of the drift.
+const DRIFT_COST: i64 = 10;
+
 /// The chains of a window within the chaining budget, best score first per strand, and the
 /// number of query occurrences above which k-mers gave no anchors and must be recovered by
 /// dense walks (`Some(0)`: all of them).
@@ -261,14 +269,14 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
                 continue;
             }
             let drift = (dt - dq).abs();
-            if drift > 50 + dt.min(dq) / 5 {
+            if drift > DRIFT_BASES + dt.min(dq) / DRIFT_SHARE {
                 continue;
             }
             eligible += 1;
             let gap_cost = if drift == 0 {
                 0
             } else {
-                drift / 10 + 1 + (64 - i64::from((drift as u64).leading_zeros())) / 2
+                drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
             };
             let gained = score[i] + dt.min(dq).min(a) - gap_cost;
             if gained > best {

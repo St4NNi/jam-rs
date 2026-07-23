@@ -52,7 +52,7 @@ pub fn align_dense_walk(
         let whole = (u64::from(walk.query), length);
         return align_dense_window(input, whole, config, workspace, optimum);
     }
-    let margin = u64::from(config.max_drift) + 64;
+    let margin = config.drift_margin();
     let walk_end = u64::from(walk.query) + u64::from(walk.length);
     let mut extension = 2 * margin;
     loop {
@@ -90,7 +90,7 @@ fn align_dense_window(
         offset,
         table,
     } = input;
-    let margin = u64::from(config.max_drift) + 64;
+    let margin = config.drift_margin();
     let diagonal = i64::from(walk.contig) - (u64::from(walk.query) - query_start) as i64;
     let low = (diagonal - margin as i64).max(0) as u64;
     let high = (diagonal + window_length as i64 + margin as i64).max(0) as u64;
