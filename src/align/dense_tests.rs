@@ -15,7 +15,8 @@ fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>,
         ChainConfig::default(),
     )
     .unwrap();
-    let (walks, reverse) = dense_walks(&table, window, 0, BandConfig::default(), 64 << 20).unwrap();
+    let dense = dense_walks(&table, window, 0, BandConfig::default(), 64 << 20).unwrap();
+    let (walks, reverse) = (dense.walks, dense.reverse);
     (walks, reverse, table)
 }
 

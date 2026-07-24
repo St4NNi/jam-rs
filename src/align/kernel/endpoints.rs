@@ -10,6 +10,9 @@ use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval, 
 /// A score no path reaches; adding scoring terms to it cannot overflow.
 const NEGATIVE: i32 = i32::MIN / 4;
 
+/// The previous states of a cell before any is known: two bits per state, the top two zero.
+const INITIAL_PREVIOUS: u8 = START | (START << 2) | (START << 4);
+
 /// Reusable buffers of the endpoint matrices.
 #[derive(Debug, Default)]
 pub(super) struct EndpointWorkspace {
@@ -157,30 +160,46 @@ fn complete(
     Ok(core)
 }
 
-/// Keeps the best endpoint cell: higher score, then the later (row + column, row, column) and
-/// the lower state. The comparison is a total order, so the visiting order does not matter.
-fn endpoint_consider(
-    best: &mut (i32, usize, usize, u8),
+/// The best end cell of an endpoint matrix so far.
+#[derive(Clone, Copy)]
+struct EndCell {
+    score: i32,
     row: usize,
     column: usize,
-    scores: [i32; 3],
-) {
-    let (score, state) = maximum(scores);
-    let candidate = (
-        row.saturating_add(column),
-        row,
-        column,
-        std::cmp::Reverse(state),
-    );
-    let current = (
-        best.1.saturating_add(best.2),
-        best.1,
-        best.2,
-        std::cmp::Reverse(best.3),
-    );
-    if score > best.0 || (score == best.0 && candidate > current) {
-        *best = (score, row, column, state);
+    state: u8,
+}
+
+impl EndCell {
+    /// Keeps the better cell: higher score, then the later (row + column, row, column) and the
+    /// lower state. The comparison is a total order, so the visiting order does not matter.
+    fn consider(&mut self, row: usize, column: usize, scores: [i32; 3]) {
+        let (score, state) = maximum(scores);
+        let order = |cell: &EndCell| {
+            let (row, column) = (cell.row, cell.column);
+            (
+                row.saturating_add(column),
+                row,
+                column,
+                std::cmp::Reverse(cell.state),
+            )
+        };
+        let candidate = EndCell {
+            score,
+            row,
+            column,
+            state,
+        };
+        if score > self.score || (score == self.score && order(&candidate) > order(self)) {
+            *self = candidate;
+        }
     }
+}
+
+/// The score of a gap of `bases` bases.
+fn gap_score(config: AlignmentConfig, bases: usize) -> i32 {
+    let bases = i32::try_from(bases).unwrap_or(i32::MAX);
+    let extend = config.gap_extend_score.saturating_mul(bases);
+    config.gap_open_score.saturating_add(extend)
 }
 
 /// The highest score and its state; ties go to the lower state.
@@ -223,15 +242,6 @@ fn anchored_semiglobal(
             max_cells: config.max_cells,
         });
     }
-    let gap = |bases: usize| {
-        config.gap_open_score.saturating_add(
-            config
-                .gap_extend_score
-                .saturating_mul(i32::try_from(bases).unwrap_or(i32::MAX)),
-        )
-    };
-    // Two bits per predecessor; the high two bits are reserved zero.
-    const INITIAL_PREVIOUS: u8 = START | (START << 2) | (START << 4);
     workspace.previous.clear();
     workspace.previous.resize(matrix_cells, INITIAL_PREVIOUS);
     for row in &mut workspace.rows {
@@ -240,25 +250,30 @@ fn anchored_semiglobal(
     workspace.rows[0][0] = [0, NEGATIVE, NEGATIVE];
     for column in 1..columns {
         workspace.rows[0][column] = [NEGATIVE; 3];
-        workspace.rows[0][column][DELETION as usize] = gap(column);
+        workspace.rows[0][column][DELETION as usize] = gap_score(config, column);
         let state = if column == 1 { MATCH } else { DELETION };
         workspace.previous[column] = (INITIAL_PREVIOUS & !(3 << 2)) | (state << 2);
     }
-    let mut best = (NEGATIVE, 0usize, 0usize, START);
-    endpoint_consider(&mut best, 0, columns - 1, workspace.rows[0][columns - 1]);
+    let mut best = EndCell {
+        score: NEGATIVE,
+        row: 0,
+        column: 0,
+        state: START,
+    };
+    best.consider(0, columns - 1, workspace.rows[0][columns - 1]);
     for row in 1..rows {
         fill_endpoint_row(workspace, query, contig, config, row);
         let current = &workspace.rows[1][..columns];
         if row + 1 == rows {
             for (column, &scores) in current.iter().enumerate() {
-                endpoint_consider(&mut best, row, column, scores);
+                best.consider(row, column, scores);
             }
         } else {
-            endpoint_consider(&mut best, row, columns - 1, current[columns - 1]);
+            best.consider(row, columns - 1, current[columns - 1]);
         }
         workspace.rows.swap(0, 1);
     }
-    if best.3 > INSERTION {
+    if best.state > INSERTION {
         return Err(AlignmentError::NoAlignment);
     }
     trace_endpoint(workspace, query, contig, best)
@@ -272,7 +287,6 @@ fn fill_endpoint_row(
     config: AlignmentConfig,
     row: usize,
 ) {
-    const INITIAL_PREVIOUS: u8 = START | (START << 2) | (START << 4);
     let columns = contig.len() + 1;
     let gap_open = config.gap_open();
     let first = row * columns;
@@ -281,11 +295,7 @@ fn fill_endpoint_row(
     let current = &mut current[..columns];
     let traceback = &mut workspace.previous[first..first + columns];
     current[0] = [NEGATIVE; 3];
-    current[0][INSERTION as usize] = config.gap_open_score.saturating_add(
-        config
-            .gap_extend_score
-            .saturating_mul(i32::try_from(row).unwrap_or(i32::MAX)),
-    );
+    current[0][INSERTION as usize] = gap_score(config, row);
     let state = if row == 1 { MATCH } else { INSERTION };
     traceback[0] = (INITIAL_PREVIOUS & !(3 << 4)) | (state << 4);
     for column in 1..columns {
@@ -325,10 +335,10 @@ fn trace_endpoint(
     workspace: &mut EndpointWorkspace,
     query: &[u8],
     contig: &[u8],
-    best: (i32, usize, usize, u8),
+    best: EndCell,
 ) -> Result<EndpointResult, AlignmentError> {
     let columns = contig.len() + 1;
-    let (_, mut row, mut column, mut state) = best;
+    let (mut row, mut column, mut state) = (best.row, best.column, best.state);
     let operations = &mut workspace.operations;
     operations.clear();
     while row > 0 || column > 0 {
@@ -361,8 +371,8 @@ fn trace_endpoint(
     operations.reverse();
     Ok(EndpointResult {
         runs: runs_of(operations)?,
-        query_bases: best.1,
-        contig_bases: best.2,
+        query_bases: best.row,
+        contig_bases: best.column,
     })
 }
 

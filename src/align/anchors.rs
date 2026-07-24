@@ -51,7 +51,7 @@ pub struct QueryTable {
     query_length: u32,
     circular: bool,
     period: Option<usize>,
-    slots: Vec<(u64, u32, u32)>,
+    slots: Vec<Slot>,
     /// One bit for each key, so that most window k-mers that the query lacks are rejected without
     /// a probe into `slots`, which is many times larger. It never rejects a key of the table.
     filter: Vec<u64>,
@@ -63,6 +63,15 @@ pub struct QueryTable {
     query: Vec<u8>,
 }
 
+/// One slot of the open-addressing table: a k-mer and where its occurrences lie.
+#[derive(Clone, Copy)]
+struct Slot {
+    key: u64,
+    start: u32,
+    count: u32,
+}
+
+/// The key of an empty slot; no k-mer of at most 31 bases has it.
 const EMPTY: u64 = u64::MAX;
 const REVERSE: u32 = 1 << 31;
 
@@ -185,17 +194,26 @@ impl QueryTable {
             .max()
             .unwrap_or(0);
         let slots = (distinct * 2).next_power_of_two().max(16);
-        let mut table = vec![(EMPTY, 0u32, 0u32); slots];
+        let empty = Slot {
+            key: EMPTY,
+            start: 0,
+            count: 0,
+        };
+        let mut table = vec![empty; slots];
         let mut filter = vec![0u64; ((distinct * 8).next_power_of_two().max(1024)) / 64];
         let mut occurrences = Vec::with_capacity(pairs.len());
         let mut left = Vec::with_capacity(pairs.len());
         for group in pairs.chunk_by(|a, b| a.0 == b.0) {
             let hash = jamhash_u64(group[0].0);
             let mut slot = (hash as usize) & (slots - 1);
-            while table[slot].0 != EMPTY {
+            while table[slot].key != EMPTY {
                 slot = (slot + 1) & (slots - 1);
             }
-            table[slot] = (group[0].0, occurrences.len() as u32, group.len() as u32);
+            table[slot] = Slot {
+                key: group[0].0,
+                start: occurrences.len() as u32,
+                count: group.len() as u32,
+            };
             let bit = filter_bit(hash, filter.len());
             filter[bit / 64] |= 1 << (bit % 64);
             occurrences.extend(group.iter().map(|pair| pair.2));
@@ -218,25 +236,26 @@ impl QueryTable {
 
     /// The occurrences of `key`: query positions, with `REVERSE` set for the reverse strand.
     fn get(&self, key: u64) -> &[u32] {
-        let (start, count) = self.slot(key);
-        &self.occurrences[start..start + count]
+        &self.occurrences[self.slot(key)]
     }
 
-    fn slot(&self, key: u64) -> (usize, usize) {
+    /// The range of the occurrences of `key`, empty when the query lacks it.
+    fn slot(&self, key: u64) -> std::ops::Range<usize> {
         let hash = jamhash_u64(key);
         let bit = filter_bit(hash, self.filter.len());
         if self.filter[bit / 64] & (1 << (bit % 64)) == 0 {
-            return (0, 0);
+            return 0..0;
         }
         let mask = self.slots.len() - 1;
         let mut slot = (hash as usize) & mask;
         loop {
-            let (found, start, count) = self.slots[slot];
-            if found == key {
-                return (start as usize, count as usize);
+            let found = self.slots[slot];
+            if found.key == key {
+                let start = found.start as usize;
+                return start..start + found.count as usize;
             }
-            if found == EMPTY {
-                return (0, 0);
+            if found.key == EMPTY {
+                return 0..0;
             }
             slot = (slot + 1) & mask;
         }
@@ -244,15 +263,15 @@ impl QueryTable {
 
     /// Occurrences of `key` on both strands.
     pub fn multiplicity(&self, key: u64) -> usize {
-        self.slot(key).1
+        self.slot(key).len()
     }
 
     /// Forward query positions of `key` that do not follow a base of code `left`, so a match
     /// with a window position whose preceding base has that code cannot extend to the left.
     /// Code 4 (none or another byte) excludes nothing.
     pub fn match_starts(&self, key: u64, left: u8) -> impl Iterator<Item = u32> + '_ {
-        let (start, count) = self.slot(key);
-        let codes = &self.left[start..start + count];
+        let range = self.slot(key);
+        let codes = &self.left[range.clone()];
         let forward = codes.partition_point(|code| *code < 5);
         let (low, high) = if left < 4 {
             (
@@ -262,7 +281,7 @@ impl QueryTable {
         } else {
             (forward, forward)
         };
-        let occurrences = &self.occurrences[start..start + count];
+        let occurrences = &self.occurrences[range];
         occurrences[..low]
             .iter()
             .chain(&occurrences[high..forward])

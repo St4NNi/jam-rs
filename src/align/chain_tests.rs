@@ -31,7 +31,9 @@ fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
         ChainConfig::default(),
     )
     .unwrap();
-    window_chains(&table, window, &mut Vec::new()).unwrap().0
+    window_chains(&table, window, &mut Vec::new())
+        .unwrap()
+        .chains
 }
 
 fn diagonals(chain: &Chain) -> Vec<i64> {
@@ -113,7 +115,8 @@ fn dense_anchor_product_is_left_to_dense_walks() {
     let mut scratch = Vec::new();
     // Every k-mer occurs about 25,000 times per strand: none gives anchors, all are left to
     // dense walks, and nothing of the 1.25 billion anchor product is held.
-    let (chains, above) = window_chains(&table, &query, &mut scratch).unwrap();
+    let found = window_chains(&table, &query, &mut scratch).unwrap();
+    let (chains, above) = (found.chains, found.dense_above);
     assert!(chains.is_empty());
     assert_eq!(above, Some(0));
     assert_eq!(scratch.capacity(), 0);
@@ -131,10 +134,10 @@ fn periodic_locations_are_enumerated_without_dense_anchor_storage() {
     .unwrap();
     let mut scratch = Vec::new();
     let found = window_chains(&table, &query, &mut scratch).unwrap();
-    assert!(found.0.len() > 99_000);
-    assert_eq!(found.1, None);
+    assert!(found.chains.len() > 99_000);
+    assert_eq!(found.dense_above, None);
     assert_eq!(scratch.capacity(), 0);
-    assert!(found.0.iter().all(|chain| chain.anchors.len() == 3));
+    assert!(found.chains.iter().all(|chain| chain.anchors.len() == 3));
 }
 
 #[test]

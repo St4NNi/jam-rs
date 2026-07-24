@@ -66,46 +66,69 @@ const DRIFT_SHARE: i64 = 5;
 /// the bits of the drift.
 const DRIFT_COST: i64 = 10;
 
-/// The chains of a window within the chaining budget, best score first per strand, and the
-/// number of query occurrences above which k-mers gave no anchors and must be recovered by
-/// dense walks (`Some(0)`: all of them).
+/// The chains of an alignment window, and the k-mers it leaves to dense walks.
+pub struct WindowChains {
+    /// The chains, best score first per strand.
+    pub chains: Vec<Chain>,
+    /// K-mers with more query occurrences than this gave no anchors, so dense walks recover
+    /// their copies (0: every k-mer). `None` when every k-mer gave anchors.
+    pub dense_above: Option<usize>,
+}
+
+/// The chains of a window within the chaining budget.
 pub fn window_chains(
     table: &QueryTable,
     window: &[u8],
     scratch: &mut Vec<Anchor>,
-) -> Result<(Vec<Chain>, Option<usize>), AlignmentError> {
+) -> Result<WindowChains, AlignmentError> {
     scratch.clear();
     if table.circular() && table.periodic_pair(window).is_some() {
-        return Ok((Vec::new(), Some(0)));
+        let chains = Vec::new();
+        return Ok(WindowChains {
+            chains,
+            dense_above: Some(0),
+        });
     }
     if let Some(chains) = periodic_chains(table, window)? {
-        return Ok((chains, None));
+        return Ok(WindowChains {
+            chains,
+            dense_above: None,
+        });
     }
-    let (count, above) = anchor_budget(table, window, scratch.capacity());
-    find_anchors(table, window, scratch, above, count);
+    let budget = anchor_budget(table, window, scratch.capacity());
+    find_anchors(table, window, scratch, budget.above, budget.expected);
     let mut chains = Vec::new();
     let split = scratch.partition_point(|anchor| anchor.strand == Strand::Forward);
     for strand in [&scratch[..split], &scratch[split..]] {
         chain_anchors(table, strand, &mut chains);
     }
-    Ok((chains, above))
+    Ok(WindowChains {
+        chains,
+        dense_above: budget.above,
+    })
 }
 
 /// The anchors a window may give within `CHAINING_BYTES` and the query occurrence count above
 /// which k-mers give none (`None`: all fit). When all anchors would not fit, only k-mers with the
 /// fewest occurrences give anchors, those that fit half of the budget.
-fn anchor_budget(table: &QueryTable, window: &[u8], capacity: usize) -> (usize, Option<usize>) {
+fn anchor_budget(table: &QueryTable, window: &[u8], capacity: usize) -> AnchorBudget {
     let price = |count: usize| anchor_bytes(capacity, count, table);
     // The most anchors a window can give, before its k-mers are looked up.
     let stride = usize::from(table.anchors().stride);
     let bound = (window.len() / stride + 1).saturating_mul(table.max_occurrences());
     if price(bound) <= CHAINING_BYTES {
         // Even a window of the most frequent k-mers fits, so the lookups need not be counted.
-        return (bound, None);
+        return AnchorBudget {
+            expected: bound,
+            above: None,
+        };
     }
     let count = count_anchors(table, window);
     if price(count) <= CHAINING_BYTES {
-        return (count, None);
+        return AnchorBudget {
+            expected: count,
+            above: None,
+        };
     }
     let (mut sparse, mut threshold) = (0usize, 0usize);
     for (occurrences, count) in occurrence_counts(table, window) {
@@ -115,7 +138,17 @@ fn anchor_budget(table: &QueryTable, window: &[u8], capacity: usize) -> (usize, 
         }
         (sparse, threshold) = (next, occurrences);
     }
-    (sparse, Some(threshold))
+    AnchorBudget {
+        expected: sparse,
+        above: Some(threshold),
+    }
+}
+
+/// The anchors a window gives at most, and the query occurrence count above which its k-mers
+/// give none (`None`: all fit).
+struct AnchorBudget {
+    expected: usize,
+    above: Option<usize>,
 }
 
 /// Bytes of `count` anchors and of the chaining arrays, traceback and chain headers that can
@@ -201,33 +234,33 @@ fn periodic_chains(
 /// never covers more than the query length.
 pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
     let config = table.chains();
-    let (score, previous, span) = chain_scores(table, anchors);
+    let links = chain_links(table, anchors);
     let n = anchors.len();
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_unstable_by_key(|&index| (std::cmp::Reverse(score[index]), index));
+    order.sort_unstable_by_key(|&index| (std::cmp::Reverse(links[index].score), index));
     let mut used = vec![false; n];
     for end in order {
-        if used[end] || score[end] < config.min_score {
+        if used[end] || links[end].score < config.min_score {
             continue;
         }
         let (mut path, mut base, mut at) = (Vec::new(), 0, end);
         loop {
             if used[at] {
-                base = score[at];
+                base = links[at].score;
                 break;
             }
             used[at] = true;
             path.push(at);
-            if previous[at] == usize::MAX {
+            if links[at].previous == usize::MAX {
                 break;
             }
-            at = previous[at];
+            at = links[at].previous;
         }
-        if path.len() < config.min_anchors as usize || score[end] - base < config.min_score {
+        if path.len() < config.min_anchors as usize || links[end].score - base < config.min_score {
             continue;
         }
         path.reverse();
-        let origin = span[path[0]];
+        let origin = links[path[0]].span;
         out.push(Chain {
             strand: anchors[end].strand,
             anchors: path
@@ -236,23 +269,29 @@ pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain
                 .collect(),
             offsets: path
                 .iter()
-                .map(|&index| (span[index] - origin) as u32)
+                .map(|&index| (links[index].span - origin) as u32)
                 .collect(),
-            score: score[end] - base,
+            score: links[end].score - base,
         });
     }
 }
 
-/// For every anchor: the best chain score ending in it, its predecessor (`usize::MAX` for none)
+/// The best chain that ends in an anchor: its score, the anchor before (`usize::MAX` for none)
 /// and the query span from the chain start.
-fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>, Vec<i64>) {
+#[derive(Clone, Copy)]
+struct Link {
+    score: i64,
+    previous: usize,
+    span: i64,
+}
+
+/// The best link of every anchor.
+fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
     let a = i64::from(table.anchors().a);
     let max_gap = i64::from(table.chains().max_gap);
     let length = i64::from(table.query_length());
     let n = anchors.len();
-    let mut score = vec![0i64; n];
-    let mut previous = vec![usize::MAX; n];
-    let mut span = vec![0i64; n];
+    let mut links: Vec<Link> = Vec::with_capacity(n);
     for j in 0..n {
         let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
         let end = anchors[..j].partition_point(|anchor| anchor.contig < anchors[j].contig);
@@ -266,7 +305,7 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
             if table.circular() && dq <= 0 {
                 dq += length;
             }
-            if dt <= 0 || dq <= 0 || dq > max_gap || span[i] + dq + a > length {
+            if dt <= 0 || dq <= 0 || dq > max_gap || links[i].span + dq + a > length {
                 continue;
             }
             let drift = (dt - dq).abs();
@@ -279,17 +318,21 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
             } else {
                 drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
             };
-            let gained = score[i] + dt.min(dq).min(a) - gap_cost;
+            let gained = links[i].score + dt.min(dq).min(a) - gap_cost;
             if gained > best {
-                (best, from, best_span) = (gained, i, span[i] + dq);
+                (best, from, best_span) = (gained, i, links[i].span + dq);
             }
             if eligible == LOOKBACK {
                 break;
             }
         }
-        (score[j], previous[j], span[j]) = (best, from, best_span);
+        links.push(Link {
+            score: best,
+            previous: from,
+            span: best_span,
+        });
     }
-    (score, previous, span)
+    links
 }
 
 /// Forward window positions `start..end` covered by the anchors of a chain.

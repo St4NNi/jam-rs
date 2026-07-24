@@ -2,7 +2,7 @@
 
 use super::{AlignStageConfig, AlignStageError, AlignWork, PreparedQuery};
 use crate::align::{
-    Anchor, CHAINING_BYTES, Chain, Walk, dense_walks, forward_extent, window_chains,
+    Anchor, CHAINING_BYTES, Chain, DenseWalks, Walk, dense_walks, forward_extent, window_chains,
 };
 use crate::index::PackedSequence;
 use std::mem::size_of;
@@ -109,21 +109,23 @@ pub(super) fn prepare_window(
     packed.read(contig as usize, range.clone(), &mut bases)?;
     work.windows += 1;
     work.bases_read += bases.len() as u64;
-    let (chains, above) = window_chains(&query.table, &bases, &mut buffers.anchors)?;
+    let found = window_chains(&query.table, &bases, &mut buffers.anchors)?;
+    let chains = found.chains;
     work.anchors += buffers.anchors.len() as u64;
     // K-mers too frequent for anchors, and those of low-complexity runs: their copies are
     // walked along their diagonals.
-    let (mut walks, mut reverse) = match above {
+    let mut dense = match found.dense_above {
         Some(above) => dense_walks(&query.table, &bases, above, config.band, CHAINING_BYTES)?,
-        None => Default::default(),
+        None => DenseWalks::default(),
     };
     if let Some(low) = &query.low {
-        let (more, copy) = dense_walks(low, &bases, 0, config.band, CHAINING_BYTES)?;
-        walks.extend(more);
-        if reverse.is_empty() {
-            reverse = copy;
+        let more = dense_walks(low, &bases, 0, config.band, CHAINING_BYTES)?;
+        dense.walks.extend(more.walks);
+        if dense.reverse.is_empty() {
+            dense.reverse = more.reverse;
         }
     }
+    let DenseWalks { walks, reverse } = dense;
     Ok(PreparedWindow {
         start: range.start,
         bases,

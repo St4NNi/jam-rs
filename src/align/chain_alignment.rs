@@ -69,8 +69,8 @@ pub fn align_chain(
     let geometry = ChainGeometry::new(chain, window.len() as u64, table, config, reach);
     let a = u64::from(table.anchors().a);
     let length = u64::from(table.query_length());
-    let (_, widest_left, widest_span, _, _) = geometry.window_at(geometry.extension);
-    let widest_right = widest_span - widest_left - geometry.span.min(widest_span);
+    let widest = geometry.stretch(geometry.extension);
+    let widest_right = widest.query_span - widest.left - geometry.span.min(widest.query_span);
     // A window that reaches at most the margin beyond the chain always counts as run into: the
     // chain itself starts within the margin. So the first window reaches past the margin.
     let mut narrow = FIRST_EXTENSION;
@@ -79,7 +79,13 @@ pub fn align_chain(
     }
     let mut narrow = narrow.min(geometry.extension);
     loop {
-        let (query_start, left, query_span, contig_low, contig_high) = geometry.window_at(narrow);
+        let Stretch {
+            query_start,
+            left,
+            query_span,
+            contig_low,
+            contig_high,
+        } = geometry.stretch(narrow);
         let (forward_low, forward_high) = if chain.strand.is_reverse() {
             (
                 window.len() as u64 - contig_high,
@@ -112,7 +118,7 @@ pub fn align_chain(
             alignment.query_interval.end - query_start,
         );
         let right = query_span - left - geometry.span.min(query_span);
-        let runs_into_edge = (left < widest_left && aligned_start <= geometry.margin)
+        let runs_into_edge = (left < widest.left && aligned_start <= geometry.margin)
             || (right < widest_right && query_span - aligned_end <= geometry.margin);
         if runs_into_edge && narrow < geometry.extension {
             narrow = narrow.saturating_mul(4).min(geometry.extension);
@@ -253,9 +259,8 @@ impl ChainGeometry {
         }
     }
 
-    /// The query start, the query bases before the chain, the query length and the contig range
-    /// of an alignment that may extend by `extension` query bases beyond the chain.
-    fn window_at(&self, extension: u64) -> (u64, u64, u64, u64, u64) {
+    /// The stretch of an alignment that may extend by `extension` query bases beyond the chain.
+    fn stretch(&self, extension: u64) -> Stretch {
         let (length, a, span) = (self.length, self.a, self.span);
         let after = self.window_length.saturating_sub(self.last_contig + a);
         let (query_start, left, query_span) = if self.circular {
@@ -266,8 +271,7 @@ impl ChainGeometry {
             let left = (room - right).min(self.first_contig);
             let right = room - left;
             // Query bases beyond the contig bases that the window has on a side can only be a
-            // long gap, so the query window does not reach further than those and the drift
-            // allowance.
+            // long gap, so the stretch does not reach further than those and the drift allowance.
             let (left, right) = (
                 left.min(self.first_contig + self.slack),
                 right.min(after + self.slack),
@@ -292,6 +296,22 @@ impl ChainGeometry {
         let contig_high =
             (self.last_contig + a + (query_span - left - span.min(query_span)) + self.margin)
                 .min(self.window_length);
-        (query_start, left, query_span, contig_low, contig_high)
+        Stretch {
+            query_start,
+            left,
+            query_span,
+            contig_low,
+            contig_high,
+        }
     }
+}
+
+/// The query bases and the oriented contig range that one alignment of a chain reads.
+struct Stretch {
+    query_start: u64,
+    /// The query bases before the chain.
+    left: u64,
+    query_span: u64,
+    contig_low: u64,
+    contig_high: u64,
 }

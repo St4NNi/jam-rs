@@ -23,11 +23,11 @@ mod walk_alignment;
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, find_anchors, kmers};
 pub use chain_alignment::{BandConfig, align_chain};
 pub use chains::{
-    CHAINING_BYTES, Chain, ChainConfig, chain_anchors, forward_extent, split_by_drift,
-    window_chains,
+    CHAINING_BYTES, Chain, ChainConfig, WindowChains, chain_anchors, forward_extent,
+    split_by_drift, window_chains,
 };
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
-pub use dense::{Walk, dense_walks, long_enough};
+pub use dense::{DenseWalks, Walk, dense_walks, long_enough};
 pub use dense_alignment::{DenseOptimum, align_dense_walk};
 pub use joins::{JoinLimits, JoinScratch};
 pub use kernel::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, DEFAULT_MAX_CELLS};

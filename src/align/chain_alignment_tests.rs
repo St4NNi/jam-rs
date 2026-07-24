@@ -35,7 +35,9 @@ fn alignments(query: &[u8], window: &[u8], circular: bool) -> Vec<Alignment> {
     )
     .unwrap();
     let mut workspace = AlignmentWorkspace::default();
-    let (chains, _) = window_chains(&table, window, &mut Vec::new()).unwrap();
+    let chains = window_chains(&table, window, &mut Vec::new())
+        .unwrap()
+        .chains;
     let mut found = Vec::new();
     for chain in chains {
         for part in split_by_drift(&chain, config.max_drift, 3) {

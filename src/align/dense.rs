@@ -22,6 +22,14 @@ pub struct Walk {
     pub length: u32,
 }
 
+/// The walks of an alignment window, and the reverse complement of the window that reverse
+/// walks are read from (empty when no walk needs it).
+#[derive(Debug, Default)]
+pub struct DenseWalks {
+    pub walks: Vec<Walk>,
+    pub reverse: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct Start {
     /// Oriented window position minus query position; modulo the query length when circular.
@@ -39,10 +47,10 @@ pub fn dense_walks(
     above: usize,
     config: BandConfig,
     budget: usize,
-) -> Result<(Vec<Walk>, Vec<u8>), AlignmentError> {
+) -> Result<DenseWalks, AlignmentError> {
     let a = usize::from(table.anchors().a);
     if window.len() < a || window.len() >= 1 << 32 {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(DenseWalks::default());
     }
     if table.circular()
         && let Some(walks) = periodic_walks(table, window, budget)?
@@ -96,17 +104,16 @@ pub fn dense_walks(
             walk_diagonal(table, sequence, strand, group, config, &mut walks);
         }
     }
-    Ok((walks, reverse))
+    Ok(DenseWalks { walks, reverse })
 }
 
 /// The walks of a circular periodic query in a window of its repeat: one equivalent phase per
 /// period, from every window position.
-#[allow(clippy::type_complexity)]
 fn periodic_walks(
     table: &QueryTable,
     window: &[u8],
     budget: usize,
-) -> Result<Option<(Vec<Walk>, Vec<u8>)>, AlignmentError> {
+) -> Result<Option<DenseWalks>, AlignmentError> {
     let Some(periodic) = table.periodic_pair(window) else {
         return Ok(None);
     };
@@ -134,7 +141,7 @@ fn periodic_walks(
     }
     let mut reverse = Vec::new();
     reverse_complement_into(window, &mut reverse);
-    Ok(Some((walks, reverse)))
+    Ok(Some(DenseWalks { walks, reverse }))
 }
 
 /// Calls `visit(contig, query)` for every match start of an oriented window: a k-mer with more
