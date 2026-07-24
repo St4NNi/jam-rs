@@ -2,7 +2,7 @@
 //! whether a walk is aligned again with gaps or lies inside an alignment already made.
 
 use super::anchors::{QueryTable, kmers};
-use super::chain_alignment::{BandConfig, strand};
+use super::chain_alignment::BandConfig;
 use super::cigar::{append_runs, counts};
 use super::dense::Walk;
 use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
@@ -76,7 +76,7 @@ pub(super) fn oriented_alignment(
     let counts = counts(&runs);
     let (contig_span, query_span) = (counts.contig_bases(), counts.query_bases());
     let low = u64::from(first.contig);
-    let (start, end) = if first.reverse {
+    let (start, end) = if first.strand.is_reverse() {
         let window_length = window_length as u64;
         (window_length - low - contig_span, window_length - low)
     } else {
@@ -85,7 +85,7 @@ pub(super) fn oriented_alignment(
     let query_start = u64::from(first.query);
     Ok(Alignment {
         score: i32::try_from(score).map_err(|_| AlignmentError::LengthOverflow)?,
-        strand: strand(first.reverse),
+        strand: first.strand,
         query_interval: Interval::new(query_start, query_start + query_span)?,
         contig_interval: Interval::new(offset + start, offset + end)?,
         runs,
@@ -179,11 +179,11 @@ pub fn holds_walk(
     offset: u64,
     query_length: u64,
 ) -> bool {
-    if (alignment.strand == super::Strand::Reverse) != walk.reverse {
+    if (alignment.strand == super::Strand::Reverse) != walk.strand.is_reverse() {
         return false;
     }
     let (low, high) = (u64::from(walk.contig), u64::from(walk.contig + walk.length));
-    let (low, high) = if walk.reverse {
+    let (low, high) = if walk.strand.is_reverse() {
         (window_length as u64 - high, window_length as u64 - low)
     } else {
         (low, high)

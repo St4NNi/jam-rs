@@ -78,7 +78,7 @@ impl JoinScratch {
         let key = |index: u32, end: bool| {
             let walk = walks[index as usize];
             let contig = walk.contig + if end { walk.length } else { 0 };
-            (walk.reverse, contig, index)
+            (walk.strand.is_reverse(), contig, index)
         };
         self.limits = limits;
         self.starts = (0..walks.len() as u32).collect();
@@ -114,14 +114,15 @@ impl JoinScratch {
         };
         let key = |other: &Walk| {
             let contig = u64::from(other.contig) + if after { 0 } else { u64::from(other.length) };
-            (other.reverse, contig)
+            (other.strand.is_reverse(), contig)
         };
-        let first =
-            order.partition_point(|&index| key(&walks[index as usize]) < (walk.reverse, low));
+        let first = order.partition_point(|&index| {
+            key(&walks[index as usize]) < (walk.strand.is_reverse(), low)
+        });
         let mut best: Option<((u64, u64, u32), u64)> = None;
         for &index in &order[first..] {
             let other = walks[index as usize];
-            if key(&other) > (walk.reverse, high) {
+            if key(&other) > (walk.strand.is_reverse(), high) {
                 break;
             }
             let (before, next) = if after { (walk, other) } else { (other, walk) };

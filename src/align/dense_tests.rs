@@ -1,4 +1,5 @@
 use super::ChainConfig;
+use super::Strand;
 use super::chain_tests::random_sequence;
 use super::{
     AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinLimits,
@@ -29,20 +30,24 @@ fn imperfect_periodic_pair_walks_every_diagonal_once() {
     for walk in &walks {
         let diagonal = i64::from(walk.contig) - i64::from(walk.query);
         assert!(
-            lines.insert((walk.reverse, diagonal)),
+            lines.insert((walk.strand.is_reverse(), diagonal)),
             "one walk per diagonal"
         );
         assert_eq!(diagonal.rem_euclid(4), 0);
         // The whole overlap, but a local alignment leaves out an N in its first or last column.
         let overlap = 10_000 - diagonal.unsigned_abs();
         assert!(overlap - u64::from(walk.length) <= 2, "{walk:?}");
-        let oriented = if walk.reverse { &reverse } else { &query };
+        let oriented = if walk.strand.is_reverse() {
+            &reverse
+        } else {
+            &query
+        };
         let alignment = walk_alignment(walk, oriented, 0, &table, BandConfig::default()).unwrap();
         alignment.validate().unwrap();
         assert!(alignment.counts().substitutions <= 2);
         let cigar = format_cigar(&alignment.runs);
         assert!(cigar.ends_with('=') && !cigar.starts_with("1X"), "{cigar}");
-        if (walk.reverse, diagonal) == (false, 0) {
+        if (walk.strand, diagonal) == (Strand::Forward, 0) {
             assert_eq!(cigar, "10000=");
         }
     }
@@ -60,7 +65,11 @@ fn circular_walks_cover_the_query_at_most_once() {
     assert!(walks.iter().all(|walk| walk.length <= 2000));
     assert!(walks.iter().any(|walk| walk.length == 2000));
     for walk in &walks {
-        let oriented = if walk.reverse { &reverse } else { &window };
+        let oriented = if walk.strand.is_reverse() {
+            &reverse
+        } else {
+            &window
+        };
         let alignment = walk_alignment(walk, oriented, 0, &table, BandConfig::default()).unwrap();
         alignment.validate().unwrap();
         assert_eq!(alignment.query_interval.len(), u64::from(walk.length));
@@ -78,14 +87,14 @@ fn walks_end_where_the_copy_ends_and_skip_repeated_starts() {
     let (walks, _, _) = walks_of(&query, &window, false);
     let longest = walks
         .iter()
-        .filter(|walk| !walk.reverse)
+        .filter(|walk| !walk.strand.is_reverse())
         .max_by_key(|walk| walk.length)
         .unwrap();
     assert!((1200..1210).contains(&longest.length), "{longest:?}");
     let diagonal = i64::from(longest.contig) - i64::from(longest.query);
-    let same = walks
-        .iter()
-        .filter(|walk| !walk.reverse && i64::from(walk.contig) - i64::from(walk.query) == diagonal);
+    let same = walks.iter().filter(|walk| {
+        !walk.strand.is_reverse() && i64::from(walk.contig) - i64::from(walk.query) == diagonal
+    });
     assert_eq!(same.count(), 1);
 }
 
@@ -124,7 +133,7 @@ fn dense_optimum_is_reused_only_for_matching_inputs_and_bands() {
     };
     let config = BandConfig::default();
     let walk = Walk {
-        reverse: false,
+        strand: Strand::Forward,
         contig: 0,
         query: 0,
         length: 200,
@@ -136,7 +145,7 @@ fn dense_optimum_is_reused_only_for_matching_inputs_and_bands() {
     assert!(align(&other, config, &mut saved).is_none());
     assert_eq!(Some(first), align(&other, config, &mut None));
     let reverse = Walk {
-        reverse: true,
+        strand: Strand::Reverse,
         ..walk
     };
     assert!(align(&reverse, config, &mut saved).is_some());
@@ -163,7 +172,7 @@ fn dense_walk_of_a_long_query_aligns_the_bases_around_it() {
     contig.extend_from_slice(&query[5_000..7_000]);
     contig.extend(random_sequence(300, 10));
     let walk = Walk {
-        reverse: false,
+        strand: Strand::Forward,
         contig: 1_300,
         query: 4_000,
         length: 300,
@@ -203,13 +212,13 @@ fn short_blocks_join_across_a_divergent_piece() {
     let config = BandConfig::default();
     let walks = [
         Walk {
-            reverse: false,
+            strand: Strand::Forward,
             contig: 0,
             query: 100,
             length: 30,
         },
         Walk {
-            reverse: false,
+            strand: Strand::Forward,
             contig: 36,
             query: 136,
             length: 30,

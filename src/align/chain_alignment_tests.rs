@@ -172,7 +172,7 @@ fn wide_band_and_drift_align_a_long_deletion() {
     let anchors = [0u32, 500, 1000, 1500, 2000, 2500]
         .map(|q| (if q < 1500 { 2000 + q } else { 3000 + q }, q));
     let chain = Chain {
-        reverse: false,
+        strand: Strand::Forward,
         anchors: anchors.to_vec(),
         offsets: anchors.iter().map(|&(_, q)| q).collect(),
         score: 100,

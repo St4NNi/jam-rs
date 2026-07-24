@@ -2,17 +2,18 @@
 //! conserved block on another diagonal, is aligned again with the banded kernel.
 
 use super::anchors::QueryTable;
-use super::chain_alignment::{BandConfig, strand};
+use super::chain_alignment::BandConfig;
 use super::dense::Walk;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
+    Strand,
 };
 
 /// A walk alignment proven to be the best for its query window and contig range, so the next
 /// walk with the same inputs and its diagonals inside its band need not be aligned again.
 #[derive(Clone, Copy, Debug)]
 pub struct DenseOptimum {
-    reverse: bool,
+    strand: Strand,
     query_start: u64,
     contig: (u64, u64),
     diagonals: (i64, i64),
@@ -100,7 +101,7 @@ fn align_dense_window(
     }
     let band = i64::from(config.max_band());
     if optimum.as_ref().is_some_and(|saved| {
-        saved.reverse == walk.reverse
+        saved.strand == walk.strand
             && saved.query_start == query_start
             && saved.contig == (low, high)
             && saved.diagonals.0 >= diagonal - band
@@ -108,7 +109,7 @@ fn align_dense_window(
     }) {
         return Ok(None);
     }
-    let (forward_low, forward_high) = if walk.reverse {
+    let (forward_low, forward_high) = if walk.strand.is_reverse() {
         (window.len() as u64 - high, window.len() as u64 - low)
     } else {
         (low, high)
@@ -133,7 +134,7 @@ fn align_dense_window(
         contig: &window[forward_low as usize..forward_high as usize],
         contig_offset: offset + forward_low,
     };
-    let alignment = match workspace.align(aligned, strand(walk.reverse), scores) {
+    let alignment = match workspace.align(aligned, walk.strand, scores) {
         Ok(alignment) => alignment,
         Err(AlignmentError::NoAlignment) => return Ok(None),
         Err(error) => return Err(error),
@@ -162,7 +163,7 @@ fn align_dense_window(
     let outside = left.max(right) * i64::from(config.alignment.match_score);
     if alignment.score >= kernel_score && i64::from(alignment.score) > outside {
         *optimum = Some(DenseOptimum {
-            reverse: walk.reverse,
+            strand: walk.strand,
             query_start,
             contig: (low, high),
             diagonals,
@@ -179,7 +180,7 @@ fn path_diagonals(
     offset: u64,
     query_start: u64,
 ) -> (i64, i64) {
-    let mut contig_at = if alignment.strand == super::Strand::Reverse {
+    let mut contig_at = if alignment.strand.is_reverse() {
         window_length - (alignment.contig_interval.end - offset)
     } else {
         alignment.contig_interval.start - offset

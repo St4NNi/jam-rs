@@ -49,7 +49,11 @@ impl AlignedPath {
         self.paired
             .iter()
             .map(move |&(query, window, length)| Walk {
-                reverse: self.reverse,
+                strand: if self.reverse {
+                    Strand::Reverse
+                } else {
+                    Strand::Forward
+                },
                 contig: window as u32,
                 query: (query % query_length) as u32,
                 length: length as u32,
@@ -112,7 +116,7 @@ impl PathIndex {
     /// Adds an ungapped dense walk.
     pub(super) fn add_walk(&mut self, walk: &Walk) {
         let path = AlignedPath {
-            reverse: walk.reverse,
+            reverse: walk.strand.is_reverse(),
             paired: vec![(walk.query.into(), walk.contig.into(), walk.length.into())],
         };
         add_segments(&mut self.diagonals, &path);
@@ -139,7 +143,12 @@ impl PathIndex {
             .anchors
             .iter()
             .filter(|&&(window, query)| {
-                self.covers(chain.reverse, window.into(), query.into(), query_length)
+                self.covers(
+                    chain.strand.is_reverse(),
+                    window.into(),
+                    query.into(),
+                    query_length,
+                )
             })
             .count();
         covered * 10 >= chain.anchors.len() * 9
@@ -156,7 +165,12 @@ impl PathIndex {
         let kept: Vec<usize> = (0..chain.anchors.len())
             .filter(|&index| {
                 let (window, query) = chain.anchors[index];
-                !self.covers(chain.reverse, window.into(), query.into(), query_length)
+                !self.covers(
+                    chain.strand.is_reverse(),
+                    window.into(),
+                    query.into(),
+                    query_length,
+                )
             })
             .collect();
         if kept.len() == chain.anchors.len() || kept.len() < min_anchors as usize {
@@ -164,7 +178,7 @@ impl PathIndex {
         }
         let base = chain.offsets[kept[0]];
         Some(Chain {
-            reverse: chain.reverse,
+            strand: chain.strand,
             anchors: kept.iter().map(|&index| chain.anchors[index]).collect(),
             offsets: kept
                 .iter()
@@ -184,7 +198,10 @@ impl PathIndex {
         let mut overlaps: Vec<(i64, i64)> = Vec::new();
         for &shift in shifts(circular) {
             let moved = shift * query_length as i64;
-            let Some(list) = self.diagonals.get(&(walk.reverse, diagonal - moved)) else {
+            let Some(list) = self
+                .diagonals
+                .get(&(walk.strand.is_reverse(), diagonal - moved))
+            else {
                 continue;
             };
             let (low, high) = (start + moved, start + length + moved);
@@ -220,7 +237,7 @@ impl PathIndex {
             let moved = shift * query_length as i64;
             let (low, high) = (start + moved, start + length + moved);
             for line in diagonal - moved - band..=diagonal - moved + band {
-                let Some(list) = self.aligned.get(&(walk.reverse, line)) else {
+                let Some(list) = self.aligned.get(&(walk.strand.is_reverse(), line)) else {
                     continue;
                 };
                 for &(at, run) in list {
@@ -259,7 +276,11 @@ mod tests {
 
     fn chain(reverse: bool, anchors: &[(u32, u32)]) -> Chain {
         Chain {
-            reverse,
+            strand: if reverse {
+                Strand::Reverse
+            } else {
+                Strand::Forward
+            },
             anchors: anchors.to_vec(),
             offsets: anchors.iter().map(|&(_, q)| q - anchors[0].1).collect(),
             score: 100,
@@ -308,7 +329,7 @@ mod tests {
         // Query position 10 is 110 one query length on, on window position 210.
         assert!(paths.redundant(&chain(false, &[(205, 5), (210, 10), (215, 15)]), 100));
         let walk = Walk {
-            reverse: false,
+            strand: Strand::Forward,
             contig: 200,
             query: 0,
             length: 30,
@@ -320,7 +341,7 @@ mod tests {
     #[test]
     fn walks_count_for_coverage_but_not_for_alignments_around() {
         let walk = Walk {
-            reverse: true,
+            strand: Strand::Reverse,
             contig: 100,
             query: 0,
             length: 200,

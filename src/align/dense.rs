@@ -5,10 +5,10 @@
 //! and are skipped. The starts are grouped by strand and diagonal and walked with ungapped X-drop
 //! extension, so every copy of a repeat becomes one ungapped alignment on its own diagonal.
 
-use super::AlignmentError;
 use super::anchors::{QueryTable, base_code, kmers};
 use super::chain_alignment::BandConfig;
 use super::reverse_complement_into;
+use super::{AlignmentError, Strand};
 use std::mem::size_of;
 
 /// The best-scoring ungapped stretch around one or more match starts of a diagonal. `contig` is
@@ -16,7 +16,7 @@ use std::mem::size_of;
 /// the start in the query, below its length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Walk {
-    pub reverse: bool,
+    pub strand: Strand,
     pub contig: u32,
     pub query: u32,
     pub length: u32,
@@ -82,7 +82,7 @@ pub fn dense_walks(
     };
     let mut walks = Vec::with_capacity(count.saturating_mul(copies));
     let mut starts = Vec::with_capacity(count);
-    for (reverse_strand, sequence) in [(false, window), (true, &reverse[..])] {
+    for (strand, sequence) in [(Strand::Forward, window), (Strand::Reverse, &reverse[..])] {
         starts.clear();
         match_starts(table, sequence, above, &mut |contig, query| {
             starts.push(Start {
@@ -93,7 +93,7 @@ pub fn dense_walks(
         });
         starts.sort_unstable();
         for group in starts.chunk_by(|a, b| a.diagonal == b.diagonal) {
-            walk_diagonal(table, sequence, reverse_strand, group, config, &mut walks);
+            walk_diagonal(table, sequence, strand, group, config, &mut walks);
         }
     }
     Ok((walks, reverse))
@@ -107,9 +107,10 @@ fn periodic_walks(
     window: &[u8],
     budget: usize,
 ) -> Result<Option<(Vec<Walk>, Vec<u8>)>, AlignmentError> {
-    let Some((period, phases)) = table.periodic_pair(window) else {
+    let Some(periodic) = table.periodic_pair(window) else {
         return Ok(None);
     };
+    let (period, phases) = (periodic.period, periodic.phases);
     let minimum = minimum_length(table) as usize;
     let positions = window.len().saturating_sub(minimum - 1);
     let count = positions.saturating_mul(phases.len());
@@ -121,12 +122,12 @@ fn periodic_walks(
         return Err(AlignmentError::ChainingBudget("circular periodic walks"));
     }
     let mut walks = Vec::with_capacity(count);
-    for (reverse, phase) in phases {
+    for phase in phases {
         for contig in 0..positions {
             walks.push(Walk {
-                reverse,
+                strand: phase.strand,
                 contig: contig as u32,
-                query: (contig as i64 - phase).rem_euclid(period as i64) as u32,
+                query: (contig as i64 - phase.diagonal).rem_euclid(period as i64) as u32,
                 length: (window.len() - contig).min(table.query_length() as usize) as u32,
             });
         }
@@ -163,7 +164,7 @@ fn match_starts(
 fn walk_diagonal(
     table: &QueryTable,
     sequence: &[u8],
-    reverse: bool,
+    strand: Strand,
     group: &[Start],
     config: BandConfig,
     walks: &mut Vec<Walk>,
@@ -176,7 +177,7 @@ fn walk_diagonal(
         }
         let mut next = *start;
         loop {
-            let found = walk(table, sequence, reverse, next, end, config);
+            let found = walk(table, sequence, strand, next, end, config);
             end = found.contig + found.length;
             // Short walks are kept too: joins link them across divergent pieces.
             walks.push(found);
@@ -275,7 +276,7 @@ impl Extension {
 fn walk(
     table: &QueryTable,
     oriented: &[u8],
-    reverse: bool,
+    strand: Strand,
     start: Start,
     previous_end: u32,
     config: BandConfig,
@@ -313,7 +314,7 @@ fn walk(
     }
     let left = left.best_length;
     Walk {
-        reverse,
+        strand,
         contig: (contig - left) as u32,
         query: ((from + length - left) % length) as u32,
         length: (left + right) as u32,

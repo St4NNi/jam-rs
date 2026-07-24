@@ -109,6 +109,13 @@ pub enum Strand {
     Reverse,
 }
 
+impl Strand {
+    /// Whether this is the reverse strand.
+    pub fn is_reverse(self) -> bool {
+        self == Self::Reverse
+    }
+}
+
 /// A gapped alignment of a query interval to a contig interval.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Alignment {

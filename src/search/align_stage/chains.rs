@@ -100,10 +100,11 @@ fn align_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::align::Strand;
 
     fn chain(anchors: usize, spacing: u32) -> Chain {
         Chain {
-            reverse: false,
+            strand: Strand::Forward,
             anchors: (0..anchors as u32)
                 .map(|i| (i * spacing, i * spacing))
                 .collect(),

@@ -4,7 +4,7 @@
 //! a + stride - 1 bases always gives an anchor.
 
 use super::chains::ChainConfig;
-use super::{AlignmentError, complement};
+use super::{AlignmentError, Strand, complement};
 use jamhash::jamhash_u64;
 
 /// How anchors are found.
@@ -329,8 +329,7 @@ impl QueryTable {
 
     /// When the query is a repeat of a period of at most a bases and `window` is a copy of the
     /// same repeat: the period and, per strand, the diagonal of one exact copy.
-    #[allow(clippy::type_complexity)]
-    pub fn periodic_pair(&self, window: &[u8]) -> Option<(usize, Vec<(bool, i64)>)> {
+    pub fn periodic_pair(&self, window: &[u8]) -> Option<Periodic> {
         if self.occurrences.is_empty() || self.query.is_empty() || window.is_empty() {
             return None;
         }
@@ -340,9 +339,9 @@ impl QueryTable {
             return None;
         }
         let mut phases = Vec::new();
-        for reverse in [false, true] {
+        for strand in [Strand::Forward, Strand::Reverse] {
             let base = |at: usize| {
-                if reverse {
+                if strand.is_reverse() {
                     complement(window[window.len() - 1 - at]).to_ascii_uppercase()
                 } else {
                     window[at].to_ascii_uppercase()
@@ -352,13 +351,29 @@ impl QueryTable {
                 if (0..window.len())
                     .all(|at| base(at) == query[(at + shift) % p].to_ascii_uppercase())
                 {
-                    phases.push((reverse, -(shift as i64)));
+                    let diagonal = -(shift as i64);
+                    phases.push(Phase { strand, diagonal });
                     break;
                 }
             }
         }
-        (!phases.is_empty()).then_some((p, phases))
+        (!phases.is_empty()).then_some(Periodic { period: p, phases })
     }
+}
+
+/// A query that repeats a short period, and an alignment window that copies the repeat.
+pub struct Periodic {
+    /// The period in bases.
+    pub period: usize,
+    /// The diagonal of one exact copy per strand that has one.
+    pub phases: Vec<Phase>,
+}
+
+/// The diagonal of one exact copy of a periodic query on one strand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Phase {
+    pub strand: Strand,
+    pub diagonal: i64,
 }
 
 /// The shortest period of at most a bases of a query of plain bases; a circular query must hold
@@ -380,7 +395,7 @@ fn period(query: &[u8], circular: bool, a: usize) -> Option<usize> {
 /// the forward strand, and in the reverse complement of the window for the reverse strand.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Anchor {
-    pub reverse: bool,
+    pub strand: Strand,
     pub contig: u32,
     pub query: u32,
 }
@@ -412,10 +427,13 @@ pub fn find_anchors(
             return;
         }
         for &occurrence in occurrences {
-            let reverse = occurrence & REVERSE != 0;
+            let (strand, contig) = match occurrence & REVERSE {
+                0 => (Strand::Forward, start),
+                _ => (Strand::Reverse, length - a - start),
+            };
             anchors.push(Anchor {
-                reverse,
-                contig: if reverse { length - a - start } else { start },
+                strand,
+                contig,
                 query: occurrence & !REVERSE,
             });
         }

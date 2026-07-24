@@ -43,7 +43,7 @@ impl PreparedWindow {
 
     /// The window bases on a walk's strand.
     pub fn oriented(&self, walk: &Walk) -> &[u8] {
-        if walk.reverse {
+        if walk.strand.is_reverse() {
             &self.reverse
         } else {
             &self.bases
@@ -88,7 +88,7 @@ impl PreparedWindow {
 /// Forward window positions `start..end` of a walk.
 pub(super) fn walk_extent(walk: &Walk, window_length: u64) -> (u64, u64) {
     let (low, high) = (u64::from(walk.contig), u64::from(walk.contig + walk.length));
-    if walk.reverse {
+    if walk.strand.is_reverse() {
         (window_length - high, window_length - low)
     } else {
         (low, high)
@@ -170,6 +170,7 @@ pub(super) fn widen(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::align::Strand;
     use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 
     fn random_bases(length: usize, mut state: u64) -> Vec<u8> {
@@ -226,7 +227,7 @@ mod tests {
         let run = read(3000..3200, &mut buffers);
         assert!(buffers.bases.is_empty());
         // The run of T pairs the run of A of the query on the reverse strand only, as walks.
-        assert!(!run.walks.is_empty() && run.walks.iter().all(|walk| walk.reverse));
+        assert!(!run.walks.is_empty() && run.walks.iter().all(|walk| walk.strand.is_reverse()));
         assert_eq!(run.oriented(&run.walks[0]), vec![b'A'; 200]);
         assert!(run.bytes() >= 400);
         assert_eq!((work.windows, work.bases_read), (2, 1400));
@@ -255,14 +256,14 @@ mod tests {
     #[test]
     fn walks_on_the_reverse_strand_are_read_from_the_window_end() {
         let walk = Walk {
-            reverse: true,
+            strand: Strand::Reverse,
             contig: 10,
             query: 0,
             length: 30,
         };
         assert_eq!(walk_extent(&walk, 100), (60, 90));
         let forward = Walk {
-            reverse: false,
+            strand: Strand::Forward,
             ..walk
         };
         assert_eq!(walk_extent(&forward, 100), (10, 40));

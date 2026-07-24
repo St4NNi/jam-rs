@@ -10,7 +10,7 @@ use super::anchors::QueryTable;
 use super::chains::Chain;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
-    EditRun, Interval, Strand, complement,
+    EditRun, Interval, complement,
 };
 
 /// The band that aligns chains and walks: scores, width and the drift of anchors it follows.
@@ -80,7 +80,7 @@ pub fn align_chain(
     let mut narrow = narrow.min(geometry.extension);
     loop {
         let (query_start, left, query_span, contig_low, contig_high) = geometry.window_at(narrow);
-        let (forward_low, forward_high) = if chain.reverse {
+        let (forward_low, forward_high) = if chain.strand.is_reverse() {
             (
                 window.len() as u64 - contig_high,
                 window.len() as u64 - contig_low,
@@ -102,7 +102,7 @@ pub fn align_chain(
             contig: &window[forward_low as usize..forward_high as usize],
             contig_offset: offset + forward_low,
         };
-        let alignment = match workspace.align(input, strand(chain.reverse), scores) {
+        let alignment = match workspace.align(input, chain.strand, scores) {
             Ok(alignment) => alignment,
             Err(AlignmentError::NoAlignment) => return Ok(None),
             Err(error) => return Err(error),
@@ -154,7 +154,7 @@ fn exact_alignment(
     let (q, t) = ((-diagonal).max(0) as u64, diagonal.max(0) as u64);
     let paired = (length - q).min(window.len() as u64 - t);
     let equal = (0..paired as usize).all(|at| {
-        let contig = if chain.reverse {
+        let contig = if chain.strand.is_reverse() {
             complement(window[window.len() - 1 - t as usize - at])
         } else {
             window[t as usize + at]
@@ -164,7 +164,7 @@ fn exact_alignment(
     if paired == 0 || !equal {
         return Ok(None);
     }
-    let (low, high) = if chain.reverse {
+    let (low, high) = if chain.strand.is_reverse() {
         (window.len() as u64 - t - paired, window.len() as u64 - t)
     } else {
         (t, t + paired)
@@ -175,7 +175,7 @@ fn exact_alignment(
             .match_score
             .checked_mul(paired as i32)
             .ok_or(AlignmentError::LengthOverflow)?,
-        strand: strand(chain.reverse),
+        strand: chain.strand,
         query_interval: Interval::new(q, q + paired)?,
         contig_interval: Interval::new(offset + low, offset + high)?,
         runs: vec![EditRun {
@@ -184,14 +184,6 @@ fn exact_alignment(
         }],
     };
     Ok(Some(alignment))
-}
-
-pub(super) fn strand(reverse: bool) -> Strand {
-    if reverse {
-        Strand::Reverse
-    } else {
-        Strand::Forward
-    }
 }
 
 /// The band and the window choices of one chain.

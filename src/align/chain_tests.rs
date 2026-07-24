@@ -1,4 +1,5 @@
 use super::ChainConfig;
+use super::Strand;
 use super::anchors::{AnchorConfig, QueryTable, find_anchors};
 use super::chains::{Chain, split_by_drift, window_chains};
 use super::complement;
@@ -64,7 +65,12 @@ fn cyclic_periods_require_a_whole_number_of_repeats() {
         ChainConfig::default(),
     )
     .unwrap();
-    assert_eq!(linear.periodic_pair(&window).map(|pair| pair.0), Some(4));
+    assert_eq!(
+        linear
+            .periodic_pair(&window)
+            .map(|periodic| periodic.period),
+        Some(4)
+    );
     let circular = QueryTable::new(
         &query,
         true,
@@ -87,7 +93,9 @@ fn exact_periodic_copy_chains_past_repeated_positions() {
     let query = b"ACGT".repeat(300);
     let found = chains(&query, false, &query);
     assert!(found.iter().any(|chain| {
-        !chain.reverse && chain.anchors[0] == (0, 0) && chain.anchors.last().unwrap().1 >= 1180
+        !chain.strand.is_reverse()
+            && chain.anchors[0] == (0, 0)
+            && chain.anchors.last().unwrap().1 >= 1180
     }));
 }
 
@@ -141,7 +149,7 @@ fn forward_and_reverse_copies() {
     let found = chains(&query, false, &window);
     assert_eq!(found.len(), 1);
     let chain = &found[0];
-    assert!(!chain.reverse);
+    assert!(!chain.strand.is_reverse());
     assert_eq!(chain.anchors[0], (500, 1000));
     assert!(chain.anchors.last().unwrap().1 >= 2480);
     assert_eq!(diagonals(chain), [500]);
@@ -153,7 +161,7 @@ fn forward_and_reverse_copies() {
     .concat();
     let found = chains(&query, false, &window);
     assert_eq!(found.len(), 1);
-    assert!(found[0].reverse);
+    assert!(found[0].strand.is_reverse());
     // In the reverse complement of the window the copy starts at 0 and holds query 200..1800.
     let first = found[0].anchors[0];
     assert_eq!(i64::from(first.0) - i64::from(first.1), -200);
@@ -244,7 +252,7 @@ fn mutations_keep_one_chain_and_low_complexity_skipped() {
 #[test]
 fn drift_splits_a_chain() {
     let chain = Chain {
-        reverse: false,
+        strand: Strand::Forward,
         anchors: vec![
             (0, 0),
             (100, 100),

@@ -1,12 +1,12 @@
 //! Chains: anchors of one strand in order along nearly the same diagonal.
 
-use super::AlignmentError;
 use super::anchors::{Anchor, QueryTable, count_anchors, find_anchors, occurrence_counts};
+use super::{AlignmentError, Strand};
 
 /// Colinear anchors of one strand, in increasing oriented contig position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chain {
-    pub reverse: bool,
+    pub strand: Strand,
     /// Oriented contig and query position of every anchor.
     pub anchors: Vec<(u32, u32)>,
     /// Query offset of every anchor from the first, counted across the origin of a circular query.
@@ -84,7 +84,7 @@ pub fn window_chains(
     let (count, above) = anchor_budget(table, window, scratch.capacity());
     find_anchors(table, window, scratch, above, count);
     let mut chains = Vec::new();
-    let split = scratch.partition_point(|anchor| !anchor.reverse);
+    let split = scratch.partition_point(|anchor| anchor.strand == Strand::Forward);
     for strand in [&scratch[..split], &scratch[split..]] {
         chain_anchors(table, strand, &mut chains);
     }
@@ -146,17 +146,18 @@ fn periodic_chains(
     if table.circular() {
         return Ok(None);
     }
-    let Some((period, phases)) = table.periodic_pair(window) else {
+    let Some(periodic) = table.periodic_pair(window) else {
         return Ok(None);
     };
+    let (period, phases) = (periodic.period, periodic.phases);
     let a = u64::from(table.anchors().a);
     let anchors = table.chains().min_anchors as usize;
     let minimum = table.chains().min_length(table.anchors().a);
     let low = minimum as i64 - i64::from(table.query_length());
     let high = window.len() as i64 - minimum as i64;
     let mut total = 0usize;
-    for &(_, phase) in &phases {
-        let first = low + (phase - low).rem_euclid(period as i64);
+    for phase in &phases {
+        let first = low + (phase.diagonal - low).rem_euclid(period as i64);
         if first <= high {
             total = total.saturating_add(((high - first) / period as i64 + 1) as usize);
         }
@@ -170,8 +171,8 @@ fn periodic_chains(
         return Err(AlignmentError::ChainingBudget("periodic chains"));
     }
     let mut chains = Vec::with_capacity(total);
-    for (reverse, phase) in phases {
-        let mut diagonal = low + (phase - low).rem_euclid(period as i64);
+    for phase in phases {
+        let mut diagonal = low + (phase.diagonal - low).rem_euclid(period as i64);
         while diagonal <= high {
             let (q, t) = ((-diagonal).max(0) as u64, diagonal.max(0) as u64);
             let length = (u64::from(table.query_length()) - q).min(window.len() as u64 - t);
@@ -183,7 +184,7 @@ fn periodic_chains(
                 offsets.push(step as u32);
             }
             chains.push(Chain {
-                reverse,
+                strand: phase.strand,
                 anchors: positions,
                 offsets,
                 score: length as i64,
@@ -228,7 +229,7 @@ pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain
         path.reverse();
         let origin = span[path[0]];
         out.push(Chain {
-            reverse: anchors[end].reverse,
+            strand: anchors[end].strand,
             anchors: path
                 .iter()
                 .map(|&index| (anchors[index].contig, anchors[index].query))
@@ -295,7 +296,7 @@ fn chain_scores(table: &QueryTable, anchors: &[Anchor]) -> (Vec<i64>, Vec<usize>
 pub fn forward_extent(chain: &Chain, window: u64, a: u64) -> (u64, u64) {
     let first = u64::from(chain.anchors[0].0);
     let last = u64::from(chain.anchors[chain.anchors.len() - 1].0) + a;
-    if chain.reverse {
+    if chain.strand.is_reverse() {
         (window - last, window - first)
     } else {
         (first, last)
@@ -319,7 +320,7 @@ pub fn split_by_drift(chain: &Chain, max_drift: u32, min_anchors: u32) -> Vec<Ch
         if index - start >= min_anchors as usize {
             let base = chain.offsets[start];
             parts.push(Chain {
-                reverse: chain.reverse,
+                strand: chain.strand,
                 anchors: chain.anchors[start..index].to_vec(),
                 offsets: chain.offsets[start..index]
                     .iter()
