@@ -262,14 +262,14 @@ impl QueryTable {
     }
 
     /// Occurrences of `key` on both strands.
-    pub fn multiplicity(&self, key: u64) -> usize {
+    pub(super) fn multiplicity(&self, key: u64) -> usize {
         self.slot(key).len()
     }
 
     /// Forward query positions of `key` that do not follow a base of code `left`, so a match
     /// with a window position whose preceding base has that code cannot extend to the left.
     /// Code 4 (none or another byte) excludes nothing.
-    pub fn match_starts(&self, key: u64, left: u8) -> impl Iterator<Item = u32> + '_ {
+    pub(super) fn match_starts(&self, key: u64, left: u8) -> impl Iterator<Item = u32> + '_ {
         let range = self.slot(key);
         let codes = &self.left[range.clone()];
         let forward = codes.partition_point(|code| *code < 5);
@@ -289,7 +289,7 @@ impl QueryTable {
     }
 
     /// The query as scanned: for a circular query, followed by its first a - 1 bases.
-    pub fn scanned(&self) -> &[u8] {
+    pub(super) fn scanned(&self) -> &[u8] {
         &self.query
     }
 
@@ -348,7 +348,7 @@ impl QueryTable {
 
     /// When the query is a repeat of a period of at most a bases and `window` is a copy of the
     /// same repeat: the period and, per strand, the diagonal of one exact copy.
-    pub fn periodic_pair(&self, window: &[u8]) -> Option<Periodic> {
+    pub(super) fn periodic_pair(&self, window: &[u8]) -> Option<Periodic> {
         if self.occurrences.is_empty() || self.query.is_empty() || window.is_empty() {
             return None;
         }
@@ -381,18 +381,18 @@ impl QueryTable {
 }
 
 /// A query that repeats a short period, and an alignment window that copies the repeat.
-pub struct Periodic {
+pub(super) struct Periodic {
     /// The period in bases.
-    pub period: usize,
+    pub(super) period: usize,
     /// The diagonal of one exact copy per strand that has one.
-    pub phases: Vec<Phase>,
+    pub(super) phases: Vec<Phase>,
 }
 
 /// The diagonal of one exact copy of a periodic query on one strand.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Phase {
-    pub strand: Strand,
-    pub diagonal: i64,
+pub(super) struct Phase {
+    pub(super) strand: Strand,
+    pub(super) diagonal: i64,
 }
 
 /// The shortest period of at most a bases of a query of plain bases; a circular query must hold
@@ -422,7 +422,7 @@ pub struct Anchor {
 /// Appends the anchors of `window`, sorted by strand, contig and query position. K-mers with
 /// more than `above` query occurrences give none, when it is set; `expected` anchors are
 /// reserved first.
-pub fn find_anchors(
+pub(super) fn find_anchors(
     table: &QueryTable,
     window: &[u8],
     anchors: &mut Vec<Anchor>,

@@ -29,7 +29,7 @@ use geometry::WaveCarry;
 use waves::WaveChunk;
 
 /// The default limit of resident traceback cells of one pass.
-pub const DEFAULT_MAX_CELLS: usize = 4_000_000;
+const DEFAULT_MAX_CELLS: usize = 4_000_000;
 
 /// Scores and band of one alignment. The band holds the cells whose diagonal (contig position
 /// minus query position) lies within `band_width` of `diagonal_offset`.
@@ -83,12 +83,12 @@ impl AlignmentConfig {
 /// A query window and a contig window, with the positions where they start. Results are in
 /// those positions: `query_offset + i` for query window byte `i`, likewise for the contig.
 #[derive(Clone, Copy, Debug)]
-pub struct AlignmentInput<'a> {
-    pub query: &'a [u8],
-    pub query_offset: u64,
+pub(in crate::align) struct AlignmentInput<'a> {
+    pub(in crate::align) query: &'a [u8],
+    pub(in crate::align) query_offset: u64,
     /// The contig window on the forward strand; the reverse strand reads its reverse complement.
-    pub contig: &'a [u8],
-    pub contig_offset: u64,
+    pub(in crate::align) contig: &'a [u8],
+    pub(in crate::align) contig_offset: u64,
 }
 
 /// The kernels a workspace runs.
@@ -98,6 +98,7 @@ enum Backend {
     #[default]
     Detected,
     /// Scalar even on hosts with AVX2, so tests can compare both.
+    #[cfg(test)]
     Scalar,
 }
 
@@ -109,6 +110,7 @@ impl Backend {
             Self::Detected => is_x86_feature_detected!("avx2"),
             #[cfg(not(target_arch = "x86_64"))]
             Self::Detected => false,
+            #[cfg(test)]
             Self::Scalar => false,
         }
     }
@@ -149,7 +151,8 @@ struct RawAlignment {
 
 impl AlignmentWorkspace {
     /// A workspace that runs the scalar kernels even on hosts with AVX2.
-    pub fn scalar() -> Self {
+    #[cfg(test)]
+    pub(in crate::align) fn scalar() -> Self {
         Self {
             backend: Backend::Scalar,
             ..Self::default()
@@ -159,7 +162,7 @@ impl AlignmentWorkspace {
     /// The best local alignment of the query window to the contig window on `strand`, within the
     /// band of `config`. On the reverse strand the band's diagonals count positions in the
     /// reverse complement of the contig window.
-    pub fn align(
+    pub(in crate::align) fn align(
         &mut self,
         input: AlignmentInput<'_>,
         strand: Strand,

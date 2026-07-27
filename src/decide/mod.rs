@@ -9,7 +9,8 @@ mod policy;
 
 pub use coverage::QueryCoverage;
 pub use fragment::Fragment;
-pub use mosaic::{Mosaic, SelectedFragment, build_mosaic};
+use mosaic::build_mosaic;
+pub use mosaic::{Mosaic, SelectedFragment};
 pub use policy::{Decision, DecisionRule};
 
 use crate::align::AlignmentError;

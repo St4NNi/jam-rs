@@ -38,7 +38,10 @@ struct Prepared {
 /// Fragments are taken by score, best first. A fragment is primary when it covers a query base
 /// that no earlier fragment covers. The result does not depend on the input order, and identical
 /// fragments count once.
-pub fn build_mosaic(query_length: u64, fragments: &[Fragment]) -> Result<Mosaic, DecideError> {
+pub(super) fn build_mosaic(
+    query_length: u64,
+    fragments: &[Fragment],
+) -> Result<Mosaic, DecideError> {
     if query_length == 0 {
         return Err(DecideError::EmptyQuery);
     }

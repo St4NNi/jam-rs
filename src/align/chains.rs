@@ -236,7 +236,7 @@ fn periodic_chains(
 /// Chains the anchors of one strand (sorted by contig, then query position), best score first.
 /// Every anchor joins at most one chain. A chain of a circular query may cross the origin but
 /// never covers more than the query length.
-pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
+pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
     let config = table.chains();
     let links = chain_links(table, anchors);
     let n = anchors.len();

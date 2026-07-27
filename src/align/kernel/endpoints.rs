@@ -36,7 +36,7 @@ impl AlignmentWorkspace {
     /// Extends `core`, an alignment from `align` over the same `input`, by an anchored
     /// semi-global alignment of at most `max_extension` bases beyond each end. The result is
     /// rescored over all its runs.
-    pub fn complete_endpoints(
+    pub(in crate::align) fn complete_endpoints(
         &mut self,
         core: Alignment,
         input: AlignmentInput<'_>,
