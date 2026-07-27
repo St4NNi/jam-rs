@@ -56,8 +56,8 @@ fn chain_too_sparse(config: &AlignStageConfig, chain: &Chain) -> bool {
     }
     let k = u64::from(config.anchors.a);
     let stride = u64::from(config.anchors.stride);
-    let first = u64::from(chain.anchors[0].0);
-    let last = u64::from(chain.anchors[chain.anchors.len() - 1].0);
+    let first = u64::from(chain.anchors[0].contig);
+    let last = u64::from(chain.anchors[chain.anchors.len() - 1].contig);
     let sampled = ((last + k).saturating_sub(first) / stride).max(1);
     let density = (chain.anchors.len() as f64 / sampled as f64).min(1.0);
     density.powf(1.0 / k as f64) < config.min_chain_identity
@@ -100,13 +100,17 @@ fn align_part(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::align::Strand;
+    use crate::align::{Anchor, Strand};
 
     fn chain(anchors: usize, spacing: u32) -> Chain {
         Chain {
             strand: Strand::Forward,
             anchors: (0..anchors as u32)
-                .map(|i| (i * spacing, i * spacing))
+                .map(|i| Anchor {
+                    strand: Strand::Forward,
+                    contig: i * spacing,
+                    query: i * spacing,
+                })
                 .collect(),
             offsets: (0..anchors as u32).map(|i| i * spacing).collect(),
             score: 100,

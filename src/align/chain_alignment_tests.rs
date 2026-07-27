@@ -1,3 +1,4 @@
+use super::Anchor;
 use super::ChainConfig;
 use super::chain_alignment::{BandConfig, align_chain};
 use super::chain_tests::{random_sequence, reverse_complement};
@@ -171,12 +172,19 @@ fn wide_band_and_drift_align_a_long_deletion() {
         },
         ..BandConfig::default()
     };
-    let anchors = [0u32, 500, 1000, 1500, 2000, 2500]
-        .map(|q| (if q < 1500 { 2000 + q } else { 3000 + q }, q));
+    let anchors = [0u32, 500, 1000, 1500, 2000, 2500].map(|query| Anchor {
+        strand: Strand::Forward,
+        contig: if query < 1500 {
+            2000 + query
+        } else {
+            3000 + query
+        },
+        query,
+    });
     let chain = Chain {
         strand: Strand::Forward,
         anchors: anchors.to_vec(),
-        offsets: anchors.iter().map(|&(_, q)| q).collect(),
+        offsets: anchors.iter().map(|anchor| anchor.query).collect(),
         score: 100,
     };
     let table = QueryTable::new(

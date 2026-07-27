@@ -142,11 +142,11 @@ impl PathIndex {
         let covered = chain
             .anchors
             .iter()
-            .filter(|&&(window, query)| {
+            .filter(|anchor| {
                 self.covers(
                     chain.strand.is_reverse(),
-                    window.into(),
-                    query.into(),
+                    anchor.contig.into(),
+                    anchor.query.into(),
                     query_length,
                 )
             })
@@ -164,11 +164,11 @@ impl PathIndex {
     ) -> Option<Chain> {
         let kept: Vec<usize> = (0..chain.anchors.len())
             .filter(|&index| {
-                let (window, query) = chain.anchors[index];
+                let anchor = chain.anchors[index];
                 !self.covers(
                     chain.strand.is_reverse(),
-                    window.into(),
-                    query.into(),
+                    anchor.contig.into(),
+                    anchor.query.into(),
                     query_length,
                 )
             })
@@ -260,7 +260,7 @@ impl PathIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::align::{Interval, parse_cigar};
+    use crate::align::{Anchor, Interval, parse_cigar};
 
     fn alignment(strand: Strand, query: (u64, u64), contig: (u64, u64), cigar: &str) -> Alignment {
         let alignment = Alignment {
@@ -275,13 +275,19 @@ mod tests {
     }
 
     fn chain(reverse: bool, anchors: &[(u32, u32)]) -> Chain {
+        let strand = if reverse {
+            Strand::Reverse
+        } else {
+            Strand::Forward
+        };
+        let anchor = |&(contig, query)| Anchor {
+            strand,
+            contig,
+            query,
+        };
         Chain {
-            strand: if reverse {
-                Strand::Reverse
-            } else {
-                Strand::Forward
-            },
-            anchors: anchors.to_vec(),
+            strand,
+            anchors: anchors.iter().map(anchor).collect(),
             offsets: anchors.iter().map(|&(_, q)| q - anchors[0].1).collect(),
             score: 100,
         }
@@ -315,7 +321,8 @@ mod tests {
             &[(50, 50), (90, 90), (300, 300), (400, 400), (500, 500)],
         );
         let rest = paths.uncovered(&longer, 1000, 3).unwrap();
-        assert_eq!(rest.anchors, [(300, 300), (400, 400), (500, 500)]);
+        let positions: Vec<_> = rest.anchors.iter().map(|a| (a.contig, a.query)).collect();
+        assert_eq!(positions, [(300, 300), (400, 400), (500, 500)]);
         assert_eq!(rest.offsets, [0, 100, 200]);
         assert!(paths.uncovered(&other_copy, 1000, 3).is_none());
     }

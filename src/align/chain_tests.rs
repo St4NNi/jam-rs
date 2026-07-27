@@ -1,3 +1,4 @@
+use super::Anchor;
 use super::ChainConfig;
 use super::Strand;
 use super::anchors::{AnchorConfig, QueryTable, find_anchors};
@@ -36,12 +37,16 @@ fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
         .chains
 }
 
+fn position(anchor: Anchor) -> (u32, u32) {
+    (anchor.contig, anchor.query)
+}
+
 fn diagonals(chain: &Chain) -> Vec<i64> {
     let mut diagonals: Vec<i64> = chain
         .anchors
         .iter()
         .zip(&chain.offsets)
-        .map(|(&(contig, _), &offset)| i64::from(contig) - i64::from(offset))
+        .map(|(anchor, &offset)| i64::from(anchor.contig) - i64::from(offset))
         .collect();
     diagonals.dedup();
     diagonals
@@ -96,8 +101,8 @@ fn exact_periodic_copy_chains_past_repeated_positions() {
     let found = chains(&query, false, &query);
     assert!(found.iter().any(|chain| {
         !chain.strand.is_reverse()
-            && chain.anchors[0] == (0, 0)
-            && chain.anchors.last().unwrap().1 >= 1180
+            && position(chain.anchors[0]) == (0, 0)
+            && chain.anchors.last().unwrap().query >= 1180
     }));
 }
 
@@ -153,8 +158,8 @@ fn forward_and_reverse_copies() {
     assert_eq!(found.len(), 1);
     let chain = &found[0];
     assert!(!chain.strand.is_reverse());
-    assert_eq!(chain.anchors[0], (500, 1000));
-    assert!(chain.anchors.last().unwrap().1 >= 2480);
+    assert_eq!(position(chain.anchors[0]), (500, 1000));
+    assert!(chain.anchors.last().unwrap().query >= 2480);
     assert_eq!(diagonals(chain), [500]);
 
     let window = [
@@ -167,8 +172,8 @@ fn forward_and_reverse_copies() {
     assert!(found[0].strand.is_reverse());
     // In the reverse complement of the window the copy starts at 0 and holds query 200..1800.
     let first = found[0].anchors[0];
-    assert_eq!(i64::from(first.0) - i64::from(first.1), -200);
-    assert!(found[0].anchors.last().unwrap().1 >= 1780);
+    assert_eq!(i64::from(first.contig) - i64::from(first.query), -200);
+    assert!(found[0].anchors.last().unwrap().query >= 1780);
 }
 
 #[test]
@@ -177,7 +182,7 @@ fn circular_origin_and_linear_split() {
     let window = [query[1500..].to_vec(), query[..600].to_vec()].concat();
     let found = chains(&query, true, &window);
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0].anchors[0], (0, 1500));
+    assert_eq!(position(found[0].anchors[0]), (0, 1500));
     assert!(*found[0].offsets.last().unwrap() >= 1080);
     // One diagonal across the origin, counted from the first anchor at window position 0.
     assert_eq!(diagonals(&found[0]), [0]);
@@ -185,7 +190,7 @@ fn circular_origin_and_linear_split() {
     assert_eq!(linear.len(), 2);
     let mut parts: Vec<(u32, u32)> = linear
         .iter()
-        .map(|chain| (chain.anchors[0].1, *chain.offsets.last().unwrap()))
+        .map(|chain| (chain.anchors[0].query, *chain.offsets.last().unwrap()))
         .collect();
     parts.sort_unstable();
     assert_eq!((parts[0].0, parts[1].0), (0, 1500));
@@ -197,7 +202,7 @@ fn query_repeat_and_tandem_copies() {
     let repeat = random_sequence(800, 6);
     let query = [repeat.clone(), random_sequence(1000, 7), repeat.clone()].concat();
     let found = chains(&query, false, &repeat);
-    let mut starts: Vec<u32> = found.iter().map(|chain| chain.anchors[0].1).collect();
+    let mut starts: Vec<u32> = found.iter().map(|chain| chain.anchors[0].query).collect();
     starts.sort_unstable();
     assert_eq!(starts, [0, 1800]);
     // Two copies of a circular query in a row: no chain covers more than one query length.
@@ -256,20 +261,26 @@ fn mutations_keep_one_chain_and_low_complexity_skipped() {
 fn drift_splits_a_chain() {
     let chain = Chain {
         strand: Strand::Forward,
-        anchors: vec![
+        anchors: [
             (0, 0),
             (100, 100),
             (200, 200),
             (900, 300),
             (1000, 400),
             (1100, 500),
-        ],
+        ]
+        .map(|(contig, query)| Anchor {
+            strand: Strand::Forward,
+            contig,
+            query,
+        })
+        .to_vec(),
         offsets: vec![0, 100, 200, 300, 400, 500],
         score: 90,
     };
     let parts = split_by_drift(&chain, 64, 3);
     assert_eq!(parts.len(), 2);
-    assert_eq!(parts[1].anchors[0], (900, 300));
+    assert_eq!(position(parts[1].anchors[0]), (900, 300));
     assert_eq!(parts[1].offsets, [0, 100, 200]);
     assert_eq!(split_by_drift(&chain, 1_000, 3).len(), 1);
 }

@@ -6,7 +6,7 @@
 //! Query positions of the results count from the query start without wrapping: for a circular
 //! query an alignment over the origin ends beyond the query length.
 
-use super::anchors::QueryTable;
+use super::anchors::{Anchor, QueryTable};
 use super::chains::Chain;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
@@ -147,13 +147,13 @@ fn exact_alignment(
 ) -> Result<Option<Alignment>, AlignmentError> {
     let query = table.query();
     let length = query.len() as u64;
-    let (first_contig, first_query) = chain.anchors[0];
-    let diagonal = i64::from(first_contig) - i64::from(first_query);
+    let diagonal_of = |anchor: &Anchor| i64::from(anchor.contig) - i64::from(anchor.query);
+    let diagonal = diagonal_of(&chain.anchors[0]);
     if table.circular()
         || !chain
             .anchors
             .iter()
-            .all(|&(t, q)| i64::from(t) - i64::from(q) == diagonal)
+            .all(|anchor| diagonal_of(anchor) == diagonal)
     {
         return Ok(None);
     }
@@ -220,13 +220,13 @@ impl ChainGeometry {
     ) -> Self {
         let length = u64::from(table.query_length());
         let a = u64::from(table.anchors().a);
-        let (first_contig, first_query) = chain.anchors[0];
-        let first_contig = u64::from(first_contig);
+        let first = chain.anchors[0];
+        let first_contig = u64::from(first.contig);
         // The lowest and highest diagonal of the anchors, counted from the first anchor's.
         let (low, high) = chain.anchors.iter().zip(&chain.offsets).fold(
             (0i64, 0i64),
-            |(low, high), (&(contig, _), &offset)| {
-                let diagonal = i64::from(contig) - first_contig as i64 - i64::from(offset);
+            |(low, high), (anchor, &offset)| {
+                let diagonal = i64::from(anchor.contig) - first_contig as i64 - i64::from(offset);
                 (low.min(diagonal), high.max(diagonal))
             },
         );
@@ -248,8 +248,8 @@ impl ChainGeometry {
             a,
             window_length,
             first_contig,
-            first_query: u64::from(first_query),
-            last_contig: u64::from(chain.anchors[chain.anchors.len() - 1].0),
+            first_query: u64::from(first.query),
+            last_contig: u64::from(chain.anchors[chain.anchors.len() - 1].contig),
             span: u64::from(*chain.offsets.last().unwrap_or(&0)) + a,
             slack: config.drift_margin(),
             margin,

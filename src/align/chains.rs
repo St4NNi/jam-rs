@@ -7,8 +7,8 @@ use super::{AlignmentError, Strand};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chain {
     pub strand: Strand,
-    /// Oriented contig and query position of every anchor.
-    pub anchors: Vec<(u32, u32)>,
+    /// The anchors in order.
+    pub anchors: Vec<Anchor>,
     /// Query offset of every anchor from the first, counted across the origin of a circular query.
     pub offsets: Vec<u32>,
     pub score: i64,
@@ -162,7 +162,8 @@ fn anchor_bytes(capacity: usize, count: usize, table: &QueryTable) -> usize {
             2 * size_of::<i64>()
                 + 4 * size_of::<usize>()
                 + size_of::<bool>()
-                + 3 * size_of::<u32>(),
+                + size_of::<Anchor>()
+                + size_of::<u32>(),
         ))
         .saturating_add(
             (2 * count / table.chains().min_anchors as usize + 4)
@@ -197,8 +198,7 @@ fn periodic_chains(
     }
     let bytes = total.saturating_mul(
         2 * std::mem::size_of::<Chain>()
-            + anchors
-                .saturating_mul(std::mem::size_of::<(u32, u32)>() + std::mem::size_of::<u32>()),
+            + anchors.saturating_mul(std::mem::size_of::<Anchor>() + std::mem::size_of::<u32>()),
     );
     if bytes > CHAINING_BYTES {
         return Err(AlignmentError::ChainingBudget("periodic chains"));
@@ -213,7 +213,11 @@ fn periodic_chains(
             let mut offsets = Vec::with_capacity(anchors);
             for at in 0..anchors {
                 let step = (length - a) * at as u64 / anchors.saturating_sub(1).max(1) as u64;
-                positions.push(((t + step) as u32, (q + step) as u32));
+                positions.push(Anchor {
+                    strand: phase.strand,
+                    contig: (t + step) as u32,
+                    query: (q + step) as u32,
+                });
                 offsets.push(step as u32);
             }
             chains.push(Chain {
@@ -263,10 +267,7 @@ pub fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain
         let origin = links[path[0]].span;
         out.push(Chain {
             strand: anchors[end].strand,
-            anchors: path
-                .iter()
-                .map(|&index| (anchors[index].contig, anchors[index].query))
-                .collect(),
+            anchors: path.iter().map(|&index| anchors[index]).collect(),
             offsets: path
                 .iter()
                 .map(|&index| (links[index].span - origin) as u32)
@@ -337,8 +338,8 @@ fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
 
 /// Forward window positions `start..end` covered by the anchors of a chain.
 pub fn forward_extent(chain: &Chain, window: u64, a: u64) -> (u64, u64) {
-    let first = u64::from(chain.anchors[0].0);
-    let last = u64::from(chain.anchors[chain.anchors.len() - 1].0) + a;
+    let first = u64::from(chain.anchors[0].contig);
+    let last = u64::from(chain.anchors[chain.anchors.len() - 1].contig) + a;
     if chain.strand.is_reverse() {
         (window - last, window - first)
     } else {
@@ -353,7 +354,8 @@ pub fn split_by_drift(chain: &Chain, max_drift: u32, min_anchors: u32) -> Vec<Ch
     let mut start = 0;
     for index in 0..=chain.anchors.len() {
         let drift = |index: usize| {
-            let contig = i64::from(chain.anchors[index].0) - i64::from(chain.anchors[start].0);
+            let contig =
+                i64::from(chain.anchors[index].contig) - i64::from(chain.anchors[start].contig);
             let query = i64::from(chain.offsets[index]) - i64::from(chain.offsets[start]);
             (contig - query).unsigned_abs()
         };

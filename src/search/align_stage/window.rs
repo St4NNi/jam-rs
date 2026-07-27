@@ -57,7 +57,7 @@ impl PreparedWindow {
             .iter()
             .map(|chain| {
                 size_of::<Chain>()
-                    + chain.anchors.capacity() * size_of::<(u32, u32)>()
+                    + chain.anchors.capacity() * size_of::<Anchor>()
                     + chain.offsets.capacity() * size_of::<u32>()
             })
             .sum();
