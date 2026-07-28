@@ -1,11 +1,11 @@
 //! Edit runs and their CIGAR text.
 
 use super::{AlignmentError, EditCounts};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
 /// One CIGAR operation; see the module documentation of `align` for its meaning.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum EditOperation {
     #[serde(rename = "=")]
     Match,
@@ -29,7 +29,7 @@ impl EditOperation {
 }
 
 /// `length` columns of one operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditRun {
     pub operation: EditOperation,
     pub length: u32,

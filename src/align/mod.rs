@@ -34,11 +34,11 @@ pub use kernel::{AlignmentConfig, AlignmentWorkspace};
 pub use walk_alignment::{gap_continuation, holds_walk, walk_alignment};
 
 use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
 /// A half-open range of positions, `start..end`.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Interval {
     pub start: u64,
     pub end: u64,
@@ -102,7 +102,7 @@ impl Interval {
 }
 
 /// The contig strand that the query aligns to.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strand {
     Forward,
@@ -129,7 +129,7 @@ pub struct Alignment {
 }
 
 /// Base counts of an alignment, one per CIGAR operation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditCounts {
     pub matches: u64,
     pub substitutions: u64,
@@ -320,6 +320,29 @@ mod tests {
         assert_eq!(json["cigar"], "4=1X");
         assert_eq!(json["identity"], 0.8);
         assert_eq!(json["contig_interval"]["start"], 10);
+    }
+
+    #[test]
+    fn records_round_trip() {
+        let counts = alignment("4=1X2I", (2, 9), (10, 15)).counts();
+        let json = serde_json::to_string(&(Strand::Reverse, Interval::new(2, 9).unwrap(), counts));
+        let json = json.unwrap();
+        assert!(
+            json.starts_with(r#"["reverse",{"start":2,"end":9},{"matches":4,"#),
+            "{json}"
+        );
+        let back: (Strand, Interval, EditCounts) = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back,
+            (Strand::Reverse, Interval::new(2, 9).unwrap(), counts)
+        );
+        let runs = parse_cigar("3=1D").unwrap();
+        let json = serde_json::to_string(&runs).unwrap();
+        assert_eq!(
+            json,
+            r#"[{"operation":"=","length":3},{"operation":"D","length":1}]"#
+        );
+        assert_eq!(serde_json::from_str::<Vec<EditRun>>(&json).unwrap(), runs);
     }
 
     #[test]
