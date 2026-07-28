@@ -5,13 +5,13 @@ mod contigs;
 mod coverage;
 mod fragment;
 mod mosaic;
-mod policy;
+mod rule;
 
 pub use coverage::QueryCoverage;
 pub use fragment::Fragment;
 use mosaic::build_mosaic;
 pub use mosaic::{Mosaic, SelectedFragment};
-pub use policy::{Decision, DecisionRule};
+pub use rule::{Decision, DecisionRule};
 
 use crate::align::AlignmentError;
 use thiserror::Error;
