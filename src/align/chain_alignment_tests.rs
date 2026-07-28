@@ -167,7 +167,7 @@ fn wide_band_and_drift_align_a_long_deletion() {
     .concat();
     let config = BandConfig {
         alignment: AlignmentConfig {
-            band_width: 3000,
+            band_width: 1_100,
             ..AlignmentConfig::default()
         },
         ..BandConfig::default()
