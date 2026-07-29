@@ -2,7 +2,7 @@
 //! twice.
 
 use super::{DecideError, Fragment};
-use crate::align::{EditOperation, Interval, format_cigar};
+use crate::align::{EditCounts, EditOperation, Interval, format_cigar};
 use serde::Serialize;
 use std::cmp::Ordering;
 
@@ -27,10 +27,12 @@ pub struct Mosaic {
     pub alternatives: Vec<Fragment>,
 }
 
+/// A fragment with the query bases it pairs and its base counts, kept for sorting.
 struct Prepared {
     fragment: Fragment,
     support: Vec<Interval>,
     support_bases: u64,
+    counts: EditCounts,
 }
 
 /// Builds the mosaic of `fragments` for a query of `query_length` bases.
@@ -53,6 +55,7 @@ pub(super) fn build_mosaic(
                 fragment: fragment.clone(),
                 support_bases: Interval::total_length(&support),
                 support,
+                counts: fragment.alignment.counts(),
             })
         })
         .collect::<Result<Vec<_>, DecideError>>()?;
@@ -63,15 +66,12 @@ pub(super) fn build_mosaic(
     let mut primary = Vec::new();
     let mut alternatives = Vec::new();
     for item in prepared {
-        let before = Interval::total_length(&covered);
-        let mut combined = covered.clone();
-        combined.extend_from_slice(&item.support);
-        let next = Interval::union(combined);
-        let new_bases = Interval::total_length(&next) - before;
+        let new_bases = item.support_bases - overlap(&covered, &item.support);
         if new_bases == 0 {
             alternatives.push(item.fragment);
         } else {
-            covered = next;
+            covered.extend_from_slice(&item.support);
+            covered = Interval::union(covered);
             primary.push(SelectedFragment {
                 new_bases,
                 fragment: item.fragment,
@@ -90,21 +90,13 @@ pub(super) fn build_mosaic(
 
 fn compare_fragments(left: &Prepared, right: &Prepared) -> Ordering {
     let (a, b) = (&left.fragment, &right.fragment);
-    let edits = |fragment: &Fragment| {
-        let counts = fragment.alignment.counts();
-        counts.substitutions + counts.insertions + counts.deletions
-    };
+    let edits = |counts: EditCounts| counts.substitutions + counts.insertions + counts.deletions;
     b.alignment
         .score
         .cmp(&a.alignment.score)
         .then_with(|| right.support_bases.cmp(&left.support_bases))
-        .then_with(|| {
-            b.alignment
-                .counts()
-                .matches
-                .cmp(&a.alignment.counts().matches)
-        })
-        .then_with(|| edits(a).cmp(&edits(b)))
+        .then_with(|| right.counts.matches.cmp(&left.counts.matches))
+        .then_with(|| edits(left.counts).cmp(&edits(right.counts)))
         .then_with(|| a.contig_index.cmp(&b.contig_index))
         .then_with(|| a.alignment.strand.cmp(&b.alignment.strand))
         .then_with(|| {
@@ -180,6 +172,21 @@ fn project_segments(
         }
     }
     Err(DecideError::QuerySpanMismatch)
+}
+
+/// The bases of the sorted, disjoint `support` that `covered`, also sorted and disjoint, holds.
+fn overlap(covered: &[Interval], support: &[Interval]) -> u64 {
+    let mut bases = 0;
+    for piece in support {
+        let first = covered.partition_point(|interval| interval.end <= piece.start);
+        for interval in covered[first..]
+            .iter()
+            .take_while(|interval| interval.start < piece.end)
+        {
+            bases += interval.end.min(piece.end) - interval.start.max(piece.start);
+        }
+    }
+    bases
 }
 
 fn gaps_between(covered: &[Interval], query_length: u64) -> Vec<Interval> {

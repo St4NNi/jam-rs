@@ -60,7 +60,7 @@ pub struct Decision {
     pub mosaic: Mosaic,
     /// Base counts summed over the counted fragments.
     pub counts: EditCounts,
-    /// Fragments left out because they fall below the fragment limits.
+    /// Fragments left out by the contig rule or the fragment limits.
     pub dropped_fragments: usize,
     /// Whether the entry is reported.
     pub qualifies: bool,
@@ -76,16 +76,8 @@ impl Decision {
 impl DecisionRule {
     /// Checks that the limits make sense.
     pub fn validate(&self) -> Result<(), DecideError> {
-        // A share is tested on a length where every decimal share of up to 17 digits is exact.
-        const LENGTH: u64 = 1_000_000_000_000_000_000;
-        let required = self.min_query_coverage.required_bases(LENGTH);
+        self.min_query_coverage.validate()?;
         let fraction = |value: f64| value.is_finite() && (0.0..=1.0).contains(&value);
-        if !(LENGTH / 20..=LENGTH).contains(&required) && !self.has_base_count() {
-            return Err(DecideError::InvalidRule("query coverage is below 0.05"));
-        }
-        if self.has_base_count() && self.min_query_coverage == QueryCoverage::Bases(0) {
-            return Err(DecideError::InvalidRule("query coverage is zero bases"));
-        }
         let shares = [
             self.min_identity,
             self.min_fragment_identity,
@@ -101,10 +93,6 @@ impl DecisionRule {
             return Err(DecideError::InvalidRule("fragment columns is zero"));
         }
         Ok(())
-    }
-
-    fn has_base_count(&self) -> bool {
-        matches!(self.min_query_coverage, QueryCoverage::Bases(_))
     }
 
     /// Whether a fragment with this alignment counts.

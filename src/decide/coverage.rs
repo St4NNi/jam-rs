@@ -72,6 +72,21 @@ impl QueryCoverage {
         }
     }
 
+    /// Checks that a share lies from 0.05 to 1, as a large plasmid can show as a few small
+    /// pieces, and that a base count is not zero.
+    pub fn validate(self) -> Result<(), DecideError> {
+        // A length on which every decimal share of up to 17 digits is exact.
+        const LENGTH: u64 = 1_000_000_000_000_000_000;
+        match self {
+            Self::Bases(0) => Err(DecideError::InvalidRule("query coverage is zero bases")),
+            Self::Bases(_) => Ok(()),
+            Self::Share { .. } if (LENGTH / 20..=LENGTH).contains(&self.required_bases(LENGTH)) => {
+                Ok(())
+            }
+            Self::Share { .. } => Err(DecideError::InvalidRule("query coverage is below 0.05")),
+        }
+    }
+
     /// Whether `covered_bases` of a query of `query_length` bases are enough.
     pub fn accepts(self, covered_bases: u64, query_length: u64) -> bool {
         covered_bases >= self.required_bases(query_length)
