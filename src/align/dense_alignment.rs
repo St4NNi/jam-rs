@@ -19,9 +19,10 @@ pub struct DenseOptimum {
     diagonals: (i64, i64),
 }
 
-/// One walk of a window: the forward window, the contig position where it starts, and the query.
+/// One walk of an alignment window: the forward window, the contig position where it starts,
+/// and the query.
 #[derive(Clone, Copy)]
-struct WalkWindow<'a> {
+struct WalkInput<'a> {
     walk: &'a Walk,
     window: &'a [u8],
     offset: u64,
@@ -42,7 +43,7 @@ pub fn align_dense_walk(
     workspace: &mut AlignmentWorkspace,
     optimum: &mut Option<DenseOptimum>,
 ) -> Result<Option<Alignment>, AlignmentError> {
-    let input = WalkWindow {
+    let input = WalkInput {
         walk,
         window,
         offset,
@@ -50,8 +51,8 @@ pub fn align_dense_walk(
     };
     let length = u64::from(table.query_length());
     if table.circular() {
-        let whole = (u64::from(walk.query), length);
-        return align_dense_window(input, whole, config, workspace, optimum);
+        let start = u64::from(walk.query);
+        return align_query_range(input, start..start + length, config, workspace, optimum);
     }
     let margin = config.drift_margin();
     let walk_end = u64::from(walk.query) + u64::from(walk.length);
@@ -59,8 +60,7 @@ pub fn align_dense_walk(
     loop {
         let start = u64::from(walk.query).saturating_sub(extension);
         let end = (walk_end + extension).min(length);
-        let Some(alignment) =
-            align_dense_window(input, (start, end - start), config, workspace, optimum)?
+        let Some(alignment) = align_query_range(input, start..end, config, workspace, optimum)?
         else {
             return Ok(None);
         };
@@ -77,15 +77,17 @@ pub fn align_dense_walk(
     }
 }
 
-/// Aligns a dense walk over the query bases `query_start..query_start + window_length`.
-fn align_dense_window(
-    input: WalkWindow<'_>,
-    (query_start, window_length): (u64, u64),
+/// Aligns a dense walk over the query positions `range`, which run on over the origin of a
+/// circular query.
+fn align_query_range(
+    input: WalkInput<'_>,
+    range: std::ops::Range<u64>,
     config: BandConfig,
     workspace: &mut AlignmentWorkspace,
     optimum: &mut Option<DenseOptimum>,
 ) -> Result<Option<Alignment>, AlignmentError> {
-    let WalkWindow {
+    let (query_start, span) = (range.start, range.end - range.start);
+    let WalkInput {
         walk,
         window,
         offset,
@@ -94,7 +96,7 @@ fn align_dense_window(
     let margin = config.drift_margin();
     let diagonal = i64::from(walk.contig) - (u64::from(walk.query) - query_start) as i64;
     let low = (diagonal - margin as i64).max(0) as u64;
-    let high = (diagonal + window_length as i64 + margin as i64).max(0) as u64;
+    let high = (diagonal + span as i64 + margin as i64).max(0) as u64;
     let high = high.min(window.len() as u64);
     if low >= high {
         return Ok(None);
@@ -118,8 +120,8 @@ fn align_dense_window(
     // an endpoint completion's reach, hold no cells: the kernel reads only the rows between.
     let a = u64::from(table.anchors().a);
     let reach = band + a as i64;
-    let first_row = (low as i64 - diagonal - reach).clamp(0, window_length as i64) as u64;
-    let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, window_length as i64);
+    let first_row = (low as i64 - diagonal - reach).clamp(0, span as i64) as u64;
+    let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, span as i64);
     let rows = last_row as u64 - first_row;
     let mut bases = Vec::new();
     table.copy_bases(query_start + first_row, rows, &mut bases)?;
@@ -142,25 +144,20 @@ fn align_dense_window(
     let kernel_score = alignment.score;
     // A completion reaches a rows beyond the alignment, which the window keeps.
     let alignment = if alignment.query_interval.start - query_start <= a
-        && window_length - (alignment.query_interval.end - query_start) <= a
+        && span - (alignment.query_interval.end - query_start) <= a
     {
         workspace.complete_endpoints(alignment, aligned, a as usize, scores)?
     } else {
         alignment
     };
     let diagonals = path_diagonals(&alignment, window.len() as u64, offset, query_start);
-    // Any path outside this band visits a diagonal with at most this many paired bases.
-    // Every other operation scores <= 0. A strictly larger score therefore proves global
-    // optimality for these inputs, independently of the band.
-    let centre = diagonal - low as i64;
-    let contig_length = (high - low) as i64;
-    let left = (window_length as i64 - (band + 1 - centre).max(0))
-        .max(0)
-        .min(contig_length);
-    let right = (contig_length - (centre + band + 1).max(0))
-        .max(0)
-        .min(window_length as i64);
-    let outside = left.max(right) * i64::from(config.alignment.match_score);
+    let outside = outside_pairs(
+        diagonal - low as i64,
+        (high - low) as i64,
+        span as i64,
+        band,
+    );
+    let outside = outside * i64::from(config.alignment.match_score);
     if alignment.score >= kernel_score && i64::from(alignment.score) > outside {
         *optimum = Some(DenseOptimum {
             strand: walk.strand,
@@ -170,6 +167,15 @@ fn align_dense_window(
         });
     }
     Ok(Some(alignment))
+}
+
+/// The most paired bases of any diagonal outside the band of width `band` around `centre`, in a
+/// matrix of `rows` query and `columns` contig bases. Every other operation scores at most zero,
+/// so an alignment that scores more than these bases of matches is the best for its inputs.
+fn outside_pairs(centre: i64, columns: i64, rows: i64, band: i64) -> i64 {
+    let left = (rows - (band + 1 - centre).max(0)).max(0).min(columns);
+    let right = (columns - (centre + band + 1).max(0)).max(0).min(rows);
+    left.max(right)
 }
 
 /// The lowest and highest diagonal (oriented window position minus query position from
