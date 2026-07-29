@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
 /// One CIGAR operation; see the module documentation of `align` for its meaning.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum EditOperation {
     #[serde(rename = "=")]
     Match,
@@ -29,7 +29,7 @@ impl EditOperation {
 }
 
 /// `length` columns of one operation.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct EditRun {
     pub operation: EditOperation,
     pub length: u32,

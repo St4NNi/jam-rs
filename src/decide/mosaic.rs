@@ -2,7 +2,7 @@
 //! twice.
 
 use super::{DecideError, Fragment};
-use crate::align::{EditCounts, EditOperation, Interval, format_cigar};
+use crate::align::{EditCounts, EditOperation, Interval};
 use serde::Serialize;
 use std::cmp::Ordering;
 
@@ -106,7 +106,7 @@ fn compare_fragments(left: &Prepared, right: &Prepared) -> Ordering {
         })
         .then_with(|| a.alignment.query_interval.cmp(&b.alignment.query_interval))
         .then_with(|| a.query_segments.cmp(&b.query_segments))
-        .then_with(|| format_cigar(&a.alignment.runs).cmp(&format_cigar(&b.alignment.runs)))
+        .then_with(|| a.alignment.runs.cmp(&b.alignment.runs))
 }
 
 /// The query bases that a fragment pairs with a contig base: matches and substitutions. Bases
