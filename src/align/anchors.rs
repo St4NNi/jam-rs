@@ -325,18 +325,22 @@ impl QueryTable {
         &self.query[..self.query_length as usize]
     }
 
+    /// The number of query bases.
     pub fn query_length(&self) -> u32 {
         self.query_length
     }
 
+    /// Whether the query is circular.
     pub fn circular(&self) -> bool {
         self.circular
     }
 
+    /// The anchor settings the table was built with.
     pub fn anchors(&self) -> AnchorConfig {
         self.anchors
     }
 
+    /// The chaining limits the table was built with.
     pub fn chains(&self) -> ChainConfig {
         self.chains
     }
@@ -414,8 +418,11 @@ fn period(query: &[u8], circular: bool, a: usize) -> Option<usize> {
 /// the forward strand, and in the reverse complement of the window for the reverse strand.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Anchor {
+    /// The contig strand of the match.
     pub strand: Strand,
+    /// The oriented window position.
     pub contig: u32,
+    /// The query position.
     pub query: u32,
 }
 

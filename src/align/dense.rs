@@ -8,7 +8,7 @@
 use super::anchors::{QueryTable, base_code, kmers};
 use super::chain_alignment::BandConfig;
 use super::reverse_complement_into;
-use super::{AlignmentError, Strand};
+use super::{AlignmentError, Budgeted, Strand};
 use std::mem::size_of;
 
 /// The best-scoring ungapped stretch around one or more match starts of a diagonal. `contig` is
@@ -16,9 +16,13 @@ use std::mem::size_of;
 /// the start in the query, below its length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Walk {
+    /// The contig strand of the walk.
     pub strand: Strand,
+    /// The start in the oriented window.
     pub contig: u32,
+    /// The start in the query.
     pub query: u32,
+    /// The bases of the walk.
     pub length: u32,
 }
 
@@ -26,7 +30,9 @@ pub struct Walk {
 /// walks are read from (empty when no walk needs it).
 #[derive(Debug, Default)]
 pub struct DenseWalks {
+    /// The walks of both strands.
     pub walks: Vec<Walk>,
+    /// The reverse complement of the window.
     pub reverse: Vec<u8>,
 }
 
@@ -71,13 +77,13 @@ pub fn dense_walks(
     let mut count = 0usize;
     match_starts(table, window, above, &mut |_, _| count += 1);
     if price(count) > budget {
-        return Err(AlignmentError::ChainingBudget("dense match starts"));
+        return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
     }
     let mut reverse = Vec::new();
     reverse_complement_into(window, &mut reverse);
     match_starts(table, &reverse, above, &mut |_, _| count += 1);
     if price(count) > budget {
-        return Err(AlignmentError::ChainingBudget("dense match starts"));
+        return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
     }
     let length = i64::from(table.query_length());
     let diagonal = |contig: u32, query: u32| {
@@ -126,7 +132,7 @@ fn periodic_walks(
         .saturating_add(window.len())
         > budget
     {
-        return Err(AlignmentError::ChainingBudget("circular periodic walks"));
+        return Err(AlignmentError::ChainingBudget(Budgeted::PeriodicWalks));
     }
     let mut walks = Vec::with_capacity(count);
     for phase in phases {

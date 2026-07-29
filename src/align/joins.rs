@@ -16,7 +16,9 @@ use std::mem::size_of;
 /// The least columns and identity a join must reach to be kept.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct JoinLimits {
+    /// The fewest alignment columns of a join.
     pub min_columns: u64,
+    /// The lowest identity of a join.
     pub min_identity: f64,
 }
 

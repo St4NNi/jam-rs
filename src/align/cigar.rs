@@ -2,7 +2,6 @@
 
 use super::{AlignmentError, EditCounts};
 use serde::{Deserialize, Serialize};
-use std::fmt::Write;
 
 /// One CIGAR operation; see the module documentation of `align` for its meaning.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -31,7 +30,9 @@ impl EditOperation {
 /// `length` columns of one operation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct EditRun {
+    /// The operation of every column of the run.
     pub operation: EditOperation,
+    /// The number of columns.
     pub length: u32,
 }
 
@@ -39,8 +40,8 @@ pub struct EditRun {
 pub fn format_cigar(runs: &[EditRun]) -> String {
     let mut cigar = String::with_capacity(runs.len() * 4);
     for run in runs {
-        write!(cigar, "{}{}", run.length, run.operation.symbol())
-            .expect("writing to a string cannot fail");
+        cigar.push_str(&run.length.to_string());
+        cigar.push(run.operation.symbol());
     }
     cigar
 }

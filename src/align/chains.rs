@@ -1,16 +1,18 @@
 //! Chains: anchors of one strand in order along nearly the same diagonal.
 
 use super::anchors::{Anchor, QueryTable, count_anchors, find_anchors, occurrence_counts};
-use super::{AlignmentError, Strand};
+use super::{AlignmentError, Budgeted, Strand};
 
 /// Colinear anchors of one strand, in increasing oriented contig position.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chain {
+    /// The contig strand of all anchors.
     pub strand: Strand,
     /// The anchors in order.
     pub anchors: Vec<Anchor>,
     /// Query offset of every anchor from the first, counted across the origin of a circular query.
     pub offsets: Vec<u32>,
+    /// The chain score: matched anchor bases less the cost of drifting links.
     pub score: i64,
 }
 
@@ -201,7 +203,7 @@ fn periodic_chains(
             + anchors.saturating_mul(std::mem::size_of::<Anchor>() + std::mem::size_of::<u32>()),
     );
     if bytes > CHAINING_BYTES {
-        return Err(AlignmentError::ChainingBudget("periodic chains"));
+        return Err(AlignmentError::ChainingBudget(Budgeted::PeriodicChains));
     }
     let mut chains = Vec::with_capacity(total);
     for phase in phases {

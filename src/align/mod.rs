@@ -40,11 +40,14 @@ use thiserror::Error;
 /// A half-open range of positions, `start..end`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Interval {
+    /// The first position.
     pub start: u64,
+    /// The position after the last.
     pub end: u64,
 }
 
 impl Interval {
+    /// The interval `start..end`; fails when `start` lies after `end`.
     pub fn new(start: u64, end: u64) -> Result<Self, AlignmentError> {
         if start > end {
             return Err(AlignmentError::ReversedInterval { start, end });
@@ -52,10 +55,12 @@ impl Interval {
         Ok(Self { start, end })
     }
 
+    /// The number of positions.
     pub fn len(self) -> u64 {
         self.end - self.start
     }
 
+    /// Whether the interval holds no position.
     pub fn is_empty(self) -> bool {
         self.start == self.end
     }
@@ -119,9 +124,13 @@ impl Strand {
 /// A gapped alignment of a query interval to a contig interval.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Alignment {
+    /// The affine score of the runs.
     pub score: i32,
+    /// The contig strand the query aligns to.
     pub strand: Strand,
+    /// The aligned query bases; over the origin of a circular query they run past its length.
     pub query_interval: Interval,
+    /// The aligned contig bases, in forward contig positions.
     pub contig_interval: Interval,
     /// The edit runs from the start of both intervals on; on the reverse strand the contig runs
     /// backwards from `contig_interval.end`.
@@ -131,9 +140,13 @@ pub struct Alignment {
 /// Base counts of an alignment, one per CIGAR operation.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditCounts {
+    /// Columns of equal bases (`=`).
     pub matches: u64,
+    /// Columns of different bases (`X`).
     pub substitutions: u64,
+    /// Bases only in the query (`I`).
     pub insertions: u64,
+    /// Bases only in the contig (`D`).
     pub deletions: u64,
 }
 
@@ -178,10 +191,12 @@ impl std::ops::AddAssign for EditCounts {
 }
 
 impl Alignment {
+    /// The base counts of the runs.
     pub fn counts(&self) -> EditCounts {
         cigar::counts(&self.runs)
     }
 
+    /// Matches divided by alignment columns.
     pub fn identity(&self) -> f64 {
         self.counts().identity()
     }
@@ -242,6 +257,7 @@ fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
     output.extend(sequence.iter().rev().map(|base| complement(*base)));
 }
 
+/// What can go wrong while finding anchors, chains and walks and while aligning.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum AlignmentError {
     #[error("interval is reversed: {start}..{end}")]
@@ -279,7 +295,25 @@ pub enum AlignmentError {
     #[error("query is too long for the query table")]
     QueryTooLong,
     #[error("{0} exceed the chaining budget")]
-    ChainingBudget(&'static str),
+    ChainingBudget(Budgeted),
+}
+
+/// What exceeded the chaining budget of an alignment window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Budgeted {
+    PeriodicChains,
+    MatchStarts,
+    PeriodicWalks,
+}
+
+impl std::fmt::Display for Budgeted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::PeriodicChains => "periodic chains",
+            Self::MatchStarts => "dense match starts",
+            Self::PeriodicWalks => "circular periodic walks",
+        })
+    }
 }
 
 #[cfg(test)]
