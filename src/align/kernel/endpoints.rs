@@ -74,45 +74,93 @@ impl AlignmentWorkspace {
 /// `complete_endpoints` with the contig window on the core's strand.
 fn complete(
     workspace: &mut EndpointWorkspace,
-    mut core: Alignment,
+    core: Alignment,
     input: AlignmentInput<'_>,
     contig: &[u8],
     max_extension: usize,
     config: AlignmentConfig,
 ) -> Result<Alignment, AlignmentError> {
     core.validate()?;
+    let span = CoreSpan::of(&core, input, contig)?;
     let query = input.query;
-    let local = |position: u64, offset: u64| {
-        position
-            .checked_sub(offset)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or(AlignmentError::EndpointOutsideWindow)
-    };
-    let query_start = local(core.query_interval.start, input.query_offset)?;
-    let query_end = local(core.query_interval.end, input.query_offset)?;
-    let local_start = local(core.contig_interval.start, input.contig_offset)?;
-    let local_end = local(core.contig_interval.end, input.contig_offset)?;
-    if query_end > query.len() || local_end > contig.len() {
-        return Err(AlignmentError::EndpointOutsideWindow);
-    }
-    let (contig_start, contig_end) = match core.strand {
-        Strand::Forward => (local_start, local_end),
-        Strand::Reverse => (contig.len() - local_end, contig.len() - local_start),
-    };
+    let left = extend_left(workspace, query, contig, &span, max_extension, config)?;
+    let query_limit = span
+        .query_end
+        .saturating_add(max_extension)
+        .min(query.len());
+    let contig_limit = span
+        .contig_end
+        .saturating_add(max_extension)
+        .min(contig.len());
+    let right = anchored_semiglobal(
+        workspace,
+        &query[span.query_end..query_limit],
+        &contig[span.contig_end..contig_limit],
+        config,
+    )?;
+    let ends = [left, right];
+    place_completion(core, &ends, &span, input, contig.len(), config)
+}
 
-    let left_query_len = query_start.min(max_extension);
-    let left_contig_len = contig_start.min(max_extension);
+/// The query and oriented contig positions of a core alignment in its windows.
+struct CoreSpan {
+    query_start: usize,
+    query_end: usize,
+    contig_start: usize,
+    contig_end: usize,
+}
+
+impl CoreSpan {
+    fn of(
+        core: &Alignment,
+        input: AlignmentInput<'_>,
+        contig: &[u8],
+    ) -> Result<Self, AlignmentError> {
+        let local = |position: u64, offset: u64| {
+            position
+                .checked_sub(offset)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or(AlignmentError::EndpointOutsideWindow)
+        };
+        let query_start = local(core.query_interval.start, input.query_offset)?;
+        let query_end = local(core.query_interval.end, input.query_offset)?;
+        let local_start = local(core.contig_interval.start, input.contig_offset)?;
+        let local_end = local(core.contig_interval.end, input.contig_offset)?;
+        if query_end > input.query.len() || local_end > contig.len() {
+            return Err(AlignmentError::EndpointOutsideWindow);
+        }
+        let (contig_start, contig_end) = match core.strand {
+            Strand::Forward => (local_start, local_end),
+            Strand::Reverse => (contig.len() - local_end, contig.len() - local_start),
+        };
+        Ok(Self {
+            query_start,
+            query_end,
+            contig_start,
+            contig_end,
+        })
+    }
+}
+
+/// The completion of the left end: the bases before the core, read backwards.
+fn extend_left(
+    workspace: &mut EndpointWorkspace,
+    query: &[u8],
+    contig: &[u8],
+    span: &CoreSpan,
+    max_extension: usize,
+    config: AlignmentConfig,
+) -> Result<EndpointResult, AlignmentError> {
+    let (query_start, contig_start) = (span.query_start, span.contig_start);
+    let query_bases = query_start.min(max_extension);
+    let contig_bases = contig_start.min(max_extension);
     let mut left_query = std::mem::take(&mut workspace.left_query);
     let mut left_contig = std::mem::take(&mut workspace.left_contig);
     left_query.clear();
-    left_query.extend(
-        query[query_start - left_query_len..query_start]
-            .iter()
-            .rev(),
-    );
+    left_query.extend(query[query_start - query_bases..query_start].iter().rev());
     left_contig.clear();
     left_contig.extend(
-        contig[contig_start - left_contig_len..contig_start]
+        contig[contig_start - contig_bases..contig_start]
             .iter()
             .rev(),
     );
@@ -120,20 +168,23 @@ fn complete(
     (workspace.left_query, workspace.left_contig) = (left_query, left_contig);
     let mut left = left?;
     left.runs.reverse();
+    Ok(left)
+}
 
-    let query_limit = query_end.saturating_add(max_extension).min(query.len());
-    let contig_limit = contig_end.saturating_add(max_extension).min(contig.len());
-    let right = anchored_semiglobal(
-        workspace,
-        &query[query_end..query_limit],
-        &contig[contig_end..contig_limit],
-        config,
-    )?;
-
+/// The core with both completed ends joined to it, rescored and placed in the positions of
+/// `input`. `contig_length` is the length of the contig window.
+fn place_completion(
+    mut core: Alignment,
+    [left, right]: &[EndpointResult; 2],
+    span: &CoreSpan,
+    input: AlignmentInput<'_>,
+    contig_length: usize,
+    config: AlignmentConfig,
+) -> Result<Alignment, AlignmentError> {
     let mut runs = Vec::with_capacity(left.runs.len() + core.runs.len() + right.runs.len());
-    append_runs(&mut runs, left.runs)?;
+    append_runs(&mut runs, left.runs.iter().copied())?;
     append_runs(&mut runs, std::mem::take(&mut core.runs))?;
-    append_runs(&mut runs, right.runs)?;
+    append_runs(&mut runs, right.runs.iter().copied())?;
     core.score = score_runs(&runs, config);
     let position = |offset: u64, at: usize| {
         u64::try_from(at)
@@ -142,14 +193,14 @@ fn complete(
             .ok_or(AlignmentError::LengthOverflow)
     };
     core.query_interval = Interval::new(
-        position(input.query_offset, query_start - left.query_bases)?,
-        position(input.query_offset, query_end + right.query_bases)?,
+        position(input.query_offset, span.query_start - left.query_bases)?,
+        position(input.query_offset, span.query_end + right.query_bases)?,
     )?;
-    let oriented_start = contig_start - left.contig_bases;
-    let oriented_end = contig_end + right.contig_bases;
+    let oriented_start = span.contig_start - left.contig_bases;
+    let oriented_end = span.contig_end + right.contig_bases;
     let (forward_start, forward_end) = match core.strand {
         Strand::Forward => (oriented_start, oriented_end),
-        Strand::Reverse => (contig.len() - oriented_end, contig.len() - oriented_start),
+        Strand::Reverse => (contig_length - oriented_end, contig_length - oriented_start),
     };
     core.contig_interval = Interval::new(
         position(input.contig_offset, forward_start)?,
