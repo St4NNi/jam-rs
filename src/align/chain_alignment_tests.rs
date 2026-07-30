@@ -1,10 +1,8 @@
-use super::Anchor;
-use super::ChainConfig;
-use super::chain_alignment::{BandConfig, align_chain};
-use super::chain_tests::{random_sequence, reverse_complement};
-use super::{
-    Alignment, AlignmentConfig, AlignmentWorkspace, AnchorConfig, Chain, EditOperation, Interval,
-    QueryTable, Strand, format_cigar, split_by_drift, window_chains,
+use super::*;
+use crate::align::chains::tests::{random_sequence, reverse_complement};
+use crate::align::{
+    Anchor, AnchorConfig, Chain, ChainConfig, EditOperation, Strand, format_cigar, split_by_drift,
+    window_chains,
 };
 
 /// Substitutes every base whose roll is below `per_thousand` of 1,000.

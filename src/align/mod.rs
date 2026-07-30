@@ -6,10 +6,6 @@
 
 mod anchors;
 mod chain_alignment;
-#[cfg(test)]
-mod chain_alignment_tests;
-#[cfg(test)]
-mod chain_tests;
 mod chains;
 mod cigar;
 mod dense;

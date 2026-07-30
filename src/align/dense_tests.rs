@@ -1,6 +1,6 @@
 use super::ChainConfig;
 use super::Strand;
-use super::chain_tests::random_sequence;
+use super::chains::tests::random_sequence;
 use super::{
     AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinContext,
     JoinLimits, JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar,

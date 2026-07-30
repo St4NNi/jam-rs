@@ -315,3 +315,7 @@ struct Stretch {
     contig_low: u64,
     contig_high: u64,
 }
+
+#[cfg(test)]
+#[path = "chain_alignment_tests.rs"]
+mod tests;

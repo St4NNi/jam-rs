@@ -1,11 +1,8 @@
-use super::Anchor;
-use super::ChainConfig;
-use super::Strand;
-use super::anchors::{AnchorConfig, QueryTable, find_anchors};
-use super::chains::{Chain, split_by_drift, window_chains};
-use super::complement;
+use super::*;
+use crate::align::anchors::{AnchorConfig, find_anchors};
+use crate::align::complement;
 
-pub(super) fn random_sequence(length: usize, mut state: u64) -> Vec<u8> {
+pub(in crate::align) fn random_sequence(length: usize, mut state: u64) -> Vec<u8> {
     (0..length)
         .map(|_| {
             state ^= state << 13;
@@ -16,7 +13,7 @@ pub(super) fn random_sequence(length: usize, mut state: u64) -> Vec<u8> {
         .collect()
 }
 
-pub(super) fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
+pub(in crate::align) fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
     sequence
         .iter()
         .rev()

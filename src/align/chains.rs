@@ -380,3 +380,7 @@ pub fn split_by_drift(chain: &Chain, max_drift: u32, min_anchors: u32) -> Vec<Ch
     }
     parts
 }
+
+#[cfg(test)]
+#[path = "chains_tests.rs"]
+pub(super) mod tests;
