@@ -12,6 +12,7 @@ mod agreement_tests;
 mod avx2;
 mod driver;
 mod endpoints;
+pub(super) use endpoints::{EndpointWorkspace, PathEnd, affine_path};
 mod fill;
 mod geometry;
 mod rebased;

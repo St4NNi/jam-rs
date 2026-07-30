@@ -7,8 +7,9 @@
 
 use super::anchors::QueryTable;
 use super::chain_alignment::BandConfig;
-use super::cigar::append_runs;
+use super::cigar::{append_runs, counts};
 use super::dense::Walk;
+use super::kernel::{EndpointWorkspace, PathEnd, affine_path};
 use super::walk_alignment::{oriented_alignment, walk_alignment};
 use super::{Alignment, AlignmentError, EditCounts, EditOperation, EditRun};
 use std::mem::size_of;
@@ -56,8 +57,7 @@ pub struct JoinScratch {
     ends: Vec<u32>,
     chain: Vec<u32>,
     parts: Vec<[Part; 2]>,
-    traceback: Vec<u8>,
-    scores: Vec<[i64; 3]>,
+    matrix: EndpointWorkspace,
     piece: Vec<u8>,
 }
 
@@ -73,14 +73,14 @@ impl JoinScratch {
         let reach = reach(context) as usize;
         walks * (3 * size_of::<u32>() + size_of::<[Part; 2]>())
             + (reach + 1) * (reach + 1)
-            + 2 * (reach + 1) * size_of::<[i64; 3]>()
+            + 2 * (reach + 1) * size_of::<[i32; 3]>()
             + reach
-            + 2 * reach * size_of::<EditRun>()
+            + 2 * reach * (size_of::<EditOperation>() + size_of::<EditRun>())
     }
 
-    /// Orders `walks` by strand and contig start and end, at the capacities `bytes` priced.
+    /// Orders `walks` by strand and contig start and end. The piece matrix grows to at most
+    /// what `bytes` priced.
     pub fn prepare(&mut self, walks: &[Walk], context: &JoinContext<'_>) {
-        let reach = reach(context) as usize;
         let key = |index: u32, end: bool| {
             let walk = walks[index as usize];
             let contig = walk.contig + if end { walk.length } else { 0 };
@@ -92,9 +92,7 @@ impl JoinScratch {
         self.ends.sort_unstable_by_key(|&index| key(index, true));
         self.chain = Vec::with_capacity(walks.len());
         self.parts = Vec::with_capacity(walks.len());
-        self.traceback = Vec::with_capacity((reach + 1) * (reach + 1));
-        self.scores = Vec::with_capacity(2 * (reach + 1));
-        self.piece = Vec::with_capacity(reach);
+        self.piece = Vec::with_capacity(reach(context) as usize);
     }
 
     /// The nearest walk after (or before) walk `at` on its strand, ordered on query and contig,
@@ -293,123 +291,20 @@ impl JoinScratch {
             .table
             .copy_bases(end as u64, query_gap as u64, &mut self.piece)?;
         let contig = &oriented[(before.contig + before.length) as usize..next.contig as usize];
-        let score = self.fill_piece(contig, context.band);
-        self.trace_piece(contig, score, runs)
-    }
-
-    /// Fills the global piece matrix of `self.piece` against `contig` and returns the end score
-    /// and state. States: 0 paired, 1 contig base only (deletion), 2 query base only (insertion).
-    /// Each cell keeps the state before each of its states, two bits each.
-    fn fill_piece(&mut self, contig: &[u8], config: BandConfig) -> (i64, u8) {
-        let scoring = config.alignment;
-        let (rows, columns) = (self.piece.len() + 1, contig.len() + 1);
-        let (open, extend) = (
-            i64::from(scoring.gap_open_score),
-            i64::from(scoring.gap_extend_score),
-        );
-        const NONE: i64 = i64::MIN / 4;
-        let best = |scores: [i64; 3]| {
-            (0..3).fold((NONE, 0u8), |saved, state| {
-                if scores[state] > saved.0 {
-                    (scores[state], state as u8)
-                } else {
-                    saved
-                }
-            })
+        let alignment = context.band.alignment;
+        let path = affine_path(
+            &mut self.matrix,
+            &self.piece,
+            contig,
+            alignment,
+            PathEnd::Corner,
+        )?;
+        let part = Part {
+            score: i64::from(path.score),
+            counts: counts(&path.runs),
         };
-        self.traceback.clear();
-        self.traceback.resize(rows * columns, 0);
-        self.scores.clear();
-        self.scores.resize(2 * columns, [NONE; 3]);
-        let (previous, current) = self.scores.split_at_mut(columns);
-        previous[0] = [0, NONE, NONE];
-        for (column, cell) in previous.iter_mut().enumerate().skip(1) {
-            *cell = [NONE, open + extend * column as i64, NONE];
-            self.traceback[column] = u8::from(column > 1) << 2;
-        }
-        for row in 1..rows {
-            current[0] = [NONE, NONE, open + extend * row as i64];
-            self.traceback[row * columns] = (if row > 1 { 2 } else { 0 }) << 4;
-            for column in 1..columns {
-                let (paired, from) = best(previous[column - 1]);
-                let paired = paired
-                    + i64::from(if self.piece[row - 1] == contig[column - 1] {
-                        scoring.match_score
-                    } else {
-                        scoring.mismatch_score
-                    });
-                let left = current[column - 1];
-                let (deleted, deleted_from) = best([
-                    left[0] + open + extend,
-                    left[1] + extend,
-                    left[2] + open + extend,
-                ]);
-                let up = previous[column];
-                let (inserted, inserted_from) =
-                    best([up[0] + open + extend, up[1] + open + extend, up[2] + extend]);
-                current[column] = [paired, deleted, inserted];
-                self.traceback[row * columns + column] =
-                    from | deleted_from << 2 | inserted_from << 4;
-            }
-            previous.copy_from_slice(current);
-        }
-        if rows == 1 && columns == 1 {
-            (0, 0)
-        } else {
-            best(previous[columns - 1])
-        }
-    }
-
-    /// Traces the filled piece matrix back from its end cell.
-    fn trace_piece(
-        &self,
-        contig: &[u8],
-        (score, mut state): (i64, u8),
-        runs: Option<&mut Vec<EditRun>>,
-    ) -> Result<Part, AlignmentError> {
-        let columns = contig.len() + 1;
-        let mut part = Part {
-            score,
-            ..Part::default()
-        };
-        let (mut row, mut column) = (self.piece.len(), contig.len());
-        let mut operations = Vec::new();
-        while row > 0 || column > 0 {
-            let before = self.traceback[row * columns + column] >> (2 * state) & 3;
-            let operation = match state {
-                0 => {
-                    let same = self.piece[row - 1] == contig[column - 1];
-                    (row, column) = (row - 1, column - 1);
-                    if same {
-                        part.counts.matches += 1;
-                        EditOperation::Match
-                    } else {
-                        part.counts.substitutions += 1;
-                        EditOperation::Substitution
-                    }
-                }
-                1 => {
-                    column -= 1;
-                    part.counts.deletions += 1;
-                    EditOperation::Deletion
-                }
-                _ => {
-                    row -= 1;
-                    part.counts.insertions += 1;
-                    EditOperation::Insertion
-                }
-            };
-            if runs.is_some() {
-                operations.push(EditRun {
-                    operation,
-                    length: 1,
-                });
-            }
-            state = before;
-        }
         if let Some(runs) = runs {
-            operations.reverse();
-            append_runs(runs, operations)?;
+            append_runs(runs, path.runs)?;
         }
         Ok(part)
     }

@@ -1,5 +1,5 @@
 //! Endpoint completion: extends a local alignment through at most a few bases beyond each end
-//! with an anchored semi-global alignment, so a short divergent end is not cut off.
+//! with an anchored semi-global alignment. Its affine matrix also aligns the pieces of joins.
 
 use super::geometry::{DELETION, INSERTION, MATCH, START};
 use super::{AlignmentConfig, AlignmentInput, AlignmentWorkspace};
@@ -15,7 +15,7 @@ const INITIAL_PREVIOUS: u8 = START | (START << 2) | (START << 4);
 
 /// Reusable buffers of the endpoint matrices.
 #[derive(Debug, Default)]
-pub(super) struct EndpointWorkspace {
+pub(in crate::align) struct EndpointWorkspace {
     /// Two rows of the three state scores.
     rows: [Vec<[i32; 3]>; 2],
     /// The previous state of each state of each cell, two bits each.
@@ -25,9 +25,19 @@ pub(super) struct EndpointWorkspace {
     left_contig: Vec<u8>,
 }
 
-/// The runs of one end and the bases they take from the query and the contig.
-struct EndpointResult {
-    runs: Vec<EditRun>,
+/// Where a path of the affine matrix may end.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::align) enum PathEnd {
+    /// At the last base of the query or of the contig, wherever it scores best.
+    Free,
+    /// At the last base of both.
+    Corner,
+}
+
+/// A path from the first bases of both sides: its runs, its score and the bases it takes.
+pub(in crate::align) struct AffinePath {
+    pub(in crate::align) runs: Vec<EditRun>,
+    pub(in crate::align) score: i32,
     query_bases: usize,
     contig_bases: usize,
 }
@@ -92,11 +102,12 @@ fn complete(
         .contig_end
         .saturating_add(max_extension)
         .min(contig.len());
-    let right = anchored_semiglobal(
+    let right = affine_path(
         workspace,
         &query[span.query_end..query_limit],
         &contig[span.contig_end..contig_limit],
         config,
+        PathEnd::Free,
     )?;
     let ends = [left, right];
     place_completion(core, &ends, &span, input, contig.len(), config)
@@ -150,7 +161,7 @@ fn extend_left(
     span: &CoreSpan,
     max_extension: usize,
     config: AlignmentConfig,
-) -> Result<EndpointResult, AlignmentError> {
+) -> Result<AffinePath, AlignmentError> {
     let (query_start, contig_start) = (span.query_start, span.contig_start);
     let query_bases = query_start.min(max_extension);
     let contig_bases = contig_start.min(max_extension);
@@ -164,7 +175,7 @@ fn extend_left(
             .iter()
             .rev(),
     );
-    let left = anchored_semiglobal(workspace, &left_query, &left_contig, config);
+    let left = affine_path(workspace, &left_query, &left_contig, config, PathEnd::Free);
     (workspace.left_query, workspace.left_contig) = (left_query, left_contig);
     let mut left = left?;
     left.runs.reverse();
@@ -175,7 +186,7 @@ fn extend_left(
 /// `input`. `contig_length` is the length of the contig window.
 fn place_completion(
     mut core: Alignment,
-    [left, right]: &[EndpointResult; 2],
+    [left, right]: &[AffinePath; 2],
     span: &CoreSpan,
     input: AlignmentInput<'_>,
     contig_length: usize,
@@ -268,17 +279,19 @@ fn maximum(values: [i32; 3]) -> (i32, u8) {
         })
 }
 
-/// The best alignment that starts at the first base of both `query` and `contig` and ends at
-/// the last base of one of them.
-fn anchored_semiglobal(
+/// The best alignment that starts at the first base of both `query` and `contig` and ends as
+/// `end` allows. A gap of n bases scores the gap open score plus n gap extend scores.
+pub(in crate::align) fn affine_path(
     workspace: &mut EndpointWorkspace,
     query: &[u8],
     contig: &[u8],
     config: AlignmentConfig,
-) -> Result<EndpointResult, AlignmentError> {
-    if query.is_empty() || contig.is_empty() {
-        return Ok(EndpointResult {
+    end: PathEnd,
+) -> Result<AffinePath, AlignmentError> {
+    if end == PathEnd::Free && (query.is_empty() || contig.is_empty()) {
+        return Ok(AffinePath {
             runs: Vec::new(),
+            score: 0,
             query_bases: 0,
             contig_bases: 0,
         });
@@ -323,6 +336,15 @@ fn anchored_semiglobal(
             best.consider(row, columns - 1, current[columns - 1]);
         }
         workspace.rows.swap(0, 1);
+    }
+    if end == PathEnd::Corner {
+        let (score, state) = maximum(workspace.rows[0][columns - 1]);
+        best = EndCell {
+            score,
+            row: rows - 1,
+            column: columns - 1,
+            state,
+        };
     }
     if best.state > INSERTION {
         return Err(AlignmentError::NoAlignment);
@@ -387,7 +409,7 @@ fn trace_endpoint(
     query: &[u8],
     contig: &[u8],
     best: EndCell,
-) -> Result<EndpointResult, AlignmentError> {
+) -> Result<AffinePath, AlignmentError> {
     let columns = contig.len() + 1;
     let (mut row, mut column, mut state) = (best.row, best.column, best.state);
     let operations = &mut workspace.operations;
@@ -420,8 +442,9 @@ fn trace_endpoint(
         state = previous;
     }
     operations.reverse();
-    Ok(EndpointResult {
+    Ok(AffinePath {
         runs: runs_of(operations)?,
+        score: best.score,
         query_bases: best.row,
         contig_bases: best.column,
     })
