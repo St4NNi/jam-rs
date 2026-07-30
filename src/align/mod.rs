@@ -28,7 +28,7 @@ pub use chains::{
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
 pub use dense::{DenseWalks, Walk, dense_walks, long_enough};
 pub use dense_alignment::{DenseOptimum, align_dense_walk};
-pub use joins::{JoinLimits, JoinScratch};
+pub use joins::{JoinContext, JoinLimits, JoinScratch};
 use kernel::AlignmentInput;
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
 pub use walk_alignment::{gap_continuation, holds_walk, walk_alignment};

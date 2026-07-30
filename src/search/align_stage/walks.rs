@@ -11,8 +11,8 @@ use super::place::query_room;
 use super::window::PreparedWindow;
 use super::{AlignStageError, AlignStageWorkspace};
 use crate::align::{
-    Alignment, DenseOptimum, EditOperation, JoinLimits, JoinScratch, Walk, align_dense_walk,
-    base_code, gap_continuation, holds_walk, long_enough, walk_alignment,
+    Alignment, DenseOptimum, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
+    align_dense_walk, base_code, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 use crate::decide::Fragment;
 use std::cmp::Reverse;
@@ -242,7 +242,15 @@ fn join_short_walks(
     if short.is_empty() {
         return Ok(());
     }
-    let bytes = JoinScratch::bytes(walks.len(), &query.table, job.config.band);
+    let context = JoinContext {
+        table: &query.table,
+        band: job.config.band,
+        limits: JoinLimits {
+            min_columns: rule.min_fragment_columns,
+            min_identity: rule.min_fragment_identity,
+        },
+    };
+    let bytes = JoinScratch::bytes(walks.len(), &context);
     if bytes > job.config.max_prepared_bytes {
         return Err(AlignStageError::TooLarge {
             what: "the joins of one window",
@@ -250,11 +258,7 @@ fn join_short_walks(
             limit: job.config.max_prepared_bytes as u64,
         });
     }
-    let limits = JoinLimits {
-        min_columns: rule.min_fragment_columns,
-        min_identity: rule.min_fragment_identity,
-    };
-    scratch.prepare(walks, &query.table, job.config.band, limits);
+    scratch.prepare(walks, &context);
     // Longer walks first, so shifted copies inside a kept join are not joined again.
     short.sort_unstable_by_key(|&index| (Reverse(walks[index].length), index));
     for index in short {
@@ -263,14 +267,7 @@ fn join_short_walks(
             continue;
         }
         let oriented = window.oriented(&walks[index]);
-        let joined = scratch.join_through(
-            walks,
-            index,
-            oriented,
-            window.start,
-            &query.table,
-            job.config.band,
-        )?;
+        let joined = scratch.join_through(walks, index, oriented, window.start, &context)?;
         if let Some(joined) = joined {
             output.work.alignments += 1;
             output.fragments.push(Fragment::place(

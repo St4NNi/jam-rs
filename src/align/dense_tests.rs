@@ -2,9 +2,9 @@ use super::ChainConfig;
 use super::Strand;
 use super::chain_tests::random_sequence;
 use super::{
-    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinLimits,
-    JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar, holds_walk,
-    walk_alignment,
+    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinContext,
+    JoinLimits, JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar,
+    holds_walk, walk_alignment,
 };
 
 fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>, QueryTable) {
@@ -225,19 +225,23 @@ fn short_blocks_join_across_a_divergent_piece() {
             length: 30,
         },
     ];
-    let limits = JoinLimits {
-        min_columns: 50,
-        min_identity: 0.8,
+    let context = JoinContext {
+        table: &table,
+        band: config,
+        limits: JoinLimits {
+            min_columns: 50,
+            min_identity: 0.8,
+        },
     };
     let mut scratch = JoinScratch::default();
-    scratch.prepare(&walks, &table, config, limits);
+    scratch.prepare(&walks, &context);
     let joined = scratch
-        .join_through(&walks, 0, &contig, 1_000, &table, config)
+        .join_through(&walks, 0, &contig, 1_000, &context)
         .unwrap()
         .unwrap();
     joined.validate().unwrap();
     assert_eq!(joined.query_interval.start, 100);
     assert_eq!(joined.query_interval.end, 166);
     assert_eq!(joined.contig_interval.start, 1_000);
-    assert!(JoinScratch::bytes(2, &table, config) > 0);
+    assert!(JoinScratch::bytes(2, &context) > 0);
 }
