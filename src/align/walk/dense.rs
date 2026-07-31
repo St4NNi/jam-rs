@@ -5,10 +5,10 @@
 //! and are skipped. The starts are grouped by strand and diagonal and walked with ungapped X-drop
 //! extension, so every copy of a repeat becomes one ungapped alignment on its own diagonal.
 
-use super::anchors::{QueryTable, base_code, kmers};
-use super::chain_alignment::BandConfig;
-use super::reverse_complement_into;
-use super::{AlignmentError, Budgeted, Strand};
+use crate::align::BandConfig;
+use crate::align::anchors::{QueryTable, base_code, kmers};
+use crate::align::reverse_complement_into;
+use crate::align::{AlignmentError, Budgeted, Strand};
 use std::mem::size_of;
 
 /// The best-scoring ungapped stretch around one or more match starts of a diagonal. `contig` is

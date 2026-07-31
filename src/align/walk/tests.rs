@@ -1,7 +1,7 @@
-use super::ChainConfig;
-use super::Strand;
-use super::chains::tests::random_sequence;
-use super::{
+use crate::align::ChainConfig;
+use crate::align::Strand;
+use crate::align::chains::tests::random_sequence;
+use crate::align::{
     AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinContext,
     JoinLimits, JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar,
     holds_walk, walk_alignment,

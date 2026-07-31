@@ -8,13 +8,8 @@ mod anchors;
 mod chain_alignment;
 mod chains;
 mod cigar;
-mod dense;
-mod dense_alignment;
-#[cfg(test)]
-mod dense_tests;
-mod joins;
 mod kernel;
-mod walk_alignment;
+mod walk;
 
 pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, kmers};
 pub use chain_alignment::{BandConfig, align_chain};
@@ -22,12 +17,12 @@ pub use chains::{
     CHAINING_BYTES, Chain, ChainConfig, WindowChains, forward_extent, split_by_drift, window_chains,
 };
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
-pub use dense::{DenseWalks, Walk, dense_walks, long_enough};
-pub use dense_alignment::{DenseOptimum, align_dense_walk};
-pub use joins::{JoinContext, JoinLimits, JoinScratch};
 use kernel::AlignmentInput;
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
-pub use walk_alignment::{gap_continuation, holds_walk, walk_alignment};
+pub use walk::{
+    DenseOptimum, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk, align_dense_walk,
+    dense_walks, gap_continuation, holds_walk, long_enough, walk_alignment,
+};
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};

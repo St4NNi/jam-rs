@@ -5,13 +5,13 @@
 //! pieces between linked walks are aligned, globally; the best qualifying run of links through
 //! the walk is kept.
 
-use super::anchors::QueryTable;
-use super::chain_alignment::BandConfig;
-use super::cigar::{append_runs, counts};
 use super::dense::Walk;
-use super::kernel::{EndpointWorkspace, PathEnd, affine_path};
-use super::walk_alignment::{oriented_alignment, walk_alignment};
-use super::{Alignment, AlignmentError, EditCounts, EditOperation, EditRun};
+use super::ungapped::{oriented_alignment, walk_alignment};
+use crate::align::BandConfig;
+use crate::align::anchors::QueryTable;
+use crate::align::cigar::{append_runs, counts};
+use crate::align::kernel::{EndpointWorkspace, PathEnd, affine_path};
+use crate::align::{Alignment, AlignmentError, EditCounts, EditOperation, EditRun};
 use std::mem::size_of;
 
 /// The least columns and identity a join must reach to be kept.

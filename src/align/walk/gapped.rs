@@ -1,10 +1,10 @@
 //! The gapped alignment around a dense walk: a mismatched walk, or one whose end can reach a
 //! conserved block on another diagonal, is aligned again with the banded kernel.
 
-use super::anchors::QueryTable;
-use super::chain_alignment::BandConfig;
 use super::dense::Walk;
-use super::{
+use crate::align::BandConfig;
+use crate::align::anchors::QueryTable;
+use crate::align::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
     Strand,
 };

@@ -1,11 +1,11 @@
 //! Alignments of dense walks: the ungapped alignment of one walk, and the probes that decide
 //! whether a walk is aligned again with gaps or lies inside an alignment already made.
 
-use super::anchors::{QueryTable, kmers};
-use super::chain_alignment::BandConfig;
-use super::cigar::{append_runs, counts};
 use super::dense::Walk;
-use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
+use crate::align::BandConfig;
+use crate::align::anchors::{QueryTable, kmers};
+use crate::align::cigar::{append_runs, counts};
+use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
 
 /// The ungapped alignment of one walk. `oriented` is the window on the walk's strand (the
 /// reverse complement for the reverse strand); the window starts `offset` bases into the contig.
@@ -179,7 +179,7 @@ pub fn holds_walk(
     offset: u64,
     query_length: u64,
 ) -> bool {
-    if (alignment.strand == super::Strand::Reverse) != walk.strand.is_reverse() {
+    if (alignment.strand == crate::align::Strand::Reverse) != walk.strand.is_reverse() {
         return false;
     }
     let (low, high) = (u64::from(walk.contig), u64::from(walk.contig + walk.length));
