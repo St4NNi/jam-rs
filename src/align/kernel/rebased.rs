@@ -1,5 +1,6 @@
-//! The rebased 16-bit score representation. See `Offset16` for the representation and its
-//! exactness argument; `rebased_avx2` holds its vector recurrence.
+//! The rebased i16 score representation: offsets from a moving base, and when to move it.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::AlignmentConfig;
 use super::geometry::{Cell, WaveRange};

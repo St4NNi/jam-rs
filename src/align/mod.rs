@@ -1,8 +1,9 @@
-//! Base-level alignment: the alignment type and CIGAR, the banded alignment kernel, anchors and
-//! chains.
-//!
-//! CIGAR strings follow SAM with the entry contig as the reference: `=` match, `X` substitution,
-//! `I` bases only in the query, `D` bases only in the contig.
+//! Base-level alignment: the alignment type, CIGAR, the banded kernel, anchors, chains and walks.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// CIGAR strings follow SAM with the entry contig as the reference: `=` match, `X` substitution,
+// `I` bases only in the query, `D` bases only in the contig.
 
 mod anchors;
 mod chain_alignment;

@@ -1,8 +1,9 @@
 //! The shape of the band in anti-diagonal waves, and the cell states of the local recurrence.
-//!
-//! Wave `w` holds the cells `(row, column)` with `row + column = w`, where a row is a query
-//! position and a column a contig position. A cell lies in the band when
-//! `|column - row - diagonal_offset| <= band_width`.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// Wave `w` holds the cells with `row + column = w` (row: query, column: contig); a cell lies in
+// the band when `|column - row - diagonal_offset| <= band_width`.
 
 use super::AlignmentConfig;
 

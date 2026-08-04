@@ -1,5 +1,7 @@
-//! The kernel paths agree: AVX2 and scalar, resident and checkpointed traceback, rebased i16
-//! and i32 scores.
+//! Tests that the kernel paths agree: AVX2 and scalar, resident and checkpointed traceback,
+//! i16 and i32 scores.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::rebased::{
     RebaseLimits, SENTINEL_BASE, TEST_HOOKS, TestHooks, rebased_local_scores, update_hooks,

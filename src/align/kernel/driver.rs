@@ -1,5 +1,9 @@
-//! The pass driver: picks the kernel, plans how a pass keeps its traceback (all resident, or in
-//! chunks of at most `max_cells` cells refilled from checkpoints), and runs the pass.
+//! The pass driver: picks the score width, plans how a pass keeps its traceback, and runs it.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// A pass keeps its traceback resident, or in chunks of at most `max_cells` cells that are
+// filled again from checkpoints.
 
 use super::fill::{Pass, RebaseViolation, ScoreWidth};
 use super::geometry::{BestCell, WaveCarry, WaveRange, wave_bounds, wave_range};

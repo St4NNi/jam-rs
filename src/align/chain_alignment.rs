@@ -1,10 +1,9 @@
-//! Aligning one chain: one banded local alignment around the chain's diagonals and the query
-//! bases beyond it. The window starts close around the chain and widens while the alignment runs
-//! into its edge, so a short element shared with a long sequence does not cost an alignment of
-//! all of it.
-//!
-//! Query positions of the results count from the query start without wrapping: for a circular
-//! query an alignment over the origin ends beyond the query length.
+//! Aligns one chain in a band around its diagonals, widening while the alignment runs into an edge.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// A short element shared with a long sequence thus does not cost an alignment of all of it.
+// Query positions over the origin of a circular query run past the query length.
 
 use super::anchors::{Anchor, QueryTable};
 use super::chains::Chain;

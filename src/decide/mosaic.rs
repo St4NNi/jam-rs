@@ -1,5 +1,6 @@
-//! The mosaic: the fragments of one entry that cover the query without counting a query base
-//! twice.
+//! The mosaic: the fragments of one entry that cover the query, each query base once.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{DecideError, Fragment};
 use crate::align::{EditCounts, EditOperation, Interval};

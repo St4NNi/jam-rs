@@ -1,7 +1,9 @@
-//! Exact anchors between the query and one alignment window. The query table holds every k-mer
-//! position of both query strands, and for a circular query also the k-mers across its origin.
-//! The window is looked up at every `stride`-th position, so an identical stretch of
-//! a + stride - 1 bases always gives an anchor.
+//! Exact anchors between the query and an alignment window, found through the query table.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// Every `stride`-th window position is looked up, so an identical stretch of a + stride - 1
+// bases always gives an anchor. A circular query also holds the k-mers across its origin.
 
 use super::chains::ChainConfig;
 use super::{AlignmentError, Strand, complement};

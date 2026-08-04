@@ -1,3 +1,7 @@
+//! Tests of walks: periodic and circular queries, budgets, gapped alignments and joins.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use crate::align::ChainConfig;
 use crate::align::Strand;
 use crate::align::chains::tests::random_sequence;

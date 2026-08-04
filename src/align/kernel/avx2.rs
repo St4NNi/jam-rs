@@ -1,5 +1,6 @@
-//! The AVX2 recurrence for eight cells of one wave with i32 scores. It serves passes the rebased
-//! i16 kernel cannot represent.
+//! The AVX2 recurrence for eight cells of one wave with i32 scores.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::AlignmentConfig;
 use super::geometry::{BestCell, DELETION, INSERTION, MATCH, START, WaveRange};

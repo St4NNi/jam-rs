@@ -1,5 +1,6 @@
-//! The gapped alignment around a dense walk: a mismatched walk, or one whose end can reach a
-//! conserved block on another diagonal, is aligned again with the banded kernel.
+//! Aligns the stretch around a walk again with gaps when its ends ask for it.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::dense::Walk;
 use crate::align::BandConfig;

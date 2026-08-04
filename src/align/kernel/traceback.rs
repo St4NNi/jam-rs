@@ -1,5 +1,6 @@
-//! The traceback from the best cell back to the start of the local alignment, over resident
-//! traceback cells or chunk by chunk from checkpoints.
+//! The traceback from the best cell to the start of the local alignment.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::fill::{Pass, ScoreWidth};
 use super::geometry::{

@@ -1,5 +1,6 @@
-//! Alignments of dense walks: the ungapped alignment of one walk, and the probes that decide
-//! whether a walk is aligned again with gaps or lies inside an alignment already made.
+//! The ungapped alignment of a walk, and the probes that decide whether to align it again.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::dense::Walk;
 use crate::align::BandConfig;

@@ -1,4 +1,6 @@
 //! The contig rule: which contigs of an entry count for the decision.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::Fragment;
 use crate::align::{EditCounts, Interval};

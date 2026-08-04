@@ -1,5 +1,6 @@
-//! Filling the band wave by wave: the scalar and vector recurrences over one wave, the rotation
-//! of the three wave buffers, the traceback layout of a chunk and its checkpoints.
+//! Fills the band wave by wave: the recurrences of one wave, the wave buffers and checkpoints.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::geometry::{BestCell, WaveCarry, WaveRange, wave_bounds, wave_range};
 #[cfg(test)]

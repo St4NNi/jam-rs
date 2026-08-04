@@ -1,4 +1,6 @@
-//! Walks: ungapped copies of dense and low-complexity k-mers, their alignments and their joins.
+//! Walks: ungapped copies of dense and low-complexity k-mers, their alignments and joins.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod dense;
 mod gapped;

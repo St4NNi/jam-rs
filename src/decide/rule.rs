@@ -1,17 +1,6 @@
-//! The decision rule: when an entry is reported.
-//!
-//! Contigs. When the contig limits are set, a contig counts only when enough of its bases lie in
-//! its fragments and its fragments reach the contig identity together. Fragments of other contigs
-//! are left out before anything else.
-//!
-//! Fragments. A fragment counts when it has at least `min_fragment_columns` alignment columns and
-//! an identity of at least `min_fragment_identity`. Others are left out. Identical fragments count
-//! once; distinct copies and overlapping fragments each count, primary and alternative alike.
-//!
-//! Decision. The identity of the entry is the sum of matches over the sum of columns of all
-//! counted fragments, so a diverged contig can be offset by a conserved one. The entry is
-//! reported when this identity reaches `min_identity` and the mosaic reaches `min_query_coverage`.
-//! Limits are compared exactly as `matches >= limit * columns`.
+//! The decision rule: which fragments count, and when an entry is reported.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::contigs::counted_contig_fragments;
 use super::{DecideError, Fragment, Mosaic, QueryCoverage, build_mosaic};
@@ -95,15 +84,17 @@ impl DecisionRule {
         Ok(())
     }
 
-    /// Whether a fragment with this alignment counts.
+    /// Whether a fragment with this alignment counts: it needs `min_fragment_columns` columns
+    /// and `min_fragment_identity`, compared exactly as `matches >= limit * columns`.
     pub fn counts_fragment(&self, alignment: &Alignment) -> bool {
         let counts = alignment.counts();
         counts.columns() >= self.min_fragment_columns
             && counts.reaches_identity(self.min_fragment_identity)
     }
 
-    /// Builds the mosaic of the counted fragments of one entry and decides. `contig_length` gives
-    /// the length of a contig of the entry by its index; it is only called for the contig rule.
+    /// Builds the mosaic of the counted fragments of one entry and decides. The identity sums
+    /// matches and columns over all counted fragments, each copy too, so a conserved contig can
+    /// offset a diverged one. `contig_length` gives a contig length for the contig rule.
     pub fn decide(
         &self,
         query_length: u64,

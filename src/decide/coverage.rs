@@ -1,4 +1,6 @@
 //! The query coverage that an entry must reach: a share of the query or a number of bases.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::DecideError;
 use std::str::FromStr;

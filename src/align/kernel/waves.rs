@@ -1,8 +1,9 @@
 //! Score planes of the wave kernel and the scalar recurrence of one cell.
-//!
-//! Each wave keeps three planes (match, deletion, insertion) of `stride` elements. A plane has
-//! `WAVE_PAD` spare elements before its rows and as many after, so vector blocks can read one
-//! neighbour outside the previous wave.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// Each wave keeps three planes of `stride` elements, with `WAVE_PAD` spare elements on each side
+// so vector blocks can read one neighbour outside the previous wave.
 
 use super::AlignmentConfig;
 use super::geometry::{

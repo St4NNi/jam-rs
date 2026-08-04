@@ -1,9 +1,9 @@
-//! Copies in dense repeats, found without expanding all their anchors. A window k-mer with more
-//! query occurrences than the chaining budget allows gives no anchor per occurrence. Instead only
-//! maximal exact matches are started: at every oriented window position, occurrences whose
-//! preceding query base equals the preceding window base continue a match that started earlier
-//! and are skipped. The starts are grouped by strand and diagonal and walked with ungapped X-drop
-//! extension, so every copy of a repeat becomes one ungapped alignment on its own diagonal.
+//! Finds walks: ungapped copies of k-mers too dense or too simple for anchors.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// Only matches whose previous bases differ start a walk, grouped by strand and diagonal and
+// extended with X-drop, so every copy of a repeat becomes one walk on its own diagonal.
 
 use crate::align::BandConfig;
 use crate::align::anchors::{QueryTable, base_code, kmers};

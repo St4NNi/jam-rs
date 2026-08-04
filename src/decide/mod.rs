@@ -1,5 +1,6 @@
-//! Fragments, the mosaic of an entry, query coverage, identity and the decision that reports an
-//! entry.
+//! Fragments, the mosaic of an entry, query coverage, identity and the decision.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod contigs;
 mod coverage;

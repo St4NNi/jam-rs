@@ -1,9 +1,9 @@
-//! Joins of short walks across divergent pieces. A local alignment ends at a conserved block
-//! shorter than the fragment minimum when the piece to the next block costs more than one block
-//! scores, although the joined path has enough columns. A walk is linked to its nearest walk on
-//! each side, ordered on query and contig, within the reach of `gap_continuation`. Only the
-//! pieces between linked walks are aligned, globally; the best qualifying run of links through
-//! the walk is kept.
+//! Joins short walks across the divergent pieces between them.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// A walk is linked to its nearest walk on each side; only the pieces between are aligned, and
+// the best run of links that reaches the join limits is kept.
 
 use super::dense::Walk;
 use super::ungapped::{oriented_alignment, walk_alignment};

@@ -1,3 +1,7 @@
+//! Tests of the kernel: CIGAR, coordinates, endpoint completion, band geometry and scores.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::geometry::{WaveRange, wave_bounds, wave_range};
 use super::*;
 use crate::align::{format_cigar, parse_cigar};

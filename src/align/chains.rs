@@ -1,4 +1,6 @@
 //! Chains: anchors of one strand in order along nearly the same diagonal.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::anchors::{Anchor, QueryTable, count_anchors, find_anchors, occurrence_counts};
 use super::{AlignmentError, Budgeted, Strand};

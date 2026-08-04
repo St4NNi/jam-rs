@@ -1,4 +1,6 @@
-//! Edit runs and their CIGAR text.
+//! Edit runs, their CIGAR text and their base counts.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{AlignmentError, EditCounts};
 use serde::{Deserialize, Serialize};

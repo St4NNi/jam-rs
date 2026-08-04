@@ -1,5 +1,7 @@
-//! Endpoint completion: extends a local alignment through at most a few bases beyond each end
-//! with an anchored semi-global alignment. Its affine matrix also aligns the pieces of joins.
+//! Endpoint completion through a few bases beyond each end, and the affine matrix it shares
+//! with the pieces of joins.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::geometry::{DELETION, INSERTION, MATCH, START};
 use super::{AlignmentConfig, AlignmentInput, AlignmentWorkspace};

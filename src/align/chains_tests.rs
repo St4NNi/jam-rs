@@ -1,3 +1,7 @@
+//! Tests of chaining: copies, circular origins, repeats, periodic queries and drift.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use crate::align::anchors::{AnchorConfig, find_anchors};
 use crate::align::complement;

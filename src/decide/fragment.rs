@@ -1,4 +1,6 @@
-//! Fragments and the query windows they come from.
+//! Fragments: alignments placed on the query and on a contig of an entry.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::DecideError;
 use crate::align::{Alignment, Interval};

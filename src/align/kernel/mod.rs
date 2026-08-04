@@ -1,10 +1,9 @@
-//! The banded affine-gap local alignment kernel.
-//!
-//! The band is filled in anti-diagonal waves. On hosts with AVX2, waves run in vector blocks of
-//! sixteen i16 offsets from a moving base (`rebased`), or of eight i32 scores when the offsets
-//! cannot represent a pass; other hosts run the same waves cell by cell. All paths give the same
-//! alignment. Traceback cells take two bytes; long passes keep only a chunk of them and fill
-//! earlier chunks again from checkpoints during the traceback.
+//! The banded affine-gap local alignment kernel and its reusable workspace.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
+// Waves run in AVX2 blocks of sixteen i16 offsets from a moving base or eight i32 scores, or
+// cell by cell without AVX2; every path gives the same alignment.
 
 #[cfg(test)]
 mod agreement_tests;

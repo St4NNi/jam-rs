@@ -1,3 +1,7 @@
+//! Tests of chain alignment: copies, divergent stretches, drift, indels and circular queries.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::*;
 use crate::align::chains::tests::{random_sequence, reverse_complement};
 use crate::align::{
@@ -153,7 +157,8 @@ fn circular_query_keeps_a_whole_linear_copy() {
 
 #[test]
 fn wide_band_and_drift_align_a_long_deletion() {
-    // A configured band wider than the drift margin and a chain drifting 1,000 bases: the alignment pairs the whole query with 1,000 contig bases between.
+    // A band wider than the drift margin and a chain drifting 1,000 bases: the alignment pairs
+    // the whole query with 1,000 contig bases between.
     let query = random_sequence(3000, 21);
     let window = [
         random_sequence(2000, 22),

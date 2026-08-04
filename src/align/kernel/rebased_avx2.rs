@@ -1,4 +1,6 @@
 //! The AVX2 recurrence of the rebased i16 planes: sixteen cells of one wave per block.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::AlignmentConfig;
 use super::geometry::{BestCell, START, WaveRange};
