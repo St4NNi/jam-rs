@@ -6,8 +6,9 @@
 use super::rebased::{
     RebaseLimits, SENTINEL_BASE, TEST_HOOKS, TestHooks, rebased_local_scores, update_hooks,
 };
-use super::tests::{test_dna, test_mutate};
+use super::tests::mutate;
 use super::*;
+use crate::test_support::{random_bases, rng};
 
 fn avx2() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -59,13 +60,16 @@ fn avx2_matches_scalar() {
     if !avx2() {
         return;
     }
-    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut rng = rng(0x9e37_79b9_7f4a_7c15);
     let mut aligned = 0;
     for case in 0..160u64 {
-        let query = test_dna(&mut state, 24 + (case as usize * 7) % 300);
-        let mut contig = test_mutate(&mut state, &query, 20 + case % 9 * 40, case % 2 == 0);
+        let query = random_bases(&mut rng, 24 + (case as usize * 7) % 300);
+        let mut contig = mutate(&mut rng, &query, 20 + case % 9 * 40, case % 2 == 0);
         if case % 5 == 0 {
-            contig.splice(contig.len() / 2..contig.len() / 2, test_dna(&mut state, 30));
+            contig.splice(
+                contig.len() / 2..contig.len() / 2,
+                random_bases(&mut rng, 30),
+            );
         }
         if case % 7 == 0 {
             contig = contig.to_ascii_lowercase();
@@ -84,10 +88,10 @@ fn avx2_matches_scalar() {
 
 #[test]
 fn checkpoints_match_resident() {
-    let mut state = 0x1234_5678_9abc_def1u64;
+    let mut rng = rng(0x1234_5678_9abc_def1);
     for case in 0..48u64 {
-        let query = test_dna(&mut state, 60 + (case as usize * 13) % 400);
-        let contig = test_mutate(&mut state, &query, 80, true);
+        let query = random_bases(&mut rng, 60 + (case as usize * 13) % 400);
+        let contig = mutate(&mut rng, &query, 80, true);
         let base = AlignmentConfig {
             band_width: 2 + case as u32 % 15,
             diagonal_offset: case as i64 % 7 - 3,
@@ -113,9 +117,9 @@ fn checkpoints_match_resident() {
 #[test]
 fn scores_filled_first() {
     // Above `max_cells` the vector path fills all waves without traceback first.
-    let mut state = 0x0bad_5eed_1234_5678u64;
-    let query = test_dna(&mut state, 6_000);
-    let contig = test_mutate(&mut state, &query, 30, true);
+    let mut rng = rng(0x0bad_5eed_1234_5678);
+    let query = random_bases(&mut rng, 6_000);
+    let contig = mutate(&mut rng, &query, 30, true);
     let config = AlignmentConfig {
         band_width: 64,
         max_cells: 100_000,
@@ -130,7 +134,7 @@ fn base_shifts_exact() {
     if !avx2() {
         return;
     }
-    let mut state = 0x7777_1111_9999_3333u64;
+    let mut rng = rng(0x7777_1111_9999_3333);
     // Thresholds this low move the base every few waves, so short inputs cover shifts up,
     // shifts down, zero states stored below the base, and chunk restarts from a saved base.
     TEST_HOOKS.set(TestHooks {
@@ -143,10 +147,10 @@ fn base_shifts_exact() {
     });
     for round in 0..14u64 {
         let length = 200 + 37 * round as usize;
-        let query = test_dna(&mut state, length);
-        let mut contig = test_mutate(&mut state, &query, 10 + round % 5 * 20, round % 2 == 0);
+        let query = random_bases(&mut rng, length);
+        let mut contig = mutate(&mut rng, &query, 10 + round % 5 * 20, round % 2 == 0);
         if round % 3 == 0 {
-            contig.splice(length / 2..length / 2, test_dna(&mut state, 40));
+            contig.splice(length / 2..length / 2, random_bases(&mut rng, 40));
         }
         for band_width in [5, 16, 40] {
             for max_cells in [usize::MAX, 900] {
@@ -171,9 +175,9 @@ fn reaches_sentinel_bases() {
         return;
     }
     // Scores above 40,000 need a base beyond the i16 range of a zero state.
-    let mut state = 0x5555_aaaa_1234_4321u64;
-    let query = test_dna(&mut state, 30_000);
-    let contig = test_mutate(&mut state, &query, 12, false);
+    let mut rng = rng(0x5555_aaaa_1234_4321);
+    let query = random_bases(&mut rng, 30_000);
+    let contig = mutate(&mut rng, &query, 12, false);
     let config = AlignmentConfig {
         band_width: 16,
         ..AlignmentConfig::default()
@@ -192,13 +196,13 @@ fn violation_reruns_i32() {
     if !avx2() {
         return;
     }
-    let mut state = 0x3141_5926_5358_9793u64;
+    let mut rng = rng(0x3141_5926_5358_9793);
     let config = AlignmentConfig {
         band_width: 16,
         ..AlignmentConfig::default()
     };
-    let query = test_dna(&mut state, 4_000);
-    let contig = test_mutate(&mut state, &query, 15, true);
+    let query = random_bases(&mut rng, 4_000);
+    let contig = mutate(&mut rng, &query, 15, true);
     let expected = align(
         AlignmentWorkspace::scalar(),
         &query,

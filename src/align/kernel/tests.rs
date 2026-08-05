@@ -5,6 +5,9 @@
 use super::geometry::{WaveRange, wave_bounds, wave_range};
 use super::*;
 use crate::align::{format_cigar, parse_cigar};
+use crate::test_support::{random_bases, rng};
+use rand::RngExt;
+use rand::rngs::StdRng;
 
 fn config() -> AlignmentConfig {
     AlignmentConfig {
@@ -31,40 +34,19 @@ fn forward(
     workspace.align(input(query, contig, 0), Strand::Forward, config)
 }
 
-pub(super) fn test_dna(state: &mut u64, length: usize) -> Vec<u8> {
-    (0..length)
-        .map(|_| {
-            *state ^= *state << 13;
-            *state ^= *state >> 7;
-            *state ^= *state << 17;
-            b"ACGT"[(*state >> 33) as usize % 4]
-        })
-        .collect()
-}
-
-/// A copy of `source` with substitutions at `per_thousand`, and as many indels again when set.
-pub(super) fn test_mutate(
-    state: &mut u64,
-    source: &[u8],
-    per_thousand: u64,
-    indels: bool,
-) -> Vec<u8> {
-    let mut next = |bound: u64| {
-        *state ^= *state << 13;
-        *state ^= *state >> 7;
-        *state ^= *state << 17;
-        (*state >> 20) % bound
-    };
+/// A copy of `source` with substitutions at `per_thousand`, and an eighth as many deletions
+/// and as many insertions again when `indels` is set.
+pub(super) fn mutate(rng: &mut StdRng, source: &[u8], per_thousand: u64, indels: bool) -> Vec<u8> {
     let mut output = Vec::with_capacity(source.len() + 16);
     for &base in source {
-        let roll = next(1000);
+        let roll = rng.random_range(0..1000);
+        let other = b"ACGT"[rng.random_range(0..4)];
         if roll < per_thousand {
-            output.push(b"ACGT"[next(4) as usize]);
+            output.push(other);
         } else if indels && roll < per_thousand + per_thousand / 8 {
             // The base is left out.
         } else if indels && roll < per_thousand + per_thousand / 4 {
-            output.push(base);
-            output.push(b"ACGT"[next(4) as usize]);
+            output.extend([base, other]);
         } else {
             output.push(base);
         }
@@ -310,10 +292,10 @@ fn reference_score(query: &[u8], contig: &[u8], config: AlignmentConfig) -> i32 
 
 #[test]
 fn finds_reference_score() {
-    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut rng = rng(0x2545_f491_4f6c_dd1d);
     for round in 0..40 {
-        let query = test_dna(&mut state, 20 + round * 3);
-        let contig = test_mutate(&mut state, &query, 150, true);
+        let query = random_bases(&mut rng, 20 + round * 3);
+        let contig = mutate(&mut rng, &query, 150, true);
         let config = AlignmentConfig {
             band_width: 400,
             ..AlignmentConfig::default()

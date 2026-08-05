@@ -4,12 +4,12 @@
 
 use crate::align::ChainConfig;
 use crate::align::Strand;
-use crate::align::chains::tests::random_sequence;
 use crate::align::{
     AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinContext,
     JoinLimits, JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar,
     holds_walk, walk_alignment,
 };
+use crate::test_support::{random_bases, rng};
 
 fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>, QueryTable) {
     let table = QueryTable::new(
@@ -88,7 +88,12 @@ fn walks_end_copy() {
     // X-drop tail, and starts inside it give no second walk.
     let element = b"ACG".repeat(400);
     let query = [b"GATTACATTGCCAGTTCAGG".to_vec(), element.clone()].concat();
-    let window = [random_sequence(3000, 7), element, random_sequence(3000, 8)].concat();
+    let window = [
+        random_bases(&mut rng(7), 3000),
+        element,
+        random_bases(&mut rng(8), 3000),
+    ]
+    .concat();
     let (walks, _, _) = walks_of(&query, &window, false);
     let longest = walks
         .iter()
@@ -170,12 +175,12 @@ fn optimum_reuse_matches() {
 
 #[test]
 fn gapped_walk_widens() {
-    let query = random_sequence(10_000, 7);
-    let mut contig = random_sequence(300, 8);
+    let query = random_bases(&mut rng(7), 10_000);
+    let mut contig = random_bases(&mut rng(8), 300);
     contig.extend_from_slice(&query[3_000..5_000]);
-    contig.extend(random_sequence(20, 9));
+    contig.extend(random_bases(&mut rng(9), 20));
     contig.extend_from_slice(&query[5_000..7_000]);
-    contig.extend(random_sequence(300, 10));
+    contig.extend(random_bases(&mut rng(10), 300));
     let walk = Walk {
         strand: Strand::Forward,
         contig: 1_300,
@@ -208,7 +213,7 @@ fn gapped_walk_widens() {
 fn short_blocks_join() {
     // Two 30-base blocks of the query with a 6-base piece between them that differs: each block
     // is shorter than the 50 columns a join must reach, but together they reach it.
-    let query = random_sequence(400, 31);
+    let query = random_bases(&mut rng(31), 400);
     let mut contig = query[100..166].to_vec();
     for base in &mut contig[30..36] {
         *base = if *base == b'A' { b'C' } else { b'A' };

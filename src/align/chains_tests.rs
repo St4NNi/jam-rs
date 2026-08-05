@@ -4,26 +4,8 @@
 
 use super::*;
 use crate::align::anchors::{AnchorConfig, find_anchors};
-use crate::align::complement;
-
-pub(in crate::align) fn random_sequence(length: usize, mut state: u64) -> Vec<u8> {
-    (0..length)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            b"ACGT"[(state % 4) as usize]
-        })
-        .collect()
-}
-
-pub(in crate::align) fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
-    sequence
-        .iter()
-        .rev()
-        .map(|base| complement(*base))
-        .collect()
-}
+use crate::seeds::reverse_complement;
+use crate::test_support::{random_bases, rng};
 
 fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
     let table = QueryTable::new(
@@ -88,7 +70,7 @@ fn cyclic_whole_periods() {
     .unwrap();
     assert!(circular.periodic_pair(&window).is_none());
     let random = QueryTable::new(
-        &random_sequence(20_000, 91),
+        &random_bases(&mut rng(91), 20_000),
         true,
         AnchorConfig::default(),
         ChainConfig::default(),
@@ -148,11 +130,11 @@ fn periodic_chains_enumerated() {
 
 #[test]
 fn chains_both_strands() {
-    let query = random_sequence(3000, 1);
+    let query = random_bases(&mut rng(1), 3000);
     let window = [
-        random_sequence(500, 2),
+        random_bases(&mut rng(2), 500),
         query[1000..2500].to_vec(),
-        random_sequence(500, 3),
+        random_bases(&mut rng(3), 500),
     ]
     .concat();
     let found = chains(&query, false, &window);
@@ -164,7 +146,7 @@ fn chains_both_strands() {
     assert_eq!(diagonals(chain), [500]);
 
     let window = [
-        random_sequence(300, 4),
+        random_bases(&mut rng(4), 300),
         reverse_complement(&query[200..1800]),
     ]
     .concat();
@@ -179,7 +161,7 @@ fn chains_both_strands() {
 
 #[test]
 fn origin_chain_splits() {
-    let query = random_sequence(2000, 5);
+    let query = random_bases(&mut rng(5), 2000);
     let window = [query[1500..].to_vec(), query[..600].to_vec()].concat();
     let found = chains(&query, true, &window);
     assert_eq!(found.len(), 1);
@@ -200,14 +182,19 @@ fn origin_chain_splits() {
 
 #[test]
 fn repeats_chain_apart() {
-    let repeat = random_sequence(800, 6);
-    let query = [repeat.clone(), random_sequence(1000, 7), repeat.clone()].concat();
+    let repeat = random_bases(&mut rng(6), 800);
+    let query = [
+        repeat.clone(),
+        random_bases(&mut rng(7), 1000),
+        repeat.clone(),
+    ]
+    .concat();
     let found = chains(&query, false, &repeat);
     let mut starts: Vec<u32> = found.iter().map(|chain| chain.anchors[0].query).collect();
     starts.sort_unstable();
     assert_eq!(starts, [0, 1800]);
     // Two copies of a circular query in a row: no chain covers more than one query length.
-    let plasmid = random_sequence(1500, 8);
+    let plasmid = random_bases(&mut rng(8), 1500);
     let window = [plasmid.clone(), plasmid.clone()].concat();
     let found = chains(&plasmid, true, &window);
     assert!(found.len() >= 2);
@@ -220,7 +207,7 @@ fn repeats_chain_apart() {
 
 #[test]
 fn mutated_copy_chains() {
-    let query = random_sequence(4000, 9);
+    let query = random_bases(&mut rng(9), 4000);
     let mut copy = query.clone();
     for position in (25..copy.len()).step_by(60) {
         copy[position] = if copy[position] == b'A' { b'C' } else { b'A' };
@@ -228,7 +215,7 @@ fn mutated_copy_chains() {
     let found = chains(&query, false, &copy);
     assert_eq!(found.len(), 1);
     assert!(found[0].anchors.len() > 100);
-    let poly = [vec![b'A'; 300], random_sequence(100, 10)].concat();
+    let poly = [vec![b'A'; 300], random_bases(&mut rng(10), 100)].concat();
     let table = QueryTable::new(
         &poly,
         false,
