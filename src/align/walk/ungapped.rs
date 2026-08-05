@@ -93,11 +93,9 @@ pub(super) fn oriented_alignment(
     })
 }
 
-/// Whether an unpaired end can reach a conserved block on a different diagonal: whether an
-/// exact k-mer within `max_drift` bases beyond the end of the query pairs with one within
-/// `max_drift` bases beyond the end of the contig at another distance from the end. Differences
-/// next to the end, such as a substitution beside an insertion, do not hide the block. `codes`
-/// is reused scratch of at most `max_drift + 1` codes.
+/// Whether an end of `walk` can reach a conserved block on another diagonal: an exact k-mer
+/// within the drift beyond the query end pairs with one beyond the contig end at another
+/// distance. `codes` is reused scratch of at most `max_drift + 1` codes.
 pub fn gap_continuation(
     walk: &Walk,
     oriented: &[u8],

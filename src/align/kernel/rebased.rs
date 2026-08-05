@@ -142,10 +142,9 @@ impl super::waves::WaveScore for Offset16 {
     }
 }
 
-/// Whether the rebased i16 kernel is exact for this configuration on any window length: the
-/// scoring terms fit i16 and one wave's score spread stays below the bound. Two cells of a wave
-/// join through a gap of at most `2 * band + 1` positions, costing at most
-/// `open + extend * (2 * band + 1)`, plus `match` per position.
+/// Whether the i16 kernel is exact for this configuration on any window: the scores fit i16 and
+/// a wave's spread stays below the bound. Two cells of a wave join through a gap of at most
+/// `2 * band + 1` positions, costing at most `open + extend * (2 * band + 1)` plus `match` each.
 pub(super) fn rebased_local_scores(config: AlignmentConfig) -> bool {
     let positions = 2 * i64::from(config.band_width) + 2;
     let spread = positions

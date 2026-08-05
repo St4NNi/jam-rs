@@ -6,11 +6,8 @@ use super::DecideError;
 use crate::align::{Alignment, Interval};
 use serde::Serialize;
 
-/// An alignment placed on the query and on one contig of an entry.
-///
-/// The alignment's query interval has the length of the query segments together. Over the end of
-/// a circular query a fragment has two query segments, the first up to the query end and the
-/// second from the query start.
+/// An alignment placed on the query and on one contig of an entry. Over the end of a circular
+/// query it has two query segments, up to the query end and from the query start.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Fragment {
     /// The index of the contig within its entry.

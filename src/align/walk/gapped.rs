@@ -30,11 +30,9 @@ struct WalkInput<'a> {
     table: &'a QueryTable,
 }
 
-/// The gapped alignment around `walk` of `window` (the forward contig bases from `offset`). A
-/// linear query is aligned over the walk and the bases around it first, and over more of it while
-/// the alignment runs into an edge of that window: the join that a walk asks for lies within the
-/// drift of its ends. `None` when no positive alignment exists, or when `optimum` already holds
-/// the best alignment of the same inputs.
+/// The gapped alignment around `walk` of `window` (the forward contig bases from `offset`),
+/// widened on a linear query while it runs into an edge. `None` when no positive alignment
+/// exists, or when `optimum` already holds the best alignment of the same inputs.
 pub fn align_dense_walk(
     walk: &Walk,
     window: &[u8],

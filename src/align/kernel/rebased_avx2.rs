@@ -80,10 +80,9 @@ unsafe fn choose_state<const SHIFT: i32>(m: __m256i, d: __m256i, i: __m256i) -> 
     (_mm256_max_epi16(first, i), state)
 }
 
-/// AVX2 recurrence for rows `start..=end` of one wave in blocks of sixteen, with i16 offsets from
-/// `rebase.base`, the floor offset as local zero and saturating adds. It equals the i32 kernel
-/// while `rebase.violation` is clear. Returns the first row it did not fill. Callers must enable
-/// AVX2, pass lowercase sequences, and prove the bounds that the debug assertions check.
+/// Fills rows `start..=end` of a wave in blocks of sixteen i16 offsets, equal to the i32 kernel
+/// while `rebase.violation` is clear, and returns the first row it did not fill. Callers must
+/// enable AVX2, pass lowercase sequences, and prove the bounds the debug assertions check.
 #[inline(always)]
 pub(super) unsafe fn fill_span16_rebased<const TRACEBACK: bool, const BEST: bool>(
     blocks: Span<'_>,

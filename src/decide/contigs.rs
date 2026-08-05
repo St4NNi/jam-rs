@@ -6,10 +6,9 @@ use super::Fragment;
 use crate::align::{EditCounts, Interval};
 use std::collections::{HashMap, HashSet};
 
-/// The fragments of the contigs that count. A contig counts when at least `min_coverage` of its
-/// bases lie in its fragments and its fragments reach `min_identity` together. A contig that only
-/// shares a gene or a repeat with the query is left out, so it cannot lower the identity of the
-/// entry. `contig_length` gives the length of a contig by index.
+/// The fragments of the contigs that count: `min_coverage` of their bases lie in fragments that
+/// reach `min_identity` together. A contig that only shares a gene or a repeat with the query
+/// is left out, so it cannot lower the identity. `contig_length` gives a contig length.
 pub(super) fn counted_contig_fragments(
     fragments: Vec<Fragment>,
     min_coverage: f64,

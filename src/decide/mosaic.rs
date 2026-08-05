@@ -36,11 +36,8 @@ struct Prepared {
     counts: EditCounts,
 }
 
-/// Builds the mosaic of `fragments` for a query of `query_length` bases.
-///
-/// Fragments are taken by score, best first. A fragment is primary when it covers a query base
-/// that no earlier fragment covers. The result does not depend on the input order, and identical
-/// fragments count once.
+/// Builds the mosaic of `fragments`, best score first: a fragment is primary when it covers a
+/// query base no earlier fragment covers. The input order does not matter; duplicates count once.
 pub(super) fn build_mosaic(
     query_length: u64,
     fragments: &[Fragment],

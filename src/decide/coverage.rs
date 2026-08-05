@@ -5,10 +5,8 @@
 use super::DecideError;
 use std::str::FromStr;
 
-/// The least query coverage that reports an entry.
-///
-/// Text forms: a share between 0 and 1 such as `0.5`, or a base count such as `800bp`. A share is
-/// kept as an exact decimal, so `0.7` never turns into 0.69999.
+/// The least query coverage that reports an entry: a share such as `0.5` or a base count such
+/// as `800bp`. A share is kept as an exact decimal, so `0.7` never turns into 0.69999.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum QueryCoverage {
     /// `numerator / 10^decimal_places` of the query.
