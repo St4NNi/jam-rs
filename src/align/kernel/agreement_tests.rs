@@ -10,15 +10,13 @@ use super::tests::mutate;
 use super::*;
 use crate::test_support::{random_bases, rng};
 
+/// Whether the host runs the AVX2 kernels; tests that compare them say so when it does not.
 fn avx2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        is_x86_feature_detected!("avx2")
+    let vector = Backend::Detected.vector();
+    if !vector {
+        eprintln!("skipped: this host has no AVX2");
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    vector
 }
 
 fn align(
