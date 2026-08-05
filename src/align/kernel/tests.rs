@@ -73,7 +73,7 @@ pub(super) fn test_mutate(
 }
 
 #[test]
-fn contig_base_is_a_deletion() {
+fn contig_base_deleted() {
     let mut workspace = AlignmentWorkspace::default();
     let alignment = forward(&mut workspace, b"ACGTACGT", b"ACGTGACGT", config()).unwrap();
     assert_eq!(format_cigar(&alignment.runs), "4=1D4=");
@@ -98,7 +98,7 @@ fn reverse_interval_coordinates() {
 }
 
 #[test]
-fn query_offset_shifts_the_query_interval() {
+fn query_offset_shifts() {
     let mut workspace = AlignmentWorkspace::default();
     let shifted = AlignmentInput {
         query_offset: 50,
@@ -152,7 +152,7 @@ fn reverse_completion_coordinates() {
 }
 
 #[test]
-fn completion_leaves_a_free_contig_overhang() {
+fn overhang_stays_free() {
     let mut workspace = AlignmentWorkspace::default();
     let core = Alignment {
         score: 2,
@@ -309,7 +309,7 @@ fn reference_score(query: &[u8], contig: &[u8], config: AlignmentConfig) -> i32 
 }
 
 #[test]
-fn wide_band_finds_the_reference_score() {
+fn finds_reference_score() {
     let mut state = 0x2545_f491_4f6c_dd1du64;
     for round in 0..40 {
         let query = test_dna(&mut state, 20 + round * 3);

@@ -138,14 +138,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cigar_text_round_trips() {
+    fn cigar_round_trips() {
         let runs = parse_cigar("12=1X3I40=2D").unwrap();
         assert_eq!(runs.len(), 5);
         assert_eq!(format_cigar(&runs), "12=1X3I40=2D");
     }
 
     #[test]
-    fn invalid_cigar_text_is_rejected() {
+    fn invalid_cigar_rejected() {
         for text in ["", "5", "=", "0=", "5M", "3=4=", "99999999999="] {
             assert!(parse_cigar(text).is_err(), "{text}");
         }

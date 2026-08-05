@@ -98,7 +98,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shares_round_up_to_whole_bases() {
+    fn shares_round_up() {
         for (text, percent) in [
             ("0", 0),
             (".1", 10),
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_text_is_rejected() {
+    fn bad_text_rejected() {
         for text in [
             "NaN", "inf", "-inf", "-0.1", "1.01", "bad", "-5bp", "bp", "1.5bp",
         ] {
@@ -130,7 +130,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_shares_need_one_base() {
+    fn tiny_shares_round() {
         for text in ["5e-324", "1e-100", "1e-20"] {
             let coverage: QueryCoverage = text.parse().unwrap();
             assert_eq!(coverage.required_bases(u64::MAX), 1);
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn base_counts_are_capped_by_the_query() {
+    fn base_counts_capped() {
         let coverage: QueryCoverage = "800bp".parse().unwrap();
         assert_eq!(coverage.required_bases(10_000), 800);
         assert_eq!(coverage.required_bases(500), 500);

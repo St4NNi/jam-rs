@@ -56,7 +56,7 @@ fn alignments(query: &[u8], window: &[u8], circular: bool) -> Vec<Alignment> {
 }
 
 #[test]
-fn alignment_widens_through_a_region_without_anchors() {
+fn widens_without_anchors() {
     // The copy differs from the query at every 12th base outside the middle 600 bases, so only
     // the middle holds anchors. The alignment still reaches both ends: the first window around
     // the chain is much narrower than the 3,000 bases that pair.
@@ -76,7 +76,7 @@ fn alignment_widens_through_a_region_without_anchors() {
 }
 
 #[test]
-fn positive_divergent_tail_reaches_query_end() {
+fn divergent_tail_kept() {
     let query = random_sequence(10_000, 42);
     let mut contig = query.clone();
     for at in (6004..10_000).step_by(5) {
@@ -96,7 +96,7 @@ fn positive_divergent_tail_reaches_query_end() {
 }
 
 #[test]
-fn identical_and_reverse_copies() {
+fn copies_both_strands() {
     let query = random_sequence(3000, 1);
     let window = [
         random_sequence(700, 2),
@@ -123,7 +123,7 @@ fn identical_and_reverse_copies() {
 }
 
 #[test]
-fn diverged_block_stays_in_one_alignment() {
+fn diverged_block_kept() {
     let query = random_sequence(3000, 4);
     let mut copy = query.clone();
     substitute(&mut copy[1000..2000], 250, 5);
@@ -134,7 +134,7 @@ fn diverged_block_stays_in_one_alignment() {
 }
 
 #[test]
-fn circular_origin_in_one_alignment() {
+fn spans_circular_origin() {
     let query = random_sequence(2000, 6);
     let window = [query[1500..].to_vec(), query[..1500].to_vec()].concat();
     let found = alignments(&query, &window, true);
@@ -145,7 +145,7 @@ fn circular_origin_in_one_alignment() {
 }
 
 #[test]
-fn circular_query_keeps_a_whole_linear_copy() {
+fn whole_linear_copy() {
     // The first anchor of the reverse copy is at query 1: the one base before it must still
     // align, as the window has no base after the copy.
     let query = random_sequence(3000, 9);
@@ -156,7 +156,7 @@ fn circular_query_keeps_a_whole_linear_copy() {
 }
 
 #[test]
-fn wide_band_and_drift_align_a_long_deletion() {
+fn drift_long_deletion() {
     // A band wider than the drift margin and a chain drifting 1,000 bases: the alignment pairs
     // the whole query with 1,000 contig bases between.
     let query = random_sequence(3000, 21);
@@ -206,7 +206,7 @@ fn wide_band_and_drift_align_a_long_deletion() {
 }
 
 #[test]
-fn indels_kept_and_long_contig_insert_splits() {
+fn long_insert_splits() {
     let query = random_sequence(4000, 7);
     let copy = [
         &query[..1500],
@@ -244,7 +244,7 @@ fn indels_kept_and_long_contig_insert_splits() {
 }
 
 #[test]
-fn periodic_pair_keeps_every_exact_diagonal() {
+fn periodic_exact_diagonals() {
     let query = b"ACGT".repeat(300);
     let found = alignments(&query, &query, false);
     let mappings: std::collections::BTreeSet<_> = found

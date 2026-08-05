@@ -80,7 +80,7 @@ mod tests {
     }
 
     #[test]
-    fn a_contig_that_is_mostly_not_the_query_is_left_out() {
+    fn partial_contig_dropped() {
         // Contig 0 is 81 percent paired. Contig 1 shares 600 of 10,000 bases.
         let fragments = [fragment(0, 400, "3000="), fragment(1, 0, "600=")];
         assert_eq!(kept(&fragments, 0.0, 0.0), [0, 1]);
@@ -89,7 +89,7 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_fragments_of_a_contig_count_their_union() {
+    fn overlaps_count_once() {
         let fragments = [fragment(0, 0, "2000="), fragment(0, 1000, "2000=")];
         // The union is 3,000 of 3,700 bases (81 percent), not 4,000.
         assert_eq!(kept(&fragments, 0.8, 0.0), [0, 0]);
@@ -97,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn the_identity_is_taken_over_all_fragments_of_a_contig() {
+    fn identity_spans_fragments() {
         let fragments = [fragment(0, 0, "1800=200X"), fragment(0, 2000, "1000=")];
         // 2,800 matches in 3,000 columns.
         assert_eq!(kept(&fragments, 0.0, 0.93), [0, 0]);

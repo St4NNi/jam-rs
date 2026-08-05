@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn insertions_take_query_bases_and_deletions_take_contig_bases() {
+    fn indels_take_bases() {
         alignment("5=2I3=", (0, 10), (0, 8)).validate().unwrap();
         alignment("5=2D3=", (0, 8), (0, 10)).validate().unwrap();
         assert_eq!(
@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_counts_every_column() {
+    fn identity_counts_columns() {
         let counts = alignment("6=1X1I2D", (0, 8), (0, 9)).counts();
         assert_eq!(counts.columns(), 10);
         assert_eq!(counts.identity(), 0.6);
@@ -341,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn serialized_alignments_carry_cigar_and_identity() {
+    fn alignment_json_fields() {
         let json = serde_json::to_value(alignment("4=1X", (2, 7), (10, 15))).unwrap();
         assert_eq!(json["cigar"], "4=1X");
         assert_eq!(json["identity"], 0.8);
@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn complement_keeps_unknown_bytes() {
+    fn complement_keeps_unknown() {
         assert_eq!(complement(b'a'), b'T');
         assert_eq!(complement(b'N'), b'N');
     }

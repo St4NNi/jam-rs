@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_identity_passes_only_combined() {
+    fn mixed_identity_combined() {
         let conserved = fragment(0, &[(0, 3000)], "1425=150X1425=");
         let diverged = fragment(1, &[(3000, 5000)], "720=280X720=280X");
         let both = rule("0.5")
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_just_below_the_limit_fails() {
+    fn identity_below_fails() {
         let low = fragment(1, &[(1000, 2000)], "700=300X");
         let below = fragment(0, &[(0, 1000)], "899=101X");
         let decision = rule("1")
@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_is_weighted_by_columns_not_averaged() {
+    fn identity_column_weighted() {
         let short = fragment(1, &[(9000, 10_000)], "990=10X");
         // 75 and 99 percent average 87, but 7,740 of 10,000 columns match.
         let long = fragment(0, &[(0, 9000)], "6750=2250X");
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn copies_count_and_duplicates_count_once() {
+    fn copies_count_once() {
         let first = fragment(0, &[(0, 5000)], "4500=500X");
         let copy = fragment(1, &[(0, 5000)], "3600=1400X");
         let decision = rule("0.5")
@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn a_weak_piece_can_be_needed_for_the_coverage() {
+    fn weak_piece_needed() {
         let conserved = fragment(0, &[(0, 4000)], "3960=40X");
         let divergent = fragment(1, &[(4000, 5000)], "650=350X");
         for coverage in ["0.5", "1"] {
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn insertions_and_deletions_are_columns_and_bases_only_in_the_query_are_not_covered() {
+    fn indels_count_columns() {
         let gapped = fragment(0, &[(0, 1000)], "800=50I100=50D50=");
         let decision = rule("1").decide(1000, vec![gapped.clone()], |_| 0).unwrap();
         assert_eq!(columns_and_matches(&decision), (950, 1050));
@@ -323,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_limits_are_exact() {
+    fn coverage_limits_exact() {
         for (limit, required) in [("0.50", 501), ("0.75", 751), ("0.90", 901), ("1.00", 1001)] {
             for (bases, expected) in [(required, true), (required - 1, false)] {
                 let exact = fragment(0, &[(0, bases)], &format!("{bases}="));
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn a_base_count_decides_like_a_share() {
+    fn base_count_decides() {
         let piece = fragment(0, &[(0, 800)], "800=");
         assert!(
             rule("800bp")
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn a_contig_that_only_shares_a_part_does_not_lower_the_identity() {
+    fn contig_rule_identity() {
         // Contig 0 is the query. Contig 1 shares 400 of 10,000 bases at 75 percent.
         let query_copy = fragment(0, &[(0, 3000)], "2970=30X");
         let shared_part = fragment(1, &[(3000, 3400)], "300=100X");
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn rule_limits_are_checked() {
+    fn rule_limits_checked() {
         assert!(DecisionRule::default().validate().is_ok());
         for coverage in ["0.05", "0.1", "0.4999", "0.5", "0.75", "1", "1bp", "5000bp"] {
             assert!(rule(coverage).validate().is_ok(), "{coverage}");

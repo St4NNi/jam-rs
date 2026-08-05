@@ -54,7 +54,7 @@ fn diagonals(chain: &Chain) -> Vec<i64> {
 }
 
 #[test]
-fn cyclic_periods_require_a_whole_number_of_repeats() {
+fn cyclic_whole_periods() {
     let mut query = b"ACGT".repeat(300);
     let window = query.clone();
     let whole = QueryTable::new(
@@ -97,7 +97,7 @@ fn cyclic_periods_require_a_whole_number_of_repeats() {
 }
 
 #[test]
-fn exact_periodic_copy_chains_past_repeated_positions() {
+fn periodic_copy_chains() {
     let query = b"ACGT".repeat(300);
     let found = chains(&query, false, &query);
     assert!(found.iter().any(|chain| {
@@ -108,7 +108,7 @@ fn exact_periodic_copy_chains_past_repeated_positions() {
 }
 
 #[test]
-fn dense_anchor_product_is_left_to_dense_walks() {
+fn dense_product_walked() {
     let mut query = b"ACGT".repeat(25_000);
     query[50_000] = b'N';
     let table = QueryTable::new(
@@ -129,7 +129,7 @@ fn dense_anchor_product_is_left_to_dense_walks() {
 }
 
 #[test]
-fn periodic_locations_are_enumerated_without_dense_anchor_storage() {
+fn periodic_chains_enumerated() {
     let query = b"ACGT".repeat(25_000);
     let table = QueryTable::new(
         &query,
@@ -147,7 +147,7 @@ fn periodic_locations_are_enumerated_without_dense_anchor_storage() {
 }
 
 #[test]
-fn forward_and_reverse_copies() {
+fn chains_both_strands() {
     let query = random_sequence(3000, 1);
     let window = [
         random_sequence(500, 2),
@@ -178,7 +178,7 @@ fn forward_and_reverse_copies() {
 }
 
 #[test]
-fn circular_origin_and_linear_split() {
+fn origin_chain_splits() {
     let query = random_sequence(2000, 5);
     let window = [query[1500..].to_vec(), query[..600].to_vec()].concat();
     let found = chains(&query, true, &window);
@@ -199,7 +199,7 @@ fn circular_origin_and_linear_split() {
 }
 
 #[test]
-fn query_repeat_and_tandem_copies() {
+fn repeats_chain_apart() {
     let repeat = random_sequence(800, 6);
     let query = [repeat.clone(), random_sequence(1000, 7), repeat.clone()].concat();
     let found = chains(&query, false, &repeat);
@@ -219,7 +219,7 @@ fn query_repeat_and_tandem_copies() {
 }
 
 #[test]
-fn mutations_keep_one_chain_and_low_complexity_skipped() {
+fn mutated_copy_chains() {
     let query = random_sequence(4000, 9);
     let mut copy = query.clone();
     for position in (25..copy.len()).step_by(60) {
@@ -259,7 +259,7 @@ fn mutations_keep_one_chain_and_low_complexity_skipped() {
 }
 
 #[test]
-fn drift_splits_a_chain() {
+fn drift_splits_chain() {
     let chain = Chain {
         strand: Strand::Forward,
         anchors: [

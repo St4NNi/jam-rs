@@ -25,7 +25,7 @@ fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>,
 }
 
 #[test]
-fn imperfect_periodic_pair_walks_every_diagonal_once() {
+fn periodic_diagonals_once() {
     // 10 kb of ACGT with one N, against itself: every diagonal a multiple of four apart is one
     // ungapped alignment across both N positions, on both strands.
     let mut query = b"ACGT".repeat(2500);
@@ -61,7 +61,7 @@ fn imperfect_periodic_pair_walks_every_diagonal_once() {
 }
 
 #[test]
-fn circular_walks_cover_the_query_at_most_once() {
+fn circular_walks_bounded() {
     let mut query = b"ACGT".repeat(500);
     query[1000] = b'N';
     let window = [query.clone(), query.clone()].concat();
@@ -83,7 +83,7 @@ fn circular_walks_cover_the_query_at_most_once() {
 }
 
 #[test]
-fn walks_end_where_the_copy_ends_and_skip_repeated_starts() {
+fn walks_end_copy() {
     // A repeat copy inside unrelated sequence: the walk stops at the copy's end, not after the
     // X-drop tail, and starts inside it give no second walk.
     let element = b"ACG".repeat(400);
@@ -104,7 +104,7 @@ fn walks_end_where_the_copy_ends_and_skip_repeated_starts() {
 }
 
 #[test]
-fn match_starts_exceeding_the_budget_fail_before_allocation() {
+fn starts_budget_fails() {
     let query = b"ACGT".repeat(2500);
     let table = QueryTable::new(
         &query,
@@ -127,7 +127,7 @@ fn linear(query: &[u8]) -> QueryTable {
 }
 
 #[test]
-fn dense_optimum_is_reused_only_for_matching_inputs_and_bands() {
+fn optimum_reuse_matches() {
     let query = [vec![b'A'; 100], vec![b'C'; 100]].concat();
     let contig = [vec![b'A'; 100], vec![b'G'; 20], vec![b'C'; 100]].concat();
     let table = linear(&query);
@@ -169,7 +169,7 @@ fn dense_optimum_is_reused_only_for_matching_inputs_and_bands() {
 }
 
 #[test]
-fn dense_walk_of_a_long_query_aligns_the_bases_around_it() {
+fn gapped_walk_widens() {
     let query = random_sequence(10_000, 7);
     let mut contig = random_sequence(300, 8);
     contig.extend_from_slice(&query[3_000..5_000]);
@@ -205,7 +205,7 @@ fn dense_walk_of_a_long_query_aligns_the_bases_around_it() {
 }
 
 #[test]
-fn short_blocks_join_across_a_divergent_piece() {
+fn short_blocks_join() {
     // Two 30-base blocks of the query with a 6-base piece between them that differs: each block
     // is shorter than the 50 columns a join must reach, but together they reach it.
     let query = random_sequence(400, 31);

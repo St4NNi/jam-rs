@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn bases_only_in_the_query_are_gaps() {
+    fn insertions_leave_gaps() {
         // 2= 1I 2=: the middle query base has no contig base.
         let mosaic = build_mosaic(5, &[fragment(0, 7, &[(0, 5)], "2=1I2=")]).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
@@ -260,14 +260,14 @@ mod tests {
     }
 
     #[test]
-    fn bases_only_in_the_contig_use_no_query_base() {
+    fn deletions_take_nothing() {
         let mosaic = build_mosaic(4, &[fragment(0, 7, &[(0, 4)], "2=3D2=")]).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert!(mosaic.gaps.is_empty());
     }
 
     #[test]
-    fn later_fragments_count_only_new_bases() {
+    fn later_count_new() {
         let input = [
             equal_fragment(2, 7, 1, 5),
             equal_fragment(1, 8, 4, 10),
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fragment_over_the_query_end_covers_both_ends() {
+    fn wrap_covers_ends() {
         let wrapped = fragment(0, 8, &[(8, 10), (0, 2)], "4=");
         let mosaic = build_mosaic(10, &[wrapped]).unwrap();
         assert_eq!(mosaic.covered_intervals, [interval(0, 2), interval(8, 10)]);
@@ -308,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn query_only_bases_next_to_the_query_end_stay_uncovered() {
+    fn wrap_insertions_uncovered() {
         let wrapped = fragment(0, 8, &[(8, 10), (0, 3)], "1=1I1=1I1=");
         let mosaic = build_mosaic(10, &[wrapped]).unwrap();
         assert_eq!(
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn bad_fragments_are_errors() {
+    fn bad_fragments_fail() {
         assert_eq!(build_mosaic(0, &[]), Err(DecideError::EmptyQuery));
         let outside = fragment(0, 1, &[(5, 12)], "7=");
         assert_eq!(

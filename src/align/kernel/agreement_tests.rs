@@ -55,7 +55,7 @@ fn assert_paths_agree(
 }
 
 #[test]
-fn avx2_and_scalar_agree_on_random_inputs() {
+fn avx2_matches_scalar() {
     if !avx2() {
         return;
     }
@@ -83,7 +83,7 @@ fn avx2_and_scalar_agree_on_random_inputs() {
 }
 
 #[test]
-fn checkpointed_traceback_matches_resident() {
+fn checkpoints_match_resident() {
     let mut state = 0x1234_5678_9abc_def1u64;
     for case in 0..48u64 {
         let query = test_dna(&mut state, 60 + (case as usize * 13) % 400);
@@ -111,7 +111,7 @@ fn checkpointed_traceback_matches_resident() {
 }
 
 #[test]
-fn long_passes_fill_scores_first() {
+fn scores_filled_first() {
     // Above `max_cells` the vector path fills all waves without traceback first.
     let mut state = 0x0bad_5eed_1234_5678u64;
     let query = test_dna(&mut state, 6_000);
@@ -126,7 +126,7 @@ fn long_passes_fill_scores_first() {
 }
 
 #[test]
-fn rebased_base_shifts_match_i32() {
+fn base_shifts_exact() {
     if !avx2() {
         return;
     }
@@ -166,7 +166,7 @@ fn rebased_base_shifts_match_i32() {
 }
 
 #[test]
-fn rebased_reaches_sentinel_bases() {
+fn reaches_sentinel_bases() {
     if !avx2() {
         return;
     }
@@ -188,7 +188,7 @@ fn rebased_reaches_sentinel_bases() {
 }
 
 #[test]
-fn violation_reruns_on_i32() {
+fn violation_reruns_i32() {
     if !avx2() {
         return;
     }
