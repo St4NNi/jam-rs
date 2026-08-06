@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 /// The fragments of the contigs that count: `min_coverage` of their bases lie in fragments that
 /// reach `min_identity` together. A contig that only shares a gene or a repeat with the query
-/// is left out, so it cannot lower the identity. `contig_length` gives a contig length.
+/// is left out, so it cannot lower the identity.
 pub(super) fn counted_contig_fragments(
     fragments: Vec<Fragment>,
     min_coverage: f64,
@@ -16,16 +16,16 @@ pub(super) fn counted_contig_fragments(
     contig_length: impl Fn(u32) -> u64,
 ) -> Vec<Fragment> {
     let mut spans: HashMap<u32, Vec<Interval>> = HashMap::new();
-    let mut pairing: HashMap<u32, EditCounts> = HashMap::new();
+    let mut contig_counts: HashMap<u32, EditCounts> = HashMap::new();
     for fragment in &fragments {
         let contig = fragment.contig_index;
         spans
             .entry(contig)
             .or_default()
             .push(fragment.alignment.contig_interval);
-        *pairing.entry(contig).or_default() += fragment.alignment.counts();
+        *contig_counts.entry(contig).or_default() += fragment.alignment.counts();
     }
-    let counted: HashSet<u32> = pairing
+    let counted: HashSet<u32> = contig_counts
         .into_iter()
         .filter(|&(contig, counts)| {
             let union = Interval::union(spans.remove(&contig).unwrap_or_default());
@@ -65,7 +65,7 @@ mod tests {
 
     #[test]
     fn partial_contig_dropped() {
-        // Contig 0 is 81 percent paired. Contig 1 shares 600 of 10,000 bases.
+        // Contig 0 is 81 percent aligned. Contig 1 shares 600 of 10,000 bases.
         let fragments = [fragment(0, 400, "3000="), fragment(1, 0, "600=")];
         assert_eq!(kept(&fragments, 0.0, 0.0), [0, 1]);
         assert_eq!(kept(&fragments, 0.5, 0.0), [0]);

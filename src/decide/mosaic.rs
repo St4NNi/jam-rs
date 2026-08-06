@@ -10,17 +10,22 @@ use std::cmp::Ordering;
 /// A fragment of the mosaic with the query bases it alone adds.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SelectedFragment {
+    /// Covered query bases that no better fragment covers.
     pub new_bases: u64,
+    /// The fragment.
     pub fragment: Fragment,
 }
 
 /// The fragments chosen to cover the query, best first, and the query bases they cover.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Mosaic {
+    /// The number of query bases.
     pub query_length: u64,
     /// Query bases that are aligned to a contig base (matches and substitutions) in some fragment.
     pub covered_bases: u64,
+    /// The covered query bases as sorted, disjoint intervals.
     pub covered_intervals: Vec<Interval>,
+    /// The query bases that no fragment covers, sorted.
     pub gaps: Vec<Interval>,
     /// Fragments that cover query bases no better fragment covers.
     pub primary: Vec<SelectedFragment>,
@@ -31,6 +36,7 @@ pub struct Mosaic {
 /// A fragment with the query bases it pairs and its base counts, kept for sorting.
 struct Prepared {
     fragment: Fragment,
+    /// The query bases the fragment pairs with contig bases, sorted and disjoint.
     support: Vec<Interval>,
     support_bases: u64,
     counts: EditCounts,
@@ -86,6 +92,8 @@ pub(super) fn build_mosaic(
     })
 }
 
+/// Best first: higher score, more support, more matches, fewer edits. The remaining fields only
+/// break ties, so that the mosaic does not depend on the input order.
 fn compare_fragments(left: &Prepared, right: &Prepared) -> Ordering {
     let (a, b) = (&left.fragment, &right.fragment);
     let edits = |counts: EditCounts| counts.substitutions + counts.insertions + counts.deletions;
@@ -187,6 +195,7 @@ fn overlap(covered: &[Interval], support: &[Interval]) -> u64 {
     bases
 }
 
+/// The query bases outside the sorted, disjoint `covered` intervals.
 fn gaps_between(covered: &[Interval], query_length: u64) -> Vec<Interval> {
     let mut gaps = Vec::new();
     let mut start = 0;
@@ -214,7 +223,7 @@ mod tests {
     use crate::align::Strand;
     use crate::decide::fragment::tests::fragment;
 
-    /// A fragment of `fragment` with another score.
+    /// The shared test fragment with another score.
     fn scored(contig_index: u32, score: i32, segments: &[(u64, u64)], cigar: &str) -> Fragment {
         let mut scored = fragment(contig_index, segments, cigar);
         scored.alignment.score = score;

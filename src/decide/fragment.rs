@@ -14,6 +14,7 @@ pub struct Fragment {
     pub contig_index: u32,
     /// The query bases the alignment spans, in alignment order.
     pub query_segments: Vec<Interval>,
+    /// The alignment, with its query interval moved to start inside the query.
     pub alignment: Alignment,
 }
 

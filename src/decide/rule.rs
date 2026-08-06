@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::contigs::counted_contig_fragments;
-use super::{DecideError, Fragment, Mosaic, QueryCoverage, build_mosaic};
+use super::mosaic::build_mosaic;
+use super::{DecideError, Fragment, Mosaic, QueryCoverage};
 use crate::align::{Alignment, EditCounts};
 
 /// The limits that decide whether an entry is reported.
@@ -153,7 +154,7 @@ mod tests {
         }
     }
 
-    fn columns_and_matches(decision: &Decision) -> (u64, u64) {
+    fn matches_and_columns(decision: &Decision) -> (u64, u64) {
         (decision.counts.matches, decision.counts.columns())
     }
 
@@ -165,7 +166,7 @@ mod tests {
             .decide(10_000, vec![conserved.clone(), diverged.clone()], |_| 0)
             .unwrap();
         assert!(both.qualifies);
-        assert_eq!(columns_and_matches(&both), (2850 + 1440, 5000));
+        assert_eq!(matches_and_columns(&both), (2850 + 1440, 5000));
         assert_eq!(both.mosaic.covered_bases, 5000);
         for alone in [conserved.clone(), diverged.clone()] {
             assert!(
@@ -194,7 +195,7 @@ mod tests {
         let decision = rule("1")
             .decide(2000, vec![below, low.clone()], |_| 0)
             .unwrap();
-        assert_eq!(columns_and_matches(&decision), (1599, 2000));
+        assert_eq!(matches_and_columns(&decision), (1599, 2000));
         assert!(!decision.qualifies);
         let exact = fragment(0, &[(0, 1000)], "900=100X");
         assert!(
@@ -231,7 +232,7 @@ mod tests {
         let decision = rule("0.5")
             .decide(10_000, vec![first.clone(), copy, first.clone()], |_| 0)
             .unwrap();
-        assert_eq!(columns_and_matches(&decision), (8100, 10_000));
+        assert_eq!(matches_and_columns(&decision), (8100, 10_000));
         assert_eq!(decision.mosaic.covered_bases, 5000);
         assert_eq!(decision.mosaic.primary.len(), 1);
         assert_eq!(decision.mosaic.alternatives.len(), 1);
@@ -284,7 +285,7 @@ mod tests {
     fn indels_count_columns() {
         let gapped = fragment(0, &[(0, 1000)], "800=50I100=50D50=");
         let decision = rule("1").decide(1000, vec![gapped.clone()], |_| 0).unwrap();
-        assert_eq!(columns_and_matches(&decision), (950, 1050));
+        assert_eq!(matches_and_columns(&decision), (950, 1050));
         // The 50 query-only bases are not covered, and the 50 contig-only bases use no query base.
         assert_eq!(decision.mosaic.covered_bases, 950);
         assert!(!decision.qualifies);
@@ -359,7 +360,7 @@ mod tests {
         let fragments = || vec![query_copy.clone(), shared_part.clone()];
         let open = rule("0.5");
         let decision = open.decide(3400, fragments(), lengths).unwrap();
-        assert_eq!(columns_and_matches(&decision), (3270, 3400));
+        assert_eq!(matches_and_columns(&decision), (3270, 3400));
         let by_contig = DecisionRule {
             min_contig_coverage: 0.5,
             min_identity: 0.98,
@@ -367,7 +368,7 @@ mod tests {
         };
         let decision = by_contig.decide(3400, fragments(), lengths).unwrap();
         assert!(decision.qualifies);
-        assert_eq!(columns_and_matches(&decision), (2970, 3000));
+        assert_eq!(matches_and_columns(&decision), (2970, 3000));
         assert_eq!(decision.dropped_fragments, 1);
         let without = DecisionRule {
             min_contig_coverage: 0.0,

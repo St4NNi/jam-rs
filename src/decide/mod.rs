@@ -10,7 +10,6 @@ mod rule;
 
 pub use coverage::QueryCoverage;
 pub use fragment::Fragment;
-use mosaic::build_mosaic;
 pub use mosaic::{Mosaic, SelectedFragment};
 pub use rule::{Decision, DecisionRule};
 

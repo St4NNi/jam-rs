@@ -15,42 +15,6 @@ pub enum QueryCoverage {
     Bases(u64),
 }
 
-impl FromStr for QueryCoverage {
-    type Err = DecideError;
-
-    fn from_str(input: &str) -> Result<Self, Self::Err> {
-        if let Some(count) = input.strip_suffix("bp") {
-            let bases = count
-                .parse()
-                .map_err(|_| DecideError::InvalidCoverage("not a base count"))?;
-            return Ok(Self::Bases(bases));
-        }
-        let value: f64 = input
-            .parse()
-            .map_err(|_| DecideError::InvalidCoverage("not a number"))?;
-        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-            return Err(DecideError::InvalidCoverage("a share must be from 0 to 1"));
-        }
-        let decimal = value.to_string();
-        let (whole, fraction) = decimal.split_once('.').unwrap_or((&decimal, ""));
-        let digits = format!("{whole}{fraction}");
-        let digits = digits.trim_start_matches('0').trim_end_matches('0');
-        if digits.is_empty() {
-            return Ok(Self::Share {
-                numerator: 0,
-                decimal_places: 0,
-            });
-        }
-        let trailing = fraction.len() - fraction.trim_end_matches('0').len();
-        Ok(Self::Share {
-            numerator: digits
-                .parse()
-                .map_err(|_| DecideError::InvalidCoverage("too many digits"))?,
-            decimal_places: (fraction.len() - trailing) as u32,
-        })
-    }
-}
-
 impl QueryCoverage {
     /// The number of query bases that must be covered. A base count above the query length is
     /// lowered to the query length.
@@ -90,6 +54,42 @@ impl QueryCoverage {
     /// Whether `covered_bases` of a query of `query_length` bases are enough.
     pub fn accepts(self, covered_bases: u64, query_length: u64) -> bool {
         covered_bases >= self.required_bases(query_length)
+    }
+}
+
+impl FromStr for QueryCoverage {
+    type Err = DecideError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        if let Some(count) = input.strip_suffix("bp") {
+            let bases = count
+                .parse()
+                .map_err(|_| DecideError::InvalidCoverage("not a base count"))?;
+            return Ok(Self::Bases(bases));
+        }
+        let value: f64 = input
+            .parse()
+            .map_err(|_| DecideError::InvalidCoverage("not a number"))?;
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(DecideError::InvalidCoverage("a share must be from 0 to 1"));
+        }
+        let decimal = value.to_string();
+        let (whole, fraction) = decimal.split_once('.').unwrap_or((&decimal, ""));
+        let digits = format!("{whole}{fraction}");
+        let digits = digits.trim_start_matches('0').trim_end_matches('0');
+        if digits.is_empty() {
+            return Ok(Self::Share {
+                numerator: 0,
+                decimal_places: 0,
+            });
+        }
+        let trailing = fraction.len() - fraction.trim_end_matches('0').len();
+        Ok(Self::Share {
+            numerator: digits
+                .parse()
+                .map_err(|_| DecideError::InvalidCoverage("too many digits"))?,
+            decimal_places: (fraction.len() - trailing) as u32,
+        })
     }
 }
 
