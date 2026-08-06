@@ -1,10 +1,11 @@
 //! End-to-end tests of the screen on small generated entries and assemblies.
 
 use super::*;
-use crate::align::{Strand, complement, format_cigar};
+use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use crate::search::SearchControl;
+use crate::seeds::complement;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 

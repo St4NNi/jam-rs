@@ -4,9 +4,10 @@
 
 use super::dense::Walk;
 use crate::align::BandConfig;
-use crate::align::anchors::{QueryTable, kmers};
+use crate::align::anchors::QueryTable;
 use crate::align::cigar::{append_runs, counts};
 use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
+use crate::seeds::kmers;
 
 /// The ungapped alignment of one walk. `oriented` is the window on the walk's strand (the
 /// reverse complement for the reverse strand); the window starts `offset` bases into the contig.
@@ -149,12 +150,14 @@ pub fn gap_continuation(
             continue;
         }
         codes.clear();
-        kmers(&query_side, table.anchors().a, |at, code, _| {
+        kmers(&query_side, table.anchors().a, |kmer| {
+            let (at, code) = (kmer.position, kmer.forward);
             codes.push((code, distance(at, query_bases) as u32))
         });
         codes.sort_unstable();
         let mut found = false;
-        kmers(contig_side, table.anchors().a, |at, code, _| {
+        kmers(contig_side, table.anchors().a, |kmer| {
+            let (at, code) = (kmer.position, kmer.forward);
             let at = distance(at, contig_bases) as u32;
             // Pairs of one code are ordered by distance, so another distance is at an end.
             let first = codes.partition_point(|pair| pair.0 < code);

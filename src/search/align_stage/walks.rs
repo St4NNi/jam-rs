@@ -12,9 +12,10 @@ use super::window::PreparedWindow;
 use super::{AlignStageError, AlignStageWorkspace};
 use crate::align::{
     Alignment, DenseOptimum, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
-    align_dense_walk, base_code, gap_continuation, holds_walk, long_enough, walk_alignment,
+    align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 use crate::decide::Fragment;
+use crate::seeds::base_code;
 use std::cmp::Reverse;
 
 /// Aligns the walks of `window`, keeps their gapped alignments once per copy, and joins short

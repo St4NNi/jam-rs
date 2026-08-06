@@ -9,8 +9,9 @@ use super::anchors::{Anchor, QueryTable};
 use super::chains::Chain;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
-    EditRun, Interval, complement,
+    EditRun, Interval,
 };
+use crate::seeds::complement;
 
 /// The band that aligns chains and walks: scores, width and the drift of anchors it follows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -12,7 +12,7 @@ mod cigar;
 mod kernel;
 mod walk;
 
-pub use anchors::{Anchor, AnchorConfig, QueryTable, base_code, kmers};
+pub use anchors::{Anchor, AnchorConfig, QueryTable};
 pub use chain_alignment::{BandConfig, align_chain};
 pub use chains::{
     CHAINING_BYTES, Chain, ChainConfig, WindowChains, forward_extent, split_by_drift, window_chains,
@@ -223,30 +223,15 @@ impl Serialize for Alignment {
     }
 }
 
-/// The complement of an IUPAC base; other bytes stay as they are.
-pub fn complement(base: u8) -> u8 {
-    match base.to_ascii_uppercase() {
-        b'A' => b'T',
-        b'C' => b'G',
-        b'G' => b'C',
-        b'T' | b'U' => b'A',
-        b'R' => b'Y',
-        b'Y' => b'R',
-        b'K' => b'M',
-        b'M' => b'K',
-        b'B' => b'V',
-        b'V' => b'B',
-        b'D' => b'H',
-        b'H' => b'D',
-        other => other,
-    }
-}
-
-/// Writes the reverse complement of `sequence` into `output`.
+/// Writes the reverse complement of `sequence` into `output`, so the kernel can reuse it.
 fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
     output.clear();
-    output.reserve(sequence.len());
-    output.extend(sequence.iter().rev().map(|base| complement(*base)));
+    output.extend(
+        sequence
+            .iter()
+            .rev()
+            .map(|&base| crate::seeds::complement(base)),
+    );
 }
 
 /// What can go wrong while finding anchors, chains and walks and while aligning.
@@ -369,11 +354,5 @@ mod tests {
             r#"[{"operation":"=","length":3},{"operation":"D","length":1}]"#
         );
         assert_eq!(serde_json::from_str::<Vec<EditRun>>(&json).unwrap(), runs);
-    }
-
-    #[test]
-    fn complement_keeps_unknown() {
-        assert_eq!(complement(b'a'), b'T');
-        assert_eq!(complement(b'N'), b'N');
     }
 }

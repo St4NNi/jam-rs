@@ -170,7 +170,8 @@ pub(super) fn swap_roles(alignment: &Alignment) -> Alignment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::align::{complement, format_cigar, parse_cigar};
+    use crate::align::{format_cigar, parse_cigar};
+    use crate::seeds::complement;
 
     fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
         sequence

@@ -6,7 +6,8 @@
 // bases always gives an anchor. A circular query also holds the k-mers across its origin.
 
 use super::chains::ChainConfig;
-use super::{AlignmentError, Strand, complement};
+use super::{AlignmentError, Strand};
+use crate::seeds::{base_code, complement, kmers};
 use jamhash::jamhash_u64;
 
 /// How anchors are found.
@@ -83,38 +84,8 @@ fn filter_bit(hash: u64, words: usize) -> usize {
     (hash >> (64 - (words * 64).trailing_zeros())) as usize
 }
 
-/// The 2-bit code of a base, `None` for other bytes.
-pub fn base_code(byte: u8) -> Option<u64> {
-    match byte {
-        b'A' | b'a' => Some(0),
-        b'C' | b'c' => Some(1),
-        b'G' | b'g' => Some(2),
-        b'T' | b't' => Some(3),
-        _ => None,
-    }
-}
-
-/// Calls `visit(start, forward, reverse_complement)` for every k-mer without another byte.
-pub fn kmers(sequence: &[u8], k: u8, mut visit: impl FnMut(usize, u64, u64)) {
-    let k = u32::from(k);
-    let mask = (1u64 << (2 * k)) - 1;
-    let (mut forward, mut reverse, mut bases) = (0u64, 0u64, 0u32);
-    for (index, byte) in sequence.iter().enumerate() {
-        let Some(code) = base_code(*byte) else {
-            bases = 0;
-            continue;
-        };
-        forward = ((forward << 2) | code) & mask;
-        reverse = (reverse >> 2) | ((3 - code) << (2 * (k - 1)));
-        bases = (bases + 1).min(k);
-        if bases == k {
-            visit(index + 1 - k as usize, forward, reverse);
-        }
-    }
-}
-
-/// The Shannon entropy in bits of the bases of a 2-bit k-mer. A local stand-in for the
-/// low-complexity filter of the `seeds` module.
+/// The Shannon entropy in bits of the bases of a 2-bit k-mer; k-mers below the entropy limit
+/// are left to dense walks.
 fn base_entropy(kmer: u64, k: u8) -> f64 {
     let mut counts = [0u8; 4];
     for at in 0..k {
@@ -181,9 +152,10 @@ impl QueryTable {
             None => b'N',
         };
         let mut pairs: Vec<(u64, u8, u32)> = Vec::new();
-        kmers(&scanned, anchors.a, |start, forward, reverse| {
+        kmers(&scanned, anchors.a, |kmer| {
+            let (start, forward, reverse) = (kmer.position, kmer.forward, kmer.reverse);
             if start < query.len() && keep(forward) {
-                let left = base_code(before(start)).map_or(4, |code| code as u8);
+                let left = base_code(before(start)).unwrap_or(4);
                 pairs.push((forward, left, start as u32));
                 pairs.push((reverse, 5, start as u32 | REVERSE));
             }
@@ -445,7 +417,8 @@ pub(super) fn find_anchors(
     if anchors.capacity() < first + expected {
         anchors.reserve_exact(expected);
     }
-    kmers(window, table.anchors.a, |start, forward, _| {
+    kmers(window, table.anchors.a, |kmer| {
+        let (start, forward) = (kmer.position, kmer.forward);
         let start = start as u32;
         if !start.is_multiple_of(stride) {
             return;
@@ -473,7 +446,8 @@ pub(super) fn find_anchors(
 pub(super) fn count_anchors(table: &QueryTable, window: &[u8]) -> usize {
     let stride = usize::from(table.anchors.stride);
     let mut count = 0usize;
-    kmers(window, table.anchors.a, |start, forward, _| {
+    kmers(window, table.anchors.a, |kmer| {
+        let (start, forward) = (kmer.position, kmer.forward);
         if start % stride == 0 {
             count = count.saturating_add(table.multiplicity(forward));
         }
@@ -488,7 +462,8 @@ pub(super) fn occurrence_counts(
 ) -> std::collections::BTreeMap<usize, usize> {
     let stride = usize::from(table.anchors.stride);
     let mut positions = std::collections::BTreeMap::<usize, usize>::new();
-    kmers(window, table.anchors.a, |start, forward, _| {
+    kmers(window, table.anchors.a, |kmer| {
+        let (start, forward) = (kmer.position, kmer.forward);
         if start % stride == 0 {
             let occurrences = table.multiplicity(forward);
             if occurrences > 0 {

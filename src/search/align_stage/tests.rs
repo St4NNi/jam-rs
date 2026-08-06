@@ -2,10 +2,11 @@
 //! k-mer matches between the query and each contig, as stage 2 would find them from seeds.
 
 use super::*;
-use crate::align::{Interval, Strand, complement, format_cigar};
+use crate::align::{Interval, Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Parameters, build_shard};
 use crate::search::ContigWindows;
+use crate::seeds::complement;
 use crate::storage::MappedFile;
 use std::collections::HashSet;
 use std::ops::Range;

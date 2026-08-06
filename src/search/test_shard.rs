@@ -64,7 +64,7 @@ pub fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
     sequence
         .iter()
         .rev()
-        .map(|&base| crate::align::complement(base))
+        .map(|&base| crate::seeds::complement(base))
         .collect()
 }
 

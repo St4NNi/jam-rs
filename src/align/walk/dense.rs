@@ -6,9 +6,9 @@
 // extended with X-drop, so every copy of a repeat becomes one walk on its own diagonal.
 
 use crate::align::BandConfig;
-use crate::align::anchors::{QueryTable, base_code, kmers};
-use crate::align::reverse_complement_into;
+use crate::align::anchors::QueryTable;
 use crate::align::{AlignmentError, Budgeted, Strand};
+use crate::seeds::{base_code, kmers, reverse_complement};
 use std::mem::size_of;
 
 /// The best-scoring ungapped stretch around one or more match starts of a diagonal. `contig` is
@@ -79,8 +79,7 @@ pub fn dense_walks(
     if price(count) > budget {
         return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
     }
-    let mut reverse = Vec::new();
-    reverse_complement_into(window, &mut reverse);
+    let reverse = reverse_complement(window);
     match_starts(table, &reverse, above, &mut |_, _| count += 1);
     if price(count) > budget {
         return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
@@ -145,8 +144,7 @@ fn periodic_walks(
             });
         }
     }
-    let mut reverse = Vec::new();
-    reverse_complement_into(window, &mut reverse);
+    let reverse = reverse_complement(window);
     Ok(Some(DenseWalks { walks, reverse }))
 }
 
@@ -158,14 +156,15 @@ fn match_starts(
     above: usize,
     visit: &mut dyn FnMut(u32, u32),
 ) {
-    kmers(oriented, table.anchors().a, |start, code, _| {
+    kmers(oriented, table.anchors().a, |kmer| {
+        let (start, code) = (kmer.position, kmer.forward);
         if table.multiplicity(code) <= above {
             return;
         }
         let left = start
             .checked_sub(1)
             .and_then(|at| base_code(oriented[at]))
-            .map_or(4, |code| code as u8);
+            .unwrap_or(4);
         for query in table.match_starts(code, left) {
             visit(start as u32, query);
         }
