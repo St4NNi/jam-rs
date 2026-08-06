@@ -50,9 +50,37 @@ impl Fragment {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::align::{Strand, parse_cigar};
+
+    /// A forward fragment with `cigar`, scored 2 per match and -3 or -1 per other column, from
+    /// position 0 of the query and of the contig.
+    pub(in crate::decide) fn fragment(
+        contig_index: u32,
+        segments: &[(u64, u64)],
+        cigar: &str,
+    ) -> Fragment {
+        let mut alignment = Alignment {
+            score: 0,
+            strand: Strand::Forward,
+            query_interval: Interval::new(0, 0).unwrap(),
+            contig_interval: Interval::new(0, 0).unwrap(),
+            runs: parse_cigar(cigar).unwrap(),
+        };
+        let counts = alignment.counts();
+        alignment.score = 2 * counts.matches as i32
+            - (3 * counts.substitutions + counts.insertions + counts.deletions) as i32;
+        alignment.query_interval = Interval::new(0, counts.query_bases()).unwrap();
+        alignment.contig_interval = Interval::new(0, counts.contig_bases()).unwrap();
+        let segments = segments.iter();
+        let segments = segments.map(|&(start, end)| Interval::new(start, end).unwrap());
+        Fragment {
+            contig_index,
+            query_segments: segments.collect(),
+            alignment,
+        }
+    }
 
     fn alignment(query: (u64, u64)) -> Alignment {
         let length = query.1 - query.0;

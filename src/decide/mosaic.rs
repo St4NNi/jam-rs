@@ -211,35 +211,18 @@ fn gaps_between(covered: &[Interval], query_length: u64) -> Vec<Interval> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::align::{Alignment, Strand, parse_cigar};
+    use crate::align::Strand;
+    use crate::decide::fragment::tests::fragment;
 
-    /// A fragment on a forward strand; the contig interval just has the right length.
-    fn fragment(contig_index: u32, score: i32, segments: &[(u64, u64)], cigar: &str) -> Fragment {
-        let runs = parse_cigar(cigar).unwrap();
-        let mut alignment = Alignment {
-            score,
-            strand: Strand::Forward,
-            query_interval: Interval::new(0, 0).unwrap(),
-            contig_interval: Interval::new(0, 0).unwrap(),
-            runs,
-        };
-        let counts = alignment.counts();
-        let query_bases = counts.matches + counts.substitutions + counts.insertions;
-        let contig_bases = counts.matches + counts.substitutions + counts.deletions;
-        alignment.query_interval = Interval::new(0, query_bases).unwrap();
-        alignment.contig_interval = Interval::new(0, contig_bases).unwrap();
-        Fragment {
-            contig_index,
-            query_segments: segments
-                .iter()
-                .map(|&(start, end)| Interval::new(start, end).unwrap())
-                .collect(),
-            alignment,
-        }
+    /// A fragment of `fragment` with another score.
+    fn scored(contig_index: u32, score: i32, segments: &[(u64, u64)], cigar: &str) -> Fragment {
+        let mut scored = fragment(contig_index, segments, cigar);
+        scored.alignment.score = score;
+        scored
     }
 
     fn equal_fragment(contig_index: u32, score: i32, start: u64, end: u64) -> Fragment {
-        fragment(
+        scored(
             contig_index,
             score,
             &[(start, end)],
@@ -254,14 +237,14 @@ mod tests {
     #[test]
     fn insertions_leave_gaps() {
         // 2= 1I 2=: the middle query base has no contig base.
-        let mosaic = build_mosaic(5, &[fragment(0, 7, &[(0, 5)], "2=1I2=")]).unwrap();
+        let mosaic = build_mosaic(5, &[scored(0, 7, &[(0, 5)], "2=1I2=")]).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert_eq!(mosaic.gaps, [interval(2, 3)]);
     }
 
     #[test]
     fn deletions_take_nothing() {
-        let mosaic = build_mosaic(4, &[fragment(0, 7, &[(0, 4)], "2=3D2=")]).unwrap();
+        let mosaic = build_mosaic(4, &[scored(0, 7, &[(0, 4)], "2=3D2=")]).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert!(mosaic.gaps.is_empty());
     }
@@ -301,7 +284,7 @@ mod tests {
 
     #[test]
     fn wrap_covers_ends() {
-        let wrapped = fragment(0, 8, &[(8, 10), (0, 2)], "4=");
+        let wrapped = scored(0, 8, &[(8, 10), (0, 2)], "4=");
         let mosaic = build_mosaic(10, &[wrapped]).unwrap();
         assert_eq!(mosaic.covered_intervals, [interval(0, 2), interval(8, 10)]);
         assert_eq!(mosaic.gaps, [interval(2, 8)]);
@@ -309,7 +292,7 @@ mod tests {
 
     #[test]
     fn wrap_insertions_uncovered() {
-        let wrapped = fragment(0, 8, &[(8, 10), (0, 3)], "1=1I1=1I1=");
+        let wrapped = scored(0, 8, &[(8, 10), (0, 3)], "1=1I1=1I1=");
         let mosaic = build_mosaic(10, &[wrapped]).unwrap();
         assert_eq!(
             mosaic.covered_intervals,
@@ -320,17 +303,17 @@ mod tests {
     #[test]
     fn bad_fragments_fail() {
         assert_eq!(build_mosaic(0, &[]), Err(DecideError::EmptyQuery));
-        let outside = fragment(0, 1, &[(5, 12)], "7=");
+        let outside = scored(0, 1, &[(5, 12)], "7=");
         assert_eq!(
             build_mosaic(10, &[outside]),
             Err(DecideError::InvalidQuerySegments)
         );
-        let overlap = fragment(0, 1, &[(0, 4), (3, 6)], "7=");
+        let overlap = scored(0, 1, &[(0, 4), (3, 6)], "7=");
         assert_eq!(
             build_mosaic(10, &[overlap]),
             Err(DecideError::InvalidQuerySegments)
         );
-        let short = fragment(0, 1, &[(0, 4)], "5=");
+        let short = scored(0, 1, &[(0, 4)], "5=");
         assert_eq!(
             build_mosaic(10, &[short]),
             Err(DecideError::QuerySpanMismatch)

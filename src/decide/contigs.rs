@@ -44,31 +44,15 @@ pub(super) fn counted_contig_fragments(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::align::{Alignment, Interval, Strand, parse_cigar};
+    use crate::decide::fragment::tests;
 
+    /// A fragment on `contig` from `contig_start` on; the contig rule reads no query segment.
     fn fragment(contig: u32, contig_start: u64, cigar: &str) -> Fragment {
-        let runs = parse_cigar(cigar).unwrap();
-        let counts = Alignment {
-            score: 0,
-            strand: Strand::Forward,
-            query_interval: Interval::new(0, 0).unwrap(),
-            contig_interval: Interval::new(0, 0).unwrap(),
-            runs: runs.clone(),
-        }
-        .counts();
-        let query = counts.matches + counts.substitutions + counts.insertions;
-        let on_contig = counts.matches + counts.substitutions + counts.deletions;
-        Fragment {
-            contig_index: contig,
-            query_segments: vec![Interval::new(0, query).unwrap()],
-            alignment: Alignment {
-                score: 0,
-                strand: Strand::Forward,
-                query_interval: Interval::new(0, query).unwrap(),
-                contig_interval: Interval::new(contig_start, contig_start + on_contig).unwrap(),
-                runs,
-            },
-        }
+        let mut fragment = tests::fragment(contig, &[], cigar);
+        let interval = fragment.alignment.contig_interval;
+        let shifted = Interval::new(contig_start, contig_start + interval.len());
+        fragment.alignment.contig_interval = shifted.unwrap();
+        fragment
     }
 
     fn kept(fragments: &[Fragment], coverage: f64, identity: f64) -> Vec<u32> {

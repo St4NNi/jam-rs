@@ -144,33 +144,7 @@ impl DecisionRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::align::{Interval, Strand, parse_cigar};
-
-    fn fragment(contig_index: u32, segments: &[(u64, u64)], cigar: &str) -> Fragment {
-        let runs = parse_cigar(cigar).unwrap();
-        let mut alignment = Alignment {
-            score: 0,
-            strand: Strand::Forward,
-            query_interval: Interval::new(0, 0).unwrap(),
-            contig_interval: Interval::new(0, 0).unwrap(),
-            runs,
-        };
-        let counts = alignment.counts();
-        let query = counts.matches + counts.substitutions + counts.insertions;
-        let contig = counts.matches + counts.substitutions + counts.deletions;
-        alignment.score = (2 * counts.matches) as i32
-            - (3 * counts.substitutions + counts.insertions + counts.deletions) as i32;
-        alignment.query_interval = Interval::new(0, query).unwrap();
-        alignment.contig_interval = Interval::new(0, contig).unwrap();
-        Fragment {
-            contig_index,
-            query_segments: segments
-                .iter()
-                .map(|&(start, end)| Interval::new(start, end).unwrap())
-                .collect(),
-            alignment,
-        }
-    }
+    use crate::decide::fragment::tests::fragment;
 
     fn rule(coverage: &str) -> DecisionRule {
         DecisionRule {
