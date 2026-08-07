@@ -45,6 +45,18 @@ impl AnchorConfig {
     }
 }
 
+/// A shared k-mer. `contig` is the oriented window position: the k-mer start in the window for
+/// the forward strand, and in the reverse complement of the window for the reverse strand.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Anchor {
+    /// The contig strand of the match.
+    pub strand: Strand,
+    /// The oriented window position.
+    pub contig: u32,
+    /// The query position.
+    pub query: u32,
+}
+
 /// Every k-mer of the query on both strands, keyed by its 2-bit code. The forward occurrences of
 /// a k-mer come first, ordered by the code of the query base before them (4 for none or another
 /// byte), then its reverse occurrences.
@@ -64,41 +76,6 @@ pub struct QueryTable {
     /// For each occurrence: the code of the base before a forward occurrence, 5 for a reverse one.
     left: Vec<u8>,
     query: Vec<u8>,
-}
-
-/// One slot of the open-addressing table: a k-mer and where its occurrences lie.
-#[derive(Clone, Copy)]
-struct Slot {
-    key: u64,
-    start: u32,
-    count: u32,
-}
-
-/// The key of an empty slot; no k-mer of at most 31 bases has it.
-const EMPTY: u64 = u64::MAX;
-const REVERSE: u32 = 1 << 31;
-
-/// The bit of a key with hash `hash` in a filter of `words` 64-bit words (a power of two).
-#[inline(always)]
-fn filter_bit(hash: u64, words: usize) -> usize {
-    (hash >> (64 - (words * 64).trailing_zeros())) as usize
-}
-
-/// The Shannon entropy in bits of the bases of a 2-bit k-mer; k-mers below the entropy limit
-/// are left to dense walks.
-fn base_entropy(kmer: u64, k: u8) -> f64 {
-    let mut counts = [0u8; 4];
-    for at in 0..k {
-        counts[((kmer >> (2 * at)) & 3) as usize] += 1;
-    }
-    counts
-        .iter()
-        .filter(|&&count| count > 0)
-        .map(|&count| {
-            let share = f64::from(count) / f64::from(k);
-            -share * share.log2()
-        })
-        .sum()
 }
 
 impl QueryTable {
@@ -151,6 +128,8 @@ impl QueryTable {
             None if circular => query[query.len() - 1],
             None => b'N',
         };
+        // (k-mer, left code, occurrence): sorting puts the forward occurrences of a k-mer first,
+        // by left code, and its reverse ones (code 5) last.
         let mut pairs: Vec<(u64, u8, u32)> = Vec::new();
         kmers(&scanned, anchors.a, |kmer| {
             let (start, forward, reverse) = (kmer.position, kmer.forward, kmer.reverse);
@@ -210,11 +189,11 @@ impl QueryTable {
 
     /// The occurrences of `key`: query positions, with `REVERSE` set for the reverse strand.
     fn get(&self, key: u64) -> &[u32] {
-        &self.occurrences[self.slot(key)]
+        &self.occurrences[self.occurrence_range(key)]
     }
 
     /// The range of the occurrences of `key`, empty when the query lacks it.
-    fn slot(&self, key: u64) -> std::ops::Range<usize> {
+    fn occurrence_range(&self, key: u64) -> std::ops::Range<usize> {
         let hash = jamhash_u64(key);
         let bit = filter_bit(hash, self.filter.len());
         if self.filter[bit / 64] & (1 << (bit % 64)) == 0 {
@@ -237,14 +216,14 @@ impl QueryTable {
 
     /// Occurrences of `key` on both strands.
     pub(super) fn multiplicity(&self, key: u64) -> usize {
-        self.slot(key).len()
+        self.occurrence_range(key).len()
     }
 
     /// Forward query positions of `key` that do not follow a base of code `left`, so a match
     /// with a window position whose preceding base has that code cannot extend to the left.
     /// Code 4 (none or another byte) excludes nothing.
     pub(super) fn match_starts(&self, key: u64, left: u8) -> impl Iterator<Item = u32> + '_ {
-        let range = self.slot(key);
+        let range = self.occurrence_range(key);
         let codes = &self.left[range.clone()];
         let forward = codes.partition_point(|code| *code < 5);
         let (low, high) = if left < 4 {
@@ -330,7 +309,7 @@ impl QueryTable {
         if self.occurrences.is_empty() || self.query.is_empty() || window.is_empty() {
             return None;
         }
-        let p = self.period?;
+        let period = self.period?;
         let query = self.query();
         if window.iter().any(|base| base_code(*base).is_none()) {
             return None;
@@ -344,9 +323,9 @@ impl QueryTable {
                     window[at].to_ascii_uppercase()
                 }
             };
-            for shift in 0..p {
+            for shift in 0..period {
                 if (0..window.len())
-                    .all(|at| base(at) == query[(at + shift) % p].to_ascii_uppercase())
+                    .all(|at| base(at) == query[(at + shift) % period].to_ascii_uppercase())
                 {
                     let diagonal = -(shift as i64);
                     phases.push(Phase { strand, diagonal });
@@ -354,50 +333,8 @@ impl QueryTable {
                 }
             }
         }
-        (!phases.is_empty()).then_some(Periodic { period: p, phases })
+        (!phases.is_empty()).then_some(Periodic { period, phases })
     }
-}
-
-/// A query that repeats a short period, and an alignment window that copies the repeat.
-pub(super) struct Periodic {
-    /// The period in bases.
-    pub(super) period: usize,
-    /// The diagonal of one exact copy per strand that has one.
-    pub(super) phases: Vec<Phase>,
-}
-
-/// The diagonal of one exact copy of a periodic query on one strand.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct Phase {
-    pub(super) strand: Strand,
-    pub(super) diagonal: i64,
-}
-
-/// The shortest period of at most a bases of a query of plain bases; a circular query must hold
-/// a whole number of periods.
-fn period(query: &[u8], circular: bool, a: usize) -> Option<usize> {
-    if query.iter().any(|base| base_code(*base).is_none()) {
-        return None;
-    }
-    (1..=a.min(query.len())).find(|&p| {
-        (!circular || query.len().is_multiple_of(p))
-            && query
-                .iter()
-                .enumerate()
-                .all(|(at, base)| base.eq_ignore_ascii_case(&query[at % p]))
-    })
-}
-
-/// A shared k-mer. `contig` is the oriented window position: the k-mer start in the window for
-/// the forward strand, and in the reverse complement of the window for the reverse strand.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct Anchor {
-    /// The contig strand of the match.
-    pub strand: Strand,
-    /// The oriented window position.
-    pub contig: u32,
-    /// The query position.
-    pub query: u32,
 }
 
 /// Appends the anchors of `window`, sorted by strand, contig and query position. K-mers with
@@ -472,4 +409,72 @@ pub(super) fn occurrence_counts(
         }
     });
     positions
+}
+
+/// A query that repeats a short period, and an alignment window that copies the repeat.
+pub(super) struct Periodic {
+    /// The period in bases.
+    pub(super) period: usize,
+    /// The diagonal of one exact copy per strand that has one.
+    pub(super) phases: Vec<Phase>,
+}
+
+/// The diagonal of one exact copy of a periodic query on one strand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Phase {
+    /// The contig strand of the copy.
+    pub(super) strand: Strand,
+    /// Oriented window position minus query position, at most zero.
+    pub(super) diagonal: i64,
+}
+
+/// One slot of the open-addressing table: a k-mer and where its occurrences lie.
+#[derive(Clone, Copy)]
+struct Slot {
+    key: u64,
+    start: u32,
+    count: u32,
+}
+
+/// The key of an empty slot; no k-mer of at most 31 bases has it.
+const EMPTY: u64 = u64::MAX;
+/// The bit of an occurrence that marks the reverse strand; a query stays shorter than it.
+const REVERSE: u32 = 1 << 31;
+
+/// The bit of a key with hash `hash` in a filter of `words` 64-bit words (a power of two).
+#[inline(always)]
+fn filter_bit(hash: u64, words: usize) -> usize {
+    (hash >> (64 - (words * 64).trailing_zeros())) as usize
+}
+
+/// The Shannon entropy in bits of the bases of a 2-bit k-mer; k-mers below the entropy limit
+/// are left to dense walks.
+fn base_entropy(kmer: u64, k: u8) -> f64 {
+    let mut counts = [0u8; 4];
+    for at in 0..k {
+        counts[((kmer >> (2 * at)) & 3) as usize] += 1;
+    }
+    counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let share = f64::from(count) / f64::from(k);
+            -share * share.log2()
+        })
+        .sum()
+}
+
+/// The shortest period of at most a bases of a query of plain bases; a circular query must hold
+/// a whole number of periods.
+fn period(query: &[u8], circular: bool, a: usize) -> Option<usize> {
+    if query.iter().any(|base| base_code(*base).is_none()) {
+        return None;
+    }
+    (1..=a.min(query.len())).find(|&candidate| {
+        (!circular || query.len().is_multiple_of(candidate))
+            && query
+                .iter()
+                .enumerate()
+                .all(|(at, base)| base.eq_ignore_ascii_case(&query[at % candidate]))
+    })
 }
