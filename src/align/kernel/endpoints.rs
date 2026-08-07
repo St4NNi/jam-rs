@@ -4,9 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::geometry::{DELETION, INSERTION, MATCH, START};
-use super::{AlignmentConfig, AlignmentInput, AlignmentWorkspace};
+use super::{AlignmentConfig, AlignmentInput, AlignmentWorkspace, reverse_complement_into};
 use crate::align::cigar::{append_runs, runs_of};
-use crate::align::reverse_complement_into;
 use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand};
 
 /// A score no path reaches; adding scoring terms to it cannot overflow.

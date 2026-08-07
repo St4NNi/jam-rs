@@ -7,9 +7,10 @@
 
 use super::anchors::{Anchor, QueryTable};
 use super::chains::Chain;
+use super::kernel::AlignmentInput;
 use super::{
-    Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
-    EditRun, Interval,
+    Alignment, AlignmentConfig, AlignmentError, AlignmentWorkspace, EditOperation, EditRun,
+    Interval,
 };
 use crate::seeds::complement;
 

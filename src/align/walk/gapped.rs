@@ -5,9 +5,9 @@
 use super::dense::Walk;
 use crate::align::BandConfig;
 use crate::align::anchors::QueryTable;
+use crate::align::kernel::AlignmentInput;
 use crate::align::{
-    Alignment, AlignmentConfig, AlignmentError, AlignmentInput, AlignmentWorkspace, EditOperation,
-    Strand,
+    Alignment, AlignmentConfig, AlignmentError, AlignmentWorkspace, EditOperation, Strand,
 };
 
 /// A walk alignment proven to be the best for its query window and contig range, so the next

@@ -22,9 +22,7 @@ mod tests;
 mod traceback;
 mod waves;
 
-use super::{
-    Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand, reverse_complement_into,
-};
+use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand};
 use geometry::WaveCarry;
 use waves::WaveChunk;
 
@@ -214,4 +212,15 @@ fn finish(
     };
     alignment.validate()?;
     Ok(alignment)
+}
+
+/// Writes the reverse complement of `sequence` into `output`, so the kernel can reuse it.
+fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
+    output.clear();
+    output.extend(
+        sequence
+            .iter()
+            .rev()
+            .map(|&base| crate::seeds::complement(base)),
+    );
 }

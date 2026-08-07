@@ -5,7 +5,8 @@
 use super::{AlignmentError, EditCounts};
 use serde::{Deserialize, Serialize};
 
-/// One CIGAR operation; see the module documentation of `align` for its meaning.
+/// One CIGAR operation: `=` match, `X` substitution, `I` a base only in the query, `D` a base
+/// only in the contig.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum EditOperation {
     #[serde(rename = "=")]

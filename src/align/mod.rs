@@ -18,7 +18,6 @@ pub use chains::{
     CHAINING_BYTES, Chain, ChainConfig, WindowChains, forward_extent, split_by_drift, window_chains,
 };
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
-use kernel::AlignmentInput;
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
 pub use walk::{
     DenseOptimum, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk, align_dense_walk,
@@ -129,6 +128,47 @@ pub struct Alignment {
     pub runs: Vec<EditRun>,
 }
 
+impl Alignment {
+    /// The base counts of the runs.
+    pub fn counts(&self) -> EditCounts {
+        cigar::counts(&self.runs)
+    }
+
+    /// Matches divided by alignment columns.
+    pub fn identity(&self) -> f64 {
+        self.counts().identity()
+    }
+
+    /// Checks that the runs are valid and span exactly both intervals.
+    pub fn validate(&self) -> Result<(), AlignmentError> {
+        let counts = cigar::checked_counts(&self.runs)?;
+        if counts.query_bases() != self.query_interval.len()
+            || counts.contig_bases() != self.contig_interval.len()
+        {
+            return Err(AlignmentError::CigarSpanMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for Alignment {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let counts = self.counts();
+        let mut record = serializer.serialize_struct("Alignment", 10)?;
+        record.serialize_field("score", &self.score)?;
+        record.serialize_field("strand", &self.strand)?;
+        record.serialize_field("query_interval", &self.query_interval)?;
+        record.serialize_field("contig_interval", &self.contig_interval)?;
+        record.serialize_field("matches", &counts.matches)?;
+        record.serialize_field("substitutions", &counts.substitutions)?;
+        record.serialize_field("insertions", &counts.insertions)?;
+        record.serialize_field("deletions", &counts.deletions)?;
+        record.serialize_field("identity", &counts.identity())?;
+        record.serialize_field("cigar", &format_cigar(&self.runs))?;
+        record.end()
+    }
+}
+
 /// Base counts of an alignment, one per CIGAR operation.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EditCounts {
@@ -180,58 +220,6 @@ impl std::ops::AddAssign for EditCounts {
         self.insertions += other.insertions;
         self.deletions += other.deletions;
     }
-}
-
-impl Alignment {
-    /// The base counts of the runs.
-    pub fn counts(&self) -> EditCounts {
-        cigar::counts(&self.runs)
-    }
-
-    /// Matches divided by alignment columns.
-    pub fn identity(&self) -> f64 {
-        self.counts().identity()
-    }
-
-    /// Checks that the runs are valid and span exactly both intervals.
-    pub fn validate(&self) -> Result<(), AlignmentError> {
-        let counts = cigar::checked_counts(&self.runs)?;
-        if counts.query_bases() != self.query_interval.len()
-            || counts.contig_bases() != self.contig_interval.len()
-        {
-            return Err(AlignmentError::CigarSpanMismatch);
-        }
-        Ok(())
-    }
-}
-
-impl Serialize for Alignment {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let counts = self.counts();
-        let mut record = serializer.serialize_struct("Alignment", 10)?;
-        record.serialize_field("score", &self.score)?;
-        record.serialize_field("strand", &self.strand)?;
-        record.serialize_field("query_interval", &self.query_interval)?;
-        record.serialize_field("contig_interval", &self.contig_interval)?;
-        record.serialize_field("matches", &counts.matches)?;
-        record.serialize_field("substitutions", &counts.substitutions)?;
-        record.serialize_field("insertions", &counts.insertions)?;
-        record.serialize_field("deletions", &counts.deletions)?;
-        record.serialize_field("identity", &counts.identity())?;
-        record.serialize_field("cigar", &format_cigar(&self.runs))?;
-        record.end()
-    }
-}
-
-/// Writes the reverse complement of `sequence` into `output`, so the kernel can reuse it.
-fn reverse_complement_into(sequence: &[u8], output: &mut Vec<u8>) {
-    output.clear();
-    output.extend(
-        sequence
-            .iter()
-            .rev()
-            .map(|&base| crate::seeds::complement(base)),
-    );
 }
 
 /// What can go wrong while finding anchors, chains and walks and while aligning.
