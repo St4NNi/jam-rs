@@ -59,17 +59,6 @@ impl ChainConfig {
 /// Bytes of anchors and chaining arrays of one window.
 pub const CHAINING_BYTES: usize = 64 << 20;
 
-/// Predecessors with a valid link that one anchor considers at most.
-const LOOKBACK: usize = 64;
-
-/// A link may leave the diagonal by this many bases plus one part in `DRIFT_SHARE` of its length.
-const DRIFT_BASES: i64 = 50;
-const DRIFT_SHARE: i64 = 5;
-
-/// A link that leaves the diagonal costs one per this many drifted bases, plus one, plus half
-/// the bits of the drift.
-const DRIFT_COST: i64 = 10;
-
 /// The chains of an alignment window, and the k-mers it leaves to dense walks.
 pub struct WindowChains {
     /// The chains, best score first per strand.
@@ -86,6 +75,7 @@ pub fn window_chains(
     scratch: &mut Vec<Anchor>,
 ) -> Result<WindowChains, AlignmentError> {
     scratch.clear();
+    // Every copy of a circular repeat is on many diagonals at once; dense walks take them all.
     if table.circular() && table.periodic_pair(window).is_some() {
         let chains = Vec::new();
         return Ok(WindowChains {
@@ -110,6 +100,49 @@ pub fn window_chains(
         chains,
         dense_above: budget.above,
     })
+}
+
+/// Forward window positions `start..end` covered by the anchors of a chain.
+pub fn forward_extent(chain: &Chain, window: u64, a: u64) -> (u64, u64) {
+    let first = u64::from(chain.anchors[0].contig);
+    let last = u64::from(chain.anchors[chain.anchors.len() - 1].contig) + a;
+    if chain.strand.is_reverse() {
+        (window - last, window - first)
+    } else {
+        (first, last)
+    }
+}
+
+/// Splits a chain where its anchors drift more than `max_drift` off the first diagonal; parts of
+/// fewer than `min_anchors` anchors are dropped.
+pub fn split_by_drift(chain: &Chain, max_drift: u32, min_anchors: u32) -> Vec<Chain> {
+    let mut parts: Vec<Chain> = Vec::new();
+    let mut start = 0;
+    for index in 0..=chain.anchors.len() {
+        let drift = |index: usize| {
+            let contig =
+                i64::from(chain.anchors[index].contig) - i64::from(chain.anchors[start].contig);
+            let query = i64::from(chain.offsets[index]) - i64::from(chain.offsets[start]);
+            (contig - query).unsigned_abs()
+        };
+        if index < chain.anchors.len() && drift(index) <= u64::from(max_drift) {
+            continue;
+        }
+        if index - start >= min_anchors as usize {
+            let base = chain.offsets[start];
+            parts.push(Chain {
+                strand: chain.strand,
+                anchors: chain.anchors[start..index].to_vec(),
+                offsets: chain.offsets[start..index]
+                    .iter()
+                    .map(|offset| offset - base)
+                    .collect(),
+                score: chain.score,
+            });
+        }
+        start = index;
+    }
+    parts
 }
 
 /// The anchors a window may give within `CHAINING_BYTES` and the query occurrence count above
@@ -211,16 +244,17 @@ fn periodic_chains(
     for phase in phases {
         let mut diagonal = low + (phase.diagonal - low).rem_euclid(period as i64);
         while diagonal <= high {
-            let (q, t) = ((-diagonal).max(0) as u64, diagonal.max(0) as u64);
-            let length = (u64::from(table.query_length()) - q).min(window.len() as u64 - t);
+            let (query_start, contig_start) = ((-diagonal).max(0) as u64, diagonal.max(0) as u64);
+            let length = (u64::from(table.query_length()) - query_start)
+                .min(window.len() as u64 - contig_start);
             let mut positions = Vec::with_capacity(anchors);
             let mut offsets = Vec::with_capacity(anchors);
             for at in 0..anchors {
                 let step = (length - a) * at as u64 / anchors.saturating_sub(1).max(1) as u64;
                 positions.push(Anchor {
                     strand: phase.strand,
-                    contig: (t + step) as u32,
-                    query: (q + step) as u32,
+                    contig: (contig_start + step) as u32,
+                    query: (query_start + step) as u32,
                 });
                 offsets.push(step as u32);
             }
@@ -243,10 +277,9 @@ fn periodic_chains(
 pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
     let config = table.chains();
     let links = chain_links(table, anchors);
-    let n = anchors.len();
-    let mut order: Vec<usize> = (0..n).collect();
+    let mut order: Vec<usize> = (0..anchors.len()).collect();
     order.sort_unstable_by_key(|&index| (std::cmp::Reverse(links[index].score), index));
-    let mut used = vec![false; n];
+    let mut used = vec![false; anchors.len()];
     for end in order {
         if used[end] || links[end].score < config.min_score {
             continue;
@@ -281,6 +314,17 @@ pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Ve
     }
 }
 
+/// Predecessors with a valid link that one anchor considers at most.
+const LOOKBACK: usize = 64;
+
+/// A link may leave the diagonal by this many bases plus one part in `DRIFT_SHARE` of its length.
+const DRIFT_BASES: i64 = 50;
+const DRIFT_SHARE: i64 = 5;
+
+/// A link that leaves the diagonal costs one per this many drifted bases, plus one, plus half
+/// the bits of the drift.
+const DRIFT_COST: i64 = 10;
+
 /// The best chain that ends in an anchor: its score, the anchor before (`usize::MAX` for none)
 /// and the query span from the chain start.
 #[derive(Clone, Copy)]
@@ -295,26 +339,29 @@ fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
     let a = i64::from(table.anchors().a);
     let max_gap = i64::from(table.chains().max_gap);
     let length = i64::from(table.query_length());
-    let n = anchors.len();
-    let mut links: Vec<Link> = Vec::with_capacity(n);
-    for j in 0..n {
+    let mut links: Vec<Link> = Vec::with_capacity(anchors.len());
+    for (current, anchor) in anchors.iter().enumerate() {
         let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
-        let end = anchors[..j].partition_point(|anchor| anchor.contig < anchors[j].contig);
+        let end = anchors[..current].partition_point(|earlier| earlier.contig < anchor.contig);
         let mut eligible = 0;
-        for i in (0..end).rev() {
-            let dt = i64::from(anchors[j].contig) - i64::from(anchors[i].contig);
-            if dt > max_gap {
+        for earlier in (0..end).rev() {
+            let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
+            if contig_step > max_gap {
                 break;
             }
-            let mut dq = i64::from(anchors[j].query) - i64::from(anchors[i].query);
-            if table.circular() && dq <= 0 {
-                dq += length;
+            let mut query_step = i64::from(anchor.query) - i64::from(anchors[earlier].query);
+            if table.circular() && query_step <= 0 {
+                query_step += length;
             }
-            if dt <= 0 || dq <= 0 || dq > max_gap || links[i].span + dq + a > length {
+            if contig_step <= 0
+                || query_step <= 0
+                || query_step > max_gap
+                || links[earlier].span + query_step + a > length
+            {
                 continue;
             }
-            let drift = (dt - dq).abs();
-            if drift > DRIFT_BASES + dt.min(dq) / DRIFT_SHARE {
+            let drift = (contig_step - query_step).abs();
+            if drift > DRIFT_BASES + contig_step.min(query_step) / DRIFT_SHARE {
                 continue;
             }
             eligible += 1;
@@ -323,9 +370,9 @@ fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
             } else {
                 drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
             };
-            let gained = links[i].score + dt.min(dq).min(a) - gap_cost;
+            let gained = links[earlier].score + contig_step.min(query_step).min(a) - gap_cost;
             if gained > best {
-                (best, from, best_span) = (gained, i, links[i].span + dq);
+                (best, from, best_span) = (gained, earlier, links[earlier].span + query_step);
             }
             if eligible == LOOKBACK {
                 break;
@@ -338,49 +385,6 @@ fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
         });
     }
     links
-}
-
-/// Forward window positions `start..end` covered by the anchors of a chain.
-pub fn forward_extent(chain: &Chain, window: u64, a: u64) -> (u64, u64) {
-    let first = u64::from(chain.anchors[0].contig);
-    let last = u64::from(chain.anchors[chain.anchors.len() - 1].contig) + a;
-    if chain.strand.is_reverse() {
-        (window - last, window - first)
-    } else {
-        (first, last)
-    }
-}
-
-/// Splits a chain where its anchors drift more than `max_drift` off the first diagonal; parts of
-/// fewer than `min_anchors` anchors are dropped.
-pub fn split_by_drift(chain: &Chain, max_drift: u32, min_anchors: u32) -> Vec<Chain> {
-    let mut parts: Vec<Chain> = Vec::new();
-    let mut start = 0;
-    for index in 0..=chain.anchors.len() {
-        let drift = |index: usize| {
-            let contig =
-                i64::from(chain.anchors[index].contig) - i64::from(chain.anchors[start].contig);
-            let query = i64::from(chain.offsets[index]) - i64::from(chain.offsets[start]);
-            (contig - query).unsigned_abs()
-        };
-        if index < chain.anchors.len() && drift(index) <= u64::from(max_drift) {
-            continue;
-        }
-        if index - start >= min_anchors as usize {
-            let base = chain.offsets[start];
-            parts.push(Chain {
-                strand: chain.strand,
-                anchors: chain.anchors[start..index].to_vec(),
-                offsets: chain.offsets[start..index]
-                    .iter()
-                    .map(|offset| offset - base)
-                    .collect(),
-                score: chain.score,
-            });
-        }
-        start = index;
-    }
-    parts
 }
 
 #[cfg(test)]
