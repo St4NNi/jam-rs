@@ -2,7 +2,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-// A short element shared with a long sequence thus does not cost an alignment of all of it.
+// Starting narrow means a short element shared with a long sequence does not cost an alignment
+// of all of it.
 // Query positions over the origin of a circular query run past the query length.
 
 use super::anchors::{Anchor, QueryTable};
@@ -158,23 +159,26 @@ fn exact_alignment(
     {
         return Ok(None);
     }
-    let (q, t) = ((-diagonal).max(0) as u64, diagonal.max(0) as u64);
-    let paired = (length - q).min(window.len() as u64 - t);
+    let (query_start, contig_start) = ((-diagonal).max(0) as u64, diagonal.max(0) as u64);
+    let paired = (length - query_start).min(window.len() as u64 - contig_start);
     let equal = (0..paired as usize).all(|at| {
         let contig = if chain.strand.is_reverse() {
-            complement(window[window.len() - 1 - t as usize - at])
+            complement(window[window.len() - 1 - contig_start as usize - at])
         } else {
-            window[t as usize + at]
+            window[contig_start as usize + at]
         };
-        query[q as usize + at].eq_ignore_ascii_case(&contig)
+        query[query_start as usize + at].eq_ignore_ascii_case(&contig)
     }) || table.periodic_pair(window).is_some();
     if paired == 0 || !equal {
         return Ok(None);
     }
     let (low, high) = if chain.strand.is_reverse() {
-        (window.len() as u64 - t - paired, window.len() as u64 - t)
+        (
+            window.len() as u64 - contig_start - paired,
+            window.len() as u64 - contig_start,
+        )
     } else {
-        (t, t + paired)
+        (contig_start, contig_start + paired)
     };
     let alignment = Alignment {
         score: config
@@ -183,7 +187,7 @@ fn exact_alignment(
             .checked_mul(paired as i32)
             .ok_or(AlignmentError::LengthOverflow)?,
         strand: chain.strand,
-        query_interval: Interval::new(q, q + paired)?,
+        query_interval: Interval::new(query_start, query_start + paired)?,
         contig_interval: Interval::new(offset + low, offset + high)?,
         runs: vec![EditRun {
             operation: EditOperation::Match,
@@ -196,18 +200,25 @@ fn exact_alignment(
 /// The band and the window choices of one chain.
 struct ChainGeometry {
     circular: bool,
+    /// The query length.
     length: u64,
     a: u64,
     window_length: u64,
+    /// The oriented window and query positions of the first anchor.
     first_contig: u64,
     first_query: u64,
+    /// The oriented window position of the last anchor.
     last_contig: u64,
     /// Query bases from the first anchor's start to the last anchor's end.
     span: u64,
+    /// The bases a side may reach beyond its window bases: the largest drift and its margin.
     slack: u64,
+    /// The drift of this chain's anchors plus the drift margin.
     margin: u64,
+    /// The band centre, counted from the first anchor's diagonal.
     centre: i64,
     band: u32,
+    /// The most query bases an alignment may reach beyond the chain on each side.
     extension: u64,
 }
 
@@ -309,10 +320,12 @@ impl ChainGeometry {
 
 /// The query bases and the oriented contig range that one alignment of a chain reads.
 struct Stretch {
+    /// The first query position; the stretch may run on over the origin of a circular query.
     query_start: u64,
     /// The query bases before the chain.
     left: u64,
     query_span: u64,
+    /// The oriented window positions `contig_low..contig_high`.
     contig_low: u64,
     contig_high: u64,
 }
