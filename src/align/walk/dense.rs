@@ -36,6 +36,7 @@ pub struct DenseWalks {
     pub reverse: Vec<u8>,
 }
 
+/// A match start: a window k-mer that equals a query k-mer whose previous bases differ.
 #[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
 struct Start {
     /// Oriented window position minus query position; modulo the query length when circular.
@@ -110,6 +111,11 @@ pub fn dense_walks(
         }
     }
     Ok(DenseWalks { walks, reverse })
+}
+
+/// Whether a walk is long enough to count, as a chain must reach the minimum chain length.
+pub fn long_enough(walk: &Walk, table: &QueryTable) -> bool {
+    u64::from(walk.length) >= minimum_length(table)
 }
 
 /// The walks of a circular periodic query in a window of its repeat: one equivalent phase per
@@ -211,11 +217,13 @@ fn walk_diagonal(
 
 /// Running state of one ungapped extension.
 struct Extension {
+    /// The scores of an equal and of a different base.
     matched: i64,
     mismatched: i64,
     /// The drop below the best score that ends a walk: a chaining gap of matches, so a walk
     /// crosses what a chain may bridge.
     drop: i64,
+    /// The score after `length` bases, and the best score with the length that reached it.
     score: i64,
     best: i64,
     best_length: usize,
@@ -236,6 +244,7 @@ impl Extension {
         }
     }
 
+    /// Adds one base; false once the score dropped too far below the best.
     fn step(&mut self, same: bool) -> bool {
         self.score += if same { self.matched } else { self.mismatched };
         self.length += 1;
@@ -245,20 +254,25 @@ impl Extension {
         self.best - self.score <= self.drop
     }
 
+    /// Adds a block of equal bases. Callers only do so at the best score, so the block end
+    /// becomes the new best.
     fn equal_block(&mut self, length: usize) {
         self.score += self.matched * length as i64;
         self.length += length;
         (self.best, self.best_length) = (self.score, self.length);
     }
 
-    /// Extends over equally long `a` and `b` from their starts; false once the walk ends.
-    fn forward(&mut self, a: &[u8], b: &[u8]) -> bool {
+    /// Extends over equally long `contig` and `query` from their starts; false once the walk ends.
+    fn forward(&mut self, contig: &[u8], query: &[u8]) -> bool {
         let mut at = 0;
-        while at < a.len() {
-            if at + 8 <= a.len() && self.score >= self.best && a[at..at + 8] == b[at..at + 8] {
+        while at < contig.len() {
+            if at + 8 <= contig.len()
+                && self.score >= self.best
+                && contig[at..at + 8] == query[at..at + 8]
+            {
                 self.equal_block(8);
                 at += 8;
-            } else if self.step(a[at] == b[at]) {
+            } else if self.step(contig[at] == query[at]) {
                 at += 1;
             } else {
                 return false;
@@ -267,14 +281,14 @@ impl Extension {
         true
     }
 
-    /// Extends over equally long `a` and `b` from their ends; false once the walk ends.
-    fn backward(&mut self, a: &[u8], b: &[u8]) -> bool {
-        let mut at = a.len();
+    /// Extends over equally long `contig` and `query` from their ends; false once the walk ends.
+    fn backward(&mut self, contig: &[u8], query: &[u8]) -> bool {
+        let mut at = contig.len();
         while at > 0 {
-            if at >= 8 && self.score >= self.best && a[at - 8..at] == b[at - 8..at] {
+            if at >= 8 && self.score >= self.best && contig[at - 8..at] == query[at - 8..at] {
                 self.equal_block(8);
                 at -= 8;
-            } else if self.step(a[at - 1] == b[at - 1]) {
+            } else if self.step(contig[at - 1] == query[at - 1]) {
                 at -= 1;
             } else {
                 return false;
@@ -331,11 +345,6 @@ fn walk(
         query: ((from + length - left) % length) as u32,
         length: (left + right) as u32,
     }
-}
-
-/// Whether a walk is long enough to count, as a chain must reach the minimum chain length.
-pub fn long_enough(walk: &Walk, table: &QueryTable) -> bool {
-    u64::from(walk.length) >= minimum_length(table)
 }
 
 fn minimum_length(table: &QueryTable) -> u64 {

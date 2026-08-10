@@ -27,7 +27,7 @@ pub fn walk_alignment(
         // The longest piece in which the query does not wrap.
         let from = (walk.query as usize + at) % length;
         let piece = (walk.length as usize - at).min(length - from);
-        let (a, b) = (
+        let (contig_piece, query_piece) = (
             &oriented[contig + at..contig + at + piece],
             &query[from..from + piece],
         );
@@ -35,9 +35,10 @@ pub fn walk_alignment(
         while step < piece {
             let equal = step;
             loop {
-                if step + 8 <= piece && a[step..step + 8] == b[step..step + 8] {
+                if step + 8 <= piece && contig_piece[step..step + 8] == query_piece[step..step + 8]
+                {
                     step += 8;
-                } else if step < piece && a[step] == b[step] {
+                } else if step < piece && contig_piece[step] == query_piece[step] {
                     step += 1;
                 } else {
                     break;
@@ -57,41 +58,6 @@ pub fn walk_alignment(
     let score = i64::from(config.alignment.match_score) * matches
         + i64::from(config.alignment.mismatch_score) * substitutions;
     oriented_alignment(runs, score, walk, oriented.len(), offset)
-}
-
-fn run(operation: EditOperation, length: usize) -> EditRun {
-    EditRun {
-        operation,
-        length: length as u32,
-    }
-}
-
-/// The alignment of `runs` starting at the oriented window and query positions of `first`, in
-/// contig positions. Query positions run on over the origin of a circular query.
-pub(super) fn oriented_alignment(
-    runs: Vec<EditRun>,
-    score: i64,
-    first: &Walk,
-    window_length: usize,
-    offset: u64,
-) -> Result<Alignment, AlignmentError> {
-    let counts = counts(&runs);
-    let (contig_span, query_span) = (counts.contig_bases(), counts.query_bases());
-    let low = u64::from(first.contig);
-    let (start, end) = if first.strand.is_reverse() {
-        let window_length = window_length as u64;
-        (window_length - low - contig_span, window_length - low)
-    } else {
-        (low, low + contig_span)
-    };
-    let query_start = u64::from(first.query);
-    Ok(Alignment {
-        score: i32::try_from(score).map_err(|_| AlignmentError::LengthOverflow)?,
-        strand: first.strand,
-        query_interval: Interval::new(query_start, query_start + query_span)?,
-        contig_interval: Interval::new(offset + start, offset + end)?,
-        runs,
-    })
 }
 
 /// Whether an end of `walk` can reach a conserved block on another diagonal: an exact k-mer
@@ -181,7 +147,7 @@ pub fn holds_walk(
     offset: u64,
     query_length: u64,
 ) -> bool {
-    if (alignment.strand == crate::align::Strand::Reverse) != walk.strand.is_reverse() {
+    if alignment.strand != walk.strand {
         return false;
     }
     let (low, high) = (u64::from(walk.contig), u64::from(walk.contig + walk.length));
@@ -205,4 +171,39 @@ pub fn holds_walk(
             .wrap(query_length)
             .any(|segment| segment.start <= piece.start && piece.end <= segment.end)
     })
+}
+
+/// The alignment of `runs` starting at the oriented window and query positions of `first`, in
+/// contig positions. Query positions run on over the origin of a circular query.
+pub(super) fn oriented_alignment(
+    runs: Vec<EditRun>,
+    score: i64,
+    first: &Walk,
+    window_length: usize,
+    offset: u64,
+) -> Result<Alignment, AlignmentError> {
+    let counts = counts(&runs);
+    let (contig_span, query_span) = (counts.contig_bases(), counts.query_bases());
+    let low = u64::from(first.contig);
+    let (start, end) = if first.strand.is_reverse() {
+        let window_length = window_length as u64;
+        (window_length - low - contig_span, window_length - low)
+    } else {
+        (low, low + contig_span)
+    };
+    let query_start = u64::from(first.query);
+    Ok(Alignment {
+        score: i32::try_from(score).map_err(|_| AlignmentError::LengthOverflow)?,
+        strand: first.strand,
+        query_interval: Interval::new(query_start, query_start + query_span)?,
+        contig_interval: Interval::new(offset + start, offset + end)?,
+        runs,
+    })
+}
+
+fn run(operation: EditOperation, length: usize) -> EditRun {
+    EditRun {
+        operation,
+        length: length as u32,
+    }
 }
