@@ -23,22 +23,6 @@ pub struct JoinLimits {
     pub min_identity: f64,
 }
 
-/// Score and base counts of a walk or of the piece between two linked walks.
-#[derive(Clone, Copy, Default)]
-struct Part {
-    score: i64,
-    counts: EditCounts,
-}
-
-impl std::ops::Add for Part {
-    type Output = Self;
-    fn add(mut self, other: Self) -> Self {
-        self.score += other.score;
-        self.counts += other.counts;
-        self
-    }
-}
-
 /// What the joins of one alignment window read: the query table, the band and the limits.
 #[derive(Clone, Copy)]
 pub struct JoinContext<'a> {
@@ -55,19 +39,15 @@ pub struct JoinContext<'a> {
 pub struct JoinScratch {
     starts: Vec<u32>,
     ends: Vec<u32>,
-    chain: Vec<u32>,
+    /// The walks linked through one walk, in contig order.
+    linked: Vec<u32>,
     parts: Vec<[Part; 2]>,
     matrix: EndpointWorkspace,
     piece: Vec<u8>,
 }
 
-/// The query and contig bases a link may cross, as for `gap_continuation`.
-fn reach(context: &JoinContext<'_>) -> u64 {
-    u64::from(context.band.max_drift) + u64::from(context.table.anchors().a)
-}
-
 impl JoinScratch {
-    /// The bytes `prepare` holds for `walks` walks: walk orders, one chain, and one piece
+    /// The bytes `prepare` holds for `walks` walks: walk orders, one set of linked walks, and one piece
     /// alignment of at most the reach on each side with its operations.
     pub fn bytes(walks: usize, context: &JoinContext<'_>) -> usize {
         let reach = reach(context) as usize;
@@ -90,9 +70,73 @@ impl JoinScratch {
         self.starts.sort_unstable_by_key(|&index| key(index, false));
         self.ends = (0..walks.len() as u32).collect();
         self.ends.sort_unstable_by_key(|&index| key(index, true));
-        self.chain = Vec::with_capacity(walks.len());
+        self.linked = Vec::with_capacity(walks.len());
         self.parts = Vec::with_capacity(walks.len());
         self.piece = Vec::with_capacity(reach(context) as usize);
+    }
+
+    /// The best qualifying join through walk `at`, of at least two walks, from the oriented
+    /// window `oriented` that starts `offset` bases into the contig. Its score may be zero or
+    /// negative: only the join limits decide.
+    pub fn join_through(
+        &mut self,
+        walks: &[Walk],
+        at: usize,
+        oriented: &[u8],
+        offset: u64,
+        context: &JoinContext<'_>,
+    ) -> Result<Option<Alignment>, AlignmentError> {
+        self.link_walks(walks, at, context);
+        if self.linked.len() < 2 {
+            return Ok(None);
+        }
+        let middle = self
+            .linked
+            .iter()
+            .position(|&index| index as usize == at)
+            .unwrap_or(0);
+        self.score_parts(walks, oriented, context)?;
+        let Some(Selection { score, first, last }) = self.best_run(middle, context.limits) else {
+            return Ok(None);
+        };
+        let mut runs: Vec<EditRun> = Vec::new();
+        for position in first..=last {
+            let walk = walks[self.linked[position] as usize];
+            let alignment = walk_alignment(&walk, oriented, offset, context.table, context.band)?;
+            append_runs(&mut runs, alignment.runs)?;
+            if position < last {
+                let next = walks[self.linked[position + 1] as usize];
+                self.piece(walk, next, oriented, context, Some(&mut runs))?;
+            }
+        }
+        let first = walks[self.linked[first] as usize];
+        oriented_alignment(runs, score, &first, oriented.len(), offset).map(Some)
+    }
+
+    /// Links walks to walk `at` on both sides; a circular join covers the query at most once.
+    fn link_walks(&mut self, walks: &[Walk], at: usize, context: &JoinContext<'_>) {
+        let length = u64::from(context.table.query_length());
+        self.linked.clear();
+        self.linked.push(at as u32);
+        let mut span = u64::from(walks[at].length);
+        for after in [false, true] {
+            let mut current = at;
+            while let Some(Link {
+                walk: next,
+                query_gap,
+            }) = self.link(walks, current, after, context)
+            {
+                span += query_gap + u64::from(walks[next].length);
+                if span > length {
+                    break;
+                }
+                self.linked.push(next as u32);
+                current = next;
+            }
+            if !after {
+                self.linked.reverse();
+            }
+        }
     }
 
     /// The nearest walk after (or before) walk `at` on its strand, ordered on query and contig,
@@ -103,7 +147,7 @@ impl JoinScratch {
         at: usize,
         after: bool,
         context: &JoinContext<'_>,
-    ) -> Option<(usize, u64)> {
+    ) -> Option<Link> {
         let reach = reach(context);
         let length = u64::from(context.table.query_length());
         let walk = walks[at];
@@ -149,67 +193,10 @@ impl JoinScratch {
                 best = Some((rank, query_gap));
             }
         }
-        best.map(|((_, _, index), gap)| (index as usize, gap))
-    }
-
-    /// The best qualifying join through walk `at`, of at least two walks, from the oriented
-    /// window `oriented` that starts `offset` bases into the contig. Its score may be zero or
-    /// negative: only the join limits decide.
-    pub fn join_through(
-        &mut self,
-        walks: &[Walk],
-        at: usize,
-        oriented: &[u8],
-        offset: u64,
-        context: &JoinContext<'_>,
-    ) -> Result<Option<Alignment>, AlignmentError> {
-        self.link_chain(walks, at, context);
-        if self.chain.len() < 2 {
-            return Ok(None);
-        }
-        let middle = self
-            .chain
-            .iter()
-            .position(|&index| index as usize == at)
-            .unwrap_or(0);
-        self.score_parts(walks, oriented, context)?;
-        let Some((score, first, last)) = self.best_run(middle, context.limits) else {
-            return Ok(None);
-        };
-        let mut runs: Vec<EditRun> = Vec::new();
-        for position in first..=last {
-            let walk = walks[self.chain[position] as usize];
-            let alignment = walk_alignment(&walk, oriented, offset, context.table, context.band)?;
-            append_runs(&mut runs, alignment.runs)?;
-            if position < last {
-                let next = walks[self.chain[position + 1] as usize];
-                self.piece(walk, next, oriented, context, Some(&mut runs))?;
-            }
-        }
-        let first = walks[self.chain[first] as usize];
-        oriented_alignment(runs, score, &first, oriented.len(), offset).map(Some)
-    }
-
-    /// Links walks to walk `at` on both sides; a circular join covers the query at most once.
-    fn link_chain(&mut self, walks: &[Walk], at: usize, context: &JoinContext<'_>) {
-        let length = u64::from(context.table.query_length());
-        self.chain.clear();
-        self.chain.push(at as u32);
-        let mut span = u64::from(walks[at].length);
-        for after in [false, true] {
-            let mut current = at;
-            while let Some((next, gap)) = self.link(walks, current, after, context) {
-                span += gap + u64::from(walks[next].length);
-                if span > length {
-                    break;
-                }
-                self.chain.push(next as u32);
-                current = next;
-            }
-            if !after {
-                self.chain.reverse();
-            }
-        }
+        best.map(|((_, _, index), query_gap)| Link {
+            walk: index as usize,
+            query_gap,
+        })
     }
 
     /// The parts of every linked walk and of the piece after it.
@@ -221,8 +208,8 @@ impl JoinScratch {
     ) -> Result<(), AlignmentError> {
         let query = context.table.query();
         self.parts.clear();
-        for position in 0..self.chain.len() {
-            let walk = walks[self.chain[position] as usize];
+        for position in 0..self.linked.len() {
+            let walk = walks[self.linked[position] as usize];
             let mut part = Part::default();
             for step in 0..walk.length as usize {
                 let same = oriented[walk.contig as usize + step]
@@ -235,7 +222,7 @@ impl JoinScratch {
                 part.counts.matches += u64::from(same);
                 part.counts.substitutions += u64::from(!same);
             }
-            let piece = match self.chain.get(position + 1) {
+            let piece = match self.linked.get(position + 1) {
                 Some(&next) => self.piece(walk, walks[next as usize], oriented, context, None)?,
                 None => Part::default(),
             };
@@ -246,8 +233,8 @@ impl JoinScratch {
 
     /// The best run of walks `first..=last` around position `middle` that meets the limits, by
     /// score, then the first found.
-    fn best_run(&self, middle: usize, limits: JoinLimits) -> Option<(i64, usize, usize)> {
-        let mut best: Option<(i64, usize, usize)> = None;
+    fn best_run(&self, middle: usize, limits: JoinLimits) -> Option<Selection> {
+        let mut best: Option<Selection> = None;
         let mut left = Part::default();
         for first in (0..=middle).rev() {
             left = left
@@ -258,15 +245,21 @@ impl JoinScratch {
                     Part::default()
                 };
             let mut whole = left;
-            for last in middle..self.chain.len() {
+            for last in middle..self.linked.len() {
                 if last > middle {
                     whole = whole + self.parts[last - 1][1] + self.parts[last][0];
                 }
                 let qualifies = whole.counts.columns() >= limits.min_columns
                     && whole.counts.reaches_identity(limits.min_identity);
-                if first < last && qualifies && best.is_none_or(|(score, _, _)| whole.score > score)
+                if first < last
+                    && qualifies
+                    && best.as_ref().is_none_or(|saved| whole.score > saved.score)
                 {
-                    best = Some((whole.score, first, last));
+                    best = Some(Selection {
+                        score: whole.score,
+                        first,
+                        last,
+                    });
                 }
             }
         }
@@ -308,4 +301,38 @@ impl JoinScratch {
         }
         Ok(part)
     }
+}
+
+/// Score and base counts of a walk or of the piece between two linked walks.
+#[derive(Clone, Copy, Default)]
+struct Part {
+    score: i64,
+    counts: EditCounts,
+}
+
+impl std::ops::Add for Part {
+    type Output = Self;
+    fn add(mut self, other: Self) -> Self {
+        self.score += other.score;
+        self.counts += other.counts;
+        self
+    }
+}
+
+/// The walk that a walk links to, and the query bases between them.
+struct Link {
+    walk: usize,
+    query_gap: u64,
+}
+
+/// The linked walks `first..=last` of the best join, and its score.
+struct Selection {
+    score: i64,
+    first: usize,
+    last: usize,
+}
+
+/// The query and contig bases a link may cross, as for `gap_continuation`.
+fn reach(context: &JoinContext<'_>) -> u64 {
+    u64::from(context.band.max_drift) + u64::from(context.table.anchors().a)
 }

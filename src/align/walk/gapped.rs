@@ -16,7 +16,9 @@ use crate::align::{
 pub struct DenseOptimum {
     strand: Strand,
     query_start: u64,
+    /// The oriented window range `low..high` that was aligned.
     contig: (u64, u64),
+    /// The lowest and highest diagonal of the alignment path.
     diagonals: (i64, i64),
 }
 
