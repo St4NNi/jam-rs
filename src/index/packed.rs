@@ -1,5 +1,5 @@
 //! The packed sequence of one entry (stage 3): contigs at 2 bits per base with their names and the
-//! runs of other bytes (layout in FORMATS.md).
+//! runs of other bytes.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 

@@ -1,5 +1,5 @@
 //! The manifest `manifest.json` of a shard: parameters, entries, and the size and SHA-256 digest of
-//! every file (layout in FORMATS.md).
+//! every file.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 

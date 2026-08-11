@@ -1,5 +1,5 @@
 //! The sketch file (stage 1): the color set of every stored seed, found from its hash, and every
-//! distinct color set once (layout in FORMATS.md).
+//! distinct color set once.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 

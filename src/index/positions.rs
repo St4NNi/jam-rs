@@ -1,5 +1,5 @@
 //! The positions file (stage 2): per entry its seed locations and contig starts, read memory-mapped
-//! or as byte ranges (layout in FORMATS.md).
+//! or as byte ranges.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 

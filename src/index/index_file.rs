@@ -1,5 +1,4 @@
-//! The index file `index.json` of a resharded index, which lists its shards in order (layout in
-//! FORMATS.md).
+//! The index file `index.json` of a resharded index, which lists its shards in order.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
