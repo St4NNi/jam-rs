@@ -36,6 +36,7 @@ pub(super) struct WaveRange {
 }
 
 impl WaveRange {
+    /// The number of rows.
     pub(super) fn width(self) -> usize {
         self.end - self.start + 1
     }
@@ -189,10 +190,12 @@ pub(super) fn encode_traceback(cell: Cell) -> u16 {
     traceback
 }
 
+/// Whether `state` of a traceback cell scored positive.
 pub(super) fn traceback_positive(traceback: u16, state: u8) -> bool {
     traceback & (1 << state) != 0
 }
 
+/// The state that `state` of a traceback cell came from.
 pub(super) fn traceback_previous(traceback: u16, state: u8) -> u8 {
     ((traceback >> (3 + 2 * state)) & 3) as u8
 }

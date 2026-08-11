@@ -2,12 +2,10 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use crate::align::ChainConfig;
-use crate::align::Strand;
 use crate::align::{
-    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, DenseOptimum, JoinContext,
-    JoinLimits, JoinScratch, QueryTable, Walk, align_dense_walk, dense_walks, format_cigar,
-    holds_walk, walk_alignment,
+    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, ChainConfig, DenseOptimum,
+    JoinContext, JoinLimits, JoinScratch, QueryTable, Strand, Walk, align_dense_walk, dense_walks,
+    format_cigar, holds_walk, walk_alignment,
 };
 use crate::test_support::{random_bases, rng};
 
@@ -22,6 +20,16 @@ fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>,
     let dense = dense_walks(&table, window, 0, BandConfig::default(), 64 << 20).unwrap();
     let (walks, reverse) = (dense.walks, dense.reverse);
     (walks, reverse, table)
+}
+
+fn linear(query: &[u8]) -> QueryTable {
+    QueryTable::new(
+        query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -111,24 +119,8 @@ fn walks_end_copy() {
 #[test]
 fn starts_budget_fails() {
     let query = b"ACGT".repeat(2500);
-    let table = QueryTable::new(
-        &query,
-        false,
-        AnchorConfig::default(),
-        ChainConfig::default(),
-    )
-    .unwrap();
+    let table = linear(&query);
     assert!(dense_walks(&table, &query, 0, BandConfig::default(), 1 << 10).is_err());
-}
-
-fn linear(query: &[u8]) -> QueryTable {
-    QueryTable::new(
-        query,
-        false,
-        AnchorConfig::default(),
-        ChainConfig::default(),
-    )
-    .unwrap()
 }
 
 #[test]

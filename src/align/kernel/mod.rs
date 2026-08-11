@@ -11,7 +11,6 @@ mod agreement_tests;
 mod avx2;
 mod driver;
 mod endpoints;
-pub(super) use endpoints::{EndpointWorkspace, PathEnd, affine_path};
 mod fill;
 mod geometry;
 mod rebased;
@@ -23,6 +22,7 @@ mod traceback;
 mod waves;
 
 use super::{Alignment, AlignmentError, EditOperation, EditRun, Interval, Strand};
+pub(super) use endpoints::{EndpointWorkspace, PathEnd, affine_path};
 use geometry::WaveCarry;
 use waves::WaveChunk;
 
@@ -33,12 +33,17 @@ const DEFAULT_MAX_CELLS: usize = 4_000_000;
 /// minus query position) lies within `band_width` of `diagonal_offset`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AlignmentConfig {
+    /// The score of two equal bases; positive.
     pub match_score: i32,
+    /// The score of two different bases; at most zero.
     pub mismatch_score: i32,
     /// Added once for each gap, on top of one `gap_extend_score` per gap base.
     pub gap_open_score: i32,
+    /// The score of each gap base; at most zero.
     pub gap_extend_score: i32,
+    /// The most diagonals the band reaches on each side of its centre.
     pub band_width: u32,
+    /// The diagonal at the centre of the band.
     pub diagonal_offset: i64,
     /// Traceback cells a pass keeps resident; longer passes recompute chunks from checkpoints.
     pub max_cells: usize,
