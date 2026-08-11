@@ -18,10 +18,6 @@ pub enum SeedError {
     Scheme(&'static str),
 }
 
-/// Mixed into the hash of a seed of a low-complexity run, so it differs from the hash of the same
-/// k-mer as an ordinary seed.
-const LOW_COMPLEXITY_SALT: u64 = 0x6c6f_7720_636f_6d70;
-
 /// How seeds are chosen: k-mer size, minimizer window and entropy limit.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SeedScheme {
@@ -70,11 +66,6 @@ pub struct Kmer {
     pub position: u64,
     /// The canonical k-mer is the reverse complement of the k-mer read on the sequence.
     pub reverse: bool,
-}
-
-/// The hash of a canonical 2-bit k-mer.
-fn kmer_hash(canonical: u64) -> u64 {
-    jamhash::jamhash_u64(canonical)
 }
 
 /// Chooses seeds and query k-mers with one seed scheme.
@@ -149,7 +140,7 @@ impl Seeder {
             Step::Kmer(code) => {
                 let candidate = Candidate {
                     kmer: Kmer {
-                        hash: kmer_hash(code.canonical()),
+                        hash: jamhash::jamhash_u64(code.canonical()),
                         position: code.position as u64,
                         reverse: code.reverse < code.forward,
                     },
@@ -172,7 +163,7 @@ impl Seeder {
     /// salted hash, as the seeds of low-complexity runs do.
     pub fn query_kmers(&self, query: &[u8], mut emit: impl FnMut(Kmer)) {
         kmers(query, self.scheme.k, |code| {
-            let mut hash = kmer_hash(code.canonical());
+            let mut hash = jamhash::jamhash_u64(code.canonical());
             if !self.passes_entropy(code.canonical()) {
                 hash ^= LOW_COMPLEXITY_SALT;
             }
@@ -243,6 +234,10 @@ pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
     bases.iter().rev().map(|&base| complement(base)).collect()
 }
 
+/// Mixed into the hash of a seed of a low-complexity run, so it differs from the hash of the same
+/// k-mer as an ordinary seed.
+const LOW_COMPLEXITY_SALT: u64 = 0x6c6f_7720_636f_6d70;
+
 /// The code of every byte that is not A, C, G or T.
 const OTHER: u8 = 4;
 
@@ -270,6 +265,7 @@ fn shannon_entropy(counts: [usize; 4], k: usize) -> f64 {
         .sum()
 }
 
+/// The low `2 * k` bits, which hold a 2-bit k-mer.
 fn kmer_mask(k: u32) -> u64 {
     if k == 32 {
         u64::MAX
@@ -310,6 +306,7 @@ fn scan(sequence: &[u8], k: u8, mut visit: impl FnMut(Step)) {
     }
 }
 
+/// A k-mer of a clean run and whether it reaches the entropy limit.
 #[derive(Clone, Copy)]
 struct Candidate {
     kmer: Kmer,

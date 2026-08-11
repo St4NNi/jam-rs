@@ -70,7 +70,7 @@ fn reference(sequence: &[u8], k: usize, w: usize) -> Vec<u64> {
             .windows(k)
             .map(|kmer| {
                 let (forward, reverse) = encode(kmer);
-                kmer_hash(forward.min(reverse))
+                jamhash::jamhash_u64(forward.min(reverse))
             })
             .collect();
         sliding_minima(&hashes, offset, w, &mut selected);
@@ -115,7 +115,7 @@ fn single_kmer_windows() {
         }
         let (forward, reverse) = encode(kmer);
         expected.push(Kmer {
-            hash: kmer_hash(forward.min(reverse)),
+            hash: jamhash::jamhash_u64(forward.min(reverse)),
             position: start as u64,
             reverse: reverse < forward,
         });
@@ -181,7 +181,7 @@ fn low_entropy_skipped() {
             .filter(|seed| {
                 let kmer = &sequence[seed.position as usize..seed.position as usize + 21];
                 let (forward, reverse) = encode(kmer);
-                seed.hash == kmer_hash(forward.min(reverse))
+                seed.hash == jamhash::jamhash_u64(forward.min(reverse))
             })
             .count()
     };
@@ -216,7 +216,7 @@ fn salted_run_seeds() {
     let salted = |sequence: &[u8]| -> Vec<Kmer> {
         collect(sequence, scheme)
             .into_iter()
-            .filter(|seed| seed.hash == kmer_hash(0) ^ LOW_COMPLEXITY_SALT)
+            .filter(|seed| seed.hash == jamhash::jamhash_u64(0) ^ LOW_COMPLEXITY_SALT)
             .collect()
     };
     // A run shorter than a minimizer window still gets one salted seed.
@@ -233,7 +233,7 @@ fn salted_run_seeds() {
     assert!(
         collect(&sequence, scheme)
             .iter()
-            .all(|seed| seed.hash != kmer_hash(0))
+            .all(|seed| seed.hash != jamhash::jamhash_u64(0))
     );
     // The query side salts every k-mer below the limit, so it finds the run's seed.
     let mut query = Vec::new();
@@ -265,7 +265,7 @@ fn salted_seed_minima() {
                     let (forward, reverse) = encode(kmer);
                     (
                         entropy_of(kmer) < min_entropy,
-                        kmer_hash(forward.min(reverse)),
+                        jamhash::jamhash_u64(forward.min(reverse)),
                     )
                 })
                 .collect();
@@ -308,7 +308,7 @@ fn query_kmers_complete() {
         let start = kmer.position as usize;
         let (forward, reverse) = encode(&query[start..start + 15]);
         assert_eq!(kmer.reverse, reverse < forward);
-        assert_eq!(kmer.hash, kmer_hash(forward.min(reverse)));
+        assert_eq!(kmer.hash, jamhash::jamhash_u64(forward.min(reverse)));
     }
 }
 
