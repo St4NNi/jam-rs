@@ -8,6 +8,7 @@ use foyer::{
     HybridCacheEntry, PsyncIoEngineConfig, RecoverMode, Spawner,
 };
 use std::io::{self, Read, Write};
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,46 +57,6 @@ impl CacheConfig {
         }
     }
 }
-
-/// A block of one wrapped source.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct BlockKey {
-    /// The number of the wrapped source.
-    source: u64,
-    /// The number of the block in that source.
-    block: u64,
-}
-
-impl Code for BlockKey {
-    fn encode(&self, writer: &mut impl Write) -> foyer::Result<()> {
-        writer
-            .write_all(&self.source.to_le_bytes())
-            .map_err(foyer::Error::io_error)?;
-        writer
-            .write_all(&self.block.to_le_bytes())
-            .map_err(foyer::Error::io_error)
-    }
-
-    fn decode(reader: &mut impl Read) -> foyer::Result<Self> {
-        let mut number = || -> foyer::Result<u64> {
-            let mut bytes = [0u8; 8];
-            reader
-                .read_exact(&mut bytes)
-                .map_err(foyer::Error::io_error)?;
-            Ok(u64::from_le_bytes(bytes))
-        };
-        Ok(Self {
-            source: number()?,
-            block: number()?,
-        })
-    }
-
-    fn estimated_size(&self) -> usize {
-        16
-    }
-}
-
-type Block = HybridCacheEntry<BlockKey, Vec<u8>>;
 
 /// A cache of fixed-size blocks shared by every wrapped source of one process. Wrap each source
 /// with [`BlockCache::wrap`].
@@ -152,16 +113,17 @@ impl BlockCache {
         }
     }
 
-    /// Calls `consume(first, blocks)` for the blocks `first..=last` of a source, at most
+    /// Calls `consume(first, batch)` for the `blocks` of a source, at most
     /// `FILL_BLOCKS` at a time, each batch after the fetch of its missing blocks.
     fn fill_batches(
         &self,
         inner: &dyn ReadAt,
         source: u64,
-        (first, last): (u64, u64),
+        blocks: RangeInclusive<u64>,
         mut consume: impl FnMut(u64, &[Block]),
     ) -> io::Result<()> {
-        for start in (first..=last).step_by(FILL_BLOCKS as usize) {
+        let last = *blocks.end();
+        for start in blocks.step_by(FILL_BLOCKS as usize) {
             let end = last.min(start + FILL_BLOCKS - 1);
             consume(start, &self.fill(inner, source, start, end)?);
         }
@@ -242,7 +204,7 @@ impl ReadAt for CachedSource {
             return Ok(());
         }
         let block_bytes = self.cache.block_bytes;
-        let blocks = (offset / block_bytes, (end - 1) / block_bytes);
+        let blocks = offset / block_bytes..=(end - 1) / block_bytes;
         let mut written = 0;
         let inner = self.inner.as_ref();
         self.cache
@@ -266,14 +228,14 @@ impl ReadAt for CachedSource {
         let length = length.min(FILL_BLOCKS * cache.block_bytes);
         self.inner.will_need(offset, length);
         let end = offset.saturating_add(length).min(self.inner.size());
+        if offset >= end {
+            return;
+        }
         // Without a free place the hint is dropped: it never changes what is read.
         let Ok(permit) = Arc::clone(&cache.read_ahead).try_acquire_owned() else {
             return;
         };
-        if offset >= end {
-            return;
-        }
-        let blocks = (offset / cache.block_bytes, (end - 1) / cache.block_bytes);
+        let blocks = offset / cache.block_bytes..=(end - 1) / cache.block_bytes;
         let (inner, source, cache) = (Arc::clone(&self.inner), self.source, Arc::clone(cache));
         cache.runtime.clone().spawn_blocking(move || {
             let _permit = permit;
@@ -282,6 +244,46 @@ impl ReadAt for CachedSource {
         });
     }
 }
+
+/// A block of one wrapped source.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct BlockKey {
+    /// The number of the wrapped source.
+    source: u64,
+    /// The number of the block in that source.
+    block: u64,
+}
+
+impl Code for BlockKey {
+    fn encode(&self, writer: &mut impl Write) -> foyer::Result<()> {
+        writer
+            .write_all(&self.source.to_le_bytes())
+            .map_err(foyer::Error::io_error)?;
+        writer
+            .write_all(&self.block.to_le_bytes())
+            .map_err(foyer::Error::io_error)
+    }
+
+    fn decode(reader: &mut impl Read) -> foyer::Result<Self> {
+        let mut number = || -> foyer::Result<u64> {
+            let mut bytes = [0u8; 8];
+            reader
+                .read_exact(&mut bytes)
+                .map_err(foyer::Error::io_error)?;
+            Ok(u64::from_le_bytes(bytes))
+        };
+        Ok(Self {
+            source: number()?,
+            block: number()?,
+        })
+    }
+
+    fn estimated_size(&self) -> usize {
+        16
+    }
+}
+
+type Block = HybridCacheEntry<BlockKey, Vec<u8>>;
 
 #[cfg(test)]
 #[path = "cache_tests.rs"]
