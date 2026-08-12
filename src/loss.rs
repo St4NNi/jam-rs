@@ -10,24 +10,6 @@ use crate::seeds::{SeedError, SeedScheme};
 use rayon::prelude::*;
 use thiserror::Error;
 
-/// The stretch lengths of the table, in bases. Lengths below the k-mer size are left out.
-const LENGTHS: [u64; 21] = [
-    25, 35, 50, 70, 100, 140, 200, 280, 400, 560, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000,
-    5000, 6500, 8000,
-];
-
-/// The identities of the table: 0.700 to 0.990 in steps of 0.005, then 0.995 and 0.999.
-fn identity_grid() -> Vec<f64> {
-    let mut grid: Vec<f64> = (0..=58)
-        .map(|step| 0.70 + 0.005 * f64::from(step))
-        .collect();
-    grid.extend([0.995, 0.999]);
-    grid
-}
-
-/// The largest k the model supports, as the seed scheme does.
-const MAX_K: usize = 32;
-
 /// Bad input to the loss model.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum LossError {
@@ -51,80 +33,6 @@ pub struct MissModel {
     identities: Vec<f64>,
     /// Natural logarithm of the chance, row by length, column by identity.
     ln_miss: Vec<f64>,
-}
-
-/// A small, fast random number generator (splitmix64) for the layouts.
-struct Random(u64);
-
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-}
-
-/// The base positions where the seeds of a random stretch end (the last base of the seed k-mer),
-/// in increasing order. The hashes of the k-mers of a random sequence are independent and uniform.
-fn random_layout(length: usize, k: usize, w: usize, random: &mut Random) -> Vec<usize> {
-    let kmers = length + 1 - k;
-    let hashes: Vec<u64> = (0..kmers).map(|_| random.next()).collect();
-    let mut seeds = Vec::new();
-    if kmers < w {
-        let smallest = (0..kmers).min_by_key(|&i| hashes[i]).unwrap_or(0);
-        seeds.push(smallest + k - 1);
-        return seeds;
-    }
-    // A monotone queue of k-mer positions with rising hashes gives the minimum of each minimizer window.
-    let mut queue = std::collections::VecDeque::new();
-    for position in 0..kmers {
-        while queue
-            .back()
-            .is_some_and(|&back| hashes[back] > hashes[position])
-        {
-            queue.pop_back();
-        }
-        queue.push_back(position);
-        if queue[0] + w <= position {
-            queue.pop_front();
-        }
-        if position + 1 >= w && seeds.last() != Some(&(queue[0] + k - 1)) {
-            seeds.push(queue[0] + k - 1);
-        }
-    }
-    seeds
-}
-
-/// The exact chance that every seed has a mutated base, for seeds ending at `seed_ends`. The state
-/// is the number of unmutated bases before the current seed end; a seed is hit when it reaches
-/// `k`, so only states below `k` are kept.
-fn layout_miss_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
-    let mut powers = [1.0f64; MAX_K + 1];
-    for t in 1..=k {
-        powers[t] = powers[t - 1] * identity;
-    }
-    let mut state = [0.0f64; MAX_K];
-    state[0] = 1.0;
-    // One position before the first base.
-    let mut previous_end = -1i64;
-    for &end in seed_ends {
-        let gap = (end as i64 - previous_end) as usize;
-        let total: f64 = state[..k].iter().sum();
-        let mut next = [0.0f64; MAX_K];
-        // A mutation inside the gap leaves `run` unmutated bases at the seed end.
-        for (run, slot) in next.iter_mut().enumerate().take(gap.min(k)) {
-            *slot = total * powers[run] * (1.0 - identity);
-        }
-        // No mutation in the gap extends the earlier run.
-        for run in 0..k.saturating_sub(gap) {
-            next[run + gap] += state[run] * powers[gap.min(k)];
-        }
-        state = next;
-        previous_end = end as i64;
-    }
-    state[..k].iter().sum()
 }
 
 impl MissModel {
@@ -199,33 +107,6 @@ impl MissModel {
     }
 }
 
-/// The index of the grid point at or below `value` and the share of the way to the next point.
-/// Values beyond the grid end stay on its last point.
-fn locate(grid: &[f64], value: f64) -> (usize, f64) {
-    let last = grid.len() - 1;
-    if value >= grid[last] {
-        return (last, 0.0);
-    }
-    let below = grid
-        .partition_point(|&point| point <= value)
-        .saturating_sub(1);
-    let weight = (value - grid[below]) / (grid[below + 1] - grid[below]);
-    (below, weight)
-}
-
-/// The average miss chance over random layouts of one stretch length, for every identity.
-fn average_row(length: usize, k: usize, w: usize, layouts: usize, identities: &[f64]) -> Vec<f64> {
-    let mut random = Random(0x6A09_E667_F3BC_C908 ^ length as u64);
-    let mut sums = vec![0.0f64; identities.len()];
-    for _ in 0..layouts {
-        let seeds = random_layout(length, k, w, &mut random);
-        for (sum, &identity) in sums.iter_mut().zip(identities) {
-            *sum += layout_miss_chance(&seeds, k, identity);
-        }
-    }
-    sums.iter().map(|sum| sum / layouts as f64).collect()
-}
-
 /// The largest chance of missing a qualifying entry that all shortcuts of one search may add up to.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LossBudget {
@@ -251,6 +132,126 @@ impl LossBudget {
     /// The chance of the budget.
     pub fn chance(self) -> f64 {
         self.chance
+    }
+}
+
+/// The stretch lengths of the table, in bases. Lengths below the k-mer size are left out.
+const LENGTHS: [u64; 21] = [
+    25, 35, 50, 70, 100, 140, 200, 280, 400, 560, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000,
+    5000, 6500, 8000,
+];
+
+/// The identities of the table: 0.700 to 0.990 in steps of 0.005, then 0.995 and 0.999.
+fn identity_grid() -> Vec<f64> {
+    let mut grid: Vec<f64> = (0..=58)
+        .map(|step| 0.70 + 0.005 * f64::from(step))
+        .collect();
+    grid.extend([0.995, 0.999]);
+    grid
+}
+
+/// The largest k the model supports, as the seed scheme does.
+const MAX_K: usize = 32;
+
+/// The average miss chance over random layouts of one stretch length, for every identity.
+fn average_row(length: usize, k: usize, w: usize, layouts: usize, identities: &[f64]) -> Vec<f64> {
+    let mut random = Random(0x6A09_E667_F3BC_C908 ^ length as u64);
+    let mut sums = vec![0.0f64; identities.len()];
+    for _ in 0..layouts {
+        let seeds = random_layout(length, k, w, &mut random);
+        for (sum, &identity) in sums.iter_mut().zip(identities) {
+            *sum += layout_miss_chance(&seeds, k, identity);
+        }
+    }
+    sums.iter().map(|sum| sum / layouts as f64).collect()
+}
+
+/// The base positions where the seeds of a random stretch end (the last base of the seed k-mer),
+/// in increasing order. The hashes of the k-mers of a random sequence are independent and uniform.
+fn random_layout(length: usize, k: usize, w: usize, random: &mut Random) -> Vec<usize> {
+    let kmers = length + 1 - k;
+    let hashes: Vec<u64> = (0..kmers).map(|_| random.next()).collect();
+    let mut seeds = Vec::new();
+    if kmers < w {
+        let smallest = (0..kmers).min_by_key(|&i| hashes[i]).unwrap_or(0);
+        seeds.push(smallest + k - 1);
+        return seeds;
+    }
+    // A monotone queue of k-mer positions with rising hashes gives the minimum of each minimizer window.
+    let mut queue = std::collections::VecDeque::new();
+    for position in 0..kmers {
+        while queue
+            .back()
+            .is_some_and(|&back| hashes[back] > hashes[position])
+        {
+            queue.pop_back();
+        }
+        queue.push_back(position);
+        if queue[0] + w <= position {
+            queue.pop_front();
+        }
+        if position + 1 >= w && seeds.last() != Some(&(queue[0] + k - 1)) {
+            seeds.push(queue[0] + k - 1);
+        }
+    }
+    seeds
+}
+
+/// The exact chance that every seed has a mutated base, for seeds ending at `seed_ends`. The state
+/// is the number of unmutated bases before the current seed end; a seed is hit when it reaches
+/// `k`, so only states below `k` are kept.
+fn layout_miss_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
+    let mut powers = [1.0f64; MAX_K + 1];
+    for t in 1..=k {
+        powers[t] = powers[t - 1] * identity;
+    }
+    let mut state = [0.0f64; MAX_K];
+    state[0] = 1.0;
+    // One position before the first base.
+    let mut previous_end = -1i64;
+    for &end in seed_ends {
+        let gap = (end as i64 - previous_end) as usize;
+        let total: f64 = state[..k].iter().sum();
+        let mut next = [0.0f64; MAX_K];
+        // A mutation inside the gap leaves `run` unmutated bases at the seed end.
+        for (run, slot) in next.iter_mut().enumerate().take(gap.min(k)) {
+            *slot = total * powers[run] * (1.0 - identity);
+        }
+        // No mutation in the gap extends the earlier run.
+        for run in 0..k.saturating_sub(gap) {
+            next[run + gap] += state[run] * powers[gap.min(k)];
+        }
+        state = next;
+        previous_end = end as i64;
+    }
+    state[..k].iter().sum()
+}
+
+/// The index of the grid point at or below `value` and the share of the way to the next point.
+/// Values beyond the grid end stay on its last point.
+fn locate(grid: &[f64], value: f64) -> (usize, f64) {
+    let last = grid.len() - 1;
+    if value >= grid[last] {
+        return (last, 0.0);
+    }
+    let below = grid
+        .partition_point(|&point| point <= value)
+        .saturating_sub(1);
+    let weight = (value - grid[below]) / (grid[below + 1] - grid[below]);
+    (below, weight)
+}
+
+/// A small, fast random number generator (splitmix64) for the layouts. Its own code keeps the
+/// table the same on every run and with every version of the rand crate.
+struct Random(u64);
+
+impl Random {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 }
 
