@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u32_at, u64_at};
-use super::{AtPath, IndexError, seed_key};
+use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, seed_key};
 use crate::storage::ReadAt;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -16,7 +16,7 @@ pub const POSITIONS_FILE: &str = "positions";
 
 /// Bits of a hash that the positions store per seed: enough for the largest bucket bits and the
 /// fingerprint, so shards of any size can be joined without changing their sections.
-pub const POSITION_KEY_BITS: u32 = super::MAX_BUCKET_BITS as u32 + super::FINGERPRINT_BITS as u32;
+pub const POSITION_KEY_BITS: u32 = MAX_BUCKET_BITS as u32 + FINGERPRINT_BITS as u32;
 
 const MAGIC: [u8; 16] = *b"jam positions\0\0\0";
 const VERSION: u32 = 2;
@@ -47,161 +47,6 @@ impl SeedLocation {
             reverse: value & 1 == 1,
         }
     }
-}
-
-/// Where one entry's section lies and how its records are packed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Section {
-    /// Offset of the section in the file.
-    pub(crate) offset: u64,
-    /// Bytes of the section.
-    pub(crate) length: u64,
-    /// Seed locations in the section.
-    pub(crate) locations: u64,
-    /// CRC-32 of the section bytes.
-    pub(crate) crc: u32,
-    /// Contigs of the entry.
-    pub(crate) contigs: u64,
-    slot_bits: u8,
-    suffix_bits: u8,
-    location_bits: u8,
-}
-
-impl Section {
-    fn record_bits(&self) -> u64 {
-        u64::from(self.suffix_bits) + u64::from(self.location_bits)
-    }
-
-    fn directory_bytes(&self) -> u64 {
-        4 * ((1u64 << self.slot_bits) + 1)
-    }
-
-    /// Bytes of the contig starts and the entry's bases, before the slot directory.
-    fn contig_bytes(&self) -> u64 {
-        8 * (self.contigs + 1)
-    }
-
-    fn to_row(self) -> [u8; ROW_BYTES] {
-        let mut row = [0u8; ROW_BYTES];
-        row[..8].copy_from_slice(&self.offset.to_le_bytes());
-        row[8..16].copy_from_slice(&self.length.to_le_bytes());
-        row[16..24].copy_from_slice(&self.locations.to_le_bytes());
-        row[24..28].copy_from_slice(&self.crc.to_le_bytes());
-        row[28..31].copy_from_slice(&[self.slot_bits, self.suffix_bits, self.location_bits]);
-        row[32..40].copy_from_slice(&self.contigs.to_le_bytes());
-        row
-    }
-
-    fn from_row(row: &[u8]) -> Option<Self> {
-        let section = Self {
-            offset: u64_at(row, 0)?,
-            length: u64_at(row, 8)?,
-            locations: u64_at(row, 16)?,
-            crc: u32_at(row, 24)?,
-            slot_bits: row[28],
-            suffix_bits: row[29],
-            location_bits: row[30],
-            contigs: u64_at(row, 32)?,
-        };
-        let valid = u32::from(section.slot_bits) + u32::from(section.suffix_bits)
-            == POSITION_KEY_BITS
-            && section.location_bits <= 32
-            && section.slot_bits <= 32
-            && row[31] == 0
-            && section.contigs < 1 << 40
-            && section.length
-                == section.contig_bytes()
-                    + section.directory_bytes()
-                    + (section.locations * section.record_bits()).div_ceil(8)
-                    + BIT_PADDING as u64;
-        valid.then_some(section)
-    }
-}
-
-/// Encodes one entry's section from its (key, seed location value) pairs, sorted and distinct,
-/// and its contig starts followed by its bases. The offset of the returned section is 0 until a
-/// writer places it.
-pub(crate) fn encode_section(
-    records: &[(u64, u32)],
-    contig_bounds: &[u64],
-) -> Result<(Section, Vec<u8>), IndexError> {
-    if contig_bounds.first() != Some(&0) || !contig_bounds.is_sorted() {
-        return Err(IndexError::Input("contig starts must ascend from 0".into()));
-    }
-    let count = records.len() as u64;
-    if u32::try_from(count).is_err() {
-        return Err(IndexError::Input(
-            "an entry has 2^32 seed locations or more".into(),
-        ));
-    }
-    let slot_bits = if count >= 2 * SLOT_LOCATIONS {
-        (count / SLOT_LOCATIONS).ilog2().min(POSITION_KEY_BITS)
-    } else {
-        0
-    };
-    let suffix_bits = POSITION_KEY_BITS - slot_bits;
-    let location_bits = bits_needed(u64::from(records.iter().map(|r| r.1).max().unwrap_or(0)));
-    let mut bytes: Vec<u8> = contig_bounds.iter().flat_map(|v| v.to_le_bytes()).collect();
-    let mut next = 0usize;
-    for slot in 0..=1u64 << slot_bits {
-        while next < records.len() && records[next].0 >> suffix_bits < slot {
-            next += 1;
-        }
-        bytes.extend_from_slice(&(next as u32).to_le_bytes());
-    }
-    let mut writer = BitWriter::new(&mut bytes);
-    let suffix_mask = (1u64 << suffix_bits) - 1;
-    for &(key, location) in records {
-        writer.push(key & suffix_mask, suffix_bits);
-        writer.push(u64::from(location), location_bits);
-    }
-    writer.finish();
-    bytes.resize(bytes.len() + BIT_PADDING, 0);
-    let section = Section {
-        offset: 0,
-        length: bytes.len() as u64,
-        locations: count,
-        crc: crc32fast::hash(&bytes),
-        slot_bits: slot_bits as u8,
-        suffix_bits: suffix_bits as u8,
-        location_bits: location_bits as u8,
-        contigs: contig_bounds.len() as u64 - 1,
-    };
-    Ok((section, bytes))
-}
-
-/// Decodes all (key, seed location value) pairs of a section from its bytes, in stored order.
-pub(crate) fn decode_section(
-    section: &Section,
-    bytes: &[u8],
-    mut visit: impl FnMut(u64, u32),
-) -> Result<(), IndexError> {
-    let damaged = || IndexError::format("positions section");
-    let directory = bytes
-        .get(section.contig_bytes() as usize..)
-        .ok_or_else(damaged)?;
-    let records = directory
-        .get(section.directory_bytes() as usize..)
-        .ok_or_else(damaged)?;
-    let (suffix_bits, location_bits) = (
-        u32::from(section.suffix_bits),
-        u32::from(section.location_bits),
-    );
-    let mut index = 0u64;
-    for slot in 0..1u64 << section.slot_bits {
-        let end = u64::from(u32_at(directory, 4 * (slot as usize + 1)).ok_or_else(damaged)?);
-        if end < index || end > section.locations {
-            return Err(damaged());
-        }
-        while index < end {
-            let bit = index * section.record_bits();
-            let suffix = read_bits(records, bit, suffix_bits);
-            let location = read_bits(records, bit + u64::from(suffix_bits), location_bits);
-            visit((slot << suffix_bits) | suffix, location as u32);
-            index += 1;
-        }
-    }
-    Ok(())
 }
 
 /// The positions of a shard, read by offset from a local file or S3.
@@ -435,6 +280,161 @@ impl PositionsWriter {
         file.sync_all().at(path)?;
         Ok(())
     }
+}
+
+/// Where one entry's section lies and how its records are packed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Section {
+    /// Offset of the section in the file.
+    pub(crate) offset: u64,
+    /// Bytes of the section.
+    pub(crate) length: u64,
+    /// Seed locations in the section.
+    pub(crate) locations: u64,
+    /// CRC-32 of the section bytes.
+    pub(crate) crc: u32,
+    /// Contigs of the entry.
+    pub(crate) contigs: u64,
+    slot_bits: u8,
+    suffix_bits: u8,
+    location_bits: u8,
+}
+
+impl Section {
+    fn record_bits(&self) -> u64 {
+        u64::from(self.suffix_bits) + u64::from(self.location_bits)
+    }
+
+    fn directory_bytes(&self) -> u64 {
+        4 * ((1u64 << self.slot_bits) + 1)
+    }
+
+    /// Bytes of the contig starts and the entry's bases, before the slot directory.
+    fn contig_bytes(&self) -> u64 {
+        8 * (self.contigs + 1)
+    }
+
+    fn to_row(self) -> [u8; ROW_BYTES] {
+        let mut row = [0u8; ROW_BYTES];
+        row[..8].copy_from_slice(&self.offset.to_le_bytes());
+        row[8..16].copy_from_slice(&self.length.to_le_bytes());
+        row[16..24].copy_from_slice(&self.locations.to_le_bytes());
+        row[24..28].copy_from_slice(&self.crc.to_le_bytes());
+        row[28..31].copy_from_slice(&[self.slot_bits, self.suffix_bits, self.location_bits]);
+        row[32..40].copy_from_slice(&self.contigs.to_le_bytes());
+        row
+    }
+
+    fn from_row(row: &[u8]) -> Option<Self> {
+        let section = Self {
+            offset: u64_at(row, 0)?,
+            length: u64_at(row, 8)?,
+            locations: u64_at(row, 16)?,
+            crc: u32_at(row, 24)?,
+            slot_bits: row[28],
+            suffix_bits: row[29],
+            location_bits: row[30],
+            contigs: u64_at(row, 32)?,
+        };
+        let valid = u32::from(section.slot_bits) + u32::from(section.suffix_bits)
+            == POSITION_KEY_BITS
+            && section.location_bits <= 32
+            && section.slot_bits <= 32
+            && row[31] == 0
+            && section.contigs < 1 << 40
+            && section.length
+                == section.contig_bytes()
+                    + section.directory_bytes()
+                    + (section.locations * section.record_bits()).div_ceil(8)
+                    + BIT_PADDING as u64;
+        valid.then_some(section)
+    }
+}
+
+/// Encodes one entry's section from its (key, seed location value) pairs, sorted and distinct,
+/// and its contig starts followed by its bases. The offset of the returned section is 0 until a
+/// writer places it.
+pub(crate) fn encode_section(
+    records: &[(u64, u32)],
+    contig_bounds: &[u64],
+) -> Result<(Section, Vec<u8>), IndexError> {
+    if contig_bounds.first() != Some(&0) || !contig_bounds.is_sorted() {
+        return Err(IndexError::Input("contig starts must ascend from 0".into()));
+    }
+    let count = records.len() as u64;
+    if u32::try_from(count).is_err() {
+        return Err(IndexError::Input(
+            "an entry has 2^32 seed locations or more".into(),
+        ));
+    }
+    let slot_bits = if count >= 2 * SLOT_LOCATIONS {
+        (count / SLOT_LOCATIONS).ilog2().min(POSITION_KEY_BITS)
+    } else {
+        0
+    };
+    let suffix_bits = POSITION_KEY_BITS - slot_bits;
+    let location_bits = bits_needed(u64::from(records.iter().map(|r| r.1).max().unwrap_or(0)));
+    let mut bytes: Vec<u8> = contig_bounds.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut next = 0usize;
+    for slot in 0..=1u64 << slot_bits {
+        while next < records.len() && records[next].0 >> suffix_bits < slot {
+            next += 1;
+        }
+        bytes.extend_from_slice(&(next as u32).to_le_bytes());
+    }
+    let mut writer = BitWriter::new(&mut bytes);
+    let suffix_mask = (1u64 << suffix_bits) - 1;
+    for &(key, location) in records {
+        writer.push(key & suffix_mask, suffix_bits);
+        writer.push(u64::from(location), location_bits);
+    }
+    writer.finish();
+    bytes.resize(bytes.len() + BIT_PADDING, 0);
+    let section = Section {
+        offset: 0,
+        length: bytes.len() as u64,
+        locations: count,
+        crc: crc32fast::hash(&bytes),
+        slot_bits: slot_bits as u8,
+        suffix_bits: suffix_bits as u8,
+        location_bits: location_bits as u8,
+        contigs: contig_bounds.len() as u64 - 1,
+    };
+    Ok((section, bytes))
+}
+
+/// Decodes all (key, seed location value) pairs of a section from its bytes, in stored order.
+pub(crate) fn decode_section(
+    section: &Section,
+    bytes: &[u8],
+    mut visit: impl FnMut(u64, u32),
+) -> Result<(), IndexError> {
+    let damaged = || IndexError::format("positions section");
+    let directory = bytes
+        .get(section.contig_bytes() as usize..)
+        .ok_or_else(damaged)?;
+    let records = directory
+        .get(section.directory_bytes() as usize..)
+        .ok_or_else(damaged)?;
+    let (suffix_bits, location_bits) = (
+        u32::from(section.suffix_bits),
+        u32::from(section.location_bits),
+    );
+    let mut index = 0u64;
+    for slot in 0..1u64 << section.slot_bits {
+        let end = u64::from(u32_at(directory, 4 * (slot as usize + 1)).ok_or_else(damaged)?);
+        if end < index || end > section.locations {
+            return Err(damaged());
+        }
+        while index < end {
+            let bit = index * section.record_bits();
+            let suffix = read_bits(records, bit, suffix_bits);
+            let location = read_bits(records, bit + u64::from(suffix_bits), location_bits);
+            visit((slot << suffix_bits) | suffix, location as u32);
+            index += 1;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
