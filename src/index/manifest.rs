@@ -179,7 +179,15 @@ pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
 }
 
 /// The size and SHA-256 digest of a file.
-pub(crate) fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
+pub(crate) struct FileDigest {
+    /// Size in bytes.
+    pub(crate) bytes: u64,
+    /// SHA-256 digest, lower case hex.
+    pub(crate) sha256: String,
+}
+
+/// The size and SHA-256 digest of the file at `path`.
+pub(crate) fn sha256_file(path: &Path) -> Result<FileDigest, IndexError> {
     let mut file = std::fs::File::open(path).at(path)?;
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
@@ -192,13 +200,14 @@ pub(crate) fn sha256_file(path: &Path) -> Result<(u64, String), IndexError> {
         digest.update(&buffer[..read]);
         bytes += read as u64;
     }
-    Ok((bytes, format!("{:x}", digest.finalize())))
+    let sha256 = format!("{:x}", digest.finalize());
+    Ok(FileDigest { bytes, sha256 })
 }
 
 /// Checks a file against its record.
 pub(crate) fn verify_file(path: &Path, record: &FileRecord) -> Result<(), IndexError> {
-    let (bytes, sha256) = sha256_file(path)?;
-    if bytes != record.bytes || sha256 != record.sha256 {
+    let digest = sha256_file(path)?;
+    if digest.bytes != record.bytes || digest.sha256 != record.sha256 {
         return Err(IndexError::Checksum(format!(
             "{} differs from its manifest record",
             path.display()

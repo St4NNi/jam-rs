@@ -17,18 +17,6 @@ const HEADER_BYTES: u64 = 128;
 const BLOCK_BYTES: u64 = 4096;
 const RUN_BYTES: u64 = 16;
 
-/// A run of one byte other than A, C, G or T, at entry coordinates `start..start + length`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Run {
-    start: u64,
-    length: u32,
-    byte: u8,
-}
-
-fn valid_name(name: &[u8]) -> bool {
-    !name.is_empty() && !name.iter().any(u8::is_ascii_whitespace)
-}
-
 /// Collects the contigs of one entry and encodes its packed sequence file.
 #[derive(Default)]
 pub struct PackedWriter {
@@ -76,22 +64,6 @@ impl PackedWriter {
         Ok(())
     }
 
-    fn push_run(&mut self, byte: u8) {
-        if let Some(run) = self.runs.last_mut()
-            && run.byte == byte
-            && run.start + u64::from(run.length) == self.bases
-            && run.length < u32::MAX
-        {
-            run.length += 1;
-            return;
-        }
-        self.runs.push(Run {
-            start: self.bases,
-            length: 1,
-            byte,
-        });
-    }
-
     /// Bases added so far.
     pub fn bases(&self) -> u64 {
         self.bases
@@ -102,9 +74,8 @@ impl PackedWriter {
         self.name_ends.len() as u64
     }
 
-    /// The file in two parts: header and tables, then the packed bases, so a caller can write
-    /// both without copying the bases.
-    pub fn finish(mut self) -> (Vec<u8>, Vec<u8>) {
+    /// The file in two parts, so a caller can write both without copying the bases.
+    pub fn finish(mut self) -> PackedFile {
         let contigs = self.name_ends.len() as u64;
         self.starts.push(self.bases);
         let mut file = vec![0u8; HEADER_BYTES as usize];
@@ -138,8 +109,36 @@ impl PackedWriter {
         file[64..68].copy_from_slice(&tables_crc.to_le_bytes());
         let header_crc = crc32fast::hash(&file[..68]);
         file[68..72].copy_from_slice(&header_crc.to_le_bytes());
-        (file, self.packed)
+        PackedFile {
+            header_and_tables: file,
+            packed_bases: self.packed,
+        }
     }
+
+    /// Adds one byte other than A, C, G or T, extending the last run when it continues it.
+    fn push_run(&mut self, byte: u8) {
+        if let Some(run) = self.runs.last_mut()
+            && run.byte == byte
+            && run.start + u64::from(run.length) == self.bases
+            && run.length < u32::MAX
+        {
+            run.length += 1;
+            return;
+        }
+        self.runs.push(Run {
+            start: self.bases,
+            length: 1,
+            byte,
+        });
+    }
+}
+
+/// A packed sequence file in two parts, one written after the other.
+pub struct PackedFile {
+    /// The header and the tables.
+    pub header_and_tables: Vec<u8>,
+    /// The packed bases.
+    pub packed_bases: Vec<u8>,
 }
 
 /// An open packed sequence. Contig starts, runs and block checksums stay in memory; names and
@@ -170,6 +169,13 @@ impl PackedSequence {
         }
         let [contigs, bases, runs, names, packed_offset] =
             [24, 32, 40, 48, 56].map(|offset| u64_at(&header, offset).unwrap_or_default());
+        let fields = Header {
+            contigs,
+            bases,
+            runs,
+            names,
+            packed_offset,
+        };
         let blocks = bases.div_ceil(4).div_ceil(BLOCK_BYTES);
         let tables_end = [
             contigs.checked_add(1).and_then(|n| n.checked_mul(8)),
@@ -190,69 +196,7 @@ impl PackedSequence {
         if u32_at(&header, 64) != Some(crc32fast::hash(&tables)) {
             return Err(IndexError::Checksum("packed sequence tables".into()));
         }
-        Self::from_tables(
-            source,
-            &tables,
-            [contigs, bases, runs, names, packed_offset],
-        )
-    }
-
-    fn from_tables(
-        source: Arc<dyn ReadAt>,
-        tables: &[u8],
-        [contigs, bases, runs, names, packed_offset]: [u64; 5],
-    ) -> Result<Self, IndexError> {
-        let words = |at: usize, count: u64| -> Vec<u64> {
-            (0..count as usize)
-                .map(|i| u64_at(tables, at + 8 * i).unwrap_or_default())
-                .collect()
-        };
-        let starts = words(0, contigs + 1);
-        let name_ends = words(8 * (contigs as usize + 1), contigs);
-        let names_at = 8 * (2 * contigs as usize + 1);
-        let runs_at = names_at + names.next_multiple_of(8) as usize;
-        let runs: Vec<Run> = (0..runs as usize)
-            .map(|i| {
-                let at = runs_at + i * RUN_BYTES as usize;
-                Run {
-                    start: u64_at(tables, at).unwrap_or_default(),
-                    length: u32_at(tables, at + 8).unwrap_or_default(),
-                    byte: tables[at + 12],
-                }
-            })
-            .collect();
-        let crcs_at = runs_at + runs.len() * RUN_BYTES as usize;
-        let block_crcs = (0..(tables.len() - crcs_at) / 4)
-            .map(|i| u32_at(tables, crcs_at + 4 * i).unwrap_or_default())
-            .collect();
-        let ordered = starts.first() == Some(&0)
-            && starts.last() == Some(&bases)
-            && starts.is_sorted()
-            && name_ends.is_sorted()
-            && name_ends.last().copied().unwrap_or(0) == names;
-        let mut previous_end = 0;
-        let runs_valid = runs.iter().all(|run| {
-            let end = run.start + u64::from(run.length);
-            let valid = run.length > 0
-                && run.start >= previous_end
-                && end <= bases
-                && base_code(run.byte).is_none()
-                && !run.byte.is_ascii_lowercase();
-            previous_end = end;
-            valid
-        });
-        if !ordered || !runs_valid {
-            return Err(IndexError::format("packed sequence tables"));
-        }
-        Ok(Self {
-            source,
-            starts,
-            names_offset: HEADER_BYTES + names_at as u64,
-            name_ends,
-            runs,
-            block_crcs,
-            packed_offset,
-        })
+        Self::from_tables(source, &tables, fields)
     }
 
     /// Bases of all contigs.
@@ -360,6 +304,94 @@ impl PackedSequence {
         }
         Ok(())
     }
+
+    /// Reads the tables after a checked header and checks their order.
+    fn from_tables(
+        source: Arc<dyn ReadAt>,
+        tables: &[u8],
+        header: Header,
+    ) -> Result<Self, IndexError> {
+        let Header {
+            contigs,
+            bases,
+            runs,
+            names,
+            packed_offset,
+        } = header;
+        let words = |at: usize, count: u64| -> Vec<u64> {
+            (0..count as usize)
+                .map(|i| u64_at(tables, at + 8 * i).unwrap_or_default())
+                .collect()
+        };
+        let starts = words(0, contigs + 1);
+        let name_ends = words(8 * (contigs as usize + 1), contigs);
+        let names_at = 8 * (2 * contigs as usize + 1);
+        let runs_at = names_at + names.next_multiple_of(8) as usize;
+        let runs: Vec<Run> = (0..runs as usize)
+            .map(|i| {
+                let at = runs_at + i * RUN_BYTES as usize;
+                Run {
+                    start: u64_at(tables, at).unwrap_or_default(),
+                    length: u32_at(tables, at + 8).unwrap_or_default(),
+                    byte: tables[at + 12],
+                }
+            })
+            .collect();
+        let crcs_at = runs_at + runs.len() * RUN_BYTES as usize;
+        let block_crcs = (0..(tables.len() - crcs_at) / 4)
+            .map(|i| u32_at(tables, crcs_at + 4 * i).unwrap_or_default())
+            .collect();
+        let ordered = starts.first() == Some(&0)
+            && starts.last() == Some(&bases)
+            && starts.is_sorted()
+            && name_ends.is_sorted()
+            && name_ends.last().copied().unwrap_or(0) == names;
+        let mut previous_end = 0;
+        let runs_valid = runs.iter().all(|run| {
+            let end = run.start + u64::from(run.length);
+            let valid = run.length > 0
+                && run.start >= previous_end
+                && end <= bases
+                && base_code(run.byte).is_none()
+                && !run.byte.is_ascii_lowercase();
+            previous_end = end;
+            valid
+        });
+        if !ordered || !runs_valid {
+            return Err(IndexError::format("packed sequence tables"));
+        }
+        Ok(Self {
+            source,
+            starts,
+            names_offset: HEADER_BYTES + names_at as u64,
+            name_ends,
+            runs,
+            block_crcs,
+            packed_offset,
+        })
+    }
+}
+
+/// The counts and the packed offset that the header of a packed sequence holds.
+struct Header {
+    contigs: u64,
+    bases: u64,
+    runs: u64,
+    names: u64,
+    packed_offset: u64,
+}
+
+/// A run of one byte other than A, C, G or T, at entry coordinates `start..start + length`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Run {
+    start: u64,
+    length: u32,
+    byte: u8,
+}
+
+/// A contig name is one word.
+fn valid_name(name: &[u8]) -> bool {
+    !name.is_empty() && !name.iter().any(u8::is_ascii_whitespace)
 }
 
 fn no_contig(contig: usize) -> IndexError {

@@ -198,11 +198,11 @@ pub(crate) fn complete_shard(
         temporary_directory,
     )?;
     let record = |path: &Path, name: &str| -> Result<FileRecord, IndexError> {
-        let (bytes, sha256) = sha256_file(path)?;
+        let digest = sha256_file(path)?;
         Ok(FileRecord {
             path: name.to_string(),
-            bytes,
-            sha256,
+            bytes: digest.bytes,
+            sha256: digest.sha256,
         })
     };
     let manifest = Manifest {
@@ -284,7 +284,7 @@ impl<'a> EntryBuilder<'a> {
         let section_path = self.context.temporary.join(format!("section-{index:010}"));
         std::fs::write(&section_path, &bytes).at(&section_path)?;
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
-        let (head, packed) = self.packed.finish();
+        let parts = self.packed.finish();
         let file_name = packed_file_name(&name);
         let path = self.context.packed.join(&file_name);
         let mut file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
@@ -296,8 +296,9 @@ impl<'a> EntryBuilder<'a> {
                 source: error,
             },
         })?;
-        file.write_all(&head).at(&path)?;
-        file.write_all(&packed).at(&path)?;
+        let (head, packed) = (&parts.header_and_tables, &parts.packed_bases);
+        file.write_all(head).at(&path)?;
+        file.write_all(packed).at(&path)?;
         let record = EntryRecord {
             name,
             contigs,
@@ -305,7 +306,7 @@ impl<'a> EntryBuilder<'a> {
             packed: FileRecord {
                 path: file_name,
                 bytes: (head.len() + packed.len()) as u64,
-                sha256: sha256_hex(&[&head, &packed]),
+                sha256: sha256_hex(&[head, packed]),
             },
         };
         Ok(BuiltEntry {

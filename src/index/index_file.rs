@@ -84,7 +84,7 @@ impl IndexFile {
     pub fn verify(&self, directory: &Path) -> Result<(), IndexError> {
         for shard in &self.shards {
             let path = directory.join(&shard.directory).join(MANIFEST_FILE);
-            if sha256_file(&path)?.1 != shard.manifest_sha256 {
+            if sha256_file(&path)?.sha256 != shard.manifest_sha256 {
                 return Err(IndexError::Checksum(format!(
                     "the manifest of {} differs from the index file",
                     shard.directory

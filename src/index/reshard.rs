@@ -115,13 +115,13 @@ fn output_shard(
     let shard_directory = directory.join(&name);
     std::fs::create_dir(&shard_directory).at(&shard_directory)?;
     let manifest = write_shard(shards, part.sources, &shard_directory, options)?;
-    let (_, manifest_sha256) = sha256_file(&shard_directory.join(MANIFEST_FILE))?;
+    let manifest_digest = sha256_file(&shard_directory.join(MANIFEST_FILE))?;
     Ok(ShardRecord {
         directory: name,
         first_entry: part.first_entry as u64,
         entries: part.sources.len() as u64,
         seed_locations: manifest.seed_locations,
-        manifest_sha256,
+        manifest_sha256: manifest_digest.sha256,
     })
 }
 

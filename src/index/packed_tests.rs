@@ -33,8 +33,8 @@ fn write(path: &Path, contigs: &[(Vec<u8>, Vec<u8>)]) {
     for (name, sequence) in contigs {
         writer.add_contig(name, sequence).unwrap();
     }
-    let (head, packed) = writer.finish();
-    std::fs::write(path, [head, packed].concat()).unwrap();
+    let file = writer.finish();
+    std::fs::write(path, [file.header_and_tables, file.packed_bases].concat()).unwrap();
 }
 
 fn open(path: &Path) -> Result<PackedSequence, IndexError> {
