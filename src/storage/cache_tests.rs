@@ -6,20 +6,9 @@ use super::*;
 use crate::test_support::{random_bytes, rng, runtime};
 use rand::RngExt;
 use std::sync::atomic::AtomicUsize;
-use std::time::Duration;
 
 fn cache(ram_bytes: u64, block_bytes: u64) -> Arc<BlockCache> {
     BlockCache::open(&CacheConfig::new(ram_bytes, block_bytes), runtime()).unwrap()
-}
-
-/// Waits until `done` holds, for at most five seconds.
-fn wait_for(done: impl Fn() -> bool) {
-    for _ in 0..500 {
-        if done() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 /// Bytes in memory that count their reads and remember the largest one.
@@ -119,9 +108,15 @@ fn read_ahead_fills() {
     };
     let source = Watched::new(data.clone());
     let reads = Arc::clone(&source.reads);
-    let cached = BlockCache::open(&config, runtime()).unwrap().wrap(source);
+    let cache = BlockCache::open(&config, runtime()).unwrap();
+    let cached = cache.wrap(source);
     cached.will_need(100_000, 50_000);
-    wait_for(|| reads.load(Ordering::SeqCst) == 1);
+    // The read-ahead task holds its place until its blocks are in the cache.
+    let places = runtime()
+        .block_on(cache.read_ahead.acquire_many(2))
+        .unwrap();
+    drop(places);
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
     let mut out = vec![0; 50_000];
     cached.read_exact_at(100_000, &mut out).unwrap();
     assert_eq!(out, data[100_000..150_000]);

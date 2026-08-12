@@ -8,6 +8,7 @@ use crate::test_support::runtime;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// A request as the server saw it.
@@ -80,13 +81,14 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.stop.store(true, Ordering::SeqCst);
+        // One more connection wakes the accepting thread, which then sees the stop flag.
+        let _ = std::net::TcpStream::connect(self.address.trim_start_matches("http://"));
     }
 }
 
 fn serve(handler: impl Fn(usize, &Request) -> Reply + Send + Sync + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
     let server = Server {
         address: format!("http://{}", listener.local_addr().unwrap()),
         requests: Arc::new(AtomicUsize::new(0)),
@@ -95,9 +97,11 @@ fn serve(handler: impl Fn(usize, &Request) -> Reply + Send + Sync + 'static) -> 
     let (requests, stop) = (Arc::clone(&server.requests), Arc::clone(&server.stop));
     let handler = Arc::new(handler);
     std::thread::spawn(move || {
-        while !stop.load(Ordering::Relaxed) {
-            let Ok((stream, _)) = listener.accept() else {
-                std::thread::sleep(Duration::from_millis(1));
+        for stream in listener.incoming() {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(stream) = stream else {
                 continue;
             };
             let index = requests.fetch_add(1, Ordering::SeqCst);
@@ -113,7 +117,6 @@ fn answer(
     index: usize,
     handler: &dyn Fn(usize, &Request) -> Reply,
 ) {
-    stream.set_nonblocking(false).unwrap();
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut first = String::new();
     reader.read_line(&mut first).unwrap();
@@ -272,12 +275,16 @@ fn short_body_fails() {
 fn in_flight_limited() {
     let data = pattern(100_000);
     let (active, peak) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    // The twelve reads pass in groups of three, so they only finish when three run at once.
+    let together = Arc::new(Barrier::new(3));
     let server = serve({
         let (data, active, peak) = (data.clone(), Arc::clone(&active), Arc::clone(&peak));
-        move |_, request| {
+        move |index, request| {
             let now = active.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(30));
+            if index > 0 {
+                together.wait();
+            }
             active.fetch_sub(1, Ordering::SeqCst);
             Reply::range_of(&data, "\"fixture\"", request)
         }
@@ -299,8 +306,7 @@ fn in_flight_limited() {
             });
         }
     });
-    let peak = peak.load(Ordering::SeqCst);
-    assert!(peak > 1 && peak <= 3, "peak {peak}");
+    assert_eq!(peak.load(Ordering::SeqCst), 3);
 }
 
 #[test]
