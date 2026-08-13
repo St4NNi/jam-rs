@@ -3,9 +3,9 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::positions::{POSITION_KEY_BITS, Positions, decode_section};
 use super::sketch::{SketchWriter, encode_bucket, encode_color_set};
-use crate::index::positions::{POSITION_KEY_BITS, Positions, decode_section};
-use crate::index::{AtPath, IndexError};
+use super::{AtPath, FINGERPRINT_BITS, IndexError};
 use crate::storage::lock;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -24,54 +24,11 @@ const WRITE_ROUND: usize = 64;
 /// Keys per distinct color set (encoded), in lock stripes.
 type SetCounts = Vec<HashMap<Box<[u8]>, u64>>;
 
-/// The bucket blocks of one partition, one after the other.
-struct EncodedPartition {
-    bytes: Vec<u8>,
-    blocks: Vec<EncodedBucket>,
-}
-
-/// One non-empty bucket of an encoded partition.
-struct EncodedBucket {
-    bucket: usize,
-    length: usize,
-    seeds: u64,
-}
-
 /// Totals of a written sketch.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SketchTotals {
     pub(crate) seeds: u64,
     pub(crate) color_sets: u64,
-}
-
-/// The spill files: one per partition of the key space. A record is a u64: the key bits below
-/// the partition bits in the high half, the entry in the low half.
-struct Spill {
-    paths: Vec<PathBuf>,
-    key_bits: u32,
-    partition_bits: u32,
-}
-
-impl Spill {
-    fn low_bits(&self) -> u32 {
-        self.key_bits - self.partition_bits
-    }
-
-    fn read(&self, partition: usize) -> Result<Vec<u64>, IndexError> {
-        let mut bytes = Vec::new();
-        let path = &self.paths[partition];
-        File::open(path)
-            .and_then(|mut file| file.read_to_end(&mut bytes))
-            .at(path)?;
-        let mut records: Vec<u64> = bytes
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|chunk| u64::from_le_bytes(*chunk))
-            .collect();
-        records.sort_unstable();
-        Ok(records)
-    }
 }
 
 /// Writes the sketch at `path` from `positions`, with temporary files in `temporary_directory`.
@@ -90,7 +47,7 @@ pub(crate) fn build_sketch(
         paths: (0..1usize << partition_bits)
             .map(|partition| directory.path().join(format!("partition-{partition:04}")))
             .collect(),
-        key_bits: bucket_bits + u32::from(crate::index::FINGERPRINT_BITS),
+        key_bits: bucket_bits + u32::from(FINGERPRINT_BITS),
         partition_bits,
     };
     spill_keys(positions, &spill)?;
@@ -124,6 +81,49 @@ pub(crate) fn build_sketch(
         seeds,
         color_sets: ranked.len() as u64,
     })
+}
+
+/// The bucket blocks of one partition, one after the other.
+struct EncodedPartition {
+    bytes: Vec<u8>,
+    blocks: Vec<EncodedBucket>,
+}
+
+/// One non-empty bucket of an encoded partition.
+struct EncodedBucket {
+    bucket: usize,
+    length: usize,
+    seeds: u64,
+}
+
+/// The spill files: one per partition of the key space. A record is a u64: the key bits below
+/// the partition bits in the high half, the entry in the low half.
+struct Spill {
+    paths: Vec<PathBuf>,
+    key_bits: u32,
+    partition_bits: u32,
+}
+
+impl Spill {
+    fn low_bits(&self) -> u32 {
+        self.key_bits - self.partition_bits
+    }
+
+    fn read(&self, partition: usize) -> Result<Vec<u64>, IndexError> {
+        let mut bytes = Vec::new();
+        let path = &self.paths[partition];
+        File::open(path)
+            .and_then(|mut file| file.read_to_end(&mut bytes))
+            .at(path)?;
+        let mut records: Vec<u64> = bytes
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|chunk| u64::from_le_bytes(*chunk))
+            .collect();
+        records.sort_unstable();
+        Ok(records)
+    }
 }
 
 /// Writes the distinct keys of every entry into the spill partitions.
@@ -250,7 +250,7 @@ fn encode_partition(
         Ok(())
     })?;
     let first_key = (partition as u64) << spill.low_bits();
-    let fingerprint_bits = u32::from(crate::index::FINGERPRINT_BITS);
+    let fingerprint_bits = u32::from(FINGERPRINT_BITS);
     let mut bytes = Vec::new();
     let mut blocks = Vec::new();
     let mut bucket_seeds = Vec::new();
