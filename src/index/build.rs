@@ -96,7 +96,7 @@ pub fn build_shard(
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
-            packed: directory.join(PACKED_DIRECTORY),
+            packed,
             temporary: temporary.path().to_path_buf(),
         };
         pool.install(|| {
@@ -227,6 +227,69 @@ struct Context {
     temporary: PathBuf,
 }
 
+/// One entry per file: files run in parallel, the largest first.
+fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
+    let mut order: Vec<(u64, usize)> = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| Ok((std::fs::metadata(&input.path).at(&input.path)?.len(), index)))
+        .collect::<Result<_, IndexError>>()?;
+    order.sort_unstable_by(|a, b| b.cmp(a));
+    let mut built = order
+        .par_iter()
+        .with_max_len(1)
+        .map(|&(_, index)| {
+            let input = &inputs[index];
+            let mut entry = EntryBuilder::new(context);
+            for_each_record(&input.path, |name, sequence| {
+                entry.add_contig(name, sequence)
+            })?;
+            Ok((index, entry.finish(index, input.name.clone())?))
+        })
+        .collect::<Result<Vec<_>, IndexError>>()?;
+    built.sort_unstable_by_key(|(index, _)| *index);
+    Ok(built.into_iter().map(|(_, entry)| entry).collect())
+}
+
+/// One entry per record: records are read in order and indexed in parallel rounds.
+fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
+    let mut built = Vec::new();
+    let mut round: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut round_bytes = 0usize;
+    let run_round = |round: &mut Vec<(Vec<u8>, Vec<u8>)>, built: &mut Vec<BuiltEntry>| {
+        let first = built.len();
+        let entries = round
+            .par_iter()
+            .enumerate()
+            .with_max_len(1)
+            .map(|(offset, (name, sequence))| {
+                let mut entry = EntryBuilder::new(context);
+                entry.add_contig(name, sequence)?;
+                // The name becomes a file name, so it is checked before the file is made.
+                let name = String::from_utf8_lossy(name).into_owned();
+                check_names(std::iter::once(name.as_str()))?;
+                entry.finish(first + offset, name)
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        built.extend(entries);
+        round.clear();
+        Ok::<_, IndexError>(())
+    };
+    for input in inputs {
+        for_each_record(&input.path, |name, sequence| {
+            round.push((name.to_vec(), sequence.to_vec()));
+            round_bytes += sequence.len();
+            if round_bytes >= RECORD_ROUND_BYTES {
+                round_bytes = 0;
+                run_round(&mut round, &mut built)?;
+            }
+            Ok(())
+        })?;
+    }
+    run_round(&mut round, &mut built)?;
+    Ok(built)
+}
+
 /// An indexed entry whose positions section waits in a temporary file.
 struct BuiltEntry {
     record: EntryRecord,
@@ -337,67 +400,4 @@ fn for_each_record(
         visit(name.unwrap_or_default(), &record.seq())?;
     }
     Ok(())
-}
-
-/// One entry per file: files run in parallel, the largest first.
-fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
-    let mut order: Vec<(u64, usize)> = inputs
-        .iter()
-        .enumerate()
-        .map(|(index, input)| Ok((std::fs::metadata(&input.path).at(&input.path)?.len(), index)))
-        .collect::<Result<_, IndexError>>()?;
-    order.sort_unstable_by(|a, b| b.cmp(a));
-    let mut built = order
-        .par_iter()
-        .with_max_len(1)
-        .map(|&(_, index)| {
-            let input = &inputs[index];
-            let mut entry = EntryBuilder::new(context);
-            for_each_record(&input.path, |name, sequence| {
-                entry.add_contig(name, sequence)
-            })?;
-            Ok((index, entry.finish(index, input.name.clone())?))
-        })
-        .collect::<Result<Vec<_>, IndexError>>()?;
-    built.sort_unstable_by_key(|(index, _)| *index);
-    Ok(built.into_iter().map(|(_, entry)| entry).collect())
-}
-
-/// One entry per record: records are read in order and indexed in parallel rounds.
-fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
-    let mut built = Vec::new();
-    let mut round: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut round_bytes = 0usize;
-    let run_round = |round: &mut Vec<(Vec<u8>, Vec<u8>)>, built: &mut Vec<BuiltEntry>| {
-        let first = built.len();
-        let entries = round
-            .par_iter()
-            .enumerate()
-            .with_max_len(1)
-            .map(|(offset, (name, sequence))| {
-                let mut entry = EntryBuilder::new(context);
-                entry.add_contig(name, sequence)?;
-                // The name becomes a file name, so it is checked before the file is made.
-                let name = String::from_utf8_lossy(name).into_owned();
-                check_names(std::iter::once(name.as_str()))?;
-                entry.finish(first + offset, name)
-            })
-            .collect::<Result<Vec<_>, IndexError>>()?;
-        built.extend(entries);
-        round.clear();
-        Ok::<_, IndexError>(())
-    };
-    for input in inputs {
-        for_each_record(&input.path, |name, sequence| {
-            round.push((name.to_vec(), sequence.to_vec()));
-            round_bytes += sequence.len();
-            if round_bytes >= RECORD_ROUND_BYTES {
-                round_bytes = 0;
-                run_round(&mut round, &mut built)?;
-            }
-            Ok(())
-        })?;
-    }
-    run_round(&mut round, &mut built)?;
-    Ok(built)
 }

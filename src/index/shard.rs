@@ -147,13 +147,6 @@ impl Shard {
         Ok(packed)
     }
 
-    fn entry_record(&self, entry: u32) -> Result<&EntryRecord, IndexError> {
-        self.manifest
-            .entries
-            .get(entry as usize)
-            .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))
-    }
-
     /// Checks the SHA-256 digest of every file and the checksum of every section.
     pub fn verify(&self) -> Result<(), IndexError> {
         verify_file(&self.directory.join(SKETCH_FILE), &self.manifest.sketch)?;
@@ -184,5 +177,13 @@ impl Shard {
             positions_bytes: self.manifest.positions.bytes,
             packed_bytes: entries.iter().map(|entry| entry.packed.bytes).sum(),
         }
+    }
+
+    /// The manifest record of an entry.
+    fn entry_record(&self, entry: u32) -> Result<&EntryRecord, IndexError> {
+        self.manifest
+            .entries
+            .get(entry as usize)
+            .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))
     }
 }
