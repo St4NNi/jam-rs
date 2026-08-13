@@ -25,50 +25,6 @@ const MAX_ESCAPES: usize = (1 << 24) - 1;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ColorSetId(pub u32);
 
-/// Where the sections of a sketch file lie.
-#[derive(Clone, Copy, Debug)]
-struct Layout {
-    directory: usize,
-    buckets: usize,
-    buckets_end: usize,
-    set_offsets: usize,
-    sets: usize,
-    end: usize,
-}
-
-impl Layout {
-    fn new(bucket_bits: u32, bucket_bytes: u64, sets: u64, set_bytes: u64) -> Option<Self> {
-        let directory = HEADER_BYTES;
-        let buckets = directory.checked_add(8usize.checked_mul((1usize << bucket_bits) + 1)?)?;
-        let padded = usize::try_from(bucket_bytes)
-            .ok()?
-            .checked_add(BIT_PADDING)?
-            .next_multiple_of(8);
-        let buckets_end = buckets.checked_add(padded)?;
-        let offsets = usize::try_from(sets).ok()?.checked_add(1)?.checked_mul(8)?;
-        let set_offsets = buckets_end;
-        let sets = set_offsets.checked_add(offsets)?;
-        let end = sets.checked_add(usize::try_from(set_bytes).ok()?)?;
-        Some(Self {
-            directory,
-            buckets,
-            buckets_end,
-            set_offsets,
-            sets,
-            end,
-        })
-    }
-
-    fn sections(&self) -> [std::ops::Range<usize>; 4] {
-        [
-            self.directory..self.buckets,
-            self.buckets..self.buckets_end,
-            self.set_offsets..self.sets,
-            self.sets..self.end,
-        ]
-    }
-}
-
 /// An open sketch file.
 pub struct Sketch {
     file: MappedFile,
@@ -172,35 +128,6 @@ impl Sketch {
     }
 }
 
-/// Finds a fingerprint in a bucket block and decodes its color set id.
-fn find_in_block(block: &[u8], fingerprint: u16) -> Option<ColorSetId> {
-    let count = u32_at(block, 0)? as usize;
-    let packed = u32_at(block, 4)?;
-    let (width, escapes) = (packed >> 24, (packed & 0x00ff_ffff) as usize);
-    let fingerprints = block.get(BLOCK_HEADER_BYTES..BLOCK_HEADER_BYTES + 2 * count)?;
-    let (mut low, mut high) = (0, count);
-    while low < high {
-        let middle = (low + high) / 2;
-        if u16_at(fingerprints, 2 * middle)? < fingerprint {
-            low = middle + 1;
-        } else {
-            high = middle;
-        }
-    }
-    if u16_at(fingerprints, 2 * low)? != fingerprint || width > 32 {
-        return None;
-    }
-    let escaped = BLOCK_HEADER_BYTES + 2 * count;
-    let values = block.get(escaped + 4 * escapes..)?;
-    let value = read_bits(values, low as u64 * u64::from(width), width);
-    let direct = (1u64 << width).checked_sub(escapes as u64)?;
-    if value < direct {
-        return Some(ColorSetId(value as u32));
-    }
-    let index = usize::try_from(value - direct).ok()?;
-    u32_at(block, escaped + 4 * index).map(ColorSetId)
-}
-
 /// The distinct color sets of a sketch.
 #[derive(Clone, Copy)]
 pub struct ColorSets<'a> {
@@ -302,31 +229,6 @@ pub(crate) fn encode_bucket(seeds: &[(u16, u32)], out: &mut Vec<u8>) {
         writer.push(value, width);
     }
     writer.finish();
-}
-
-/// The id width and escape count with the fewest bits for these ids.
-fn choose_width(ids: &[u32]) -> (u32, usize) {
-    let mut sorted = ids.to_vec();
-    sorted.sort_unstable();
-    let count = sorted.len();
-    let max = u64::from(sorted[count - 1]);
-    let mut best = (bits_needed(max), 0);
-    let mut best_cost = count as u64 * u64::from(best.0);
-    for width in 0..best.0 {
-        let slots = 1u64 << width;
-        for escapes in 0..=count.min(MAX_ESCAPES) {
-            let cost = count as u64 * u64::from(width) + 32 * escapes as u64;
-            if cost >= best_cost || escapes as u64 > slots {
-                break;
-            }
-            let direct = slots - escapes as u64;
-            if escapes == count || u64::from(sorted[count - 1 - escapes]) < direct {
-                (best, best_cost) = ((width, escapes), cost);
-                break;
-            }
-        }
-    }
-    best
 }
 
 /// Writes a sketch file bucket by bucket.
@@ -440,6 +342,104 @@ impl SketchWriter {
         file.sync_all().at(&path)?;
         Ok(())
     }
+}
+
+/// Where the sections of a sketch file lie.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    directory: usize,
+    buckets: usize,
+    buckets_end: usize,
+    set_offsets: usize,
+    sets: usize,
+    end: usize,
+}
+
+impl Layout {
+    fn new(bucket_bits: u32, bucket_bytes: u64, sets: u64, set_bytes: u64) -> Option<Self> {
+        let directory = HEADER_BYTES;
+        let buckets = directory.checked_add(8usize.checked_mul((1usize << bucket_bits) + 1)?)?;
+        let padded = usize::try_from(bucket_bytes)
+            .ok()?
+            .checked_add(BIT_PADDING)?
+            .next_multiple_of(8);
+        let buckets_end = buckets.checked_add(padded)?;
+        let offsets = usize::try_from(sets).ok()?.checked_add(1)?.checked_mul(8)?;
+        let set_offsets = buckets_end;
+        let sets = set_offsets.checked_add(offsets)?;
+        let end = sets.checked_add(usize::try_from(set_bytes).ok()?)?;
+        Some(Self {
+            directory,
+            buckets,
+            buckets_end,
+            set_offsets,
+            sets,
+            end,
+        })
+    }
+
+    fn sections(&self) -> [std::ops::Range<usize>; 4] {
+        [
+            self.directory..self.buckets,
+            self.buckets..self.buckets_end,
+            self.set_offsets..self.sets,
+            self.sets..self.end,
+        ]
+    }
+}
+
+/// Finds a fingerprint in a bucket block and decodes its color set id.
+fn find_in_block(block: &[u8], fingerprint: u16) -> Option<ColorSetId> {
+    let count = u32_at(block, 0)? as usize;
+    let packed = u32_at(block, 4)?;
+    let (width, escapes) = (packed >> 24, (packed & 0x00ff_ffff) as usize);
+    let fingerprints = block.get(BLOCK_HEADER_BYTES..BLOCK_HEADER_BYTES + 2 * count)?;
+    let (mut low, mut high) = (0, count);
+    while low < high {
+        let middle = (low + high) / 2;
+        if u16_at(fingerprints, 2 * middle)? < fingerprint {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    if u16_at(fingerprints, 2 * low)? != fingerprint || width > 32 {
+        return None;
+    }
+    let escaped = BLOCK_HEADER_BYTES + 2 * count;
+    let values = block.get(escaped + 4 * escapes..)?;
+    let value = read_bits(values, low as u64 * u64::from(width), width);
+    let direct = (1u64 << width).checked_sub(escapes as u64)?;
+    if value < direct {
+        return Some(ColorSetId(value as u32));
+    }
+    let index = usize::try_from(value - direct).ok()?;
+    u32_at(block, escaped + 4 * index).map(ColorSetId)
+}
+
+/// The id width and escape count with the fewest bits for these ids.
+fn choose_width(ids: &[u32]) -> (u32, usize) {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    let count = sorted.len();
+    let max = u64::from(sorted[count - 1]);
+    let mut best = (bits_needed(max), 0);
+    let mut best_cost = count as u64 * u64::from(best.0);
+    for width in 0..best.0 {
+        let slots = 1u64 << width;
+        for escapes in 0..=count.min(MAX_ESCAPES) {
+            let cost = count as u64 * u64::from(width) + 32 * escapes as u64;
+            if cost >= best_cost || escapes as u64 > slots {
+                break;
+            }
+            let direct = slots - escapes as u64;
+            if escapes == count || u64::from(sorted[count - 1 - escapes]) < direct {
+                (best, best_cost) = ((width, escapes), cost);
+                break;
+            }
+        }
+    }
+    best
 }
 
 #[cfg(test)]
