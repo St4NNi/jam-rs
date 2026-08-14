@@ -50,13 +50,6 @@ pub struct ReshardOptions {
     pub temporary_directory: PathBuf,
 }
 
-/// One input shard, opened for copying its entries.
-struct InputShard {
-    directory: PathBuf,
-    manifest: Manifest,
-    positions: Positions,
-}
-
 /// Reshards `inputs`, in order, into the new index directory `output`. An input is a shard
 /// directory or an index directory (with an index file), whose shards are taken in order.
 pub fn reshard(
@@ -67,11 +60,12 @@ pub fn reshard(
     let shards = open_inputs(inputs)?;
     let mut sources = Vec::new();
     for (shard, input) in shards.iter().enumerate() {
-        sources.extend((0..input.positions.entry_count()).map(|entry| (shard, entry)));
+        let entries = 0..input.positions.entry_count();
+        sources.extend(entries.map(|entry| EntrySource { shard, entry }));
     }
     let weights = sources
         .iter()
-        .map(|&(shard, entry)| shards[shard].positions.entry_locations(entry))
+        .map(|source| shards[source.shard].positions.entry_locations(source.entry))
         .collect::<Result<Vec<_>, IndexError>>()?;
     let groups = split_groups(&weights, options.split)?;
     let pool = rayon::ThreadPoolBuilder::new()
@@ -97,32 +91,27 @@ pub fn reshard(
     })
 }
 
-/// The entries of one output shard: (input shard, entry) pairs, in index order.
+/// One input shard, opened for copying its entries.
+struct InputShard {
+    directory: PathBuf,
+    manifest: Manifest,
+    positions: Positions,
+}
+
+/// The entries of one output shard, in index order.
 struct Part<'a> {
     number: usize,
     first_entry: usize,
-    sources: &'a [(usize, u32)],
+    sources: &'a [EntrySource],
 }
 
-/// Writes output shard `part` into its directory under `directory` and returns its record.
-fn output_shard(
-    shards: &[InputShard],
-    part: &Part<'_>,
-    directory: &Path,
-    options: &ReshardOptions,
-) -> Result<ShardRecord, IndexError> {
-    let name = format!("shard-{:04}", part.number);
-    let shard_directory = directory.join(&name);
-    std::fs::create_dir(&shard_directory).at(&shard_directory)?;
-    let manifest = write_shard(shards, part.sources, &shard_directory, options)?;
-    let manifest_digest = sha256_file(&shard_directory.join(MANIFEST_FILE))?;
-    Ok(ShardRecord {
-        directory: name,
-        first_entry: part.first_entry as u64,
-        entries: part.sources.len() as u64,
-        seed_locations: manifest.seed_locations,
-        manifest_sha256: manifest_digest.sha256,
-    })
+/// An entry of an input shard.
+#[derive(Clone, Copy)]
+struct EntrySource {
+    /// The input shard, by its place among the inputs.
+    shard: usize,
+    /// The entry in that shard.
+    entry: u32,
 }
 
 /// Opens every input shard, expanding index directories, and checks that they fit together.
@@ -182,17 +171,38 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
     Ok(shards)
 }
 
-/// Writes one output shard from the entries `part` (input shard, entry) into `directory`.
+/// Writes output shard `part` into its directory under `directory` and returns its record.
+fn output_shard(
+    shards: &[InputShard],
+    part: &Part<'_>,
+    directory: &Path,
+    options: &ReshardOptions,
+) -> Result<ShardRecord, IndexError> {
+    let name = format!("shard-{:04}", part.number);
+    let shard_directory = directory.join(&name);
+    std::fs::create_dir(&shard_directory).at(&shard_directory)?;
+    let manifest = write_shard(shards, part.sources, &shard_directory, options)?;
+    let manifest_digest = sha256_file(&shard_directory.join(MANIFEST_FILE))?;
+    Ok(ShardRecord {
+        directory: name,
+        first_entry: part.first_entry as u64,
+        entries: part.sources.len() as u64,
+        seed_locations: manifest.seed_locations,
+        manifest_sha256: manifest_digest.sha256,
+    })
+}
+
+/// Writes one output shard of the entries `part` into `directory`.
 fn write_shard(
     shards: &[InputShard],
-    part: &[(usize, u32)],
+    part: &[EntrySource],
     directory: &Path,
     options: &ReshardOptions,
 ) -> Result<Manifest, IndexError> {
     let packed = directory.join(PACKED_DIRECTORY);
     std::fs::create_dir(&packed).at(&packed)?;
     let mut entries = Vec::with_capacity(part.len());
-    for &(shard, entry) in part {
+    for &EntrySource { shard, entry } in part {
         let input = &shards[shard];
         let record = input.manifest.entries[entry as usize].clone();
         let source = input
@@ -219,7 +229,7 @@ fn write_shard(
         &options.temporary_directory,
         None,
         |writer| {
-            for &(shard, entry) in part {
+            for &EntrySource { shard, entry } in part {
                 let positions = &shards[shard].positions;
                 // The section's CRC-32 is checked as it is read, so damage is not copied.
                 let bytes = positions.section_bytes(entry)?;
