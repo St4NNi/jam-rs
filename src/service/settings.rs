@@ -15,18 +15,29 @@ use serde::{Deserialize, Serialize};
 pub struct SearchSettings {
     /// The last stage that runs.
     pub level: Stage,
+    /// The least query coverage of the mosaic.
     pub min_query_coverage: CoverageSetting,
+    /// The least identity over all counted fragments together.
     pub min_identity: f64,
+    /// The least identity of one fragment to count.
     pub min_fragment_identity: f64,
+    /// The least number of alignment columns of one fragment to count.
     pub min_fragment_columns: u64,
+    /// The least share of a contig's bases that its fragments span for the contig to count.
     pub min_contig_coverage: f64,
+    /// The least identity of the fragments of one contig together for the contig to count.
     pub min_contig_identity: f64,
+    /// The identity below which a chain's anchors are too sparse for it to be aligned.
     pub min_chain_identity: f64,
     /// The largest accepted chance of missing a qualifying entry.
     pub loss_budget: f64,
+    /// The alignment score of a match.
     pub match_score: i32,
+    /// The alignment score of a mismatch.
     pub mismatch_score: i32,
+    /// The score added once for each gap.
     pub gap_open_score: i32,
+    /// The score added for each gap base.
     pub gap_extend_score: i32,
 }
 
@@ -34,38 +45,10 @@ pub struct SearchSettings {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageSetting {
+    /// A share of the query, `numerator` divided by 10 to the power `decimal_places`.
     Share { numerator: u64, decimal_places: u32 },
+    /// A number of query bases.
     Bases(u64),
-}
-
-impl From<QueryCoverage> for CoverageSetting {
-    fn from(coverage: QueryCoverage) -> Self {
-        match coverage {
-            QueryCoverage::Share {
-                numerator,
-                decimal_places,
-            } => Self::Share {
-                numerator,
-                decimal_places,
-            },
-            QueryCoverage::Bases(bases) => Self::Bases(bases),
-        }
-    }
-}
-
-impl From<CoverageSetting> for QueryCoverage {
-    fn from(coverage: CoverageSetting) -> Self {
-        match coverage {
-            CoverageSetting::Share {
-                numerator,
-                decimal_places,
-            } => Self::Share {
-                numerator,
-                decimal_places,
-            },
-            CoverageSetting::Bases(bases) => Self::Bases(bases),
-        }
-    }
 }
 
 impl SearchSettings {
@@ -113,6 +96,36 @@ impl SearchSettings {
         scores.gap_extend_score = self.gap_extend_score;
         config.validate()?;
         Ok(config)
+    }
+}
+
+impl From<QueryCoverage> for CoverageSetting {
+    fn from(coverage: QueryCoverage) -> Self {
+        match coverage {
+            QueryCoverage::Share {
+                numerator,
+                decimal_places,
+            } => Self::Share {
+                numerator,
+                decimal_places,
+            },
+            QueryCoverage::Bases(bases) => Self::Bases(bases),
+        }
+    }
+}
+
+impl From<CoverageSetting> for QueryCoverage {
+    fn from(coverage: CoverageSetting) -> Self {
+        match coverage {
+            CoverageSetting::Share {
+                numerator,
+                decimal_places,
+            } => Self::Share {
+                numerator,
+                decimal_places,
+            },
+            CoverageSetting::Bases(bases) => Self::Bases(bases),
+        }
     }
 }
 

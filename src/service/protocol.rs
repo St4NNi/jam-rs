@@ -27,10 +27,13 @@ pub const MAX_MESSAGE_BYTES: usize = 64 << 20;
 /// A search: the only message a client sends on its stream.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SearchRequest {
+    /// The name the records of the search carry.
     pub query_name: String,
     /// The query bases.
     pub bases: Vec<u8>,
+    /// The query is circular.
     pub circular: bool,
+    /// The settings the client chose.
     pub settings: SearchSettings,
     /// Milliseconds from receipt until the search stops; the server's clock starts it.
     pub deadline_ms: Option<u64>,
@@ -43,34 +46,20 @@ pub struct SearchRequest {
 /// then `End`; or one `Refused`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Reply {
-    Possible {
-        shard: String,
-        record: Possible,
-    },
-    Located {
-        shard: String,
-        record: Located,
-    },
-    Confirmed {
-        shard: String,
-        record: Confirmed,
-    },
-    Dropped {
-        shard: String,
-        record: Dropped,
-    },
-    Unfinished {
-        shard: String,
-        record: Unfinished,
-    },
-    Summary {
-        shard: String,
-        record: Summary,
-    },
+    /// A possible entry of a shard.
+    Possible { shard: String, record: Possible },
+    /// A located entry of a shard.
+    Located { shard: String, record: Located },
+    /// A confirmed entry of a shard.
+    Confirmed { shard: String, record: Confirmed },
+    /// A dropped entry of a shard.
+    Dropped { shard: String, record: Dropped },
+    /// An entry of a shard that the search did not finish.
+    Unfinished { shard: String, record: Unfinished },
+    /// The summary of a shard, its last record.
+    Summary { shard: String, record: Summary },
     /// The server did not run the search: it is busy, or the settings are invalid.
-    Refused {
-        reason: String,
-    },
+    Refused { reason: String },
     /// The last message of a search.
     End,
 }

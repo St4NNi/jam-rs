@@ -69,7 +69,9 @@ pub enum ServiceError {
     /// A peer failed; its shard gets a failed summary.
     #[error("peer {peer}: {source}")]
     Peer {
+        /// The node id of the peer.
         peer: EndpointId,
+        /// Why the peer failed.
         source: Box<ServiceError>,
     },
     /// The search thread panicked.

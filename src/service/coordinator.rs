@@ -23,9 +23,11 @@ pub const PEER_CONNECT: Duration = Duration::from_secs(5);
 
 /// One search as a server runs it.
 pub struct ShardSearch {
+    /// The request as the client sent it.
     pub request: SearchRequest,
     /// The server's settings with the client's choices in place.
     pub config: SearchConfig,
+    /// When the search stops, from the request's deadline.
     pub deadline: Option<Instant>,
     /// Set when the client left; the own shard's search then ends.
     pub stop: Arc<AtomicBool>,
@@ -34,8 +36,11 @@ pub struct ShardSearch {
 /// The shards one search runs on: the own shard and, unless the request is local only, every
 /// peer, dialled through `endpoint`.
 pub struct Shards<'a> {
+    /// The endpoint that dials the peers.
     pub endpoint: &'a Endpoint,
+    /// The shard of this server.
     pub own: &'a Arc<ServedShard>,
+    /// The servers of the other shards.
     pub peers: &'a [EndpointAddr],
 }
 
@@ -88,8 +93,9 @@ async fn forward_peer(
     }
 }
 
-/// Sends the search to `peer` and passes its messages on. Each wait is bounded by the deadline
-/// plus `PEER_GRACE`, and connecting also by `PEER_CONNECT`. An error after the peer's summary changes nothing, so it is dropped.
+/// Sends the search to `peer` and passes its messages on. Each wait ends at the deadline plus
+/// `PEER_GRACE`, and connecting also after `PEER_CONNECT`. An error after the peer's summary
+/// changes nothing, so it is dropped.
 async fn relay(
     endpoint: &Endpoint,
     peer: EndpointAddr,
