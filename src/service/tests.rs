@@ -4,11 +4,11 @@
 
 use super::*;
 use crate::decide::QueryCoverage;
-use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
+use crate::index::{EntryInput, Shard, build_shard};
 use crate::loss::MissModel;
 use crate::report::{Dropped, Reason, Record, ShardRecord, Stage, Unfinished};
 use crate::search::{SearchConfig, SearchControl};
-use crate::test_support::{random_bases, rng, with_substitutions};
+use crate::test_support::{build_options, random_bases, rng, with_substitutions};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::path::Path;
@@ -45,35 +45,12 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
             EntryInput { name, path }
         })
         .collect();
-    let options = BuildOptions {
-        parameters: Parameters {
-            scheme: crate::seeds::SeedScheme {
-                k: 21,
-                w: 20,
-                ..Default::default()
-            },
-            bin_bits: 8,
-            ..Parameters::default()
-        },
-        bucket_bits: None,
-        threads: 2,
-        temporary_directory: directory.to_path_buf(),
-        entry_per_record: false,
-    };
+    let options = build_options(directory, 2);
     let output = directory.join(name);
     build_shard(&inputs, &output, &options).unwrap();
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    let model = MODEL.get_or_init(|| {
-        MissModel::with_layouts(
-            crate::seeds::SeedScheme {
-                k: 21,
-                w: 20,
-                ..Default::default()
-            },
-            200,
-        )
-        .unwrap()
-    });
+    let scheme = options.parameters.scheme;
+    let model = MODEL.get_or_init(|| MissModel::with_layouts(scheme, 200).unwrap());
     ServedShard::new(name.into(), Shard::open(&output).unwrap(), model.clone()).unwrap()
 }
 
@@ -247,11 +224,19 @@ async fn busy_server_refuses() {
     let directory = tempfile::tempdir().unwrap();
     let router = full_server(directory.path()).await;
     let client = endpoint().await;
-    let _waiting = search(&client, address(router.endpoint()), &request(None)).await;
-    let started = tokio::time::Instant::now();
-    while !refused(&client, &router).await {
-        assert!(started.elapsed() < WAIT, "no search was refused");
-    }
+    let server_address = address(router.endpoint());
+    let mut first = search(&client, server_address.clone(), &request(None))
+        .await
+        .unwrap();
+    let mut second = search(&client, server_address, &request(None))
+        .await
+        .unwrap();
+    // Whichever search arrives first takes the only place and waits; the other is refused.
+    let answer = tokio::select! {
+        answer = first.next() => answer,
+        answer = second.next() => answer,
+    };
+    assert!(matches!(answer, Err(ServiceError::Refused(reason)) if reason == server::BUSY));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
