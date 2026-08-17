@@ -61,6 +61,13 @@ foyer = "~0.22.6"
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
 
+# Tests run the alignment kernel; unoptimized it is about fifty times slower.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = true
