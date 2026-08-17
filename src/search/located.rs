@@ -1,4 +1,6 @@
 //! What stage 2 hands to stage 3 for one candidate entry.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use std::ops::Range;
 

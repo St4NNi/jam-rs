@@ -1,4 +1,6 @@
 //! The JSON line of an entry event and the closing summary line of a search.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::DecisionRecord;
 use crate::report::ContigInfo;
@@ -161,8 +163,8 @@ pub struct Summary {
     pub align: AlignWorkRecord,
 }
 
-/// One line of output. `kind` names the record; `query` is the name of the query record and
-/// `entry` the name of the entry.
+/// One line of output. `kind` names the record, `query` the query record and `entry` the entry.
+/// It holds names and numbers only, so another process can read it back with serde.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Record {

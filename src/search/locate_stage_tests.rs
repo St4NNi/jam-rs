@@ -1,3 +1,7 @@
+//! Tests of stage 2: false seed hits, the second pruning and the alignment windows.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::bound::CoverageBound;
 use super::control::SearchControl;
 use super::events::DropReason;

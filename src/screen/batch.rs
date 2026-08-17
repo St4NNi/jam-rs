@@ -1,4 +1,6 @@
 //! Reading an assembly and joining its contigs into batches, which are searched like queries.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::ScreenError;
 use std::io::{BufRead, BufReader, Read};
@@ -84,9 +86,8 @@ pub(super) type ContigSink<'a> = dyn FnMut(u32, &[u8], &[u8]) -> Result<(), Scre
 pub(super) type BatchVisit<'a> = dyn FnMut(usize, &Batch) -> Result<(), ScreenError> + 'a;
 
 /// Reads an assembly (plain or gzip FASTA) and passes its contigs to `visit` in batches of at
-/// most `batch_bases` bases. Contigs shorter than `min_bases`, or with fewer known bases, cannot
-/// hold a fragment and are skipped. A contig longer than a batch goes in pieces of one batch.
-/// Reading the file again gives the same batches. `None` is an empty file.
+/// most `batch_bases` bases, the same on every read; a longer contig goes in pieces. Contigs of
+/// fewer than `min_bases` known bases are skipped, as they cannot hold a fragment; `None` if empty.
 pub(super) fn read_batches(
     path: &Path,
     batch_bases: usize,

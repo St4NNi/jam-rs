@@ -1,6 +1,7 @@
-//! Fragments of a batch, cut at the contig borders and turned around: the alignment of a batch
-//! (the query) to an index entry becomes an alignment of the entry (now the query) to one
-//! assembly contig.
+//! Fragments of a batch, cut at the contig borders and turned around, so that each aligns an
+//! entry (now the query) to one assembly contig.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::align::{
     Alignment, AlignmentConfig, AlignmentError, EditOperation, EditRun, Interval, Strand,

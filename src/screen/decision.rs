@@ -1,5 +1,7 @@
 //! The decision of each entry contig over the contigs of an assembly: the contig rule, the
 //! closest margin, and the entry records.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::ScreenError;
 use super::batch::AssemblyContig;

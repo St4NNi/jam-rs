@@ -1,5 +1,7 @@
 //! The output records of a screen: one entry record for each entry contig found in an assembly,
 //! and one summary record for each assembly. Both are written as JSON lines.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::align::Interval;
 use crate::decide::{Fragment, SelectedFragment};

@@ -1,4 +1,6 @@
 //! End-to-end tests of all three stages on small generated shards.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::control::SearchControl;
 use super::driver::{SearchConfig, SearchSummary, Searcher};

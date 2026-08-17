@@ -1,8 +1,6 @@
 //! The three stages of one search against one shard: sketch, locate and align.
-//!
-//! Stage 1 (`sketch_stage`) and stage 2 (`locate_stage`) choose candidate entries and their
-//! alignment windows without reading any sequence; stage 3 (`align_stage`) reads the windows,
-//! aligns the query there and decides each entry. `located` is what stage 2 hands to stage 3.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 pub mod align_stage;
 pub mod bound;

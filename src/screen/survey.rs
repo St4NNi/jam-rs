@@ -1,12 +1,6 @@
 //! Stage 1 of the screen: which entries share enough seeds with which contigs of a batch.
-//!
-//! Every distinct k-mer of the batch is looked up in the sketch, and each entry of its color set
-//! in the positions, which keep more hash bits than the sketch's fingerprint, so that false seed
-//! hits are not counted. The seeds are counted for each piece of a contig on its own: a piece
-//! counts for an entry only when it shares enough seeds with it for the share of the piece that
-//! has to align (the contig rule), so a contig that shares a gene or two with many entries counts
-//! for none of them. With a closest margin a piece
-//! counts only for the entries that share nearly as many seeds with it as its best one.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::ScreenError;
 use super::batch::Batch;
@@ -97,7 +91,9 @@ pub(super) fn found_seeds(
     Ok(pieces.concat())
 }
 
-/// The entries that each piece of the batch counts for.
+/// The entries that each piece of the batch counts for. A piece counts for an entry only when it
+/// shares enough seeds for the share that the contig rule requires, so a contig that shares a
+/// gene with many entries counts for none of them.
 pub(super) fn survey(
     shard: &Shard,
     seeder: &Seeder,
@@ -131,7 +127,7 @@ pub(super) fn survey(
 }
 
 /// The seeds of one piece that each entry holds, by the color sets of the sketch and checked in
-/// the positions.
+/// the positions, which keep more hash bits than the fingerprint, so false seed hits drop out.
 fn shared_seeds(
     shard: &Shard,
     found: &[PieceSeed],

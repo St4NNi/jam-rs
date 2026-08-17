@@ -1,6 +1,7 @@
 //! The contig output: the contigs of an assembly that share enough with an entry, written to one
-//! gzip FASTA per assembly. They form a much smaller set of the assemblies that still holds every
-//! close relative of the entries.
+//! gzip FASTA per assembly.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::batch::read_batches;
 use super::{ScreenConfig, ScreenError};
@@ -10,6 +11,7 @@ use std::path::Path;
 
 /// Writes the contigs of the assembly at `path` whose ids are in `chosen` to a gzip FASTA in
 /// `directory`, named like the assembly with `.gz`. Nothing is written when no contig is chosen.
+/// These files form a much smaller set that still holds every close relative of the entries.
 pub(super) fn write_contigs(
     path: &Path,
     name: &str,

@@ -1,9 +1,6 @@
 //! PAF lines: one per fragment of a confirmed entry, so standard tools read jam's alignments.
-//!
-//! The query is the PAF query and the contig is the PAF target. jam's CIGAR follows SAM with the
-//! contig as the reference, which is the `cg` convention of PAF. A fragment over the end of a
-//! circular query starts at its first segment and ends past the query length, as on a query
-//! written twice.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::decision::{DecisionRecord, FragmentRecord, Strand};
 use std::fmt::Write;
@@ -20,6 +17,8 @@ pub fn paf_lines(query: &str, decision: &DecisionRecord) -> Vec<String> {
 }
 
 fn paf_line(query: &str, query_length: u64, fragment: &FragmentRecord, kind: char) -> String {
+    // The contig is the PAF target, and the CIGAR follows SAM with the contig as the reference.
+    // A fragment over the end of a circular query ends past the query length.
     let query_start = fragment.query_segments.first().map_or(0, |span| span.start);
     let strand = match fragment.strand {
         Strand::Forward => '+',

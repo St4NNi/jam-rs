@@ -1,4 +1,6 @@
 //! What a search reports while it runs: one event each time an entry changes its state.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::LocatedEntry;
 use super::align_stage::AlignedEntry;

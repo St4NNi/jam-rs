@@ -1,4 +1,6 @@
 //! The errors of a search.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::align_stage::AlignStageError;
 use super::control::Stopped;

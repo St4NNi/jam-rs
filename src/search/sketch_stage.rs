@@ -1,20 +1,6 @@
 //! Stage 1: seed hits per entry from the sketch, the containment estimate and the coverage bound.
-//!
-//! Every distinct query k-mer is looked up in the sketch. A k-mer whose color set holds more than
-//! the frequent-seed limit is not expanded. The other color sets are expanded rare seeds first,
-//! until the memory limit of seed hits is reached; the seeds left over count as frequent too.
-//!
-//! Frequent seeds are not expanded into seed hits, but the union of their color sets is marked in
-//! a bitmap over the shard's entries. The cost is the sum of the frequent color sets' sizes, at
-//! most entries times frequent seeds, and the marking stops early once every entry is marked. An
-//! entry in the union counts the query starts of all frequent seeds as possibly hit, which can only
-//! raise its bound; an entry outside it has only its expanded seed hits.
-//!
-//! An entry with neither a seed hit nor a possible seed hit is left out whatever its bound says,
-//! as stage 2 could build no alignment window for it. This matters at low identities, where the
-//! bound of such an entry is the whole query. Entries whose coverage bound stays below the
-//! requested query coverage are left out too; the others become candidate entries, ordered by
-//! coverage bound.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
@@ -189,7 +175,8 @@ fn look_up(
     Ok(chunks.concat())
 }
 
-/// Splits the found seeds into those to expand, rarest first, and the frequent ones.
+/// Splits the found seeds into those to expand, rarest first, and the frequent ones: those held
+/// by more entries than the frequent-seed limit, and those over the memory limit of seed hits.
 fn split_frequent(
     mut found: Vec<FoundSeed>,
     limits: SketchLimits,
@@ -207,13 +194,15 @@ fn split_frequent(
     (found, frequent)
 }
 
-/// The union of the frequent seeds' color sets, as a bitmap over the shard's entries.
+/// The union of the frequent seeds' color sets, as a bitmap over the shard's entries. An entry in
+/// it counts every frequent seed as possibly hit, which can only raise its bound.
 struct FrequentUnion {
     words: Vec<u64>,
 }
 
 impl FrequentUnion {
-    /// Marks the entries of every frequent seed's color set, and stops once all are marked.
+    /// Marks the entries of every frequent seed's color set, and stops once all are marked, so the
+    /// cost is at most the sum of the frequent color sets' sizes.
     fn new(sketch: &Sketch, frequent: &[FoundSeed], entries: u32) -> Self {
         let mut words = vec![0u64; (entries as usize).div_ceil(64)];
         let mut marked = 0u32;
@@ -266,7 +255,8 @@ fn expand(
 }
 
 /// The candidate entry for `entry` with seed hits `seeds` and possible seed hits at the query
-/// starts `possible_hits`, or `None` when it has neither or its bound is too low.
+/// starts `possible_hits`, or `None` when its bound is too low or it has neither (then stage 2
+/// could build no alignment window, though at low identities the bound is the whole query).
 fn possible_entry(
     entry: u32,
     seeds: Vec<u32>,

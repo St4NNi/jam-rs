@@ -1,4 +1,6 @@
 //! How a running search is stopped: a deadline and a stop flag, checked between steps.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;

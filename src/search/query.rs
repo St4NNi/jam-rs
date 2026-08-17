@@ -1,4 +1,6 @@
 //! The query k-mers of one search, grouped by hash, so each distinct k-mer is looked up once.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::seeds::Seeder;
 use rayon::prelude::*;

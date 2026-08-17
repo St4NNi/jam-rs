@@ -1,5 +1,7 @@
 //! The screen agrees with a forward search: the assembly as the index entry and the plasmid as
 //! the query give the same query coverage, identity and contigs.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::tests::{diverged, index_of, plasmids, random_sequence, reverse_complement, screen};
 use super::*;

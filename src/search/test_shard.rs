@@ -1,4 +1,6 @@
 //! Small generated shards for the search tests.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use crate::loss::MissModel;

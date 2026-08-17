@@ -1,4 +1,6 @@
 //! End-to-end tests of the `jam` binary on small generated entries.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

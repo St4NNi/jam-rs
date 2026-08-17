@@ -1,5 +1,7 @@
 //! Stages 2 and 3 of the screen for one batch: the kept entries are located and aligned with the
 //! batch as the query, and their fragments are cut at the contig borders and turned around.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::ScreenError;
 use super::batch::Batch;

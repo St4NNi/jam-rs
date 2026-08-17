@@ -1,5 +1,7 @@
 //! The screen of one assembly: the survey of all its batches, the alignments of the batches that
 //! reached a kept entry, the decisions, and the contig output.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::batch::{AssemblyContigs, Batch, read_batches};
 use super::decision::decide_entries;
@@ -20,8 +22,9 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
-/// Screens assemblies against the entries of one shard. It can screen several assemblies at
-/// once from different threads.
+/// Screens assemblies against the entries of one shard, several at once from different threads.
+/// The contigs of an assembly are joined into batches, surveyed (stage 1), and the batches that
+/// reached a kept entry are located and aligned (stages 2 and 3), with the batch as the query.
 pub struct Screener<'a> {
     shard: &'a Shard,
     config: ScreenConfig,
@@ -190,7 +193,7 @@ impl<'a> Screener<'a> {
     }
 
     /// Reads the batches again and aligns those that reached a kept entry. Returns the fragments
-    /// of each entry contig.
+    /// of each entry contig, cut at the contig borders and turned around, for the decision.
     fn align_assembly(
         &self,
         path: &Path,

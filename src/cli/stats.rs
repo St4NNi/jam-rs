@@ -1,4 +1,6 @@
 //! `jam stats`: what a shard holds.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::CliError;
 use crate::index::{Parameters, Shard, ShardStats};

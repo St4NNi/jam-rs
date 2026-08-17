@@ -1,3 +1,7 @@
+//! End-to-end tests of the search driver on small generated shards.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::control::{SearchControl, Stopped};
 use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};

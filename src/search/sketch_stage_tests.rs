@@ -1,3 +1,7 @@
+//! Tests of stage 1: seed hits, frequent seeds, the memory limit and the candidate order.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::query::QueryKmers;

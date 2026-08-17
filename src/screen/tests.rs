@@ -1,4 +1,6 @@
 //! End-to-end tests of the screen on small generated entries and assemblies.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::*;
 use crate::align::{Strand, format_cigar};

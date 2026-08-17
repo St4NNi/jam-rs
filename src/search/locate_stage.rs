@@ -1,12 +1,7 @@
 //! Stage 2: the seed locations of each candidate entry, the second pruning and the alignment
 //! windows.
-//!
-//! The positions keep more hash bits than the sketch's fingerprint, so a seed hit of the sketch
-//! without seed locations is a false seed hit and disappears here. Frequent seeds, which stage 1
-//! counted as possibly hit, are looked up too. The coverage bound is computed again from the seed
-//! hits that have seed locations, and the entry is dropped when it falls below the requested
-//! query coverage, before any sequence is read. The bins of the seed hits, widened by the flank
-//! and merged per contig, become the alignment windows.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::bound::CoverageBound;
 use super::control::SearchControl;
@@ -83,7 +78,8 @@ pub struct LocateRequest<'a> {
     pub flank: u64,
 }
 
-/// Runs stage 2 for one candidate entry.
+/// Runs stage 2 for one candidate entry. The coverage bound is computed again from the seed hits
+/// with seed locations; the bins of those seed hits, widened by the flank, give the windows.
 pub fn locate_entry(
     shard: &Shard,
     request: &LocateRequest<'_>,
@@ -143,8 +139,9 @@ fn locate(
     }))
 }
 
-/// Reads the seed locations of the entry's seed hits and of the frequent seeds. Fills the workspace
-/// with the query starts and the bins of the seed hits that have seed locations.
+/// Reads the seed locations of the entry's seed hits and of the frequent seeds. The positions keep
+/// more hash bits than the fingerprint, so a seed hit without seed locations is a false seed hit.
+/// Fills the workspace with the query starts and the bins of the seed hits that have locations.
 fn read_seed_hits(
     shard: &Shard,
     request: &LocateRequest<'_>,

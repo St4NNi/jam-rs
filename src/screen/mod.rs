@@ -1,12 +1,6 @@
 //! The reverse direction: small sequences form the index and large assemblies stream past it once.
-//!
-//! The contigs of an assembly are joined into batches that are searched like queries against the
-//! index of small sequences. A survey (stage 1) counts the seeds each contig shares with each
-//! entry and keeps the entries that enough contigs share enough seeds with. The batches that
-//! reached a kept entry are then located and aligned (stages 2 and 3). The fragments are cut at
-//! the contig borders and turned around, so that they align an entry contig (the query of the
-//! screen) to contigs of the assembly. The fragments of one entry contig over all contigs of the
-//! assembly then get the decision, with the assembly contigs for the contig rule.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod assembly;
 mod batch;

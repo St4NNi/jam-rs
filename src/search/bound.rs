@@ -1,18 +1,7 @@
 //! The coverage bound of an entry: the most query bases it can still cover, given where its seed
 //! hits lie on the query.
-//!
-//! Rule. The query bases that k-mers with a seed hit (or a possible seed hit) cover may all be
-//! covered. The rest of the query falls into n stretches without a seed hit. A present piece of
-//! `g` bases at the accepted identity shows no seed hit with the chance `P_miss(g)` of the miss
-//! model, which falls as `g` grows. The allowance `a` is the shortest length with
-//! `n * P_miss(a) <= B`, where B is the stage's share of the loss budget (a union bound over the
-//! stretches). Each stretch then keeps at most `a` bases:
-//!
-//! coverage bound = covered bases + sum over the stretches of min(stretch length, a)
-//!
-//! A stretch shorter than `a` is kept whole. Assumption: a stretch holds at most one present
-//! piece. The decision counts only fragments of at least `min_fragment_columns` columns, and in
-//! practice the part of an entry that matches a stretch aligns as one piece.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::loss::{LossBudget, MissModel};
 
@@ -55,8 +44,11 @@ impl<'a> CoverageBound<'a> {
     }
 
     /// The highest query coverage, in bases, of an entry with seed hits (or possible seed hits)
-    /// at the query starts `positions`, which must be ascending.
+    /// at the ascending query starts `positions`: the bases their k-mers cover, plus at most the
+    /// allowance `a` of each stretch without a seed hit.
     pub fn bound(&self, positions: &[u32]) -> u64 {
+        // Assumes a stretch holds at most one present piece: the decision counts only long
+        // fragments, and the part of an entry that matches a stretch aligns as one piece.
         let stretches = self.stretches(positions);
         let allowance = self.allowance(stretches.len() as u64);
         let left_out: u64 = stretches
@@ -66,8 +58,8 @@ impl<'a> CoverageBound<'a> {
         self.query_length - left_out
     }
 
-    /// The shortest length `a` with `stretches * P_miss(a) <= B`, or the query length when no
-    /// length up to it is short enough.
+    /// The shortest length `a` with `stretches * P_miss(a) <= B` (a union bound over the
+    /// stretches, B the stage's share of the loss budget), or the query length if none fits.
     fn allowance(&self, stretches: u64) -> u64 {
         let fits = |length: u64| {
             stretches as f64 * self.model.miss_chance(length, self.identity) <= self.budget.chance()

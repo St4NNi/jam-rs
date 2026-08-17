@@ -1,5 +1,7 @@
 //! The record of a confirmed entry's decision: query coverage, identity, counts and the
 //! fragments of its mosaic.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::ReportError;
 use crate::align::{Alignment, EditRun, Strand as AlignStrand, format_cigar};

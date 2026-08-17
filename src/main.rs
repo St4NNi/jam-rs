@@ -1,3 +1,7 @@
+//! The jam binary: runs the command line and prints an error in one line.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
+
 use std::process::ExitCode;
 
 #[cfg(not(target_env = "msvc"))]

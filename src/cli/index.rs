@@ -1,4 +1,6 @@
 //! `jam index`: build a shard from FASTA files, or reshard shards (merge and split them).
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::CliError;
 use crate::index::{

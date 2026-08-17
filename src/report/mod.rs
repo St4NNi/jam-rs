@@ -1,8 +1,7 @@
 //! The output records of a search: JSON lines for every entry event and the summary, and PAF
 //! lines with the CIGAR in the `cg:Z` tag. The command line and the network use the same records.
-//!
-//! A record holds names and numbers only, never a reference into a shard, so it can be sent to
-//! another process and read back with serde.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod decision;
 mod event;

@@ -1,11 +1,7 @@
 //! The driver of one search against one shard: it connects the stages, streams the entry events,
 //! and sums the work.
-//!
-//! Stage 1 runs in parallel chunks. The candidate entries then go to a work queue, highest
-//! coverage bound first, and each worker takes one entry through stages 2 and 3, so the events of
-//! one entry come from one thread, in order. Memory per request stays bounded: stage 1 holds at
-//! most `max_seed_hits` seed hits, and stages 2 and 3 hold one entry per worker; results leave as
-//! events.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::align_stage::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, PreparedQuery,
@@ -145,10 +141,9 @@ impl<'a> Searcher<'a> {
         })
     }
 
-    /// Searches `query` and sends an event into `events` each time an entry changes its state.
-    /// The caller must read the receiver on another thread while the search runs. When the
-    /// receiver is dropped the search stops as if asked. Bad input fails at once; a stop or a
-    /// read failure ends the search early, which the summary's completion tells.
+    /// Searches `query` and sends an event into `events` each time an entry changes its state;
+    /// another thread must read the receiver, and dropping it stops the search as if asked.
+    /// Bad input fails at once; a later stop or failure ends it early, as the summary tells.
     pub fn search(
         &self,
         query: &[u8],
@@ -184,6 +179,8 @@ impl<'a> Searcher<'a> {
         Ok(pool.install(|| self.run(query, circular, budget, &request)))
     }
 
+    /// Stage 1 runs in parallel chunks; then each worker takes the next candidate entry, highest
+    /// coverage bound first, through stages 2 and 3, so the events of an entry come in order.
     fn run(
         &self,
         query: &[u8],
