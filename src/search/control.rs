@@ -44,7 +44,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn the_stop_flag_and_the_deadline_stop_a_search() {
+    fn flag_and_deadline() {
         let stop = AtomicBool::new(false);
         let mut control = SearchControl {
             deadline: None,

@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fragment_becomes_one_line_with_the_standard_columns() {
+    fn fragment_standard_columns() {
         let span = Span { start: 2, end: 10 };
         let lines = paf_lines(
             "q1",
@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn alternatives_follow_as_secondary_lines_and_wrapped_fragments_end_past_the_query() {
+    fn secondary_and_wrapped() {
         let wrapped = vec![Span { start: 7, end: 10 }, Span { start: 0, end: 5 }];
         let single = vec![Span { start: 0, end: 8 }];
         let lines = paf_lines(

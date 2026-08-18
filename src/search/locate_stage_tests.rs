@@ -105,7 +105,7 @@ fn windows(outcome: &LocateOutcome) -> Vec<(u32, Vec<Range<u64>>)> {
 }
 
 #[test]
-fn false_seed_hits_of_the_sketch_have_no_seed_locations() {
+fn false_seed_hits() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0xfa15e);
     let query = random.bases(20_000);
@@ -131,7 +131,7 @@ fn false_seed_hits_of_the_sketch_have_no_seed_locations() {
 }
 
 #[test]
-fn the_bound_from_the_seed_locations_drops_entries_again() {
+fn second_pruning_drops() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0xb0b);
     let query = random.bases(5_000);
@@ -152,7 +152,7 @@ fn the_bound_from_the_seed_locations_drops_entries_again() {
 }
 
 #[test]
-fn windows_widen_the_bins_by_the_flank_and_stop_at_contig_ends() {
+fn flank_widens_bins() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0x3d);
     let query = random.bases(4_000);

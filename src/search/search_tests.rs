@@ -109,7 +109,7 @@ fn planted_shard(directory: &std::path::Path) -> (Shard, Vec<u8>) {
 }
 
 #[test]
-fn a_planted_query_is_confirmed_with_its_place_strand_and_cigar() {
+fn planted_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
     let (summary, events) = search(&shard, &query, false, &config());
@@ -146,7 +146,7 @@ fn a_planted_query_is_confirmed_with_its_place_strand_and_cigar() {
 }
 
 #[test]
-fn an_entry_below_the_decision_rule_is_dropped_in_stage_3() {
+fn decision_drops_entry() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
     // The query covers a fifth of the contig of entry 0 and a third of that of entry 1.
@@ -168,7 +168,7 @@ fn an_entry_below_the_decision_rule_is_dropped_in_stage_3() {
 }
 
 #[test]
-fn a_circular_query_is_confirmed_over_its_end() {
+fn circular_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0xc1c);
     let query = random.bases(QUERY_LENGTH);

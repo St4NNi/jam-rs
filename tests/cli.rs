@@ -108,7 +108,7 @@ fn json(line: &str) -> serde_json::Value {
 }
 
 #[test]
-fn a_planted_query_is_confirmed_with_its_alignment() {
+fn planted_query_confirmed() {
     let fixture = fixture();
     let lines = search(&fixture, &[]);
     let confirmed: Vec<_> = lines
@@ -134,7 +134,7 @@ fn a_planted_query_is_confirmed_with_its_alignment() {
 }
 
 #[test]
-fn paf_output_has_one_standard_line_per_fragment() {
+fn paf_fragment_lines() {
     let fixture = fixture();
     let lines = search(&fixture, &["--format", "paf"]);
     assert_eq!(lines.len(), 1);
@@ -153,7 +153,7 @@ fn paf_output_has_one_standard_line_per_fragment() {
 }
 
 #[test]
-fn the_sketch_level_names_possible_entries_only() {
+fn sketch_level_possible() {
     let fixture = fixture();
     let lines = search(&fixture, &["--level", "sketch"]);
     let records: Vec<_> = lines.iter().map(|line| json(line)).collect();
@@ -168,7 +168,7 @@ fn the_sketch_level_names_possible_entries_only() {
 }
 
 #[test]
-fn stats_and_errors_are_plain() {
+fn stats_and_errors() {
     let fixture = fixture();
     let output = jam(&[
         "stats".as_ref(),
@@ -189,7 +189,7 @@ fn stats_and_errors_are_plain() {
 }
 
 #[test]
-fn several_shards_are_searched_and_every_record_names_its_shard() {
+fn records_name_shards() {
     let fixture = fixture();
     let other_input = fixture.directory.path().join("other.fa");
     write_fasta(&other_input, "other_contig", &random_bases(44, 20_000));
@@ -237,7 +237,7 @@ fn several_shards_are_searched_and_every_record_names_its_shard() {
 }
 
 #[test]
-fn a_search_that_does_not_complete_fails_after_writing_its_summary() {
+fn incomplete_search_fails() {
     let fixture = fixture();
     let output = jam(&[
         "search".as_ref(),

@@ -196,7 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn contigs_are_joined_with_spacers_and_long_ones_are_cut() {
+    fn batches_join_contigs() {
         let mut fasta = b">a one\nACGTACGT\n>n\nNNNNNN\n>b\nGGGGCCCC\n>c\n".to_vec();
         fasta.extend_from_slice(&[b'T'; 88]);
         fasta.push(b'\n');
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn a_subset_keeps_the_contigs_and_offsets_of_its_pieces() {
+    fn subset_keeps_offsets() {
         let mut batch = Batch::default();
         batch.add(0, 0, b"ACGT");
         batch.add(1, 0, b"ACGT");

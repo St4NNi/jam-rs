@@ -92,7 +92,7 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
 }
 
 #[test]
-fn the_screen_and_a_forward_search_report_the_same_coverage_and_identity() {
+fn screen_matches_search() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(9_000, 101);
     let gene = random_sequence(1_500, 102);

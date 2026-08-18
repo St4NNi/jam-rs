@@ -192,7 +192,7 @@ fn placed(report: &ScreenEntry) -> Vec<(u64, u64, String, u64, u64, Strand, Stri
 }
 
 #[test]
-fn a_planted_plasmid_is_found_with_its_contig_coverage_identity_and_cigar() {
+fn planted_plasmid_found() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(6_000, 1);
     let other = random_sequence(6_000, 2);
@@ -257,7 +257,7 @@ fn a_planted_plasmid_is_found_with_its_contig_coverage_identity_and_cigar() {
 }
 
 #[test]
-fn contigs_in_both_strands_are_placed_on_the_entry() {
+fn both_strands_placed() {
     let directory = tempfile::tempdir().unwrap();
     let first = random_sequence(3_000, 5);
     let second = random_sequence(3_000, 6);
@@ -308,7 +308,7 @@ fn contigs_in_both_strands_are_placed_on_the_entry() {
 }
 
 #[test]
-fn fragments_of_a_plasmid_in_several_whole_contigs_count_together() {
+fn split_plasmid_counts() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(6_000, 31);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
@@ -331,7 +331,7 @@ fn fragments_of_a_plasmid_in_several_whole_contigs_count_together() {
 }
 
 #[test]
-fn adjacent_contigs_in_one_batch_are_not_joined_across_the_spacer() {
+fn spacer_blocks_joins() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(3_000, 15);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
@@ -370,7 +370,7 @@ fn adjacent_contigs_in_one_batch_are_not_joined_across_the_spacer() {
 }
 
 #[test]
-fn a_plasmid_across_the_border_of_two_batches_is_found_whole() {
+fn batch_border_whole() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(4_000, 81);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
@@ -405,7 +405,7 @@ fn a_plasmid_across_the_border_of_two_batches_is_found_whole() {
 }
 
 #[test]
-fn an_entry_with_several_contigs_is_screened_contig_by_contig() {
+fn entry_contigs_separate() {
     let directory = tempfile::tempdir().unwrap();
     let (first, second) = (random_sequence(3_000, 91), random_sequence(2_000, 92));
     let shard = index_of(directory.path(), &[("pair", &[&first, &second])]);
@@ -419,7 +419,7 @@ fn an_entry_with_several_contigs_is_screened_contig_by_contig() {
 }
 
 #[test]
-fn an_entry_that_shares_only_a_sliver_is_not_aligned() {
+fn sliver_not_aligned() {
     let directory = tempfile::tempdir().unwrap();
     let first = random_sequence(3_000, 5);
     let second = random_sequence(3_000, 6);
@@ -434,7 +434,7 @@ fn an_entry_that_shares_only_a_sliver_is_not_aligned() {
 }
 
 #[test]
-fn a_relative_far_below_the_identity_is_not_aligned() {
+fn distant_relative_skipped() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(6_000, 11);
     let relative = diverged(&plasmid, 16, 12);
@@ -453,7 +453,7 @@ fn a_relative_far_below_the_identity_is_not_aligned() {
 }
 
 #[test]
-fn a_contig_belongs_to_the_closest_plasmids_when_a_margin_is_set() {
+fn margin_picks_closest() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(6_000, 21);
     let cousin = diverged(&plasmid, 250, 22);
@@ -490,7 +490,7 @@ fn a_contig_belongs_to_the_closest_plasmids_when_a_margin_is_set() {
 }
 
 #[test]
-fn a_plasmid_is_found_when_the_index_also_holds_its_multimer() {
+fn multimer_keeps_plasmid() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(3_000, 51);
     let double = [&plasmid[..], &plasmid[..]].concat();
@@ -508,7 +508,7 @@ fn a_plasmid_is_found_when_the_index_also_holds_its_multimer() {
 }
 
 #[test]
-fn contigs_that_share_single_genes_do_not_add_up_to_a_plasmid() {
+fn shared_genes_ignored() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(6_000, 41);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
@@ -537,7 +537,7 @@ fn contigs_that_share_single_genes_do_not_add_up_to_a_plasmid() {
 }
 
 #[test]
-fn a_contig_with_a_long_rest_counts_only_when_the_contig_rule_allows() {
+fn contig_rule_limits() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(3_000, 5);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
@@ -576,7 +576,7 @@ fn a_contig_with_a_long_rest_counts_only_when_the_contig_rule_allows() {
 }
 
 #[test]
-fn matched_contigs_are_written_for_a_smaller_set_of_assemblies() {
+fn matched_contigs_written() {
     use std::io::Read;
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(3_000, 61);
@@ -637,7 +637,7 @@ fn matched_contigs_are_written_for_a_smaller_set_of_assemblies() {
 }
 
 #[test]
-fn contigs_of_unknown_bases_are_skipped_and_gzip_and_empty_files_are_read() {
+fn assembly_files_read() {
     use std::io::Write;
     let directory = tempfile::tempdir().unwrap();
     let first = random_sequence(3_000, 5);
@@ -669,7 +669,7 @@ fn contigs_of_unknown_bases_are_skipped_and_gzip_and_empty_files_are_read() {
 }
 
 #[test]
-fn records_are_plain_json() {
+fn records_plain_json() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_sequence(3_000, 71);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);

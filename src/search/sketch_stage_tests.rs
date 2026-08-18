@@ -80,7 +80,7 @@ fn run_with(
 }
 
 #[test]
-fn entries_below_the_coverage_limit_are_left_out() {
+fn low_bounds_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
     let kept = run(&shard, &query, 2_500, UNLIMITED);
@@ -97,7 +97,7 @@ fn entries_below_the_coverage_limit_are_left_out() {
 }
 
 #[test]
-fn the_containment_estimate_follows_the_shared_share() {
+fn containment_follows_share() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
     let seeder = Seeder::new(parameters().scheme).unwrap();
@@ -124,7 +124,7 @@ fn the_containment_estimate_follows_the_shared_share() {
 }
 
 #[test]
-fn frequent_seeds_count_as_possibly_hit_in_every_entry() {
+fn frequent_seeds_count() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
     // Seeds held by more than one entry are frequent; they keep the entries of their color sets
@@ -150,7 +150,7 @@ fn frequent_seeds_count_as_possibly_hit_in_every_entry() {
 }
 
 #[test]
-fn a_stopped_search_ends_stage_1() {
+fn stop_ends_sketch() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
     let seeder = Seeder::new(parameters().scheme).unwrap();
@@ -165,7 +165,7 @@ fn a_stopped_search_ends_stage_1() {
 }
 
 #[test]
-fn entries_without_any_seed_hit_are_left_out_at_a_low_identity() {
+fn seedless_entries_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0x10e);
     let query = random.bases(5_000);
@@ -191,7 +191,7 @@ fn entries_without_any_seed_hit_are_left_out_at_a_low_identity() {
 }
 
 #[test]
-fn entries_outside_every_frequent_color_set_get_no_possible_seed_hits() {
+fn frequent_union_only() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = Random(0xf2e);
     let (first, second) = (random.bases(3_000), random.bases(3_000));

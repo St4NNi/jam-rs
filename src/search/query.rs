@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_kmers_form_one_seed_with_every_start() {
+    fn repeats_share_kmer() {
         let query = b"ACGTTGCAACGTTGCA";
         let kmers = QueryKmers::new(&seeder(), query, false);
         assert_eq!(kmers.kmers(), 12);
@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn a_circular_query_has_a_kmer_at_every_start() {
+    fn circular_kmers_wrap() {
         let query = b"ACGTTGCAAGGT";
         let linear = QueryKmers::new(&seeder(), query, false);
         let circular = QueryKmers::new(&seeder(), query, true);
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn bases_other_than_acgt_leave_no_kmer() {
+    fn unknown_bases_skipped() {
         let query = b"ACGTTNGCAAGGT";
         let kmers = QueryKmers::new(&seeder(), query, false);
         let all: Vec<u32> = (0..kmers.seeds().len() as u32).collect();

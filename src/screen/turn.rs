@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn slices_keep_a_valid_alignment_with_its_own_score() {
+    fn slices_stay_valid() {
         let scores = AlignmentConfig::default();
         for strand in [Strand::Forward, Strand::Reverse] {
             let (query, contig, alignment) = example(strand);
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn turning_around_moves_the_gaps_to_the_other_side() {
+    fn turn_swaps_gaps() {
         for strand in [Strand::Forward, Strand::Reverse] {
             let (query, contig, alignment) = example(strand);
             let turned = swap_roles(&alignment);

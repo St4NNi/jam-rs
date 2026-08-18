@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn a_fragment_record_holds_names_counts_and_the_contig_order_cigar() {
+    fn fragment_record_fields() {
         let forward = fragment(AlignStrand::Forward, "3=1X3=1D1=");
         let record = FragmentRecord::new(&forward, 8, &contigs()).unwrap();
         assert_eq!(record.contig, "plasmid_1");
@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn decision_records_round_trip_through_json() {
+    fn decision_round_trip() {
         let decision = decision(fragment(AlignStrand::Forward, "3=1X3=1D1="));
         let record = DecisionRecord::new(8, &decision, &contigs()).unwrap();
         assert_eq!(record.fragments.len(), 1);

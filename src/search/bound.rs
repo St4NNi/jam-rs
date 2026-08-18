@@ -127,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn stretches_lie_between_and_around_the_kmers_with_seed_hits() {
+    fn stretch_lengths() {
         let linear = bound(1_000, false);
         assert_eq!(linear.stretches(&[]), vec![1_000]);
         assert_eq!(
@@ -144,7 +144,7 @@ mod tests {
     }
 
     #[test]
-    fn the_allowance_is_the_shortest_length_within_the_budget() {
+    fn allowance_fits_budget() {
         let linear = bound(10_000, false);
         let one = linear.allowance(1);
         assert!(model().miss_chance(one, 0.95) <= 1e-4);
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn each_stretch_keeps_at_most_the_allowance() {
+    fn stretches_keep_allowance() {
         let linear = bound(10_000, false);
         // 40 k-mers with seed hits, 40 bases apart, then 7,600 bases without one.
         let positions: Vec<u32> = (0..40).map(|i| 61 * i).collect();
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stretch_over_the_end_joins_both_ends() {
+    fn circular_ends_join() {
         // Stretches of 250 and 300 bases at the ends: each is shorter than the allowance, but
         // together they are not.
         let positions: Vec<u32> = (250..=5_679).collect();

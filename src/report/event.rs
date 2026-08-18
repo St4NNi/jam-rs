@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn event_records_round_trip_through_json() {
+    fn events_round_trip() {
         let events = [
             EntryEvent::Possible {
                 entry: 3,
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn a_record_with_its_shard_keeps_the_flat_json_line() {
+    fn shard_record_flat() {
         let record = Record::Dropped(Dropped {
             query: "q1".into(),
             entry: "e".into(),
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn a_summary_round_trips_and_names_the_ending() {
+    fn summary_names_ending() {
         let summary = SearchSummary {
             query_length: 5_000,
             completion: Completion::Stopped(Stopped::Deadline),

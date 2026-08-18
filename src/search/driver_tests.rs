@@ -53,7 +53,7 @@ fn search(
     query: &[u8],
     circular: bool,
     config: &SearchConfig,
-    stop_at_first_event: bool,
+    stop_early: bool,
 ) -> (SearchSummary, BTreeMap<u32, Vec<EntryEvent>>) {
     let searcher = Searcher::new(shard, model()).unwrap();
     let stop = AtomicBool::new(false);
@@ -63,7 +63,7 @@ fn search(
     };
     // Without a buffer each event is handed over only when it is read, so a stop set at the first
     // event is seen before stage 2 starts.
-    let (sender, receiver) = sync_channel(if stop_at_first_event { 0 } else { 16 });
+    let (sender, receiver) = sync_channel(if stop_early { 0 } else { 16 });
     let mut events = BTreeMap::<u32, Vec<EntryEvent>>::new();
     let summary = std::thread::scope(|scope| {
         let search = scope.spawn(|| {
@@ -72,7 +72,7 @@ fn search(
             summary
         });
         for event in receiver {
-            if stop_at_first_event {
+            if stop_early {
                 stop.store(true, Ordering::Relaxed);
             }
             events.entry(event.entry()).or_default().push(event);
@@ -100,7 +100,7 @@ fn small_shard(directory: &std::path::Path) -> (Shard, Vec<u8>) {
 }
 
 #[test]
-fn the_search_stops_after_the_requested_stage() {
+fn level_ends_search() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Sketch), false);
@@ -127,7 +127,7 @@ fn the_search_stops_after_the_requested_stage() {
 }
 
 #[test]
-fn a_stopped_search_reports_the_rest_as_unfinished() {
+fn stop_marks_unfinished() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Locate), true);
@@ -147,7 +147,7 @@ fn a_stopped_search_reports_the_rest_as_unfinished() {
 }
 
 #[test]
-fn bad_queries_and_settings_fail_at_once() {
+fn bad_input_fails() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, _) = small_shard(directory.path());
     let searcher = Searcher::new(&shard, model()).unwrap();
@@ -174,7 +174,7 @@ fn bad_queries_and_settings_fail_at_once() {
 
 /// A caller that drops the receiver ends the search as if it asked to stop.
 #[test]
-fn a_dropped_receiver_stops_the_search() {
+fn dropped_receiver_stops() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
     let searcher = Searcher::new(&shard, model()).unwrap();
@@ -194,7 +194,7 @@ fn a_dropped_receiver_stops_the_search() {
 /// Every entry holds the query at exactly the accepted identity, linear or rotated; none may be
 /// dropped by stages 1 and 2, while unrelated entries are.
 #[test]
-fn entries_at_the_accepted_identity_are_never_dropped() {
+fn accepted_identity_kept() {
     let mut random = Random(0x1055);
     for (trial, circular) in [(0, false), (1, true)] {
         let directory = tempfile::tempdir().unwrap();
@@ -250,7 +250,7 @@ fn entries_at_the_accepted_identity_are_never_dropped() {
 /// stretches without seed hits around it; none may be dropped by stages 1 and 2. Entries with a
 /// few short scattered pieces of the query must be dropped.
 #[test]
-fn a_present_piece_inside_a_long_stretch_is_never_dropped() {
+fn long_stretch_kept() {
     const PIECE: usize = 4_000;
     let mut random = Random(0x9ece);
     let directory = tempfile::tempdir().unwrap();
