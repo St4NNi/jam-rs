@@ -113,14 +113,7 @@ impl<'a> CoverageBound<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
-
-    fn model() -> &'static MissModel {
-        static MODEL: OnceLock<MissModel> = OnceLock::new();
-        MODEL.get_or_init(|| {
-            MissModel::with_layouts(crate::search::test_shard::parameters().scheme, 50).unwrap()
-        })
-    }
+    use crate::test_support::miss_model as model;
 
     fn bound(length: u64, circular: bool) -> CoverageBound<'static> {
         CoverageBound::new(model(), LossBudget::default(), 0.95, length, circular, 0)

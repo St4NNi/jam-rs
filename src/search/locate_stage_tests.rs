@@ -3,19 +3,19 @@
 // SPDX-License-Identifier: MIT
 
 use super::bound::CoverageBound;
-use super::control::SearchControl;
 use super::events::DropReason;
 use super::locate_stage::{
     LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
 };
 use super::query::QueryKmers;
 use super::sketch_stage::{PossibleEntry, SketchLimits, sketch_stage};
-use super::test_shard::{Random, build, model, parameters};
-use crate::index::Shard;
+use crate::index::{Shard, build_shard};
 use crate::loss::LossBudget;
 use crate::seeds::Seeder;
+use crate::test_support::{
+    build_options, miss_model, no_stop, parameters, random_bases, rng, test_shard, write_entries,
+};
 use std::ops::Range;
-use std::sync::atomic::AtomicBool;
 
 const FLANK: u64 = 1_000;
 
@@ -25,7 +25,7 @@ fn kmers(query: &[u8]) -> QueryKmers {
 
 fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
     CoverageBound::new(
-        model(),
+        miss_model(),
         LossBudget::default(),
         0.95,
         length,
@@ -41,11 +41,7 @@ fn locate(
     bound: &CoverageBound,
     possible: &PossibleEntry,
 ) -> (LocateOutcome, LocateWork) {
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let control = no_stop();
     let request = LocateRequest {
         query,
         bound,
@@ -73,11 +69,7 @@ fn search(
 ) -> Vec<(PossibleEntry, LocateOutcome, LocateWork)> {
     let query_kmers = kmers(query);
     let bound = bound(query.len() as u64, required);
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let control = no_stop();
     let limits = SketchLimits {
         frequent_seed_entries: u64::MAX,
         max_seed_hits: u64::MAX,
@@ -107,12 +99,24 @@ fn windows(outcome: &LocateOutcome) -> Vec<(u32, Vec<Range<u64>>)> {
 #[test]
 fn false_seed_hits() {
     let directory = tempfile::tempdir().unwrap();
-    let mut random = Random(0xfa15e);
-    let query = random.bases(20_000);
+    let mut random = rng(0xfa15e5);
+    let query = random_bases(&mut random, 20_000);
     // The fewest buckets put many seeds of the large unrelated entry into each bucket, so some
     // share a fingerprint with a query k-mer.
-    let entries = vec![vec![random.bases(400_000)], vec![query.clone()]];
-    let shard = build(directory.path(), &entries, Some(8));
+    let entries = vec![
+        vec![random_bases(&mut random, 400_000)],
+        vec![query.clone()],
+    ];
+    let mut options = build_options(directory.path(), 2);
+    options.bucket_bits = Some(8);
+    let output = directory.path().join("shard");
+    build_shard(
+        &write_entries(directory.path(), &entries),
+        &output,
+        &options,
+    )
+    .unwrap();
+    let shard = Shard::open(&output).unwrap();
     let results = search(&shard, &query, 0);
     let (possible, outcome, work) = results.iter().find(|(p, ..)| p.entry == 0).unwrap();
     assert!(
@@ -133,10 +137,10 @@ fn false_seed_hits() {
 #[test]
 fn second_pruning_drops() {
     let directory = tempfile::tempdir().unwrap();
-    let mut random = Random(0xb0b);
-    let query = random.bases(5_000);
-    let entries = vec![vec![random.bases(10_000)]];
-    let shard = build(directory.path(), &entries, None);
+    let mut random = rng(0xb0b);
+    let query = random_bases(&mut random, 5_000);
+    let entries = vec![vec![random_bases(&mut random, 10_000)]];
+    let shard = test_shard(directory.path(), &entries);
     let query_kmers = kmers(&query);
     // As if the sketch had placed every query k-mer in the unrelated entry.
     let possible = PossibleEntry {
@@ -154,21 +158,26 @@ fn second_pruning_drops() {
 #[test]
 fn flank_widens_bins() {
     let directory = tempfile::tempdir().unwrap();
-    let mut random = Random(0x3d);
-    let query = random.bases(4_000);
+    let mut random = rng(0x3d);
+    let query = random_bases(&mut random, 4_000);
     let entries = vec![
         // The query in the middle of the second contig.
         vec![
-            random.bases(3_000),
-            [random.bases(20_000), query.clone(), random.bases(20_000)].concat(),
+            random_bases(&mut random, 3_000),
+            [
+                random_bases(&mut random, 20_000),
+                query.clone(),
+                random_bases(&mut random, 20_000),
+            ]
+            .concat(),
         ],
         // The query split over the end of one contig and the start of the next.
         vec![
-            [random.bases(10_000), query[..2_000].to_vec()].concat(),
-            [query[2_000..].to_vec(), random.bases(10_000)].concat(),
+            [random_bases(&mut random, 10_000), query[..2_000].to_vec()].concat(),
+            [query[2_000..].to_vec(), random_bases(&mut random, 10_000)].concat(),
         ],
     ];
-    let shard = build(directory.path(), &entries, None);
+    let shard = test_shard(directory.path(), &entries);
     let results = search(&shard, &query, 2_000);
     assert_eq!(results.len(), 2);
     for (possible, outcome, _) in &results {

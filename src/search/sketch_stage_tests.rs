@@ -6,10 +6,13 @@ use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::query::QueryKmers;
 use super::sketch_stage::{SketchLimits, sketch_stage};
-use super::test_shard::{Random, build, model, parameters};
-use crate::index::Shard;
+use crate::index::{Shard, build_shard};
 use crate::loss::LossBudget;
 use crate::seeds::Seeder;
+use crate::test_support::{
+    build_options, miss_model, no_stop, parameters, random_bases, rng, test_shard,
+    with_substitutions, write_entries,
+};
 use std::sync::atomic::AtomicBool;
 
 const UNLIMITED: SketchLimits = SketchLimits {
@@ -20,16 +23,26 @@ const UNLIMITED: SketchLimits = SketchLimits {
 /// Entry 0 holds the query, entry 1 a copy at 97% identity, entry 2 the first 30% of it, and
 /// entry 3 is unrelated.
 fn shard(directory: &std::path::Path) -> (Shard, Vec<u8>) {
-    let mut random = Random(0x5eed);
-    let query = random.bases(5_000);
-    let close = random.mutate(&query, 0.97);
+    let mut random = rng(0x5eed);
+    let query = random_bases(&mut random, 5_000);
+    let close = with_substitutions(&mut random, &query, 0.97);
     let entries = vec![
-        vec![[random.bases(3_000), query.clone(), random.bases(2_000)].concat()],
-        vec![random.bases(1_000), [close, random.bases(500)].concat()],
-        vec![[random.bases(4_000), query[..1_500].to_vec()].concat()],
-        vec![random.bases(8_000)],
+        vec![
+            [
+                random_bases(&mut random, 3_000),
+                query.clone(),
+                random_bases(&mut random, 2_000),
+            ]
+            .concat(),
+        ],
+        vec![
+            random_bases(&mut random, 1_000),
+            [close, random_bases(&mut random, 500)].concat(),
+        ],
+        vec![[random_bases(&mut random, 4_000), query[..1_500].to_vec()].concat()],
+        vec![random_bases(&mut random, 8_000)],
     ];
-    (build(directory, &entries, None), query)
+    (test_shard(directory, &entries), query)
 }
 
 fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
@@ -38,7 +51,7 @@ fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
 
 fn bound_at(length: u64, required_bases: u64, identity: f64) -> CoverageBound<'static> {
     CoverageBound::new(
-        model(),
+        miss_model(),
         LossBudget::default(),
         identity,
         length,
@@ -61,11 +74,7 @@ fn run_with(
 ) -> (Vec<(u32, u64)>, u64) {
     let seeder = Seeder::new(parameters().scheme).unwrap();
     let kmers = QueryKmers::new(&seeder, query, false);
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let control = no_stop();
     let outcome = sketch_stage(shard.sketch(), &kmers, bound, limits, control).unwrap();
     assert_eq!(
         outcome.work.possible_entries,
@@ -102,11 +111,7 @@ fn containment_follows_share() {
     let (shard, query) = shard(directory.path());
     let seeder = Seeder::new(parameters().scheme).unwrap();
     let kmers = QueryKmers::new(&seeder, &query, false);
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let control = no_stop();
     let outcome =
         sketch_stage(shard.sketch(), &kmers, &bound(5_000, 0), UNLIMITED, control).unwrap();
     let estimate = |entry: u32| {
@@ -167,22 +172,22 @@ fn stop_ends_sketch() {
 #[test]
 fn seedless_entries_dropped() {
     let directory = tempfile::tempdir().unwrap();
-    let mut random = Random(0x10e);
-    let query = random.bases(5_000);
+    let mut random = rng(0x10e);
+    let query = random_bases(&mut random, 5_000);
     let entries = vec![
-        vec![[random.bases(1_000), query.clone()].concat()],
+        vec![[random_bases(&mut random, 1_000), query.clone()].concat()],
         // One short piece of the query: a single seed hit or very few.
         vec![
             [
-                random.bases(3_000),
+                random_bases(&mut random, 3_000),
                 query[2_000..2_060].to_vec(),
-                random.bases(3_000),
+                random_bases(&mut random, 3_000),
             ]
             .concat(),
         ],
-        vec![random.bases(6_000)],
+        vec![random_bases(&mut random, 6_000)],
     ];
-    let shard = build(directory.path(), &entries, None);
+    let shard = test_shard(directory.path(), &entries);
     // At 80% a stretch without seed hits may hold the query, so every bound is the whole query.
     let low = bound_at(5_000, 4_500, 0.8);
     let (kept, without) = run_with(&shard, &query, &low, UNLIMITED);
@@ -193,18 +198,32 @@ fn seedless_entries_dropped() {
 #[test]
 fn frequent_union_only() {
     let directory = tempfile::tempdir().unwrap();
-    let mut random = Random(0xf2e);
-    let (first, second) = (random.bases(3_000), random.bases(3_000));
+    let mut random = rng(0xf2e);
+    let (first, second) = (
+        random_bases(&mut random, 3_000),
+        random_bases(&mut random, 3_000),
+    );
     let query = [first.clone(), second.clone()].concat();
     // The first half is in entries 0, 1, 2 and 4, so its seeds are frequent at a limit of 2. The
     // second half is in entries 3 and 4 only, so its seeds are expanded.
     let mut entries: Vec<Vec<Vec<u8>>> = (0..3)
-        .map(|_| vec![[random.bases(500), first.clone()].concat()])
+        .map(|_| vec![[random_bases(&mut random, 500), first.clone()].concat()])
         .collect();
-    entries.push(vec![[random.bases(500), second.clone()].concat()]);
+    entries.push(vec![
+        [random_bases(&mut random, 500), second.clone()].concat(),
+    ]);
     entries.push(vec![query.clone()]);
     // Many buckets, so no seed of entry 3 shares a stored key with a seed of the first half.
-    let shard = build(directory.path(), &entries, Some(20));
+    let mut options = build_options(directory.path(), 2);
+    options.bucket_bits = Some(20);
+    let output = directory.path().join("shard");
+    build_shard(
+        &write_entries(directory.path(), &entries),
+        &output,
+        &options,
+    )
+    .unwrap();
+    let shard = Shard::open(&output).unwrap();
     let limits = SketchLimits {
         frequent_seed_entries: 2,
         max_seed_hits: u64::MAX,
