@@ -3,36 +3,31 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::tests::{diverged, index_of, plasmids, random_sequence, reverse_complement, screen};
+use super::tests::{index_of, plasmids, screen};
 use super::*;
 use crate::index::Shard;
-use crate::loss::{LossBudget, MissModel};
-use crate::search::SearchControl;
+use crate::loss::LossBudget;
 use crate::search::align_stage::{AlignStageWorkspace, PreparedQuery, align_entry};
 use crate::search::bound::CoverageBound;
 use crate::search::locate_stage::{LocateOutcome, LocateRequest, LocateWorkspace, locate_entry};
 use crate::search::query::QueryKmers;
 use crate::search::sketch_stage::{SketchLimits, sketch_stage};
-use crate::seeds::Seeder;
-use std::sync::atomic::AtomicBool;
+use crate::seeds::{Seeder, reverse_complement};
+use crate::test_support::{miss_model, no_stop, random_bases, rng, with_substitutions};
 
 /// The decision of a forward search of `query` (linear) in the only entry of `shard`: covered
 /// bases, identity and the contigs of the mosaic, or `None` when it does not qualify.
 fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f64, Vec<u32>)> {
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let control = no_stop();
     let parameters = shard.manifest().parameters;
     let seeder = Seeder::new(parameters.scheme).unwrap();
-    let model = MissModel::with_layouts(parameters.scheme, 20).unwrap();
+    let model = miss_model();
     let rule = &config.rule;
     let length = query.len() as u64;
     let kmers = QueryKmers::new(&seeder, query, false);
     let required = rule.min_query_coverage.required_bases(length);
     let bound = CoverageBound::new(
-        &model,
+        model,
         LossBudget::default(),
         rule.min_identity,
         length,
@@ -94,18 +89,18 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
 #[test]
 fn screen_matches_search() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(9_000, 101);
-    let gene = random_sequence(1_500, 102);
+    let plasmid = random_bases(&mut rng(101), 9_000);
+    let gene = random_bases(&mut rng(102), 1_500);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid), ("gene", &gene)]);
     // A relative at about 97.5% identity with small gaps, in three contigs, one reversed, and a
     // chromosome contig with the gene of the other entry.
-    let mut relative = diverged(&plasmid, 40, 103);
+    let mut relative = with_substitutions(&mut rng(103), &plasmid, 0.975);
     relative.drain(4_000..4_004);
     relative.splice(6_000..6_000, *b"ACG");
     let chromosome = [
-        &random_sequence(6_000, 104)[..],
+        &random_bases(&mut rng(104), 6_000)[..],
         &gene,
-        &random_sequence(6_000, 105),
+        &random_bases(&mut rng(105), 6_000),
     ]
     .concat();
     let contigs = [

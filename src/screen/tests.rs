@@ -5,53 +5,10 @@
 use super::*;
 use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
-use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
-use crate::search::SearchControl;
-use crate::seeds::complement;
+use crate::index::{EntryInput, Shard, build_shard};
+use crate::seeds::reverse_complement;
+use crate::test_support::{build_options, no_stop, random_bases, rng, with_substitutions};
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
-
-pub(super) fn random_sequence(length: usize, seed: u64) -> Vec<u8> {
-    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    (0..length)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            b"ACGT"[(state % 4) as usize]
-        })
-        .collect()
-}
-
-pub(super) fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
-    sequence
-        .iter()
-        .rev()
-        .map(|&base| complement(base))
-        .collect()
-}
-
-/// A copy with about one base in `one_in` changed.
-pub(super) fn diverged(sequence: &[u8], one_in: u64, mut state: u64) -> Vec<u8> {
-    sequence
-        .iter()
-        .map(|&base| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            if state.is_multiple_of(one_in) {
-                match base {
-                    b'A' => b'C',
-                    b'C' => b'G',
-                    b'G' => b'T',
-                    _ => b'A',
-                }
-            } else {
-                base
-            }
-        })
-        .collect()
-}
 
 /// An index with one entry per item, each a list of contigs.
 pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard {
@@ -72,21 +29,7 @@ pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard 
             }
         })
         .collect();
-    let options = BuildOptions {
-        parameters: Parameters {
-            scheme: crate::seeds::SeedScheme {
-                k: 21,
-                w: 20,
-                ..Default::default()
-            },
-            bin_bits: 8,
-            ..Parameters::default()
-        },
-        bucket_bits: None,
-        threads: 2,
-        temporary_directory: directory.to_path_buf(),
-        entry_per_record: false,
-    };
+    let options = build_options(directory, 2);
     let output = directory.join("index");
     build_shard(&inputs, &output, &options).unwrap();
     Shard::open(&output).unwrap()
@@ -121,11 +64,7 @@ pub(super) fn screen_path(
     path: &Path,
     config: &ScreenConfig,
 ) -> (Vec<ScreenEntry>, AssemblySummary) {
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let control = no_stop();
     let screener = Screener::new(shard, config.clone()).unwrap();
     let mut reported = Vec::new();
     let summary = screener
@@ -194,8 +133,8 @@ fn placed(report: &ScreenEntry) -> Vec<(u64, u64, String, u64, u64, Strand, Stri
 #[test]
 fn planted_plasmid_found() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(6_000, 1);
-    let other = random_sequence(6_000, 2);
+    let plasmid = random_bases(&mut rng(1), 6_000);
+    let other = random_bases(&mut rng(2), 6_000);
     let shard = plasmids(
         directory.path(),
         &[("plasmid", &plasmid), ("other", &other)],
@@ -211,14 +150,14 @@ fn planted_plasmid_found() {
     ]
     .concat();
     let contig = [
-        &random_sequence(2_000, 3)[..],
+        &random_bases(&mut rng(3), 2_000)[..],
         &copy,
-        &random_sequence(2_000, 4),
+        &random_bases(&mut rng(4), 2_000),
     ]
     .concat();
     let contigs = [
         ("chromosome", contig),
-        ("unrelated", random_sequence(5_000, 5)),
+        ("unrelated", random_bases(&mut rng(5), 5_000)),
     ];
     let (reported, summary) = screen(&shard, directory.path(), &contigs, &ScreenConfig::default());
     assert_eq!(names(&reported), ["plasmid"]);
@@ -259,12 +198,12 @@ fn planted_plasmid_found() {
 #[test]
 fn both_strands_placed() {
     let directory = tempfile::tempdir().unwrap();
-    let first = random_sequence(3_000, 5);
-    let second = random_sequence(3_000, 6);
+    let first = random_bases(&mut rng(5), 3_000);
+    let second = random_bases(&mut rng(6), 3_000);
     let shard = plasmids(directory.path(), &[("first", &first), ("second", &second)]);
     let contigs = [
         ("forward", first[200..1_800].to_vec()),
-        ("unrelated", random_sequence(2_000, 7)),
+        ("unrelated", random_bases(&mut rng(7), 2_000)),
         ("reverse", reverse_complement(&first[1_900..2_900])),
         // A third of the second entry: below the query coverage asked for.
         ("partial", second[..1_000].to_vec()),
@@ -310,7 +249,7 @@ fn both_strands_placed() {
 #[test]
 fn split_plasmid_counts() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(6_000, 31);
+    let plasmid = random_bases(&mut rng(31), 6_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
     let contigs = [
         ("one", plasmid[..2_100].to_vec()),
@@ -322,7 +261,10 @@ fn split_plasmid_counts() {
     assert_eq!(reported[0].contigs.len(), 3);
     assert_eq!(reported[0].covered_bases, 5_800);
     // One of the three and a contig from another place cover less than asked for.
-    let few = [contigs[0].clone(), ("odd", random_sequence(2_000, 32))];
+    let few = [
+        contigs[0].clone(),
+        ("odd", random_bases(&mut rng(32), 2_000)),
+    ];
     assert!(
         screen(&shard, directory.path(), &few, &close_lineage())
             .0
@@ -333,7 +275,7 @@ fn split_plasmid_counts() {
 #[test]
 fn spacer_blocks_joins() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(3_000, 15);
+    let plasmid = random_bases(&mut rng(15), 3_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
     // The two contigs continue each other on the plasmid, so an alignment of the batch could run
     // through the spacer.
@@ -372,13 +314,13 @@ fn spacer_blocks_joins() {
 #[test]
 fn batch_border_whole() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(4_000, 81);
+    let plasmid = random_bases(&mut rng(81), 4_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
     // A contig longer than a batch goes in pieces; the plasmid sits over the cut at 5,000.
     let long = [
-        &random_sequence(3_000, 82)[..],
+        &random_bases(&mut rng(82), 3_000)[..],
         &plasmid,
-        &random_sequence(5_000, 83),
+        &random_bases(&mut rng(83), 5_000),
     ]
     .concat();
     // A contig of its own right after it starts the next batch.
@@ -407,7 +349,10 @@ fn batch_border_whole() {
 #[test]
 fn entry_contigs_separate() {
     let directory = tempfile::tempdir().unwrap();
-    let (first, second) = (random_sequence(3_000, 91), random_sequence(2_000, 92));
+    let (first, second) = (
+        random_bases(&mut rng(91), 3_000),
+        random_bases(&mut rng(92), 2_000),
+    );
     let shard = index_of(directory.path(), &[("pair", &[&first, &second])]);
     let contigs = [("copy", second.clone())];
     let (reported, _) = screen(&shard, directory.path(), &contigs, &ScreenConfig::default());
@@ -421,8 +366,8 @@ fn entry_contigs_separate() {
 #[test]
 fn sliver_not_aligned() {
     let directory = tempfile::tempdir().unwrap();
-    let first = random_sequence(3_000, 5);
-    let second = random_sequence(3_000, 6);
+    let first = random_bases(&mut rng(5), 3_000);
+    let second = random_bases(&mut rng(6), 3_000);
     let shard = plasmids(directory.path(), &[("first", &first), ("second", &second)]);
     let contigs = [
         ("most", first[..2_500].to_vec()),
@@ -436,8 +381,8 @@ fn sliver_not_aligned() {
 #[test]
 fn distant_relative_skipped() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(6_000, 11);
-    let relative = diverged(&plasmid, 16, 12);
+    let plasmid = random_bases(&mut rng(11), 6_000);
+    let relative = with_substitutions(&mut rng(12), &plasmid, 0.9375);
     let shard = plasmids(
         directory.path(),
         &[("plasmid", &plasmid), ("relative", &relative)],
@@ -455,8 +400,8 @@ fn distant_relative_skipped() {
 #[test]
 fn margin_picks_closest() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(6_000, 21);
-    let cousin = diverged(&plasmid, 250, 22);
+    let plasmid = random_bases(&mut rng(21), 6_000);
+    let cousin = with_substitutions(&mut rng(22), &plasmid, 0.996);
     let shard = plasmids(
         directory.path(),
         &[("plasmid", &plasmid), ("cousin", &cousin)],
@@ -492,7 +437,7 @@ fn margin_picks_closest() {
 #[test]
 fn multimer_keeps_plasmid() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(3_000, 51);
+    let plasmid = random_bases(&mut rng(51), 3_000);
     let double = [&plasmid[..], &plasmid[..]].concat();
     let shard = plasmids(
         directory.path(),
@@ -510,13 +455,13 @@ fn multimer_keeps_plasmid() {
 #[test]
 fn shared_genes_ignored() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(6_000, 41);
+    let plasmid = random_bases(&mut rng(41), 6_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
     // Four chromosome contigs of 20 kb, each with a different quarter of the plasmid in it.
     let contigs: Vec<(String, Vec<u8>)> = (0..4)
         .map(|quarter| {
             let gene = &plasmid[quarter * 1_500..(quarter + 1) * 1_500];
-            let chromosome = random_sequence(20_000, 42 + quarter as u64);
+            let chromosome = random_bases(&mut rng(42 + quarter as u64), 20_000);
             (
                 format!("chromosome{quarter}"),
                 [&chromosome[..8_000], gene, &chromosome[8_000..]].concat(),
@@ -539,9 +484,9 @@ fn shared_genes_ignored() {
 #[test]
 fn contig_rule_limits() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(3_000, 5);
+    let plasmid = random_bases(&mut rng(5), 3_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
-    let carrier = [&plasmid[2_000..], &random_sequence(9_000, 8)[..]].concat();
+    let carrier = [&plasmid[2_000..], &random_bases(&mut rng(8), 9_000)[..]].concat();
     let contigs = [("pure", plasmid[..2_000].to_vec()), ("carrier", carrier)];
     let spans = |report: &ScreenEntry| -> Vec<(String, u64, u64)> {
         report
@@ -579,7 +524,7 @@ fn contig_rule_limits() {
 fn matched_contigs_written() {
     use std::io::Read;
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(3_000, 61);
+    let plasmid = random_bases(&mut rng(61), 3_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
     let read = |path: &Path| {
         let mut text = String::new();
@@ -596,7 +541,7 @@ fn matched_contigs_written() {
     };
     let contigs = [
         ("copy", plasmid[200..2_800].to_vec()),
-        ("other", random_sequence(2_000, 62)),
+        ("other", random_bases(&mut rng(62), 2_000)),
     ];
     let (reported, summary) = screen(&shard, directory.path(), &contigs, &config);
     assert!(reported.is_empty());
@@ -630,7 +575,7 @@ fn matched_contigs_written() {
         contig_dir: Some(empty.clone()),
         ..config
     };
-    let unrelated = [("other", random_sequence(2_000, 63))];
+    let unrelated = [("other", random_bases(&mut rng(63), 2_000))];
     let (_, summary) = screen(&shard, directory.path(), &unrelated, &config);
     assert_eq!(summary.matched_contigs, 0);
     assert!(!empty.exists());
@@ -640,7 +585,7 @@ fn matched_contigs_written() {
 fn assembly_files_read() {
     use std::io::Write;
     let directory = tempfile::tempdir().unwrap();
-    let first = random_sequence(3_000, 5);
+    let first = random_bases(&mut rng(5), 3_000);
     let shard = plasmids(directory.path(), &[("first", &first)]);
     let fasta = [
         b">gap\n".as_slice(),
@@ -671,7 +616,7 @@ fn assembly_files_read() {
 #[test]
 fn records_plain_json() {
     let directory = tempfile::tempdir().unwrap();
-    let plasmid = random_sequence(3_000, 71);
+    let plasmid = random_bases(&mut rng(71), 3_000);
     let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
     let contigs = [("copy", reverse_complement(&plasmid))];
     let (reported, summary) = screen(&shard, directory.path(), &contigs, &ScreenConfig::default());

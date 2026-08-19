@@ -172,15 +172,7 @@ pub(super) fn swap_roles(alignment: &Alignment) -> Alignment {
 mod tests {
     use super::*;
     use crate::align::{format_cigar, parse_cigar};
-    use crate::seeds::complement;
-
-    fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
-        sequence
-            .iter()
-            .rev()
-            .map(|&base| complement(base))
-            .collect()
-    }
+    use crate::seeds::reverse_complement;
 
     /// Checks that every paired base of `alignment` pairs equal bases (for `=`) or different ones
     /// (for `X`) between `query` and `contig`.

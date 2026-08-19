@@ -2,6 +2,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use rand::rngs::StdRng;
+use rand::{RngExt, SeedableRng};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -13,14 +15,9 @@ fn jam(arguments: &[&std::ffi::OsStr]) -> Output {
 }
 
 fn random_bases(seed: u64, length: usize) -> Vec<u8> {
-    let mut state = seed;
+    let mut rng = StdRng::seed_from_u64(seed);
     (0..length)
-        .map(|_| {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            b"ACGT"[(state >> 33) as usize % 4]
-        })
+        .map(|_| b"ACGT"[rng.random_range(0..4)])
         .collect()
 }
 
@@ -160,11 +157,17 @@ fn sketch_level_possible() {
     let (summary, possible) = records.split_last().unwrap();
     assert_eq!(summary["kind"], "summary");
     assert!(possible.iter().all(|record| record["kind"] == "possible"));
-    // The unrelated entries share no seed with the query, so only the planted one is possible.
-    assert_eq!(possible.len(), 1);
-    assert_eq!(possible[0]["entry"], "plasmid_1");
-    assert!(possible[0]["containment_estimate"].as_f64().unwrap() > 0.9);
-    assert_eq!(summary["sketch"]["entries_without_seed_hits"], 2);
+    // An unrelated entry is possible only by a false seed hit, so its estimate stays low.
+    let estimate = |record: &serde_json::Value| record["containment_estimate"].as_f64().unwrap();
+    for record in possible {
+        let planted = record["entry"] == "plasmid_1";
+        assert!(planted == (estimate(record) > 0.9), "{lines:?}");
+    }
+    assert!(possible.iter().any(|record| record["entry"] == "plasmid_1"));
+    let without = summary["sketch"]["entries_without_seed_hits"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(without + possible.len() as u64, 3);
 }
 
 #[test]

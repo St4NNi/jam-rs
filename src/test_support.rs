@@ -3,11 +3,14 @@
 // SPDX-License-Identifier: MIT
 
 use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
+use crate::loss::MissModel;
+use crate::search::SearchControl;
 use crate::seeds::SeedScheme;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 use std::path::Path;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use tokio::runtime::{Handle, Runtime};
 
 /// A random generator that gives the same values for the same seed on every run.
@@ -80,19 +83,24 @@ pub fn write_entries(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Vec<EntryInp
     inputs.collect()
 }
 
-/// The build options of the test shards: k 21, w 20 and bins of 256 bases, so short queries have
+/// The parameters of the test shards: k 21, w 20 and bins of 256 bases, so short queries have
 /// enough seeds.
+pub fn parameters() -> Parameters {
+    Parameters {
+        scheme: SeedScheme {
+            k: 21,
+            w: 20,
+            ..SeedScheme::default()
+        },
+        bin_bits: 8,
+        ..Parameters::default()
+    }
+}
+
+/// The build options of the test shards, with `parameters`.
 pub fn build_options(directory: &Path, threads: usize) -> BuildOptions {
     BuildOptions {
-        parameters: Parameters {
-            scheme: SeedScheme {
-                k: 21,
-                w: 20,
-                ..SeedScheme::default()
-            },
-            bin_bits: 8,
-            ..Parameters::default()
-        },
+        parameters: parameters(),
         bucket_bits: None,
         threads,
         temporary_directory: directory.to_path_buf(),
@@ -106,6 +114,22 @@ pub fn test_shard(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Shard {
     let output = directory.join("shard");
     build_shard(&inputs, &output, &build_options(directory, 2)).unwrap();
     Shard::open(&output).unwrap()
+}
+
+/// The miss model of the test shards, built once per test process. 50 layouts per length keep
+/// the build short and are enough for tests.
+pub fn miss_model() -> &'static MissModel {
+    static MODEL: OnceLock<MissModel> = OnceLock::new();
+    MODEL.get_or_init(|| MissModel::with_layouts(parameters().scheme, 50).unwrap())
+}
+
+/// A search control without a deadline whose stop flag is never set.
+pub fn no_stop() -> SearchControl<'static> {
+    static NEVER: AtomicBool = AtomicBool::new(false);
+    SearchControl {
+        deadline: None,
+        stop: &NEVER,
+    }
 }
 
 #[cfg(test)]
