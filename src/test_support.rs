@@ -116,6 +116,20 @@ pub fn test_shard(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Shard {
     Shard::open(&output).unwrap()
 }
 
+/// A copy of `bases` with exactly `1 - identity` of its bases changed, at random places.
+pub fn diverged(rng: &mut StdRng, bases: &[u8], identity: f64) -> Vec<u8> {
+    let mut copy = bases.to_vec();
+    let changes = ((1.0 - identity) * bases.len() as f64).round() as usize;
+    let mut places: Vec<usize> = (0..bases.len()).collect();
+    for index in 0..changes {
+        places.swap(index, rng.random_range(index..bases.len()));
+        let at = places[index];
+        let others: Vec<u8> = b"ACGT".iter().copied().filter(|&b| b != copy[at]).collect();
+        copy[at] = others[rng.random_range(0..others.len())];
+    }
+    copy
+}
+
 /// The miss model of the test shards, built once per test process. 50 layouts per length keep
 /// the build short and are enough for tests.
 pub fn miss_model() -> &'static MissModel {
@@ -150,5 +164,13 @@ mod tests {
         let same = bases.iter().zip(&copy).filter(|(a, b)| a == b).count();
         assert!((89_000..91_000).contains(&same), "{same}");
         assert_eq!(with_substitutions(&mut rng, &bases, 1.0), bases);
+    }
+
+    #[test]
+    fn diverged_changes_exactly() {
+        let mut rng = rng(2);
+        let bases = random_bases(&mut rng, 1_000);
+        let copy = diverged(&mut rng, &bases, 0.95);
+        assert_eq!(bases.iter().zip(&copy).filter(|(a, b)| a != b).count(), 50);
     }
 }

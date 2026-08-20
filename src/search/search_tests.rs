@@ -5,10 +5,11 @@
 use super::control::SearchControl;
 use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
-use super::test_shard::{Random, build, model, reverse_complement};
 use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
 use crate::index::Shard;
+use crate::seeds::reverse_complement;
+use crate::test_support::{miss_model, random_bases, rng, test_shard};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::sync_channel;
@@ -34,7 +35,7 @@ fn search(
     circular: bool,
     config: &SearchConfig,
 ) -> (SearchSummary, BTreeMap<u32, Vec<EntryEvent>>) {
-    let searcher = Searcher::new(shard, model()).unwrap();
+    let searcher = Searcher::new(shard, miss_model()).unwrap();
     let stop = AtomicBool::new(false);
     let control = SearchControl {
         deadline: None,
@@ -84,28 +85,33 @@ fn fragments(event: &EntryEvent) -> Vec<&Fragment> {
 /// Entry 0: the query with three substitutions in its second contig, at 10,000. Entry 1: the
 /// reverse complement of the query at 8,000. Entry 2: unrelated.
 fn planted_shard(directory: &std::path::Path) -> (Shard, Vec<u8>) {
-    let mut random = Random(0xa119);
-    let query = random.bases(QUERY_LENGTH);
+    let mut random = rng(0xa119);
+    let query = random_bases(&mut random, QUERY_LENGTH);
     let mut changed = query.clone();
     for at in [1_000, 2_000, 3_000] {
         changed[at] = if changed[at] == b'A' { b'C' } else { b'A' };
     }
     let entries = vec![
         vec![
-            random.bases(3_000),
-            [random.bases(10_000), changed, random.bases(10_000)].concat(),
-        ],
-        vec![
+            random_bases(&mut random, 3_000),
             [
-                random.bases(8_000),
-                reverse_complement(&query),
-                random.bases(4_000),
+                random_bases(&mut random, 10_000),
+                changed,
+                random_bases(&mut random, 10_000),
             ]
             .concat(),
         ],
-        vec![random.bases(20_000)],
+        vec![
+            [
+                random_bases(&mut random, 8_000),
+                reverse_complement(&query),
+                random_bases(&mut random, 4_000),
+            ]
+            .concat(),
+        ],
+        vec![random_bases(&mut random, 20_000)],
     ];
-    (build(directory, &entries, None), query)
+    (test_shard(directory, &entries), query)
 }
 
 #[test]
@@ -170,14 +176,21 @@ fn decision_drops_entry() {
 #[test]
 fn circular_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();
-    let mut random = Random(0xc1c);
-    let query = random.bases(QUERY_LENGTH);
+    let mut random = rng(0xc1c);
+    let query = random_bases(&mut random, QUERY_LENGTH);
     let rotated = [&query[1_700..], &query[..1_700]].concat();
     let entries = vec![
-        vec![[random.bases(6_000), rotated, random.bases(6_000)].concat()],
-        vec![random.bases(15_000)],
+        vec![
+            [
+                random_bases(&mut random, 6_000),
+                rotated,
+                random_bases(&mut random, 6_000),
+            ]
+            .concat(),
+        ],
+        vec![random_bases(&mut random, 15_000)],
     ];
-    let shard = build(directory.path(), &entries, None);
+    let shard = test_shard(directory.path(), &entries);
     let (summary, events) = search(&shard, &query, true, &config());
     assert_eq!(summary.align.confirmed_entries, 1);
     let EntryEvent::Confirmed(aligned) = last_event(&events, 0) else {

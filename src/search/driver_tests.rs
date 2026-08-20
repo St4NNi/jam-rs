@@ -5,32 +5,15 @@
 use super::control::{SearchControl, Stopped};
 use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
-use super::test_shard::{Random, build, model};
 use crate::decide::QueryCoverage;
 use crate::index::Shard;
+use crate::test_support::{diverged, miss_model, no_stop, random_bases, rng, test_shard};
+use rand::RngExt;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::sync_channel;
 
 const QUERY_LENGTH: usize = 5_000;
-
-/// A copy of `sequence` with exactly `1 - identity` of its bases changed, at random places.
-fn diverged(random: &mut Random, sequence: &[u8], identity: f64) -> Vec<u8> {
-    let mut copy = sequence.to_vec();
-    let changes = ((1.0 - identity) * sequence.len() as f64).round() as usize;
-    let mut changed = vec![false; sequence.len()];
-    let mut done = 0;
-    while done < changes {
-        let at = (random.next() % sequence.len() as u64) as usize;
-        if !changed[at] {
-            changed[at] = true;
-            let others: Vec<u8> = b"ACGT".iter().copied().filter(|&b| b != copy[at]).collect();
-            copy[at] = others[(random.next() % 3) as usize];
-            done += 1;
-        }
-    }
-    copy
-}
 
 fn config(level: SearchStage) -> SearchConfig {
     let mut config = SearchConfig {
@@ -55,7 +38,7 @@ fn search(
     config: &SearchConfig,
     stop_early: bool,
 ) -> (SearchSummary, BTreeMap<u32, Vec<EntryEvent>>) {
-    let searcher = Searcher::new(shard, model()).unwrap();
+    let searcher = Searcher::new(shard, miss_model()).unwrap();
     let stop = AtomicBool::new(false);
     let control = SearchControl {
         deadline: None,
@@ -84,19 +67,24 @@ fn search(
 
 /// Entries 0 to 3 hold the query at 97% identity, entries 4 to 7 are unrelated.
 fn small_shard(directory: &std::path::Path) -> (Shard, Vec<u8>) {
-    let mut random = Random(0xd1e);
-    let query = random.bases(QUERY_LENGTH);
+    let mut random = rng(0xd1e);
+    let query = random_bases(&mut random, QUERY_LENGTH);
     let mut entries = Vec::new();
     for _ in 0..4 {
         let copy = diverged(&mut random, &query, 0.97);
         entries.push(vec![
-            [random.bases(2_000), copy, random.bases(2_000)].concat(),
+            [
+                random_bases(&mut random, 2_000),
+                copy,
+                random_bases(&mut random, 2_000),
+            ]
+            .concat(),
         ]);
     }
     for _ in 0..4 {
-        entries.push(vec![random.bases(9_000)]);
+        entries.push(vec![random_bases(&mut random, 9_000)]);
     }
-    (build(directory, &entries, None), query)
+    (test_shard(directory, &entries), query)
 }
 
 #[test]
@@ -150,12 +138,8 @@ fn stop_marks_unfinished() {
 fn bad_input_fails() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, _) = small_shard(directory.path());
-    let searcher = Searcher::new(&shard, model()).unwrap();
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let searcher = Searcher::new(&shard, miss_model()).unwrap();
+    let control = no_stop();
     let config = config(SearchStage::Locate);
     let (sender, _receiver) = sync_channel(1);
     assert!(
@@ -177,12 +161,8 @@ fn bad_input_fails() {
 fn dropped_receiver_stops() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
-    let searcher = Searcher::new(&shard, model()).unwrap();
-    let stop = AtomicBool::new(false);
-    let control = SearchControl {
-        deadline: None,
-        stop: &stop,
-    };
+    let searcher = Searcher::new(&shard, miss_model()).unwrap();
+    let control = no_stop();
     let (sender, receiver) = sync_channel(1);
     drop(receiver);
     let summary = searcher
@@ -195,25 +175,32 @@ fn dropped_receiver_stops() {
 /// dropped by stages 1 and 2, while unrelated entries are.
 #[test]
 fn accepted_identity_kept() {
-    let mut random = Random(0x1055);
+    let mut random = rng(0x1055);
     for (trial, circular) in [(0, false), (1, true)] {
         let directory = tempfile::tempdir().unwrap();
-        let query = random.bases(QUERY_LENGTH);
+        let query = random_bases(&mut random, QUERY_LENGTH);
         let mut entries = Vec::new();
         for _ in 0..150 {
             let copy = diverged(&mut random, &query, 0.95);
             let copy = if circular {
-                let cut = (random.next() % QUERY_LENGTH as u64) as usize;
+                let cut = random.random_range(0..QUERY_LENGTH);
                 [&copy[cut..], &copy[..cut]].concat()
             } else {
                 copy
             };
-            entries.push(vec![[random.bases(500), copy, random.bases(500)].concat()]);
+            entries.push(vec![
+                [
+                    random_bases(&mut random, 500),
+                    copy,
+                    random_bases(&mut random, 500),
+                ]
+                .concat(),
+            ]);
         }
         for _ in 0..20 {
-            entries.push(vec![random.bases(6_000)]);
+            entries.push(vec![random_bases(&mut random, 6_000)]);
         }
-        let shard = build(directory.path(), &entries, None);
+        let shard = test_shard(directory.path(), &entries);
         for frequent_seed_entries in [None, Some(u64::MAX)] {
             let config = SearchConfig {
                 frequent_seed_entries,
@@ -252,25 +239,32 @@ fn accepted_identity_kept() {
 #[test]
 fn long_stretch_kept() {
     const PIECE: usize = 4_000;
-    let mut random = Random(0x9ece);
+    let mut random = rng(0x9ece);
     let directory = tempfile::tempdir().unwrap();
-    let query = random.bases(20_000);
+    let query = random_bases(&mut random, 20_000);
     let mut entries = Vec::new();
     for _ in 0..150 {
-        let start = (random.next() % (query.len() - PIECE) as u64) as usize;
+        let start = random.random_range(0..query.len() - PIECE);
         let piece = diverged(&mut random, &query[start..start + PIECE], 0.95);
-        entries.push(vec![[random.bases(500), piece, random.bases(500)].concat()]);
+        entries.push(vec![
+            [
+                random_bases(&mut random, 500),
+                piece,
+                random_bases(&mut random, 500),
+            ]
+            .concat(),
+        ]);
     }
     for _ in 0..20 {
-        let mut sequence = random.bases(500);
+        let mut sequence = random_bases(&mut random, 500);
         for _ in 0..3 {
-            let start = (random.next() % (query.len() - 50) as u64) as usize;
+            let start = random.random_range(0..query.len() - 50);
             sequence.extend_from_slice(&query[start..start + 50]);
-            sequence.extend(random.bases(500));
+            sequence.extend(random_bases(&mut random, 500));
         }
         entries.push(vec![sequence]);
     }
-    let shard = build(directory.path(), &entries, None);
+    let shard = test_shard(directory.path(), &entries);
     for frequent_seed_entries in [None, Some(u64::MAX)] {
         let mut config = SearchConfig {
             frequent_seed_entries,
