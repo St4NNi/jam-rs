@@ -6,7 +6,6 @@
 use super::ServiceError;
 use crate::decide::QueryCoverage;
 use crate::loss::LossBudget;
-use crate::report::Stage;
 use crate::search::{SearchConfig, SearchStage};
 use serde::{Deserialize, Serialize};
 
@@ -14,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SearchSettings {
     /// The last stage that runs.
-    pub level: Stage,
+    pub level: SearchStage,
     /// The least query coverage of the mosaic.
     pub min_query_coverage: CoverageSetting,
     /// The least identity over all counted fragments together.
@@ -56,7 +55,7 @@ impl SearchSettings {
     pub fn of(config: &SearchConfig) -> Self {
         let (rule, scores) = (&config.rule, &config.align.band.alignment);
         Self {
-            level: config.level.into(),
+            level: config.level,
             min_query_coverage: rule.min_query_coverage.into(),
             min_identity: rule.min_identity,
             min_fragment_identity: rule.min_fragment_identity,
@@ -75,11 +74,7 @@ impl SearchSettings {
     /// The server's `base` configuration with these settings in place, checked.
     pub fn apply(&self, base: &SearchConfig) -> Result<SearchConfig, ServiceError> {
         let mut config = *base;
-        config.level = match self.level {
-            Stage::Sketch => SearchStage::Sketch,
-            Stage::Locate => SearchStage::Locate,
-            Stage::Align => SearchStage::Align,
-        };
+        config.level = self.level;
         let rule = &mut config.rule;
         rule.min_query_coverage = self.min_query_coverage.into();
         rule.min_identity = self.min_identity;

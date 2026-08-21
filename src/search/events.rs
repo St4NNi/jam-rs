@@ -5,17 +5,35 @@
 use super::LocatedEntry;
 use super::align_stage::AlignedEntry;
 use super::control::Stopped;
+use serde::{Deserialize, Serialize};
 
-/// A stage of the search. As a search level it is the last stage that runs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash)]
+/// A stage of the search; as the last stage of a search it is its level.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchStage {
+    /// Stage 1: the entries that may hold the query
     Sketch,
+    /// Stage 2: where in those entries the query may lie
     Locate,
+    /// Stage 3: aligned and decided entries
     Align,
 }
 
 /// Why an entry left the search before it was confirmed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DropReason {
     /// The coverage bound fell below the requested query coverage.
     CoverageBound,

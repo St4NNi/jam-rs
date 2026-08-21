@@ -9,8 +9,8 @@ mod paf;
 
 pub use decision::{ContigInfo, DecisionRecord, FragmentRecord, Span, Strand};
 pub use event::{
-    AlignWorkRecord, Confirmed, Dropped, Ending, LocateWorkRecord, Located, Possible, Reason,
-    Record, ShardRecord, SketchWorkRecord, Stage, Summary, Unfinished,
+    AlignWorkRecord, Confirmed, Dropped, Ending, LocateWorkRecord, Located, Possible, Record,
+    ShardRecord, SketchWorkRecord, Summary, Unfinished,
 };
 pub use paf::paf_lines;
 

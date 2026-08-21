@@ -2,50 +2,10 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::DecisionRecord;
-use crate::report::ContigInfo;
-use crate::report::ReportError;
+use super::{ContigInfo, DecisionRecord, ReportError};
 use crate::search::align_stage::AlignedEntry;
 use crate::search::{Completion, DropReason, EntryEvent, SearchStage, SearchSummary, Stopped};
 use serde::{Deserialize, Serialize};
-
-/// A stage of the search.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Stage {
-    Sketch,
-    Locate,
-    Align,
-}
-
-impl From<SearchStage> for Stage {
-    fn from(stage: SearchStage) -> Self {
-        match stage {
-            SearchStage::Sketch => Self::Sketch,
-            SearchStage::Locate => Self::Locate,
-            SearchStage::Align => Self::Align,
-        }
-    }
-}
-
-/// Why an entry left the search before it was confirmed.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Reason {
-    CoverageBound,
-    NoSeedHits,
-    Decision,
-}
-
-impl From<DropReason> for Reason {
-    fn from(reason: DropReason) -> Self {
-        match reason {
-            DropReason::CoverageBound => Self::CoverageBound,
-            DropReason::NoSeedHits => Self::NoSeedHits,
-            DropReason::Decision => Self::Decision,
-        }
-    }
-}
 
 /// How a search ended.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -138,8 +98,8 @@ pub struct Confirmed {
 pub struct Dropped {
     pub query: String,
     pub entry: String,
-    pub stage: Stage,
-    pub reason: Reason,
+    pub stage: SearchStage,
+    pub reason: DropReason,
 }
 
 /// The search ended before `stage` finished for the entry.
@@ -147,7 +107,7 @@ pub struct Dropped {
 pub struct Unfinished {
     pub query: String,
     pub entry: String,
-    pub stage: Stage,
+    pub stage: SearchStage,
 }
 
 /// The last line of a search.
@@ -228,13 +188,13 @@ impl Record {
             EntryEvent::Dropped { stage, reason, .. } => Self::Dropped(Dropped {
                 query,
                 entry,
-                stage: (*stage).into(),
-                reason: (*reason).into(),
+                stage: *stage,
+                reason: *reason,
             }),
             EntryEvent::Unfinished { stage, .. } => Self::Unfinished(Unfinished {
                 query,
                 entry,
-                stage: (*stage).into(),
+                stage: *stage,
             }),
         })
     }
@@ -348,8 +308,8 @@ mod tests {
         let record = Record::Dropped(Dropped {
             query: "q1".into(),
             entry: "e".into(),
-            stage: Stage::Align,
-            reason: Reason::Decision,
+            stage: SearchStage::Align,
+            reason: DropReason::Decision,
         });
         let shard_record = ShardRecord {
             shard: "s1".into(),

@@ -24,17 +24,6 @@ use std::time::{Duration, Instant};
 /// Events held between the search and the writer.
 const EVENT_QUEUE: usize = 64;
 
-/// The last stage that runs.
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum Level {
-    /// Stage 1 only: the entries that may hold the query
-    Sketch,
-    /// Stages 1 and 2: where in those entries the query may lie
-    Locate,
-    /// All three stages: aligned and decided entries
-    Align,
-}
-
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Format {
@@ -80,7 +69,7 @@ pub struct SearchArgs {
     loss_budget: Option<f64>,
     /// The last stage that runs
     #[arg(long, value_enum, default_value = "align")]
-    level: Level,
+    level: SearchStage,
     /// Threads to use [default: all cores]
     #[arg(short, long)]
     threads: Option<usize>,
@@ -318,11 +307,7 @@ fn search_one(
 
 fn config_of(args: &SearchArgs) -> Result<SearchConfig, CliError> {
     let mut config = SearchConfig {
-        level: match args.level {
-            Level::Sketch => SearchStage::Sketch,
-            Level::Locate => SearchStage::Locate,
-            Level::Align => SearchStage::Align,
-        },
+        level: args.level,
         ..SearchConfig::default()
     };
     let rule = &mut config.rule;

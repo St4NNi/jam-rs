@@ -6,8 +6,8 @@ use super::*;
 use crate::decide::QueryCoverage;
 use crate::index::{EntryInput, Shard, build_shard};
 use crate::loss::MissModel;
-use crate::report::{Dropped, Reason, Record, ShardRecord, Stage, Unfinished};
-use crate::search::{SearchConfig, SearchControl};
+use crate::report::{Dropped, Record, ShardRecord, Unfinished};
+use crate::search::{DropReason, SearchConfig, SearchControl, SearchStage};
 use crate::test_support::{build_options, random_bases, rng, with_substitutions};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
@@ -307,8 +307,8 @@ fn records_cross_postcard() {
         records.push(reply.into_record().unwrap());
     }
     let (query, entry) = (String::from("query"), String::from("alpha_entry1"));
-    let stage = Stage::Align;
-    let reason = Reason::Decision;
+    let stage = SearchStage::Align;
+    let reason = DropReason::Decision;
     for record in [
         Record::Dropped(Dropped {
             query: query.clone(),
