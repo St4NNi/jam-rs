@@ -8,7 +8,6 @@ use super::settings::SearchSettings;
 use crate::report::{
     Confirmed, Dropped, Located, Possible, Record, ShardRecord, Summary, Unfinished,
 };
-use crate::search::{Completion, SearchSummary};
 use futures_util::{SinkExt, StreamExt};
 use iroh::endpoint::{RecvStream, SendStream};
 use serde::de::DeserializeOwned;
@@ -79,14 +78,8 @@ impl Reply {
 
     /// The failed summary of `shard`, for a search that could not run or a peer that failed.
     pub fn failed(shard: String, request: &SearchRequest, error: &ServiceError) -> Self {
-        let summary = SearchSummary {
-            query_length: request.bases.len() as u64,
-            completion: Completion::Failed(error.to_string()),
-            sketch: Default::default(),
-            locate: Default::default(),
-            align: Default::default(),
-        };
-        Self::record(shard, Record::summary(&request.query_name, &summary))
+        let length = request.bases.len() as u64;
+        Self::record(shard, Record::failed(&request.query_name, length, error))
     }
 
     /// The record of this message with its shard, as `jam search` prints it; `None` for a

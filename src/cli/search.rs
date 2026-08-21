@@ -168,7 +168,7 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
             let query = Query { name, sequence };
             let summary = search_one(args, searcher, open, &config, &mut sink, &query)?;
             sink.finish_query(args.format, &open.name, name, &summary)?;
-            incomplete += usize::from(summary.completion != Completion::Complete);
+            incomplete += usize::from(!matches!(summary.completion, Completion::Complete));
         }
         Ok(incomplete)
     })?;

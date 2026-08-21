@@ -17,12 +17,12 @@ pub enum Ending {
     Deadline,
     /// The search was asked to stop.
     Asked,
-    /// Reading the index failed; the summary names the error.
+    /// A stage, or the server, failed; the summary names the error.
     Failed,
 }
 
 /// The work of stage 1.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SketchWorkRecord {
     pub query_kmers: u64,
     pub lookups: u64,
@@ -37,7 +37,7 @@ pub struct SketchWorkRecord {
 }
 
 /// The work of stage 2.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct LocateWorkRecord {
     pub entries: u64,
     pub lookups: u64,
@@ -51,7 +51,7 @@ pub struct LocateWorkRecord {
 }
 
 /// The work of stage 3.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct AlignWorkRecord {
     pub entries: u64,
     pub confirmed_entries: u64,
@@ -199,13 +199,26 @@ impl Record {
         })
     }
 
+    /// The summary line of a search that failed before it ran, or whose server failed.
+    pub fn failed(query: &str, query_length: u64, error: &dyn std::error::Error) -> Self {
+        Self::Summary(Summary {
+            query: query.to_string(),
+            query_length,
+            ending: Ending::Failed,
+            error: Some(error.to_string()),
+            sketch: SketchWorkRecord::default(),
+            locate: LocateWorkRecord::default(),
+            align: AlignWorkRecord::default(),
+        })
+    }
+
     /// The summary line of a finished search.
     pub fn summary(query: &str, summary: &SearchSummary) -> Self {
         let (ending, error) = match &summary.completion {
             Completion::Complete => (Ending::Complete, None),
             Completion::Stopped(Stopped::Deadline) => (Ending::Deadline, None),
             Completion::Stopped(Stopped::Asked) => (Ending::Asked, None),
-            Completion::Failed(message) => (Ending::Failed, Some(message.clone())),
+            Completion::Failed(error) => (Ending::Failed, Some(error.to_string())),
         };
         let (sketch, locate, align) = (&summary.sketch, &summary.locate, &summary.align);
         Self::Summary(Summary {

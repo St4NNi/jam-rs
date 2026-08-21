@@ -21,7 +21,7 @@ use crate::decide::DecisionRule;
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
 use crate::seeds::Seeder;
-use std::sync::Mutex;
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
@@ -70,9 +70,7 @@ impl Default for SearchConfig {
 impl SearchConfig {
     /// Checks that the settings make sense.
     pub fn validate(&self) -> Result<(), SearchError> {
-        self.rule
-            .validate()
-            .map_err(|_| SearchError::InvalidConfig("the decision rule is invalid"))?;
+        self.rule.validate()?;
         if self.flank == 0 {
             return Err(SearchError::InvalidConfig("the flank must be at least 1"));
         }
@@ -82,7 +80,7 @@ impl SearchConfig {
 }
 
 /// The work of one search and how it ended.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub struct SearchSummary {
     pub query_length: u64,
     pub completion: Completion,
@@ -132,8 +130,7 @@ impl<'a> Searcher<'a> {
                 "the miss model has another k or minimizer window than the shard",
             ));
         }
-        let seeder = Seeder::new(parameters.scheme)
-            .map_err(|_| SearchError::InvalidConfig("the seed scheme of the shard"))?;
+        let seeder = Seeder::new(parameters.scheme)?;
         Ok(Self {
             shard,
             model,
@@ -174,8 +171,7 @@ impl<'a> Searcher<'a> {
         }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.threads)
-            .build()
-            .map_err(|_| SearchError::InvalidConfig("the thread pool cannot start"))?;
+            .build()?;
         Ok(pool.install(|| self.run(query, circular, budget, &request)))
     }
 
@@ -247,8 +243,10 @@ impl<'a> Searcher<'a> {
             flank: config.flank,
         };
         let queue = EntryQueue::new(&sketch.candidates, control, events);
-        queue.run(|possible, worker| self.finish_entry(possible, &locate, request, worker));
-        (summary.completion, summary.locate, summary.align) = queue.finish();
+        let finish = |possible: &PossibleEntry, worker: &mut Worker| {
+            self.finish_entry(possible, &locate, request, worker)
+        };
+        queue.run(finish, &mut summary);
         summary
     }
 
@@ -269,7 +267,7 @@ impl<'a> Searcher<'a> {
         locate: &LocateRequest<'_>,
         request: &Request<'_>,
         worker: &mut Worker,
-    ) -> Result<(), (SearchStage, SearchError)> {
+    ) -> Result<(), Halt> {
         let entry = possible.entry;
         let events = request.events;
         let outcome = locate_entry(
@@ -280,7 +278,10 @@ impl<'a> Searcher<'a> {
             &mut worker.locate,
             request.control,
         )
-        .map_err(|error| (SearchStage::Locate, error))?;
+        .map_err(|error| Halt {
+            stage: SearchStage::Locate,
+            error,
+        })?;
         let located = match outcome {
             LocateOutcome::Located(located) => located,
             LocateOutcome::Dropped(reason) => {
@@ -304,7 +305,10 @@ impl<'a> Searcher<'a> {
         let aligned = self.align(prepared, &located, request, worker);
         worker.align.entries += 1;
         worker.align.time += started.elapsed();
-        let aligned = aligned.map_err(|error| (SearchStage::Align, error.into()))?;
+        let aligned = aligned.map_err(|error| Halt {
+            stage: SearchStage::Align,
+            error: error.into(),
+        })?;
         worker.align.counts.add(&aligned.work);
         if aligned.decision.qualifies {
             worker.align.confirmed_entries += 1;
@@ -360,6 +364,18 @@ struct Worker {
     align: AlignStageWork,
 }
 
+/// Why a worker stopped taking entries: the error, and the stage the entry was in.
+struct Halt {
+    stage: SearchStage,
+    error: SearchError,
+}
+
+/// What a worker hands back once the queue is empty: its work, and the error that halted it.
+struct WorkerEnd {
+    worker: Worker,
+    result: Result<(), SearchError>,
+}
+
 /// The candidate entries of one search as a work queue: workers take the next entry in order
 /// until the queue is empty. After a stop or a failure the rest are reported as unfinished.
 struct EntryQueue<'a> {
@@ -367,9 +383,8 @@ struct EntryQueue<'a> {
     control: SearchControl<'a>,
     events: &'a SyncSender<EntryEvent>,
     next: AtomicUsize,
+    /// Set by the first worker that stops or fails, so the others take no more entries.
     halted: AtomicBool,
-    completion: Mutex<Completion>,
-    work: Mutex<(LocateWork, AlignStageWork)>,
 }
 
 impl<'a> EntryQueue<'a> {
@@ -384,78 +399,72 @@ impl<'a> EntryQueue<'a> {
             events,
             next: AtomicUsize::new(0),
             halted: AtomicBool::new(false),
-            completion: Mutex::new(Completion::Complete),
-            work: Mutex::default(),
         }
     }
 
-    /// Runs `finish` for every entry on the workers of the current thread pool.
-    fn run<F>(&self, finish: F)
+    /// Runs `finish` for every entry on the workers of the current thread pool, then adds their
+    /// work to `summary`. The first error, by worker, decides how the search ended.
+    fn run<F>(&self, finish: F, summary: &mut SearchSummary)
     where
-        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), (SearchStage, SearchError)> + Sync,
+        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), Halt> + Sync,
     {
         let workers = rayon::current_num_threads().min(self.candidates.len());
-        rayon::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|_| self.work_on(&finish));
+        let ends: Vec<WorkerEnd> = (0..workers)
+            .into_par_iter()
+            .map(|_| self.work_on(&finish))
+            .collect();
+        for end in ends {
+            summary.locate.add(&end.worker.locate);
+            summary.align.add(&end.worker.align);
+            if let (Completion::Complete, Err(error)) = (&summary.completion, end.result) {
+                summary.completion = error.into();
             }
-        });
+        }
     }
 
-    fn work_on<F>(&self, finish: &F)
+    fn work_on<F>(&self, finish: &F) -> WorkerEnd
     where
-        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), (SearchStage, SearchError)>,
+        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), Halt>,
     {
         let mut worker = Worker::default();
-        while let Some(possible) = self
-            .candidates
-            .get(self.next.fetch_add(1, Ordering::Relaxed))
-        {
+        while let Some(possible) = self.take() {
             if self.halted.load(Ordering::Relaxed) {
                 self.unfinished(possible.entry, SearchStage::Locate);
                 continue;
             }
             let result = match self.control.check() {
-                Err(stopped) => Err((SearchStage::Locate, SearchError::Stopped(stopped))),
+                Err(stopped) => Err(Halt {
+                    stage: SearchStage::Locate,
+                    error: SearchError::Stopped(stopped),
+                }),
                 Ok(()) => finish(possible, &mut worker),
             };
-            if let Err((stage, error)) = result {
-                self.halt(error);
+            if let Err(Halt { stage, error }) = result {
+                self.halted.store(true, Ordering::Relaxed);
                 self.unfinished(possible.entry, stage);
+                while let Some(rest) = self.take() {
+                    self.unfinished(rest.entry, SearchStage::Locate);
+                }
+                return WorkerEnd {
+                    worker,
+                    result: Err(error),
+                };
             }
         }
-        let mut work = lock(&self.work);
-        work.0.add(&worker.locate);
-        work.1.add(&worker.align);
+        WorkerEnd {
+            worker,
+            result: Ok(()),
+        }
     }
 
-    /// Stops the queue and keeps the first reason.
-    fn halt(&self, error: SearchError) {
-        self.halted.store(true, Ordering::Relaxed);
-        let mut completion = lock(&self.completion);
-        if *completion == Completion::Complete {
-            *completion = match error {
-                SearchError::Stopped(stopped)
-                | SearchError::Align(AlignStageError::Stopped(stopped)) => {
-                    Completion::Stopped(stopped)
-                }
-                error => Completion::Failed(error.to_string()),
-            };
-        }
+    fn take(&self) -> Option<&'a PossibleEntry> {
+        self.candidates
+            .get(self.next.fetch_add(1, Ordering::Relaxed))
     }
 
     fn unfinished(&self, entry: u32, stage: SearchStage) {
         // A dropped receiver means nobody listens any more.
         let _ = self.events.send(EntryEvent::Unfinished { entry, stage });
-    }
-
-    fn finish(self) -> (Completion, LocateWork, AlignStageWork) {
-        let completion = self
-            .completion
-            .into_inner()
-            .unwrap_or_else(|e| e.into_inner());
-        let (locate, align) = self.work.into_inner().unwrap_or_else(|e| e.into_inner());
-        (completion, locate, align)
     }
 }
 
@@ -464,14 +473,9 @@ fn emit(
     events: &SyncSender<EntryEvent>,
     event: EntryEvent,
     stage: SearchStage,
-) -> Result<(), (SearchStage, SearchError)> {
-    events
-        .send(event)
-        .map_err(|_| (stage, SearchError::Stopped(Stopped::Asked)))
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+) -> Result<(), Halt> {
+    events.send(event).map_err(|_| Halt {
+        stage,
+        error: SearchError::Stopped(Stopped::Asked),
+    })
 }

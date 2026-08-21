@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 use super::LocatedEntry;
-use super::align_stage::AlignedEntry;
+use super::align_stage::{AlignStageError, AlignedEntry};
 use super::control::Stopped;
+use super::error::SearchError;
 use serde::{Deserialize, Serialize};
 
 /// A stage of the search; as the last stage of a search it is its level.
@@ -82,10 +83,21 @@ impl EntryEvent {
 }
 
 /// How a search ended. Only `Complete` means every possible entry was decided.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum Completion {
     Complete,
     Stopped(Stopped),
-    /// Reading the index failed; the message names the cause.
-    Failed(String),
+    /// A stage failed for one entry, for example reading the index or aligning; the entries not
+    /// yet decided are unfinished.
+    Failed(SearchError),
+}
+
+impl From<SearchError> for Completion {
+    fn from(error: SearchError) -> Self {
+        match error {
+            SearchError::Stopped(stopped)
+            | SearchError::Align(AlignStageError::Stopped(stopped)) => Self::Stopped(stopped),
+            error => Self::Failed(error),
+        }
+    }
 }

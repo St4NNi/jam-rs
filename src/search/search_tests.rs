@@ -96,7 +96,7 @@ fn level_ends_search() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Sketch), false);
-    assert_eq!(summary.completion, Completion::Complete);
+    assert!(matches!(summary.completion, Completion::Complete));
     assert_eq!(summary.locate.entries, 0);
     assert_eq!(events.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3]);
     assert!(
@@ -105,7 +105,7 @@ fn level_ends_search() {
             .all(|list| list.len() == 1 && matches!(list[0], EntryEvent::Possible { .. }))
     );
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Locate), false);
-    assert_eq!(summary.completion, Completion::Complete);
+    assert!(matches!(summary.completion, Completion::Complete));
     assert_eq!(summary.locate.entries, summary.sketch.possible_entries);
     for (entry, list) in &events {
         assert_eq!(list.len(), 2, "{list:?}");
@@ -123,7 +123,10 @@ fn stop_marks_unfinished() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Locate), true);
-    assert_eq!(summary.completion, Completion::Stopped(Stopped::Asked));
+    assert!(matches!(
+        summary.completion,
+        Completion::Stopped(Stopped::Asked)
+    ));
     assert_eq!(events.len(), 4);
     for list in events.values() {
         assert_eq!(list.len(), 2, "{list:?}");
@@ -172,7 +175,10 @@ fn dropped_receiver_stops() {
     let summary = searcher
         .search(&query, false, &config(SearchStage::Align), control, &sender)
         .unwrap();
-    assert_eq!(summary.completion, Completion::Stopped(Stopped::Asked));
+    assert!(matches!(
+        summary.completion,
+        Completion::Stopped(Stopped::Asked)
+    ));
 }
 
 /// Every entry holds the query at exactly the accepted identity, linear or rotated; none may be
@@ -211,7 +217,7 @@ fn accepted_identity_kept() {
                 ..config(SearchStage::Locate)
             };
             let (summary, events) = search(&shard, &query, circular, &config, false);
-            assert_eq!(summary.completion, Completion::Complete);
+            assert!(matches!(summary.completion, Completion::Complete));
             for entry in 0..170u32 {
                 let last = events.get(&entry).and_then(|list| list.last());
                 if entry < 150 {
@@ -276,7 +282,7 @@ fn long_stretch_kept() {
         };
         config.rule.min_query_coverage = QueryCoverage::Bases(PIECE as u64);
         let (summary, events) = search(&shard, &query, false, &config, false);
-        assert_eq!(summary.completion, Completion::Complete);
+        assert!(matches!(summary.completion, Completion::Complete));
         for entry in 0..170u32 {
             let last = events.get(&entry).and_then(|list| list.last());
             if entry < 150 {
@@ -445,4 +451,27 @@ fn circular_query_confirmed() {
     assert!(over_end, "{:?}", aligned.decision.mosaic.primary);
     // The unrelated entry never reaches stage 3.
     assert_eq!(summary.align.entries, 1);
+}
+
+/// A packed sequence that disappears after the shard is open fails stage 3 for its entry.
+#[test]
+fn failure_marks_unfinished() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = planted_shard(directory.path());
+    for entry in 0..2 {
+        std::fs::remove_file(shard.packed_path(entry).unwrap()).unwrap();
+    }
+    let (summary, events) = search(&shard, &query, false, &config(SearchStage::Align), false);
+    assert!(
+        matches!(summary.completion, Completion::Failed(_)),
+        "{:?}",
+        summary.completion
+    );
+    for entry in [0, 1] {
+        let last = events[&entry].last();
+        assert!(
+            matches!(last, Some(EntryEvent::Unfinished { .. })),
+            "entry {entry}: {last:?}"
+        );
+    }
 }
