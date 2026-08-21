@@ -164,9 +164,7 @@ fn sketch_level_possible() {
         assert!(planted == (estimate(record) > 0.9), "{lines:?}");
     }
     assert!(possible.iter().any(|record| record["entry"] == "plasmid_1"));
-    let without = summary["sketch"]["entries_without_seed_hits"]
-        .as_u64()
-        .unwrap();
+    let without = summary["sketch"]["unseeded_entries"].as_u64().unwrap();
     assert_eq!(without + possible.len() as u64, 3);
 }
 

@@ -18,9 +18,9 @@ use std::sync::mpsc::sync_channel;
 const QUERY_LENGTH: usize = 5_000;
 
 /// 90% query coverage at 95% identity, on three threads.
-fn config(level: SearchStage) -> SearchConfig {
+fn config(last_stage: SearchStage) -> SearchConfig {
     let mut config = SearchConfig {
-        level,
+        last_stage,
         threads: 3,
         flank: 1_000,
         ..SearchConfig::default()
@@ -292,7 +292,7 @@ fn long_stretch_kept() {
             }
         }
         // The scattered pieces have seed hits, so the bound, not their absence, drops them.
-        assert!(summary.sketch.entries_with_seed_hits >= 160);
+        assert!(summary.sketch.seeded_entries >= 160);
     }
 }
 

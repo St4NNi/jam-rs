@@ -85,7 +85,7 @@ fn run_with(
         .iter()
         .map(|candidate| (candidate.entry, candidate.coverage_bound))
         .collect();
-    (kept, outcome.work.entries_without_seed_hits)
+    (kept, outcome.work.unseeded_entries)
 }
 
 #[test]

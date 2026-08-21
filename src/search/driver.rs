@@ -30,13 +30,13 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SearchConfig {
     /// The last stage that runs.
-    pub level: SearchStage,
+    pub last_stage: SearchStage,
     /// The rule that reports an entry; its query coverage and identity also drive the pruning.
     pub rule: DecisionRule,
     /// The chance of missing a qualifying entry that stages 1 and 2 may spend, half each.
     pub loss_budget: LossBudget,
     /// A seed held by more entries is not expanded in stage 1. `None` takes 1% of the shard's
-    /// entries, at least `MIN_FREQUENT_SEED_ENTRIES`.
+    /// entries, at least `MIN_FREQUENT_LIMIT`.
     pub frequent_seed_entries: Option<u64>,
     /// The most seed hits stage 1 holds; seeds over it count as frequent.
     pub max_seed_hits: u64,
@@ -49,12 +49,12 @@ pub struct SearchConfig {
 }
 
 /// The least frequent-seed limit that `SearchConfig::frequent_seed_entries` takes by default.
-pub const MIN_FREQUENT_SEED_ENTRIES: u64 = 32;
+pub const MIN_FREQUENT_LIMIT: u64 = 32;
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            level: SearchStage::Align,
+            last_stage: SearchStage::Align,
             rule: DecisionRule::default(),
             loss_budget: LossBudget::default(),
             frequent_seed_entries: None,
@@ -159,7 +159,7 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = LossBudget::new(config.loss_budget.chance() / 2.0)?;
-        let prepared = match config.level {
+        let prepared = match config.last_stage {
             SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
             _ => None,
         };
@@ -237,7 +237,7 @@ impl<'a> Searcher<'a> {
                 return summary;
             }
         }
-        if config.level == SearchStage::Sketch {
+        if config.last_stage == SearchStage::Sketch {
             return summary;
         }
         let locate = LocateRequest {
@@ -257,7 +257,7 @@ impl<'a> Searcher<'a> {
         SketchLimits {
             frequent_seed_entries: config
                 .frequent_seed_entries
-                .unwrap_or((entries / 100).max(MIN_FREQUENT_SEED_ENTRIES)),
+                .unwrap_or((entries / 100).max(MIN_FREQUENT_LIMIT)),
             max_seed_hits: config.max_seed_hits,
         }
     }

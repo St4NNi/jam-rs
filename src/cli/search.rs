@@ -307,7 +307,7 @@ fn search_one(
 
 fn config_of(args: &SearchArgs) -> Result<SearchConfig, CliError> {
     let mut config = SearchConfig {
-        level: args.level,
+        last_stage: args.level,
         ..SearchConfig::default()
     };
     let rule = &mut config.rule;

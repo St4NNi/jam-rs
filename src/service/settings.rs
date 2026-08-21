@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SearchSettings {
     /// The last stage that runs.
-    pub level: SearchStage,
+    pub last_stage: SearchStage,
     /// The least query coverage of the mosaic.
     pub min_query_coverage: CoverageSetting,
     /// The least identity over all counted fragments together.
@@ -55,7 +55,7 @@ impl SearchSettings {
     pub fn of(config: &SearchConfig) -> Self {
         let (rule, scores) = (&config.rule, &config.align.band.alignment);
         Self {
-            level: config.level,
+            last_stage: config.last_stage,
             min_query_coverage: rule.min_query_coverage.into(),
             min_identity: rule.min_identity,
             min_fragment_identity: rule.min_fragment_identity,
@@ -74,7 +74,7 @@ impl SearchSettings {
     /// The server's `base` configuration with these settings in place, checked.
     pub fn apply(&self, base: &SearchConfig) -> Result<SearchConfig, ServiceError> {
         let mut config = *base;
-        config.level = self.level;
+        config.last_stage = self.last_stage;
         let rule = &mut config.rule;
         rule.min_query_coverage = self.min_query_coverage.into();
         rule.min_identity = self.min_identity;
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn settings_keep_limits() {
         let mut client = SearchConfig {
-            level: SearchStage::Locate,
+            last_stage: SearchStage::Locate,
             threads: 3,
             ..SearchConfig::default()
         };
@@ -150,7 +150,7 @@ mod tests {
         };
         let applied = read.apply(&base).unwrap();
         assert_eq!(applied.threads, 8);
-        assert_eq!(applied.level, SearchStage::Locate);
+        assert_eq!(applied.last_stage, SearchStage::Locate);
         assert_eq!(applied.rule, client.rule);
         assert_eq!(applied.loss_budget, client.loss_budget);
         assert_eq!(applied.align.band.alignment, client.align.band.alignment);

@@ -50,9 +50,9 @@ pub struct SketchWork {
     /// Seed hits from the expanded seeds (pairs of entry and distinct query k-mer).
     pub seed_hits: u64,
     /// Entries with at least one expanded seed hit.
-    pub entries_with_seed_hits: u64,
+    pub seeded_entries: u64,
     /// Entries left out as they have no seed hit and are in no frequent seed's color set.
-    pub entries_without_seed_hits: u64,
+    pub unseeded_entries: u64,
     /// Candidate entries kept by the coverage bound.
     pub possible_entries: u64,
     /// Wall time of the stage.
@@ -119,13 +119,13 @@ pub fn sketch_stage(
         .chunk_by(|a, b| a.0 == b.0)
         .map(|h| h[0].0)
         .collect();
-    work.entries_with_seed_hits = with_hits.len() as u64;
+    work.seeded_entries = with_hits.len() as u64;
     // An entry in the frequent union without an expanded seed hit has only the frequent seeds;
     // their bound is shared. Entries in neither are left out.
     let only_frequent: Vec<u32> = (0..entries)
         .filter(|&entry| in_frequent.holds(entry) && with_hits.binary_search(&entry).is_err())
         .collect();
-    work.entries_without_seed_hits =
+    work.unseeded_entries =
         u64::from(entries) - with_hits.len() as u64 - only_frequent.len() as u64;
     if let Some(shared) = possible_entry(0, Vec::new(), query, bound, &frequent_positions) {
         candidates.extend(only_frequent.into_iter().map(|entry| PossibleEntry {
