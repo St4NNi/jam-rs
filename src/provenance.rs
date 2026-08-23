@@ -1,3 +1,4 @@
+use crate::resource::ResourceLocator;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -188,4 +189,84 @@ pub fn unix_time_seconds() -> u64 {
 
 pub fn command_line() -> Vec<String> {
     std::env::args().collect()
+}
+
+/// Returns the process command line with URL credentials and signed URL
+/// parameters removed.
+///
+/// The original [`command_line`] function remains unchanged for callers that
+/// need the historical, unredacted behavior.  Provenance written to manifests
+/// and result files should use this function instead.
+pub fn redacted_command_line() -> Vec<String> {
+    redact_command_arguments(&std::env::args().collect::<Vec<_>>())
+}
+
+/// Redacts URL-like command arguments while preserving option structure and
+/// ordinary non-URL arguments.  This separate argument-based entry point keeps
+/// redaction deterministic and testable without modifying process arguments.
+pub fn redact_command_arguments(arguments: &[String]) -> Vec<String> {
+    arguments
+        .iter()
+        .map(|argument| {
+            if let Some((option, value)) = argument.split_once('=')
+                && is_supported_url(value)
+            {
+                return format!("{option}={}", redact_url(value));
+            }
+            if is_supported_url(argument) {
+                redact_url(argument)
+            } else {
+                argument.clone()
+            }
+        })
+        .collect()
+}
+
+fn is_supported_url(value: &str) -> bool {
+    let value = value.trim_start();
+    ["http://", "https://", "s3://", "file://"]
+        .iter()
+        .any(|scheme| value.starts_with(scheme))
+}
+
+fn redact_url(value: &str) -> String {
+    let value = value.trim();
+    let redacted = ResourceLocator::parse(value)
+        .map(|locator| locator.redacted())
+        .unwrap_or_else(|_| redact_malformed_url(value));
+    strip_url_userinfo(&redacted)
+}
+
+fn strip_url_userinfo(value: &str) -> String {
+    let Some((scheme, remainder)) = value.split_once("://") else {
+        return value.to_string();
+    };
+    let authority_end = remainder.find('/').unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let Some((_, host)) = authority.rsplit_once('@') else {
+        return value.to_string();
+    };
+    format!("{scheme}://{host}{}", &remainder[authority_end..])
+}
+
+fn redact_malformed_url(value: &str) -> String {
+    let Some((scheme, remainder)) = value.split_once("://") else {
+        return "<redacted-url>".to_string();
+    };
+    let without_suffix = remainder
+        .find(['?', '#'])
+        .map_or(remainder, |index| &remainder[..index]);
+    let (authority, path) = without_suffix
+        .split_once('/')
+        .map_or((without_suffix, ""), |(authority, path)| (authority, path));
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() {
+        format!("{scheme}://<redacted-url>")
+    } else if path.is_empty() {
+        format!("{scheme}://{host}")
+    } else {
+        format!("{scheme}://{host}/{path}")
+    }
 }
