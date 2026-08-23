@@ -43,6 +43,71 @@
     "long_insertion",
     "long_deletion"
   ],
+  "query_kinds": [
+    "plasmid"
+  ],
+  "topologies": [
+    "unknown"
+  ],
+  "terminal_repeats": [
+    "none"
+  ],
+  "query_strata": [
+    {
+      "id": "plasmid-linear",
+      "query_kind": "plasmid",
+      "topology": "linear",
+      "terminal_repeat": "none"
+    },
+    {
+      "id": "plasmid-circular",
+      "query_kind": "plasmid",
+      "topology": "circular",
+      "terminal_repeat": "none"
+    },
+    {
+      "id": "plasmid-unknown",
+      "query_kind": "plasmid",
+      "topology": "unknown",
+      "terminal_repeat": "none"
+    },
+    {
+      "id": "plasmid-circular-direct-repeat",
+      "query_kind": "plasmid",
+      "topology": "circular",
+      "terminal_repeat": "direct"
+    },
+    {
+      "id": "plasmid-circular-inverted-repeat",
+      "query_kind": "plasmid",
+      "topology": "circular",
+      "terminal_repeat": "inverted"
+    },
+    {
+      "id": "phage-linear",
+      "query_kind": "phage",
+      "topology": "linear",
+      "terminal_repeat": "none"
+    },
+    {
+      "id": "phage-unknown",
+      "query_kind": "phage",
+      "topology": "unknown",
+      "terminal_repeat": "none"
+    },
+    {
+      "id": "phage-linear-direct-repeat",
+      "query_kind": "phage",
+      "topology": "linear",
+      "terminal_repeat": "direct"
+    },
+    {
+      "id": "phage-linear-inverted-repeat",
+      "query_kind": "phage",
+      "topology": "linear",
+      "terminal_repeat": "inverted"
+    }
+  ],
   "labels": [
     "standard",
     "origin_crossing",
@@ -59,9 +124,12 @@
   "coordinate_convention": {
     "sequence_coordinates": "zero_based_half_open",
     "circular_query_intervals": "forward_coordinates_split_at_origin",
+    "linear_query_intervals": "forward_coordinates_without_wrapping",
+    "unknown_query_intervals": "linear_display_without_topology_claim",
     "contig_coordinates": "zero_based_half_open",
     "identity": "substitution identity before optional indel events",
-    "coverage": "union of source query coordinates, not sum of fragment lengths"
+    "coverage": "union of source query coordinates, not sum of fragment lengths",
+    "topology_evidence": "undetermined_for_controlled_construction"
   },
   "source_requirements": [
     "catalog records must be checksum verified",

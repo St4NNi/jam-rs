@@ -69,8 +69,9 @@ def redact(value: str) -> str:
     return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
 
 
-def command_version(executable: str) -> str | None:
-    flag = "-version" if Path(executable).name == "blastn" else "--version"
+def command_version(executable: str, tool: str | None = None) -> str | None:
+    name = tool or Path(executable).name
+    flag = "-version" if name == "blastn" else "version" if name == "lexicmap" else "--version"
     try:
         completed = subprocess.run(
             [executable, flag],
@@ -95,6 +96,23 @@ def redact_message(message: str) -> str:
 
 def _truth_checksum(path: Path | None) -> str | None:
     return sha256(path) if path and path.is_file() else None
+
+
+def comparator_metadata(tool: str) -> dict:
+    manifest = SCRIPT_ROOT / "evaluation" / "trace-production" / "environment" / "manifest.json"
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        entry = value.get("comparators", {}).get(tool)
+        if not isinstance(entry, dict):
+            return {"status": "unavailable", "reason": f"no pinned metadata for {tool}"}
+        return {
+            "status": "pinned",
+            "manifest": str(manifest),
+            "manifest_sha256": sha256(manifest),
+            **entry,
+        }
+    except (OSError, TypeError, ValueError) as exc:
+        return {"status": "unavailable", "reason": f"cannot read comparator metadata: {exc}"}
 
 
 def _field(row: dict[str, str], *names: str) -> str | None:
@@ -423,7 +441,7 @@ def run_alignment_tool(
     truth_path: Path | None,
     args: argparse.Namespace,
 ) -> tuple[list[dict], list[list[str]]]:
-    version = command_version(executable)
+    version = command_version(executable, tool)
     results: list[dict] = []
     commands: list[list[str]] = []
     for assembly in assemblies:
@@ -488,6 +506,216 @@ def run_alignment_tool(
         except (OSError, NormalizationError, UnicodeError) as exc:
             results.append(failed_result(assembly, query_length, str(exc), command, version))
     return results, commands
+
+
+def _lexicmap_genome_key(value: str) -> str:
+    name = Path(value).name
+    lower = name.lower()
+    for suffix in sorted(FASTA_SUFFIXES, key=len, reverse=True):
+        if lower.endswith(suffix):
+            return name[: -len(suffix)]
+    return Path(name).stem
+
+
+def _lexicmap_reference_map(assemblies: list[Assembly]) -> dict[str, Assembly]:
+    references: dict[str, Assembly] = {}
+    for assembly in assemblies:
+        keys = {assembly.metagenome_id, assembly.path.name, _lexicmap_genome_key(assembly.path.name)}
+        for key in keys:
+            previous = references.get(key)
+            if previous is not None and previous != assembly:
+                raise ValueError(f"LexicMap reference ID is ambiguous: {key!r}")
+            references[key] = assembly
+    return references
+
+
+def _lexicmap_records(
+    text: str,
+    query_id: str,
+    query_length: int,
+    references: dict[str, Assembly],
+    min_pident: float,
+) -> dict[str, list[dict]]:
+    records_by_assembly: dict[str, list[dict]] = {}
+    for line_number, raw in enumerate(text.splitlines(), 1):
+        if not raw.strip() or raw.startswith("#"):
+            continue
+        fields = raw.rstrip("\n").split("\t")
+        if len(fields) >= 2 and fields[0] == "query" and fields[1] == "qlen":
+            continue
+        if len(fields) < 20:
+            raise NormalizationError(
+                f"LexicMap output line {line_number} has {len(fields)} fields; expected at least 20"
+            )
+        try:
+            output_query = fields[0]
+            output_length = int(fields[1])
+            genome_id = fields[3]
+            contig_id = fields[4]
+            pident = float(fields[10])
+            aligned_length = int(fields[9])
+            qstart = int(fields[12])
+            qend = int(fields[13])
+            sstart = int(fields[14])
+            send = int(fields[15])
+            bitscore = fields[19]
+            subject_strand = fields[16]
+        except (IndexError, TypeError, ValueError) as exc:
+            raise NormalizationError(f"invalid LexicMap output at line {line_number}") from exc
+        if output_query != query_id:
+            raise NormalizationError(
+                f"LexicMap output query {output_query!r} differs from {query_id!r} at line {line_number}"
+            )
+        if output_length != query_length:
+            raise NormalizationError(
+                f"LexicMap output query length {output_length} differs from {query_length} at line {line_number}"
+            )
+        if subject_strand not in {"+", "-"}:
+            raise NormalizationError(f"invalid LexicMap subject strand at line {line_number}")
+        assembly = references.get(genome_id) or references.get(_lexicmap_genome_key(genome_id))
+        if assembly is None:
+            raise NormalizationError(
+                f"LexicMap returned unselected subject genome {genome_id!r} at line {line_number}"
+            )
+        blast_fields = (
+            output_query,
+            contig_id,
+            str(pident),
+            str(aligned_length),
+            str(output_length),
+            str(qstart),
+            str(qend),
+            str(sstart),
+            str(send),
+            bitscore,
+        )
+        parsed = parse_blast6(
+            "\t".join(blast_fields),
+            query_id,
+            query_length,
+            assembly.metagenome_id,
+            min_pident,
+        )
+        for record in parsed:
+            record["strand"] = "reverse" if subject_strand == "-" else "forward"
+            record["reference_genome"] = genome_id
+        records_by_assembly.setdefault(assembly.metagenome_id, []).extend(parsed)
+    return records_by_assembly
+
+
+def run_lexicmap(
+    executable: str,
+    query: Path,
+    query_id: str,
+    query_length: int,
+    assemblies: list[Assembly],
+    truth_path: Path | None,
+    args: argparse.Namespace,
+) -> tuple[list[dict], list[list[str]]]:
+    version = command_version(executable, "lexicmap")
+    references = _lexicmap_reference_map(assemblies)
+    reference_manifest = "\n".join(str(assembly.path) for assembly in assemblies) + "\n"
+    reference_manifest_sha256 = hashlib.sha256(reference_manifest.encode("utf-8")).hexdigest()
+    with tempfile.TemporaryDirectory(prefix="jam-trace-lexicmap-") as directory:
+        work = Path(directory)
+        index_command: list[str] | None = None
+        if args.lexicmap_index:
+            index = args.lexicmap_index
+            if not index.is_dir():
+                raise ValueError(f"LexicMap index is not a directory: {index}")
+            index_source = "provided"
+        else:
+            file_list = work / "references.txt"
+            file_list.write_text(reference_manifest, encoding="utf-8")
+            index = work / "references.lmi"
+            index_source = "built_from_selected_assemblies"
+            index_command = [
+                executable,
+                "index",
+                "-S",
+                "-X",
+                str(file_list),
+                "-O",
+                str(index),
+                "--quiet",
+                "-j",
+                str(args.threads),
+            ]
+            completed = subprocess.run(
+                index_command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if completed.returncode != 0:
+                error = completed.stderr.strip() or f"exit {completed.returncode}"
+                return [failed_result(item, query_length, error, index_command, version) for item in assemblies], [index_command]
+        output = work / "search.tsv"
+        search_command = [
+            executable,
+            "search",
+            "-d",
+            str(index),
+            str(query),
+            "-o",
+            str(output),
+            "--align-min-match-pident",
+            str(args.lexicmap_min_pident),
+            "--min-qcov-per-hsp",
+            str(args.lexicmap_min_qcov_hsp),
+            "--min-qcov-per-genome",
+            str(args.lexicmap_min_qcov_genome),
+            "--align-min-match-len",
+            str(args.lexicmap_min_align_len),
+            "--top-n-genomes",
+            "0",
+            "--top-n-chains",
+            "0",
+            "--quiet",
+            "-j",
+            str(args.threads),
+        ]
+        completed = subprocess.run(
+            search_command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        commands = [search_command] if index_command is None else [index_command, search_command]
+        if completed.returncode != 0:
+            error = completed.stderr.strip() or f"exit {completed.returncode}"
+            return [failed_result(item, query_length, error, search_command, version) for item in assemblies], commands
+        try:
+            records_by_assembly = _lexicmap_records(
+                output.read_text(encoding="utf-8"),
+                query_id,
+                query_length,
+                references,
+                args.lexicmap_min_pident,
+            )
+        except (OSError, UnicodeError, NormalizationError) as exc:
+            return [failed_result(item, query_length, str(exc), search_command, version) for item in assemblies], commands
+        extra = {
+            "lexicmap_index_source": index_source,
+            "lexicmap_reference_manifest_sha256": reference_manifest_sha256,
+        }
+        results = []
+        for assembly in assemblies:
+            results.append(
+                result_for_records(
+                    assembly,
+                    records_by_assembly.get(assembly.metagenome_id, []),
+                    query_length,
+                    truth_path,
+                    search_command,
+                    version,
+                    extra,
+                    query_id,
+                )
+            )
+        return results, commands
 
 
 def jam_result_records(
@@ -560,7 +788,7 @@ def run_jam(
     truth_path: Path | None,
     args: argparse.Namespace,
 ) -> tuple[list[dict], list[list[str]]]:
-    version = command_version(executable)
+    version = command_version(executable, "jam")
     if args.jam_output:
         command = [executable, "trace", "(precomputed output)", str(args.jam_output)]
         try:
@@ -608,7 +836,13 @@ def run_jam(
 
 
 def unavailable_result(
-    tool: str, scope: str, query_id: str, query_length: int, selection: dict, error: str
+    tool: str,
+    scope: str,
+    query_id: str,
+    query_length: int,
+    selection: dict,
+    error: str,
+    query_kind: str,
 ) -> dict:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -617,6 +851,8 @@ def unavailable_result(
         "scope": scope,
         "query_id": query_id,
         "query_length": query_length,
+        "query_kind": query_kind,
+        "tool_metadata": comparator_metadata(tool),
         "selection": selection,
         "results": [],
         "metrics": {"truth_status": "unavailable"},
@@ -626,7 +862,7 @@ def unavailable_result(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--tool", choices=("jam", "blastn", "minimap2"), required=True)
+    parser.add_argument("--tool", choices=("jam", "blastn", "minimap2", "lexicmap"), required=True)
     parser.add_argument("--query", type=Path, required=True)
     parser.add_argument("--assemblies-dir", type=Path, required=True)
     parser.add_argument("--candidate-manifest", type=Path)
@@ -635,6 +871,11 @@ def main() -> int:
     parser.add_argument("--truth", type=Path)
     parser.add_argument("--query-id")
     parser.add_argument("--query-length", type=int)
+    parser.add_argument(
+        "--query-kind",
+        choices=("plasmid", "phage", "other", "unknown"),
+        default="plasmid",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--executable")
     parser.add_argument("--jam-output", type=Path)
@@ -651,6 +892,11 @@ def main() -> int:
     parser.add_argument("--min-pident", type=float, default=0.0)
     parser.add_argument("--minimap-preset", default="asm5")
     parser.add_argument("--min-mapq", type=int, default=0)
+    parser.add_argument("--lexicmap-index", type=Path)
+    parser.add_argument("--lexicmap-min-pident", type=float, default=70.0)
+    parser.add_argument("--lexicmap-min-qcov-per-hsp", type=float, default=0.0)
+    parser.add_argument("--lexicmap-min-qcov-per-genome", type=float, default=0.0)
+    parser.add_argument("--lexicmap-min-align-len", type=int, default=1)
     args = parser.parse_args()
     try:
         query_id, query_length = read_fasta_length(args.query, args.query_id)
@@ -671,6 +917,7 @@ def main() -> int:
                 query_length,
                 selection,
                 f"executable not found: {args.executable or args.tool}",
+                args.query_kind,
             )
             result["input_manifest_sha256"] = _truth_checksum(args.candidate_manifest)
             result["truth_manifest_sha256"] = _truth_checksum(args.truth)
@@ -679,6 +926,8 @@ def main() -> int:
             return 0
         if args.tool == "jam":
             results, commands = run_jam(executable, args.query, query_id, query_length, assemblies, args.truth, args)
+        elif args.tool == "lexicmap":
+            results, commands = run_lexicmap(executable, args.query, query_id, query_length, assemblies, args.truth, args)
         else:
             results, commands = run_alignment_tool(args.tool, executable, args.query, query_id, query_length, assemblies, args.truth, args)
         failed = sum(item.get("status") == "failed" for item in results)
@@ -691,7 +940,9 @@ def main() -> int:
             "scope": scope,
             "query_id": query_id,
             "query_length": query_length,
-            "version": command_version(executable),
+            "query_kind": args.query_kind,
+            "version": command_version(executable, args.tool),
+            "tool_metadata": comparator_metadata(args.tool),
             "commands": [command_text(command) for command in commands],
             "selection": selection,
             "input_manifest_sha256": _truth_checksum(args.candidate_manifest),

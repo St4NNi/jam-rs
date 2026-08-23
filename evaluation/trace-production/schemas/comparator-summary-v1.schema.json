@@ -7,11 +7,13 @@
   "required": ["schema_version", "tool", "status", "scope", "query_id", "query_length", "metrics"],
   "properties": {
     "schema_version": {"const": "1.0.0"},
-    "tool": {"enum": ["jam", "blastn", "minimap2"]},
+    "tool": {"enum": ["jam", "blastn", "minimap2", "lexicmap"]},
     "status": {"enum": ["measured", "unavailable", "failed"]},
     "scope": {"enum": ["candidate", "direct_subset", "direct_full"]},
     "query_id": {"type": ["string", "null"]},
     "query_length": {"type": ["integer", "null"], "minimum": 0},
+    "query_kind": {"enum": ["plasmid", "phage", "other", "unknown"]},
+    "tool_metadata": {"type": "object"},
     "metrics": {
       "type": "object",
       "additionalProperties": true,

@@ -20,8 +20,49 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "evidence-summary-v1"
+SCHEMA_VERSION = "evidence-summary-v2"
 TSV_FIELDS = ("section", "case", "metric", "value", "unit", "status", "note")
+OPTIONAL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "query_kind": ("query_kind", "query_type"),
+    "topology": ("topology",),
+    "model": ("model", "model_name", "alignment_model", "comparator_model"),
+    "stratum": ("stratum", "query_stratum", "phage_stratum"),
+    "coordinate_model": (
+        "coordinate_model",
+        "topology_coordinate_model",
+        "topology_model",
+    ),
+    "topology_coordinate_model_outcome": (
+        "topology_coordinate_model_outcome",
+        "coordinate_model_outcome",
+        "topology_coordinate_outcome",
+        "coordinate_outcome",
+    ),
+    "interval_precision": ("interval_precision", "coverage_interval_precision"),
+    "interval_recall": ("interval_recall", "coverage_interval_recall"),
+    "common_sequence_false_assignments": (
+        "common_sequence_false_assignments",
+        "common_sequence_false_assignment_count",
+        "common_sequence_false_assignment",
+        "false_common_sequence_assignments",
+        "common_false_assignments",
+        "common_sequence_false_positive",
+        "common_sequence_fp",
+        "false_assignment_count",
+    ),
+    "common_sequence_false_assignment_rate": (
+        "common_sequence_false_assignment_rate",
+        "common_sequence_false_positive_rate",
+        "false_assignment_rate",
+    ),
+    "peak_rss_kib": ("peak_rss_kib", "peak_rss", "rss_peak_kib", "peak_memory_kib"),
+    "remote_bytes": ("remote_bytes", "remote_bytes_read", "bytes_remote"),
+}
+OPTIONAL_FIELD_KEYS = {
+    alias: canonical
+    for canonical, aliases in OPTIONAL_FIELD_ALIASES.items()
+    for alias in aliases
+}
 EXPECTED_FRAGMENT_CASES = (
     "jam_fragments_fast_s1_t8.json",
     "jam_fragments_fast_s3_t8.json",
@@ -171,10 +212,12 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
         raise ValueError(f"{path}: cannot read JSONL: {error}") from error
     if not records:
         raise ValueError(f"{path}: empty JSONL")
-    if records[0].get("record_type") != "run_header":
-        raise ValueError(f"{path}: first record is not run_header")
-    if records[-1].get("record_type") != "run_footer":
-        raise ValueError(f"{path}: last record is not run_footer")
+    has_header = any(record.get("record_type") == "run_header" for record in records)
+    has_footer = any(record.get("record_type") == "run_footer" for record in records)
+    if has_header and records[0].get("record_type") != "run_header":
+        raise ValueError(f"{path}: run_header is not the first JSONL record")
+    if has_footer and records[-1].get("record_type") != "run_footer":
+        raise ValueError(f"{path}: run_footer is not the last JSONL record")
     return records
 
 
@@ -308,6 +351,169 @@ def load_object(values: dict[str, JsonValue], rel: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"expected JSON object: {rel}")
     return value
+
+
+def iter_dicts(value: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_dicts(child)
+
+
+def optional_values(value: Any, canonical: str) -> list[tuple[str, Any]]:
+    aliases = set(OPTIONAL_FIELD_ALIASES[canonical])
+    found: list[tuple[str, Any]] = []
+    for item in iter_dicts(value):
+        for key, child in item.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in aliases and isinstance(child, (str, int, float, bool)) and (not isinstance(child, str) or child.strip()):
+                found.append((str(key), child))
+            elif normalized in aliases and isinstance(child, dict):
+                for name in ("id", "name", "value", "outcome", "type"):
+                    candidate = child.get(name)
+                    if isinstance(candidate, (str, int, float, bool)) and (not isinstance(candidate, str) or candidate.strip()):
+                        found.append((f"{key}.{name}", candidate))
+                        break
+    return found
+
+
+def tool_values(value: Any) -> list[str]:
+    found: list[str] = []
+    for item in iter_dicts(value):
+        for key, child in item.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized not in {"tool", "tool_name", "program", "aligner", "comparator"}:
+                continue
+            if isinstance(child, str):
+                found.append(child)
+            elif isinstance(child, dict):
+                for name in ("name", "id", "tool", "program"):
+                    if isinstance(child.get(name), str):
+                        found.append(child[name])
+                        break
+    return found
+
+
+def unique_values(values: Iterable[Any]) -> list[Any]:
+    unique: dict[str, Any] = {}
+    for value in values:
+        key = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+        unique.setdefault(key, value)
+    return [unique[key] for key in sorted(unique)]
+
+
+def optional_unit(canonical: str) -> str:
+    if canonical in {"interval_precision", "interval_recall", "common_sequence_false_assignment_rate"}:
+        return "fraction"
+    if canonical in {"common_sequence_false_assignments"}:
+        return "assignments"
+    if canonical == "peak_rss_kib":
+        return "KiB"
+    if canonical == "remote_bytes":
+        return "bytes"
+    return "identifier"
+
+
+def optional_numeric(canonical: str, values: Iterable[Any]) -> Any:
+    numbers = [finite_number(value) for value in values]
+    numbers = [value for value in numbers if value is not None]
+    if not numbers:
+        return None
+    if canonical in {"peak_rss_kib", "remote_bytes", "common_sequence_false_assignments"}:
+        return max(numbers)
+    return statistics.median(numbers)
+
+
+def summarize_optional_fields(
+    rows: list[dict[str, Any]],
+    json_values: dict[str, JsonValue],
+    tsv_values: dict[str, list[dict[str, str]]],
+    jsonl_values: dict[str, list[dict[str, Any]]],
+) -> dict[str, set[str]]:
+    """Collect optional v2 dimensions without requiring them in v1 artifacts."""
+
+    dimensions: dict[str, set[str]] = {
+        field: set() for field in OPTIONAL_FIELD_ALIASES
+    }
+    dimensions["tool"] = set()
+    dimensions["phage_stratum"] = set()
+    sources: list[tuple[str, Any]] = []
+    sources.extend(json_values.items())
+    sources.extend(jsonl_values.items())
+    for rel, values in tsv_values.items():
+        sources.append((rel, values))
+
+    for rel, value in sorted(sources, key=lambda item: item[0]):
+        for canonical in OPTIONAL_FIELD_ALIASES:
+            found = optional_values(value, canonical)
+            if not found:
+                continue
+            raw_values = [child for _, child in found]
+            for child in unique_values(raw_values):
+                dimensions[canonical].add(str(child))
+            if canonical in {"query_kind", "topology", "model", "stratum", "coordinate_model", "topology_coordinate_model_outcome"}:
+                for child in unique_values(raw_values):
+                    add_row(
+                        rows,
+                        "v2_dimensions",
+                        rel,
+                        canonical,
+                        child,
+                        "identifier",
+                        "measured",
+                        "optional v2 dimension retained from source",
+                        [rel],
+                    )
+            else:
+                add_row(
+                    rows,
+                    "v2_evidence",
+                    rel,
+                    canonical,
+                    optional_numeric(canonical, raw_values),
+                    optional_unit(canonical),
+                    "measured",
+                    "optional v2 evidence metric retained from source",
+                    [rel],
+                )
+        query_kinds = {str(child).lower() for _, child in optional_values(value, "query_kind")}
+        if "phage" in query_kinds:
+            strata = unique_values(child for _, child in optional_values(value, "stratum"))
+            for stratum in strata:
+                dimensions["phage_stratum"].add(str(stratum))
+                add_row(
+                    rows,
+                    "v2_dimensions",
+                    rel,
+                    "phage_stratum",
+                    stratum,
+                    "identifier",
+                    "measured",
+                    "phage query stratum retained from source",
+                    [rel],
+                )
+        tools = tool_values(value)
+        if "lexicmap" in rel.lower() and not any("lexicmap" in str(tool).lower() for tool in tools):
+            tools.append("LexicMap")
+        for tool in unique_values(tools):
+            dimensions["tool"].add(str(tool))
+            if "lexicmap" in str(tool).lower():
+                add_row(
+                    rows,
+                    "v2_comparator",
+                    rel,
+                    "tool",
+                    str(tool),
+                    "identifier",
+                    "measured",
+                    "LexicMap result or command identified in source",
+                    [rel],
+                )
+
+    return dimensions
 
 
 def summarize_controlled(
@@ -615,6 +821,10 @@ def add_unavailable(rows: list[dict[str, Any]], case: str, note: str) -> None:
     add_row(rows, "availability", case, "status", "NA", "status", "unavailable", note)
 
 
+def add_optional_unavailable(rows: list[dict[str, Any]], metric: str, note: str) -> None:
+    add_row(rows, "v2_availability", metric, metric, "NA", optional_unit(metric), "unavailable", note)
+
+
 def format_value(value: Any) -> str:
     if value is None or value == "NA":
         return "NA"
@@ -666,12 +876,50 @@ def main() -> int:
     summarize_accession(rows, json_values, jsonl_values, tsv_values)
     summarize_block_and_memory(rows, json_values)
     summarize_http_and_catalog(rows, json_values)
+    dimensions = summarize_optional_fields(rows, json_values, tsv_values, jsonl_values)
+    for field in OPTIONAL_FIELD_ALIASES:
+        if not dimensions[field]:
+            add_optional_unavailable(rows, field, "No source artifact reported this optional v2 field.")
+    if not dimensions["phage_stratum"]:
+        add_row(
+            rows,
+            "v2_availability",
+            "phage_strata",
+            "status",
+            "NA",
+            "status",
+            "unavailable",
+            "No phage query stratum was reported in the raw artifacts.",
+        )
+    if not any("lexicmap" in value.lower() for value in dimensions["tool"]):
+        add_row(
+            rows,
+            "v2_availability",
+            "lexicmap",
+            "status",
+            "NA",
+            "status",
+            "unavailable",
+            "No LexicMap result or measurement was present in the raw artifacts.",
+        )
     add_unavailable(rows, "actual_s3", "No actual S3 object-storage run is present; the HTTP range fixture is not an S3 run.")
     add_unavailable(rows, "read_derived_assemblies", "No read-derived assembly track is present in the raw tree.")
     add_unavailable(rows, "natural_supported_positives", "No natural or independently supported positive track is present in the raw tree.")
     add_unavailable(rows, "1000_real_assemblies", "The 1,000-real-assembly release scale was not run.")
     add_unavailable(rows, "100_plasmid_queries", "The 100-query release scale was not run.")
     rows.sort(key=lambda row: (row["section"], row["case"], row["metric"], row["unit"], row["status"]))
+
+    input_schema_versions: set[str] = set()
+    for value in list(json_values.values()) + list(jsonl_values.values()):
+        for item in iter_dicts(value):
+            schema = item.get("schema_version")
+            if isinstance(schema, (str, int, float)):
+                input_schema_versions.add(str(schema))
+    for values in tsv_values.values():
+        for item in values:
+            schema = item.get("schema_version")
+            if schema:
+                input_schema_versions.add(str(schema))
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir()
@@ -686,6 +934,8 @@ def main() -> int:
         "raw_root": str(raw_root),
         "raw_file_count": len(checksums),
         "raw_checksums_file": "raw-checksums.json",
+        "input_schema_versions": sorted(input_schema_versions),
+        "dimensions": {key: sorted(value) for key, value in sorted(dimensions.items())},
         "validation": {
             "status": "valid",
             "json_file_count": len(json_values),

@@ -13,6 +13,9 @@
     "missing_prerequisites": {"type": "array", "items": {"type": "string"}},
     "job_id": {"type": "string", "minLength": 1},
     "query_id": {"type": "string", "minLength": 1},
+    "query_kind": {"enum": ["plasmid", "phage"]},
+    "topology": {"enum": ["circular", "linear", "unknown"]},
+    "plasmid_id": {"type": "string", "minLength": 1},
     "metagenome_id": {"type": "string", "minLength": 1},
     "trace_output": {"type": ["string", "null"]},
     "trace_summary": {"$ref": "#/$defs/trace_summary"},
@@ -43,5 +46,11 @@
         "mean_supported_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"record_type": {"const": "natural_result"}}},
+      "then": {"required": ["job_id", "query_id", "query_kind", "topology", "support_status", "biological_interpretation"]}
+    }
+  ]
 }

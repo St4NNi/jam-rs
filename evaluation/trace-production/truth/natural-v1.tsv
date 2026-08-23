@@ -1,1 +1,1 @@
-metagenome_id\tplasmid_id\tsupport_status\tsupport_type\tevidence_id\tevidence_source\tevidence_sha256\tlicense_spdx_id\tnotes
+metagenome_id\tquery_id\tquery_kind\ttopology\tsupport_status\tsupport_type\tevidence_id\tevidence_source\tevidence_sha256\tlicense_spdx_id\tnotes

@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0.0",
+  "track": "C",
+  "dataset_id": "natural-phage-example-unavailable",
+  "status": "unavailable",
+  "missing_prerequisites": [
+    "licensed natural metagenome assemblies with verified SHA-256 checksums",
+    "a licensed phage query FASTA with a verified SHA-256 checksum",
+    "an independent phage support record",
+    "a pinned jam command"
+  ],
+  "license": {
+    "spdx_id": "NOASSERTION",
+    "source": "not supplied",
+    "redistribution": "unknown"
+  },
+  "support_manifest_id": "natural-phage-example-support",
+  "support_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "query_elements": [
+    {
+      "query_id": "phage-example",
+      "query_kind": "phage",
+      "topology": "linear",
+      "fasta": "data/phage-example.fasta",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "source": "not supplied",
+        "redistribution": "unknown"
+      }
+    }
+  ],
+  "metagenomes": [],
+  "jam": null,
+  "support_schema": "../schemas/natural-support-v1.schema.json"
+}

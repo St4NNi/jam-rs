@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://stanni.github.io/jam-rs/schemas/evidence-summary-v1.schema.json",
+  "$id": "https://stanni.github.io/jam-rs/schemas/evidence-summary-v2.schema.json",
   "title": "jam trace production evidence summary",
   "type": "object",
   "additionalProperties": false,
@@ -9,16 +9,29 @@
     "raw_root",
     "raw_file_count",
     "raw_checksums_file",
+    "input_schema_versions",
+    "dimensions",
     "validation",
     "row_count",
     "rows",
     "availability_note"
   ],
   "properties": {
-    "schema_version": {"const": "evidence-summary-v1"},
+    "schema_version": {"const": "evidence-summary-v2"},
     "raw_root": {"type": "string", "minLength": 1},
     "raw_file_count": {"type": "integer", "minimum": 0},
     "raw_checksums_file": {"const": "raw-checksums.json"},
+    "input_schema_versions": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "dimensions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {"type": "string"}
+      }
+    },
     "validation": {"$ref": "#/$defs/validation"},
     "row_count": {"type": "integer", "minimum": 1},
     "rows": {

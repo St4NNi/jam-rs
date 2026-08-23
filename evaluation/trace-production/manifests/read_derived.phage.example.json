@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0.0",
+  "track": "B",
+  "dataset_id": "read-derived-phage-example-unavailable",
+  "status": "unavailable",
+  "missing_prerequisites": [
+    "an explicit read manifest with licensed read files and verified SHA-256 checksums",
+    "a licensed phage query FASTA with a verified SHA-256 checksum",
+    "pinned mixer, assembler, coordinate extractor, and jam commands"
+  ],
+  "license": {
+    "spdx_id": "NOASSERTION",
+    "source": "not supplied",
+    "redistribution": "unknown"
+  },
+  "read_manifest_id": "read-derived-phage-example-reads",
+  "read_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "abundance_grid": [
+    {"label": "low", "fraction": 0.0001},
+    {"label": "medium", "fraction": 0.001},
+    {"label": "high", "fraction": 0.01}
+  ],
+  "query_elements": [
+    {
+      "query_id": "phage-example",
+      "query_kind": "phage",
+      "topology": "linear",
+      "fasta": "data/phage-example.fasta",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "license": {
+        "spdx_id": "NOASSERTION",
+        "source": "not supplied",
+        "redistribution": "unknown"
+      }
+    }
+  ],
+  "mixer": null,
+  "assembler": null,
+  "coordinate_extractor": null,
+  "jam": null,
+  "truth_schema": "../truth/read_derived-v1.tsv"
+}

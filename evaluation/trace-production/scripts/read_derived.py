@@ -32,6 +32,8 @@ UNAVAILABLE_EXIT = 3
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 PLACEHOLDER_RE = re.compile(r"(?:<[^>]+>|TODO|CHANGEME|REPLACE[-_ ]WITH)", re.I)
+QUERY_KINDS = {"plasmid", "phage"}
+TOPOLOGIES = {"circular", "linear", "unknown"}
 SECRET_RE = re.compile(
     r"(?i)((?:[?&]|\b)(?:x-amz-signature|x-amz-credential|x-amz-security-token|authorization|password|token|secret)=)[^&\s]+"
 )
@@ -156,6 +158,61 @@ def validate_file(
             issue_missing(missing, f"{label}: checksum mismatch (declared {declared_sha}, actual {actual})")
 
 
+def query_entries(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    missing: list[str],
+    errors: list[str],
+    check_content: bool,
+) -> list[dict[str, Any]]:
+    """Normalize new query_elements and legacy plasmids into one representation."""
+    new_entries = manifest.get("query_elements")
+    legacy_entries = manifest.get("plasmids")
+    if new_entries is not None and legacy_entries is not None:
+        issue_error(errors, "provide query_elements or legacy plasmids, not both")
+        return []
+    legacy = new_entries is None
+    entries = legacy_entries if legacy else new_entries
+    if not isinstance(entries, list) or not entries:
+        issue_missing(missing, "at least one query element")
+        return []
+    valid: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        label = f"{'plasmids' if legacy else 'query_elements'}[{index}]"
+        if not isinstance(entry, dict):
+            issue_error(errors, f"{label}: query element object is required")
+            continue
+        query_id = entry.get("plasmid_id") if legacy else entry.get("query_id")
+        if not valid_text(query_id):
+            issue_error(errors, f"{label}: {'plasmid_id' if legacy else 'query_id'} is required")
+            continue
+        query_kind = entry.get("query_kind", "plasmid" if legacy else None)
+        topology = entry.get("topology", "circular" if legacy else "unknown")
+        if query_kind not in QUERY_KINDS:
+            issue_error(errors, f"{label}.query_kind must be plasmid or phage")
+        if topology not in TOPOLOGIES:
+            issue_error(errors, f"{label}.topology must be circular, linear, or unknown")
+        if query_id in seen:
+            issue_error(errors, f"duplicate query_id: {query_id}")
+            continue
+        seen.add(query_id)
+        validate_file(
+            entry.get("fasta"),
+            entry.get("sha256"),
+            entry.get("license"),
+            label,
+            manifest_path.parent,
+            missing,
+            errors,
+            check_content,
+        )
+        path = resolve_path(entry.get("fasta"), manifest_path.parent)
+        if path is not None and path.is_file():
+            valid.append({**entry, "query_id": query_id, "query_kind": query_kind, "topology": topology, "_fasta_path": path})
+    return valid
+
+
 def validate_read_manifest(
     read_manifest: dict[str, Any],
     read_path: Path,
@@ -244,9 +301,11 @@ def validate_manifest(
     if not valid_text(manifest.get("dataset_id")):
         issue_error(errors, "dataset_id is required")
     validate_license(manifest.get("license"), "benchmark", errors)
-    for field in ("read_manifest_id", "read_manifest_sha256", "abundance_grid", "plasmids", "mixer", "assembler", "coordinate_extractor", "jam"):
+    for field in ("read_manifest_id", "read_manifest_sha256", "abundance_grid", "mixer", "assembler", "coordinate_extractor", "jam"):
         if field not in manifest:
             issue_missing(missing, f"benchmark field: {field}")
+    if "query_elements" not in manifest and "plasmids" not in manifest:
+        issue_missing(missing, "query_elements (or legacy plasmids)")
     validate_read_manifest(read_manifest, read_manifest_path, manifest, missing, errors, check_content)
     abundance_grid = manifest.get("abundance_grid")
     labels: set[str] = set()
@@ -267,39 +326,11 @@ def validate_manifest(
             labels.add(level["label"])
             valid_abundances.append(level)
 
-    plasmids = manifest.get("plasmids")
-    valid_plasmids: list[dict[str, Any]] = []
-    if not isinstance(plasmids, list) or not plasmids:
-        issue_missing(missing, "at least one plasmid sequence")
-    else:
-        seen_plasmids: set[str] = set()
-        for index, plasmid in enumerate(plasmids):
-            label = f"plasmids[{index}]"
-            if not isinstance(plasmid, dict) or not valid_text(plasmid.get("plasmid_id")):
-                issue_error(errors, f"{label}: plasmid_id and sequence metadata are required")
-                continue
-            plasmid_id = plasmid["plasmid_id"]
-            if plasmid_id in seen_plasmids:
-                issue_error(errors, f"duplicate plasmid_id: {plasmid_id}")
-                continue
-            seen_plasmids.add(plasmid_id)
-            validate_file(
-                plasmid.get("fasta"),
-                plasmid.get("sha256"),
-                plasmid.get("license"),
-                label,
-                manifest_path.parent,
-                missing,
-                errors,
-                check_content,
-            )
-            path = resolve_path(plasmid.get("fasta"), manifest_path.parent)
-            if path is not None and path.is_file():
-                valid_plasmids.append({**plasmid, "_fasta_path": path})
+    valid_queries = query_entries(manifest, manifest_path, missing, errors, check_content)
 
     for field in ("mixer", "assembler", "coordinate_extractor", "jam"):
         validate_tool(manifest.get(field), field, missing, errors)
-    return errors, missing, valid_abundances, valid_plasmids
+    return errors, missing, valid_abundances, valid_queries
 
 
 def prepare_output(path: Path) -> None:
@@ -404,46 +435,57 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def coordinate_truth(path: Path, plasmid_id: str, plasmid_length: int, job_id: str) -> tuple[str, list[dict[str, Any]], list[tuple[int, int]]]:
+def coordinate_truth(
+    path: Path,
+    query_id: str,
+    query_kind: str,
+    topology: str,
+    query_length: int,
+    job_id: str,
+) -> tuple[str, list[dict[str, Any]], list[tuple[int, int]]]:
     try:
         value = json_load(path)
     except ValueError as exc:
         raise ValueError(f"invalid coordinate extractor output: {exc}") from exc
     if value.get("schema_version") != SCHEMA_VERSION or value.get("job_id") != job_id:
         raise ValueError("coordinate output schema_version or job_id does not match")
-    if value.get("plasmid_id") != plasmid_id or value.get("plasmid_length") != plasmid_length:
-        raise ValueError("coordinate output plasmid identity or length does not match manifest")
-    sequence = value.get("assembled_plasmid_sequence")
+    output_id = value.get("query_id", value.get("plasmid_id"))
+    output_length = value.get("query_length", value.get("plasmid_length"))
+    if output_id != query_id or output_length != query_length:
+        raise ValueError("coordinate output query identity or length does not match manifest")
+    if value.get("query_kind", query_kind) != query_kind or value.get("topology", topology) != topology:
+        raise ValueError("coordinate output query_kind or topology does not match manifest")
+    sequence = value.get("assembled_query_sequence", value.get("assembled_plasmid_sequence"))
     if not isinstance(sequence, str) or not sequence:
-        raise ValueError("coordinate output must contain assembled_plasmid_sequence")
+        raise ValueError("coordinate output must contain assembled_query_sequence")
     sequence = sequence.upper()
-    declared_sha = value.get("assembled_plasmid_sequence_sha256")
+    declared_sha = value.get("assembled_query_sequence_sha256", value.get("assembled_plasmid_sequence_sha256"))
     actual_sha = hashlib.sha256(sequence.encode("ascii")).hexdigest()
     if declared_sha != actual_sha:
-        raise ValueError("coordinate output assembled sequence checksum does not match sequence")
+        raise ValueError("coordinate output assembled query sequence checksum does not match sequence")
     raw_intervals = value.get("intervals")
     if not isinstance(raw_intervals, list) or not raw_intervals:
-        raise ValueError("coordinate output must contain at least one plasmid interval")
+        raise ValueError("coordinate output must contain at least one query interval")
     intervals: list[tuple[int, int]] = []
     normalized: list[dict[str, Any]] = []
     for index, interval in enumerate(raw_intervals):
         if not isinstance(interval, dict):
             raise ValueError(f"coordinate interval {index} is not an object")
-        start = interval.get("plasmid_start")
-        end = interval.get("plasmid_end")
-        if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= plasmid_length:
-            raise ValueError(f"coordinate interval {index} is outside the plasmid")
+        start = interval.get("query_start", interval.get("plasmid_start"))
+        end = interval.get("query_end", interval.get("plasmid_end"))
+        if not isinstance(start, int) or not isinstance(end, int) or not 0 <= start < end <= query_length:
+            raise ValueError(f"coordinate interval {index} is outside the query element")
         if not valid_text(interval.get("contig_id")):
             raise ValueError(f"coordinate interval {index} lacks contig_id")
         intervals.append((start, end))
         normalized.append(interval)
-    union = union_intervals(intervals, plasmid_length)
+    union = union_intervals(intervals, query_length)
     if not union:
-        raise ValueError("coordinate output has zero assembled plasmid bases")
+        raise ValueError("coordinate output has zero assembled query bases")
     return sequence, normalized, union
 
 
-def trace_support(path: Path, plasmid_length: int, assembled: list[tuple[int, int]]) -> dict[str, Any]:
+def trace_support(path: Path, query_length: int, assembled: list[tuple[int, int]]) -> dict[str, Any]:
     records = read_jsonl(path)
     all_intervals: list[tuple[int, int]] = []
     for record in records:
@@ -454,11 +496,11 @@ def trace_support(path: Path, plasmid_length: int, assembled: list[tuple[int, in
             if not isinstance(interval, dict):
                 continue
             start, end = interval.get("start"), interval.get("end")
-            if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= plasmid_length:
+            if isinstance(start, int) and isinstance(end, int) and 0 <= start < end <= query_length:
                 all_intervals.append((start, end))
     if not any(record.get("record_type") == "metagenome_result" for record in records):
         raise ValueError("trace output contains no metagenome_result record")
-    supported = union_intervals(all_intervals, plasmid_length)
+    supported = union_intervals(all_intervals, query_length)
     assembled_bases = sum(end - start for start, end in assembled)
     observed_bases = intersection_length(supported, assembled)
     return {
@@ -466,9 +508,9 @@ def trace_support(path: Path, plasmid_length: int, assembled: list[tuple[int, in
         "supported_intervals": [{"start": start, "end": end} for start, end in supported],
         "assembled_intervals": [{"start": start, "end": end} for start, end in assembled],
         "supported_bases_in_assembled_sequence": observed_bases,
-        "assembled_plasmid_bases": assembled_bases,
         "supported_fraction_of_assembled_sequence": observed_bases / assembled_bases if assembled_bases else None,
-        "supported_fraction_of_plasmid": observed_bases / plasmid_length if plasmid_length else None,
+        "supported_fraction_of_query": observed_bases / query_length if query_length else None,
+        "assembled_query_bases": assembled_bases,
     }
 
 
@@ -497,7 +539,7 @@ def run(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    errors, missing, abundances, plasmids = validate_manifest(
+    errors, missing, abundances, queries = validate_manifest(
         manifest, manifest_path, read_manifest, read_manifest_path, check_content=True
     )
     if errors:
@@ -542,13 +584,15 @@ def run(args: argparse.Namespace) -> int:
         r2_path = resolve_path(read_set.get("r2"), read_manifest_path.parent)
         if r1_path is None:
             continue
-        for plasmid in plasmids:
-            plasmid_id = plasmid["plasmid_id"]
-            plasmid_path = plasmid["_fasta_path"]
-            plasmid_sequence = fasta_sequence(plasmid_path)
+        for query in queries:
+            query_id = query["query_id"]
+            query_kind = query["query_kind"]
+            topology = query["topology"]
+            query_path = query["_fasta_path"]
+            query_sequence = fasta_sequence(query_path)
             for abundance in abundances:
                 label = abundance["label"]
-                job_id = f"{read_set_id}__{plasmid_id}__{label}"
+                job_id = f"{read_set_id}__{query_id}__{label}"
                 job_dir = jobs_dir / job_id
                 job_dir.mkdir()
                 mixed_r1 = job_dir / "mixed_R1.fastq.gz"
@@ -562,9 +606,15 @@ def run(args: argparse.Namespace) -> int:
                     "read_set_id": read_set_id,
                     "input_r1": str(r1_path),
                     "input_r2": str(r2_path) if r2_path is not None else "",
-                    "plasmid": str(plasmid_path),
-                    "plasmid_id": plasmid_id,
-                    "plasmid_length": len(plasmid_sequence),
+                    "query_fasta": str(query_path),
+                    "query_id": query_id,
+                    "query_kind": query_kind,
+                    "topology": topology,
+                    "query_length": len(query_sequence),
+                    # Legacy aliases remain available to old command templates.
+                    "plasmid": str(query_path),
+                    "plasmid_id": query_id,
+                    "plasmid_length": len(query_sequence),
                     "abundance": abundance["fraction"],
                     "abundance_label": label,
                     "output_dir": str(job_dir),
@@ -609,37 +659,49 @@ def run(args: argparse.Namespace) -> int:
                     "run_id": run_id,
                     "job_id": job_id,
                     "read_set_id": read_set_id,
-                    "plasmid_id": plasmid_id,
+                    "query_id": query_id,
+                    "query_kind": query_kind,
+                    "topology": topology,
+                    "query_length": len(query_sequence),
                     "abundance_label": label,
                     "abundance_fraction": abundance["fraction"],
                     "status": status,
                     "commands": commands,
                     "failure": failure,
                 }
+                if query_kind == "plasmid":
+                    output_record["plasmid_id"] = query_id
                 if status == "complete":
                     try:
                         sequence, coordinates_value, assembled_intervals = coordinate_truth(
-                            coordinates, plasmid_id, len(plasmid_sequence), job_id
+                            coordinates, query_id, query_kind, topology, len(query_sequence), job_id
                         )
                         sequence_sha = hashlib.sha256(sequence.encode("ascii")).hexdigest()
-                        sequence_path = job_dir / "assembled_plasmid.fasta"
+                        sequence_path = job_dir / "assembled_query.fasta"
                         with sequence_path.open("w", encoding="ascii") as handle:
-                            handle.write(f">{plasmid_id}|{job_id}|assembled\n")
+                            handle.write(f">{query_id}|{job_id}|assembled\n")
                             for offset in range(0, len(sequence), 80):
                                 handle.write(sequence[offset : offset + 80] + "\n")
-                        support = trace_support(trace_output, len(plasmid_sequence), assembled_intervals)
+                        support = trace_support(trace_output, len(query_sequence), assembled_intervals)
+                        if query_kind == "plasmid":
+                            support["assembled_plasmid_bases"] = support["assembled_query_bases"]
+                            support["supported_fraction_of_plasmid"] = support["supported_fraction_of_query"]
+                        sequence_record = {
+                            "path": str(sequence_path),
+                            "sha256": sequence_sha,
+                            "fasta_sha256": sha256(sequence_path),
+                            "length": len(sequence),
+                        }
+                        output_record["assembled_query_sequence"] = sequence_record
+                        if query_kind == "plasmid":
+                            output_record["plasmid_id"] = query_id
+                            output_record["assembled_plasmid_sequence"] = sequence_record
                         output_record.update(
                             {
-                                "assembled_plasmid_sequence": {
-                                    "path": str(sequence_path),
-                                    "sha256": sequence_sha,
-                                    "fasta_sha256": sha256(sequence_path),
-                                    "length": len(sequence),
-                                },
                                 "assembled_coordinates": coordinates_value,
                                 "assembled_intervals": support["assembled_intervals"],
                                 "trace_evidence": support,
-                                "measurement_scope": "intersection of Jam-supported intervals and independently extracted assembled plasmid intervals",
+                                "measurement_scope": "intersection of Jam-supported intervals and independently extracted assembled query-element intervals",
                             }
                         )
                     except (OSError, ValueError, UnicodeError, json.JSONDecodeError, subprocess.SubprocessError) as exc:

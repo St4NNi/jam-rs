@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/normalized-mge-v1.schema.json",
+  "title": "Normalized metagenome alignment evidence",
+  "description": "Common query-coordinate evidence for Jam trace, BLASTn, minimap2, and LexicMap records.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "normalization_schema",
+    "format",
+    "query_id",
+    "query_length",
+    "metagenome_id",
+    "query_kind",
+    "topology_requested",
+    "records",
+    "coverage"
+  ],
+  "properties": {
+    "schema_version": {"enum": ["1.0.0", "normalized-mge-v1"]},
+    "normalization_schema": {"const": "normalized-mge-v1"},
+    "format": {"enum": ["blast6", "blastn", "paf", "lexicmap", "jam"]},
+    "query_id": {"type": "string", "minLength": 1},
+    "query_length": {"type": "integer", "minimum": 1},
+    "metagenome_id": {"type": "string", "minLength": 1},
+    "query_kind": {"type": "string", "minLength": 1},
+    "topology_requested": {"type": "string", "minLength": 1},
+    "coordinate_model": {"type": "string", "minLength": 1},
+    "topology_evidence": {"type": "string", "minLength": 1},
+    "source_schema_version": {"type": "string", "minLength": 1},
+    "records": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/record"}
+    },
+    "coverage": {"$ref": "#/$defs/coverage"},
+    "input_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
+  },
+  "$defs": {
+    "interval": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "record": {
+      "type": "object",
+      "required": [
+        "metagenome_id",
+        "contig_id",
+        "intervals",
+        "aligned_intervals",
+        "alignment_deletions",
+        "unsupported_intervals"
+      ],
+      "properties": {
+        "metagenome_id": {"type": ["string", "null"]},
+        "contig_id": {"type": "string", "minLength": 1},
+        "strand": {"type": "string"},
+        "query_segments": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "aligned_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "alignment_deletions": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "unsupported_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "primary": {"type": "boolean"},
+        "accepted": {"type": "boolean"},
+        "source": {"type": "string"},
+        "source_schema_version": {"type": "string"},
+        "query_kind": {"type": "string"},
+        "topology_requested": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "query_kind",
+        "topology_requested",
+        "coordinate_model",
+        "topology_evidence",
+        "supported_intervals",
+        "supported_bases",
+        "supported_fraction",
+        "aligned_intervals",
+        "aligned_bases",
+        "aligned_fraction",
+        "alignment_deletions",
+        "alignment_deletion_bases",
+        "unsupported_gaps",
+        "gaps"
+      ],
+      "properties": {
+        "query_kind": {"type": "string", "minLength": 1},
+        "topology_requested": {"type": "string", "minLength": 1},
+        "coordinate_model": {"type": "string", "minLength": 1},
+        "topology_evidence": {"type": "string", "minLength": 1},
+        "supported_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "supported_bases": {"type": "integer", "minimum": 0},
+        "supported_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "aligned_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "aligned_bases": {"type": "integer", "minimum": 0},
+        "aligned_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "alignment_deletions": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "alignment_deletion_bases": {"type": "integer", "minimum": 0},
+        "unsupported_gaps": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "gaps": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "truth_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "truth_status": {"type": "string"},
+        "metrics": {"type": "object"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -13,11 +13,16 @@
     "missing_prerequisites": {"type": "array", "items": {"type": "string"}},
     "job_id": {"type": "string", "minLength": 1},
     "read_set_id": {"type": "string", "minLength": 1},
+    "query_id": {"type": "string", "minLength": 1},
+    "query_kind": {"enum": ["plasmid", "phage"]},
+    "topology": {"enum": ["circular", "linear", "unknown"]},
+    "query_length": {"type": "integer", "minimum": 1},
     "plasmid_id": {"type": "string", "minLength": 1},
     "abundance_label": {"type": "string", "minLength": 1},
     "abundance_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
     "commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
     "failure": {"type": ["string", "null"]},
+    "assembled_query_sequence": {"$ref": "#/$defs/sequence"},
     "assembled_plasmid_sequence": {"$ref": "#/$defs/sequence"},
     "assembled_coordinates": {"type": "array", "items": {"$ref": "#/$defs/coordinate"}},
     "assembled_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
@@ -46,9 +51,11 @@
     },
     "coordinate": {
       "type": "object",
-      "required": ["contig_id", "plasmid_start", "plasmid_end"],
+      "required": ["contig_id"],
       "properties": {
         "contig_id": {"type": "string", "minLength": 1},
+        "query_start": {"type": "integer", "minimum": 0},
+        "query_end": {"type": "integer", "minimum": 1},
         "plasmid_start": {"type": "integer", "minimum": 0},
         "plasmid_end": {"type": "integer", "minimum": 1},
         "assembly_start": {"type": "integer", "minimum": 0},
@@ -66,15 +73,23 @@
     },
     "trace_evidence": {
       "type": "object",
-      "required": ["supported_intervals", "assembled_intervals", "supported_bases_in_assembled_sequence", "assembled_plasmid_bases"],
+      "required": ["supported_intervals", "assembled_intervals", "supported_bases_in_assembled_sequence", "assembled_query_bases"],
       "properties": {
         "supported_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
         "assembled_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
         "supported_bases_in_assembled_sequence": {"type": "integer", "minimum": 0},
+        "assembled_query_bases": {"type": "integer", "minimum": 0},
         "assembled_plasmid_bases": {"type": "integer", "minimum": 0},
         "supported_fraction_of_assembled_sequence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "supported_fraction_of_query": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "supported_fraction_of_plasmid": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"record_type": {"const": "job_result"}}},
+      "then": {"required": ["job_id", "query_id", "query_kind", "topology", "query_length"]}
+    }
+  ]
 }

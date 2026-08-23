@@ -13,7 +13,6 @@
     "read_manifest_id",
     "read_manifest_sha256",
     "abundance_grid",
-    "plasmids",
     "mixer",
     "assembler",
     "coordinate_extractor",
@@ -39,6 +38,10 @@
           "fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
         }
       }
+    },
+    "query_elements": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/query_element"}
     },
     "plasmids": {
       "type": "array",
@@ -84,6 +87,28 @@
         "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
         "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
       }
+    },
+    "query_element": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query_id", "query_kind", "topology", "fasta", "sha256", "license"],
+      "properties": {
+        "query_id": {"type": "string", "minLength": 1},
+        "query_kind": {"enum": ["plasmid", "phage"]},
+        "topology": {"enum": ["circular", "linear", "unknown"]},
+        "fasta": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "length": {"type": "integer", "minimum": 1},
+        "license": {"$ref": "#/$defs/license"}
+      }
     }
-  }
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {"required": ["query_elements"]},
+        {"required": ["plasmids"]}
+      ]
+    }
+  ]
 }

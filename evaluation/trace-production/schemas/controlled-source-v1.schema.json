@@ -108,6 +108,15 @@
           "items": {
             "type": "string"
           }
+        },
+        "query_kind": {
+          "enum": ["plasmid", "phage", "other", "unknown"]
+        },
+        "topology": {
+          "enum": ["linear", "circular", "unknown"]
+        },
+        "terminal_repeat": {
+          "enum": ["none", "direct", "inverted"]
         }
       },
       "additionalProperties": true

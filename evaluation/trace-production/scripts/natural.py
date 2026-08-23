@@ -28,6 +28,8 @@ UNAVAILABLE_EXIT = 3
 SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-fA-F]{64}$")
 PLACEHOLDER_RE = re.compile(r"(?:<[^>]+>|TODO|CHANGEME|REPLACE[-_ ]WITH)", re.I)
+QUERY_KINDS = {"plasmid", "phage"}
+TOPOLOGIES = {"circular", "linear", "unknown"}
 SECRET_RE = re.compile(
     r"(?i)((?:[?&]|\b)(?:x-amz-signature|x-amz-credential|x-amz-security-token|authorization|password|token|secret)=)[^&\s]+"
 )
@@ -151,6 +153,52 @@ def validate_file(
             issue_missing(missing, f"{label}: checksum mismatch (declared {declared_sha}, actual {actual})")
 
 
+def query_entries(
+    manifest: dict[str, Any],
+    manifest_path: Path,
+    missing: list[str],
+    errors: list[str],
+    check_content: bool,
+) -> list[dict[str, Any]]:
+    """Normalize query_elements and legacy query_plasmids entries."""
+    new_entries = manifest.get("query_elements")
+    legacy_entries = manifest.get("query_plasmids")
+    if new_entries is not None and legacy_entries is not None:
+        issue_error(errors, "provide query_elements or legacy query_plasmids, not both")
+        return []
+    legacy = new_entries is None
+    entries = legacy_entries if legacy else new_entries
+    if not isinstance(entries, list) or not entries:
+        issue_missing(missing, "at least one query element")
+        return []
+    valid: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        label = f"{'query_plasmids' if legacy else 'query_elements'}[{index}]"
+        if not isinstance(entry, dict):
+            issue_error(errors, f"{label}: query element object is required")
+            continue
+        query_id = entry.get("plasmid_id") if legacy else entry.get("query_id")
+        if not valid_text(query_id):
+            issue_error(errors, f"{label}: {'plasmid_id' if legacy else 'query_id'} is required")
+            continue
+        query_kind = entry.get("query_kind", "plasmid" if legacy else None)
+        topology = entry.get("topology", "circular" if legacy else "unknown")
+        if query_kind not in QUERY_KINDS:
+            issue_error(errors, f"{label}.query_kind must be plasmid or phage")
+        if topology not in TOPOLOGIES:
+            issue_error(errors, f"{label}.topology must be circular, linear, or unknown")
+        if query_id in seen:
+            issue_error(errors, f"duplicate query_id: {query_id}")
+            continue
+        seen.add(query_id)
+        validate_file(entry.get("fasta"), entry.get("sha256"), entry.get("license"), label, manifest_path.parent, missing, errors, check_content)
+        path = resolve_path(entry.get("fasta"), manifest_path.parent)
+        if path is not None and path.is_file():
+            valid.append({**entry, "query_id": query_id, "query_kind": query_kind, "topology": topology, "_fasta_path": path})
+    return valid
+
+
 def validate_support_manifest(
     support: dict[str, Any], support_path: Path, parent: dict[str, Any], missing: list[str], errors: list[str], check_content: bool
 ) -> list[dict[str, Any]]:
@@ -181,15 +229,24 @@ def validate_support_manifest(
         if not isinstance(record, dict):
             issue_error(errors, f"{label}: object is required")
             continue
-        for field in ("metagenome_id", "plasmid_id", "support_type", "evidence_id", "evidence_source"):
+        for field in ("metagenome_id", "support_type", "evidence_id", "evidence_source"):
             if not valid_text(record.get(field)):
                 issue_error(errors, f"{label}.{field} is required")
+        query_id = record.get("query_id", record.get("plasmid_id"))
+        query_kind = record.get("query_kind", "plasmid" if record.get("plasmid_id") is not None else None)
+        topology = record.get("topology", "circular" if query_kind == "plasmid" else "unknown")
+        if not valid_text(query_id):
+            issue_error(errors, f"{label}.query_id is required")
+        if query_kind not in QUERY_KINDS:
+            issue_error(errors, f"{label}.query_kind must be plasmid or phage")
+        if topology not in TOPOLOGIES:
+            issue_error(errors, f"{label}.topology must be circular, linear, or unknown")
         validate_sha(record.get("evidence_sha256"), f"{label}.evidence_sha256", errors)
         validate_license(record.get("license"), label, errors)
         support_type = record.get("support_type")
         if isinstance(support_type, str) and support_type.lower() in {"truth", "none", "unknown", "absence"}:
             issue_error(errors, f"{label}.support_type must identify independent evidence")
-        key = (str(record.get("metagenome_id")), str(record.get("plasmid_id")))
+        key = (str(record.get("metagenome_id")), str(query_id))
         if key in seen:
             issue_error(errors, f"duplicate support record for {key[0]} and {key[1]}")
             continue
@@ -204,7 +261,7 @@ def validate_support_manifest(
                     issue_missing(missing, f"{label}: evidence checksum mismatch (declared {record.get('evidence_sha256')}, actual {actual})")
         elif not valid_text(record.get("evidence_uri")):
             issue_missing(missing, f"{label}: evidence_path or evidence_uri")
-        valid.append(record)
+        valid.append({**record, "query_id": query_id, "query_kind": query_kind, "topology": topology})
     return valid
 
 
@@ -220,30 +277,14 @@ def validate_manifest(
     if not valid_text(manifest.get("dataset_id")):
         issue_error(errors, "dataset_id is required")
     validate_license(manifest.get("license"), "benchmark", errors)
-    for field in ("support_manifest_id", "support_manifest_sha256", "query_plasmids", "metagenomes", "jam"):
+    for field in ("support_manifest_id", "support_manifest_sha256", "metagenomes", "jam"):
         if field not in manifest:
             issue_missing(missing, f"benchmark field: {field}")
+    if "query_elements" not in manifest and "query_plasmids" not in manifest:
+        issue_missing(missing, "query_elements (or legacy query_plasmids)")
     valid_support = validate_support_manifest(support, support_path, manifest, missing, errors, check_content)
 
-    queries = manifest.get("query_plasmids")
-    valid_queries: list[dict[str, Any]] = []
-    if not isinstance(queries, list) or not queries:
-        issue_missing(missing, "at least one query plasmid")
-    else:
-        seen: set[str] = set()
-        for index, query in enumerate(queries):
-            label = f"query_plasmids[{index}]"
-            if not isinstance(query, dict) or not valid_text(query.get("plasmid_id")):
-                issue_error(errors, f"{label}: plasmid_id and sequence metadata are required")
-                continue
-            if query["plasmid_id"] in seen:
-                issue_error(errors, f"duplicate plasmid_id: {query['plasmid_id']}")
-                continue
-            seen.add(query["plasmid_id"])
-            validate_file(query.get("fasta"), query.get("sha256"), query.get("license"), label, manifest_path.parent, missing, errors, check_content)
-            path = resolve_path(query.get("fasta"), manifest_path.parent)
-            if path is not None and path.is_file():
-                valid_queries.append({**query, "_fasta_path": path})
+    valid_queries = query_entries(manifest, manifest_path, missing, errors, check_content)
 
     metagenomes = manifest.get("metagenomes")
     valid_metagenomes: list[dict[str, Any]] = []
@@ -266,6 +307,13 @@ def validate_manifest(
             if path is not None and path.is_file():
                 valid_metagenomes.append({**metagenome, "_assembly_path": path})
     validate_tool(manifest.get("jam"), "jam", missing, errors)
+    query_metadata = {query["query_id"]: query for query in valid_queries}
+    for record in valid_support:
+        query = query_metadata.get(record["query_id"])
+        if query is None:
+            issue_error(errors, f"support record references unknown query_id: {record['query_id']}")
+        elif record["query_kind"] != query["query_kind"] or record["topology"] != query["topology"]:
+            issue_error(errors, f"support record query metadata does not match query_id: {record['query_id']}")
     return errors, missing, valid_queries, valid_metagenomes, valid_support
 
 
@@ -404,14 +452,16 @@ def run(args: argparse.Namespace) -> int:
         unavailable_files(args.output_dir, run_record, missing)
         return UNAVAILABLE_EXIT
 
-    support_by_pair = {(record["metagenome_id"], record["plasmid_id"]): record for record in supports}
+    support_by_pair = {(record["metagenome_id"], record["query_id"]): record for record in supports}
     jobs_dir = args.output_dir / "jobs"
     jobs_dir.mkdir()
     records: list[dict[str, Any]] = []
     failed = False
     for query in queries:
         for metagenome in metagenomes:
-            query_id = query["plasmid_id"]
+            query_id = query["query_id"]
+            query_kind = query["query_kind"]
+            topology = query["topology"]
             metagenome_id = metagenome["metagenome_id"]
             job_id = f"{query_id}__{metagenome_id}"
             job_dir = jobs_dir / job_id
@@ -422,7 +472,12 @@ def run(args: argparse.Namespace) -> int:
             values = {
                 "job_id": job_id,
                 "query_id": query_id,
+                "query_kind": query_kind,
+                "topology": topology,
                 "query_fasta": str(query_path),
+                # Legacy command templates remain supported for plasmid runs.
+                "plasmid_id": query_id,
+                "plasmid": str(query_path),
                 "metagenome_id": metagenome_id,
                 "metagenome": str(assembly_path),
                 "output_dir": str(job_dir),
@@ -456,6 +511,8 @@ def run(args: argparse.Namespace) -> int:
                     "run_id": run_id,
                     "job_id": job_id,
                     "query_id": query_id,
+                    "query_kind": query_kind,
+                    "topology": topology,
                     "metagenome_id": metagenome_id,
                     "status": status,
                     "trace_output": str(trace_output) if trace_output.is_file() else None,
@@ -467,6 +524,8 @@ def run(args: argparse.Namespace) -> int:
                     "failure": failure,
                 }
             )
+            if query_kind == "plasmid":
+                records[-1]["plasmid_id"] = query_id
     run_record.update(
         {
             "finished_at_utc": utc_now(),

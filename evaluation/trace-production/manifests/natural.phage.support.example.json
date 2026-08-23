@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "support_manifest_id": "natural-phage-example-support",
+  "status": "unavailable",
+  "license": {
+    "spdx_id": "NOASSERTION",
+    "source": "not supplied",
+    "redistribution": "unknown"
+  },
+  "support_records": []
+}

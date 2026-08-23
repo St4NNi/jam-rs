@@ -68,6 +68,12 @@ DEFAULT_INDELS = (
     "long_insertion",
     "long_deletion",
 )
+DEFAULT_QUERY_KINDS = ("plasmid", "phage")
+DEFAULT_TOPOLOGIES = ("linear", "circular", "unknown")
+DEFAULT_TERMINAL_REPEATS = ("none", "direct", "inverted")
+VALID_QUERY_KINDS = frozenset({"plasmid", "phage", "other", "unknown"})
+VALID_TOPOLOGIES = frozenset({"linear", "circular", "unknown"})
+VALID_TERMINAL_REPEATS = frozenset({"none", "direct", "inverted"})
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -164,6 +170,9 @@ class SequenceRecord:
     source: SequenceSource
     source_record_index: int
     labels: tuple[str, ...] = ()
+    query_kind: str = "unknown"
+    topology: str = "unknown"
+    terminal_repeat: str = "none"
 
 
 @dataclass(frozen=True)
@@ -190,6 +199,9 @@ class Cell:
     indel: str
     background: SequenceSource | None
     label: str
+    query_kind: str
+    topology: str
+    terminal_repeat: str
 
 
 def _manifest_file(root: Path, explicit: Path | None) -> Path:
@@ -242,6 +254,14 @@ def _metadata_records(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 if isinstance(identifier, str) and identifier:
                     result[identifier] = item
     return result
+
+
+def _metadata_value(item: dict[str, Any], key: str, allowed: frozenset[str], default: str) -> str:
+    value = item.get(key, default)
+    if not isinstance(value, str):
+        return default
+    value = value.lower()
+    return value if value in allowed else default
 
 
 def _make_source(root: Path, item: dict[str, Any], fallback_id: str, field: str) -> SequenceSource:
@@ -316,6 +336,11 @@ def load_source(root: Path, explicit_manifest: Path | None = None) -> SourceData
             labels = metadata_item.get("labels", source.labels)
             if isinstance(labels, str):
                 labels = (labels,)
+            query_kind = _metadata_value(metadata_item, "query_kind", VALID_QUERY_KINDS, "unknown")
+            topology = _metadata_value(metadata_item, "topology", VALID_TOPOLOGIES, "unknown")
+            terminal_repeat = _metadata_value(
+                metadata_item, "terminal_repeat", VALID_TERMINAL_REPEATS, "none"
+            )
             catalog_records.append(
                 SequenceRecord(
                     identifier=identifier,
@@ -330,6 +355,9 @@ def load_source(root: Path, explicit_manifest: Path | None = None) -> SourceData
                     ),
                     source_record_index=record_index,
                     labels=tuple(str(label) for label in labels),
+                    query_kind=query_kind,
+                    topology=topology,
+                    terminal_repeat=terminal_repeat,
                 )
             )
     if not catalog_records:
@@ -393,11 +421,40 @@ def load_matrix(path: Path | None = None) -> dict[str, Any]:
     missing = sorted(required - matrix.keys())
     if missing:
         raise SystemExit(f"controlled matrix misses axes: {', '.join(missing)}")
+    for stratum in matrix.get("query_strata", []):
+        if not isinstance(stratum, dict):
+            raise SystemExit("query_strata entries must be objects")
+        if stratum.get("query_kind") not in VALID_QUERY_KINDS:
+            raise SystemExit("query_strata has an unsupported query_kind")
+        if stratum.get("topology") not in VALID_TOPOLOGIES:
+            raise SystemExit("query_strata has an unsupported topology")
+        if stratum.get("terminal_repeat") not in VALID_TERMINAL_REPEATS:
+            raise SystemExit("query_strata has an unsupported terminal_repeat")
     return matrix
 
 
-def choose_query(records: Sequence[SequenceRecord], requested_length: int) -> SequenceRecord | None:
-    eligible = [record for record in records if len(record.sequence) >= requested_length]
+def choose_query(
+    records: Sequence[SequenceRecord],
+    requested_length: int,
+    query_kind: str = "plasmid",
+    topology: str = "unknown",
+    terminal_repeat: str = "none",
+) -> SequenceRecord | None:
+    eligible = [
+        record
+        for record in records
+        if len(record.sequence) >= requested_length
+        and (
+            query_kind == "unknown"
+            or record.query_kind == query_kind
+            or (query_kind == "plasmid" and record.query_kind == "unknown")
+        )
+        and (topology == "unknown" or record.topology in {topology, "unknown"})
+        and (
+            terminal_repeat == "none"
+            or record.terminal_repeat in {terminal_repeat, "none"}
+        )
+    ]
     if not eligible:
         return None
     return min(eligible, key=lambda record: (len(record.sequence), record.identifier))
@@ -465,6 +522,31 @@ def split_intervals(
         if end <= begin:
             return [], overlap
         intervals.append(((start + begin) % query_length, end - begin))
+    return intervals, overlap
+
+
+def split_linear_intervals(
+    query_length: int,
+    start: int,
+    coverage_bases: int,
+    fragment_count: int,
+) -> tuple[list[tuple[int, int]], int]:
+    """Partition a linear query without modulo or origin crossing."""
+    if fragment_count < 1 or coverage_bases < fragment_count:
+        return [], 0
+    overlap = requested_overlap(fragment_count, coverage_bases, query_length)
+    edges = [round(index * coverage_bases / fragment_count) for index in range(fragment_count + 1)]
+    intervals: list[tuple[int, int]] = []
+    for index in range(fragment_count):
+        begin = edges[index] - (overlap if index else 0)
+        end = edges[index + 1] + (overlap if index + 1 < fragment_count else 0)
+        if end <= begin:
+            return [], overlap
+        fragment_start = start + begin
+        fragment_end = start + end
+        if fragment_start < 0 or fragment_end > query_length:
+            return [], overlap
+        intervals.append((fragment_start, end - begin))
     return intervals, overlap
 
 
@@ -545,9 +627,14 @@ def mutate_fragment(
     }
 
 
-def _axis_values(matrix: dict[str, Any], key: str, values: Sequence[Any] | None) -> tuple[Any, ...]:
+def _axis_values(
+    matrix: dict[str, Any],
+    key: str,
+    values: Sequence[Any] | None,
+    default: Sequence[Any] = (),
+) -> tuple[Any, ...]:
     if values is None:
-        return tuple(matrix[key])
+        return tuple(matrix.get(key, default))
     return tuple(values)
 
 
@@ -560,13 +647,19 @@ def _case_id(
     orientation: str,
     indel: str,
     background: SequenceSource | None,
+    query_kind: str = "plasmid",
+    topology: str = "unknown",
+    terminal_repeat: str = "none",
 ) -> str:
     query_id = safe_name(query.identifier if query else "unavailable")
     background_id = safe_name(background.identifier if background else "unavailable")
-    return (
+    base = (
         f"q{query_length}__{query_id}__i{identity}__c{coverage}__n{fragments}__"
         f"{orientation}__{indel}__bg_{background_id}"
     )
+    if query_kind == "plasmid" and topology == "unknown" and terminal_repeat == "none":
+        return base
+    return f"{base}__kind_{safe_name(query_kind)}__top_{safe_name(topology)}__repeat_{safe_name(terminal_repeat)}"
 
 
 def iter_cells(
@@ -581,13 +674,16 @@ def iter_cells(
     indels: Sequence[str] | None = None,
     background_id: str | None = None,
     label: str = "standard",
+    query_kinds: Sequence[str] | None = None,
+    topologies: Sequence[str] | None = None,
+    terminal_repeats: Sequence[str] | None = None,
 ) -> Iterator[Cell]:
     backgrounds = [item for item in source.background_files if background_id is None or item.identifier == background_id]
     if background_id is not None and not backgrounds:
         raise SystemExit(f"requested background is absent: {background_id}")
     if not backgrounds:
         return
-    for requested_length, identity, coverage, fragment_count, orientation, indel, background in product(
+    for requested_length, identity, coverage, fragment_count, orientation, indel, background, query_kind, topology, terminal_repeat in product(
         _axis_values(matrix, "query_lengths", query_lengths),
         _axis_values(matrix, "identities", identities),
         _axis_values(matrix, "coverages", coverages),
@@ -595,8 +691,17 @@ def iter_cells(
         _axis_values(matrix, "orientations", orientations),
         _axis_values(matrix, "indel_profiles", indels),
         backgrounds,
+        _axis_values(matrix, "query_kinds", query_kinds, DEFAULT_QUERY_KINDS[:1]),
+        _axis_values(matrix, "topologies", topologies, DEFAULT_TOPOLOGIES[-1:]),
+        _axis_values(matrix, "terminal_repeats", terminal_repeats, DEFAULT_TERMINAL_REPEATS[:1]),
     ):
-        query = choose_query(source.catalog_records, int(requested_length))
+        query = choose_query(
+            source.catalog_records,
+            int(requested_length),
+            str(query_kind),
+            str(topology),
+            str(terminal_repeat),
+        )
         yield Cell(
             case_id=_case_id(
                 query,
@@ -607,6 +712,9 @@ def iter_cells(
                 str(orientation),
                 str(indel),
                 background,
+                str(query_kind),
+                str(topology),
+                str(terminal_repeat),
             ),
             query=query,
             requested_query_length=int(requested_length),
@@ -617,12 +725,23 @@ def iter_cells(
             indel=str(indel),
             background=background,
             label=label,
+            query_kind=str(query_kind),
+            topology=str(topology),
+            terminal_repeat=str(terminal_repeat),
         )
 
 
 def cell_status(cell: Cell, query_length: int, overlap: int | None = None) -> tuple[str, str]:
     if cell.query is None:
         return "unsupported", "no_catalog_record_reaches_requested_query_length"
+    if cell.query_kind not in VALID_QUERY_KINDS:
+        return "unsupported", "unsupported_query_kind"
+    if cell.topology not in VALID_TOPOLOGIES:
+        return "unsupported", "unsupported_topology"
+    if cell.terminal_repeat not in VALID_TERMINAL_REPEATS:
+        return "unsupported", "unsupported_terminal_repeat"
+    if cell.label == "origin_crossing" and cell.topology != "circular":
+        return "unsupported", "origin_crossing_requires_circular_coordinate_model"
     if cell.label in ANNOTATED_LABELS:
         available_labels = set(cell.query.labels)
         if cell.background is not None:
@@ -659,6 +778,12 @@ def _truth_fields() -> list[str]:
         "case_id",
         "metagenome_id",
         "query_id",
+        "query_kind",
+        "topology_requested",
+        "coordinate_model",
+        "topology_evidence",
+        "terminal_repeat_type",
+        "terminal_repeat_length",
         "source_query_id",
         "source_query_sha256",
         "reference_id",
@@ -676,6 +801,8 @@ def _truth_fields() -> list[str]:
         "coverage_union_bases",
         "fragment_count",
         "fragment_id",
+        "query_fragment_start",
+        "query_fragment_end",
         "orientation",
         "origin_crossing",
         "indel_profile",
@@ -699,6 +826,9 @@ def _status_fields() -> list[str]:
         "reason",
         "metagenome_id",
         "query_id",
+        "query_kind",
+        "topology_requested",
+        "terminal_repeat_type",
         "source_query_id",
         "source_query_sha256",
         "background_id",
@@ -735,6 +865,37 @@ def _background_records_for_output(
         yield name, sequence
 
 
+def query_output_id(cell: Cell, query_length: int) -> str:
+    base = f"{safe_name(cell.query.identifier if cell.query else 'unavailable')}__q{query_length}"
+    if cell.query_kind == "plasmid" and cell.topology == "unknown" and cell.terminal_repeat == "none":
+        return base
+    return (
+        f"{base}__kind_{safe_name(cell.query_kind)}__top_{safe_name(cell.topology)}"
+        f"__repeat_{safe_name(cell.terminal_repeat)}"
+    )
+
+
+def apply_terminal_repeat(sequence: str, repeat_type: str) -> tuple[str, dict[str, Any]]:
+    """Construct a deterministic terminal-repeat query without topology claims."""
+    if repeat_type == "none":
+        return sequence, {"type": "none", "length": 0, "intervals": []}
+    if repeat_type not in {"direct", "inverted"}:
+        raise ValueError(f"unsupported terminal repeat type: {repeat_type}")
+    repeat_length = min(100, max(MIN_SEED, len(sequence) // 10))
+    if repeat_length * 2 > len(sequence):
+        repeat_length = len(sequence) // 2
+    if repeat_length < MIN_SEED:
+        raise ValueError("terminal repeat requires at least two k21-sized regions")
+    tail = sequence[-repeat_length:]
+    prefix = tail if repeat_type == "direct" else reverse_complement(tail)
+    transformed = prefix + sequence[repeat_length:]
+    return transformed, {
+        "type": repeat_type,
+        "length": repeat_length,
+        "intervals": [[0, repeat_length], [len(sequence) - repeat_length, len(sequence)]],
+    }
+
+
 def materialize_cell(
     output: Path,
     source: SourceData,
@@ -744,21 +905,38 @@ def materialize_cell(
     background_records: Sequence[tuple[str, str]],
     background_reused: bool,
     seed: int,
+    repeat_metadata: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     query_length = len(query_sequence)
     coverage_bases = math.ceil(query_length * cell.coverage / 100)
-    origin_start = query_length - max(1, coverage_bases // 3) if cell.coverage else 0
-    selected_start = origin_start if cell.label == "origin_crossing" else stable_int(seed, cell.case_id, "segment") % query_length
     # A reverse case reverses each fragment, not the source query record.  The
     # recorded intervals always remain in forward query coordinates.
-    intervals, overlap = split_intervals(query_length, selected_start, coverage_bases, cell.fragments)
+    if cell.topology == "circular":
+        origin_start = query_length - max(1, coverage_bases // 3) if cell.coverage else 0
+        selected_start = (
+            origin_start
+            if cell.label == "origin_crossing"
+            else stable_int(seed, cell.case_id, "segment") % query_length
+        )
+        intervals, overlap = split_intervals(query_length, selected_start, coverage_bases, cell.fragments)
+    else:
+        max_start = query_length - coverage_bases
+        selected_start = stable_int(seed, cell.case_id, "segment") % (max_start + 1)
+        intervals, overlap = split_linear_intervals(
+            query_length, selected_start, coverage_bases, cell.fragments
+        )
     assembly_records = list(_background_records_for_output(background_records))
     truth_rows: list[dict[str, Any]] = []
     case_dir = output / "cases" / safe_name(cell.case_id)
     case_dir.mkdir(parents=True, exist_ok=False)
     for index, (fragment_start, fragment_length) in enumerate(intervals, 1):
-        positions = circular_positions(query_length, fragment_start, fragment_length)
-        exact = circular_slice(query_sequence, fragment_start, fragment_length)
+        origin_crossing = cell.topology == "circular" and fragment_start + fragment_length > query_length
+        if cell.topology == "circular":
+            positions = circular_positions(query_length, fragment_start, fragment_length)
+            exact = circular_slice(query_sequence, fragment_start, fragment_length)
+        else:
+            positions = list(range(fragment_start, fragment_start + fragment_length))
+            exact = query_sequence[fragment_start : fragment_start + fragment_length]
         if cell.orientation == "reverse":
             exact = reverse_complement(exact)
             positions = list(reversed(positions))
@@ -767,13 +945,20 @@ def materialize_cell(
         contig_id = f"trace_{safe_name(cell.case_id)}_fragment_{index:02d}"
         assembly_records.append((contig_id, observed))
         query_intervals = intervals_for_positions(sorted(set(positions)), query_length)
-        origin_crossing = fragment_start + fragment_length > query_length
+        repeat_length = int((repeat_metadata or {}).get("length", 0))
         truth_rows.append(
             {
                 "schema_version": TRUTH_SCHEMA,
                 "case_id": cell.case_id,
                 "metagenome_id": safe_name(cell.case_id),
-                "query_id": safe_name(cell.query.identifier if cell.query else "unavailable"),
+                "query_id": query_output_id(cell, query_length),
+                "query_kind": cell.query_kind,
+                "topology_requested": cell.topology,
+                "coordinate_model": "wrap" if cell.topology == "circular" else "linear",
+                # Controlled construction does not infer biological topology.
+                "topology_evidence": "undetermined",
+                "terminal_repeat_type": cell.terminal_repeat,
+                "terminal_repeat_length": repeat_length,
                 "source_query_id": cell.query.identifier if cell.query else "",
                 "source_query_sha256": sha256_bytes(cell.query.sequence.encode("ascii")) if cell.query else "",
                 "reference_id": cell.query.identifier if cell.query else "",
@@ -791,6 +976,8 @@ def materialize_cell(
                 "coverage_union_bases": coverage_bases,
                 "fragment_count": cell.fragments,
                 "fragment_id": index,
+                "query_fragment_start": fragment_start,
+                "query_fragment_end": fragment_start + fragment_length,
                 "orientation": cell.orientation,
                 "origin_crossing": origin_crossing,
                 "indel_profile": cell.indel,
@@ -811,7 +998,7 @@ def materialize_cell(
         "schema_version": TRUTH_SCHEMA,
         "case_id": cell.case_id,
         "metagenome_id": safe_name(cell.case_id),
-        "query_id": safe_name(cell.query.identifier if cell.query else "unavailable"),
+        "query_id": query_output_id(cell, query_length),
         "query_length": query_length,
         "query_sha256": sha256_bytes(query_sequence.encode("ascii")),
         "query_source_id": cell.query.identifier if cell.query else None,
@@ -829,6 +1016,13 @@ def materialize_cell(
         "identity_target_percent": cell.identity,
         "indel_profile": cell.indel,
         "label": cell.label,
+        "query_kind": cell.query_kind,
+        "topology_requested": cell.topology,
+        "coordinate_model": "wrap" if cell.topology == "circular" else "linear",
+        # Construction metadata is deliberately not a biological topology call.
+        "topology_evidence": "undetermined",
+        "terminal_repeat_type": cell.terminal_repeat,
+        "terminal_repeat": repeat_metadata or {"type": "none", "length": 0, "intervals": []},
         "truth_rows": len(truth_rows),
         "source_manifest_sha256": source.manifest_sha256,
     }
@@ -852,6 +1046,9 @@ def materialize(
     indels: Sequence[str] | None,
     background_id: str | None,
     label: str,
+    query_kinds: Sequence[str] | None,
+    topologies: Sequence[str] | None,
+    terminal_repeats: Sequence[str] | None,
     case_id: str | None,
     limit: int | None,
 ) -> dict[str, Any]:
@@ -891,6 +1088,9 @@ def materialize(
             indels=indels,
             background_id=background_id,
             label=label,
+            query_kinds=query_kinds,
+            topologies=topologies,
+            terminal_repeats=terminal_repeats,
         )
     )
     all_cells.sort(key=lambda cell: cell.case_id)
@@ -903,7 +1103,7 @@ def materialize(
             raise SystemExit("--limit must be positive")
         all_cells = all_cells[:limit]
 
-    query_cache: dict[tuple[str, int], tuple[str, int]] = {}
+    query_cache: dict[tuple[str, int, str], tuple[str, int, dict[str, Any]]] = {}
     query_files: dict[str, dict[str, Any]] = {}
     status_rows: list[dict[str, Any]] = []
     truth_rows: list[dict[str, Any]] = []
@@ -915,15 +1115,20 @@ def materialize(
         metagenome_id = safe_name(cell.case_id)
         if status == "materialize":
             assert cell.query is not None and cell.background is not None
-            key = (cell.query.identifier, cell.requested_query_length)
+            key = (cell.query.identifier, cell.requested_query_length, cell.terminal_repeat)
             if key not in query_cache:
-                query_cache[key] = query_slice(cell.query, cell.requested_query_length, seed)
-            query_sequence, source_query_start = query_cache[key]
-            query_id = safe_name(cell.query.identifier)
-            query_key = f"{query_id}__q{cell.requested_query_length}"
+                source_sequence, source_query_start = query_slice(
+                    cell.query, cell.requested_query_length, seed
+                )
+                query_sequence, repeat_metadata = apply_terminal_repeat(
+                    source_sequence, cell.terminal_repeat
+                )
+                query_cache[key] = (query_sequence, source_query_start, repeat_metadata)
+            query_sequence, source_query_start, repeat_metadata = query_cache[key]
+            query_key = query_output_id(cell, cell.requested_query_length)
             query_path = output / "queries" / f"{query_key}.fasta"
             if query_key not in query_files:
-                write_fasta(query_path, [(f"{query_id}__q{cell.requested_query_length}", query_sequence)])
+                write_fasta(query_path, [(query_key, query_sequence)])
                 query_files[query_key] = {
                     "id": query_key,
                     "source_id": cell.query.identifier,
@@ -932,6 +1137,11 @@ def materialize(
                     "source_interval": [source_query_start, source_query_start + len(query_sequence)],
                     "sha256": sha256_bytes(query_sequence.encode("ascii")),
                     "path": str(query_path.relative_to(output)),
+                    "query_kind": cell.query_kind,
+                    "topology_requested": cell.topology,
+                    "coordinate_model": "wrap" if cell.topology == "circular" else "linear",
+                    "topology_evidence": "undetermined",
+                    "terminal_repeat": repeat_metadata,
                 }
             background_records = source.background_records[cell.background.identifier]
             background_use[cell.background.identifier] = background_use.get(cell.background.identifier, 0) + 1
@@ -944,6 +1154,7 @@ def materialize(
                 background_records,
                 background_reused=True,
                 seed=seed,
+                repeat_metadata=repeat_metadata,
             )
             truth_rows.extend(rows)
             case_metadata.append(metadata)
@@ -957,7 +1168,10 @@ def materialize(
                 "status": status,
                 "reason": reason,
                 "metagenome_id": metagenome_id,
-                "query_id": safe_name(cell.query.identifier) if cell.query else "",
+                "query_id": query_output_id(cell, cell.requested_query_length) if cell.query else "",
+                "query_kind": cell.query_kind,
+                "topology_requested": cell.topology,
+                "terminal_repeat_type": cell.terminal_repeat,
                 "source_query_id": cell.query.identifier if cell.query else "",
                 "source_query_sha256": sha256_bytes(cell.query.sequence.encode("ascii")) if cell.query else "",
                 "background_id": cell.background.identifier if cell.background else "",
@@ -1016,6 +1230,11 @@ def materialize(
             "fragment_counts": list(_axis_values(matrix, "fragment_counts", fragments)),
             "orientations": list(_axis_values(matrix, "orientations", orientations)),
             "indel_profiles": list(_axis_values(matrix, "indel_profiles", indels)),
+            "query_kinds": list(_axis_values(matrix, "query_kinds", query_kinds, DEFAULT_QUERY_KINDS[:1])),
+            "topologies": list(_axis_values(matrix, "topologies", topologies, DEFAULT_TOPOLOGIES[-1:])),
+            "terminal_repeats": list(
+                _axis_values(matrix, "terminal_repeats", terminal_repeats, DEFAULT_TERMINAL_REPEATS[:1])
+            ),
             "background_id": background_id,
             "label": label,
             "case_id": case_id,
@@ -1026,6 +1245,8 @@ def materialize(
             "identity is applied by deterministic substitutions before optional indels",
             "unsupported matrix cells remain in status.tsv instead of being silently omitted",
             "read-derived assemblies and natural independently supported positives are separate benchmark tracks",
+            "query_kind and topology are controlled construction strata; topology_evidence remains undetermined",
+            "terminal repeat cases alter the query sequence deterministically and preserve unique query-coordinate coverage",
         ],
     }
     (output / "manifest.json").write_text(json.dumps(output_manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1093,6 +1314,16 @@ def self_check() -> dict[str, Any]:
     observed, evidence = mutate_fragment("A" * 200, list(range(200)), 90, "long_insertion", rng)
     if len(observed) <= 200 or evidence["substitution_count"] != 20:
         raise SystemExit("mutation invariant failed")
+    linear_intervals, _ = split_linear_intervals(2_000, 100, 1_000, 5)
+    if any(start < 0 or start + length > 2_000 for start, length in linear_intervals):
+        raise SystemExit("linear coordinate invariant failed")
+    repeat_input = "ACGT" * 80 + "AAAA" * 20 + "TGCA" * 20
+    direct, direct_meta = apply_terminal_repeat(repeat_input, "direct")
+    inverted, inverted_meta = apply_terminal_repeat(repeat_input, "inverted")
+    if direct == repeat_input or inverted == repeat_input:
+        raise SystemExit("terminal repeat construction invariant failed")
+    if direct_meta["type"] != "direct" or inverted_meta["type"] != "inverted":
+        raise SystemExit("terminal repeat metadata invariant failed")
     matrix = load_matrix()
     for key, expected in {
         "query_lengths": DEFAULT_QUERY_LENGTHS,
@@ -1103,6 +1334,13 @@ def self_check() -> dict[str, Any]:
     }.items():
         if tuple(matrix[key]) != expected:
             raise SystemExit(f"matrix axis changed unexpectedly: {key}")
+    strata = matrix.get("query_strata", [])
+    if not any(item.get("query_kind") == "plasmid" for item in strata):
+        raise SystemExit("matrix lacks plasmid query stratum")
+    if not any(item.get("query_kind") == "phage" for item in strata):
+        raise SystemExit("matrix lacks phage query stratum")
+    if not {item.get("topology") for item in strata}.issuperset({"linear", "circular", "unknown"}):
+        raise SystemExit("matrix lacks topology strata")
     return {"status": "ok", "script_version": SCRIPT_VERSION, "matrix_schema": MATRIX_SCHEMA}
 
 
@@ -1138,6 +1376,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fragments", type=lambda value: _parse_int_list(value, "fragments"))
     parser.add_argument("--orientation", type=lambda value: _parse_string_list(value, "orientation"))
     parser.add_argument("--indel", type=lambda value: _parse_string_list(value, "indel"))
+    parser.add_argument("--query-kind", type=lambda value: _parse_string_list(value, "query-kind"))
+    parser.add_argument("--topology", type=lambda value: _parse_string_list(value, "topology"))
+    parser.add_argument(
+        "--terminal-repeat", type=lambda value: _parse_string_list(value, "terminal-repeat")
+    )
     parser.add_argument("--background-id")
     parser.add_argument("--label", default="standard")
     parser.add_argument("--case-id")
@@ -1168,6 +1411,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         indels=args.indel,
         background_id=args.background_id,
         label=args.label,
+        query_kinds=args.query_kind,
+        topologies=args.topology,
+        terminal_repeats=args.terminal_repeat,
         case_id=args.case_id,
         limit=args.limit,
     )

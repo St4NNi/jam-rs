@@ -13,6 +13,13 @@
       "source": "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/ncbi-blast-2.17.0+-x64-linux.tar.gz",
       "sha256": "3888112d8207831aa47371d93583c601f058f88b5db22dc782438b039a3a411b",
       "md5": "bdec166721de3b55f90a3badc83538e8"
+    },
+    "lexicmap": {
+      "version": "0.9.0",
+      "release_tag": "v0.9.0",
+      "release_commit_prefix": "e8dec8d",
+      "source": "https://github.com/shenwei356/LexicMap/releases/download/v0.9.0/lexicmap_linux_amd64.tar.gz",
+      "sha256": "54dea6a35e0c1a25025ad649da47d7cc7f6190ae69e44624db9685bf3c0dd662"
     }
   }
 }

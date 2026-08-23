@@ -15,9 +15,12 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["metagenome_id", "plasmid_id", "support_type", "evidence_id", "evidence_source", "evidence_sha256", "license"],
+        "required": ["metagenome_id", "support_type", "evidence_id", "evidence_source", "evidence_sha256", "license"],
         "properties": {
           "metagenome_id": {"type": "string", "minLength": 1},
+          "query_id": {"type": "string", "minLength": 1},
+          "query_kind": {"enum": ["plasmid", "phage"]},
+          "topology": {"enum": ["circular", "linear", "unknown"]},
           "plasmid_id": {"type": "string", "minLength": 1},
           "support_type": {"type": "string", "minLength": 1},
           "evidence_id": {"type": "string", "minLength": 1},
@@ -27,7 +30,15 @@
           "evidence_sha256": {"$ref": "#/$defs/sha256"},
           "license": {"$ref": "#/$defs/license"},
           "notes": {"type": "string"}
-        }
+        },
+        "allOf": [
+          {
+            "oneOf": [
+              {"required": ["query_id", "query_kind", "topology"]},
+              {"required": ["plasmid_id"]}
+            ]
+          }
+        ]
       }
     }
   },

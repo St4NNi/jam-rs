@@ -47,6 +47,25 @@ METRIC_KEYS = (
     "seed_buckets_read",
     "sequence_blocks_read",
 )
+PERFORMANCE_KEYS = (
+    "candidates_processed",
+    "contigs_considered",
+    "windows_retrieved",
+    "alignments_attempted",
+    "alignments_succeeded",
+    "failures",
+    "elapsed_millis",
+)
+RESCUE_KEYS = (
+    "seed_buckets_requested",
+    "seed_keys_tested",
+    "anchors_created",
+    "chains_accepted",
+    "sequence_blocks_fetched",
+    "alignment_windows_attempted",
+    "new_query_bases_supported",
+    "elapsed_millis",
+)
 
 
 def redact_text(value: str) -> str:
@@ -106,10 +125,13 @@ def number(value: Any) -> int | float | None:
     return None
 
 
-def nested_metrics(value: Any) -> dict[str, int | float]:
+def nested_metrics(
+    value: Any,
+    keys: tuple[str, ...] = METRIC_KEYS,
+) -> dict[str, int | float]:
     """Collect only known metric names from headers/results/footers."""
 
-    wanted = set(METRIC_KEYS)
+    wanted = set(keys)
     result: dict[str, int | float] = {}
     if isinstance(value, dict):
         for key, child in value.items():
@@ -118,13 +140,39 @@ def nested_metrics(value: Any) -> dict[str, int | float]:
                 item = number(child)
                 if item is not None:
                     result[normalized] = result.get(normalized, 0) + item
-            for child_key, child_value in nested_metrics(child).items():
+            for child_key, child_value in nested_metrics(child, keys).items():
                 result[child_key] = result.get(child_key, 0) + child_value
     elif isinstance(value, list):
         for child in value:
-            for child_key, child_value in nested_metrics(child).items():
+            for child_key, child_value in nested_metrics(child, keys).items():
                 result[child_key] = result.get(child_key, 0) + child_value
     return result
+
+
+def trace_metadata(records: list[dict[str, Any]]) -> tuple[str | None, str | None]:
+    """Return query-kind and requested-topology metadata when present."""
+
+    query_kind: str | None = None
+    topology_requested: str | None = None
+    for record in records:
+        for key in ("query_kind", "query_class"):
+            value = record.get(key)
+            if query_kind is None and isinstance(value, str) and value:
+                query_kind = value
+        value = record.get("topology_requested")
+        if topology_requested is None and isinstance(value, str) and value:
+            topology_requested = value
+        descriptor = record.get("query_descriptor")
+        if isinstance(descriptor, dict):
+            value = descriptor.get("query_kind")
+            if query_kind is None and isinstance(value, str) and value:
+                query_kind = value
+            value = descriptor.get("topology_requested")
+            if topology_requested is None and isinstance(value, str) and value:
+                topology_requested = value
+        if query_kind is not None and topology_requested is not None:
+            break
+    return query_kind, topology_requested
 
 
 def parse_bool(value: Any) -> bool | None:
@@ -213,21 +261,50 @@ def load_truth(path: Path | None) -> dict[tuple[str, str], dict[str, str]]:
     if path is None or not path.is_file():
         return {}
     with path.open(encoding="utf-8", newline="") as handle:
-        return {
-            (str(row.get("query_id", "")), str(row.get("metagenome_id", ""))): row
-            for row in csv.DictReader(handle, delimiter="\t")
-            if row.get("query_id") and row.get("metagenome_id")
-        }
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    truth: dict[tuple[str, str], dict[str, str]] = {}
+    for row in rows:
+        query_id = str(row.get("query_id") or row.get("query_accession") or "")
+        metagenome_id = str(row.get("metagenome_id") or "")
+        if not metagenome_id and row.get("assembly_path"):
+            metagenome_id = Path(str(row["assembly_path"])).name
+        if query_id and metagenome_id:
+            truth[(query_id, metagenome_id)] = row
+    return truth
 
 
 def result_metrics(records: list[dict[str, Any]], truth_path: Path | None) -> dict[str, Any]:
     results = {
-        (str(record.get("plasmid_id", "")), str(record.get("metagenome_id", ""))): record
+        (
+            str(record.get("query_id", record.get("plasmid_id", ""))),
+            str(record.get("metagenome_id", "")),
+        ): record
         for record in records
         if record.get("record_type") == "metagenome_result"
     }
     footer = next((record for record in records if record.get("record_type") == "run_footer"), {})
-    metrics = nested_metrics(footer)
+    metrics = nested_metrics(footer, METRIC_KEYS)
+    per_result_metrics = nested_metrics(
+        [record.get("resource_metrics", {}) for record in results.values()],
+        METRIC_KEYS,
+    )
+    # New trace footers contain an aggregate snapshot.  Legacy or failed
+    # outputs may only contain per-result snapshots, so fill only absent
+    # fields from those records and never replace an explicit footer value.
+    for key in METRIC_KEYS:
+        if key not in metrics and key in per_result_metrics:
+            metrics[key] = per_result_metrics[key]
+    performance = nested_metrics(
+        [record.get("performance_counters", {}) for record in results.values()],
+        PERFORMANCE_KEYS,
+    )
+    rescue_records = []
+    for record in results.values():
+        rounds = record.get("rescue_rounds", [])
+        if isinstance(rounds, list):
+            rescue_records.extend(round for round in rounds if isinstance(round, dict))
+    rescue_metrics = nested_metrics(rescue_records, RESCUE_KEYS)
+    observed_query_kind, observed_topology = trace_metadata(records)
     alignments = sum(
         len(record.get("alignments", []))
         for record in results.values()
@@ -236,15 +313,28 @@ def result_metrics(records: list[dict[str, Any]], truth_path: Path | None) -> di
     candidates = sum(record.get("candidate") is not None for record in results.values())
     aligned = sum(bool(record.get("alignments")) for record in results.values())
     truth = load_truth(truth_path)
+    result_query_ids = {query_id for query_id, _ in results}
     candidate_tp = candidate_total = final_tp = final_total = false_candidates = negatives = 0
     overlap_bases = predicted_bases = expected_bases = 0
     gap_errors: list[int] = []
+    considered_truth = 0
     for key, row in truth.items():
+        if result_query_ids and key[0] not in result_query_ids:
+            continue
+        considered_truth += 1
         record = results.get(key)
         has_candidate = bool(record and record.get("candidate") is not None)
         has_alignment = bool(record and record.get("alignments"))
         expected_candidate = parse_bool(row.get("expected_candidate"))
         expected_final = parse_bool(row.get("expected_final"))
+        controlled_positive = bool(
+            str(row.get("truth_class", "")).startswith("controlled_")
+            and row.get("query_intervals_json")
+        )
+        if expected_candidate is None and controlled_positive:
+            expected_candidate = True
+        if expected_final is None and controlled_positive:
+            expected_final = True
         if expected_candidate is True:
             candidate_total += 1
             candidate_tp += int(has_candidate)
@@ -254,12 +344,19 @@ def result_metrics(records: list[dict[str, Any]], truth_path: Path | None) -> di
         if expected_final is True:
             final_total += 1
             final_tp += int(has_alignment)
-        expected = parse_intervals(row.get("expected_intervals") or row.get("truth_intervals"))
+        expected = parse_intervals(
+            row.get("expected_intervals")
+            or row.get("truth_intervals")
+            or row.get("query_intervals_json")
+        )
         if expected:
             expected_bases += interval_length(expected)
             if record:
                 coverage = record.get("coverage") or {}
-                actual = parse_intervals(coverage.get("primary_intervals"))
+                mosaic = record.get("primary_fragment_mosaic") or {}
+                actual = parse_intervals(
+                    mosaic.get("covered_intervals") or coverage.get("primary_intervals")
+                )
                 predicted_bases += interval_length(actual)
                 overlap_bases += interval_intersection(actual, expected)
                 gaps = parse_intervals(row.get("expected_gaps"))
@@ -267,7 +364,7 @@ def result_metrics(records: list[dict[str, Any]], truth_path: Path | None) -> di
                 error = boundary_error(actual_gaps, gaps)
                 if error is not None:
                     gap_errors.append(error)
-    if not truth:
+    if considered_truth == 0:
         accuracy = {
             "truth_status": "unavailable",
             "candidate_recall": None,
@@ -283,8 +380,8 @@ def result_metrics(records: list[dict[str, Any]], truth_path: Path | None) -> di
             "truth_status": "available",
             "candidate_recall": candidate_tp / candidate_total if candidate_total else None,
             "final_recall": final_tp / final_total if final_total else None,
-            "false_candidate_count": false_candidates,
-            "negative_pair_count": negatives,
+            "false_candidate_count": false_candidates if negatives else None,
+            "negative_pair_count": negatives if negatives else None,
             "interval_precision": overlap_bases / predicted_bases if predicted_bases else None,
             "interval_recall": overlap_bases / expected_bases if expected_bases else None,
             "gap_boundary_error_bases": sum(gap_errors) / len(gap_errors) if gap_errors else None,
@@ -293,7 +390,16 @@ def result_metrics(records: list[dict[str, Any]], truth_path: Path | None) -> di
         "metagenome_count": len(results),
         "candidate_count": candidates,
         "alignment_count": alignments,
-        "resource_metrics": {key: metrics.get(key, 0) for key in METRIC_KEYS if key in metrics},
+        "resource_metrics": {key: metrics.get(key) for key in METRIC_KEYS},
+        "performance_counters": {
+            key: performance.get(key) for key in PERFORMANCE_KEYS
+        },
+        "rescue_round_metrics": {
+            key: rescue_metrics.get(key) for key in RESCUE_KEYS
+        },
+        "rescue_round_count": len(rescue_records) if records else None,
+        "query_kind_observed": observed_query_kind,
+        "topology_requested_observed": observed_topology,
         **accuracy,
     }
 
@@ -303,6 +409,11 @@ def unavailable_record(args: argparse.Namespace, reason: str) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "status": "unavailable",
         "unavailable_reason": reason,
+        "track": args.track,
+        "track_kind": args.track_kind,
+        "query_id": args.query_id,
+        "query_kind": args.query_kind or None,
+        "topology_requested": args.topology_requested or None,
         "command": redacted_command(args.command),
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "finished_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -311,7 +422,10 @@ def unavailable_record(args: argparse.Namespace, reason: str) -> dict[str, Any]:
         "user_seconds": None,
         "system_seconds": None,
         "peak_rss_kib": None,
-        "resource_metrics": {},
+        "resource_metrics": {key: None for key in METRIC_KEYS},
+        "performance_counters": {key: None for key in PERFORMANCE_KEYS},
+        "rescue_round_metrics": {key: None for key in RESCUE_KEYS},
+        "rescue_round_count": None,
     }
 
 
@@ -325,7 +439,15 @@ def main() -> int:
     parser.add_argument("--metadata", type=Path)
     parser.add_argument("--phase-json", type=Path)
     parser.add_argument("--track", default="")
+    parser.add_argument("--track-kind", default="")
     parser.add_argument("--query-id", default="")
+    parser.add_argument("--query-kind", "--query-class", dest="query_kind", default="")
+    parser.add_argument(
+        "--topology",
+        "--topology-requested",
+        dest="topology_requested",
+        default="",
+    )
     parser.add_argument("--metagenome-set", default="")
     parser.add_argument("--resource-mode", default="local")
     parser.add_argument("--cache-state", default="local-process-cold")
@@ -400,11 +522,16 @@ def main() -> int:
         except (OSError, ValueError):
             archive = {"status": "unavailable", "reason": "invalid archive JSON"}
     status = "complete" if completed.returncode == 0 and trace_error is None else "failed"
+    observed_query_kind = result.pop("query_kind_observed", None)
+    observed_topology = result.pop("topology_requested_observed", None)
     output = {
         "schema_version": SCHEMA_VERSION,
         "status": status,
         "track": args.track,
+        "track_kind": args.track_kind,
         "query_id": args.query_id,
+        "query_kind": args.query_kind or observed_query_kind,
+        "topology_requested": args.topology_requested or observed_topology,
         "metagenome_set": args.metagenome_set,
         "resource_mode": args.resource_mode,
         "cache_state": args.cache_state,

@@ -10,6 +10,11 @@
     "raw_directory": {"type": "string"},
     "raw_measurement_count": {"type": "integer", "minimum": 0},
     "raw_measurements": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "query_strata": {"type": "array", "items": {"type": "string"}},
+    "query_kinds": {"type": "array", "items": {"type": "string"}},
+    "topologies": {"type": "array", "items": {"type": "string"}},
+    "ablation_dimensions": {"type": "array", "items": {"type": "string"}},
+    "matched_recall_policy": {"type": "string"},
     "groups": {"type": "array", "items": {"$ref": "#/$defs/group"}},
     "statistics": {"type": "object"},
     "accuracy_note": {"type": "string"}
@@ -21,12 +26,18 @@
       "properties": {
         "schema_version": {"const": "1.0.0"},
         "track": {"type": "string"},
+        "query_kind": {"type": "string"},
+        "query_class": {"type": "string"},
+        "topology": {"type": "string"},
+        "stratum": {"type": "string"},
         "resource_mode": {"type": "string"},
         "cache_state": {"type": "string"},
         "cpu_threads": {"type": "integer", "minimum": 1},
         "io_tasks": {"type": "integer", "minimum": 1},
         "sweep_dimension": {"type": "string"},
         "sweep_value": {},
+        "ablation": {"type": "object", "additionalProperties": {"type": "string"}},
+        "matched_recall_target": {"type": ["number", "null"]},
         "status": {"enum": ["complete", "failed", "unavailable"]}
       },
       "additionalProperties": true

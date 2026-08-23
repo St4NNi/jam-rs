@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Normalize sequence-comparison intervals onto one checked query coordinate system.
+"""Normalize alignment evidence onto one checked query coordinate system.
 
-The comparator runners use query coordinates as zero-based, half-open plasmid
-coordinates.  BLAST tabular output is converted from its one-based inclusive
-coordinates; PAF output is already zero-based half-open and may additionally
-carry a ``cg:Z:`` CIGAR tag.  The same interval union and truth comparison is
-used for both formats and for jam trace JSONL output.
+All normalized support is represented as zero-based, half-open query
+intervals.  BLASTn and LexicMap report one-based inclusive query coordinates;
+PAF reports zero-based half-open coordinates; and jam trace JSON uses explicit
+query segments.  A single projection routine handles direct spans and edit
+scripts so supported bases, aligned deletions, and unsupported gaps remain
+separate evidence components.
 """
 
 from __future__ import annotations
@@ -17,10 +18,11 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Sequence
 
 
 SCHEMA_VERSION = "1.0.0"
+NORMALIZATION_SCHEMA_VERSION = "normalized-mge-v1"
 _CIGAR_RE = re.compile(r"([0-9]+)([MIDNSHP=X])")
 
 
@@ -73,6 +75,219 @@ def _checked_interval(start: int, end: int, query_length: int) -> list[dict[str,
         {"start": start, "end": query_length},
         {"start": 0, "end": end},
     ]
+
+
+def _query_segments(value: Any, query_length: int) -> list[dict[str, int]]:
+    """Decode one or more query segments without assigning topology.
+
+    The caller may provide a single interval, a list of intervals, or records
+    containing an ``interval`` member.  A wrapping interval is split at the
+    query origin, but the function does not conclude that the query is
+    circular; that fact must come from an explicit input field.
+    """
+
+    if isinstance(value, dict):
+        value = value.get("segments", value.get("query_segments", value.get("interval", value)))
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, (list, tuple)):
+        raise NormalizationError("query segments must be an interval or list of intervals")
+    segments: list[dict[str, int]] = []
+    for item in value:
+        if isinstance(item, dict) and "interval" in item:
+            item = item["interval"]
+        if not isinstance(item, dict):
+            raise NormalizationError("query segment must be an object")
+        try:
+            start = int(item["start"])
+            end = int(item["end"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise NormalizationError("query segment requires integer start and end") from exc
+        segments.extend(_checked_interval(start, end, query_length))
+    if not segments:
+        raise NormalizationError("query alignment has no non-empty query segment")
+    # Query segments may be ordered around an origin.  They must not overlap,
+    # because a CIGAR cursor cannot unambiguously map to two query bases.
+    if _length(union_intervals(segments, query_length)) != _length(segments):
+        raise NormalizationError("query alignment segments overlap")
+    return segments
+
+
+def _map_query_span(
+    segments: Sequence[dict[str, int]], offset: int, length: int, query_length: int
+) -> list[dict[str, int]]:
+    """Map a linear edit-script cursor onto ordered query segments."""
+
+    if offset < 0 or length < 0:
+        raise NormalizationError("query edit span cannot be negative")
+    available = _length(segments)
+    if offset > available or length > available - offset:
+        raise NormalizationError(
+            f"query edit span [{offset}, {offset + length}) exceeds {available} query bases"
+        )
+    pieces: list[dict[str, int]] = []
+    remaining_offset = offset
+    remaining = length
+    for segment in segments:
+        segment_length = segment["end"] - segment["start"]
+        if remaining_offset >= segment_length:
+            remaining_offset -= segment_length
+            continue
+        start = segment["start"] + remaining_offset
+        take = min(remaining, segment["end"] - start)
+        if take:
+            pieces.append({"start": start, "end": start + take})
+        remaining = remaining - take
+        remaining_offset = 0
+        if not remaining:
+            break
+    if remaining:
+        raise NormalizationError("query edit span could not be mapped to query segments")
+    return [piece for piece in pieces if piece["start"] < piece["end"]]
+
+
+def _cigar_runs(cigar: str) -> list[tuple[str, int]]:
+    if not cigar or cigar == "*":
+        return []
+    runs: list[tuple[str, int]] = []
+    offset = 0
+    for match in _CIGAR_RE.finditer(cigar):
+        if match.start() != offset:
+            raise NormalizationError(f"invalid CIGAR at byte {offset}: {cigar!r}")
+        length = int(match.group(1))
+        if length <= 0:
+            raise NormalizationError(f"CIGAR contains a zero-length operation: {cigar!r}")
+        runs.append((match.group(2), length))
+        offset = match.end()
+    if offset != len(cigar):
+        raise NormalizationError(f"invalid CIGAR at byte {offset}: {cigar!r}")
+    return runs
+
+
+def _edit_script_runs(edit_script: Any) -> list[tuple[str, int]]:
+    if edit_script is None:
+        return []
+    if not isinstance(edit_script, list):
+        raise NormalizationError("edit_script must be a list")
+    names = {
+        "equal": "=",
+        "match": "=",
+        "m": "M",
+        "substitution": "X",
+        "mismatch": "X",
+        "x": "X",
+        "insertion": "I",
+        "i": "I",
+        "deletion": "D",
+        "d": "D",
+        "soft_clip": "S",
+        "softclip": "S",
+        "s": "S",
+    }
+    runs: list[tuple[str, int]] = []
+    for item in edit_script:
+        if not isinstance(item, dict):
+            raise NormalizationError("edit_script entries must be objects")
+        operation = str(item.get("operation", "")).strip().lower()
+        try:
+            length = int(item["length"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise NormalizationError("edit_script entries require integer length") from exc
+        if operation not in names:
+            raise NormalizationError(f"unsupported edit operation: {operation!r}")
+        if length <= 0:
+            raise NormalizationError("edit_script contains a zero-length operation")
+        runs.append((names[operation], length))
+    return runs
+
+
+def calculate_query_intervals(
+    query_segments: Any,
+    query_length: int,
+    *,
+    cigar: str | None = None,
+    edit_script: Any = None,
+    query_deletion_operation: str = "D",
+) -> dict[str, Any]:
+    """Project accepted alignment evidence onto query coordinates.
+
+    ``query_deletion_operation`` identifies the operation that consumes query
+    bases while aligning them to a target gap.  Jam's edit script uses ``D``
+    for this operation.  SAM/PAF/LexicMap CIGAR conventions use ``I`` because
+    the query is inserted relative to the target.  In either convention such
+    bases are aligned deletions: they are part of the aligned span but are not
+    supported coverage.  Unsupported gaps are calculated later as the
+    complement of supported coverage.
+    """
+
+    if query_deletion_operation not in {"I", "D"}:
+        raise NormalizationError("query_deletion_operation must be I or D")
+    segments = _query_segments(query_segments, query_length)
+    runs = (
+        _edit_script_runs(edit_script)
+        if edit_script not in (None, [])
+        else _cigar_runs(cigar or "")
+    )
+    if not runs:
+        supported = list(segments)
+        return {
+            "query_segments": segments,
+            "supported_intervals": supported,
+            "aligned_intervals": list(segments),
+            "alignment_deletions": [],
+            "clipped_intervals": [],
+            "clipped_bases": 0,
+            "query_consumed": _length(segments),
+        }
+
+    supported: list[dict[str, int]] = []
+    aligned: list[dict[str, int]] = []
+    deletions: list[dict[str, int]] = []
+    clipped: list[dict[str, int]] = []
+    cursor = 0
+    clipped_bases = 0
+    support_operations = {"M", "=", "X"}
+    for operation, length in runs:
+        consumes_query = operation in support_operations or operation in {
+            query_deletion_operation,
+            "S",
+        }
+        if not consumes_query:
+            # Target-only insertion/deletion/skip operations do not consume
+            # any query coordinate and therefore cannot create query support.
+            continue
+        if operation == "S" and cursor + length > _length(segments):
+            # Some external formats include terminal soft clips outside the
+            # declared aligned query span.  Preserve their count without
+            # inventing coordinates; the complement remains unsupported.
+            clipped_bases += length
+            cursor += length
+            continue
+        pieces = _map_query_span(segments, cursor, length, query_length)
+        cursor += length
+        if operation in support_operations:
+            supported.extend(pieces)
+            aligned.extend(pieces)
+        elif operation == query_deletion_operation:
+            aligned.extend(pieces)
+            deletions.extend(pieces)
+        else:
+            clipped.extend(pieces)
+            clipped_bases += length
+    available = _length(segments)
+    if cursor != available and cursor < available:
+        raise NormalizationError(
+            f"edit script consumes {cursor} query bases but segments contain {available}"
+        )
+    return {
+        "query_segments": segments,
+        "supported_intervals": supported,
+        "aligned_intervals": aligned,
+        "alignment_deletions": deletions,
+        "clipped_intervals": clipped,
+        "clipped_bases": clipped_bases,
+        "query_consumed": cursor,
+    }
 
 
 def union_intervals(intervals: Iterable[dict[str, int]], query_length: int) -> list[dict[str, int]]:
@@ -202,44 +417,15 @@ def interval_metrics(
 def parse_cigar_query_intervals(
     cigar: str, qstart: int, qend: int, query_length: int
 ) -> list[dict[str, int]]:
-    """Project supported query bases from a PAF CIGAR.
+    """Return supported PAF query intervals while retaining deletion evidence."""
 
-    PAF's query is the plasmid.  Match, equal, and substitution operations
-    support query bases.  Query insertions and soft clips advance the query
-    cursor but are not supported by the target; target-only deletion/skip
-    operations do not advance it.
-    """
-
-    if not cigar or cigar == "*":
-        return _checked_interval(qstart, qend, query_length)
-    cursor = qstart
-    consumed = 0
-    supported: list[dict[str, int]] = []
-    offset = 0
-    for match in _CIGAR_RE.finditer(cigar):
-        if match.start() != offset:
-            raise NormalizationError(f"invalid CIGAR at byte {offset}: {cigar!r}")
-        length = int(match.group(1))
-        operation = match.group(2)
-        if length <= 0:
-            raise NormalizationError(f"CIGAR contains a zero-length operation: {cigar!r}")
-        if operation in {"M", "=", "X", "I", "S"}:
-            consumed += length
-            if operation in {"M", "=", "X"}:
-                supported.extend(_checked_interval(cursor, cursor + length, query_length))
-            cursor += length
-        elif operation in {"D", "N", "H", "P"}:
-            pass
-        offset = match.end()
-    if offset != len(cigar):
-        raise NormalizationError(f"invalid CIGAR at byte {offset}: {cigar!r}")
-    if cursor != qend:
-        raise NormalizationError(
-            f"CIGAR query span ends at {cursor}, but PAF declares {qend}: {cigar!r}"
-        )
-    if consumed < qend - qstart:
-        raise NormalizationError("CIGAR query consumption is inconsistent with PAF span")
-    return supported
+    projection = calculate_query_intervals(
+        [{"start": qstart, "end": qend}],
+        query_length,
+        cigar=cigar,
+        query_deletion_operation="I",
+    )
+    return projection["supported_intervals"]
 
 
 def parse_blast6(
@@ -248,6 +434,9 @@ def parse_blast6(
     query_length: int,
     metagenome_id: str,
     min_pident: float = 0.0,
+    *,
+    query_kind: str = "unknown",
+    topology_requested: str = "unknown",
 ) -> list[dict]:
     """Parse BLAST outfmt 6 with qseqid/sseqid/pident/length/qlen/qstart/qend."""
 
@@ -280,13 +469,21 @@ def parse_blast6(
             continue
         if qstart < 1 or qend < 1 or qstart > query_length or qend > query_length:
             raise NormalizationError(f"BLAST query coordinates are out of range: {raw!r}")
-        intervals = _checked_interval(min(qstart, qend) - 1, max(qstart, qend), query_length)
+        query_segments = _checked_interval(
+            min(qstart, qend) - 1, max(qstart, qend), query_length
+        )
         rows.append(
             {
                 "metagenome_id": metagenome_id,
                 "contig_id": sseqid,
                 "strand": "reverse" if qend < qstart else "forward",
-                "intervals": intervals,
+                "query_segments": query_segments,
+                "intervals": query_segments,
+                "aligned_intervals": query_segments,
+                "alignment_deletions": [],
+                "unsupported_intervals": [],
+                "query_kind": query_kind,
+                "topology_requested": topology_requested,
                 "pident": pident,
                 "query_start_1based": qstart,
                 "query_end_1based": qend,
@@ -303,6 +500,9 @@ def parse_paf(
     query_length: int,
     metagenome_id: str,
     min_mapq: int = 0,
+    *,
+    query_kind: str = "unknown",
+    topology_requested: str = "unknown",
 ) -> list[dict]:
     """Parse PAF, projecting an optional ``cg:Z:`` tag onto query intervals."""
 
@@ -343,13 +543,24 @@ def parse_paf(
             if tag.startswith("cg:Z:"):
                 cigar = tag[5:]
                 break
-        intervals = parse_cigar_query_intervals(cigar, qstart, qend, query_length)
+        projection = calculate_query_intervals(
+            [{"start": qstart, "end": qend}],
+            query_length,
+            cigar=cigar,
+            query_deletion_operation="I",
+        )
         rows.append(
             {
                 "metagenome_id": metagenome_id,
                 "contig_id": tname,
                 "strand": "reverse" if strand == "-" else "forward",
-                "intervals": intervals,
+                "query_segments": projection["query_segments"],
+                "intervals": projection["supported_intervals"],
+                "aligned_intervals": projection["aligned_intervals"],
+                "alignment_deletions": projection["alignment_deletions"],
+                "unsupported_intervals": projection["clipped_intervals"],
+                "query_kind": query_kind,
+                "topology_requested": topology_requested,
                 "matches": matches,
                 "block_length": block_length,
                 "mapq": mapq,
@@ -360,6 +571,293 @@ def parse_paf(
                 "cigar": cigar,
             }
         )
+    return rows
+
+
+def parse_blastn(
+    text: str,
+    query_id: str,
+    query_length: int,
+    metagenome_id: str,
+    min_pident: float = 0.0,
+    *,
+    query_kind: str = "unknown",
+    topology_requested: str = "unknown",
+) -> list[dict]:
+    """Parse BLASTn tabular output with either positional or named columns.
+
+    The production comparator uses the positional outfmt 6 emitted by
+    :func:`parse_blast6`.  BLAST's ``# Fields:`` header is also accepted so a
+    caller can retain optional CIGAR/aligned-sequence columns without
+    changing the coordinate calculator.
+    """
+
+    header: list[str] | None = None
+    data: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+        if line.startswith("#"):
+            fields_text = line.split(":", 1)[1] if ":" in line else ""
+            if line.lower().startswith("# fields:"):
+                header = [
+                    re.sub(r"[^a-z0-9]+", "", item.lower())
+                    for item in fields_text.split(",")
+                ]
+            continue
+        data.append(line)
+    if header is None:
+        return parse_blast6(
+            "\n".join(data),
+            query_id,
+            query_length,
+            metagenome_id,
+            min_pident,
+            query_kind=query_kind,
+            topology_requested=topology_requested,
+        )
+
+    aliases = {
+        "query": ("qseqid", "query", "qname", "queryid", "queryaccver"),
+        "target": ("sseqid", "subject", "sname", "subjectid", "subjectaccver"),
+        "pident": ("pident", "identity"),
+        "qlen": ("qlen", "querylength"),
+        "qstart": ("qstart", "querystart"),
+        "qend": ("qend", "queryend"),
+        "sstart": ("sstart", "subjectstart"),
+        "send": ("send", "subjectend"),
+    }
+
+    def index(name: str, required: bool = True) -> int | None:
+        for candidate in aliases[name]:
+            if candidate in header:
+                return header.index(candidate)
+        if required:
+            raise NormalizationError(f"BLAST header has no {name} column")
+        return None
+
+    query_index = index("query")
+    target_index = index("target")
+    pident_index = index("pident")
+    qlen_index = index("qlen")
+    qstart_index = index("qstart")
+    qend_index = index("qend")
+    sstart_index = index("sstart")
+    send_index = index("send")
+    cigar_index = next(
+        (header.index(name) for name in ("cigar", "cg", "cigarstring") if name in header),
+        None,
+    )
+    rows: list[dict] = []
+    for line_number, raw in enumerate(data, 1):
+        fields = raw.split("\t")
+        try:
+            values = {
+                "query": fields[query_index],
+                "target": fields[target_index],
+                "pident": float(fields[pident_index]),
+                "qlen": int(fields[qlen_index]),
+                "qstart": int(fields[qstart_index]),
+                "qend": int(fields[qend_index]),
+                "sstart": int(fields[sstart_index]),
+                "send": int(fields[send_index]),
+            }
+            cigar = fields[cigar_index] if cigar_index is not None else None
+        except (IndexError, TypeError, ValueError) as exc:
+            raise NormalizationError(f"invalid BLAST header row {line_number}: {raw!r}") from exc
+        if values["query"] != query_id:
+            continue
+        if values["qlen"] != query_length:
+            raise NormalizationError(
+                f"BLAST qlen {values['qlen']} disagrees with query length {query_length}"
+            )
+        if values["pident"] < min_pident:
+            continue
+        qstart, qend = values["qstart"], values["qend"]
+        if qstart < 1 or qend < 1 or qstart > query_length or qend > query_length:
+            raise NormalizationError(f"BLAST query coordinates are out of range: {raw!r}")
+        projection = calculate_query_intervals(
+            [{"start": min(qstart, qend) - 1, "end": max(qstart, qend)}],
+            query_length,
+            cigar=cigar,
+            query_deletion_operation="I",
+        )
+        rows.append(
+            {
+                "metagenome_id": metagenome_id,
+                "contig_id": values["target"],
+                "strand": "reverse" if qend < qstart else "forward",
+                "query_segments": projection["query_segments"],
+                "intervals": projection["supported_intervals"],
+                "aligned_intervals": projection["aligned_intervals"],
+                "alignment_deletions": projection["alignment_deletions"],
+                "unsupported_intervals": projection["clipped_intervals"],
+                "query_kind": query_kind,
+                "topology_requested": topology_requested,
+                "pident": values["pident"],
+                "query_start_1based": qstart,
+                "query_end_1based": qend,
+                "target_start_1based": values["sstart"],
+                "target_end_1based": values["send"],
+                "cigar": cigar,
+            }
+        )
+    return rows
+
+
+_LEXICMAP_COLUMNS = (
+    "query",
+    "qlen",
+    "hits",
+    "sgenome",
+    "sseqid",
+    "qcovgnm",
+    "cls",
+    "hsp",
+    "qcovhsp",
+    "alenhsp",
+    "pident",
+    "gaps",
+    "qstart",
+    "qend",
+    "sstart",
+    "send",
+    "sstr",
+    "slen",
+    "evalue",
+    "bitscore",
+)
+
+
+def _normalized_column(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.lower())
+
+
+def parse_lexicmap(
+    text: str,
+    query_id: str,
+    query_length: int,
+    metagenome_id: str,
+    min_pident: float = 0.0,
+    *,
+    query_kind: str = "unknown",
+    topology_requested: str = "unknown",
+) -> list[dict]:
+    """Parse LexicMap's tabular search output.
+
+    LexicMap's documented default columns use one-based inclusive ``qstart``
+    and ``qend``.  The parser accepts the header emitted by LexicMap and the
+    same fixed column order when a header was removed.  Optional ``cigar`` or
+    ``cg`` columns are projected with external-tool (PAF/SAM) semantics.
+    """
+
+    rows: list[dict] = []
+    header: list[str] | None = None
+    data: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip("\n")
+        if not line.strip() or set(line.replace("\t", "").replace(" ", "")) <= {"-"}:
+            continue
+        fields = line.split("\t") if "\t" in line else line.split()
+        normalized = [_normalized_column(item) for item in fields]
+        if "query" in normalized and "qstart" in normalized and "qend" in normalized:
+            header = normalized
+            continue
+        if line.startswith("#"):
+            continue
+        data.append(line)
+    if header is None:
+        header = list(_LEXICMAP_COLUMNS)
+
+    def index(*names: str, required: bool = True) -> int | None:
+        for name in names:
+            normalized = _normalized_column(name)
+            if normalized in header:
+                return header.index(normalized)
+        if required:
+            raise NormalizationError(f"LexicMap output has no required column {names[0]!r}")
+        return None
+
+    query_index = index("query", "qseqid")
+    qlen_index = index("qlen", "query_length")
+    qstart_index = index("qstart")
+    qend_index = index("qend")
+    target_index = index("sseqid", "subject", "target")
+    genome_index = index("sgenome", "genome", "metagenome_id", required=False)
+    strand_index = index("sstr", "strand", required=False)
+    pident_index = index("pident", "identity", required=False)
+    cigar_index = index("cigar", "cg", "cigar_string", required=False)
+    optional_names = {
+        name: index(name, required=False)
+        for name in ("qcovgnm", "qcovhsp", "alenhsp", "gaps", "evalue", "bitscore")
+    }
+
+    for line_number, raw in enumerate(data, 1):
+        fields = raw.split("\t") if "\t" in raw else raw.split()
+        try:
+            current_query = fields[query_index]
+            qlen = int(fields[qlen_index])
+            qstart = int(fields[qstart_index])
+            qend = int(fields[qend_index])
+            target = fields[target_index]
+        except (IndexError, TypeError, ValueError) as exc:
+            raise NormalizationError(f"invalid LexicMap row {line_number}: {raw!r}") from exc
+        if current_query != query_id:
+            continue
+        if qlen != query_length:
+            raise NormalizationError(
+                f"LexicMap qlen {qlen} disagrees with query length {query_length}"
+            )
+        if qstart < 1 or qend < 1 or qstart > query_length or qend > query_length:
+            raise NormalizationError(f"LexicMap query coordinates are out of range: {raw!r}")
+        pident = None
+        if pident_index is not None:
+            try:
+                pident = float(fields[pident_index])
+            except (IndexError, TypeError, ValueError) as exc:
+                raise NormalizationError(f"invalid LexicMap identity: {raw!r}") from exc
+            if pident < min_pident:
+                continue
+        cigar = fields[cigar_index] if cigar_index is not None and cigar_index < len(fields) else None
+        projection = calculate_query_intervals(
+            [{"start": min(qstart, qend) - 1, "end": max(qstart, qend)}],
+            query_length,
+            cigar=cigar,
+            query_deletion_operation="I",
+        )
+        record: dict[str, Any] = {
+            # The caller's assembly/resource identifier is the canonical
+            # grouping key.  LexicMap's optional sgenome is retained as
+            # source metadata rather than silently replacing that key.
+            "metagenome_id": metagenome_id,
+            "contig_id": target,
+            "strand": (
+                "reverse"
+                if strand_index is not None
+                and strand_index < len(fields)
+                and fields[strand_index].strip() in {"-", "reverse"}
+                else "forward"
+            ),
+            "query_segments": projection["query_segments"],
+            "intervals": projection["supported_intervals"],
+            "aligned_intervals": projection["aligned_intervals"],
+            "alignment_deletions": projection["alignment_deletions"],
+            "unsupported_intervals": projection["clipped_intervals"],
+            "query_kind": query_kind,
+            "topology_requested": topology_requested,
+            "query_start_1based": qstart,
+            "query_end_1based": qend,
+            "cigar": cigar,
+        }
+        if pident is not None:
+            record["pident"] = pident
+        if genome_index is not None and genome_index < len(fields):
+            record["source_genome_id"] = fields[genome_index]
+        for name, column_index in optional_names.items():
+            if column_index is not None and column_index < len(fields):
+                record[name] = fields[column_index]
+        rows.append(record)
     return rows
 
 
@@ -412,7 +910,14 @@ def _truth_intervals(
                 raise NormalizationError(f"invalid truth query_length: {row!r}") from exc
             if parsed_length != query_length:
                 continue
-        nested = row.get("intervals")
+        nested = next(
+            (
+                row.get(name)
+                for name in ("intervals", "query_intervals", "truth_intervals")
+                if isinstance(row.get(name), list)
+            ),
+            None,
+        )
         if isinstance(nested, list):
             for interval in nested:
                 if not isinstance(interval, dict):
@@ -436,10 +941,17 @@ def _truth_intervals(
             if not isinstance(encoded_intervals, list):
                 raise NormalizationError(f"query_intervals_json must be a list: {row!r}")
             for interval in encoded_intervals:
-                if (
-                    not isinstance(interval, (list, tuple))
-                    or len(interval) != 2
-                ):
+                if isinstance(interval, dict):
+                    try:
+                        intervals.extend(
+                            _checked_interval(
+                                int(interval["start"]), int(interval["end"]), query_length
+                            )
+                        )
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise NormalizationError(f"invalid query interval: {row!r}") from exc
+                    continue
+                if not isinstance(interval, (list, tuple)) or len(interval) != 2:
                     raise NormalizationError(f"invalid query interval: {row!r}")
                 try:
                     start, end = (int(value) for value in interval)
@@ -486,16 +998,54 @@ def _truth_intervals(
 
 
 def normalize_records(
-    records: list[dict], query_length: int, truth: list[dict[str, int]] | None = None
+    records: list[dict],
+    query_length: int,
+    truth: list[dict[str, int]] | None = None,
+    *,
+    query_kind: str = "unknown",
+    topology_requested: str = "unknown",
+    coordinate_model: str = "undetermined",
+    topology_evidence: str = "undetermined",
+    source_schema_version: str | None = None,
 ) -> dict:
-    intervals = [piece for record in records for piece in record.get("intervals", [])]
+    # Secondary/alternative alignments are retained in ``records`` but do not
+    # contribute to the nonredundant coverage union.  External comparator rows
+    # have no ``primary`` field and therefore retain the historical behavior.
+    primary_records = [record for record in records if record.get("primary", True)]
+    intervals = [piece for record in primary_records for piece in record.get("intervals", [])]
     supported = union_intervals(intervals, query_length)
+    aligned = union_intervals(
+        [
+            piece
+            for record in primary_records
+            for piece in record.get("aligned_intervals", record.get("intervals", []))
+        ],
+        query_length,
+    )
+    alignment_deletions = union_intervals(
+        [piece for record in primary_records for piece in record.get("alignment_deletions", [])],
+        query_length,
+    )
+    unsupported = complement(supported, query_length)
     result: dict = {
+        "query_kind": query_kind,
+        "topology_requested": topology_requested,
+        "coordinate_model": coordinate_model,
+        "topology_evidence": topology_evidence,
         "supported_intervals": supported,
         "supported_bases": _length(supported),
         "supported_fraction": _length(supported) / query_length,
-        "gaps": complement(supported, query_length),
+        "aligned_intervals": aligned,
+        "aligned_bases": _length(aligned),
+        "aligned_fraction": _length(aligned) / query_length,
+        "alignment_deletions": alignment_deletions,
+        "alignment_deletion_bases": _length(alignment_deletions),
+        "unsupported_gaps": unsupported,
+        # ``gaps`` is retained as the v1 normalized-output spelling.
+        "gaps": unsupported,
     }
+    if source_schema_version is not None:
+        result["source_schema_version"] = source_schema_version
     if truth is None:
         result["truth_status"] = "unavailable"
     else:
@@ -506,17 +1056,28 @@ def normalize_records(
     return result
 
 
-def normalize_jam_jsonl(
+def _normalize_jam_jsonl(
     text: str, query_id: str | None = None, metagenome_id: str | None = None
-) -> tuple[str, int, list[dict]]:
+) -> tuple[str, int, list[dict], dict[str, Any]]:
     records = [json.loads(line) for line in text.splitlines() if line.strip()]
     header = next((record for record in records if record.get("record_type") == "run_header"), None)
     if header is None:
         raise NormalizationError("jam JSONL has no run_header record")
-    selected_query = query_id or header.get("plasmid_id")
-    query_length = int(header.get("plasmid_length", 0))
+    selected_query = query_id or header.get("query_id") or header.get("plasmid_id")
+    query_length = int(header.get("query_length", header.get("plasmid_length", 0)))
     if not selected_query or query_length <= 0:
         raise NormalizationError("jam JSONL header lacks plasmid id or length")
+    explicit_topology = header.get("topology_requested")
+    if not isinstance(explicit_topology, str):
+        candidate_topology = header.get("topology")
+        explicit_topology = candidate_topology if isinstance(candidate_topology, str) else "unknown"
+    context = {
+        "source_schema_version": header.get("schema_version", "unknown"),
+        "query_kind": header.get("query_kind", "unknown"),
+        "topology_requested": explicit_topology,
+        "coordinate_model": header.get("coordinate_model", "undetermined"),
+        "topology_evidence": header.get("topology_evidence", "undetermined"),
+    }
     output: list[dict] = []
     for record in records:
         if record.get("record_type") != "metagenome_result":
@@ -524,7 +1085,71 @@ def normalize_jam_jsonl(
         current_id = record.get("metagenome_id")
         if metagenome_id is not None and current_id != metagenome_id:
             continue
-        for interval in (record.get("coverage") or {}).get("primary_intervals", []):
+        result_topology = record.get("topology_requested")
+        if not isinstance(result_topology, str):
+            candidate_topology = record.get("topology")
+            result_topology = candidate_topology if isinstance(candidate_topology, str) else context["topology_requested"]
+        result_context = {
+            key: record.get(key, value)
+            for key, value in context.items()
+        }
+        result_context["topology_requested"] = result_topology
+        for alignment in record.get("alignments", []) or []:
+            if not isinstance(alignment, dict):
+                raise NormalizationError("jam alignment records must be objects")
+            query_value = alignment.get("query_segments", alignment.get("query_interval"))
+            if query_value is None:
+                # Keep malformed accepted records visible to downstream
+                # review, but they cannot contribute query-coordinate support.
+                output.append(
+                    {
+                        "metagenome_id": current_id,
+                        "contig_id": alignment.get("contig_id", "unknown"),
+                        "strand": alignment.get("strand", "unknown"),
+                        "intervals": [],
+                        "aligned_intervals": [],
+                        "alignment_deletions": [],
+                        "unsupported_intervals": [],
+                        "source": "jam",
+                        "accepted": True,
+                        "primary": bool(alignment.get("primary", True)),
+                        "source_record": alignment,
+                        **result_context,
+                    }
+                )
+                continue
+            projection = calculate_query_intervals(
+                query_value,
+                query_length,
+                cigar=alignment.get("cigar"),
+                edit_script=alignment.get("edit_script"),
+                query_deletion_operation="D",
+            )
+            output.append(
+                {
+                    "metagenome_id": current_id,
+                    "contig_id": alignment.get("contig_id", "unknown"),
+                    "strand": alignment.get("strand", "unknown"),
+                    "intervals": projection["supported_intervals"],
+                    "aligned_intervals": projection["aligned_intervals"],
+                    "alignment_deletions": projection["alignment_deletions"],
+                    "unsupported_intervals": projection["clipped_intervals"],
+                    "query_segments": projection["query_segments"],
+                    "source": "jam",
+                    "accepted": True,
+                    "primary": bool(alignment.get("primary", True)),
+                    "source_record": alignment,
+                    **result_context,
+                }
+            )
+        if record.get("alignments"):
+            continue
+        # v1 streams and no-alignment v2 records still carry the selected
+        # primary mosaic/coverage.  Preserve that established fallback.
+        coverage = record.get("coverage") or {}
+        mosaic = record.get("primary_fragment_mosaic") or {}
+        intervals = coverage.get("primary_intervals") or mosaic.get("covered_intervals") or []
+        for interval in intervals:
             for piece in _checked_interval(
                 int(interval["start"]), int(interval["end"]), query_length
             ):
@@ -533,10 +1158,28 @@ def normalize_jam_jsonl(
                         "metagenome_id": current_id,
                         "contig_id": "jam-primary",
                         "strand": "unknown",
+                        "query_segments": [piece],
                         "intervals": [piece],
+                        "aligned_intervals": [piece],
+                        "alignment_deletions": [],
+                        "unsupported_intervals": [],
                         "source": "jam",
+                        "accepted": True,
+                        "primary": True,
+                        **result_context,
                     }
                 )
+    return selected_query, query_length, output, context
+
+
+def normalize_jam_jsonl(
+    text: str, query_id: str | None = None, metagenome_id: str | None = None
+) -> tuple[str, int, list[dict]]:
+    """Compatibility wrapper for callers using the original three-tuple API."""
+
+    selected_query, query_length, output, _context = _normalize_jam_jsonl(
+        text, query_id, metagenome_id
+    )
     return selected_query, query_length, output
 
 
@@ -549,16 +1192,55 @@ def normalize_file(
     truth_path: Path | None = None,
     min_pident: float = 0.0,
     min_mapq: int = 0,
+    *,
+    query_kind: str = "unknown",
+    topology_requested: str = "unknown",
 ) -> dict:
     text = input_path.read_text(encoding="utf-8")
-    if input_format == "blast6":
-        records = parse_blast6(text, query_id, query_length, metagenome_id, min_pident)
+    context: dict[str, Any] = {
+        "query_kind": query_kind,
+        "topology_requested": topology_requested,
+        "coordinate_model": "undetermined",
+        "topology_evidence": "undetermined",
+    }
+    if input_format in {"blast6", "blastn"}:
+        parser = parse_blastn if input_format == "blastn" else parse_blast6
+        records = parser(
+            text,
+            query_id,
+            query_length,
+            metagenome_id,
+            min_pident,
+            query_kind=query_kind,
+            topology_requested=topology_requested,
+        )
     elif input_format == "paf":
-        records = parse_paf(text, query_id, query_length, metagenome_id, min_mapq)
+        records = parse_paf(
+            text,
+            query_id,
+            query_length,
+            metagenome_id,
+            min_mapq,
+            query_kind=query_kind,
+            topology_requested=topology_requested,
+        )
+    elif input_format == "lexicmap":
+        records = parse_lexicmap(
+            text,
+            query_id,
+            query_length,
+            metagenome_id,
+            min_pident,
+            query_kind=query_kind,
+            topology_requested=topology_requested,
+        )
     elif input_format == "jam":
-        selected, discovered_length, records = normalize_jam_jsonl(text, query_id, metagenome_id)
+        selected, discovered_length, records, jam_context = _normalize_jam_jsonl(
+            text, query_id, metagenome_id
+        )
         if selected != query_id or discovered_length != query_length:
             raise NormalizationError("jam JSONL query identity or length disagrees with arguments")
+        context.update(jam_context)
     else:
         raise NormalizationError(f"unsupported input format: {input_format}")
     truth = (
@@ -569,11 +1251,13 @@ def normalize_file(
     return {
         "schema_version": SCHEMA_VERSION,
         "format": input_format,
+        "normalization_schema": NORMALIZATION_SCHEMA_VERSION,
         "query_id": query_id,
         "query_length": query_length,
         "metagenome_id": metagenome_id,
+        **context,
         "records": records,
-        "coverage": normalize_records(records, query_length, truth),
+        "coverage": normalize_records(records, query_length, truth, **context),
     }
 
 
@@ -588,7 +1272,9 @@ def _sha256(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--format", choices=("blast6", "paf", "jam"), required=True)
+    parser.add_argument(
+        "--format", choices=("blast6", "blastn", "paf", "lexicmap", "jam"), required=True
+    )
     parser.add_argument("--query-id")
     parser.add_argument("--query-length", type=int)
     parser.add_argument("--query-fasta", type=Path)
@@ -596,16 +1282,22 @@ def main() -> int:
     parser.add_argument("--truth", type=Path)
     parser.add_argument("--min-pident", type=float, default=0.0)
     parser.add_argument("--min-mapq", type=int, default=0)
+    parser.add_argument("--query-kind", default="unknown")
+    parser.add_argument("--topology-requested", default="unknown")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
         if args.format == "jam":
-            selected, query_length, records = normalize_jam_jsonl(
+            selected, query_length, records, context = _normalize_jam_jsonl(
                 args.input.read_text(encoding="utf-8"), args.query_id, args.metagenome_id
             )
             query_id = args.query_id or selected
             if args.query_length is not None and args.query_length != query_length:
                 raise NormalizationError("--query-length disagrees with jam JSONL header")
+            if args.query_kind != "unknown":
+                context["query_kind"] = args.query_kind
+            if args.topology_requested != "unknown":
+                context["topology_requested"] = args.topology_requested
             truth = (
                 _truth_intervals(args.truth, args.metagenome_id, query_length, query_id)
                 if args.truth
@@ -614,11 +1306,13 @@ def main() -> int:
             result = {
                 "schema_version": SCHEMA_VERSION,
                 "format": args.format,
+                "normalization_schema": NORMALIZATION_SCHEMA_VERSION,
                 "query_id": query_id,
                 "query_length": query_length,
                 "metagenome_id": args.metagenome_id or "all",
+                **context,
                 "records": records,
-                "coverage": normalize_records(records, query_length, truth),
+                "coverage": normalize_records(records, query_length, truth, **context),
                 "input_sha256": _sha256(args.input),
             }
         else:
@@ -643,6 +1337,8 @@ def main() -> int:
                 args.truth,
                 args.min_pident,
                 args.min_mapq,
+                query_kind=args.query_kind,
+                topology_requested=args.topology_requested,
             )
             result["input_sha256"] = _sha256(args.input)
     except (OSError, json.JSONDecodeError, NormalizationError) as exc:

@@ -71,6 +71,44 @@
         ]
       }
     },
+    "query_kinds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["plasmid", "phage", "other", "unknown"]
+      }
+    },
+    "topologies": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["linear", "circular", "unknown"]
+      }
+    },
+    "terminal_repeats": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": ["none", "direct", "inverted"]
+      }
+    },
+    "query_strata": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "query_kind", "topology", "terminal_repeat"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "query_kind": {"enum": ["plasmid", "phage", "other", "unknown"]},
+          "topology": {"enum": ["linear", "circular", "unknown"]},
+          "terminal_repeat": {"enum": ["none", "direct", "inverted"]}
+        },
+        "additionalProperties": false
+      }
+    },
     "labels": {
       "type": "array",
       "items": {

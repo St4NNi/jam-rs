@@ -54,6 +54,31 @@
       "type": "string",
       "minLength": 1
     },
+    "query_kind": {
+      "enum": ["plasmid", "phage", "other", "unknown"]
+    },
+    "topology_requested": {
+      "enum": ["linear", "circular", "unknown"]
+    },
+    "coordinate_model": {
+      "enum": ["linear", "wrap", "undetermined"]
+    },
+    "topology_evidence": {
+      "enum": [
+        "linear_supported",
+        "wrap_supported",
+        "both_compatible",
+        "insufficient",
+        "undetermined"
+      ]
+    },
+    "terminal_repeat_type": {
+      "enum": ["none", "direct", "inverted"]
+    },
+    "terminal_repeat_length": {
+      "type": "integer",
+      "minimum": 0
+    },
     "source_query_id": {
       "type": "string",
       "minLength": 1
@@ -114,6 +139,14 @@
       "enum": [1, 2, 5, 20]
     },
     "fragment_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "query_fragment_start": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "query_fragment_end": {
       "type": "integer",
       "minimum": 1
     },

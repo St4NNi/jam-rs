@@ -114,13 +114,58 @@
     "queries": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "query_kind": {
+            "enum": ["plasmid", "phage", "other", "unknown"]
+          },
+          "topology_requested": {
+            "enum": ["linear", "circular", "unknown"]
+          },
+          "coordinate_model": {
+            "enum": ["linear", "wrap", "undetermined"]
+          },
+          "topology_evidence": {
+            "enum": [
+              "linear_supported",
+              "wrap_supported",
+              "both_compatible",
+              "insufficient",
+              "undetermined"
+            ]
+          }
+        },
+        "additionalProperties": true
       }
     },
     "cases": {
       "type": "array",
       "items": {
-        "type": "object"
+        "type": "object",
+        "properties": {
+          "query_kind": {
+            "enum": ["plasmid", "phage", "other", "unknown"]
+          },
+          "topology_requested": {
+            "enum": ["linear", "circular", "unknown"]
+          },
+          "coordinate_model": {
+            "enum": ["linear", "wrap", "undetermined"]
+          },
+          "topology_evidence": {
+            "enum": [
+              "linear_supported",
+              "wrap_supported",
+              "both_compatible",
+              "insufficient",
+              "undetermined"
+            ]
+          },
+          "terminal_repeat_type": {
+            "enum": ["none", "direct", "inverted"]
+          }
+        },
+        "additionalProperties": true
       }
     },
     "status_path": {
