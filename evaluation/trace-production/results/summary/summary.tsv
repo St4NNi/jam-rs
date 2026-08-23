@@ -1,0 +1,780 @@
+section	case	metric	value	unit	status	note
+accession_spike	AP000342.1	truth_rows	3	rows	measured	truth classes: exact, near_known_accession, split_overlap; source: accession-spike-v1/source/truth.tsv
+accession_spike	AP000342.1/threads=1;cache=process-cold	alignment_count	16	alignments	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	cache_bytes	10790073	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	cache_hits	1447	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	cache_misses	24	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	candidate_count	3	candidates	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	coverage_mean	0.865483678224	fraction	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	decoded_bytes	25238525	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	exact_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	exact_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	gap_bases	38047	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	largest_gap	17670	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	metadata_requests	1462	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	partial_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	partial_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	peak_rss_kib	419344	KiB	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	range_requests	1456	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	requested_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	returned_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	reverse_complement_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	reverse_complement_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	short_fragment_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	short_fragment_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	split_overlap_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	split_overlap_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	system_seconds	0.261025	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	user_seconds	3.120136	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=1;cache=process-cold	wall_seconds	3.407197435	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t1_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	alignment_count	16	alignments	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	cache_bytes	10790073	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	cache_hits	1447	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	cache_misses	24	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	candidate_count	3	candidates	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	coverage_mean	0.865483678224	fraction	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	decoded_bytes	25238525	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	exact_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	exact_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	gap_bases	38047	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	largest_gap	17670	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	metadata_requests	1462	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	partial_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	partial_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	peak_rss_kib	721032	KiB	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	range_requests	1456	requests	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	requested_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	returned_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	reverse_complement_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	reverse_complement_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	short_fragment_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	short_fragment_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	split_overlap_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	split_overlap_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	system_seconds	0.345095	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	user_seconds	3.146982	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	AP000342.1/threads=8;cache=process-cold	wall_seconds	1.803527142	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.json
+accession_spike	J01749.1	truth_rows	3	rows	measured	truth classes: exact, near_known_accession, reverse_complement; source: accession-spike-v1/source/truth.tsv
+accession_spike	J01749.1/threads=1;cache=process-cold	alignment_count	4	alignments	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	cache_bytes	551592	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	cache_hits	61	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	cache_misses	24	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	candidate_count	3	candidates	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	coverage_mean	0.820454024306	fraction	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	decoded_bytes	4656057	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	exact_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	exact_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	gap_bases	2349	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	largest_gap	2349	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	metadata_requests	88	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	partial_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	partial_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	peak_rss_kib	65000	KiB	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	range_requests	82	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	requested_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	returned_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	reverse_complement_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	reverse_complement_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	short_fragment_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	short_fragment_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	split_overlap_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	split_overlap_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	system_seconds	0.030804	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	user_seconds	0.107538	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=1;cache=process-cold	wall_seconds	0.139775125004	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t1_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	alignment_count	4	alignments	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	cache_bytes	551592	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	cache_hits	61	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	cache_misses	24	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	candidate_count	3	candidates	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	coverage_mean	0.820454024306	fraction	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	decoded_bytes	4656057	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	exact_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	exact_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	gap_bases	2349	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	largest_gap	2349	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	metadata_requests	88	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	partial_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	partial_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	peak_rss_kib	170176	KiB	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	range_requests	82	requests	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	requested_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	returned_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	reverse_complement_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	reverse_complement_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	short_fragment_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	short_fragment_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	split_overlap_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	split_overlap_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	system_seconds	0.037663	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	user_seconds	0.111334	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	J01749.1/threads=8;cache=process-cold	wall_seconds	0.0736434939972	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1	truth_rows	2	rows	measured	truth classes: exact, partial; source: accession-spike-v1/source/truth.tsv
+accession_spike	NC_008272.1/threads=1;cache=process-cold	alignment_count	6	alignments	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	cache_bytes	6303523	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	cache_hits	846	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	cache_misses	24	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	candidate_count	3	candidates	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	coverage_mean	0.440051731852	fraction	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	decoded_bytes	16231151	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	exact_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	exact_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	gap_bases	91355	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	largest_gap	47102	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	metadata_requests	864	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	partial_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	partial_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	peak_rss_kib	488004	KiB	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	range_requests	858	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	requested_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	returned_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	reverse_complement_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	reverse_complement_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	short_fragment_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	short_fragment_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	split_overlap_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	split_overlap_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	system_seconds	0.091475	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	user_seconds	1.178494	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=1;cache=process-cold	wall_seconds	1.292186492	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t1_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	alignment_count	6	alignments	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	cache_bytes	6303523	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	cache_hits	846	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	cache_misses	24	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	candidate_count	3	candidates	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	coverage_mean	0.440051731852	fraction	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	decoded_bytes	16231151	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	exact_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	exact_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	gap_bases	91355	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	largest_gap	47102	bases	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	metadata_requests	864	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	partial_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	partial_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	peak_rss_kib	565460	KiB	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	range_requests	858	requests	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	requested_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	returned_bytes	22390624	bytes	measured	resource metric; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	reverse_complement_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	reverse_complement_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	short_fragment_alignment_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	short_fragment_candidate_recovery	1	fraction	measured	reported recovery 1/1; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	split_overlap_alignment_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	split_overlap_candidate_recovery	NA	fraction	unavailable	reported recovery 0/0; denominator is zero; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	system_seconds	0.164359	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	user_seconds	1.185887	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike	NC_008272.1/threads=8;cache=process-cold	wall_seconds	0.775607861004	seconds	measured	accession-spike Jam screening measurement; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.json
+accession_spike_index	AP000342.1	jam_index_wall_seconds	0.461047402998	seconds	measured	Jam sketch index timing; source: accession-spike-v1/AP000342.1/summary.tsv
+accession_spike_index	AP000342.1	jma_index_wall_seconds	2.776375864	seconds	measured	JMA archive index timing; source: accession-spike-v1/AP000342.1/summary.tsv
+accession_spike_index	J01749.1	jam_index_wall_seconds	0.464293814999	seconds	measured	Jam sketch index timing; source: accession-spike-v1/J01749.1/summary.tsv
+accession_spike_index	J01749.1	jma_index_wall_seconds	2.761105052	seconds	measured	JMA archive index timing; source: accession-spike-v1/J01749.1/summary.tsv
+accession_spike_index	NC_008272.1	jam_index_wall_seconds	0.456740499998	seconds	measured	Jam sketch index timing; source: accession-spike-v1/NC_008272.1/summary.tsv
+accession_spike_index	NC_008272.1	jma_index_wall_seconds	2.761524995	seconds	measured	JMA archive index timing; source: accession-spike-v1/NC_008272.1/summary.tsv
+accession_spike_output	AP000342.1	jsonl_records	5	records	measured	validated run JSONL records; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.jsonl
+accession_spike_output	AP000342.1	jsonl_result_records	3	records	measured	validated metagenome result records; source: accession-spike-v1/AP000342.1/local_balanced_t8_cold.jsonl
+accession_spike_output	J01749.1	jsonl_records	5	records	measured	validated run JSONL records; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.jsonl
+accession_spike_output	J01749.1	jsonl_result_records	3	records	measured	validated metagenome result records; source: accession-spike-v1/J01749.1/local_balanced_t8_cold.jsonl
+accession_spike_output	NC_008272.1	jsonl_records	5	records	measured	validated run JSONL records; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.jsonl
+accession_spike_output	NC_008272.1	jsonl_result_records	3	records	measured	validated metagenome result records; source: accession-spike-v1/NC_008272.1/local_balanced_t8_cold.jsonl
+availability	1000_real_assemblies	status	NA	status	unavailable	The 1,000-real-assembly release scale was not run.
+availability	100_plasmid_queries	status	NA	status	unavailable	The 100-query release scale was not run.
+availability	actual_s3	status	NA	status	unavailable	No actual S3 object-storage run is present; the HTTP range fixture is not an S3 run.
+availability	natural_supported_positives	status	NA	status	unavailable	No natural or independently supported positive track is present in the raw tree.
+availability	read_derived_assemblies	status	NA	status	unavailable	No read-derived assembly track is present in the raw tree.
+block_size	archive_block=1048576;cache_block=1048576	archive_build_cpu_seconds_median	1.1996	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	archive_build_peak_rss_kib_median	62124	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	archive_build_wall_seconds_median	1.23062451401	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	cache_bytes_median	75110	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	peak_rss_kib_median	35296	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	requested_bytes_median	5803483	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	returned_bytes_median	5803483	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=1048576	wall_seconds_median	0.0378455259997	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	archive_build_cpu_seconds_median	1.1996	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	archive_build_peak_rss_kib_median	62124	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	archive_build_wall_seconds_median	1.23062451401	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	cache_bytes_median	23264	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	peak_rss_kib_median	26008	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	requested_bytes_median	1079615	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	returned_bytes_median	1079615	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=16384	wall_seconds_median	0.0399522080043	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	archive_build_cpu_seconds_median	1.1996	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	archive_build_peak_rss_kib_median	62124	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	archive_build_wall_seconds_median	1.23062451401	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	cache_bytes_median	60390	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	peak_rss_kib_median	26520	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	requested_bytes_median	2657755	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	returned_bytes_median	2657755	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=262144	wall_seconds_median	0.0429926799989	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	archive_build_cpu_seconds_median	1.1996	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	archive_build_peak_rss_kib_median	62124	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	archive_build_wall_seconds_median	1.23062451401	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	cache_bytes_median	53414	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	peak_rss_kib_median	26708	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	requested_bytes_median	1390911	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	returned_bytes_median	1390911	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=1048576;cache_block=65536	wall_seconds_median	0.0451062749999	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	archive_build_cpu_seconds_median	1.179386	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	archive_build_peak_rss_kib_median	64552	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	archive_build_wall_seconds_median	1.188589036	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	archive_size_bytes_median	18316856	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	cache_bytes_median	75110	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	decoded_bytes_median	1202740	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	peak_rss_kib_median	27156	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	requested_bytes_median	6005166	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	returned_bytes_median	6005166	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=1048576	wall_seconds_median	0.0465109809957	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	archive_build_cpu_seconds_median	1.179386	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	archive_build_peak_rss_kib_median	64552	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	archive_build_wall_seconds_median	1.188589036	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	archive_size_bytes_median	18316856	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	cache_bytes_median	23264	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	decoded_bytes_median	1202740	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	peak_rss_kib_median	26180	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	requested_bytes_median	1269130	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	returned_bytes_median	1269130	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=16384	wall_seconds_median	0.0422486280004	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	archive_build_cpu_seconds_median	1.179386	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	archive_build_peak_rss_kib_median	64552	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	archive_build_wall_seconds_median	1.188589036	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	archive_size_bytes_median	18316856	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	cache_bytes_median	60390	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	decoded_bytes_median	1202740	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	peak_rss_kib_median	26184	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	requested_bytes_median	2859438	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	returned_bytes_median	2859438	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=262144	wall_seconds_median	0.0443607080015	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	archive_build_cpu_seconds_median	1.179386	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	archive_build_peak_rss_kib_median	64552	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	archive_build_wall_seconds_median	1.188589036	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	archive_size_bytes_median	18316856	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	cache_bytes_median	53414	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	decoded_bytes_median	1202740	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	peak_rss_kib_median	26140	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	requested_bytes_median	1645962	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	returned_bytes_median	1645962	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=16384;cache_block=65536	wall_seconds_median	0.0415552069971	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	archive_build_cpu_seconds_median	1.197099	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	archive_build_peak_rss_kib_median	58368	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	archive_build_wall_seconds_median	1.206117306	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	cache_bytes_median	75110	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	peak_rss_kib_median	26368	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	requested_bytes_median	5803483	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	returned_bytes_median	5803483	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=1048576	wall_seconds_median	0.038644414999	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	archive_build_cpu_seconds_median	1.197099	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	archive_build_peak_rss_kib_median	58368	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	archive_build_wall_seconds_median	1.206117306	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	cache_bytes_median	23264	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	peak_rss_kib_median	26376	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	requested_bytes_median	1079615	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	returned_bytes_median	1079615	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=16384	wall_seconds_median	0.0325231940005	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	archive_build_cpu_seconds_median	1.197099	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	archive_build_peak_rss_kib_median	58368	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	archive_build_wall_seconds_median	1.206117306	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	cache_bytes_median	60390	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	peak_rss_kib_median	25444	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	requested_bytes_median	2657755	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	returned_bytes_median	2657755	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=262144	wall_seconds_median	0.043215589998	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	archive_build_cpu_seconds_median	1.197099	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	archive_build_peak_rss_kib_median	58368	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	archive_build_wall_seconds_median	1.206117306	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	cache_bytes_median	53414	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	peak_rss_kib_median	25152	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	requested_bytes_median	1390911	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	returned_bytes_median	1390911	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=262144;cache_block=65536	wall_seconds_median	0.0416652419954	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	archive_build_cpu_seconds_median	1.183763	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	archive_build_peak_rss_kib_median	58172	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	archive_build_wall_seconds_median	1.19495435699	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	cache_bytes_median	75110	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	peak_rss_kib_median	27956	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	requested_bytes_median	5803483	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	returned_bytes_median	5803483	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=1048576	wall_seconds_median	0.0478718939994	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	archive_build_cpu_seconds_median	1.183763	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	archive_build_peak_rss_kib_median	58172	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	archive_build_wall_seconds_median	1.19495435699	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	cache_bytes_median	23264	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	peak_rss_kib_median	43536	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	requested_bytes_median	1079615	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	returned_bytes_median	1079615	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=16384	wall_seconds_median	0.0430352930052	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	archive_build_cpu_seconds_median	1.183763	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	archive_build_peak_rss_kib_median	58172	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	archive_build_wall_seconds_median	1.19495435699	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	cache_bytes_median	60390	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	peak_rss_kib_median	47852	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	requested_bytes_median	2657755	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	returned_bytes_median	2657755	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=262144	wall_seconds_median	0.0436389040042	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	archive_build_cpu_seconds_median	1.183763	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	archive_build_peak_rss_kib_median	58172	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	archive_build_wall_seconds_median	1.19495435699	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	archive_size_bytes_median	18292412	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	cache_bytes_median	53414	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	decoded_bytes_median	1013225	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	failed_count	0	cases	measured	explicit failed case count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	full_object_fallback_count	0	fallbacks	measured	explicit fallback count; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	peak_rss_kib_median	47396	KiB	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	range_requests_median	12	requests	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	requested_bytes_median	1390911	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	returned_bytes_median	1390911	bytes	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+block_size	archive_block=65536;cache_block=65536	wall_seconds_median	0.0458510230019	seconds	measured	median across query classes; source: resource-scaling-v1/block/summary.json
+comparator_accuracy	blastn/candidate	assemblies_total	72	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	assemblies_with_records	72	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	base_precision	0.593692074794	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	base_recall	0.982890625	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	gap_error_bases	220728	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	gap_error_fraction	0.306566666667	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	intersection_bases	314525	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	interval_precision	0.555555555556	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	interval_recall	1	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	observed_bases	529778	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	truth_bases	320000	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/candidate	version	blastn: 2.17.0+	identifier	measured	comparator version from normalized result; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+comparator_accuracy	blastn/direct_full	assemblies_total	40	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	assemblies_with_records	40	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	base_precision	1	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	base_recall	0.982890625	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	gap_error_bases	5475	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	gap_error_fraction	0.0136875	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	intersection_bases	314525	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	interval_precision	1	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	interval_recall	1	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	observed_bases	314525	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	truth_bases	320000	bases	measured	normalized comparator metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	blastn/direct_full	version	blastn: 2.17.0+	identifier	measured	comparator version from normalized result; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/candidate	assemblies_total	72	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	assemblies_with_records	71	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	base_precision	0.580479569969	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	base_recall	0.86930625	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	gap_error_bases	242865	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	gap_error_fraction	0.3373125	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	intersection_bases	278178	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	interval_precision	0.56338028169	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	interval_recall	0.925	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	observed_bases	479221	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	truth_bases	320000	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/candidate	version	2.31-r1302	identifier	measured	comparator version from normalized result; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+comparator_accuracy	minimap2/direct_full	assemblies_total	40	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	assemblies_with_records	40	assemblies	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	base_precision	1	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	base_recall	0.86930625	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	gap_error_bases	41822	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	gap_error_fraction	0.104555	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	intersection_bases	278178	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	interval_precision	1	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	interval_recall	0.925	fraction	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	observed_bases	278178	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	truth_bases	320000	bases	measured	normalized comparator metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_accuracy	minimap2/direct_full	version	2.31-r1302	identifier	measured	comparator version from normalized result; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+comparator_timing	blastn/candidate	peak_rss_kib	74808	KiB	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_candidates_t8.json
+comparator_timing	blastn/candidate	system_seconds	2.991217	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_candidates_t8.json
+comparator_timing	blastn/candidate	user_seconds	27.906469	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_candidates_t8.json
+comparator_timing	blastn/candidate	wall_seconds	32.080605176	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_candidates_t8.json
+comparator_timing	blastn/direct_full	peak_rss_kib	74848	KiB	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_fragments_direct_t8.json
+comparator_timing	blastn/direct_full	system_seconds	1.488134	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_fragments_direct_t8.json
+comparator_timing	blastn/direct_full	user_seconds	13.226747	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_fragments_direct_t8.json
+comparator_timing	blastn/direct_full	wall_seconds	14.84467506	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/blastn_q10000_fragments_direct_t8.json
+comparator_timing	minimap2/candidate	peak_rss_kib	90976	KiB	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_candidates_t8.json
+comparator_timing	minimap2/candidate	system_seconds	8.522783	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_candidates_t8.json
+comparator_timing	minimap2/candidate	user_seconds	39.478672	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_candidates_t8.json
+comparator_timing	minimap2/candidate	wall_seconds	33.94642394	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_candidates_t8.json
+comparator_timing	minimap2/direct_full	peak_rss_kib	90344	KiB	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_fragments_direct_t8.json
+comparator_timing	minimap2/direct_full	system_seconds	4.840371	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_fragments_direct_t8.json
+comparator_timing	minimap2/direct_full	user_seconds	22.549026	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_fragments_direct_t8.json
+comparator_timing	minimap2/direct_full	wall_seconds	19.264992858	seconds	measured	comparator measurement timing and resident memory; source: controlled-v1/measurements/minimap2_q10000_fragments_direct_t8.json
+controlled_comparator	blastn-q10000-candidates-t8	assemblies_total	72	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	assemblies_with_records	72	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	base_precision	0.593692074794	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	base_recall	0.982890625	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	gap_error_bases	220728	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	gap_error_fraction	0.306566666667	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	intersection_bases	314525	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	interval_precision	0.555555555556	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	interval_recall	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	observed_bases	529778	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	tool	blastn	identifier	measured	normalized result tool; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	blastn-q10000-candidates-t8	version	blastn: 2.17.0+	identifier	measured	normalized result version; source: controlled-v1/normalized/blastn-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	assemblies_total	72	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	assemblies_with_records	71	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	base_precision	0.580479569969	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	base_recall	0.86930625	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	gap_error_bases	242865	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	gap_error_fraction	0.3373125	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	intersection_bases	278178	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	interval_precision	0.56338028169	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	interval_recall	0.925	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	observed_bases	479221	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	tool	minimap2	identifier	measured	normalized result tool; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_comparator	minimap2-q10000-candidates-t8	version	2.31-r1302	identifier	measured	normalized result version; source: controlled-v1/normalized/minimap2-q10000-candidates-t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	alignment_count	75	alignments	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	candidate_count	40	candidates	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	coverage_mean	0.474225	fraction	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	gap_bases	210310	bases	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	peak_rss_kib	295996	KiB	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	system_seconds	0.350393	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	user_seconds	1.592598	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=1;threads=8	wall_seconds	0.587417303002	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s1_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	alignment_count	75	alignments	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	candidate_count	40	candidates	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	coverage_mean	0.474225	fraction	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	gap_bases	210310	bases	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	peak_rss_kib	274356	KiB	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	system_seconds	0.274307	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	user_seconds	1.577492	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=balanced;min_shared=3;threads=8	wall_seconds	0.533665836003	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_balanced_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	alignment_count	23	alignments	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	candidate_count	25	candidates	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	coverage_mean	0.244636	fraction	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	gap_bases	188841	bases	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	peak_rss_kib	184216	KiB	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	system_seconds	0.16137	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	user_seconds	0.398212	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=1;threads=8	wall_seconds	0.219353269	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s1_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	alignment_count	23	alignments	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	candidate_count	25	candidates	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	coverage_mean	0.244636	fraction	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	gap_bases	188841	bases	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	peak_rss_kib	173160	KiB	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	system_seconds	0.134884	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	user_seconds	0.375606	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=fast;min_shared=3;threads=8	wall_seconds	0.176063115003	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_fast_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	alignment_count	170	alignments	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	candidate_count	40	candidates	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	coverage_mean	0.632905	fraction	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	gap_bases	146838	bases	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	peak_rss_kib	257064	KiB	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	system_seconds	0.308309	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	user_seconds	3.60239	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=1;threads=8	wall_seconds	2.039569843	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s1_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	alignment_count	170	alignments	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	candidate_count	40	candidates	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	coverage_mean	0.632905	fraction	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	gap_bases	146838	bases	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	peak_rss_kib	243172	KiB	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	system_seconds	0.415265	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	user_seconds	3.56876	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragment_measurements	profile=sensitive;min_shared=3;threads=8	wall_seconds	2.058891742	seconds	measured	Jam fragment profile measurement; source: controlled-v1/measurements/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	assemblies_with_records	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	base_recall	0.982890625	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	gap_error_bases	5475	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	gap_error_fraction	0.0136875	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	intersection_bases	314525	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	interval_recall	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	observed_bases	314525	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	tool	blastn	identifier	measured	normalized result tool; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	blastn-q10000-fragments-direct-t8	version	blastn: 2.17.0+	identifier	measured	normalized result version; source: controlled-v1/normalized/blastn-q10000-fragments-direct-t8.json
+controlled_fragments	jam-q10000-fragments	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	assemblies_with_records	38	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	base_recall	0.59278125	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	gap_error_bases	130310	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	gap_error_fraction	0.325775	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	intersection_bases	189690	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	interval_recall	0.8375	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	observed_bases	189690	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam-q10000-fragments	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam-q10000-fragments.json
+controlled_fragments	jam_fragments_balanced_s1_t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	assemblies_with_records	38	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	base_recall	0.59278125	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	gap_error_bases	130310	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	gap_error_fraction	0.325775	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	intersection_bases	189690	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	interval_recall	0.8375	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	observed_bases	189690	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s1_t8	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam_fragments_balanced_s1_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	assemblies_with_records	38	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	base_recall	0.59278125	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	gap_error_bases	130310	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	gap_error_fraction	0.325775	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	intersection_bases	189690	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	interval_recall	0.8375	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	observed_bases	189690	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_balanced_s3_t8	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam_fragments_balanced_s3_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	assemblies_with_records	20	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	base_recall	0.191121875	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	gap_error_bases	258841	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	gap_error_fraction	0.6471025	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	intersection_bases	61159	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	interval_recall	0.4	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	observed_bases	61159	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s1_t8	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam_fragments_fast_s1_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	assemblies_with_records	20	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	base_recall	0.191121875	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	gap_error_bases	258841	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	gap_error_fraction	0.6471025	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	intersection_bases	61159	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	interval_recall	0.4	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	observed_bases	61159	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_fast_s3_t8	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam_fragments_fast_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	assemblies_with_records	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	base_recall	0.79113125	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	gap_error_bases	66838	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	gap_error_fraction	0.167095	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	intersection_bases	253162	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	interval_recall	0.95	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	observed_bases	253162	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s1_t8	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam_fragments_sensitive_s1_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	assemblies_with_records	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	base_recall	0.79113125	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	gap_error_bases	66838	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	gap_error_fraction	0.167095	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	intersection_bases	253162	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	interval_recall	0.95	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	observed_bases	253162	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	jam_fragments_sensitive_s3_t8	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam_fragments_sensitive_s3_t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	assemblies_total	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	assemblies_with_records	40	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	base_recall	0.86930625	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	gap_error_bases	41822	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	gap_error_fraction	0.104555	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	intersection_bases	278178	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	interval_recall	0.925	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	observed_bases	278178	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	tool	minimap2	identifier	measured	normalized result tool; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	truth_bases	320000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_fragments	minimap2-q10000-fragments-direct-t8	version	2.31-r1302	identifier	measured	normalized result version; source: controlled-v1/normalized/minimap2-q10000-fragments-direct-t8.json
+controlled_identity	jam-q10000-identity	assemblies_total	36	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	assemblies_with_records	19	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	base_recall	0.682371069182	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	gap_error_bases	50503	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	gap_error_fraction	0.140286111111	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	intersection_bases	108497	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	interval_recall	0.527777777778	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	observed_bases	108497	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	truth_bases	159000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q10000-identity	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam-q10000-identity.json
+controlled_identity	jam-q2000-identity	assemblies_total	36	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	assemblies_with_records	5	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	base_recall	0.22641509434	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	gap_error_bases	24600	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	gap_error_fraction	0.341666666667	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	intersection_bases	7200	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	interval_recall	0.138888888889	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	observed_bases	7200	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	truth_bases	31800	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q2000-identity	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam-q2000-identity.json
+controlled_identity	jam-q50000-identity	assemblies_total	36	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	assemblies_with_records	24	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	base_precision	0.997430137761	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	base_recall	0.798709433962	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	gap_error_bases	161662	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	gap_error_fraction	0.0898122222222	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	intersection_bases	634974	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	interval_precision	0.972222222222	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	interval_recall	0.666666666667	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	observed_bases	636610	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	truth_bases	795000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_identity	jam-q50000-identity	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam-q50000-identity.json
+controlled_origin	jam-q10000-origin	assemblies_total	1	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	assemblies_with_records	1	assemblies	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	base_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	base_recall	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	gap_error_bases	0	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	gap_error_fraction	0	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	intersection_bases	2000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	interval_precision	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	interval_recall	1	fraction	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	observed_bases	2000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	tool	jam	identifier	measured	normalized result tool; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	truth_bases	2000	bases	measured	normalized truth comparison metric; source: controlled-v1/normalized/jam-q10000-origin.json
+controlled_origin	jam-q10000-origin	version	jam 0.10.0	identifier	measured	normalized result version; source: controlled-v1/normalized/jam-q10000-origin.json
+http	combined-cold-warm	bytes_served	12420860	bytes	measured	combined HTTP fixture metric; source: resource-scaling-v1/http/http.metrics.json
+http	combined-cold-warm	requests	194	requests	measured	combined HTTP fixture metric; source: resource-scaling-v1/http/http.metrics.json
+http	combined-cold-warm	responses_200	4	responses	measured	combined HTTP fixture metric; source: resource-scaling-v1/http/http.metrics.json
+http	combined-cold-warm	responses_206	190	responses	measured	combined HTTP fixture metric; source: resource-scaling-v1/http/http.metrics.json
+http	http/cold	bytes_served	6210430	bytes	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	get_requests	95	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	head_requests	2	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	peak_rss_kib	417228	KiB	measured	HTTP range measurement; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	range_requests	95	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	requests	97	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	responses_200	2	responses	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	responses_206	95	responses	measured	HTTP server or client metric; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	system_seconds	0.590344	seconds	measured	HTTP range measurement; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	user_seconds	1.623749	seconds	measured	HTTP range measurement; source: resource-scaling-v1/http/cold.measurement.json
+http	http/cold	wall_seconds	3.3394351	seconds	measured	HTTP range measurement; source: resource-scaling-v1/http/cold.measurement.json
+http	http/warm	bytes_served	6210430	bytes	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	get_requests	95	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	head_requests	2	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	peak_rss_kib	434712	KiB	measured	HTTP range measurement; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	range_requests	95	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	requests	97	requests	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	responses_200	2	responses	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	responses_206	95	responses	measured	HTTP server or client metric; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	system_seconds	0.573626	seconds	measured	HTTP range measurement; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	user_seconds	1.633454	seconds	measured	HTTP range measurement; source: resource-scaling-v1/http/warm.measurement.json
+http	http/warm	wall_seconds	3.313175939	seconds	measured	HTTP range measurement; source: resource-scaling-v1/http/warm.measurement.json
+large_catalog	threads=1	alignment_count	226	alignments	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	candidate_count	83	candidates	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	decoded_bytes	721717254	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	full_object_fallbacks	0	fallbacks	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	peak_rss_kib	479536	KiB	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	range_requests	42722	requests	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	requested_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	returned_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	system_seconds	1.825644	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	user_seconds	20.270685	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=1	wall_seconds	23.350475355	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t1.json
+large_catalog	threads=16	alignment_count	226	alignments	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	candidate_count	83	candidates	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	decoded_bytes	721717254	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	full_object_fallbacks	0	fallbacks	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	peak_rss_kib	875996	KiB	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	range_requests	42722	requests	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	requested_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	returned_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	system_seconds	2.601619	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	user_seconds	20.596584	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=16	wall_seconds	14.509883439	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t16.json
+large_catalog	threads=4	alignment_count	226	alignments	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	candidate_count	83	candidates	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	decoded_bytes	721717254	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	full_object_fallbacks	0	fallbacks	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	peak_rss_kib	828792	KiB	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	range_requests	42722	requests	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	requested_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	returned_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	system_seconds	3.193889	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	user_seconds	20.64541	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=4	wall_seconds	14.764680677	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t4.json
+large_catalog	threads=8	alignment_count	226	alignments	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	candidate_count	83	candidates	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	decoded_bytes	721717254	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	full_object_fallbacks	0	fallbacks	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	peak_rss_kib	802240	KiB	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	range_requests	42722	requests	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	requested_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	returned_bytes	741435014	bytes	measured	large-catalog resource metric; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	system_seconds	3.129957	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	user_seconds	20.683146	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+large_catalog	threads=8	wall_seconds	14.792359361	seconds	measured	large-catalog Jam measurement; source: resource-scaling-v1/large-catalog/jam_q50000_sensitive_c100_t8.json
+memory	all-288-cases	alignment_count_median	1	alignments	measured	median over complete memory cases; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	candidate_count_median	1	candidates	measured	median over complete memory cases; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	case_count	288	cases	measured	raw memory matrix case count; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	complete_count	288	cases	measured	explicit status count; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	failed_count	0	cases	measured	explicit status count; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	full_object_fallbacks_total	0	fallbacks	measured	sum of explicit raw counters; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	peak_rss_kib_max	507068	KiB	measured	maximum over complete memory cases; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	peak_rss_kib_median	69410	KiB	measured	median over complete memory cases; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	retries_total	0	retries	measured	sum of explicit raw counters; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	stale_cache_rejections_total	0	rejections	measured	sum of explicit raw counters; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	unavailable_count	0	cases	measured	explicit status count; source: resource-scaling-v1/memory/summary.json
+memory	all-288-cases	wall_seconds_median	0.0313632395009	seconds	measured	median over complete memory cases; source: resource-scaling-v1/memory/summary.json
