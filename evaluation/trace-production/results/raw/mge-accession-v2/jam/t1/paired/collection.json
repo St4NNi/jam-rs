@@ -1,0 +1,17 @@
+{
+  "included_in_sequential_timing_summary": false,
+  "query_process_concurrency": 2,
+  "query_order": [
+    "J01749.1",
+    "M77789.2",
+    "AP000342.1",
+    "KY749247.1",
+    "NC_008272.1",
+    "AP001918.1",
+    "NC_001735.1",
+    "NC_001416.1",
+    "NC_000866.4",
+    "NC_001604.1"
+  ],
+  "repeat": 1
+}

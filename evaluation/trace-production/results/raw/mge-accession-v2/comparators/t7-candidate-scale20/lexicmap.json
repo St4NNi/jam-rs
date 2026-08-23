@@ -1,0 +1,593 @@
+{
+  "commands": [
+    [
+      "tools/out/trace-production-lexicmap-v0.9.0/lexicmap",
+      "search",
+      "-d",
+      "tools/out/mge-accession-spike-20260823/comparators/NC_001604.1-fscale20/lexicmap/references.lmi",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta",
+      "-o",
+      "/home/beavis/projects/jam-rs/tools/out/mge-accession-spike-20260823/comparators/tmp/jam-trace-lexicmap-ux9_sves/search.tsv",
+      "--align-min-match-pident",
+      "70.0",
+      "--min-qcov-per-hsp",
+      "0.0",
+      "--min-qcov-per-genome",
+      "0.0",
+      "--align-min-match-len",
+      "160",
+      "--top-n-genomes",
+      "0",
+      "--top-n-chains",
+      "0",
+      "--quiet",
+      "-j",
+      "1"
+    ]
+  ],
+  "failed_count": 0,
+  "input_manifest_sha256": "52778d7d12cc470bdf2df26791200b3d1ac0fe7623c8c0b686aa325d3ea77243",
+  "metrics": {
+    "assemblies_total": 3,
+    "assemblies_with_records": 3,
+    "base_precision": 0.998004838267202,
+    "base_recall": 1.0,
+    "gap_error_bases": 160,
+    "gap_error_fraction": 0.0013354366460508634,
+    "intersection_bases": 80034,
+    "interval_precision": 0.8333333333333334,
+    "interval_recall": 1.0,
+    "observed_bases": 80194,
+    "truth_bases": 80034,
+    "truth_status": "measured"
+  },
+  "query_id": "NC_001604.1",
+  "query_kind": "phage",
+  "query_length": 39937,
+  "results": [
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-lexicmap-v0.9.0/lexicmap",
+        "search",
+        "-d",
+        "tools/out/mge-accession-spike-20260823/comparators/NC_001604.1-fscale20/lexicmap/references.lmi",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta",
+        "-o",
+        "/home/beavis/projects/jam-rs/tools/out/mge-accession-spike-20260823/comparators/tmp/jam-trace-lexicmap-ux9_sves/search.tsv",
+        "--align-min-match-pident",
+        "70.0",
+        "--min-qcov-per-hsp",
+        "0.0",
+        "--min-qcov-per-genome",
+        "0.0",
+        "--align-min-match-len",
+        "160",
+        "--top-n-genomes",
+        "0",
+        "--top-n-chains",
+        "0",
+        "--quiet",
+        "-j",
+        "1"
+      ],
+      "coverage": {
+        "aligned_bases": 39937,
+        "aligned_fraction": 1.0,
+        "aligned_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 39937,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 39937,
+          "truth_bases": 39937
+        },
+        "query_kind": "unknown",
+        "supported_bases": 39937,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": []
+      },
+      "lexicmap_index_source": "provided",
+      "lexicmap_reference_manifest_sha256": "a4f95862b2d2bf369a944d82e1f3c47de29cffefc6b7364412ee0b8a89e08a89",
+      "metagenome_id": "NC_001604.1__forward.fasta",
+      "records": [
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__forward",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__forward.fasta",
+          "pident": 100.0,
+          "query_end_1based": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "query_start_1based": 1,
+          "reference_genome": "NC_001604.1__forward",
+          "strand": "forward",
+          "target_end_1based": 39937,
+          "target_start_1based": 1,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        },
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__forward",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "metagenome_id": "NC_001604.1__forward.fasta",
+          "pident": 100.0,
+          "query_end_1based": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "query_start_1based": 39778,
+          "reference_genome": "NC_001604.1__forward",
+          "strand": "forward",
+          "target_end_1based": 160,
+          "target_start_1based": 1,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        },
+        {
+          "aligned_intervals": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__forward",
+          "intervals": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__forward.fasta",
+          "pident": 100.0,
+          "query_end_1based": 160,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "query_start_1based": 1,
+          "reference_genome": "NC_001604.1__forward",
+          "strand": "forward",
+          "target_end_1based": 39937,
+          "target_start_1based": 39778,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        }
+      ],
+      "status": "measured",
+      "version": "LexicMap v0.9.0"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-lexicmap-v0.9.0/lexicmap",
+        "search",
+        "-d",
+        "tools/out/mge-accession-spike-20260823/comparators/NC_001604.1-fscale20/lexicmap/references.lmi",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta",
+        "-o",
+        "/home/beavis/projects/jam-rs/tools/out/mge-accession-spike-20260823/comparators/tmp/jam-trace-lexicmap-ux9_sves/search.tsv",
+        "--align-min-match-pident",
+        "70.0",
+        "--min-qcov-per-hsp",
+        "0.0",
+        "--min-qcov-per-genome",
+        "0.0",
+        "--align-min-match-len",
+        "160",
+        "--top-n-genomes",
+        "0",
+        "--top-n-chains",
+        "0",
+        "--quiet",
+        "-j",
+        "1"
+      ],
+      "coverage": {
+        "aligned_bases": 39937,
+        "aligned_fraction": 1.0,
+        "aligned_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 39937,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 39937,
+          "truth_bases": 39937
+        },
+        "query_kind": "unknown",
+        "supported_bases": 39937,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": []
+      },
+      "lexicmap_index_source": "provided",
+      "lexicmap_reference_manifest_sha256": "a4f95862b2d2bf369a944d82e1f3c47de29cffefc6b7364412ee0b8a89e08a89",
+      "metagenome_id": "NC_001604.1__reverse.fasta",
+      "records": [
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__reverse",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__reverse.fasta",
+          "pident": 100.0,
+          "query_end_1based": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "query_start_1based": 1,
+          "reference_genome": "NC_001604.1__reverse",
+          "strand": "reverse",
+          "target_end_1based": 39937,
+          "target_start_1based": 1,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        },
+        {
+          "aligned_intervals": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__reverse",
+          "intervals": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__reverse.fasta",
+          "pident": 100.0,
+          "query_end_1based": 160,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "query_start_1based": 1,
+          "reference_genome": "NC_001604.1__reverse",
+          "strand": "reverse",
+          "target_end_1based": 160,
+          "target_start_1based": 1,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        },
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__reverse",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "metagenome_id": "NC_001604.1__reverse.fasta",
+          "pident": 100.0,
+          "query_end_1based": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "query_start_1based": 39778,
+          "reference_genome": "NC_001604.1__reverse",
+          "strand": "reverse",
+          "target_end_1based": 39937,
+          "target_start_1based": 39778,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        }
+      ],
+      "status": "measured",
+      "version": "LexicMap v0.9.0"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__terminal_repeat.fasta",
+      "command": [
+        "tools/out/trace-production-lexicmap-v0.9.0/lexicmap",
+        "search",
+        "-d",
+        "tools/out/mge-accession-spike-20260823/comparators/NC_001604.1-fscale20/lexicmap/references.lmi",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta",
+        "-o",
+        "/home/beavis/projects/jam-rs/tools/out/mge-accession-spike-20260823/comparators/tmp/jam-trace-lexicmap-ux9_sves/search.tsv",
+        "--align-min-match-pident",
+        "70.0",
+        "--min-qcov-per-hsp",
+        "0.0",
+        "--min-qcov-per-genome",
+        "0.0",
+        "--align-min-match-len",
+        "160",
+        "--top-n-genomes",
+        "0",
+        "--top-n-chains",
+        "0",
+        "--quiet",
+        "-j",
+        "1"
+      ],
+      "coverage": {
+        "aligned_bases": 320,
+        "aligned_fraction": 0.00801261987630518,
+        "aligned_intervals": [
+          {
+            "end": 160,
+            "start": 0
+          },
+          {
+            "end": 39937,
+            "start": 39777
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39777,
+            "start": 160
+          }
+        ],
+        "metrics": {
+          "base_precision": 0.5,
+          "base_recall": 1.0,
+          "gap_error_bases": 160,
+          "gap_error_fraction": 0.00400630993815259,
+          "intersection_bases": 160,
+          "interval_precision": 0.5,
+          "interval_recall": 1.0,
+          "observed_bases": 320,
+          "truth_bases": 160
+        },
+        "query_kind": "unknown",
+        "supported_bases": 320,
+        "supported_fraction": 0.00801261987630518,
+        "supported_intervals": [
+          {
+            "end": 160,
+            "start": 0
+          },
+          {
+            "end": 39937,
+            "start": 39777
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 160,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39777,
+            "start": 160
+          }
+        ]
+      },
+      "lexicmap_index_source": "provided",
+      "lexicmap_reference_manifest_sha256": "a4f95862b2d2bf369a944d82e1f3c47de29cffefc6b7364412ee0b8a89e08a89",
+      "metagenome_id": "NC_001604.1__terminal_repeat.fasta",
+      "records": [
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__terminal_repeat",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "metagenome_id": "NC_001604.1__terminal_repeat.fasta",
+          "pident": 100.0,
+          "query_end_1based": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 39777
+            }
+          ],
+          "query_start_1based": 39778,
+          "reference_genome": "NC_001604.1__terminal_repeat",
+          "strand": "forward",
+          "target_end_1based": 160,
+          "target_start_1based": 1,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        },
+        {
+          "aligned_intervals": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "contig_id": "NC_001604.1__terminal_repeat",
+          "intervals": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__terminal_repeat.fasta",
+          "pident": 100.0,
+          "query_end_1based": 160,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 160,
+              "start": 0
+            }
+          ],
+          "query_start_1based": 1,
+          "reference_genome": "NC_001604.1__terminal_repeat",
+          "strand": "forward",
+          "target_end_1based": 160,
+          "target_start_1based": 1,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        }
+      ],
+      "status": "measured",
+      "version": "LexicMap v0.9.0"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "scope": "candidate",
+  "selection": {
+    "effective_scope": "candidate",
+    "ids": [
+      "NC_001604.1__forward.fasta",
+      "NC_001604.1__reverse.fasta",
+      "NC_001604.1__terminal_repeat.fasta"
+    ],
+    "limit": null,
+    "selected_count": 3,
+    "source": "tools/out/mge-accession-spike-20260823/sweeps/NC_001604.1-fscale20-minshared3.jsonl",
+    "total_count": 3
+  },
+  "status": "measured",
+  "tool": "lexicmap",
+  "tool_metadata": {
+    "manifest": "/home/beavis/projects/jam-rs/evaluation/trace-production/environment/manifest.json",
+    "manifest_sha256": "cadcf832cd0eeda493008641f33413a9b6c3f629a578b6a4bcfd2991e68cc743",
+    "release_commit_prefix": "e8dec8d",
+    "release_tag": "v0.9.0",
+    "sha256": "54dea6a35e0c1a25025ad649da47d7cc7f6190ae69e44624db9685bf3c0dd662",
+    "source": "https://github.com/shenwei356/LexicMap/releases/download/v0.9.0/lexicmap_linux_amd64.tar.gz",
+    "status": "pinned",
+    "version": "0.9.0"
+  },
+  "truth_manifest_sha256": "b2c3d675e5724d7cf49c786ef1a14d758b7e35a02475590d9cf45cf03601a6b7",
+  "version": "LexicMap v0.9.0"
+}

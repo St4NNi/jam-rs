@@ -1,0 +1,192 @@
+{
+  "commands": [
+    [
+      "target/release/jam",
+      "trace",
+      "(precomputed output)",
+      "tools/out/mge-accession-spike-20260823/trace-v2-run2/outputs/NC_001604.1.jsonl"
+    ]
+  ],
+  "failed_count": 0,
+  "input_manifest_sha256": "93b8d32e64f0809249c451acaab088afb441c0dbf56bb118e91aae55bbaff2af",
+  "metrics": {
+    "assemblies_total": 2,
+    "assemblies_with_records": 2,
+    "base_precision": 1.0,
+    "base_recall": 1.0,
+    "gap_error_bases": 0,
+    "gap_error_fraction": 0.0,
+    "intersection_bases": 79874,
+    "interval_precision": 1.0,
+    "interval_recall": 1.0,
+    "observed_bases": 79874,
+    "truth_bases": 79874,
+    "truth_status": "measured"
+  },
+  "query_id": "NC_001604.1",
+  "query_kind": "phage",
+  "query_length": 39937,
+  "results": [
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__forward.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/mge-accession-spike-20260823/trace-v2-run2/outputs/NC_001604.1.jsonl"
+      ],
+      "coverage": {
+        "aligned_bases": 39937,
+        "aligned_fraction": 1.0,
+        "aligned_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 39937,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 39937,
+          "truth_bases": 39937
+        },
+        "query_kind": "unknown",
+        "supported_bases": 39937,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": []
+      },
+      "jam_status": "complete",
+      "metagenome_id": "NC_001604.1__forward.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__forward.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__reverse.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/mge-accession-spike-20260823/trace-v2-run2/outputs/NC_001604.1.jsonl"
+      ],
+      "coverage": {
+        "aligned_bases": 39937,
+        "aligned_fraction": 1.0,
+        "aligned_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 39937,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 39937,
+          "truth_bases": 39937
+        },
+        "query_kind": "unknown",
+        "supported_bases": 39937,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": []
+      },
+      "jam_status": "complete",
+      "metagenome_id": "NC_001604.1__reverse.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "NC_001604.1__reverse.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "scope": "candidate",
+  "selection": {
+    "effective_scope": "candidate",
+    "ids": [
+      "NC_001604.1__forward.fasta",
+      "NC_001604.1__reverse.fasta"
+    ],
+    "limit": null,
+    "selected_count": 2,
+    "source": "tools/out/mge-accession-spike-20260823/trace-v2-run2/outputs/NC_001604.1.jsonl",
+    "total_count": 2
+  },
+  "status": "measured",
+  "tool": "jam",
+  "tool_metadata": {
+    "reason": "no pinned metadata for jam",
+    "status": "unavailable"
+  },
+  "truth_manifest_sha256": "b2c3d675e5724d7cf49c786ef1a14d758b7e35a02475590d9cf45cf03601a6b7",
+  "version": "jam 0.10.0"
+}

@@ -1,0 +1,2125 @@
+{
+  "commands": [
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_000866.4__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_000866.4__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001416.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001416.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__terminal_repeat.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__forward.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__origin_crossing.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ],
+    [
+      "tools/out/trace-production-comparator-bin-v1/minimap2",
+      "-x",
+      "asm5",
+      "--secondary=no",
+      "-t",
+      "1",
+      "-c",
+      "--eqx",
+      "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__reverse.fasta",
+      "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+    ]
+  ],
+  "failed_count": 0,
+  "input_manifest_sha256": null,
+  "metrics": {
+    "assemblies_total": 28,
+    "assemblies_with_records": 2,
+    "base_precision": 1.0,
+    "base_recall": 0.9980008496389035,
+    "gap_error_bases": 160,
+    "gap_error_fraction": 0.00014308249779116394,
+    "intersection_bases": 79874,
+    "interval_precision": 1.0,
+    "interval_recall": 0.6666666666666666,
+    "observed_bases": 79874,
+    "truth_bases": 80034,
+    "truth_status": "measured"
+  },
+  "query_id": "NC_001604.1",
+  "query_kind": "phage",
+  "query_length": 39937,
+  "results": [
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "AP000342.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "AP000342.1__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP000342.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "AP000342.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "AP001918.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "AP001918.1__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/AP001918.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "AP001918.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "J01749.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "J01749.1__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/J01749.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "J01749.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "KY749247.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "KY749247.1__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/KY749247.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "KY749247.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "M77789.2__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "M77789.2__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/M77789.2__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "M77789.2__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_000866.4__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_000866.4__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_000866.4__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_000866.4__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_000866.4__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_000866.4__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001416.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001416.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_001416.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001416.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001416.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_001416.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 39937,
+        "aligned_fraction": 1.0,
+        "aligned_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 39937,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 39937,
+          "truth_bases": 39937
+        },
+        "query_kind": "unknown",
+        "supported_bases": 39937,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": []
+      },
+      "metagenome_id": "NC_001604.1__forward.fasta",
+      "records": [
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "block_length": 39937,
+          "cigar": "39937=",
+          "contig_id": "NC_001604.1__forward",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "mapq": 60,
+          "matches": 39937,
+          "metagenome_id": "NC_001604.1__forward.fasta",
+          "query_end": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "query_start": 0,
+          "strand": "forward",
+          "target_end": 39937,
+          "target_start": 0,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        }
+      ],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 39937,
+        "aligned_fraction": 1.0,
+        "aligned_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 39937,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 39937,
+          "truth_bases": 39937
+        },
+        "query_kind": "unknown",
+        "supported_bases": 39937,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": []
+      },
+      "metagenome_id": "NC_001604.1__reverse.fasta",
+      "records": [
+        {
+          "aligned_intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "alignment_deletions": [],
+          "block_length": 39937,
+          "cigar": "39937=",
+          "contig_id": "NC_001604.1__reverse",
+          "intervals": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "mapq": 60,
+          "matches": 39937,
+          "metagenome_id": "NC_001604.1__reverse.fasta",
+          "query_end": 39937,
+          "query_kind": "unknown",
+          "query_segments": [
+            {
+              "end": 39937,
+              "start": 0
+            }
+          ],
+          "query_start": 0,
+          "strand": "reverse",
+          "target_end": 39937,
+          "target_start": 0,
+          "topology_requested": "unknown",
+          "unsupported_intervals": []
+        }
+      ],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__terminal_repeat.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001604.1__terminal_repeat.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 160,
+          "gap_error_fraction": 0.00400630993815259,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 160
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [
+          {
+            "end": 160,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_001604.1__terminal_repeat.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_001735.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_001735.1__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_001735.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_001735.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__forward.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__forward.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_008272.1__forward.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__origin_crossing.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__origin_crossing.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_008272.1__origin_crossing.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    },
+    {
+      "assembly": "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__reverse.fasta",
+      "command": [
+        "tools/out/trace-production-comparator-bin-v1/minimap2",
+        "-x",
+        "asm5",
+        "--secondary=no",
+        "-t",
+        "1",
+        "-c",
+        "--eqx",
+        "tools/out/mge-accession-spike-20260823/dataset/assemblies/NC_008272.1__reverse.fasta",
+        "tools/out/mge-accession-spike-20260823/dataset-v2/queries/NC_001604.1.fasta"
+      ],
+      "coverage": {
+        "aligned_bases": 0,
+        "aligned_fraction": 0.0,
+        "aligned_intervals": [],
+        "alignment_deletion_bases": 0,
+        "alignment_deletions": [],
+        "coordinate_model": "undetermined",
+        "gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": null,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": null,
+          "observed_bases": 0,
+          "truth_bases": 0
+        },
+        "query_kind": "unknown",
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "topology_evidence": "undetermined",
+        "topology_requested": "unknown",
+        "truth_intervals": [],
+        "truth_status": "measured",
+        "unsupported_gaps": [
+          {
+            "end": 39937,
+            "start": 0
+          }
+        ]
+      },
+      "metagenome_id": "NC_008272.1__reverse.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "2.31-r1302"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "scope": "direct_full",
+  "selection": {
+    "effective_scope": "direct_full",
+    "ids": [
+      "AP000342.1__forward.fasta",
+      "AP000342.1__origin_crossing.fasta",
+      "AP000342.1__reverse.fasta",
+      "AP001918.1__forward.fasta",
+      "AP001918.1__origin_crossing.fasta",
+      "AP001918.1__reverse.fasta",
+      "J01749.1__forward.fasta",
+      "J01749.1__origin_crossing.fasta",
+      "J01749.1__reverse.fasta",
+      "KY749247.1__forward.fasta",
+      "KY749247.1__origin_crossing.fasta",
+      "KY749247.1__reverse.fasta",
+      "M77789.2__forward.fasta",
+      "M77789.2__origin_crossing.fasta",
+      "M77789.2__reverse.fasta",
+      "NC_000866.4__forward.fasta",
+      "NC_000866.4__reverse.fasta",
+      "NC_001416.1__forward.fasta",
+      "NC_001416.1__reverse.fasta",
+      "NC_001604.1__forward.fasta",
+      "NC_001604.1__reverse.fasta",
+      "NC_001604.1__terminal_repeat.fasta",
+      "NC_001735.1__forward.fasta",
+      "NC_001735.1__origin_crossing.fasta",
+      "NC_001735.1__reverse.fasta",
+      "NC_008272.1__forward.fasta",
+      "NC_008272.1__origin_crossing.fasta",
+      "NC_008272.1__reverse.fasta"
+    ],
+    "limit": null,
+    "selected_count": 28,
+    "source": "assemblies_dir",
+    "total_count": 28
+  },
+  "status": "measured",
+  "tool": "minimap2",
+  "tool_metadata": {
+    "manifest": "/home/beavis/projects/jam-rs/evaluation/trace-production/environment/manifest.json",
+    "manifest_sha256": "cadcf832cd0eeda493008641f33413a9b6c3f629a578b6a4bcfd2991e68cc743",
+    "release_commit_prefix": "3c28777",
+    "release_tag": "v2.31",
+    "sha256": "300bc287f05eb890c6211fa7db043ce98320a401621fadd1cfdbeabd1a6e4ab5",
+    "source": "https://github.com/lh3/minimap2/releases/download/v2.31/minimap2-2.31_x64-linux.tar.bz2",
+    "status": "pinned",
+    "version": "2.31"
+  },
+  "truth_manifest_sha256": "b2c3d675e5724d7cf49c786ef1a14d758b7e35a02475590d9cf45cf03601a6b7",
+  "version": "2.31-r1302"
+}

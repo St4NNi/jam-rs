@@ -1,0 +1,29 @@
+{
+  "cache_policy": "cold means a fresh process and case cache without harness warmup; kernel cache eviction is not attempted; warm means one unmeasured invocation followed by timed repeats",
+  "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "cpu_count": 32,
+  "created_at_utc": "2026-08-23T19:27:12.484496+00:00",
+  "jam": "jam 0.10.0",
+  "machine": "x86_64",
+  "platform": "Linux-7.1.8-arch1-3-x86_64-with-glibc2.44",
+  "processor": "",
+  "python": "3.14.7",
+  "release_flags": {
+    "codegen_units": 1,
+    "lto": true,
+    "opt_level": 3,
+    "panic": "abort",
+    "profile": "release"
+  },
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8",
+  "schema_version": "1.0.0",
+  "source_commit": "bc561f584aaee3895af494762e3a086e4391c375",
+  "source_dirty": true,
+  "source_dirty_note": "generated evaluation result files were untracked while this environment record was captured; measured Jam headers retain their exact source commit",
+  "storage": {
+    "available_bytes_at_start": 288669618176,
+    "filesystem_block_bytes": 4096
+  },
+  "storage_environment": "local SSD-backed filesystem; kernel page cache was not evicted",
+  "timing_policy": "build, installation, environment creation, and comparator setup are outside timed commands"
+}

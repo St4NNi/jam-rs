@@ -1,0 +1,18 @@
+{
+  "assemblies": {
+    "contig_count": 112,
+    "file_bytes": 430455620,
+    "file_count": 28,
+    "total_bases": 425138705
+  },
+  "background_reuse": "three source chromosomes are reused in each controlled derivative; the 28 assemblies are not independent metagenomes",
+  "queries": {
+    "contig_count": 10,
+    "file_bytes": 671532,
+    "file_count": 10,
+    "total_bases": 663117
+  },
+  "schema_version": "1.0.0",
+  "status_rows": 50,
+  "truth_rows": 28
+}

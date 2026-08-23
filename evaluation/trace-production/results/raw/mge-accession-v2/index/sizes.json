@@ -1,0 +1,11 @@
+{
+  "jam_scale200_bytes": 25723925,
+  "jam_scale20_bytes": 253338645,
+  "jma_archive_bytes": 363345582,
+  "jma_sidecar_bytes": 16256395,
+  "lexicmap_direct_index_bytes": 252467909,
+  "lexicmap_pbr322_candidate_index_bytes": 91556217,
+  "lexicmap_t7_scale200_candidate_index_bytes": 32727393,
+  "lexicmap_t7_scale20_candidate_index_bytes": 41190653,
+  "schema_version": "1.0.0"
+}

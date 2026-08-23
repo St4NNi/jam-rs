@@ -1,0 +1,1500 @@
+{
+  "ablation_dimensions": [
+    "local_aligner",
+    "mosaic",
+    "dense_k31_rescue",
+    "k21_rescue",
+    "common_sequence_evidence",
+    "selective_reads"
+  ],
+  "accuracy_note": "final_recall means aligned trace recovery where expected_final is present; it is not an autonomous plasmid confirmation call",
+  "generated_at_utc": "2026-08-23T19:27:25.148473+00:00",
+  "groups": [
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          2.0,
+          56.0
+        ],
+        "median": 2.0,
+        "p90": 56.0,
+        "p95": 56.0,
+        "p99": 56.0,
+        "query_count": 3
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          2.0,
+          28.0
+        ],
+        "median": 2.0,
+        "p90": 28.0,
+        "p95": 28.0,
+        "p99": 28.0,
+        "query_count": 3
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 3
+      },
+      "complete_count": 6,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          0.6087795,
+          18.857118
+        ],
+        "median": 2.6174660000000003,
+        "p90": 18.857118,
+        "p95": 18.878722999999997,
+        "p99": 18.896006999999997,
+        "query_count": 3
+      },
+      "cpu_threads": 1,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 3
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 2,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 3
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          0.9980008496389035,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 3
+      },
+      "interval_recall_mean": 0.9993336165463012,
+      "io_tasks": 1,
+      "io_totals": {
+        "cache_bytes": 279418812.0,
+        "cache_hits": 32430.0,
+        "cache_misses": 604.0,
+        "decoded_bytes": 603537614.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 32928.0,
+        "range_requests": 32800.0,
+        "requested_bytes": 569389582.0,
+        "retries": 0.0,
+        "returned_bytes": 569389582.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          208820.0,
+          734498.0
+        ],
+        "median": 452088.0,
+        "p90": 734498.0,
+        "p95": 740127.0,
+        "p99": 744630.2,
+        "query_count": 3
+      },
+      "phase_timing_medians": {
+        "trace_total": 2.6490027835025103
+      },
+      "query_kind": "phage",
+      "raw_count": 6,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "phage",
+      "sweep_dimension": "baseline",
+      "sweep_value": "baseline",
+      "system_seconds": {
+        "bootstrap_95": [
+          0.11313199999999997,
+          0.6532419999999999
+        ],
+        "median": 0.38762149999999995,
+        "p90": 0.830055,
+        "p95": 0.8876639999999999,
+        "p99": 0.9337511999999999,
+        "query_count": 3
+      },
+      "topology": "linear",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          0.4956475,
+          18.203876
+        ],
+        "median": 2.101846,
+        "p90": 18.203876,
+        "p95": 18.2130685,
+        "p99": 18.220422499999998,
+        "query_count": 3
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          0.6198497950026649,
+          19.063630993001425
+        ],
+        "median": 2.6490027835025103,
+        "p90": 19.063630993001425,
+        "p95": 19.081808398999783,
+        "p99": 19.096350323798468,
+        "query_count": 3
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          3.0,
+          3.0
+        ],
+        "median": 3.0,
+        "p90": 3.0,
+        "p95": 3.0,
+        "p99": 3.0,
+        "query_count": 1
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          3.0,
+          3.0
+        ],
+        "median": 3.0,
+        "p90": 3.0,
+        "p95": 3.0,
+        "p99": 3.0,
+        "query_count": 1
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 1
+      },
+      "complete_count": 1,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          0.9525859999999999,
+          0.9525859999999999
+        ],
+        "median": 0.9525859999999999,
+        "p90": 0.9525859999999999,
+        "p95": 0.9525859999999999,
+        "p99": 0.9525859999999999,
+        "query_count": 1
+      },
+      "cpu_threads": 1,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 1
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 1,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_recall_mean": 1.0,
+      "io_tasks": 1,
+      "io_totals": {
+        "cache_bytes": 6440955.0,
+        "cache_hits": 890.0,
+        "cache_misses": 24.0,
+        "decoded_bytes": 14905579.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 911.0,
+        "range_requests": 905.0,
+        "requested_bytes": 23054136.0,
+        "retries": 0.0,
+        "returned_bytes": 23054136.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          335372.0,
+          335372.0
+        ],
+        "median": 335372.0,
+        "p90": 335372.0,
+        "p95": 335372.0,
+        "p99": 335372.0,
+        "query_count": 1
+      },
+      "phase_timing_medians": {
+        "trace_total": 0.9764594709995436
+      },
+      "query_kind": "phage",
+      "raw_count": 1,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "phage",
+      "sweep_dimension": "fscale",
+      "sweep_value": "20",
+      "system_seconds": {
+        "bootstrap_95": [
+          0.11494599999999999,
+          0.11494599999999999
+        ],
+        "median": 0.11494599999999999,
+        "p90": 0.11494599999999999,
+        "p95": 0.11494599999999999,
+        "p99": 0.11494599999999999,
+        "query_count": 1
+      },
+      "topology": "linear",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          0.8376399999999999,
+          0.8376399999999999
+        ],
+        "median": 0.8376399999999999,
+        "p90": 0.8376399999999999,
+        "p95": 0.8376399999999999,
+        "p99": 0.8376399999999999,
+        "query_count": 1
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          0.9764594709995436,
+          0.9764594709995436
+        ],
+        "median": 0.9764594709995436,
+        "p90": 0.9764594709995436,
+        "p95": 0.9764594709995436,
+        "p99": 0.9764594709995436,
+        "query_count": 1
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          2.0,
+          2.0
+        ],
+        "median": 2.0,
+        "p90": 2.0,
+        "p95": 2.0,
+        "p99": 2.0,
+        "query_count": 1
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          2.0,
+          2.0
+        ],
+        "median": 2.0,
+        "p90": 2.0,
+        "p95": 2.0,
+        "p99": 2.0,
+        "query_count": 1
+      },
+      "candidate_recall": {
+        "median": 0.6666666666666666,
+        "query_count": 1
+      },
+      "complete_count": 1,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          0.533628,
+          0.533628
+        ],
+        "median": 0.533628,
+        "p90": 0.533628,
+        "p95": 0.533628,
+        "p99": 0.533628,
+        "query_count": 1
+      },
+      "cpu_threads": 1,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 0.6666666666666666,
+        "query_count": 1
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": null,
+        "interval_recall": null,
+        "query_count": 0,
+        "status": "unavailable",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          0.9980008496389035,
+          0.9980008496389035
+        ],
+        "median": 0.9980008496389035,
+        "p90": 0.9980008496389035,
+        "p95": 0.9980008496389035,
+        "p99": 0.9980008496389035,
+        "query_count": 1
+      },
+      "interval_recall_mean": 0.9980008496389035,
+      "io_tasks": 1,
+      "io_totals": {
+        "cache_bytes": 2884412.0,
+        "cache_hits": 402.0,
+        "cache_misses": 14.0,
+        "decoded_bytes": 7109399.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 414.0,
+        "range_requests": 410.0,
+        "requested_bytes": 13744131.0,
+        "retries": 0.0,
+        "returned_bytes": 13744131.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          216696.0,
+          216696.0
+        ],
+        "median": 216696.0,
+        "p90": 216696.0,
+        "p95": 216696.0,
+        "p99": 216696.0,
+        "query_count": 1
+      },
+      "phase_timing_medians": {
+        "trace_total": 0.5750483359952341
+      },
+      "query_kind": "phage",
+      "raw_count": 1,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "phage",
+      "sweep_dimension": "min_shared",
+      "sweep_value": "1",
+      "system_seconds": {
+        "bootstrap_95": [
+          0.052925,
+          0.052925
+        ],
+        "median": 0.052925,
+        "p90": 0.052925,
+        "p95": 0.052925,
+        "p99": 0.052925,
+        "query_count": 1
+      },
+      "topology": "linear",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          0.480703,
+          0.480703
+        ],
+        "median": 0.480703,
+        "p90": 0.480703,
+        "p95": 0.480703,
+        "p99": 0.480703,
+        "query_count": 1
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          0.5750483359952341,
+          0.5750483359952341
+        ],
+        "median": 0.5750483359952341,
+        "p90": 0.5750483359952341,
+        "p95": 0.5750483359952341,
+        "p99": 0.5750483359952341,
+        "query_count": 1
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          2.0,
+          56.0
+        ],
+        "median": 2.0,
+        "p90": 45.2,
+        "p95": 50.599999999999994,
+        "p99": 54.92,
+        "query_count": 3
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          2.0,
+          28.0
+        ],
+        "median": 2.0,
+        "p90": 22.8,
+        "p95": 25.4,
+        "p99": 27.48,
+        "query_count": 3
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 3
+      },
+      "complete_count": 3,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          0.525348,
+          19.171892
+        ],
+        "median": 2.080454,
+        "p90": 15.7536044,
+        "p95": 17.4627482,
+        "p99": 18.830063239999998,
+        "query_count": 3
+      },
+      "cpu_threads": 8,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 3
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 2,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 3
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          0.9980008496389035,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 3
+      },
+      "interval_recall_mean": 0.9993336165463012,
+      "io_tasks": 8,
+      "io_totals": {
+        "cache_bytes": 139709406.0,
+        "cache_hits": 16215.0,
+        "cache_misses": 302.0,
+        "decoded_bytes": 301768807.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 16464.0,
+        "range_requests": 16400.0,
+        "requested_bytes": 284694791.0,
+        "retries": 0.0,
+        "returned_bytes": 284694791.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          435576.0,
+          1484748.0
+        ],
+        "median": 1128260.0,
+        "p90": 1413450.4,
+        "p95": 1449099.2,
+        "p99": 1477618.24,
+        "query_count": 3
+      },
+      "phase_timing_medians": {
+        "trace_total": 1.0796681569991051
+      },
+      "query_kind": "phage",
+      "raw_count": 3,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "phage",
+      "sweep_dimension": "threads",
+      "sweep_value": "8",
+      "system_seconds": {
+        "bootstrap_95": [
+          0.043307000000000005,
+          0.6769229999999999
+        ],
+        "median": 0.118739,
+        "p90": 0.5652862,
+        "p95": 0.6211045999999999,
+        "p99": 0.6657593199999999,
+        "query_count": 3
+      },
+      "topology": "linear",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          0.482041,
+          18.494969
+        ],
+        "median": 1.9617149999999999,
+        "p90": 15.1883182,
+        "p95": 16.841643599999998,
+        "p99": 18.164303920000002,
+        "query_count": 3
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          0.2975273870033561,
+          5.058849761997408
+        ],
+        "median": 1.0796681569991051,
+        "p90": 4.263013440997748,
+        "p95": 4.660931601497577,
+        "p99": 4.979266129897441,
+        "query_count": 3
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          19.992857142857144,
+          169.71428571428572
+        ],
+        "median": 21.0,
+        "p90": 266.2000000000003,
+        "p95": 337.0,
+        "p99": 337.0,
+        "query_count": 7
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          10.714285714285714,
+          20.428571428571427
+        ],
+        "median": 12.0,
+        "p90": 25.900000000000006,
+        "p95": 28.0,
+        "p99": 28.0,
+        "query_count": 7
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 7
+      },
+      "complete_count": 14,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          6.820058,
+          108.03468421428572
+        ],
+        "median": 8.779786999999999,
+        "p90": 172.60350700000018,
+        "p95": 220.71120170000003,
+        "p99": 221.70404914000002,
+        "query_count": 7
+      },
+      "cpu_threads": 1,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 7
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 7,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 7
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 7
+      },
+      "interval_recall_mean": 1.0,
+      "io_tasks": 1,
+      "io_totals": {
+        "cache_bytes": 1360640900.0,
+        "cache_hits": 133134.0,
+        "cache_misses": 1996.0,
+        "decoded_bytes": 2918249380.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 134330.0,
+        "range_requests": 133906.0,
+        "requested_bytes": 1882630352.0,
+        "retries": 0.0,
+        "returned_bytes": 1882630352.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          306927.4285714286,
+          770423.4285714285
+        ],
+        "median": 510648.0,
+        "p90": 899924.0000000001,
+        "p95": 920028.6,
+        "p99": 920463.32,
+        "query_count": 7
+      },
+      "phase_timing_medians": {
+        "trace_total": 8.872488212498865
+      },
+      "query_kind": "plasmid",
+      "raw_count": 14,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "plasmid",
+      "sweep_dimension": "baseline",
+      "sweep_value": "baseline",
+      "system_seconds": {
+        "bootstrap_95": [
+          0.32285171428571424,
+          2.5485391874999976
+        ],
+        "median": 0.6219644999999999,
+        "p90": 3.392609300000002,
+        "p95": 4.5490441,
+        "p99": 5.468064019999998,
+        "query_count": 7
+      },
+      "topology": "circular",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          5.624980269642857,
+          103.41567287321429
+        ],
+        "median": 7.7918465,
+        "p90": 169.2108977000002,
+        "p95": 216.1621576,
+        "p99": 216.23598512,
+        "query_count": 7
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          6.906918597214826,
+          110.16752204378697
+        ],
+        "median": 8.872488212498865,
+        "p90": 174.4193553890016,
+        "p95": 222.95476134300188,
+        "p99": 223.9206751646033,
+        "query_count": 7
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          337.0,
+          337.0
+        ],
+        "median": 337.0,
+        "p90": 337.0,
+        "p95": 337.0,
+        "p99": 337.0,
+        "query_count": 1
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          28.0,
+          28.0
+        ],
+        "median": 28.0,
+        "p90": 28.0,
+        "p95": 28.0,
+        "p99": 28.0,
+        "query_count": 1
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 1
+      },
+      "complete_count": 1,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          218.98919999999998,
+          218.98919999999998
+        ],
+        "median": 218.98919999999998,
+        "p90": 218.98919999999998,
+        "p95": 218.98919999999998,
+        "p99": 218.98919999999998,
+        "query_count": 1
+      },
+      "cpu_threads": 16,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 1
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 1,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_recall_mean": 1.0,
+      "io_tasks": 16,
+      "io_totals": {
+        "cache_bytes": 390981480.0,
+        "cache_hits": 31805.0,
+        "cache_misses": 299.0,
+        "decoded_bytes": 809286309.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 31811.0,
+        "range_requests": 31755.0,
+        "requested_bytes": 283948657.0,
+        "retries": 0.0,
+        "returned_bytes": 283948657.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          2255904.0,
+          2255904.0
+        ],
+        "median": 2255904.0,
+        "p90": 2255904.0,
+        "p95": 2255904.0,
+        "p99": 2255904.0,
+        "query_count": 1
+      },
+      "phase_timing_medians": {
+        "trace_total": 59.183680514994194
+      },
+      "query_kind": "plasmid",
+      "raw_count": 1,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "plasmid",
+      "sweep_dimension": "threads",
+      "sweep_value": "16",
+      "system_seconds": {
+        "bootstrap_95": [
+          2.253978,
+          2.253978
+        ],
+        "median": 2.253978,
+        "p90": 2.253978,
+        "p95": 2.253978,
+        "p99": 2.253978,
+        "query_count": 1
+      },
+      "topology": "circular",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          216.735222,
+          216.735222
+        ],
+        "median": 216.735222,
+        "p90": 216.735222,
+        "p95": 216.735222,
+        "p99": 216.735222,
+        "query_count": 1
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          59.183680514994194,
+          59.183680514994194
+        ],
+        "median": 59.183680514994194,
+        "p90": 59.183680514994194,
+        "p95": 59.183680514994194,
+        "p99": 59.183680514994194,
+        "query_count": 1
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          337.0,
+          337.0
+        ],
+        "median": 337.0,
+        "p90": 337.0,
+        "p95": 337.0,
+        "p99": 337.0,
+        "query_count": 1
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          28.0,
+          28.0
+        ],
+        "median": 28.0,
+        "p90": 28.0,
+        "p95": 28.0,
+        "p99": 28.0,
+        "query_count": 1
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 1
+      },
+      "complete_count": 1,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          220.72818800000002,
+          220.72818800000002
+        ],
+        "median": 220.72818800000002,
+        "p90": 220.72818800000002,
+        "p95": 220.72818800000002,
+        "p99": 220.72818800000002,
+        "query_count": 1
+      },
+      "cpu_threads": 4,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 1
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 1,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 1
+      },
+      "interval_recall_mean": 1.0,
+      "io_tasks": 4,
+      "io_totals": {
+        "cache_bytes": 390981480.0,
+        "cache_hits": 31805.0,
+        "cache_misses": 299.0,
+        "decoded_bytes": 809286309.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 31811.0,
+        "range_requests": 31755.0,
+        "requested_bytes": 283948657.0,
+        "retries": 0.0,
+        "returned_bytes": 283948657.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          2192908.0,
+          2192908.0
+        ],
+        "median": 2192908.0,
+        "p90": 2192908.0,
+        "p95": 2192908.0,
+        "p99": 2192908.0,
+        "query_count": 1
+      },
+      "phase_timing_medians": {
+        "trace_total": 59.18675603999873
+      },
+      "query_kind": "plasmid",
+      "raw_count": 1,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "plasmid",
+      "sweep_dimension": "threads",
+      "sweep_value": "4",
+      "system_seconds": {
+        "bootstrap_95": [
+          4.383169,
+          4.383169
+        ],
+        "median": 4.383169,
+        "p90": 4.383169,
+        "p95": 4.383169,
+        "p99": 4.383169,
+        "query_count": 1
+      },
+      "topology": "circular",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          216.345019,
+          216.345019
+        ],
+        "median": 216.345019,
+        "p90": 216.345019,
+        "p95": 216.345019,
+        "p99": 216.345019,
+        "query_count": 1
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          59.18675603999873,
+          59.18675603999873
+        ],
+        "median": 59.18675603999873,
+        "p90": 59.18675603999873,
+        "p95": 59.18675603999873,
+        "p99": 59.18675603999873,
+        "query_count": 1
+      }
+    },
+    {
+      "ablation": {
+        "common_sequence_evidence": "unavailable",
+        "dense_k31_rescue": "unavailable",
+        "k21_rescue": "unavailable",
+        "local_aligner": "unavailable",
+        "mosaic": "unavailable",
+        "selective_reads": "unavailable"
+      },
+      "alignment_count": {
+        "bootstrap_95": [
+          20.285714285714285,
+          175.0
+        ],
+        "median": 21.0,
+        "p90": 195.4000000000001,
+        "p95": 266.1999999999998,
+        "p99": 322.8399999999999,
+        "query_count": 7
+      },
+      "break_even_queries_cpu": null,
+      "break_even_queries_wall": null,
+      "cache_state": "cold",
+      "candidate_count": {
+        "bootstrap_95": [
+          10.714285714285714,
+          20.142857142857142
+        ],
+        "median": 12.0,
+        "p90": 23.800000000000004,
+        "p95": 25.899999999999995,
+        "p99": 27.58,
+        "query_count": 7
+      },
+      "candidate_recall": {
+        "median": 1.0,
+        "query_count": 7
+      },
+      "complete_count": 7,
+      "cpu_seconds": {
+        "bootstrap_95": [
+          7.532420714285714,
+          105.09297500357142
+        ],
+        "median": 7.959010999999999,
+        "p90": 127.58658640000004,
+        "p95": 172.51614819999986,
+        "p99": 208.45979763999992,
+        "query_count": 7
+      },
+      "cpu_threads": 8,
+      "failed_count": 0,
+      "false_candidate_count": null,
+      "false_candidate_rate": null,
+      "final_recall": {
+        "median": 1.0,
+        "query_count": 7
+      },
+      "gap_boundary_error_bases": {
+        "bootstrap_95": [
+          null,
+          null
+        ],
+        "median": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "query_count": 0
+      },
+      "gap_boundary_error_bases_mean": null,
+      "interval_metrics_at_matched_recall": {
+        "gap_boundary_error_bases": null,
+        "interval_precision": 1.0,
+        "interval_recall": 1.0,
+        "query_count": 7,
+        "status": "available",
+        "target": 1.0
+      },
+      "interval_precision": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 7
+      },
+      "interval_precision_mean": 1.0,
+      "interval_recall": {
+        "bootstrap_95": [
+          1.0,
+          1.0
+        ],
+        "median": 1.0,
+        "p90": 1.0,
+        "p95": 1.0,
+        "p99": 1.0,
+        "query_count": 7
+      },
+      "interval_recall_mean": 1.0,
+      "io_tasks": 8,
+      "io_totals": {
+        "cache_bytes": 680320450.0,
+        "cache_hits": 66567.0,
+        "cache_misses": 998.0,
+        "decoded_bytes": 1459124690.0,
+        "get_requests": 0.0,
+        "head_requests": 0.0,
+        "metadata_requests": 67165.0,
+        "range_requests": 66953.0,
+        "requested_bytes": 941315176.0,
+        "retries": 0.0,
+        "returned_bytes": 941315176.0,
+        "stale_cache_rejections": 0.0
+      },
+      "matched_recall_target": 1.0,
+      "negative_pair_count": null,
+      "peak_rss_kib": {
+        "bootstrap_95": [
+          642196.0285714285,
+          1965632.5999999999
+        ],
+        "median": 1241460.0,
+        "p90": 2299707.2,
+        "p95": 2301245.6,
+        "p99": 2302476.32,
+        "query_count": 7
+      },
+      "phase_timing_medians": {
+        "trace_total": 2.3440893619990675
+      },
+      "query_kind": "plasmid",
+      "raw_count": 7,
+      "resource_mode": "local",
+      "schema_version": "1.0.0",
+      "status": "complete",
+      "stratum": "plasmid",
+      "sweep_dimension": "threads",
+      "sweep_value": "8",
+      "system_seconds": {
+        "bootstrap_95": [
+          0.3525092857142857,
+          2.1253988785714277
+        ],
+        "median": 0.34835699999999997,
+        "p90": 2.9458874,
+        "p95": 3.0062627,
+        "p99": 3.0545629400000003,
+        "query_count": 7
+      },
+      "topology": "circular",
+      "track": "A",
+      "unavailable_count": 0,
+      "user_seconds": {
+        "bootstrap_95": [
+          6.947672800000001,
+          108.04615103928562
+        ],
+        "median": 7.628652,
+        "p90": 125.17350440000004,
+        "p95": 170.59323319999987,
+        "p99": 206.92901623999992,
+        "query_count": 7
+      },
+      "wall_seconds": {
+        "bootstrap_95": [
+          2.5643265426299746,
+          28.17927582608146
+        ],
+        "median": 2.3440893619990675,
+        "p90": 33.79334710839905,
+        "p95": 45.20762034370052,
+        "p99": 54.33903893194174,
+        "query_count": 7
+      }
+    }
+  ],
+  "matched_recall_policy": "interval metrics are reported at a supplied matched_recall_target; without one they remain unavailable",
+  "query_kinds": [
+    "phage",
+    "plasmid"
+  ],
+  "query_strata": [
+    "phage",
+    "plasmid"
+  ],
+  "raw_directory": "/home/beavis/projects/jam-rs/evaluation/trace-production/results/raw/mge-accession-v2/jam",
+  "raw_measurement_count": 34,
+  "raw_measurements": {
+    "sweeps/AP001918.1-t16/measurement.json": "d8fb97dcc5d40dcc04171e102e2e89c111d8ffee6e102ed8da505b7f6086d589",
+    "sweeps/AP001918.1-t4/measurement.json": "e363377f3091b937ef88e34e3675d136f0edafa62b7c584c2705402269223862",
+    "sweeps/NC_001604.1-fscale20-minshared3/measurement.json": "9e2201c116756374ed7a8b869cc6ccf8a0b1c3036049613587c11813de8c77d2",
+    "sweeps/NC_001604.1-minshared1/measurement.json": "c34850453bc34751d7af4c83b7fc70041b3f076cafa317cb8d4f481f45dcb55e",
+    "t1/run2/AP000342.1/measurement.json": "a5aba6b435a8460ac2d42c514a1a7ba8a63b1c284a223f81f790af2df7dc4053",
+    "t1/run2/AP001918.1/measurement.json": "d45ad48bea492bc8e9f9bc37e6f97985d4720572bebbf0a094be008e04f30dc9",
+    "t1/run2/J01749.1/measurement.json": "195bc41f76f3c857c80ccf399c0e4efbe588df1aef284c3143755171846970fc",
+    "t1/run2/KY749247.1/measurement.json": "77f2c90a0074e5962ff513bf2f252fac3af397432fb5bd57dd0c8030c6fcd8d3",
+    "t1/run2/M77789.2/measurement.json": "c395d85631905d88b8a647ce869af3612c0e91db7c732ae5019617797d7b9938",
+    "t1/run2/NC_000866.4/measurement.json": "4b90eb5364f5c41ee2aa8d406e4c64157aa900ca146ce79468e11093bc55ce3c",
+    "t1/run2/NC_001416.1/measurement.json": "3379fe227113e7b5739239ff46284e77fd4c5b40c22375d823b14dc96b70a522",
+    "t1/run2/NC_001604.1/measurement.json": "639a92a3714616bc6bfa27ba6a5c4f89780e4149333ecbdd21b37c254826a250",
+    "t1/run2/NC_001735.1/measurement.json": "8c9110d574b14437697a9ad8de0e1a15d6514f93dc55f0bbf6d6889143b45450",
+    "t1/run2/NC_008272.1/measurement.json": "9b74d8f2951123b6357fdb58b34a6b27222456456772474e942df00c3dd06a02",
+    "t1/run3/AP000342.1/measurement.json": "b767dff8e35b52060f1b9d37315658f2a3e0abad3a8defd183586fe94181af49",
+    "t1/run3/AP001918.1/measurement.json": "10eada8fa9531807167b48826fa970ed73ecc84c0b377dc670d61c7f20d6e1c6",
+    "t1/run3/J01749.1/measurement.json": "7ba0c1ecf4ddf032403c2407bec8695952a455c40473f94c2ac6565f8f7004d9",
+    "t1/run3/KY749247.1/measurement.json": "8d085f07e1dfaea3adf787d63c2a0735c3872c84d6ec2dc16c42c20c4b371f8c",
+    "t1/run3/M77789.2/measurement.json": "7ab463313d0bdf9b26950118fa7b56b95b6b906247eff0324f9e4d84d3d61f41",
+    "t1/run3/NC_000866.4/measurement.json": "07fae6efaccb98bc7c503465b2aa8e27424049eb0c97518f0e2514a7ec10b169",
+    "t1/run3/NC_001416.1/measurement.json": "7831aa7a8f1fdfea15a42cad3d96b501b1baedf9529b3cabdceda8a05981faef",
+    "t1/run3/NC_001604.1/measurement.json": "4989986dc8ae970ccfcc2c818762e8544da2df0cb3d51ee19460d4036ddad4e7",
+    "t1/run3/NC_001735.1/measurement.json": "f2140145811b8ed835a96582b08a1c68ebd14053510087287f903690fd4f3116",
+    "t1/run3/NC_008272.1/measurement.json": "fcbff177b90740b2754d4b860a087720692023a496a70dc420d2d860c4207e0e",
+    "t8/AP000342.1/measurement.json": "480889f7375b578332283b52be1f3c8dcad767a96a0f4afaf53d2cb5aa212d4b",
+    "t8/AP001918.1/measurement.json": "1e9565e7e6f2075cebbefc5825f6f1e2d244f4443ffd3a4daedab0b57191f654",
+    "t8/J01749.1/measurement.json": "fa4addfaa159c2a726d7c2aecf305d9b49c18e819963a88463de20699da37cc2",
+    "t8/KY749247.1/measurement.json": "f7527577a73d4c42c936bee0ca9488afe142c17601daafbb87c51be25eae2bb8",
+    "t8/M77789.2/measurement.json": "83509fe4bd4959dcef439c3f56601a6855392a30549dcbbd872da367a3bd0459",
+    "t8/NC_000866.4/measurement.json": "117737156d5114de8335115d59fc33e7acf3de210380f8d24ced6d13fd688456",
+    "t8/NC_001416.1/measurement.json": "48f344330f0b2b701df6cc36ccbdc5169cf964cd600f654266a68c9e5ddbb653",
+    "t8/NC_001604.1/measurement.json": "693cee294c772b67a6a6807bb6373e6f950400d84d2875a86b6a93872b7d2db3",
+    "t8/NC_001735.1/measurement.json": "31d7ce228cb016f8117789e87a336002745518dd69a6c0cdf61d127ea98c715a",
+    "t8/NC_008272.1/measurement.json": "e13a034af7faa4d0539590c60a3d1ea5b7d88467a15f1ac3feaa5ada97c5aa90"
+  },
+  "schema_version": "1.0.0",
+  "statistics": {
+    "bootstrap_iterations": 2000,
+    "bootstrap_seed": "sha256(group-key)",
+    "quantiles": [
+      "median",
+      "p90",
+      "p95",
+      "p99"
+    ]
+  },
+  "topologies": [
+    "circular",
+    "linear"
+  ]
+}

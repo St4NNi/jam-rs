@@ -1,0 +1,885 @@
+{
+  "alignment_count": 52,
+  "archive_economics": {},
+  "cache_state": "cold",
+  "candidate_count": 15,
+  "candidate_recall": 1.0,
+  "command": [
+    "target/release/jam",
+    "trace",
+    "--query",
+    "tools/out/mge-accession-spike-20260823/dataset-v2/queries/AP000342.1.fasta",
+    "--query-kind",
+    "plasmid",
+    "--topology",
+    "circular",
+    "--database",
+    "tools/out/mge-accession-spike-20260823/metagenomes.jam",
+    "--metagenomes",
+    "tools/out/mge-accession-spike-20260823/metagenomes.tsv",
+    "--output",
+    "tools/out/mge-accession-spike-20260823/trace-v2-run2/outputs/AP000342.1.jsonl",
+    "--query-id",
+    "AP000342.1",
+    "--sensitivity",
+    "balanced",
+    "--threads",
+    "1",
+    "--io-concurrency",
+    "1",
+    "--memory-target",
+    "4",
+    "--min-shared",
+    "3",
+    "--min-query-containment",
+    "0",
+    "--min-metagenome-containment",
+    "0",
+    "--top-candidates",
+    "28",
+    "--max-alignments",
+    "256",
+    "--no-full-download-fallback",
+    "--silent"
+  ],
+  "cpu_seconds": 31.414102,
+  "cpu_threads": 1,
+  "exit_code": 0,
+  "false_candidate_count": null,
+  "final_recall": 1.0,
+  "finished_at_utc": "2026-08-23T18:56:26.750100+00:00",
+  "gap_boundary_error_bases": null,
+  "interval_precision": 1.0,
+  "interval_recall": 1.0,
+  "io_tasks": 1,
+  "metadata": {
+    "assemblies": [
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "J01749.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/J01749.1__forward.fasta",
+        "sha256": "0974853a577f90595e696d6ca46443b0c26a8d956d32a49c12d9ea4254ed5e48"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "J01749.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/J01749.1__reverse.fasta",
+        "sha256": "2be9f022ca6198d74a770a3865164a7d99945b6f5494946839e03a29cfdf7ebc"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "J01749.1__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/J01749.1__origin_crossing.fasta",
+        "sha256": "a1dabd86c36700eea4670ee13569a1265aca35bbed071edf20470ccc6cd72919"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "M77789.2__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/M77789.2__forward.fasta",
+        "sha256": "9776260a246e00cfc934b2118fad721cdc1229e85c52ec8d4310db6bb368faed"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "M77789.2__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/M77789.2__reverse.fasta",
+        "sha256": "81f77f69e85284be168cbdbfd5afb3bf33fbc3816f917bcac902b06478297c24"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "M77789.2__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/M77789.2__origin_crossing.fasta",
+        "sha256": "dac465d88c9f9688f24af7fc60fbeed280eca4e2e65beff6d81fd3fc9724cb32"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "AP000342.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/AP000342.1__forward.fasta",
+        "sha256": "4238907f6f82ed63d44116619d436246be6e90df47c8c3e0d48907afc9c51dc1"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "AP000342.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/AP000342.1__reverse.fasta",
+        "sha256": "cd6c99329c5dabf4ef70fcacdc8db6d9b60817968d88decb78416fee2b3dea00"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "AP000342.1__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/AP000342.1__origin_crossing.fasta",
+        "sha256": "50047241b823e72670d66084791ae132bc4c9c722e9719d316172ad5fced7d88"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "KY749247.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/KY749247.1__forward.fasta",
+        "sha256": "ef0476801f0a06867e8f84c5197e9b07ad2fe968f1f8d7319d37e015585f6df9"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "KY749247.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/KY749247.1__reverse.fasta",
+        "sha256": "055253d37b40a1ec3e79f07dd2b0eb7013b5308989d01f10d01142c45dfc0c0f"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "KY749247.1__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/KY749247.1__origin_crossing.fasta",
+        "sha256": "7af320a2bfa0181b38746ced6b036f667e2ba3c55de84afa060ba25d2f312d3c"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_008272.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_008272.1__forward.fasta",
+        "sha256": "cacc42726dfbad0cc53fe783f7e91fee38c8cc87b3578aa159ad41e255703c3d"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_008272.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_008272.1__reverse.fasta",
+        "sha256": "9ddba33f58f173292b5441af4d784f10a206921dd1c2d034ca1718d15a94b246"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_008272.1__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_008272.1__origin_crossing.fasta",
+        "sha256": "327f6de92cbc85defee328e0cc8545fa3753c3112cd672e1643d39550060b505"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "AP001918.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/AP001918.1__forward.fasta",
+        "sha256": "5a531c65d595af1e21b052436eb92c4d40f0a9a84a269fa7f8b45a9b85f05456"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "AP001918.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/AP001918.1__reverse.fasta",
+        "sha256": "47dceac6cc2fb8f28be52d971e50e4457d5c784f57313549dae1ecfa1c2c61f4"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "AP001918.1__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/AP001918.1__origin_crossing.fasta",
+        "sha256": "d42f76e5affee7167002f8c6f4607f8021d39bcf9a666824219c8b81db3c89f1"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001735.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001735.1__forward.fasta",
+        "sha256": "d91a63d6ee8aa307a06ad2a178ac87ec18978be2273bc4ee14822170e4f13e2d"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001735.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001735.1__reverse.fasta",
+        "sha256": "a960f4ff2d50ea0c6543b084ec9f8fd4f87d6f96846947bdbf028d8576e81f99"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001735.1__origin_crossing",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001735.1__origin_crossing.fasta",
+        "sha256": "a61de49e48a0d8a5cdc8cb752843a96ea6fbc2cdd33ab823704d7633aee21a54"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001416.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001416.1__forward.fasta",
+        "sha256": "9e22090001ea309ff3890840f4dec13f16989fed8177aa680cf62bc1d5809375"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001416.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001416.1__reverse.fasta",
+        "sha256": "592a3cdf378685d6451520b6d3c6a8b88c344f8eb297d8c7fbb4c14ef5426700"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_000866.4__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_000866.4__forward.fasta",
+        "sha256": "a6062aca1c378747d646d8fd58af2e46cd6b8607baa8b14264c1a10e31f71dd2"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_000866.4__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_000866.4__reverse.fasta",
+        "sha256": "3f01b471120bbc2936d494040471e769a03da2b73dfd60ecf7179b1c3acea489"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001604.1__forward",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001604.1__forward.fasta",
+        "sha256": "6b19b36cdc64930c817e20e019859c2390b048ab781eced5bca7662c53da114e"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001604.1__reverse",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001604.1__reverse.fasta",
+        "sha256": "a64b9b87e0b334c9218403d0528bf8e1ce3578fd160f3f8da8ffb2d1d9d99b5a"
+      },
+      {
+        "background_accessions": [
+          "NC_000913.3",
+          "NC_000964.3",
+          "NC_002516.2"
+        ],
+        "background_group": "chromosome-v1",
+        "case_id": "NC_001604.1__terminal_repeat",
+        "controlled_derivative": true,
+        "file": "assemblies/NC_001604.1__terminal_repeat.fasta",
+        "sha256": "1f9ab9040e428dbb2c2d56b94282ed66979f5a79c58f3c4fddc05c58eab9cef8"
+      }
+    ],
+    "background_accessions": [
+      "NC_000913.3",
+      "NC_000964.3",
+      "NC_002516.2"
+    ],
+    "background_group": "chromosome-v1",
+    "catalog_accessions": [
+      "J01749.1",
+      "AP000342.1",
+      "NC_008272.1",
+      "AP001918.1",
+      "NC_001735.1",
+      "NC_001416.1",
+      "NC_000866.4",
+      "NC_001604.1"
+    ],
+    "generator": "mge_accession_spike.py",
+    "limitations": [
+      "Records marked needs_live_verification are omitted only with explicit --verified-only and are not negative evidence.",
+      "Background records are supplied real chromosome or metagenome sequences reused across controlled derivatives; derivatives are not independent natural metagenomes.",
+      "Topology, terminal-repeat coordinates, and shared-region coordinates are used only when declared in the source manifest.",
+      "The forward, reverse, origin-crossing, terminal-repeat, and shared-region labels describe sequence constructions, not biological origin or autonomous plasmid status.",
+      "This output does not establish sensitivity, specificity, metagenome absence, or confirmed plasmid/phage presence."
+    ],
+    "omitted_unverified_accessions": [],
+    "queries": [
+      {
+        "accession": "J01749.1",
+        "file": "queries/J01749.1.fasta",
+        "query_kind": "plasmid",
+        "sha256": "c83fff950cb15ba7d2ad3eb2ea23b65a90c74efd95df24b59d6ec51f12ac2c18",
+        "topology": "circular"
+      },
+      {
+        "accession": "M77789.2",
+        "file": "queries/M77789.2.fasta",
+        "query_kind": "plasmid",
+        "sha256": "99e9566b93647e805bd8f2fbd52819ad4e8a29da3025ec80b71b1adf1476529f",
+        "topology": "circular"
+      },
+      {
+        "accession": "AP000342.1",
+        "file": "queries/AP000342.1.fasta",
+        "query_kind": "plasmid",
+        "sha256": "e961ebfd328b92f1c928d96c29ff26f66544620a89c5f4cbf03d8e14c3a20b51",
+        "topology": "circular"
+      },
+      {
+        "accession": "KY749247.1",
+        "file": "queries/KY749247.1.fasta",
+        "query_kind": "plasmid",
+        "sha256": "9115796a566f896f5063d4da38b8536503a3c5d48907d292ee6dcaaa9ae7c662",
+        "topology": "circular"
+      },
+      {
+        "accession": "NC_008272.1",
+        "file": "queries/NC_008272.1.fasta",
+        "query_kind": "plasmid",
+        "sha256": "b2ce52fa98af75b9a11e2f72c9e045a0b08764118e2010b4362ef30af3189e3b",
+        "topology": "circular"
+      },
+      {
+        "accession": "AP001918.1",
+        "file": "queries/AP001918.1.fasta",
+        "query_kind": "plasmid",
+        "sha256": "ee001a715630a9be1431ef6c5eecb514bd27f756b3489d9134692c3546903a26",
+        "topology": "circular"
+      },
+      {
+        "accession": "NC_001735.1",
+        "file": "queries/NC_001735.1.fasta",
+        "query_kind": "plasmid",
+        "sha256": "75be5aae6eecfd99cb555b0986144f1a36053ea25b3f0d8121caf2da2290ac0d",
+        "topology": "circular"
+      },
+      {
+        "accession": "NC_001416.1",
+        "file": "queries/NC_001416.1.fasta",
+        "query_kind": "phage",
+        "sha256": "20b2b7cec8e38e994e3c412bc9cb3bee3adc76e525a1284a574ea97e8c041eb5",
+        "topology": "linear"
+      },
+      {
+        "accession": "NC_000866.4",
+        "file": "queries/NC_000866.4.fasta",
+        "query_kind": "phage",
+        "sha256": "7910500df2c9f1d2273ee92a239f96576a540c5e375c41644bd10afe9960ea67",
+        "topology": "linear"
+      },
+      {
+        "accession": "NC_001604.1",
+        "file": "queries/NC_001604.1.fasta",
+        "query_kind": "phage",
+        "sha256": "5070769301ddf047d33fcf4b5c31bf10e459eeabf95c706febe19043112885c0",
+        "topology": "linear"
+      }
+    ],
+    "query_accessions": [
+      "J01749.1",
+      "M77789.2",
+      "AP000342.1",
+      "KY749247.1",
+      "NC_008272.1",
+      "AP001918.1",
+      "NC_001735.1",
+      "NC_001416.1",
+      "NC_000866.4",
+      "NC_001604.1"
+    ],
+    "schema_version": "jam-trace-mge-accession-spike-v1",
+    "selected_source_accessions": [
+      "AP000342.1",
+      "AP001918.1",
+      "J01749.1",
+      "KY749247.1",
+      "M77789.2",
+      "NC_000866.4",
+      "NC_000913.3",
+      "NC_000964.3",
+      "NC_001416.1",
+      "NC_001604.1",
+      "NC_001735.1",
+      "NC_002516.2",
+      "NC_008272.1"
+    ],
+    "source_fasta": "sources.fasta",
+    "source_fasta_sha256": "7ee9b69d4dee59b600321e885799a0fd22ab8760f42a08ac06df858b1f44f42c",
+    "source_manifest": "mge-accession-sources-v1.tsv",
+    "source_manifest_sha256": "46f48bd06c3e7b91785d9b30277366c94d1c2970efbc5feffa80aa82d2af3ba8",
+    "source_records": [
+      {
+        "accession": "J01749.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "pBR322",
+        "length": 4361,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=J01749.1&rettype=fasta&retmode=text",
+        "role": "catalog exact plasmid",
+        "sequence_sha256": "536042a7485bdabdf49c4d21a306213a098d77d19bdba57a1c6adc76ce2b8372",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "M77789.2",
+        "background_group": null,
+        "catalog": false,
+        "display_name": "pUC19",
+        "length": 2686,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=M77789.2&rettype=fasta&retmode=text",
+        "role": "near-known plasmid",
+        "sequence_sha256": "7c1183b16368b1435452d99152d7c95aa04fc4a5412e563a5ef1d0fbf0cf873b",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "AP000342.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "R100",
+        "length": 94281,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=AP000342.1&rettype=fasta&retmode=text",
+        "role": "catalog exact plasmid",
+        "sequence_sha256": "7c36f5821d8ba6e91910f0be47008647cf52e0d4211113500c8c5b68606ff2dd",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "KY749247.1",
+        "background_group": null,
+        "catalog": false,
+        "display_name": "R1",
+        "length": 97566,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=KY749247.1&rettype=fasta&retmode=text",
+        "role": "near-known plasmid",
+        "sequence_sha256": "db5a30b7bbcdd9b78ff5e888e6d778896fcb0f4487502b23b4e3d8ff7ebc3c27",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_008272.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "pKJK5",
+        "length": 54383,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_008272.1&rettype=fasta&retmode=text",
+        "role": "catalog exact plasmid",
+        "sequence_sha256": "92987388d2d472f208f58fc7d4ab3f32fe5cf9fa40f201dc60f42d3da06317df",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "AP001918.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "F",
+        "length": 99159,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=AP001918.1&rettype=fasta&retmode=text",
+        "role": "catalog distractor plasmid",
+        "sequence_sha256": "e8f9cb8f87c56e14c9562a7de62d15197e4fb6f7bb5af0dd286bc87d766a41ed",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_001735.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "R751",
+        "length": 53339,
+        "query_kind": "plasmid",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_001735.1&rettype=fasta&retmode=text",
+        "role": "catalog distractor plasmid",
+        "sequence_sha256": "997fe17322005c563a824ed176c80d5646d9eba3a8cd62aa41925faa5e8638a8",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "circular",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_001416.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "Escherichia phage lambda",
+        "length": 48502,
+        "query_kind": "phage",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_001416.1&rettype=fasta&retmode=text",
+        "role": "public phage query",
+        "sequence_sha256": "36432a40f602258d19ae7c8152ddbc30390b559f2859c01d7047c77b048c71b3",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "linear",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_000866.4",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "Enterobacteria phage T4",
+        "length": 168903,
+        "query_kind": "phage",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_000866.4&rettype=fasta&retmode=text",
+        "role": "public phage query",
+        "sequence_sha256": "b5ffcfee85e6b40432104f4a0adfd34d64309982d7841346957ed85b395698a8",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "linear",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_001604.1",
+        "background_group": null,
+        "catalog": true,
+        "display_name": "Enterobacteria phage T7",
+        "length": 39937,
+        "query_kind": "phage",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_001604.1&rettype=fasta&retmode=text",
+        "role": "public phage query with documented 160 bp direct terminal repeat",
+        "sequence_sha256": "00ce104454ea06f9b47d6fba8e62499bfbff7e84bc17141665b96a80588a81fd",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          0,
+          160
+        ],
+        "topology": "linear",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_000913.3",
+        "background_group": "chromosome-v1",
+        "catalog": false,
+        "display_name": "Escherichia coli K-12 MG1655",
+        "length": 4641652,
+        "query_kind": "chromosome",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_000913.3&rettype=fasta&retmode=text",
+        "role": "real chromosome background",
+        "sequence_sha256": "e999dceccb76562d40e49a10d9e6d4cf1c05d184f4f80b92bb32d4a2420c11d0",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "linear",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_000964.3",
+        "background_group": "chromosome-v1",
+        "catalog": false,
+        "display_name": "Bacillus subtilis 168",
+        "length": 4215606,
+        "query_kind": "chromosome",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_000964.3&rettype=fasta&retmode=text",
+        "role": "real chromosome background",
+        "sequence_sha256": "71572ae0b98f44a6382b29e194e56c1f7d87477be8f53915fb06816f886b17b7",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "linear",
+        "verification_status": "verified"
+      },
+      {
+        "accession": "NC_002516.2",
+        "background_group": "chromosome-v1",
+        "catalog": false,
+        "display_name": "Pseudomonas aeruginosa PAO1",
+        "length": 6264404,
+        "query_kind": "chromosome",
+        "record_url": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=NC_002516.2&rettype=fasta&retmode=text",
+        "role": "real chromosome background",
+        "sequence_sha256": "f969830bbe6aa58beccd852ae6e129a9489a92557ad082283f639b6e8539a340",
+        "shared_group": null,
+        "shared_region": [
+          null,
+          null
+        ],
+        "terminal_repeat": [
+          null,
+          null
+        ],
+        "topology": "linear",
+        "verification_status": "verified"
+      }
+    ],
+    "status_rows": 50,
+    "truth_rows": 28
+  },
+  "metagenome_count": 15,
+  "metagenome_set": "mge-accession-spike-20260823",
+  "negative_pair_count": null,
+  "order": 2,
+  "peak_rss_kib": 839300,
+  "performance_counters": {
+    "alignments_attempted": 52,
+    "alignments_succeeded": 52,
+    "candidates_processed": 15,
+    "contigs_considered": 20,
+    "elapsed_millis": 31661,
+    "failures": 0,
+    "windows_retrieved": 52
+  },
+  "phase_timings": {
+    "trace_total": {
+      "cpu_seconds": 31.414102,
+      "source": "process measurement; internal phases not exposed by this executable",
+      "wall_seconds": 31.727220348999253
+    }
+  },
+  "query_id": "AP000342.1",
+  "query_kind": "plasmid",
+  "repeat": 2,
+  "rescue_round_count": 32,
+  "rescue_round_metrics": {
+    "alignment_windows_attempted": 52,
+    "anchors_created": 4173,
+    "chains_accepted": 110,
+    "elapsed_millis": 31559,
+    "new_query_bases_supported": 422937,
+    "seed_buckets_requested": 9277,
+    "seed_keys_tested": 9277,
+    "sequence_blocks_fetched": 53
+  },
+  "resource_metrics": {
+    "cache_bytes": 77406839,
+    "cache_evictions": 0,
+    "cache_hits": 9304,
+    "cache_misses": 139,
+    "decoded_bytes": 169694594,
+    "full_object_fallbacks": 0,
+    "get_requests": 0,
+    "head_requests": 0,
+    "metadata_requests": 9420,
+    "range_requests": 9390,
+    "remote_bytes": 0,
+    "requested_bytes": 131026374,
+    "retries": 0,
+    "returned_bytes": 131026374,
+    "seed_buckets_read": 9277,
+    "sequence_blocks_read": 53,
+    "stale_cache_rejections": 0,
+    "stream_requests": 0
+  },
+  "resource_mode": "local",
+  "schema_version": "1.0.0",
+  "started_at_utc": "2026-08-23T18:55:54.949616+00:00",
+  "status": "complete",
+  "sweep_dimension": "baseline",
+  "sweep_value": "baseline",
+  "system_seconds": 0.5057539999999999,
+  "topology_requested": "circular",
+  "trace_output": "tools/out/mge-accession-spike-20260823/trace-v2-run2/outputs/AP000342.1.jsonl",
+  "trace_parse_error": null,
+  "trace_sha256": "676a357e72f7e5b754b271682ad222bf1e6e57c1085afe6dc944324c5c484f4e",
+  "track": "A",
+  "track_kind": "controlled_accession_spike",
+  "truth_status": "available",
+  "user_seconds": 30.908348,
+  "wall_seconds": 31.727220348999253
+}
