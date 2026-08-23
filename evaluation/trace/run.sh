@@ -147,14 +147,14 @@ measure_command() {
 
 measure_command \
     jam_index catalog_index jam-sketch none none "$THREADS" "" "" \
-    "$JAM" --threads "$THREADS" --memory 4 --silent sketch "${ASSEMBLIES[@]}" \
+    "$JAM" --threads "$THREADS" --memory-target 4 --silent sketch "${ASSEMBLIES[@]}" \
     --output "$WORK/indexes/metagenomes.jam" --kmer-size 31 --fscale 200
 
 measure_command \
     jma_index catalog_index jma-archive none none "$THREADS" "" "" \
     "$PYTHON" "$ROOT/evaluation/trace/build_archives.py" --jam "$JAM" \
     --assemblies-dir "$WORK/dataset/assemblies" --output-dir "$WORK/indexes/jma" \
-    --primary-scale 100 --rescue-scale 200 --threads "$THREADS" --memory 4
+    --primary-scale 100 --rescue-scale 200 --threads "$THREADS" --memory-target 4
 
 "$PYTHON" "$ROOT/evaluation/trace/make_catalog.py" \
     --assemblies-dir "$WORK/dataset/assemblies" --jma-dir "$WORK/indexes/jma" \
@@ -169,7 +169,7 @@ run_trace() {
     local server_url="$6"
     local output="$WORK/outputs/${name}.jsonl"
     local command=(
-        "$JAM" --threads "$threads" --memory 4 --silent trace
+        "$JAM" --threads "$threads" --memory-target 4 --silent trace
         --plasmid "$WORK/dataset/query.fasta"
         --database "$WORK/indexes/metagenomes.jam"
         --catalog "$catalog"
@@ -193,7 +193,7 @@ run_local_profile() {
     # privileged and intentionally not attempted by this harness.
     run_trace "${stem}_cold" "$profile" "$threads" process-cold "$WORK/catalog.local.tsv" ""
     local warmup="$WORK/outputs/${stem}_warmup.jsonl"
-    "$JAM" --threads "$threads" --memory 4 --silent trace \
+    "$JAM" --threads "$threads" --memory-target 4 --silent trace \
         --plasmid "$WORK/dataset/query.fasta" --database "$WORK/indexes/metagenomes.jam" \
         --catalog "$WORK/catalog.local.tsv" --output "$warmup" --plasmid-id "$QUERY_ID" \
         --sensitivity "$profile" --min-shared 3 --top-candidates 250 --max-alignments 256
@@ -244,7 +244,7 @@ if [[ "$WITH_REMOTE" -eq 1 ]]; then
     # three sensitivity profiles.
     run_trace remote_balanced_t1_cold balanced 1 process-cold "$WORK/catalog.http.tsv" "$BASE_URL/__metrics"
     remote_warmup="$WORK/outputs/remote_balanced_warmup.jsonl"
-    "$JAM" --threads "$THREADS" --memory 4 --silent trace \
+    "$JAM" --threads "$THREADS" --memory-target 4 --silent trace \
         --plasmid "$WORK/dataset/query.fasta" --database "$WORK/indexes/metagenomes.jam" \
         --catalog "$WORK/catalog.http.tsv" --output "$remote_warmup" --plasmid-id "$QUERY_ID" \
         --sensitivity balanced --min-shared 3 --top-candidates 250 --max-alignments 256

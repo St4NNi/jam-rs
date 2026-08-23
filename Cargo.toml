@@ -72,6 +72,10 @@ harness = false
 name = "trace_components"
 harness = false
 
+[[bench]]
+name = "trace_memory"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
