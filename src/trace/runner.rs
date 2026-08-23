@@ -15,8 +15,8 @@ use crate::trace::catalog::{CatalogEntry, CatalogError, TraceCatalog};
 use crate::trace::chain::{AnchorChain, ChainConfig, ChainError, chain_anchors};
 use crate::trace::config::{SeedSensitivity, SensitivityConfig};
 use crate::trace::model::{
-    BaseAlignment, CoverageSummary, InputResource, Strand, TraceFailure, TraceMetagenomeResult,
-    TraceStatus,
+    BaseAlignment, CoverageSummary, InputResource, QueryKind, Strand, TopologyRequested,
+    TraceFailure, TraceMetagenomeResult, TraceStatus,
 };
 use crate::trace::mosaic::{MosaicError, select_primary};
 use crate::trace::raw::{AssemblyResource, RawAssembly, RawError, open_resource};
@@ -44,7 +44,11 @@ pub struct TraceRunnerConfig {
     pub candidates: CandidateSearchConfig,
     pub resources: ResourceOpenOptions,
     pub threads: usize,
+    pub io_concurrency: usize,
     pub max_alignments_per_candidate: usize,
+    pub query_kind: QueryKind,
+    pub topology_requested: TopologyRequested,
+    pub topology_margin_bases: u64,
 }
 
 impl Default for TraceRunnerConfig {
@@ -54,7 +58,11 @@ impl Default for TraceRunnerConfig {
             candidates: CandidateSearchConfig::default(),
             resources: ResourceOpenOptions::default(),
             threads: 1,
+            io_concurrency: 1,
             max_alignments_per_candidate: 256,
+            query_kind: QueryKind::Unknown,
+            topology_requested: TopologyRequested::Auto,
+            topology_margin_bases: SensitivityConfig::default().auto_topology_margin_bases,
         }
     }
 }
@@ -70,9 +78,19 @@ impl TraceRunnerConfig {
                 "threads must be greater than zero".to_string(),
             ));
         }
+        if self.io_concurrency == 0 {
+            return Err(RunnerError::InvalidConfig(
+                "io_concurrency must be greater than zero".to_string(),
+            ));
+        }
         if self.max_alignments_per_candidate == 0 {
             return Err(RunnerError::InvalidConfig(
                 "max_alignments_per_candidate must be greater than zero".to_string(),
+            ));
+        }
+        if self.topology_margin_bases == 0 {
+            return Err(RunnerError::InvalidConfig(
+                "topology_margin_bases must be greater than zero".to_string(),
             ));
         }
         if self.resources.cache_block_bytes == 0 || self.resources.max_cache_bytes == 0 {
@@ -580,6 +598,7 @@ impl TraceRunner {
         let worker_count = self
             .config
             .threads
+            .min(self.config.io_concurrency)
             .min(self.config.sensitivity.max_concurrent_candidates as usize)
             .max(1);
         let pool = rayon::ThreadPoolBuilder::new()

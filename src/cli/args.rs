@@ -6,8 +6,8 @@ use std::path::PathBuf;
 #[command(bin_name = "jam")]
 #[command(version)]
 #[command(
-    about = "High-speed reference-guided screening for plasmid traces",
-    long_about = "Find candidate known and near-known plasmid traces in metagenomic assemblies. Sketch evidence requires independent confirmation."
+    about = "High-speed reference-guided fragment search in metagenomic assemblies",
+    long_about = "Find candidate sequence fragments from one query element across metagenomic assemblies. Sequence evidence requires independent biological interpretation."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -38,6 +38,24 @@ pub enum TraceSensitivityArg {
     Fast,
     Balanced,
     Sensitive,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum QueryKindArg {
+    Plasmid,
+    Phage,
+    Other,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum TopologyArg {
+    Linear,
+    Circular,
+    #[default]
+    Auto,
+    Unknown,
 }
 
 #[derive(Debug, Subcommand, Clone)]
@@ -138,36 +156,54 @@ pub enum Commands {
         complexity: Option<f64>,
     },
 
-    /// Trace one plasmid across candidate metagenomic assemblies
+    /// Trace one query sequence element across candidate metagenomic assemblies
     #[command(arg_required_else_help = true)]
     Trace {
-        /// FASTA/FASTQ containing exactly one plasmid sequence
-        #[arg(short, long)]
-        plasmid: PathBuf,
+        /// FASTA/FASTQ containing exactly one query sequence
+        #[arg(
+            short = 'q',
+            long,
+            required_unless_present = "plasmid",
+            conflicts_with = "plasmid"
+        )]
+        query: Option<PathBuf>,
+        /// Compatibility alias for --query; implies --query-kind plasmid
+        #[arg(short = 'p', long, conflicts_with = "query")]
+        plasmid: Option<PathBuf>,
+        /// Declared query class; this is metadata, not a classifier result
+        #[arg(long, value_enum, default_value = "unknown")]
+        query_kind: QueryKindArg,
+        /// Requested query-coordinate handling; wrap does not prove circular biology
+        #[arg(long, value_enum, default_value = "auto")]
+        topology: TopologyArg,
         /// Existing metagenome candidate index (.jam)
         #[arg(short, long)]
         database: String,
         /// TSV or JSON catalog mapping database sample IDs to JMA/raw resources
-        #[arg(short, long)]
-        catalog: PathBuf,
+        #[arg(short = 'c', long = "metagenomes", visible_alias = "catalog")]
+        metagenomes: PathBuf,
         /// JSONL output; .zst or .zstd enables Zstandard compression
         #[arg(short, long)]
         output: PathBuf,
         /// Upload the finalized local output once to an HTTP(S) or S3 object
         #[arg(long)]
         upload_to: Option<String>,
-        /// Override the plasmid FASTA record identifier
-        #[arg(long)]
-        plasmid_id: Option<String>,
+        /// Override the query FASTA record identifier
+        #[arg(long = "query-id", visible_alias = "plasmid-id")]
+        query_id: Option<String>,
         /// Bounded execution profile, not a calibrated biological sensitivity
         #[arg(long, value_enum, default_value = "balanced")]
         sensitivity: TraceSensitivityArg,
         /// Minimum shared hashes for metagenome candidate retrieval
         #[arg(long, default_value = "3")]
         min_shared: u32,
-        /// Minimum retained plasmid/query containment
-        #[arg(long, default_value = "0.0")]
-        min_plasmid_containment: f64,
+        /// Minimum retained query containment
+        #[arg(
+            long = "min-query-containment",
+            visible_alias = "min-plasmid-containment",
+            default_value = "0.0"
+        )]
+        min_query_containment: f64,
         /// Minimum retained metagenome/reference containment
         #[arg(long, default_value = "0.0")]
         min_metagenome_containment: f64,
@@ -177,6 +213,12 @@ pub enum Commands {
         /// Maximum retained alignments per candidate metagenome
         #[arg(long, default_value = "256")]
         max_alignments: usize,
+        /// Maximum candidate resource tasks in flight
+        #[arg(long)]
+        io_concurrency: Option<usize>,
+        /// Minimum new-base margin required to select one auto topology model
+        #[arg(long)]
+        topology_margin_bases: Option<u64>,
         /// Directory for identity-checked remote .jam materialization
         #[arg(long)]
         cache_dir: Option<PathBuf>,

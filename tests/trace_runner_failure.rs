@@ -36,7 +36,11 @@ fn runner_config(threads: usize) -> TraceRunnerConfig {
             ..ResourceOpenOptions::default()
         },
         threads,
+        io_concurrency: threads.max(1),
         max_alignments_per_candidate: 8,
+        query_kind: jam_rs::trace::model::QueryKind::Unknown,
+        topology_requested: jam_rs::trace::model::TopologyRequested::Auto,
+        topology_margin_bases: 100,
     }
 }
 

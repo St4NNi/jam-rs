@@ -1171,19 +1171,23 @@ pub fn handle_archive_command(
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_trace_command(
-    plasmid: PathBuf,
+    query_path: PathBuf,
+    query_kind: crate::trace::model::QueryKind,
+    topology_requested: crate::trace::model::TopologyRequested,
     database: String,
-    catalog_path: PathBuf,
+    metagenomes_path: PathBuf,
     output: PathBuf,
     upload_to: Option<String>,
-    plasmid_id: Option<String>,
+    query_id: Option<String>,
     profile: crate::trace::config::SensitivityProfile,
     min_shared_hashes: u32,
-    min_plasmid_containment: f64,
+    min_query_containment: f64,
     min_metagenome_containment: f64,
     top_candidates: Option<usize>,
     max_alignments: usize,
     threads: usize,
+    io_concurrency: usize,
+    topology_margin_bases: Option<u64>,
     memory_gb: usize,
     cache_dir: Option<PathBuf>,
     cache_block_bytes: u64,
@@ -1219,34 +1223,40 @@ pub fn handle_trace_command(
         max_retries,
         allow_full_download_fallback,
     };
-    let catalog = crate::trace::catalog::TraceCatalog::from_path(&catalog_path)?;
+    let catalog = crate::trace::catalog::TraceCatalog::from_path(&metagenomes_path)?;
     let parsed_query =
-        crate::trace::raw::RawAssembly::open(plasmid.to_string_lossy(), resources.clone())?;
+        crate::trace::raw::RawAssembly::open(query_path.to_string_lossy(), resources.clone())?;
     if parsed_query.contigs.len() != 1 {
         return Err(anyhow::anyhow!(
-            "Plasmid input must contain exactly one record, got {}",
+            "Query input must contain exactly one FASTA/FASTQ record, got {}",
             parsed_query.contigs.len()
         ));
     }
     let record = &parsed_query.contigs[0];
-    let plasmid_id = plasmid_id.unwrap_or_else(|| record.id.clone());
+    let query_id = query_id.unwrap_or_else(|| record.id.clone());
     let sensitivity = crate::trace::config::SensitivityConfig::for_profile(profile);
+    let topology_margin_bases =
+        topology_margin_bases.unwrap_or(sensitivity.auto_topology_margin_bases);
     let candidate_limit = top_candidates
         .unwrap_or_else(|| usize::try_from(sensitivity.max_candidates).unwrap_or(usize::MAX));
     let runner = crate::trace::runner::TraceRunner::new(crate::trace::runner::TraceRunnerConfig {
         sensitivity: sensitivity.clone(),
         candidates: crate::trace::screen::CandidateSearchConfig {
             min_shared_hashes,
-            min_plasmid_containment,
+            min_plasmid_containment: min_query_containment,
             min_metagenome_containment,
             top_candidates: candidate_limit,
         },
         resources,
         threads,
+        io_concurrency,
         max_alignments_per_candidate: max_alignments,
+        query_kind,
+        topology_requested,
+        topology_margin_bases,
     })?;
     let query = crate::trace::runner::TraceQuery {
-        plasmid_id: plasmid_id.clone(),
+        plasmid_id: query_id.clone(),
         plasmid_sequence: record.sequence.clone(),
         database: database.clone(),
         catalog,
@@ -1266,14 +1276,14 @@ pub fn handle_trace_command(
         source_commit: (source_commit != "unknown").then_some(source_commit),
         started_at_utc: format!("unix:{started}"),
         command: provenance::redacted_command_line(),
-        plasmid_id,
+        plasmid_id: query_id,
         plasmid_length: record.sequence.len() as u64,
         sensitivity,
         algorithm,
         inputs: vec![
-            trace_input("plasmid", &plasmid)?,
+            trace_input("query", &query_path)?,
             result.database_input.clone(),
-            trace_input("catalog", &catalog_path)?,
+            trace_input("metagenomes", &metagenomes_path)?,
         ],
     };
     let resource_metrics = result

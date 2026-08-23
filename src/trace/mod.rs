@@ -1,4 +1,4 @@
-//! One-plasmid-to-many-metagenomes trace-search contracts.
+//! One-query-to-many-metagenomes fragment-search contracts.
 
 pub mod alignment;
 pub mod anchors;
@@ -16,11 +16,15 @@ pub mod screen;
 pub mod seeds;
 
 pub use config::{
-    AlignmentScoring, SeedSensitivity, SensitivityConfig, SensitivityProfile,
-    TraceAlgorithmMetadata, TraceAlgorithmParameters,
+    AlignmentScoring, GapRescueConfig, SeedSensitivity, SensitivityConfig, SensitivityProfile,
+    TraceAlgorithmMetadata, TraceAlgorithmParameters, algorithm_identifiers,
 };
 pub use model::{
-    BaseAlignment, BaseInterval, CandidateResult, CoverageSummary, EditOperation, EditRun, Strand,
+    AlignmentMosaicEvidence, AlignmentRole, BaseAlignment, BaseInterval, CandidateResult,
+    CoordinateModel, CoverageSummary, EditOperation, EditRun, FragmentMosaicSummary,
+    MosaicAtomicInterval, MosaicSelectionComponents, QueryDescriptor, QueryKind,
+    RescueRoundMetrics, SeedEvidence, Strand, TopologyAssessment, TopologyEvidence,
+    TopologyModelEvidence, TopologyModelSummary, TopologyRequested, TraceAlgorithmIdentifiers,
     TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader,
 };
 

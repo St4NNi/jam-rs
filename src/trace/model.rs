@@ -5,10 +5,182 @@ use crate::resource::ResourceMetrics;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryKind {
+    Plasmid,
+    Phage,
+    Other,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyRequested {
+    Linear,
+    Circular,
+    #[default]
+    Auto,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinateModel {
+    Linear,
+    Wrap,
+    Undetermined,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyEvidence {
+    LinearSupported,
+    WrapSupported,
+    BothCompatible,
+    Insufficient,
+    Undetermined,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignmentRole {
+    PrimaryMosaic,
+    OverlappingSupport,
+    AlternativeMapping,
+    CommonSequence,
+    RepeatOnly,
+    OriginCrossing,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BaseInterval {
     pub start: u64,
     pub end: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct QueryDescriptor {
+    pub query_id: String,
+    pub query_length: u64,
+    pub query_kind: QueryKind,
+    pub topology_requested: TopologyRequested,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TraceAlgorithmIdentifiers {
+    pub screen_algorithm: String,
+    pub local_alignment_algorithm: String,
+    pub mosaic_algorithm: String,
+    pub trace_workflow: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SeedEvidence {
+    pub primary_anchor_count: u64,
+    pub rescue_anchor_count: u64,
+    pub nonrepetitive_anchor_count: u64,
+    pub common_anchor_count: u64,
+    pub repetitive_seed_count: u64,
+    pub query_occurrence_max: u32,
+    pub candidate_occurrence_max: u32,
+    pub collection_document_frequency_max: Option<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AlignmentMosaicEvidence {
+    pub alignment_id: String,
+    pub primary_supported_bases: u64,
+    pub secondary_supported_bases: u64,
+    pub newly_supported_bases: u64,
+    pub role: AlignmentRole,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MosaicAtomicInterval {
+    pub interval: BaseInterval,
+    pub primary_alignment_id: Option<String>,
+    pub alternative_alignment_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MosaicSelectionComponents {
+    pub local_alignment_score_sum: i64,
+    pub newly_supported_query_bases: u64,
+    pub nonrepetitive_anchor_evidence: u64,
+    pub redundant_overlap_bases: u64,
+    pub coordinate_contradictions: u64,
+    pub sequence_contradictions: u64,
+    pub fragment_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FragmentMosaicSummary {
+    pub mosaic_algorithm: String,
+    pub coordinate_model: CoordinateModel,
+    pub base_covered_bases: u64,
+    pub base_coverage_fraction: f64,
+    pub aligned_span_bases: u64,
+    pub aligned_span_fraction: f64,
+    pub covered_intervals: Vec<BaseInterval>,
+    pub unsupported_gaps: Vec<GapRecord>,
+    pub alignment_deletions: Vec<BaseInterval>,
+    pub common_sequence_intervals: Vec<BaseInterval>,
+    pub repeat_only_intervals: Vec<BaseInterval>,
+    pub supporting_contigs: Vec<String>,
+    pub accepted_alignment_count: u64,
+    pub alternative_alignment_count: u64,
+    pub nonrepetitive_supported_bases: u64,
+    pub common_sequence_supported_bases: u64,
+    pub repeat_only_supported_bases: u64,
+    pub atomic_intervals: Vec<MosaicAtomicInterval>,
+    pub alignment_evidence: Vec<AlignmentMosaicEvidence>,
+    pub selection_components: MosaicSelectionComponents,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TopologyModelEvidence {
+    pub newly_supported_query_bases: u64,
+    pub alignment_quality_sum: i64,
+    pub nonrepetitive_anchor_support: u64,
+    pub origin_crossing_alignment_count: u64,
+    pub unexplained_terminal_gap_bases: u64,
+    pub contradictory_alignment_count: u64,
+    pub fragment_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TopologyModelSummary {
+    pub coordinate_model: CoordinateModel,
+    pub mosaic: FragmentMosaicSummary,
+    pub evidence: TopologyModelEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TopologyAssessment {
+    pub topology_requested: TopologyRequested,
+    pub coordinate_model: CoordinateModel,
+    pub topology_evidence: TopologyEvidence,
+    pub selection_margin_bases: u64,
+    pub linear_model: TopologyModelSummary,
+    pub wrap_model: Option<TopologyModelSummary>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RescueRoundMetrics {
+    pub round: u8,
+    pub seed_k: u8,
+    pub seed_scale: u64,
+    pub target_gaps: Vec<BaseInterval>,
+    pub seed_buckets_requested: u64,
+    pub seed_keys_tested: u64,
+    pub anchors_created: u64,
+    pub chains_accepted: u64,
+    pub sequence_blocks_fetched: u64,
+    pub alignment_windows_attempted: u64,
+    pub new_query_bases_supported: u64,
+    pub elapsed_millis: u64,
 }
 
 impl BaseInterval {
@@ -216,5 +388,25 @@ mod tests {
         });
         let value = serde_json::to_value(record).unwrap();
         assert_eq!(value["record_type"], "run_footer");
+    }
+
+    #[test]
+    fn generic_query_and_topology_values_have_stable_names() {
+        assert_eq!(
+            serde_json::to_string(&QueryKind::Phage).unwrap(),
+            "\"phage\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TopologyRequested::Unknown).unwrap(),
+            "\"unknown\""
+        );
+        assert_eq!(
+            serde_json::to_string(&CoordinateModel::Wrap).unwrap(),
+            "\"wrap\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TopologyEvidence::BothCompatible).unwrap(),
+            "\"both_compatible\""
+        );
     }
 }

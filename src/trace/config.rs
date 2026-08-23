@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const SCREEN_ALGORITHM_ID: &str = "jam-fracminhash-screen-v1";
+pub const LOCAL_ALIGNMENT_ALGORITHM_ID: &str = "jam-exact-seed-chain-banded-v1";
+pub const MOSAIC_ALGORITHM_ID: &str = "jam-fragment-mosaic-v1";
+pub const TRACE_WORKFLOW_ID: &str = "jam-trace-v1";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SensitivityProfile {
@@ -28,6 +33,19 @@ pub struct AlignmentScoring {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GapRescueConfig {
+    /// Total rounds including the initial whole-query k=31 round.
+    pub max_rounds: u8,
+    /// Optional denser k=31 level used only inside unresolved gaps.
+    pub dense_primary: Option<SeedSensitivity>,
+    pub min_gap_bases: u64,
+    pub flank_bases: u64,
+    pub max_seed_buckets_per_round: u32,
+    pub max_sequence_blocks_per_round: u32,
+    pub max_alignment_windows_per_round: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SensitivityConfig {
     pub profile: SensitivityProfile,
     pub primary: SeedSensitivity,
@@ -39,6 +57,9 @@ pub struct SensitivityConfig {
     pub max_alignment_window_bases: u64,
     pub max_concurrent_candidates: u32,
     pub alignment: AlignmentScoring,
+    pub gap_rescue: GapRescueConfig,
+    pub common_seed_candidate_occurrence_threshold: u32,
+    pub auto_topology_margin_bases: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -88,6 +109,16 @@ impl TraceAlgorithmMetadata {
     }
 }
 
+#[must_use]
+pub fn algorithm_identifiers() -> super::model::TraceAlgorithmIdentifiers {
+    super::model::TraceAlgorithmIdentifiers {
+        screen_algorithm: SCREEN_ALGORITHM_ID.to_string(),
+        local_alignment_algorithm: LOCAL_ALIGNMENT_ALGORITHM_ID.to_string(),
+        mosaic_algorithm: MOSAIC_ALGORITHM_ID.to_string(),
+        trace_workflow: TRACE_WORKFLOW_ID.to_string(),
+    }
+}
+
 impl SensitivityConfig {
     #[must_use]
     pub fn for_profile(profile: SensitivityProfile) -> Self {
@@ -113,6 +144,17 @@ impl SensitivityConfig {
                     gap_extend_score: -1,
                     band_width: 64,
                 },
+                gap_rescue: GapRescueConfig {
+                    max_rounds: 1,
+                    dense_primary: None,
+                    min_gap_bases: 250,
+                    flank_bases: 64,
+                    max_seed_buckets_per_round: 0,
+                    max_sequence_blocks_per_round: 0,
+                    max_alignment_windows_per_round: 0,
+                },
+                common_seed_candidate_occurrence_threshold: 8,
+                auto_topology_margin_bases: 250,
             },
             SensitivityProfile::Balanced => Self {
                 profile,
@@ -139,6 +181,21 @@ impl SensitivityConfig {
                     gap_extend_score: -1,
                     band_width: 128,
                 },
+                gap_rescue: GapRescueConfig {
+                    max_rounds: 3,
+                    dense_primary: Some(SeedSensitivity {
+                        k: 31,
+                        scale: 100,
+                        max_occurrences: 96,
+                    }),
+                    min_gap_bases: 200,
+                    flank_bases: 96,
+                    max_seed_buckets_per_round: 50_000,
+                    max_sequence_blocks_per_round: 1_024,
+                    max_alignment_windows_per_round: 256,
+                },
+                common_seed_candidate_occurrence_threshold: 8,
+                auto_topology_margin_bases: 200,
             },
             SensitivityProfile::Sensitive => Self {
                 profile,
@@ -165,6 +222,21 @@ impl SensitivityConfig {
                     gap_extend_score: -1,
                     band_width: 256,
                 },
+                gap_rescue: GapRescueConfig {
+                    max_rounds: 3,
+                    dense_primary: Some(SeedSensitivity {
+                        k: 31,
+                        scale: 100,
+                        max_occurrences: 192,
+                    }),
+                    min_gap_bases: 100,
+                    flank_bases: 128,
+                    max_seed_buckets_per_round: 100_000,
+                    max_sequence_blocks_per_round: 2_048,
+                    max_alignment_windows_per_round: 512,
+                },
+                common_seed_candidate_occurrence_threshold: 16,
+                auto_topology_margin_bases: 100,
             },
         }
     }
@@ -189,6 +261,28 @@ impl SensitivityConfig {
         {
             return Err(SensitivityError::ZeroLimit);
         }
+        if self.gap_rescue.max_rounds == 0 || self.auto_topology_margin_bases == 0 {
+            return Err(SensitivityError::ZeroLimit);
+        }
+        if let Some(dense_primary) = self.gap_rescue.dense_primary {
+            if dense_primary.k != 31 {
+                return Err(SensitivityError::PrimaryK(dense_primary.k));
+            }
+            if dense_primary.scale == 0 || dense_primary.scale > self.primary.scale {
+                return Err(SensitivityError::DensePrimaryScale {
+                    dense: dense_primary.scale,
+                    initial: self.primary.scale,
+                });
+            }
+        }
+        if self.gap_rescue.max_rounds > 1
+            && (self.gap_rescue.min_gap_bases == 0
+                || self.gap_rescue.max_seed_buckets_per_round == 0
+                || self.gap_rescue.max_sequence_blocks_per_round == 0
+                || self.gap_rescue.max_alignment_windows_per_round == 0)
+        {
+            return Err(SensitivityError::ZeroLimit);
+        }
         Ok(())
     }
 }
@@ -209,6 +303,10 @@ pub enum SensitivityError {
     ZeroScale,
     #[error("trace resource limits must be greater than zero")]
     ZeroLimit,
+    #[error(
+        "dense primary scale {dense} must be non-zero and no sparser than initial scale {initial}"
+    )]
+    DensePrimaryScale { dense: u64, initial: u64 },
 }
 
 #[cfg(test)]
@@ -255,5 +353,17 @@ mod tests {
             metadata.parameters.coverage_mode,
             "nonredundant_supported_query_union"
         );
+    }
+
+    #[test]
+    fn workflow_algorithm_identifiers_are_separate_and_stable() {
+        let identifiers = algorithm_identifiers();
+        assert_eq!(identifiers.screen_algorithm, SCREEN_ALGORITHM_ID);
+        assert_eq!(
+            identifiers.local_alignment_algorithm,
+            LOCAL_ALIGNMENT_ALGORITHM_ID
+        );
+        assert_eq!(identifiers.mosaic_algorithm, MOSAIC_ALGORITHM_ID);
+        assert_eq!(identifiers.trace_workflow, TRACE_WORKFLOW_ID);
     }
 }

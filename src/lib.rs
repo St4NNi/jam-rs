@@ -23,7 +23,7 @@ pub use jamhash::jamhash_u64 as jamhash_u64_v1;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{BiasCommands, Cli, Commands, TraceSensitivityArg};
+use cli::{BiasCommands, Cli, Commands, QueryKindArg, TopologyArg, TraceSensitivityArg};
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -121,50 +121,85 @@ pub fn run() -> Result<()> {
         ),
 
         Commands::Trace {
+            query,
             plasmid,
+            query_kind,
+            topology,
             database,
-            catalog,
+            metagenomes,
             output,
             upload_to,
-            plasmid_id,
+            query_id,
             sensitivity,
             min_shared,
-            min_plasmid_containment,
+            min_query_containment,
             min_metagenome_containment,
             top_candidates,
             max_alignments,
+            io_concurrency,
+            topology_margin_bases,
             cache_dir,
             cache_block_bytes,
             request_timeout_seconds,
             max_retries,
             no_full_download_fallback,
-        } => handle_trace_command(
-            plasmid,
-            database,
-            catalog,
-            output,
-            upload_to,
-            plasmid_id,
-            match sensitivity {
-                TraceSensitivityArg::Fast => trace::config::SensitivityProfile::Fast,
-                TraceSensitivityArg::Balanced => trace::config::SensitivityProfile::Balanced,
-                TraceSensitivityArg::Sensitive => trace::config::SensitivityProfile::Sensitive,
-            },
-            min_shared,
-            min_plasmid_containment,
-            min_metagenome_containment,
-            top_candidates,
-            max_alignments,
-            threads,
-            memory_target,
-            cache_dir,
-            cache_block_bytes,
-            request_timeout_seconds,
-            max_retries,
-            !no_full_download_fallback,
-            cli.force,
-            cli.silent,
-        ),
+        } => {
+            let used_plasmid_alias = plasmid.is_some();
+            let query = query
+                .or(plasmid)
+                .ok_or_else(|| anyhow::anyhow!("--query is required"))?;
+            let query_kind = if used_plasmid_alias {
+                if !matches!(query_kind, QueryKindArg::Unknown | QueryKindArg::Plasmid) {
+                    anyhow::bail!("--plasmid implies --query-kind plasmid");
+                }
+                eprintln!("warning: --plasmid is deprecated; use --query and --query-kind plasmid");
+                trace::model::QueryKind::Plasmid
+            } else {
+                match query_kind {
+                    QueryKindArg::Plasmid => trace::model::QueryKind::Plasmid,
+                    QueryKindArg::Phage => trace::model::QueryKind::Phage,
+                    QueryKindArg::Other => trace::model::QueryKind::Other,
+                    QueryKindArg::Unknown => trace::model::QueryKind::Unknown,
+                }
+            };
+            let topology = match topology {
+                TopologyArg::Linear => trace::model::TopologyRequested::Linear,
+                TopologyArg::Circular => trace::model::TopologyRequested::Circular,
+                TopologyArg::Auto => trace::model::TopologyRequested::Auto,
+                TopologyArg::Unknown => trace::model::TopologyRequested::Unknown,
+            };
+            handle_trace_command(
+                query,
+                query_kind,
+                topology,
+                database,
+                metagenomes,
+                output,
+                upload_to,
+                query_id,
+                match sensitivity {
+                    TraceSensitivityArg::Fast => trace::config::SensitivityProfile::Fast,
+                    TraceSensitivityArg::Balanced => trace::config::SensitivityProfile::Balanced,
+                    TraceSensitivityArg::Sensitive => trace::config::SensitivityProfile::Sensitive,
+                },
+                min_shared,
+                min_query_containment,
+                min_metagenome_containment,
+                top_candidates,
+                max_alignments,
+                threads,
+                io_concurrency.unwrap_or(threads),
+                topology_margin_bases,
+                memory_target,
+                cache_dir,
+                cache_block_bytes,
+                request_timeout_seconds,
+                max_retries,
+                !no_full_download_fallback,
+                cli.force,
+                cli.silent,
+            )
+        }
 
         Commands::Bias { command } => match command {
             BiasCommands::Create {

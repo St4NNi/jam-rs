@@ -163,6 +163,33 @@
       },
       "additionalProperties": false
     },
+    "gap_rescue_config": {
+      "type": "object",
+      "required": [
+        "max_rounds",
+        "dense_primary",
+        "min_gap_bases",
+        "flank_bases",
+        "max_seed_buckets_per_round",
+        "max_sequence_blocks_per_round",
+        "max_alignment_windows_per_round"
+      ],
+      "properties": {
+        "max_rounds": {"type": "integer", "minimum": 1},
+        "dense_primary": {
+          "anyOf": [
+            {"$ref": "#/$defs/seed_sensitivity"},
+            {"type": "null"}
+          ]
+        },
+        "min_gap_bases": {"type": "integer", "minimum": 1},
+        "flank_bases": {"type": "integer", "minimum": 0},
+        "max_seed_buckets_per_round": {"type": "integer", "minimum": 0},
+        "max_sequence_blocks_per_round": {"type": "integer", "minimum": 0},
+        "max_alignment_windows_per_round": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
     "sensitivity_config": {
       "type": "object",
       "required": [
@@ -175,7 +202,10 @@
         "min_chain_anchors",
         "max_alignment_window_bases",
         "max_concurrent_candidates",
-        "alignment"
+        "alignment",
+        "gap_rescue",
+        "common_seed_candidate_occurrence_threshold",
+        "auto_topology_margin_bases"
       ],
       "properties": {
         "profile": {
@@ -195,7 +225,10 @@
         "min_chain_anchors": {"type": "integer", "minimum": 1},
         "max_alignment_window_bases": {"type": "integer", "minimum": 1},
         "max_concurrent_candidates": {"type": "integer", "minimum": 1},
-        "alignment": {"$ref": "#/$defs/alignment_scoring"}
+        "alignment": {"$ref": "#/$defs/alignment_scoring"},
+        "gap_rescue": {"$ref": "#/$defs/gap_rescue_config"},
+        "common_seed_candidate_occurrence_threshold": {"type": "integer", "minimum": 1},
+        "auto_topology_margin_bases": {"type": "integer", "minimum": 1}
       },
       "additionalProperties": false
     },
