@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "comparators": {
+    "minimap2": {
+      "version": "2.31",
+      "release_tag": "v2.31",
+      "release_commit_prefix": "3c28777",
+      "source": "https://github.com/lh3/minimap2/releases/download/v2.31/minimap2-2.31_x64-linux.tar.bz2",
+      "sha256": "300bc287f05eb890c6211fa7db043ce98320a401621fadd1cfdbeabd1a6e4ab5"
+    },
+    "blastn": {
+      "version": "2.17.0",
+      "source": "https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.17.0/ncbi-blast-2.17.0+-x64-linux.tar.gz",
+      "sha256": "3888112d8207831aa47371d93583c601f058f88b5db22dc782438b039a3a411b",
+      "md5": "bdec166721de3b55f90a3badc83538e8"
+    }
+  }
+}

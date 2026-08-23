@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/comparator-summary-v1.schema.json",
+  "title": "jam-rs comparator summary",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "tool", "status", "scope", "query_id", "query_length", "metrics"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "tool": {"enum": ["jam", "blastn", "minimap2"]},
+    "status": {"enum": ["measured", "unavailable", "failed"]},
+    "scope": {"enum": ["candidate", "direct_subset", "direct_full"]},
+    "query_id": {"type": ["string", "null"]},
+    "query_length": {"type": ["integer", "null"], "minimum": 0},
+    "metrics": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "assemblies_total": {"type": "integer", "minimum": 0},
+        "assemblies_with_records": {"type": "integer", "minimum": 0},
+        "observed_bases": {"type": "integer", "minimum": 0},
+        "truth_bases": {"type": "integer", "minimum": 0},
+        "intersection_bases": {"type": "integer", "minimum": 0},
+        "base_precision": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "base_recall": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "interval_precision": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "interval_recall": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "gap_error_bases": {"type": "integer", "minimum": 0},
+        "gap_error_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    },
+    "per_metagenome": {
+      "type": "array",
+      "items": {"type": "object"}
+    }
+  }
+}

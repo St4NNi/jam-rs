@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/comparator-result-v1.schema.json",
+  "title": "jam-rs comparator result",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "tool",
+    "status",
+    "scope",
+    "query_id",
+    "query_length",
+    "selection",
+    "results"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "tool": {"enum": ["jam", "blastn", "minimap2"]},
+    "status": {"enum": ["measured", "unavailable", "failed"]},
+    "scope": {"enum": ["candidate", "direct_subset", "direct_full"]},
+    "query_id": {"type": ["string", "null"]},
+    "query_length": {"type": ["integer", "null"], "minimum": 0},
+    "command": {"type": "array", "items": {"type": "string"}},
+    "version": {"type": ["string", "null"]},
+    "input_manifest_sha256": {"type": ["string", "null"]},
+    "truth_manifest_sha256": {"type": ["string", "null"]},
+    "selection": {"$ref": "#/$defs/selection"},
+    "results": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/metagenomeResult"}
+    }
+  },
+  "$defs": {
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0}
+      }
+    },
+    "selection": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["source", "total_count", "selected_count"],
+      "properties": {
+        "source": {"type": "string"},
+        "total_count": {"type": "integer", "minimum": 0},
+        "selected_count": {"type": "integer", "minimum": 0},
+        "limit": {"type": ["integer", "null"], "minimum": 1},
+        "ids": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["supported_intervals", "supported_bases", "supported_fraction", "gaps"],
+      "properties": {
+        "supported_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "supported_bases": {"type": "integer", "minimum": 0},
+        "supported_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "truth_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "truth_status": {"enum": ["measured", "unavailable"]},
+        "metrics": {"$ref": "#/$defs/metrics"}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "observed_bases": {"type": "integer", "minimum": 0},
+        "truth_bases": {"type": "integer", "minimum": 0},
+        "intersection_bases": {"type": "integer", "minimum": 0},
+        "base_precision": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "base_recall": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "interval_precision": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "interval_recall": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "gap_error_bases": {"type": "integer", "minimum": 0},
+        "gap_error_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["metagenome_id", "contig_id", "strand", "intervals"],
+      "properties": {
+        "metagenome_id": {"type": "string"},
+        "contig_id": {"type": "string"},
+        "strand": {"enum": ["forward", "reverse", "unknown"]},
+        "intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        }
+      }
+    },
+    "metagenomeResult": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["metagenome_id", "status", "records", "coverage"],
+      "properties": {
+        "metagenome_id": {"type": "string"},
+        "assembly": {"type": "string"},
+        "status": {"enum": ["measured", "unavailable", "failed"]},
+        "command": {"type": "array", "items": {"type": "string"}},
+        "version": {"type": ["string", "null"]},
+        "records": {"type": "array", "items": {"$ref": "#/$defs/record"}},
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "error": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
