@@ -1,8 +1,8 @@
 use crate::bias::HashBiasTable;
 use crate::core_utils::passes_entropy_filter;
 use crate::format::{BUCKET_COUNT, bucket_id};
+use crate::jamhash_u64_v1;
 use crate::reader::{JamReader, ReaderError, lower_bound_hash};
-use jamhash::jamhash_u64;
 use needletail::{Sequence, parse_fastx_file};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -109,13 +109,15 @@ impl QuerySketch {
             });
         }
 
-        let stored_sizes = source.sample_sizes();
-        let query_sizes: Vec<usize> = stored_sizes.iter().map(|&s| s as usize).collect();
-
         let mut buckets: [Vec<(u64, u32)>; BUCKET_COUNT] = std::array::from_fn(|_| Vec::new());
+        let mut query_sizes = vec![0usize; expected_sample_count];
         for (bucket_idx, bucket) in buckets.iter_mut().enumerate() {
             for entry in source.bucket_entries(bucket_idx) {
+                if entry.hash == 0 {
+                    continue;
+                }
                 bucket.push((entry.hash, entry.sample_id));
+                query_sizes[entry.sample_id as usize] += 1;
             }
         }
 
@@ -171,7 +173,8 @@ impl QuerySketch {
 
         let mut buckets: [Vec<(u64, u32)>; BUCKET_COUNT] = std::array::from_fn(|_| Vec::new());
         let mut sample_names: Vec<String> = Vec::new();
-        let mut sample_hash_sets: Vec<HashSet<u64>> = Vec::new();
+        let mut query_sizes: Vec<usize> = Vec::new();
+        let mut combined_hashes: HashSet<u64> = HashSet::new();
         let mut weight_sums: Vec<f64> = Vec::new();
         let mut current_sample_id: u32 = 0;
 
@@ -183,7 +186,6 @@ impl QuerySketch {
                     .unwrap_or("query")
                     .to_string(),
             );
-            sample_hash_sets.push(HashSet::new());
             weight_sums.push(0.0);
         }
 
@@ -198,7 +200,6 @@ impl QuerySketch {
                     .unwrap_or("unknown")
                     .to_string();
                 sample_names.push(name);
-                sample_hash_sets.push(HashSet::new());
                 weight_sums.push(0.0);
                 current_sample_id = u32::try_from(sample_names.len() - 1).map_err(|_| {
                     QueryError::Config("query sample count exceeds u32::MAX".to_string())
@@ -206,14 +207,18 @@ impl QuerySketch {
             }
 
             let sequence = record.normalize(false);
+            let mut record_hashes = HashSet::new();
             if sequence.len() < kmer_size as usize {
+                if singleton {
+                    query_sizes.push(0);
+                }
                 continue;
             }
 
             for (_, kmer, _) in sequence.bit_kmers(kmer_size, true) {
-                let hash = jamhash_u64(kmer.0);
+                let hash = jamhash_u64_v1(kmer.0);
 
-                if hash >= threshold {
+                if hash == 0 || hash >= threshold {
                     continue;
                 }
 
@@ -225,13 +230,21 @@ impl QuerySketch {
                     continue;
                 }
 
-                if sample_hash_sets[current_sample_id as usize].insert(hash) {
+                let hashes = if singleton {
+                    &mut record_hashes
+                } else {
+                    &mut combined_hashes
+                };
+                if hashes.insert(hash) {
                     buckets[bucket_id(hash)].push((hash, current_sample_id));
                     if let Some(ref bt) = bias_table {
                         weight_sums[current_sample_id as usize] +=
                             bt.effective_fscale_at(bt.weight(hash));
                     }
                 }
+            }
+            if singleton {
+                query_sizes.push(record_hashes.len());
             }
         }
 
@@ -240,7 +253,9 @@ impl QuerySketch {
             bucket.dedup();
         }
 
-        let query_sizes: Vec<usize> = sample_hash_sets.iter().map(|set| set.len()).collect();
+        if !singleton {
+            query_sizes.push(combined_hashes.len());
+        }
 
         Ok(Self {
             buckets,
@@ -371,7 +386,12 @@ type QueryBucketHitMap = HashMap<usize, SampleHitMap>;
 impl QueryResult {
     pub fn top(&self, n: usize) -> Vec<&SampleMatch> {
         let mut sorted: Vec<_> = self.matches.iter().collect();
-        sorted.sort_by(|a, b| b.containment.total_cmp(&a.containment));
+        sorted.sort_by(|a, b| {
+            b.containment
+                .total_cmp(&a.containment)
+                .then_with(|| b.hit_count.cmp(&a.hit_count))
+                .then_with(|| a.sample_id.cmp(&b.sample_id))
+        });
         sorted.truncate(n);
         sorted
     }
@@ -465,6 +485,7 @@ impl QueryEngine {
         }
 
         let mut sorted_hashes = hashes.to_vec();
+        sorted_hashes.retain(|&hash| hash != 0);
         sorted_hashes.sort_unstable_by_key(|&h| (h & 0xFF, h));
         sorted_hashes.dedup();
 
@@ -539,9 +560,12 @@ impl QueryEngine {
     pub fn query_filtered(&self, hashes: &[u64], min_containment: f64) -> QueryResult {
         let mut result = self.query(hashes);
         result.matches.retain(|m| m.containment >= min_containment);
-        result
-            .matches
-            .sort_by(|a, b| b.containment.total_cmp(&a.containment));
+        result.matches.sort_by(|a, b| {
+            b.containment
+                .total_cmp(&a.containment)
+                .then_with(|| b.hit_count.cmp(&a.hit_count))
+                .then_with(|| a.sample_id.cmp(&b.sample_id))
+        });
         result
     }
 

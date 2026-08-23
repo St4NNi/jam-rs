@@ -4,6 +4,8 @@ use std::io::Write;
 use std::{fs::remove_file, path::PathBuf};
 
 use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
+use crate::format::VERSION;
+use crate::provenance;
 use crate::query::QueryEngine;
 use crate::reader::JamReader;
 use crate::writer::{BuildConfig, build};
@@ -24,6 +26,14 @@ pub fn handle_sketch_command(
     temp_dir: Option<PathBuf>,
     bias_table_path: Option<PathBuf>,
 ) -> Result<()> {
+    let manifest_path = provenance::sidecar_path(&output_path);
+    if manifest_path.exists() && !force {
+        return Err(anyhow::anyhow!(
+            "Database manifest {:?} already exists. Use --force to overwrite.",
+            manifest_path
+        ));
+    }
+
     if let Some(ref temp_dir) = temp_dir {
         if !temp_dir.exists() {
             return Err(anyhow::anyhow!(
@@ -149,6 +159,62 @@ pub fn handle_sketch_command(
 
     let stats = build(&input_paths, &output_path, &config)?;
 
+    let input_catalog_files = provenance::file_identities(&input_paths)?;
+    let catalog_manifest_sha256 = provenance::identities_checksum(&input_catalog_files)?;
+    let database_sha256 = provenance::sha256_file(&output_path)?;
+    let bias = match (config.bias_table.as_deref(), bias_table_path.as_deref()) {
+        (Some(table), Some(path)) => {
+            let sha256 = provenance::sha256_file(path)?;
+            Some(provenance::BiasDatabaseMetadata {
+                table_id: format!("sha256:{sha256}"),
+                source_path: path.display().to_string(),
+                sha256,
+                kmer_size: table.config.k,
+                base_fscale: table.config.fscale,
+                cms_width: table.config.width,
+                cms_depth: table.config.depth,
+                alpha: table.alpha,
+                filter_mode: if table.is_soft_filter() {
+                    "enrichment_lut".to_string()
+                } else {
+                    "hard_cutoff".to_string()
+                },
+                target_fscale: table.target_fscale,
+                negative_fscale: table.negative_fscale_label(),
+                unseen_fscale: table.unseen_fscale,
+                positive_retention: table.positive_retention,
+                negative_retention: table.negative_retention,
+            })
+        }
+        _ => None,
+    };
+    let manifest = provenance::DatabaseManifest {
+        schema_version: provenance::MANIFEST_SCHEMA_VERSION.to_string(),
+        output_schema_version: provenance::OUTPUT_SCHEMA_VERSION.to_string(),
+        database_format_version: VERSION,
+        jam_rs_version: env!("CARGO_PKG_VERSION").to_string(),
+        source_commit: provenance::source_commit(),
+        source_dirty: provenance::source_dirty(),
+        hash_id: provenance::HASH_ID.to_string(),
+        hash_zero_policy: provenance::HASH_ZERO_POLICY.to_string(),
+        kmer_size,
+        fscale: effective_fscale,
+        hash_threshold: stats.frac_max,
+        entropy_threshold: min_entropy as f32 as f64,
+        bias,
+        input_catalog_files,
+        catalog_manifest_sha256,
+        sample_count: stats.sample_count,
+        entry_count: stats.total_entries,
+        unique_hash_count: stats.unique_hashes,
+        database_file: output_path.display().to_string(),
+        database_size_bytes: stats.file_size,
+        database_sha256,
+        creation_command: provenance::command_line(),
+        creation_time_unix_seconds: provenance::unix_time_seconds(),
+    };
+    provenance::write_json(&manifest_path, &manifest)?;
+
     if !silent {
         eprintln!(
             "Completed: {} ({} entries, {} unique hashes, {} samples)",
@@ -157,6 +223,7 @@ pub fn handle_sketch_command(
             stats.unique_hashes,
             stats.sample_count
         );
+        eprintln!("Manifest: {}", manifest_path.display());
     }
 
     Ok(())
@@ -243,7 +310,7 @@ pub fn handle_distance_command(
         if engine.has_bias_table() {
             sp.println("      Using embedded bias table from database");
             sp.println(
-                "      Bias mode reports containment on the retained/weighted k-mer subset; E-values are uniform-hash approximations",
+                "      Bias mode reports retained/weighted sketch evidence; uniform-hash E-values are NA",
             );
         }
         sp.set_message("[2/4] Loading query...");
@@ -310,10 +377,14 @@ pub fn handle_distance_command(
     };
 
     let has_bias = engine.has_bias_table();
+    let bias_table_id = engine
+        .bias_table()
+        .map(|table| format!("sha256:{}", provenance::sha256_bytes(&table.to_bytes())))
+        .unwrap_or_else(|| "NA".to_string());
     if has_bias {
         writeln!(
             writer,
-            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\traw_query_containment\tdb_containment_unweighted\tuniform_hash_e_value\tbias_weighted_query_containment"
+            "query\tdb_sample\tshared_hashes\tquery_hashes\tdb_hashes\tretained_query_containment\tretained_reference_containment\tuniform_hash_e_value\tbias_weighted_query_containment\tscore_mode\tbias_table_id"
         )?;
     } else {
         writeln!(
@@ -348,7 +419,23 @@ pub fn handle_distance_command(
                 }
 
                 let mut matches: Vec<_> = result.matches.iter().collect();
-                matches.sort_by(|a, b| b.containment.total_cmp(&a.containment));
+                matches.sort_by(|a, b| {
+                    b.containment
+                        .total_cmp(&a.containment)
+                        .then_with(|| b.hit_count.cmp(&a.hit_count))
+                        .then_with(|| {
+                            let left = db_names
+                                .get(a.sample_id as usize)
+                                .map(String::as_str)
+                                .unwrap_or("unknown");
+                            let right = db_names
+                                .get(b.sample_id as usize)
+                                .map(String::as_str)
+                                .unwrap_or("unknown");
+                            left.cmp(right)
+                        })
+                        .then_with(|| a.sample_id.cmp(&b.sample_id))
+                });
 
                 let mut out = String::with_capacity(matches.len() * 120);
                 for m in &matches {
@@ -363,24 +450,24 @@ pub fn handle_distance_command(
                         0.0
                     };
                     use std::fmt::Write;
-                    if has_bias && result.total_query_weight > 0.0 {
-                        let raw_query_containment = if query_hashes > 0 {
+                    if has_bias {
+                        let retained_query_containment = if query_hashes > 0 {
                             m.hit_count as f64 / query_hashes as f64
                         } else {
                             0.0
                         };
                         let _ = writeln!(
                             out,
-                            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{:.6e}\t{:.6}",
+                            "{}\t{}\t{}\t{}\t{}\t{:.6}\t{:.6}\tNA\t{:.6}\tbias\t{}",
                             query_name,
                             db_name,
                             m.hit_count,
                             query_hashes,
                             db_hashes,
-                            raw_query_containment,
+                            retained_query_containment,
                             db_containment,
-                            m.e_value,
                             m.containment,
+                            bias_table_id,
                         );
                     } else {
                         let _ = writeln!(
@@ -443,6 +530,17 @@ pub fn handle_distance_command(
     Ok(())
 }
 
+pub fn handle_screen_command(config: crate::screen::ScreenConfig, silent: bool) -> Result<()> {
+    let stats = crate::screen::run(&config)?;
+    if !silent {
+        eprintln!(
+            "Screened {} contigs: {} contig rows, {} assembly rows",
+            stats.contig_count, stats.contig_rows, stats.summary_rows
+        );
+    }
+    Ok(())
+}
+
 fn normalize_distance_cutoff(cutoff: f64) -> Option<f64> {
     if cutoff.is_finite() && cutoff > 0.0 {
         Some(cutoff)
@@ -478,6 +576,7 @@ pub fn handle_bias_create_command(
     max_fscale: Option<String>,
     unseen_fscale: Option<u64>,
     threads: Option<usize>,
+    min_positive_retention: f32,
     force: bool,
     silent: bool,
 ) -> Result<()> {
@@ -502,6 +601,13 @@ pub fn handle_bias_create_command(
             output
         ));
     }
+    let manifest_path = provenance::sidecar_path(&output);
+    if manifest_path.exists() && !force {
+        return Err(anyhow::anyhow!(
+            "Bias manifest {:?} already exists. Use --force to overwrite.",
+            manifest_path
+        ));
+    }
 
     if !alpha.is_finite() || alpha <= 0.0 {
         return Err(anyhow::anyhow!("--alpha must be finite and > 0"));
@@ -514,6 +620,11 @@ pub fn handle_bias_create_command(
     }
     if fscale == 0 {
         return Err(anyhow::anyhow!("--fscale must be > 0"));
+    }
+    if !min_positive_retention.is_finite() || !(0.0..=1.0).contains(&min_positive_retention) {
+        return Err(anyhow::anyhow!(
+            "--min-positive-retention must be finite and between 0.0 and 1.0"
+        ));
     }
 
     match (target_fscale.as_ref(), max_fscale.as_ref()) {
@@ -590,11 +701,54 @@ pub fn handle_bias_create_command(
         HashBiasTable::create(&pos_paths, &neg_paths, &config, spinner.clone())?
     };
 
+    if table.positive_retention < min_positive_retention {
+        return Err(anyhow::anyhow!(
+            "Bias calibration retained {:.2}% of the positive set, below --min-positive-retention {:.2}%",
+            table.positive_retention * 100.0,
+            min_positive_retention * 100.0
+        ));
+    }
+
     if let Some(ref sp) = spinner {
         sp.set_message("Saving bias table...");
     }
 
     table.save(&output)?;
+
+    let table_sha256 = provenance::sha256_file(&output)?;
+    let manifest = provenance::BiasTableManifest {
+        schema_version: provenance::MANIFEST_SCHEMA_VERSION.to_string(),
+        jam_rs_version: env!("CARGO_PKG_VERSION").to_string(),
+        source_commit: provenance::source_commit(),
+        source_dirty: provenance::source_dirty(),
+        hash_id: provenance::HASH_ID.to_string(),
+        hash_zero_policy: provenance::HASH_ZERO_POLICY.to_string(),
+        table_id: format!("sha256:{table_sha256}"),
+        table_file: output.display().to_string(),
+        table_size_bytes: output.metadata()?.len(),
+        table_sha256,
+        kmer_size: table.config.k,
+        base_fscale: table.config.fscale,
+        cms_width: table.config.width,
+        cms_depth: table.config.depth,
+        alpha: table.alpha,
+        filter_mode: if table.is_soft_filter() {
+            "enrichment_lut".to_string()
+        } else {
+            "hard_cutoff".to_string()
+        },
+        target_fscale: table.target_fscale,
+        negative_fscale: table.negative_fscale_label(),
+        unseen_fscale: table.unseen_fscale,
+        positive_retention: table.positive_retention,
+        negative_retention: table.negative_retention,
+        minimum_positive_retention: min_positive_retention,
+        positive_files: provenance::file_identities(&positive)?,
+        chromosome_background_files: provenance::file_identities(&negative)?,
+        creation_command: provenance::command_line(),
+        creation_time_unix_seconds: provenance::unix_time_seconds(),
+    };
+    provenance::write_json(&manifest_path, &manifest)?;
 
     if let Some(sp) = spinner {
         sp.finish_and_clear();
@@ -827,6 +981,7 @@ pub fn handle_stats_command(
     input_path: PathBuf,
     short: bool,
     full: bool,
+    json: bool,
     silent: bool,
 ) -> Result<()> {
     if !input_path.exists() {
@@ -838,6 +993,47 @@ pub fn handle_stats_command(
 
     let reader = JamReader::open(&input_path)?;
     let stats = reader.stats();
+
+    if json {
+        let manifest = provenance::load_database_manifest(&input_path)?;
+        let database_sha256 = match manifest.as_ref() {
+            Some(manifest) => manifest.database_sha256.clone(),
+            None => provenance::sha256_file(&input_path)?,
+        };
+        let bias_table_id = manifest
+            .as_ref()
+            .and_then(|manifest| manifest.bias.as_ref())
+            .map(|bias| bias.table_id.clone())
+            .or_else(|| {
+                reader
+                    .bias_table()
+                    .map(|table| format!("sha256:{}", provenance::sha256_bytes(&table.to_bytes())))
+            });
+        let value = serde_json::json!({
+            "schema_version": provenance::OUTPUT_SCHEMA_VERSION,
+            "database_format_version": VERSION,
+            "jam_rs_version": env!("CARGO_PKG_VERSION"),
+            "source_commit": provenance::source_commit(),
+            "hash_id": manifest.as_ref().map(|manifest| manifest.hash_id.as_str()).unwrap_or(provenance::HASH_ID),
+            "hash_zero_policy": manifest.as_ref().map(|manifest| manifest.hash_zero_policy.as_str()).unwrap_or("legacy database; zero excluded at query time"),
+            "database_file": input_path.display().to_string(),
+            "database_sha256": database_sha256,
+            "file_size_bytes": stats.file_size,
+            "kmer_size": stats.kmer_size,
+            "fscale": manifest.as_ref().map(|manifest| manifest.fscale).unwrap_or(u64::MAX / stats.hash_threshold.max(1)),
+            "hash_threshold": stats.hash_threshold,
+            "entropy_threshold": reader.min_entropy(),
+            "bias_mode": stats.has_bias_table,
+            "bias_table_id": bias_table_id,
+            "entry_count": stats.entry_count,
+            "unique_hash_count": stats.unique_hash_count,
+            "sample_count": stats.sample_count,
+            "bucket_entry_counts": stats.bucket_entry_counts.to_vec(),
+            "manifest": manifest,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
 
     if short {
         println!(
@@ -899,6 +1095,243 @@ pub fn handle_stats_command(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_archive_command(
+    input: PathBuf,
+    output: PathBuf,
+    block_bases: usize,
+    primary_scale: u64,
+    rescue_scale: Option<u64>,
+    complexity: Option<f64>,
+    force: bool,
+    silent: bool,
+) -> Result<()> {
+    if !input.is_file() {
+        return Err(anyhow::anyhow!(
+            "Assembly input does not exist or is not a file: {}",
+            input.display()
+        ));
+    }
+    if output.exists() {
+        if !output.is_file() {
+            return Err(anyhow::anyhow!(
+                "Archive output is not a file: {}",
+                output.display()
+            ));
+        }
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Archive output already exists: {}. Use --force to overwrite.",
+                output.display()
+            ));
+        }
+    }
+    let stats = crate::jma::builder::write_archive_from_fasta(
+        &input,
+        &output,
+        crate::jma::builder::ArchiveBuildConfig {
+            block_bases,
+            k31_scale: primary_scale,
+            k21_scale: rescue_scale,
+            min_entropy: complexity,
+            flags: crate::jma::builder::DEFAULT_FLAGS,
+        },
+    )?;
+    if !silent {
+        eprintln!(
+            "Created JMA v{} archive {}: {} contigs, {} bases, {} k=31 seeds, {} k=21 seeds",
+            crate::jma::JMA_FORMAT_VERSION,
+            output.display(),
+            stats.contig_count,
+            stats.total_bases,
+            stats.k31_seed_count,
+            stats.k21_seed_count
+        );
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_trace_command(
+    plasmid: PathBuf,
+    database: String,
+    catalog_path: PathBuf,
+    output: PathBuf,
+    plasmid_id: Option<String>,
+    profile: crate::trace::config::SensitivityProfile,
+    min_shared_hashes: u32,
+    min_plasmid_containment: f64,
+    min_metagenome_containment: f64,
+    top_candidates: Option<usize>,
+    max_alignments: usize,
+    threads: usize,
+    memory_gb: usize,
+    cache_dir: Option<PathBuf>,
+    cache_block_bytes: u64,
+    request_timeout_seconds: u64,
+    max_retries: u32,
+    allow_full_download_fallback: bool,
+    force: bool,
+    silent: bool,
+) -> Result<()> {
+    if output.exists() {
+        if !output.is_file() {
+            return Err(anyhow::anyhow!(
+                "Trace output is not a file: {}",
+                output.display()
+            ));
+        }
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Trace output already exists: {}. Use --force to overwrite.",
+                output.display()
+            ));
+        }
+    }
+
+    let resources = crate::resource::ResourceOpenOptions {
+        cache_dir,
+        cache_block_bytes,
+        max_cache_bytes: (memory_gb as u64)
+            .saturating_mul(1024 * 1024 * 1024)
+            .saturating_mul(7)
+            / 10,
+        request_timeout_seconds,
+        max_retries,
+        allow_full_download_fallback,
+    };
+    let catalog = crate::trace::catalog::TraceCatalog::from_path(&catalog_path)?;
+    let parsed_query =
+        crate::trace::raw::RawAssembly::open(plasmid.to_string_lossy(), resources.clone())?;
+    if parsed_query.contigs.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "Plasmid input must contain exactly one record, got {}",
+            parsed_query.contigs.len()
+        ));
+    }
+    let record = &parsed_query.contigs[0];
+    let plasmid_id = plasmid_id.unwrap_or_else(|| record.id.clone());
+    let sensitivity = crate::trace::config::SensitivityConfig::for_profile(profile);
+    let candidate_limit = top_candidates
+        .unwrap_or_else(|| usize::try_from(sensitivity.max_candidates).unwrap_or(usize::MAX));
+    let runner = crate::trace::runner::TraceRunner::new(crate::trace::runner::TraceRunnerConfig {
+        sensitivity: sensitivity.clone(),
+        candidates: crate::trace::screen::CandidateSearchConfig {
+            min_shared_hashes,
+            min_plasmid_containment,
+            min_metagenome_containment,
+            top_candidates: candidate_limit,
+        },
+        resources,
+        threads,
+        max_alignments_per_candidate: max_alignments,
+    })?;
+    let query = crate::trace::runner::TraceQuery {
+        plasmid_id: plasmid_id.clone(),
+        plasmid_sequence: record.sequence.clone(),
+        database: database.clone(),
+        catalog,
+    };
+    let started = provenance::unix_time_seconds();
+    let run_id = format!("trace-{started}-{}", std::process::id());
+    let mut result = runner.run(&query)?;
+    result.set_run_id(&run_id);
+
+    let source_commit = provenance::source_commit();
+    let header = crate::trace::model::TraceRunHeader {
+        schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
+        run_id: run_id.clone(),
+        jam_rs_version: env!("CARGO_PKG_VERSION").to_string(),
+        source_commit: (source_commit != "unknown").then_some(source_commit),
+        started_at_utc: format!("unix:{started}"),
+        command: provenance::command_line(),
+        plasmid_id,
+        plasmid_length: record.sequence.len() as u64,
+        sensitivity,
+        inputs: vec![
+            trace_input("plasmid", &plasmid)?,
+            result.database_input.clone(),
+            trace_input("catalog", &catalog_path)?,
+        ],
+    };
+    let resource_metrics = result
+        .metagenomes
+        .iter()
+        .fold(result.database_metrics, |total, item| {
+            add_resource_metrics(total, item.resource_metrics)
+        });
+    let footer = crate::trace::model::TraceRunFooter {
+        schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
+        run_id,
+        completed_at_utc: format!("unix:{}", provenance::unix_time_seconds()),
+        metagenomes_total: result.metagenomes.len() as u64,
+        metagenomes_with_candidates: result
+            .metagenomes
+            .iter()
+            .filter(|item| item.candidate.is_some())
+            .count() as u64,
+        metagenomes_aligned: result
+            .metagenomes
+            .iter()
+            .filter(|item| !item.alignments.is_empty())
+            .count() as u64,
+        metagenomes_failed: result
+            .metagenomes
+            .iter()
+            .filter(|item| item.status == crate::trace::model::TraceStatus::Failed)
+            .count() as u64,
+        alignments_total: result
+            .metagenomes
+            .iter()
+            .map(|item| item.alignments.len() as u64)
+            .sum(),
+        resource_metrics,
+    };
+    let mut writer = crate::trace::output::create(&output)?;
+    writer.write_header(&header)?;
+    for item in &result.metagenomes {
+        writer.write_metagenome_result(item)?;
+    }
+    writer.write_footer(&footer)?;
+    writer.finish()?;
+    if !silent {
+        eprintln!(
+            "Trace output {}: {} candidates, {} aligned metagenomes, {} alignments",
+            output.display(),
+            result.search.candidates.len(),
+            footer.metagenomes_aligned,
+            footer.alignments_total
+        );
+    }
+    Ok(())
+}
+
+fn trace_input(role: &str, path: &std::path::Path) -> Result<crate::trace::model::InputResource> {
+    let locator = crate::resource::ResourceLocator::parse(path.to_string_lossy().as_ref())?;
+    Ok(crate::trace::model::InputResource {
+        role: role.to_string(),
+        redacted_locator: locator.redacted(),
+        sha256: Some(provenance::sha256_file(path)?),
+    })
+}
+
+fn add_resource_metrics(
+    left: crate::resource::ResourceMetrics,
+    right: crate::resource::ResourceMetrics,
+) -> crate::resource::ResourceMetrics {
+    crate::resource::ResourceMetrics {
+        metadata_requests: left
+            .metadata_requests
+            .saturating_add(right.metadata_requests),
+        range_requests: left.range_requests.saturating_add(right.range_requests),
+        stream_requests: left.stream_requests.saturating_add(right.stream_requests),
+        remote_bytes: left.remote_bytes.saturating_add(right.remote_bytes),
+        cache_bytes: left.cache_bytes.saturating_add(right.cache_bytes),
+        cache_hits: left.cache_hits.saturating_add(right.cache_hits),
+        retries: left.retries.saturating_add(right.retries),
+    }
 }
 
 #[cfg(test)]

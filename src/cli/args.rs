@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -6,8 +6,8 @@ use std::path::PathBuf;
 #[command(bin_name = "jam")]
 #[command(version)]
 #[command(
-    about = "Just another (genomic) minhasher (jam), obviously blazingly fast",
-    long_about = "An optimized minhash implementation that focuses on quick scans for small sequences in large datasets."
+    about = "High-speed reference-guided screening for plasmid traces",
+    long_about = "Find candidate known and near-known plasmid traces in metagenomic assemblies. Sketch evidence requires independent confirmation."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -22,9 +22,16 @@ pub struct Cli {
     /// Only errors and output files will be printed
     #[arg(short, long, global = true, default_value = "false")]
     pub silent: bool,
-    /// Maximum memory usage in bytes in GB
+    /// Maximum memory usage in GiB
     #[arg(short, long, global = true, default_value = "2")]
     pub memory: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TraceSensitivityArg {
+    Fast,
+    Balanced,
+    Sensitive,
 }
 
 #[derive(Debug, Subcommand, Clone)]
@@ -61,6 +68,123 @@ pub enum Commands {
         bias_table: Option<PathBuf>,
     },
 
+    /// Screen assembly contigs against a reference catalog and aggregate evidence
+    #[command(arg_required_else_help = true)]
+    Screen {
+        /// Assembly FASTA/FASTQ input (compressed formats supported)
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Reference catalog database (.jam)
+        #[arg(short, long)]
+        database: PathBuf,
+        /// Contig-level candidate TSV
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Assembly-level reference summary TSV
+        #[arg(long)]
+        summary: PathBuf,
+        /// Optional run metadata JSON
+        #[arg(long)]
+        metadata: Option<PathBuf>,
+        /// Assembly identifier (defaults to the input file name)
+        #[arg(long)]
+        assembly_name: Option<String>,
+        /// Minimum distinct shared hashes per contig-reference pair
+        #[arg(long, default_value = "3")]
+        min_shared: u32,
+        /// Minimum query containment (retained-query containment in bias mode)
+        #[arg(long, default_value = "0.0")]
+        min_query_containment: f64,
+        /// Minimum reference containment (retained-reference containment in bias mode)
+        #[arg(long, default_value = "0.0")]
+        min_reference_containment: f64,
+        /// Maximum reported references per contig after deterministic ranking
+        #[arg(long, default_value = "10")]
+        top_per_contig: usize,
+        /// Maximum references in the assembly summary after deterministic ranking
+        #[arg(long, default_value = "100")]
+        top_references: usize,
+    },
+
+    /// Build a JMA v1 positional archive for trace searches
+    #[command(arg_required_else_help = true)]
+    Archive {
+        /// Metagenomic assembly FASTA/FASTQ input
+        #[arg(short, long)]
+        input: PathBuf,
+        /// Output JMA archive
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Maximum decoded bases per packed sequence block
+        #[arg(long, default_value = "1048576")]
+        block_bases: usize,
+        /// Primary k=31 FracMinHash scale
+        #[arg(long, default_value = "200")]
+        primary_scale: u64,
+        /// Rescue k=21 FracMinHash scale
+        #[arg(long, default_value = "500")]
+        rescue_scale: u64,
+        /// Omit the k=21 rescue seed section
+        #[arg(long)]
+        no_rescue: bool,
+        /// Optional Shannon-entropy threshold in bits per base
+        #[arg(long)]
+        complexity: Option<f64>,
+    },
+
+    /// Trace one plasmid across candidate metagenomic assemblies
+    #[command(arg_required_else_help = true)]
+    Trace {
+        /// FASTA/FASTQ containing exactly one plasmid sequence
+        #[arg(short, long)]
+        plasmid: PathBuf,
+        /// Existing metagenome candidate index (.jam)
+        #[arg(short, long)]
+        database: String,
+        /// TSV or JSON catalog mapping database sample IDs to JMA/raw resources
+        #[arg(short, long)]
+        catalog: PathBuf,
+        /// JSONL output; .zst or .zstd enables Zstandard compression
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Override the plasmid FASTA record identifier
+        #[arg(long)]
+        plasmid_id: Option<String>,
+        /// Bounded execution profile, not a calibrated biological sensitivity
+        #[arg(long, value_enum, default_value = "balanced")]
+        sensitivity: TraceSensitivityArg,
+        /// Minimum shared hashes for metagenome candidate retrieval
+        #[arg(long, default_value = "3")]
+        min_shared: u32,
+        /// Minimum retained plasmid/query containment
+        #[arg(long, default_value = "0.0")]
+        min_plasmid_containment: f64,
+        /// Minimum retained metagenome/reference containment
+        #[arg(long, default_value = "0.0")]
+        min_metagenome_containment: f64,
+        /// Override the profile's deterministic candidate limit
+        #[arg(long)]
+        top_candidates: Option<usize>,
+        /// Maximum retained alignments per candidate metagenome
+        #[arg(long, default_value = "256")]
+        max_alignments: usize,
+        /// Directory for identity-checked remote .jam materialization
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+        /// In-memory remote range-cache block size in bytes
+        #[arg(long, default_value = "1048576")]
+        cache_block_bytes: u64,
+        /// Per-request timeout in seconds
+        #[arg(long, default_value = "60")]
+        request_timeout_seconds: u64,
+        /// Number of retries after a failed remote request or database download
+        #[arg(long, default_value = "3")]
+        max_retries: u32,
+        /// Reject servers that require a complete-object fallback for range reads
+        #[arg(long)]
+        no_full_download_fallback: bool,
+    },
+
     /// Estimate containment of a query sequence against a sketch database.
     /// Requires all sketches to have the same kmer size
     #[command(arg_required_else_help = true)]
@@ -75,7 +199,7 @@ pub enum Commands {
         #[arg(short, long)]
         #[arg(value_parser = clap::value_parser!(std::path::PathBuf))]
         output: Option<PathBuf>,
-        /// Cut-off value for similarity/containment
+        /// Minimum query containment (bias-weighted query containment in bias mode)
         #[arg(short, long, default_value = "0.0")]
         cutoff: f64,
         /// Singleton mode, process each query sequence separately
@@ -102,6 +226,9 @@ pub enum Commands {
         /// Include the full entry statistics
         #[arg(long)]
         full: bool,
+        /// Emit stable JSON statistics
+        #[arg(long, conflicts_with_all = ["short", "full"])]
+        json: bool,
     },
 }
 
@@ -153,6 +280,9 @@ pub enum BiasCommands {
         /// Number of threads to use for bias sketching
         #[arg(long)]
         threads: Option<usize>,
+        /// Reject calibration below this positive-set retention fraction
+        #[arg(long, default_value = "0.25")]
+        min_positive_retention: f32,
     },
 
     /// Display statistics for a bias table (.bias file)

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -123,28 +123,37 @@ pub fn write_entries<P: AsRef<Path>>(path: P, entries: &[Entry]) -> io::Result<(
 }
 
 pub struct EntryWriter {
-    writer: BufWriter<File>,
+    path: PathBuf,
+    buffer: Vec<u8>,
+    buffer_size: usize,
     count: u64,
 }
 
 impl EntryWriter {
     pub fn new<P: AsRef<Path>>(path: P, buffer_size: usize) -> io::Result<Self> {
-        let file = File::create(path)?;
+        let path = path.as_ref().to_path_buf();
+        File::create(&path)?;
         Ok(Self {
-            writer: BufWriter::with_capacity(buffer_size, file),
+            path,
+            buffer: Vec::with_capacity(buffer_size),
+            buffer_size: buffer_size.max(ENTRY_SIZE),
             count: 0,
         })
     }
 
     pub fn write(&mut self, entry: &Entry) -> io::Result<()> {
-        self.writer.write_all(bytemuck::bytes_of(entry))?;
+        if self.buffer.len() + ENTRY_SIZE > self.buffer_size {
+            self.flush()?;
+        }
+        self.buffer.extend_from_slice(bytemuck::bytes_of(entry));
         self.count += 1;
         Ok(())
     }
 
     pub fn write_batch(&mut self, entries: &[Entry]) -> io::Result<()> {
-        self.writer.write_all(bytemuck::cast_slice(entries))?;
-        self.count += entries.len() as u64;
+        for entry in entries {
+            self.write(entry)?;
+        }
         Ok(())
     }
 
@@ -153,7 +162,13 @@ impl EntryWriter {
     }
 
     pub fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        let mut file = OpenOptions::new().append(true).open(&self.path)?;
+        file.write_all(&self.buffer)?;
+        self.buffer.clear();
+        Ok(())
     }
 }
 

@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+target
+tools/out
+tests/testfiles
+evaluation/performance/results/raw
+*.jam
+*.bias

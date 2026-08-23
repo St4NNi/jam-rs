@@ -2,11 +2,11 @@ use crate::bias::HashBiasTable;
 use crate::core_utils::passes_entropy_filter;
 use crate::format::{BUCKET_COUNT, ENTRY_SIZE, Entry, bucket_id};
 use crate::io::EntryWriter;
+use crate::jamhash_u64_v1;
 use crossfire::mpsc;
 use crossfire::{MTx, Rx};
 use dashmap::DashMap;
 use indicatif::{ProgressBar, ProgressStyle};
-use jamhash::jamhash_u64;
 use memmap2::Mmap;
 use needletail::{Sequence, parse_fastx_reader};
 use rayon::prelude::*;
@@ -807,9 +807,9 @@ fn sketch_records(
         }
 
         for (_, kmer, _) in sequence.bit_kmers(k, true) {
-            let hash = jamhash_u64(kmer.0);
+            let hash = jamhash_u64_v1(kmer.0);
 
-            if hash >= ctx.frac_max {
+            if hash == 0 || hash >= ctx.frac_max {
                 continue;
             }
 
@@ -1057,8 +1057,8 @@ mod tests {
         assert!(is_compressed([0x42, 0x5A]));
         assert!(is_compressed([0xFD, 0x37]));
         assert!(is_compressed([0x28, 0xB5]));
-        assert!(!is_compressed([b'>', b's']));
-        assert!(!is_compressed([b'@', b'r']));
+        assert!(!is_compressed(*b">s"));
+        assert!(!is_compressed(*b"@r"));
     }
 
     #[test]

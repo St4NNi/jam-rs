@@ -1,0 +1,375 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/schemas/jam-trace-v1.schema.json",
+  "title": "jam-rs trace JSONL record",
+  "description": "One-plasmid-to-many-metagenomes trace evidence. A JSONL stream contains one run_header, zero or more metagenome_result records, and one run_footer.",
+  "type": "object",
+  "required": ["record_type", "schema_version", "run_id"],
+  "properties": {
+    "record_type": {
+      "type": "string",
+      "enum": ["run_header", "metagenome_result", "run_footer"]
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "record_type": {"const": "run_header"},
+        "jam_rs_version": {"type": "string", "minLength": 1},
+        "source_commit": {"type": ["string", "null"]},
+        "started_at_utc": {"type": "string", "minLength": 1},
+        "command": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "plasmid_id": {"type": "string", "minLength": 1},
+        "plasmid_length": {"type": "integer", "minimum": 0},
+        "sensitivity": {"$ref": "#/$defs/sensitivity_config"},
+        "inputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/input_resource"}
+        }
+      },
+      "required": [
+        "record_type",
+        "schema_version",
+        "run_id",
+        "jam_rs_version",
+        "source_commit",
+        "started_at_utc",
+        "command",
+        "plasmid_id",
+        "plasmid_length",
+        "sensitivity",
+        "inputs"
+      ]
+    },
+    {
+      "properties": {
+        "record_type": {"const": "metagenome_result"},
+        "plasmid_id": {"type": "string", "minLength": 1},
+        "metagenome_id": {"type": "string", "minLength": 1},
+        "status": {
+          "type": "string",
+          "enum": ["complete", "partial", "no_candidate", "failed"]
+        },
+        "candidate": {
+          "anyOf": [
+            {"$ref": "#/$defs/candidate"},
+            {"type": "null"}
+          ]
+        },
+        "alignments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/alignment"}
+        },
+        "coverage": {
+          "anyOf": [
+            {"$ref": "#/$defs/coverage"},
+            {"type": "null"}
+          ]
+        },
+        "failures": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/failure"}
+        },
+        "resource_metrics": {"$ref": "#/$defs/resource_metrics"}
+      },
+      "required": [
+        "record_type",
+        "schema_version",
+        "run_id",
+        "plasmid_id",
+        "metagenome_id",
+        "status",
+        "candidate",
+        "alignments",
+        "coverage",
+        "failures",
+        "resource_metrics"
+      ]
+    },
+    {
+      "properties": {
+        "record_type": {"const": "run_footer"},
+        "completed_at_utc": {"type": "string", "minLength": 1},
+        "metagenomes_total": {"type": "integer", "minimum": 0},
+        "metagenomes_with_candidates": {"type": "integer", "minimum": 0},
+        "metagenomes_aligned": {"type": "integer", "minimum": 0},
+        "metagenomes_failed": {"type": "integer", "minimum": 0},
+        "alignments_total": {"type": "integer", "minimum": 0},
+        "resource_metrics": {"$ref": "#/$defs/resource_metrics"}
+      },
+      "required": [
+        "record_type",
+        "schema_version",
+        "run_id",
+        "completed_at_utc",
+        "metagenomes_total",
+        "metagenomes_with_candidates",
+        "metagenomes_aligned",
+        "metagenomes_failed",
+        "alignments_total",
+        "resource_metrics"
+      ]
+    }
+  ],
+  "$defs": {
+    "interval": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "seed_sensitivity": {
+      "type": "object",
+      "required": ["k", "scale", "max_occurrences"],
+      "properties": {
+        "k": {"type": "integer", "minimum": 1},
+        "scale": {"type": "integer", "minimum": 1},
+        "max_occurrences": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "alignment_scoring": {
+      "type": "object",
+      "required": [
+        "match_score",
+        "mismatch_score",
+        "gap_open_score",
+        "gap_extend_score",
+        "band_width"
+      ],
+      "properties": {
+        "match_score": {"type": "integer"},
+        "mismatch_score": {"type": "integer"},
+        "gap_open_score": {"type": "integer"},
+        "gap_extend_score": {"type": "integer"},
+        "band_width": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "sensitivity_config": {
+      "type": "object",
+      "required": [
+        "profile",
+        "primary",
+        "rescue",
+        "max_candidates",
+        "max_anchors_per_candidate",
+        "max_chains_per_candidate",
+        "min_chain_anchors",
+        "max_alignment_window_bases",
+        "max_concurrent_candidates",
+        "alignment"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["fast", "balanced", "sensitive"]
+        },
+        "primary": {"$ref": "#/$defs/seed_sensitivity"},
+        "rescue": {
+          "anyOf": [
+            {"$ref": "#/$defs/seed_sensitivity"},
+            {"type": "null"}
+          ]
+        },
+        "max_candidates": {"type": "integer", "minimum": 1},
+        "max_anchors_per_candidate": {"type": "integer", "minimum": 1},
+        "max_chains_per_candidate": {"type": "integer", "minimum": 1},
+        "min_chain_anchors": {"type": "integer", "minimum": 1},
+        "max_alignment_window_bases": {"type": "integer", "minimum": 1},
+        "max_concurrent_candidates": {"type": "integer", "minimum": 1},
+        "alignment": {"$ref": "#/$defs/alignment_scoring"}
+      },
+      "additionalProperties": false
+    },
+    "input_resource": {
+      "type": "object",
+      "required": ["role", "redacted_locator", "sha256"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "redacted_locator": {"type": "string", "minLength": 1},
+        "sha256": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "metagenome_id",
+        "shared_hashes",
+        "plasmid_hashes",
+        "metagenome_hashes",
+        "plasmid_containment",
+        "metagenome_containment",
+        "rank",
+        "score_mode",
+        "bias_weighted_plasmid_containment",
+        "uniform_hash_e_value"
+      ],
+      "properties": {
+        "metagenome_id": {"type": "string", "minLength": 1},
+        "shared_hashes": {"type": "integer", "minimum": 0},
+        "plasmid_hashes": {"type": "integer", "minimum": 0},
+        "metagenome_hashes": {"type": "integer", "minimum": 0},
+        "plasmid_containment": {"type": "number", "minimum": 0, "maximum": 1},
+        "metagenome_containment": {"type": "number", "minimum": 0, "maximum": 1},
+        "rank": {"type": "integer", "minimum": 1},
+        "score_mode": {"type": "string", "enum": ["uniform", "bias"]},
+        "bias_weighted_plasmid_containment": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "uniform_hash_e_value": {"type": ["number", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "edit_run": {
+      "type": "object",
+      "required": ["operation", "length"],
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": ["equal", "substitution", "insertion", "deletion", "soft_clip"]
+        },
+        "length": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "alignment": {
+      "type": "object",
+      "required": [
+        "plasmid_id",
+        "metagenome_id",
+        "contig_id",
+        "strand",
+        "query_segments",
+        "target_interval",
+        "query_length",
+        "target_length",
+        "origin_crossing",
+        "score",
+        "matches",
+        "substitutions",
+        "insertions",
+        "deletions",
+        "cigar",
+        "edit_script",
+        "chain_score",
+        "primary"
+      ],
+      "properties": {
+        "plasmid_id": {"type": "string", "minLength": 1},
+        "metagenome_id": {"type": "string", "minLength": 1},
+        "contig_id": {"type": "string", "minLength": 1},
+        "strand": {"type": "string", "enum": ["forward", "reverse"]},
+        "query_segments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "target_interval": {"$ref": "#/$defs/interval"},
+        "query_length": {"type": "integer", "minimum": 0},
+        "target_length": {"type": "integer", "minimum": 0},
+        "origin_crossing": {"type": "boolean"},
+        "score": {"type": "integer"},
+        "matches": {"type": "integer", "minimum": 0},
+        "substitutions": {"type": "integer", "minimum": 0},
+        "insertions": {"type": "integer", "minimum": 0},
+        "deletions": {"type": "integer", "minimum": 0},
+        "cigar": {"type": "string"},
+        "edit_script": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/edit_run"}
+        },
+        "chain_score": {"type": "integer"},
+        "primary": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "gap": {
+      "type": "object",
+      "required": ["interval", "length"],
+      "properties": {
+        "interval": {"$ref": "#/$defs/interval"},
+        "length": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "plasmid_length",
+        "supported_bases",
+        "supported_fraction",
+        "primary_intervals",
+        "secondary_intervals",
+        "gaps",
+        "largest_gap"
+      ],
+      "properties": {
+        "plasmid_length": {"type": "integer", "minimum": 0},
+        "supported_bases": {"type": "integer", "minimum": 0},
+        "supported_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "primary_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "secondary_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/gap"}
+        },
+        "largest_gap": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "failure": {
+      "type": "object",
+      "required": ["stage", "code", "message", "resource", "retryable"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string"},
+        "resource": {"type": ["string", "null"]},
+        "retryable": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "resource_metrics": {
+      "type": "object",
+      "required": [
+        "metadata_requests",
+        "range_requests",
+        "stream_requests",
+        "remote_bytes",
+        "cache_bytes",
+        "cache_hits",
+        "retries"
+      ],
+      "properties": {
+        "metadata_requests": {"type": "integer", "minimum": 0},
+        "range_requests": {"type": "integer", "minimum": 0},
+        "stream_requests": {"type": "integer", "minimum": 0},
+        "remote_bytes": {"type": "integer", "minimum": 0},
+        "cache_bytes": {"type": "integer", "minimum": 0},
+        "cache_hits": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  }
+}

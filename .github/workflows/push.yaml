@@ -1,11 +1,30 @@
 name: test_build_push
-on: push
+on:
+  push:
+  pull_request:
+
 jobs:
-  build: # This does not build the whole proto files for production, it tests if rust / tonic
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo test --all-targets
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --doc
+      - run: cargo build --release --locked
+      - name: Synthetic assembly screen
+        run: cargo test --test screen_integration synthetic_truth_and_union_containment_are_reported -- --exact
+      - name: Legacy database compatibility
+        run: cargo test --test screen_integration manifest_stats_legacy_fixture_and_hash_zero_are_compatible -- --exact
+      - name: Local positional trace
+        run: cargo test --test trace_local_e2e -- --exact
+      - name: Remote resource and database cache
+        run: cargo test --test trace_http_remote --test trace_s3_remote --test trace_remote_database
+      - name: Container build
+        run: docker build --build-arg JAM_RS_SOURCE_COMMIT="${GITHUB_SHA}" --tag jam-rs-ci .
+      - name: Container smoke test
+        run: tests/container_smoke.sh jam-rs-ci "$GITHUB_WORKSPACE/tools/out/container-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"

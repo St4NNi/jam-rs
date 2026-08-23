@@ -1,6 +1,6 @@
+use crate::jamhash_u64_v1;
 use anyhow::{Context, Result};
 use indicatif::ProgressBar;
-use jamhash::jamhash_u64;
 use needletail::{Sequence, parse_fastx_file};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -61,7 +61,7 @@ impl CountMinSketch {
             fscale: 1,
         })
         .expect("invalid Count-Min Sketch dimensions");
-        let seeds: Vec<u64> = (0..depth).map(|i| jamhash_u64(i as u64)).collect();
+        let seeds: Vec<u64> = (0..depth).map(|i| jamhash_u64_v1(i as u64)).collect();
         let counts = vec![0u64; cells];
         Self {
             width,
@@ -248,15 +248,15 @@ fn process_path(
         }
 
         for (_, kmer, _) in seq.bit_kmers(k, true) {
-            let hash = jamhash_u64(kmer.0);
-            if hash < frac_max {
+            let hash = jamhash_u64_v1(kmer.0);
+            if hash != 0 && hash < frac_max {
                 raw.cms.increment(hash);
                 raw.total += 1;
                 if raw.samples.len() < MAX_SAMPLE_HASHES {
                     raw.samples.push(hash);
                 } else {
                     let seen = raw.total;
-                    let pick = (jamhash_u64(hash ^ seen) % seen) as usize;
+                    let pick = (jamhash_u64_v1(hash ^ seen) % seen) as usize;
                     if pick < MAX_SAMPLE_HASHES {
                         raw.samples[pick] = hash;
                     }
@@ -273,7 +273,7 @@ fn downsample_samples(samples: &mut Vec<u64>) {
     if samples.len() <= MAX_SAMPLE_HASHES {
         return;
     }
-    samples.sort_unstable_by_key(|&hash| jamhash_u64(hash));
+    samples.sort_unstable_by_key(|&hash| jamhash_u64_v1(hash));
     samples.truncate(MAX_SAMPLE_HASHES);
 }
 

@@ -2,211 +2,201 @@
 [![License](https://img.shields.io/badge/License-MIT-brightgreen.svg)](https://github.com/St4NNi/jam-rs/blob/main/LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/jam-rs.svg)](https://crates.io/crates/jam-rs)
 [![Codecov](https://codecov.io/github/St4NNi/jam-rs/coverage.svg?branch=main)](https://codecov.io/gh/St4NNi/jam-rs)
-[![Dependency status](https://deps.rs/repo/github/St4NNi/jam-rs/status.svg)](https://deps.rs/repo/github/St4NNi/jam-rs)
 
 # jam-rs
 
-Just another minhash (jam). A high-performance FracMinHash implementation for genomic sequence similarity analysis, optimized for searching plasmids, phages, and other small genomic elements in large datasets.
+`jam-rs` is a high-speed candidate finder for known and near-known plasmid traces in metagenomic assemblies. It reports contig-level and assembly-level sketch evidence against a fixed plasmid catalog. Optional target-aware sampling may improve retrieval of represented targets, but final presence calls require independent confirmation.
 
-jam uses a custom hash function ([jamhash](https://github.com/St4NNi/jamhash)) that provides lower collision rates, 2-10x higher speed and better uniformity than murmur3. It also includes a compact memory-mapped database format (`.jam`) for fast random access, and a bias filtering system based on Count-Min Sketches to selectively increase sensitivity for target sequences with either hard cutoffs or a enrichment-based look up table (LUT) filtering.
+The intended workflow is:
 
-### Installation
+```text
+metagenomic assembly FASTA
+    -> jam-rs screening against a versioned plasmid reference catalog
+    -> candidate plasmid references and supporting contigs
+    -> read mapping, marker checks, assembly-graph checks, or other confirmation
+    -> final surveillance report
+```
 
-From [crates.io](https://crates.io/crates/jam-rs):
+A sketch hit is an `alert`, not proof of plasmid presence. Shared mobile elements, repeats, contamination, conserved sequence, or chromosomal integration can all create genuine sketch overlap without an intact plasmid being present.
+
+## Install
+
+Install the current crates.io release:
 
 ```bash
-cargo install jam-rs
+cargo install jam-rs --locked
 ```
 
-From source:
+Or build this source snapshot:
 
 ```bash
-cargo install --git https://github.com/St4NNi/jam-rs
+cargo build --release --locked
+install -m 0755 target/release/jam "$HOME/.local/bin/jam"
 ```
 
-Conda, Docker images and python bindings are planned for the future. In the meantime, you can use the CLI tool directly or call the Rust library from your own Rust code.
+The container build is also tested:
 
-### Key Features
-
-- **Custom hash function**: [jamhash](https://github.com/St4NNi/jamhash) provides lower collisions, better uniformity and is faster compared to murmur3
-- **Bias-aware sketching**: Count-Min Sketch based compositional filtering with automatic background extraction and optional per-bucket enrichment LUT filtering
-- **Complexity filtering**: Shannon entropy threshold to exclude low-complexity k-mers
-- **Memory-conscious build path**: Bucketed temporary files with bounded writer buffers for processing datasets larger than available RAM
-- **Compact storage**: 256-bucket memory-mapped `.jam` format with binary fuse filters for fast random access
-- **Parallel execution**: File-level parallelization via rayon with configurable thread count
-- **Tuned for speed**: jemalloc allocator, LTO, single codegen unit, `opt-level = 3`
-
-### Usage
-
-```console
-$ jam --help
-Just another (genomic) minhasher (jam), obviously blazingly fast
-
-Usage: jam [OPTIONS] <COMMAND>
-
-Commands:
-  sketch  Sketch one or more files and write the result to an output file
-  dist    Estimate containment of a query sequence against a sketch database
-  bias    Build and analyze hash bias tables for filtering
-  stats   Display statistics about a JAM database
-  help    Print this message or the help of the given subcommand(s)
-
-Options:
-  -t, --threads <THREADS>  Number of threads to use [default: 1]
-  -f, --force              Overwrite output files
-  -s, --silent             Silent mode, no (additional) output to stdout
-  -m, --memory <MEMORY>    Maximum memory usage in GB [default: 2]
-  -h, --help               Print help
-  -V, --version            Print version
-```
-
-#### Sketching
-
-Create `.jam` databases from FASTA/FASTQ files (plain or gzip/bzip2/xz/zstd compressed). Supports single files, multiple files, or directories.
-
-```console
-$ jam sketch --help
-Sketch one or more files and write the result to an output file
-
-Usage: jam sketch [OPTIONS] --output <OUTPUT> [INPUT]...
-
-Arguments:
-  [INPUT]...  Input file(s), directories, or file with list of files to be hashed
-
-Options:
-  -o, --output <OUTPUT>          Output file (.jam format)
-  -k, --kmer-size <KMER_SIZE>    K-mer size, all sketches must have the same size to be compared and below 32 [default: 21]
-      --fscale <FSCALE>          Scale the hash space to a minimum fraction of the maximum hash value (FracMinHash) [default: 100]
-      --complexity <COMPLEXITY>   Complexity cut-off, only hash sequences with complexity above this value [default: 0.0]
-      --singleton                Create a separate sketch for each sequence record
-      --temp-dir <TEMP_DIR>      Custom temporary directory for intermediate files during sorting
-      --bias-table <BIAS_TABLE>  Path to a bias table file (.bias) for compositional filtering
-  -h, --help                     Print help
-```
-
-Examples:
 ```bash
-# Sketch a single file
-jam sketch input.fasta -o sketch.jam
-
-# Sketch a directory with 8 threads and FracMinHash scaling
-jam sketch genomes/ -o db.jam --fscale 100 -t 8
-
-# Filter low-complexity k-mers by Shannon entropy
-jam sketch genomes/ -o db.jam --fscale 100 --complexity 1.5
-
-# One sketch per sequence record
-jam sketch multi.fasta -o db.jam --singleton
-
-# Apply bias filtering during sketching
-jam sketch plasmids/ -o filtered.jam --bias-table host_filter.bias
+docker build -t jam-rs:0.10.0 .
+docker run --rm jam-rs:0.10.0 --version
 ```
 
-#### Querying
+## Quick start
 
-Estimate containment of query sequences against a sketch database.
+Build one reference sketch per catalog FASTA record. Use stable, whitespace-free FASTA identifiers so candidate IDs can be passed to downstream tools.
 
-```console
-$ jam dist --help
-Estimate containment of a query sequence against a sketch database
-
-Usage: jam dist [OPTIONS] --input <INPUT> --database <DATABASE>
-
-Options:
-  -i, --input <INPUT>        Input FASTA/FASTQ file to query
-  -d, --database <DATABASE>  Database sketch (.jam file)
-  -o, --output <OUTPUT>      Output to file instead of stdout
-  -c, --cutoff <CUTOFF>      Cut-off value for similarity/containment [default: 0.0]
-      --singleton             Singleton mode, process each query sequence separately
-  -h, --help                 Print help
-```
-
-Examples:
 ```bash
-# Query against a database with a containment cutoff
-jam dist -i query.fasta -d db.jam -c 0.1 -o results.tsv
-
-# Per-sequence queries
-jam dist -i multi_query.fasta -d db.jam --singleton -c 0.1
+jam sketch plasmid_catalog.fasta \
+  --output plasmids.jam \
+  --singleton \
+  --kmer-size 21 \
+  --fscale 100 \
+  --threads 8 \
+  --memory 4
 ```
 
-Output is tab-separated. Unbiased databases report `query`, `db_sample`, `shared_hashes`, `query_hashes`, `db_hashes`, `query_containment`, `db_containment`, and `uniform_hash_e_value`.
+This writes `plasmids.jam` and the provenance sidecar `plasmids.jam.json`.
 
-For databases built with bias filtering, containment is reported on the retained/weighted k-mer subset rather than as raw genomic FracMinHash containment. E-values in the output are labeled as uniform-hash approximations and should be interpreted cautiously in bias mode.
+Screen an assembly, treating each contig as one query:
 
-#### Bias Table Construction
-
-Bias tables allow compositional filtering to increase sensitivity for target sequences while suppressing background noise. They work by scoring k-mers based on their enrichment in a positive (target) set relative to a negative (background) set. By default, hashes are filtered with a hard threshold, but you can enable per-bucket enrichment LUT filtering by supplying both `--target-fscale` and `--max-fscale`.
-
-The underlying data structure is a **Count-Min Sketch (CMS)**, a probabilistic structure that approximates k-mer frequencies using multiple independent hash functions mapped to a fixed-width table. This keeps memory usage constant regardless of the number of distinct k-mers. By default, the CMS uses 1,048,576 columns and 5 hash functions (~5 MB), this should be increased if the expected number of distinct k-mers exceeds ~100 million.
-
-**How it works:**
-
-1. K-mer frequencies from both the positive and negative input sets are counted into separate CMS tables.
-2. **Background extraction**: The positive counts are subtracted from the negative counts (floored at zero). This prevents k-mers naturally shared between target and background from being penalized.
-3. A log-ratio weight is computed per CMS cell: `log((pos + alpha) / (adjusted_neg + alpha))`, where `alpha` is a smoothing parameter.
-4. Weights are quantized to `i8` (-127 to +127) for compact storage.
-5. **Threshold calibration**: All 255 possible thresholds are evaluated. The threshold that maximizes fold enrichment (positive retention / negative retention) is selected.
-6. **Enrichment LUT (optional)**: When `--target-fscale` and `--max-fscale` are set, each weight bucket independently gets an effective fscale derived from empirical positive/negative hash frequencies. Buckets enriched in target sequences are retained more often, while background-enriched buckets can be strongly suppressed or dropped.
-7. **Unseen fscale (optional)**: `--unseen-fscale` sets a fixed effective fscale for weight-zero buckets (unseen/balanced k-mers), independent of the LUT optimizer.
-
-**Effective fscale**: Because the LUT assigns different sampling rates per weight bucket, the overall sampling rate is not uniform. The calibration output reports three derived values:
-- `eff. fscale (pos)`: effective fscale on the positive calibration population (`base_fscale / positive_retention`)
-- `eff. fscale (neg)`: effective fscale on the negative calibration population (`base_fscale / negative_retention`)
-- `eff. fscale (combined)`: geometric mean of the two, useful as a single summary (`base_fscale / sqrt(pos_ret × neg_ret)`)
-
-`jam stats` on a database with an embedded bias table also reports the combined effective fscale inline with the sample rate, e.g. `Sample rate: 1/100 (effective: 1/432)`.
-
-Examples:
 ```bash
-# Build a bias table to filter out host sequences
-jam bias create --positive plasmids.fasta --negative host_genome.fasta -o host_filter.bias
-
-# Enrichment LUT filtering: base fscale 100, pass plasmid-enriched kmers more, suppress host kmers
-jam bias create --positive plasmids.fasta --negative host.fasta -o filter.bias \
-  --target-fscale 100 --max-fscale 10000
-
-# With a stricter positive retention floor and fixed sampling for unbiased kmers
-jam bias create --positive plasmids.fasta --negative host.fasta -o filter.bias \
-  --target-fscale 100 --max-fscale 10000 \
-  --unseen-fscale 1000
-
-# Inspect bias table (text or JSON)
-jam bias stats filter.bias
-jam bias stats filter.bias -o report.json
+jam screen \
+  --input assembly.fasta.gz \
+  --database plasmids.jam \
+  --output contig_hits.tsv \
+  --summary assembly_hits.tsv \
+  --metadata screen_run.json \
+  --min-shared 3 \
+  --min-query-containment 0.0 \
+  --min-reference-containment 0.0 \
+  --top-per-contig 10 \
+  --top-references 100 \
+  --threads 8 \
+  --memory 4
 ```
 
-#### Statistics
+The filters are independent. Query containment is `shared_hashes / query_hashes`; reference containment is `shared_hashes / reference_hashes`. The assembly summary computes the union of shared hashes for each reference, so overlapping contigs cannot count the same reference hash more than once.
 
-Display database statistics including hash counts, distribution analysis, and effective fscale when a bias table is embedded.
+Contig output begins with:
 
-```console
-$ jam stats --help
-Display statistics about a JAM database
-
-Usage: jam stats [OPTIONS] --input <INPUT>
-
-Options:
-  -i, --input <INPUT>  Input JAM database (.jam file)
-      --short          Short summary only
-      --full           Include the full entry statistics
-  -h, --help           Print help
+```text
+schema_version  assembly  query_contig  reference  shared_hashes  query_hashes  reference_hashes  query_containment  reference_containment  ...
 ```
 
-Examples:
+Assembly output begins with:
+
+```text
+schema_version  assembly  reference  supporting_contigs  shared_hashes_union  reference_hashes  aggregate_reference_containment  ...
+```
+
+Both files always contain their stable header, including for an empty assembly
+or a no-hit result. Screening remains a candidate stage; downstream trace,
+mapping, or contextual evidence determines whether a candidate is supported.
+
+Inspect a database without parsing human-readable text:
+
 ```bash
-jam stats -i db.jam --short
-jam stats -i db.jam --full
+jam stats --input plasmids.jam --json
 ```
 
-### License
+## Positional follow-up with `jam trace`
 
-This project is licensed under the MIT license. See the [LICENSE](LICENSE) file for more info.
+`jam trace` is an optional follow-up for one plasmid query across many candidate
+metagenomes. It uses an existing `.jam` metagenome index, then retrieves
+positional evidence from JMA v1 archives or raw assembly resources:
 
-### Feedback & Contributions
+```bash
+jam archive \
+  --input assembly.fasta \
+  --output assembly.jma \
+  --primary-scale 200 \
+  --rescue-scale 500
 
-If you have any ideas, suggestions, or issues, please don't hesitate to open an issue and/or PR. Contributions to this project are always welcome! We appreciate your help in making this project better.
+jam trace \
+  --plasmid plasmid.fasta \
+  --database metagenomes.jam \
+  --catalog metagenomes.tsv \
+  --output plasmid.trace.jsonl.zst \
+  --sensitivity balanced \
+  --min-shared 3 \
+  --threads 8 \
+  --memory 4
+```
 
-### Credits
+The primary positional seed is k=31 for longer exact anchors in a repetitive
+assembly; k=21 is an optional rescue for shorter or more divergent represented
+sequence. This is a fixed engineering contract, not evidence that k=31 is a
+universally optimal k-mer size. Candidate `.jam` sketch parameters remain
+independent and configurable.
 
-This tool is inspired by [finch-rs](https://github.com/onecodex/finch-rs) and [sourmash](https://github.com/sourmash-bio/sourmash). Check them out if you need a more mature ecosystem.
+Catalog JMA/raw resources may be local, `file://`, HTTP(S), or S3-compatible
+object locators. A remote candidate `.jam` is downloaded into an explicit
+identity-checked cache before mmap:
+
+```bash
+jam trace \
+  --plasmid plasmid.fasta \
+  --database https://objects.example.org/metagenomes.jam \
+  --cache-dir cache/jam \
+  --catalog metagenomes.tsv \
+  --output plasmid.trace.jsonl
+```
+
+Alignment and nonredundant plasmid-coordinate coverage are `supported`
+evidence, not confirmation of plasmid presence or fragment linkage. See
+[docs/TRACE.md](docs/TRACE.md), [docs/REMOTE_RESOURCES.md](docs/REMOTE_RESOURCES.md),
+and [examples/trace/run_trace.sh](examples/trace/run_trace.sh).
+
+## Bias-assisted candidate retrieval
+
+Uniform FracMinHash is the baseline. A bias table is an optional, catalog-specific sampler tied to its positive set, chromosome background, k-mer size, and sampling configuration. It is not a classifier or a probability that a k-mer came from a plasmid.
+
+```bash
+jam bias create \
+  --positive catalog_training.fasta \
+  --negative chromosome_background.fasta \
+  --output catalog.bias \
+  --kmer-size 21 \
+  --fscale 100 \
+  --min-positive-retention 0.25
+
+jam sketch plasmid_catalog.fasta \
+  --output plasmids.bias.jam \
+  --singleton \
+  --kmer-size 21 \
+  --bias-table catalog.bias
+```
+
+Bias output uses separate `retained_*` and `bias_weighted_*` fields, includes
+`score_mode=bias` and the bias-table checksum, and reports
+`uniform_hash_e_value=NA`. It never filters on an E-value approximation. A
+recommended use is bias-assisted candidate retrieval followed by uniform
+sketch evidence and independent mapping or contextual confirmation.
+
+## Evaluation
+
+The deterministic harness under [evaluation/trace/](evaluation/trace/) is a
+small reproducibility and smoke-test workload. It does not establish
+production-scale accuracy, remote-storage economics, or a general speed
+advantage. Release measurements must record complete inputs, truth, commands,
+versions, hardware and storage, raw measurements, checksums, and summary
+generation.
+
+## Compatibility and provenance
+
+- `.jam` binary format version remains 3. Existing version-3 files remain readable; the repository tests a fixture created by jam-rs 0.9.11.
+- New builds add `<database>.jam.json`; this sidecar does not alter the binary database.
+- The released hash identity is `jamhash_u64_v1`, provided by the exactly pinned crates.io dependency `jamhash = 0.1.2`.
+- Hash zero is excluded consistently during catalog construction and query construction.
+- Screening TSV and metadata schemas are version `1.0.0`.
+
+See [docs/TRACE.md](docs/TRACE.md) before interpreting trace results. The
+pipeline example is [examples/trace/run_trace.sh](examples/trace/run_trace.sh).
+
+## Citation
+
+Citation metadata are in [CITATION.cff](CITATION.cff). Until a version-specific archive DOI is available, cite the jam-rs release/tag and commit used, plus jamhash and any comparator tools used in the analysis.
+
+## License
+
+jam-rs is available under the [MIT license](LICENSE).

@@ -1,11 +1,11 @@
 [package]
 name = "jam-rs"
-version = "0.9.11"
+version = "0.10.0"
 edition = "2024"
 repository = "https://github.com/St4NNi/jam-rs"
 license = "MIT"
 authors = ["Sebastian Beyvers <sebastian.beyvers@cb.jlug.de>"]
-description = "Just another (genomic) minhash (Jam) implementation in Rust"
+description = "High-speed reference-guided screening for plasmid traces in assemblies"
 keywords = [
     "minhash",
     "metagenomics",
@@ -29,7 +29,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.102"
 dashmap = "6.1.0"
-jamhash = "0.1.2"
+jamhash = "=0.1.2"
 needletail = { version = "0.6.3", features = [
     "flate2",
     "bzip2",
@@ -39,6 +39,7 @@ needletail = { version = "0.6.3", features = [
 rayon = "1.11.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10.9"
 clap = { version = "4.5.60", features = ["derive"] }
 tempfile = "3.25.0"
 crossfire = "3.1.3"
@@ -48,13 +49,14 @@ xorf = { version = "0.12", features = ["serde"] }
 thiserror = "2"
 indicatif = "0.18.4"
 statrs = "0.18"
+zstd = "0.13.3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-jamhash = "0.1.2"
+jamhash = "=0.1.2"
 murmurhash3 = { version = "0.0.5" }
 fastmurmur3 = "0.2.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
@@ -64,6 +66,10 @@ foldhash = "0.2.0"
 
 [[bench]]
 name = "benchmarks"
+harness = false
+
+[[bench]]
+name = "trace_components"
 harness = false
 
 [profile.release]

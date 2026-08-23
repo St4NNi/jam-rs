@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use jam-rs, cite the software release and commit used in your analysis."
+title: "jam-rs: high-speed reference-guided screening for plasmid traces"
+type: software
+version: 0.10.0
+authors:
+  - family-names: Beyvers
+    given-names: Sebastian
+    email: sebastian.beyvers@cb.jlug.de
+repository-code: "https://github.com/St4NNi/jam-rs"
+url: "https://github.com/St4NNi/jam-rs"
+license: MIT
+keywords:
+  - plasmid
+  - metagenomics
+  - FracMinHash
+  - containment
+  - bioinformatics
