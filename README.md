@@ -52,7 +52,7 @@ jam sketch plasmid_catalog.fasta \
   --kmer-size 21 \
   --fscale 100 \
   --threads 8 \
-  --memory 4
+  --memory-target 4
 ```
 
 This writes `plasmids.jam` and the provenance sidecar `plasmids.jam.json`.
@@ -72,7 +72,7 @@ jam screen \
   --top-per-contig 10 \
   --top-references 100 \
   --threads 8 \
-  --memory 4
+  --memory-target 4
 ```
 
 The filters are independent. Query containment is `shared_hashes / query_hashes`; reference containment is `shared_hashes / reference_hashes`. The assembly summary computes the union of shared hashes for each reference, so overlapping contigs cannot count the same reference hash more than once.
@@ -120,8 +120,12 @@ jam trace \
   --sensitivity balanced \
   --min-shared 3 \
   --threads 8 \
-  --memory 4
+  --memory-target 4
 ```
+
+The archive command writes `assembly.jma` and its checksum-bound range index
+`assembly.jma.idx.json`. Production catalog rows identify both objects; strict
+trace runs reject a JMA row without its range index.
 
 The primary positional seed is k=31 for longer exact anchors in a repetitive
 assembly; k=21 is an optional rescue for shorter or more divergent represented
@@ -144,8 +148,9 @@ jam trace \
 
 Alignment and nonredundant plasmid-coordinate coverage are `supported`
 evidence, not confirmation of plasmid presence or fragment linkage. See
-[docs/TRACE.md](docs/TRACE.md), [docs/REMOTE_RESOURCES.md](docs/REMOTE_RESOURCES.md),
-and [examples/trace/run_trace.sh](examples/trace/run_trace.sh).
+[docs/TRACE.md](docs/TRACE.md), [docs/ALGORITHM.md](docs/ALGORITHM.md),
+[docs/REMOTE_RESOURCES.md](docs/REMOTE_RESOURCES.md), and
+[examples/trace/run_trace.sh](examples/trace/run_trace.sh).
 
 ## Bias-assisted candidate retrieval
 
@@ -181,6 +186,18 @@ production-scale accuracy, remote-storage economics, or a general speed
 advantage. Release measurements must record complete inputs, truth, commands,
 versions, hardware and storage, raw measurements, checksums, and summary
 generation.
+
+The bounded release evidence and exact limitations are under
+[evaluation/trace-production/](evaluation/trace-production/). On the recorded
+40-case fragment/indel track, the sensitive Jam path selected all 40 cases and
+recovered 79.1% of truth bases; BLASTn recovered 98.3% and minimap2 86.9% under
+the recorded comparator settings. Jam completed that local task sooner, but
+the methods did not reach matched interval accuracy, so this is not a general
+speed claim. The accession-backed spike track additionally covers exact,
+reverse-complement, split, partial, and near-known traces in chromosome
+backgrounds. Actual S3, read-derived assemblies, independently supported
+natural positives, and the requested 1,000-assembly/100-query scale remain
+unmeasured.
 
 ## Compatibility and provenance
 
