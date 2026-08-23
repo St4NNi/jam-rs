@@ -110,6 +110,45 @@ def _truthy(value: str | None) -> bool:
 
 
 def _manifest_rows(path: Path) -> list[dict[str, str]]:
+    if path.suffix.lower() == ".jsonl":
+        rows: list[dict[str, str]] = []
+        seen: set[str] = set()
+        with path.open(encoding="utf-8") as handle:
+            for line_number, raw in enumerate(handle, 1):
+                if not raw.strip():
+                    continue
+                try:
+                    record = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"invalid JSONL candidate manifest at line {line_number}: {exc.msg}"
+                    ) from exc
+                if not isinstance(record, dict):
+                    raise ValueError(
+                        f"candidate manifest line {line_number} is not a JSON object"
+                    )
+                if record.get("record_type") != "metagenome_result":
+                    continue
+                metagenome_id = record.get("metagenome_id")
+                if not isinstance(metagenome_id, str) or not metagenome_id.strip():
+                    raise ValueError(
+                        f"candidate manifest line {line_number} has no valid metagenome_id"
+                    )
+                metagenome_id = metagenome_id.strip()
+                if metagenome_id in seen:
+                    raise ValueError(
+                        f"candidate manifest repeats metagenome_id {metagenome_id!r}"
+                    )
+                seen.add(metagenome_id)
+                rows.append(
+                    {
+                        "metagenome_id": metagenome_id,
+                        "candidate": "true" if record.get("candidate") is not None else "false",
+                    }
+                )
+        if not rows:
+            raise ValueError("candidate JSONL contains no metagenome_result records")
+        return rows
     with path.open(encoding="utf-8", newline="") as handle:
         sample = handle.read(4096)
         handle.seek(0)
