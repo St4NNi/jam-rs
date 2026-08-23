@@ -177,6 +177,7 @@ pub struct TraceRunFooter {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "record_type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum TraceRecord {
     RunHeader(TraceRunHeader),
     MetagenomeResult(TraceMetagenomeResult),

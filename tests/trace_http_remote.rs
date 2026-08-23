@@ -11,6 +11,7 @@ use jam_rs::resource::{ByteRange, CacheIdentity, RangeReader, ResourceError, Res
 use jam_rs::trace::raw::RawAssembly;
 use remote::HttpFixture;
 use std::fs;
+use std::time::Duration;
 
 fn temporary_directory(prefix: &str) -> tempfile::TempDir {
     tempfile::Builder::new()
@@ -241,7 +242,9 @@ fn remote_raw_streaming_preserves_contigs_and_redacts_query_tokens() {
 
 #[test]
 fn signed_http_failures_do_not_expose_credentials_or_query_tokens() {
-    let fixture = HttpFixture::new(b"unused".to_vec()).fail_all_requests(1);
+    // Metadata may try HEAD and then a ranged GET. Keep every bounded attempt
+    // failing so this test exercises redaction on an actual transport error.
+    let fixture = HttpFixture::new(b"unused".to_vec()).fail_all_requests(16);
     let host_path = fixture
         .url("/missing")
         .strip_prefix("http://")
@@ -263,4 +266,133 @@ fn signed_http_failures_do_not_expose_credentials_or_query_tokens() {
     assert!(!message.contains("password"));
     assert!(!message.contains("top-secret-token"));
     assert!(message.contains("/missing"));
+}
+
+#[test]
+fn http_fixture_records_status_ranges_and_byte_counts() {
+    let fixture = HttpFixture::new(b"0123456789abcdef".to_vec());
+    let resource = ObjectResource::open(
+        fixture.url("/object"),
+        ResourceOpenOptions {
+            cache_block_bytes: 8,
+            max_cache_bytes: 64,
+            max_retries: 0,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resource.read_range(ByteRange::new(3, 5).unwrap()).unwrap(),
+        b"34567"
+    );
+    let range = fixture
+        .range_requests()
+        .into_iter()
+        .find(|request| request.method == "GET")
+        .expect("range GET");
+    assert_eq!(range.status, 206);
+    assert_eq!(range.range, Some((0, 7)));
+    assert_eq!(range.content_range, Some((0, 7, 16)));
+    assert_eq!(range.requested_bytes, 8);
+    assert_eq!(range.returned_bytes, 8);
+}
+
+#[test]
+fn malformed_partial_responses_are_visible_to_the_client() {
+    let fixture = HttpFixture::new(b"0123456789abcdef".to_vec()).with_malformed_content_range();
+    let resource = ObjectResource::open(
+        fixture.url("/object"),
+        ResourceOpenOptions {
+            cache_block_bytes: 8,
+            max_cache_bytes: 64,
+            max_retries: 0,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    let result = resource.read_range(ByteRange::new(3, 5).unwrap());
+    assert!(result.is_err(), "incorrect Content-Range must be rejected");
+    assert!(
+        fixture
+            .range_requests()
+            .iter()
+            .any(|request| { request.status == 206 && request.content_range != Some((0, 7, 16)) })
+    );
+}
+
+#[test]
+fn advertised_ranges_that_return_200_are_explicitly_fallback_or_error() {
+    let fixture = HttpFixture::new(b"0123456789abcdef".to_vec()).ignoring_ranges();
+    let resource = ObjectResource::open(
+        fixture.url("/object"),
+        ResourceOpenOptions {
+            cache_block_bytes: 8,
+            max_cache_bytes: 64,
+            max_retries: 0,
+            allow_full_download_fallback: true,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        resource.read_range(ByteRange::new(3, 5).unwrap()).unwrap(),
+        b"34567"
+    );
+    assert!(fixture.range_requests().iter().any(|request| {
+        request.status == 200 && request.range == Some((0, 7)) && request.returned_bytes == 16
+    }));
+
+    let strict = ObjectResource::open(
+        fixture.url("/strict"),
+        ResourceOpenOptions {
+            cache_block_bytes: 8,
+            max_cache_bytes: 64,
+            max_retries: 0,
+            allow_full_download_fallback: false,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(strict.read_range(ByteRange::new(3, 5).unwrap()).is_err());
+}
+
+#[test]
+fn http_status_failures_are_recorded_without_leaking_locator_credentials() {
+    for status in [403, 404, 503] {
+        let fixture = HttpFixture::new(b"unavailable".to_vec()).with_status(status);
+        let host_path = fixture
+            .url("/object")
+            .strip_prefix("http://")
+            .unwrap()
+            .to_string();
+        let resource = ObjectResource::open(
+            format!("http://user:secret@{host_path}?token=do-not-leak"),
+            ResourceOpenOptions {
+                max_retries: 0,
+                ..ResourceOpenOptions::default()
+            },
+        )
+        .unwrap();
+        let error = resource.metadata().expect_err("status must fail");
+        let message = error.to_string();
+        assert!(!message.contains("secret"));
+        assert!(!message.contains("do-not-leak"));
+        assert_eq!(fixture.statuses().last().copied(), Some(status));
+    }
+}
+
+#[test]
+fn delayed_http_response_exercises_timeout_path() {
+    let fixture = HttpFixture::new(b"slow".to_vec()).delay_response(Duration::from_secs(2));
+    let resource = ObjectResource::open(
+        fixture.url("/slow"),
+        ResourceOpenOptions {
+            request_timeout_seconds: 1,
+            max_retries: 0,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(resource.metadata().is_err());
+    assert!(!fixture.requests().is_empty());
 }

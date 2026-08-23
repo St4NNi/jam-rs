@@ -122,12 +122,59 @@ pub struct CacheIdentity {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceMetrics {
     pub metadata_requests: u64,
+    pub head_requests: u64,
+    pub get_requests: u64,
     pub range_requests: u64,
     pub stream_requests: u64,
+    pub requested_bytes: u64,
+    pub returned_bytes: u64,
+    pub decoded_bytes: u64,
     pub remote_bytes: u64,
     pub cache_bytes: u64,
     pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_evictions: u64,
+    pub stale_cache_rejections: u64,
     pub retries: u64,
+    pub full_object_fallbacks: u64,
+    pub seed_buckets_read: u64,
+    pub sequence_blocks_read: u64,
+}
+
+impl ResourceMetrics {
+    #[must_use]
+    pub fn saturating_add(self, other: Self) -> Self {
+        Self {
+            metadata_requests: self
+                .metadata_requests
+                .saturating_add(other.metadata_requests),
+            head_requests: self.head_requests.saturating_add(other.head_requests),
+            get_requests: self.get_requests.saturating_add(other.get_requests),
+            range_requests: self.range_requests.saturating_add(other.range_requests),
+            stream_requests: self.stream_requests.saturating_add(other.stream_requests),
+            requested_bytes: self.requested_bytes.saturating_add(other.requested_bytes),
+            returned_bytes: self.returned_bytes.saturating_add(other.returned_bytes),
+            decoded_bytes: self.decoded_bytes.saturating_add(other.decoded_bytes),
+            remote_bytes: self.remote_bytes.saturating_add(other.remote_bytes),
+            cache_bytes: self.cache_bytes.saturating_add(other.cache_bytes),
+            cache_hits: self.cache_hits.saturating_add(other.cache_hits),
+            cache_misses: self.cache_misses.saturating_add(other.cache_misses),
+            cache_evictions: self.cache_evictions.saturating_add(other.cache_evictions),
+            stale_cache_rejections: self
+                .stale_cache_rejections
+                .saturating_add(other.stale_cache_rejections),
+            retries: self.retries.saturating_add(other.retries),
+            full_object_fallbacks: self
+                .full_object_fallbacks
+                .saturating_add(other.full_object_fallbacks),
+            seed_buckets_read: self
+                .seed_buckets_read
+                .saturating_add(other.seed_buckets_read),
+            sequence_blocks_read: self
+                .sequence_blocks_read
+                .saturating_add(other.sequence_blocks_read),
+        }
+    }
 }
 
 /// Shared opening and cache limits for all resource schemes.

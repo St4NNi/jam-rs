@@ -26,4 +26,4 @@ pub use model::{
 
 pub const TRACE_ALGORITHM_ID: &str = "jam-seed-chain-align-v1";
 pub const TRACE_ALGORITHM_VERSION: u16 = 1;
-pub const TRACE_JSON_SCHEMA_VERSION: &str = "1.1.0";
+pub const TRACE_JSON_SCHEMA_VERSION: &str = "1.2.0";

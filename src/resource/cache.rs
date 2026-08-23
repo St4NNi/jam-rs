@@ -1,5 +1,6 @@
 //! Bounded, identity-aware block caching for range resources.
 
+use super::metrics::MetricsCounter;
 use super::{ByteRange, CacheIdentity, ResourceError, ResourceResult};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -71,11 +72,35 @@ impl BlockCache {
 
     /// Select an identity and invalidate blocks from a previous version.
     pub fn prepare(&self, identity: &CacheIdentity) -> ResourceResult<()> {
+        self.prepare_inner(identity, None)
+    }
+
+    /// Select an identity and account for stale bytes discarded during the
+    /// identity transition.
+    pub(crate) fn prepare_with_metrics(
+        &self,
+        identity: &CacheIdentity,
+        metrics: &MetricsCounter,
+    ) -> ResourceResult<()> {
+        self.prepare_inner(identity, Some(metrics))
+    }
+
+    fn prepare_inner(
+        &self,
+        identity: &CacheIdentity,
+        metrics: Option<&MetricsCounter>,
+    ) -> ResourceResult<()> {
         let mut state = self.state.lock().map_err(|_| ResourceError::Io {
             locator: identity.redacted_locator.clone(),
             message: "cache lock poisoned".to_string(),
         })?;
         if state.identity.as_ref() != Some(identity) {
+            if state.identity.is_some()
+                && let Some(metrics) = metrics
+            {
+                metrics.stale_cache_rejection();
+                metrics.cache_evictions(state.blocks.len());
+            }
             state.identity = Some(identity.clone());
             state.blocks.clear();
             state.order.clear();
@@ -86,11 +111,35 @@ impl BlockCache {
 
     /// Return a full block when present for the selected identity.
     pub fn get(&self, identity: &CacheIdentity, offset: u64) -> ResourceResult<Option<Vec<u8>>> {
+        self.get_inner(identity, offset, None)
+    }
+
+    pub(crate) fn get_with_metrics(
+        &self,
+        identity: &CacheIdentity,
+        offset: u64,
+        metrics: &MetricsCounter,
+    ) -> ResourceResult<Option<Vec<u8>>> {
+        self.get_inner(identity, offset, Some(metrics))
+    }
+
+    fn get_inner(
+        &self,
+        identity: &CacheIdentity,
+        offset: u64,
+        metrics: Option<&MetricsCounter>,
+    ) -> ResourceResult<Option<Vec<u8>>> {
         let mut state = self.state.lock().map_err(|_| ResourceError::Io {
             locator: identity.redacted_locator.clone(),
             message: "cache lock poisoned".to_string(),
         })?;
         if state.identity.as_ref() != Some(identity) {
+            if state.identity.is_some()
+                && let Some(metrics) = metrics
+            {
+                metrics.stale_cache_rejection();
+                metrics.cache_evictions(state.blocks.len());
+            }
             state.identity = Some(identity.clone());
             state.blocks.clear();
             state.order.clear();
@@ -107,11 +156,37 @@ impl BlockCache {
         offset: u64,
         bytes: Vec<u8>,
     ) -> ResourceResult<()> {
+        self.insert_inner(identity, offset, bytes, None)
+    }
+
+    pub(crate) fn insert_with_metrics(
+        &self,
+        identity: &CacheIdentity,
+        offset: u64,
+        bytes: Vec<u8>,
+        metrics: &MetricsCounter,
+    ) -> ResourceResult<()> {
+        self.insert_inner(identity, offset, bytes, Some(metrics))
+    }
+
+    fn insert_inner(
+        &self,
+        identity: &CacheIdentity,
+        offset: u64,
+        bytes: Vec<u8>,
+        metrics: Option<&MetricsCounter>,
+    ) -> ResourceResult<()> {
         let mut state = self.state.lock().map_err(|_| ResourceError::Io {
             locator: identity.redacted_locator.clone(),
             message: "cache lock poisoned".to_string(),
         })?;
         if state.identity.as_ref() != Some(identity) {
+            if state.identity.is_some()
+                && let Some(metrics) = metrics
+            {
+                metrics.stale_cache_rejection();
+                metrics.cache_evictions(state.blocks.len());
+            }
             state.identity = Some(identity.clone());
             state.blocks.clear();
             state.order.clear();
@@ -139,6 +214,9 @@ impl BlockCache {
                 state.bytes = state
                     .bytes
                     .saturating_sub(u64::try_from(previous.len()).unwrap_or(u64::MAX));
+                if let Some(metrics) = metrics {
+                    metrics.cache_eviction();
+                }
             }
         }
         if state.bytes.saturating_add(len) <= self.max_bytes {
@@ -214,5 +292,37 @@ impl Default for BlockCache {
     fn default() -> Self {
         Self::new(1024 * 1024, 4 * 1024 * 1024 * 1024)
             .expect("default cache configuration is valid")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockCache, CacheIdentity, MetricsCounter};
+
+    fn identity(version: &str) -> CacheIdentity {
+        CacheIdentity {
+            redacted_locator: "https://example.org/object".to_string(),
+            version: version.to_string(),
+            size: 8,
+        }
+    }
+
+    #[test]
+    fn metrics_count_eviction_and_stale_identity() {
+        let cache = BlockCache::new(4, 4).unwrap();
+        let metrics = MetricsCounter::default();
+        let first = identity("one");
+        cache.prepare_with_metrics(&first, &metrics).unwrap();
+        cache
+            .insert_with_metrics(&first, 0, b"abcd".to_vec(), &metrics)
+            .unwrap();
+        cache
+            .insert_with_metrics(&first, 4, b"efgh".to_vec(), &metrics)
+            .unwrap();
+        let second = identity("two");
+        cache.prepare_with_metrics(&second, &metrics).unwrap();
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.cache_evictions, 2);
+        assert_eq!(snapshot.stale_cache_rejections, 1);
     }
 }

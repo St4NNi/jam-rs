@@ -18,6 +18,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 const CURL: &str = "curl";
+const MAX_RESPONSE_HEADER_BYTES: u64 = 1024 * 1024;
 
 /// A remote object addressed by HTTP(S) or S3.
 pub struct ObjectResource {
@@ -89,7 +90,12 @@ impl ObjectResource {
         ]
     }
 
-    fn execute(&self, extra: &[String]) -> ResourceResult<Vec<u8>> {
+    fn execute(
+        &self,
+        extra: &[String],
+        max_output_bytes: u64,
+        requested_bytes: Option<u64>,
+    ) -> ResourceResult<Vec<u8>> {
         let attempts = retry_count(self.options.max_retries);
         let mut last_error = None;
         for attempt in 0..attempts {
@@ -97,16 +103,63 @@ impl ObjectResource {
             command.args(self.curl_args());
             command.args(extra);
             command.arg(&self.request_url);
-            let output = command.output().map_err(|error| {
-                transport_error(&self.locator, format!("unable to execute curl: {error}"))
+            let is_head = extra.iter().any(|argument| argument == "--head");
+            if is_head {
+                self.metrics.head_request();
+            } else {
+                self.metrics.get_request();
+            }
+            if let Some(bytes) = requested_bytes {
+                self.metrics.requested_bytes(bytes);
+            }
+            let mut child = command
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| {
+                    transport_error(&self.locator, format!("unable to execute curl: {error}"))
+                })?;
+            let mut stdout = child.stdout.take().ok_or_else(|| {
+                transport_error(&self.locator, "curl did not provide a readable stdout")
             })?;
-            if output.status.success() {
-                return Ok(output.stdout);
+            let max_output_bytes = usize::try_from(max_output_bytes).unwrap_or(usize::MAX);
+            let mut output = Vec::new();
+            let mut buffer = [0_u8; 8192];
+            loop {
+                let count = match stdout.read(&mut buffer) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(transport_error(
+                            &self.locator,
+                            format!("unable to read curl response: {error}"),
+                        ));
+                    }
+                };
+                if count == 0 {
+                    break;
+                }
+                if output.len().saturating_add(count) > max_output_bytes {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(transport_error(
+                        &self.locator,
+                        format!("response exceeds configured limit of {max_output_bytes} bytes"),
+                    ));
+                }
+                output.extend_from_slice(&buffer[..count]);
+            }
+            let status = child.wait().map_err(|error| {
+                transport_error(&self.locator, format!("unable to wait for curl: {error}"))
+            })?;
+            if status.success() {
+                return Ok(output);
             }
             if attempt + 1 < attempts {
                 self.metrics.retry();
             }
-            last_error = Some(format!("curl exited with status {}", output.status));
+            last_error = Some(format!("curl exited with status {status}"));
         }
         Err(transport_error(
             &self.locator,
@@ -114,27 +167,44 @@ impl ObjectResource {
         ))
     }
 
-    fn execute_headers(&self, extra: &[String]) -> ResourceResult<Vec<u8>> {
+    fn execute_headers(
+        &self,
+        extra: &[String],
+        requested_bytes: Option<u64>,
+    ) -> ResourceResult<Vec<u8>> {
         let mut args = vec!["--dump-header".to_string(), "-".to_string()];
         args.extend_from_slice(extra);
         // Discard the response body.  `--head` is not used here because a few
         // object servers reject HEAD while accepting a range GET.
         args.extend(["--output".to_string(), "/dev/null".to_string()]);
-        self.execute(&args)
+        self.execute(&args, MAX_RESPONSE_HEADER_BYTES, requested_bytes)
     }
 
     fn fetch_metadata(&self) -> ResourceResult<ResourceMetadata> {
-        let mut headers = self.execute_headers(&["--head".to_string()])?;
-        let mut metadata = parse_metadata_headers(&headers);
+        let (mut metadata, mut head_error) =
+            match self.execute_headers(&["--head".to_string()], None) {
+                Ok(headers) => (parse_metadata_headers(&headers), None),
+                Err(error) => (ParsedHeaders::default(), Some(error)),
+            };
         if metadata.size.is_none() {
-            headers = self.execute_headers(&["--range".to_string(), "0-0".to_string()])?;
-            metadata = parse_metadata_headers(&headers);
+            let headers =
+                self.execute_headers(&["--range".to_string(), "0-0".to_string()], Some(1));
+            match headers {
+                Ok(headers) => metadata = parse_metadata_headers(&headers),
+                Err(error) => {
+                    if head_error.is_none() {
+                        head_error = Some(error);
+                    }
+                }
+            }
         }
         let size = metadata.size.ok_or_else(|| {
-            transport_error(
-                &self.locator,
-                "remote response did not include Content-Length or Content-Range",
-            )
+            head_error.unwrap_or_else(|| {
+                transport_error(
+                    &self.locator,
+                    "remote response did not include Content-Length or Content-Range",
+                )
+            })
         })?;
         Ok(ResourceMetadata {
             size,
@@ -169,7 +239,12 @@ impl ObjectResource {
         if !metadata.accepts_ranges && !self.options.allow_full_download_fallback {
             return Err(ResourceError::RangeUnsupported(self.locator.redacted()));
         }
-        let mut extra = Vec::new();
+        let mut extra = vec!["--dump-header".to_string(), "-".to_string()];
+        let requested_bytes = if metadata.accepts_ranges {
+            u64::try_from(expected).unwrap_or(u64::MAX)
+        } else {
+            metadata.size
+        };
         if metadata.accepts_ranges {
             let end = range
                 .end()?
@@ -180,39 +255,126 @@ impl ObjectResource {
                 })?;
             extra.extend(["--range".to_string(), format!("{}-{end}", range.offset)]);
         }
-        let bytes = self.execute(&extra)?;
-        self.metrics
-            .remote_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-        if bytes.len() == expected {
-            return Ok(bytes);
-        }
-        // Some servers advertise range support but return a complete object.
-        // Slice it only when explicitly permitted by the opening options.
-        if self.options.allow_full_download_fallback
-            && bytes.len() == usize::try_from(metadata.size).unwrap_or(usize::MAX)
-        {
-            let start = usize::try_from(range.offset).map_err(|_| ResourceError::Io {
-                locator: self.locator.redacted(),
-                message: "range offset is too large for this platform".to_string(),
-            })?;
-            let end = start
-                .checked_add(expected)
-                .ok_or_else(|| ResourceError::Io {
-                    locator: self.locator.redacted(),
-                    message: "range end is too large for this platform".to_string(),
-                })?;
-            if end <= bytes.len() {
-                return Ok(bytes[start..end].to_vec());
+        let fallback_limit = metadata.size.min(self.options.max_cache_bytes);
+        let max_body = if metadata.accepts_ranges {
+            u64::try_from(expected)
+                .unwrap_or(u64::MAX)
+                .max(fallback_limit)
+        } else {
+            if metadata.size > self.options.max_cache_bytes {
+                return Err(transport_error(
+                    &self.locator,
+                    format!(
+                        "full-object fallback of {} bytes exceeds max_cache_bytes {}",
+                        metadata.size, self.options.max_cache_bytes
+                    ),
+                ));
             }
+            metadata.size
+        };
+        let max_output = MAX_RESPONSE_HEADER_BYTES.saturating_add(max_body);
+        let raw = self.execute(&extra, max_output, Some(requested_bytes))?;
+        let response = parse_http_response(&raw, &self.locator)?;
+        let body_length = u64::try_from(response.body.len()).unwrap_or(u64::MAX);
+        self.metrics.returned_bytes(body_length);
+        self.metrics.remote_bytes(body_length);
+        match response.status {
+            206 => {
+                let expected_end =
+                    range
+                        .end()?
+                        .checked_sub(1)
+                        .ok_or_else(|| ResourceError::Io {
+                            locator: self.locator.redacted(),
+                            message: "non-empty range has no end".to_string(),
+                        })?;
+                let Some(content_range) = response.headers.content_range else {
+                    return Err(transport_error(
+                        &self.locator,
+                        "206 response did not include Content-Range",
+                    ));
+                };
+                if content_range.start != range.offset
+                    || content_range.end != expected_end
+                    || content_range.total != metadata.size
+                {
+                    return Err(transport_error(
+                        &self.locator,
+                        format!(
+                            "206 Content-Range bytes {}-{}/{} does not match requested {}-{}/{}",
+                            content_range.start,
+                            content_range.end,
+                            content_range.total,
+                            range.offset,
+                            expected_end,
+                            metadata.size
+                        ),
+                    ));
+                }
+                if response.body.len() != expected {
+                    return Err(transport_error(
+                        &self.locator,
+                        format!(
+                            "206 response length {} does not match requested {}",
+                            response.body.len(),
+                            expected
+                        ),
+                    ));
+                }
+                Ok(response.body)
+            }
+            200 => {
+                if !self.options.allow_full_download_fallback {
+                    return Err(ResourceError::RangeUnsupported(self.locator.redacted()));
+                }
+                if metadata.size > self.options.max_cache_bytes {
+                    return Err(transport_error(
+                        &self.locator,
+                        format!(
+                            "full-object fallback of {} bytes exceeds max_cache_bytes {}",
+                            metadata.size, self.options.max_cache_bytes
+                        ),
+                    ));
+                }
+                let object_size =
+                    usize::try_from(metadata.size).map_err(|_| ResourceError::Io {
+                        locator: self.locator.redacted(),
+                        message: "full object is too large for this platform".to_string(),
+                    })?;
+                if response.body.len() != object_size {
+                    return Err(transport_error(
+                        &self.locator,
+                        format!(
+                            "full-object fallback length {} does not match object size {}",
+                            response.body.len(),
+                            object_size
+                        ),
+                    ));
+                }
+                let start = usize::try_from(range.offset).map_err(|_| ResourceError::Io {
+                    locator: self.locator.redacted(),
+                    message: "range offset is too large for this platform".to_string(),
+                })?;
+                let end = start
+                    .checked_add(expected)
+                    .ok_or_else(|| ResourceError::Io {
+                        locator: self.locator.redacted(),
+                        message: "range end is too large for this platform".to_string(),
+                    })?;
+                if end > response.body.len() {
+                    return Err(transport_error(
+                        &self.locator,
+                        "full-object fallback does not contain requested range",
+                    ));
+                }
+                self.metrics.full_object_fallback();
+                Ok(response.body[start..end].to_vec())
+            }
+            status => Err(transport_error(
+                &self.locator,
+                format!("unexpected HTTP status {status} for range request"),
+            )),
         }
-        Err(transport_error(
-            &self.locator,
-            format!(
-                "range response length {} does not match requested {}",
-                bytes.len(),
-                expected
-            ),
-        ))
     }
 
     fn read_cached(
@@ -224,7 +386,7 @@ impl ObjectResource {
         if range.is_empty() {
             return Ok(Vec::new());
         }
-        self.cache.prepare(identity)?;
+        self.cache.prepare_with_metrics(identity, &self.metrics)?;
         let requested_end = range.end()?;
         let mut output =
             Vec::with_capacity(
@@ -238,7 +400,10 @@ impl ObjectResource {
                 .saturating_add(self.cache.block_bytes())
                 .min(metadata.size);
             let block_range = ByteRange::new(block_offset, block_end.saturating_sub(block_offset))?;
-            let block = if let Some(bytes) = self.cache.get(identity, block_offset)? {
+            let block = if let Some(bytes) =
+                self.cache
+                    .get_with_metrics(identity, block_offset, &self.metrics)?
+            {
                 let overlap_start = range.offset.max(block_offset);
                 let overlap_end = requested_end.min(block_end);
                 self.metrics.cache_hit();
@@ -246,8 +411,14 @@ impl ObjectResource {
                     .cache_bytes(overlap_end.saturating_sub(overlap_start));
                 bytes
             } else {
+                self.metrics.cache_miss();
                 let bytes = self.read_uncached(block_range, metadata)?;
-                self.cache.insert(identity, block_offset, bytes.clone())?;
+                self.cache.insert_with_metrics(
+                    identity,
+                    block_offset,
+                    bytes.clone(),
+                    &self.metrics,
+                )?;
                 bytes
             };
             let copy_start = usize::try_from(range.offset.max(block_offset) - block_offset)
@@ -270,6 +441,8 @@ impl ObjectResource {
             }
             output.extend_from_slice(&block[copy_start..copy_end]);
         }
+        self.metrics
+            .decoded_bytes(u64::try_from(output.len()).unwrap_or(u64::MAX));
         Ok(output)
     }
 }
@@ -306,6 +479,7 @@ impl RangeReader for ObjectResource {
 
     fn stream(&self) -> ResourceResult<Box<dyn Read + Send>> {
         self.metrics.stream_request();
+        self.metrics.get_request();
         let mut command = Command::new(CURL);
         command
             .args(self.curl_args())
@@ -339,15 +513,17 @@ struct ChildReader {
 impl Read for ChildReader {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         let count = self.stdout.read(bytes)?;
-        self.metrics
-            .remote_bytes(u64::try_from(count).unwrap_or(u64::MAX));
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.metrics.remote_bytes(count);
+        self.metrics.returned_bytes(count);
+        self.metrics.decoded_bytes(count);
         if count == 0 {
             let status = self.child.wait()?;
             if !status.success() {
                 return Err(io::Error::other("remote stream command failed"));
             }
         }
-        Ok(count)
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 }
 
@@ -360,25 +536,86 @@ impl Drop for ChildReader {
 
 #[derive(Default)]
 struct ParsedHeaders {
+    status: u16,
     size: Option<u64>,
     etag: Option<String>,
     last_modified: Option<String>,
     accepts_ranges: bool,
+    content_range: Option<ContentRange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ContentRange {
+    start: u64,
+    end: u64,
+    total: u64,
+}
+
+struct HttpResponse {
+    status: u16,
+    headers: ParsedHeaders,
+    body: Vec<u8>,
+}
+
+fn parse_http_response(bytes: &[u8], locator: &ResourceLocator) -> ResourceResult<HttpResponse> {
+    let mut cursor = 0;
+    loop {
+        let Some(relative_start) = find_http_status(bytes, cursor) else {
+            return Err(transport_error(
+                locator,
+                "curl response did not include an HTTP status header",
+            ));
+        };
+        let start = cursor + relative_start;
+        let Some(relative_end) = find_bytes(&bytes[start..], b"\r\n\r\n") else {
+            return Err(transport_error(
+                locator,
+                "curl response headers were incomplete",
+            ));
+        };
+        let header_end = start + relative_end + 4;
+        let headers = parse_header_block(&bytes[start..header_end]);
+        if headers.status == 0 {
+            return Err(transport_error(
+                locator,
+                "curl response had an invalid HTTP status header",
+            ));
+        }
+        // Curl emits intermediate redirect and informational response headers
+        // before the final response when --location is enabled.
+        if headers.status == 100 || (300..400).contains(&headers.status) {
+            cursor = header_end;
+            continue;
+        }
+        return Ok(HttpResponse {
+            status: headers.status,
+            headers,
+            body: bytes[header_end..].to_vec(),
+        });
+    }
 }
 
 fn parse_metadata_headers(bytes: &[u8]) -> ParsedHeaders {
-    let text = String::from_utf8_lossy(bytes);
-    let block = text
-        .split("\r\n\r\n")
-        .filter(|part| part.lines().any(|line| line.starts_with("HTTP/")))
-        .last()
-        .unwrap_or(text.as_ref());
+    let mut cursor = 0;
     let mut parsed = ParsedHeaders::default();
-    let mut status = 0u16;
-    let mut content_range_size = None;
-    for line in block.lines() {
+    while let Some(relative_start) = find_http_status(bytes, cursor) {
+        let start = cursor + relative_start;
+        let Some(relative_end) = find_bytes(&bytes[start..], b"\r\n\r\n") else {
+            break;
+        };
+        let header_end = start + relative_end + 4;
+        parsed = parse_header_block(&bytes[start..header_end]);
+        cursor = header_end;
+    }
+    parsed
+}
+
+fn parse_header_block(block: &[u8]) -> ParsedHeaders {
+    let text = String::from_utf8_lossy(block);
+    let mut parsed = ParsedHeaders::default();
+    for line in text.lines() {
         if let Some(value) = line.strip_prefix("HTTP/") {
-            status = value
+            parsed.status = value
                 .split_whitespace()
                 .nth(1)
                 .and_then(|value| value.parse().ok())
@@ -392,8 +629,9 @@ fn parse_metadata_headers(bytes: &[u8]) -> ParsedHeaders {
         match name.to_ascii_lowercase().as_str() {
             "content-length" => parsed.size = value.parse().ok(),
             "content-range" => {
-                if let Some((_, total)) = value.rsplit_once('/') {
-                    content_range_size = total.parse().ok();
+                if let Some(content_range) = parse_content_range(value) {
+                    parsed.size = Some(content_range.total);
+                    parsed.content_range = Some(content_range);
                 }
             }
             "accept-ranges" => parsed.accepts_ranges = value.eq_ignore_ascii_case("bytes"),
@@ -402,11 +640,38 @@ fn parse_metadata_headers(bytes: &[u8]) -> ParsedHeaders {
             _ => {}
         }
     }
-    if let Some(size) = content_range_size {
-        parsed.size = Some(size);
-    }
-    parsed.accepts_ranges |= status == 206;
+    parsed.accepts_ranges |= parsed.status == 206;
     parsed
+}
+
+fn parse_content_range(value: &str) -> Option<ContentRange> {
+    let (unit, value) = value.split_once(|character: char| character.is_ascii_whitespace())?;
+    let value = value.trim_start();
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let value = value.trim_start();
+    let (range, total) = value.split_once('/')?;
+    let total = total.parse().ok()?;
+    let (start, end) = range.split_once('-')?;
+    Some(ContentRange {
+        start: start.parse().ok()?,
+        end: end.parse().ok()?,
+        total,
+    })
+}
+
+fn find_http_status(bytes: &[u8], from: usize) -> Option<usize> {
+    bytes
+        .get(from..)?
+        .windows(5)
+        .position(|window| window == b"HTTP/")
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn request_url(locator: &ResourceLocator) -> ResourceResult<String> {
@@ -438,7 +703,7 @@ fn request_url(locator: &ResourceLocator) -> ResourceResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_metadata_headers, request_url};
+    use super::{parse_http_response, parse_metadata_headers, request_url};
     use crate::resource::ResourceLocator;
 
     #[test]
@@ -456,5 +721,37 @@ mod tests {
             request_url(&locator).unwrap(),
             "https://s3.amazonaws.com/bucket/path/object.jma"
         );
+    }
+
+    #[test]
+    fn parses_response_body_separately_from_content_range() {
+        let locator = ResourceLocator::parse("https://example.org/object").unwrap();
+        let response = parse_http_response(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 3-6/16\r\n\r\n3456",
+            &locator,
+        )
+        .unwrap();
+        assert_eq!(response.status, 206);
+        assert_eq!(response.body, b"3456");
+        assert_eq!(
+            response.headers.content_range,
+            Some(super::ContentRange {
+                start: 3,
+                end: 6,
+                total: 16,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_redirect_then_final_response() {
+        let locator = ResourceLocator::parse("https://example.org/object").unwrap();
+        let response = parse_http_response(
+            b"HTTP/1.1 302 Found\r\nLocation: /object\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nbody",
+            &locator,
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"body");
     }
 }

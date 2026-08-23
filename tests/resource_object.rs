@@ -1,5 +1,7 @@
 use jam_rs::resource::object::ObjectResource;
 use jam_rs::resource::{ByteRange, RangeReader, ResourceOpenOptions};
+#[path = "support/remote/mod.rs"]
+mod remote;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -89,4 +91,74 @@ fn http_ranges_use_a_bounded_cache() {
     assert!(second.cache_hits > first.cache_hits);
     assert!(second.remote_bytes > 0);
     server.join().unwrap();
+}
+
+#[test]
+fn ranged_reads_require_an_exact_content_range() {
+    let fixture = remote_fixture(b"0123456789abcdef".to_vec()).with_malformed_content_range();
+    let resource = ObjectResource::open(
+        fixture.url("/fixture"),
+        ResourceOpenOptions {
+            cache_block_bytes: 16,
+            max_cache_bytes: 64,
+            max_retries: 0,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    let error = resource
+        .read_range(ByteRange::new(3, 4).unwrap())
+        .expect_err("mismatched Content-Range must be rejected");
+    assert!(matches!(
+        error,
+        jam_rs::resource::ResourceError::Transport { .. }
+    ));
+    let metrics = resource.metrics();
+    assert!(metrics.head_requests >= 1);
+    assert!(metrics.get_requests >= 1);
+    assert!(metrics.requested_bytes >= 4);
+    assert!(metrics.returned_bytes >= 4);
+}
+
+#[test]
+fn full_object_fallback_is_counted_and_bounded() {
+    let fixture = remote_fixture(b"0123456789abcdef".to_vec()).ignoring_ranges();
+    let allowed = ObjectResource::open(
+        fixture.url("/fixture"),
+        ResourceOpenOptions {
+            cache_block_bytes: 16,
+            max_cache_bytes: 32,
+            max_retries: 0,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        allowed.read_range(ByteRange::new(3, 4).unwrap()).unwrap(),
+        b"3456"
+    );
+    let allowed_metrics = allowed.metrics();
+    assert_eq!(allowed_metrics.full_object_fallbacks, 1);
+    assert_eq!(allowed_metrics.returned_bytes, 16);
+    assert_eq!(allowed_metrics.requested_bytes, 16);
+
+    let bounded_fixture = remote_fixture(b"0123456789abcdef".to_vec()).ignoring_ranges();
+    let bounded = ObjectResource::open(
+        bounded_fixture.url("/fixture"),
+        ResourceOpenOptions {
+            cache_block_bytes: 4,
+            max_cache_bytes: 8,
+            max_retries: 0,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(bounded.read_range(ByteRange::new(3, 4).unwrap()).is_err());
+    assert_eq!(bounded.metrics().full_object_fallbacks, 0);
+}
+
+fn remote_fixture(body: Vec<u8>) -> remote::HttpFixture {
+    // Keep this test file self-contained while sharing the canonical fixture
+    // behavior used by the trace remote integration tests.
+    remote::HttpFixture::new(body)
 }

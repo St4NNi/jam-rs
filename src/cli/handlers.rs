@@ -1324,17 +1324,7 @@ fn add_resource_metrics(
     left: crate::resource::ResourceMetrics,
     right: crate::resource::ResourceMetrics,
 ) -> crate::resource::ResourceMetrics {
-    crate::resource::ResourceMetrics {
-        metadata_requests: left
-            .metadata_requests
-            .saturating_add(right.metadata_requests),
-        range_requests: left.range_requests.saturating_add(right.range_requests),
-        stream_requests: left.stream_requests.saturating_add(right.stream_requests),
-        remote_bytes: left.remote_bytes.saturating_add(right.remote_bytes),
-        cache_bytes: left.cache_bytes.saturating_add(right.cache_bytes),
-        cache_hits: left.cache_hits.saturating_add(right.cache_hits),
-        retries: left.retries.saturating_add(right.retries),
-    }
+    left.saturating_add(right)
 }
 
 #[cfg(test)]

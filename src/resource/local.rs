@@ -113,6 +113,7 @@ impl LocalResource {
     }
 
     fn read_uncached(&self, range: ByteRange) -> ResourceResult<Vec<u8>> {
+        self.metrics.requested_bytes(range.length);
         let length = usize::try_from(range.length).map_err(|_| ResourceError::Io {
             locator: self.locator.redacted(),
             message: "requested range is too large for this platform".to_string(),
@@ -123,6 +124,8 @@ impl LocalResource {
         let mut bytes = vec![0; length];
         file.read_exact(&mut bytes)
             .map_err(|error| io_error(&self.locator, error))?;
+        self.metrics
+            .returned_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         Ok(bytes)
     }
 
@@ -135,7 +138,7 @@ impl LocalResource {
         if range.is_empty() {
             return Ok(Vec::new());
         }
-        self.cache.prepare(identity)?;
+        self.cache.prepare_with_metrics(identity, &self.metrics)?;
         let mut output =
             Vec::with_capacity(
                 usize::try_from(range.length).map_err(|_| ResourceError::Io {
@@ -149,7 +152,10 @@ impl LocalResource {
                 .saturating_add(self.cache.block_bytes())
                 .min(metadata.size);
             let block_range = ByteRange::new(block_offset, block_end.saturating_sub(block_offset))?;
-            let block = if let Some(bytes) = self.cache.get(identity, block_offset)? {
+            let block = if let Some(bytes) =
+                self.cache
+                    .get_with_metrics(identity, block_offset, &self.metrics)?
+            {
                 let overlap_start = range.offset.max(block_offset);
                 let overlap_end = requested_end.min(block_end);
                 self.metrics.cache_hit();
@@ -157,8 +163,14 @@ impl LocalResource {
                     .cache_bytes(overlap_end.saturating_sub(overlap_start));
                 bytes
             } else {
+                self.metrics.cache_miss();
                 let bytes = self.read_uncached(block_range)?;
-                self.cache.insert(identity, block_offset, bytes.clone())?;
+                self.cache.insert_with_metrics(
+                    identity,
+                    block_offset,
+                    bytes.clone(),
+                    &self.metrics,
+                )?;
                 bytes
             };
             let copy_start = range.offset.max(block_offset).saturating_sub(block_offset);
@@ -179,6 +191,8 @@ impl LocalResource {
             }
             output.extend_from_slice(&block[copy_start..copy_end]);
         }
+        self.metrics
+            .decoded_bytes(u64::try_from(output.len()).unwrap_or(u64::MAX));
         Ok(output)
     }
 }
@@ -213,11 +227,29 @@ impl RangeReader for LocalResource {
     fn stream(&self) -> ResourceResult<Box<dyn Read + Send>> {
         self.metrics.stream_request();
         let file = File::open(&self.path).map_err(|error| io_error(&self.locator, error))?;
-        Ok(Box::new(BufReader::with_capacity(1024 * 1024, file)))
+        Ok(Box::new(LocalReader {
+            reader: BufReader::with_capacity(1024 * 1024, file),
+            metrics: Arc::clone(&self.metrics),
+        }))
     }
 
     fn metrics(&self) -> super::ResourceMetrics {
         self.metrics.snapshot()
+    }
+}
+
+struct LocalReader {
+    reader: BufReader<File>,
+    metrics: Arc<MetricsCounter>,
+}
+
+impl Read for LocalReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.reader.read(bytes)?;
+        let count = u64::try_from(count).unwrap_or(u64::MAX);
+        self.metrics.returned_bytes(count);
+        self.metrics.decoded_bytes(count);
+        Ok(usize::try_from(count).unwrap_or(usize::MAX))
     }
 }
 

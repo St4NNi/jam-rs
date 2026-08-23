@@ -11,7 +11,7 @@
       "enum": ["run_header", "metagenome_result", "run_footer"]
     },
     "schema_version": {
-      "const": "1.1.0"
+      "const": "1.2.0"
     },
     "run_id": {
       "type": "string",
@@ -397,21 +397,43 @@
       "type": "object",
       "required": [
         "metadata_requests",
+        "head_requests",
+        "get_requests",
         "range_requests",
         "stream_requests",
+        "requested_bytes",
+        "returned_bytes",
+        "decoded_bytes",
         "remote_bytes",
         "cache_bytes",
         "cache_hits",
-        "retries"
+        "cache_misses",
+        "cache_evictions",
+        "stale_cache_rejections",
+        "retries",
+        "full_object_fallbacks",
+        "seed_buckets_read",
+        "sequence_blocks_read"
       ],
       "properties": {
         "metadata_requests": {"type": "integer", "minimum": 0},
+        "head_requests": {"type": "integer", "minimum": 0},
+        "get_requests": {"type": "integer", "minimum": 0},
         "range_requests": {"type": "integer", "minimum": 0},
         "stream_requests": {"type": "integer", "minimum": 0},
+        "requested_bytes": {"type": "integer", "minimum": 0},
+        "returned_bytes": {"type": "integer", "minimum": 0},
+        "decoded_bytes": {"type": "integer", "minimum": 0},
         "remote_bytes": {"type": "integer", "minimum": 0},
         "cache_bytes": {"type": "integer", "minimum": 0},
         "cache_hits": {"type": "integer", "minimum": 0},
-        "retries": {"type": "integer", "minimum": 0}
+        "cache_misses": {"type": "integer", "minimum": 0},
+        "cache_evictions": {"type": "integer", "minimum": 0},
+        "stale_cache_rejections": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "full_object_fallbacks": {"type": "integer", "minimum": 0},
+        "seed_buckets_read": {"type": "integer", "minimum": 0},
+        "sequence_blocks_read": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": false
     }
