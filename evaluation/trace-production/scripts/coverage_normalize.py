@@ -364,7 +364,10 @@ def parse_paf(
 
 
 def _truth_intervals(
-    path: Path | None, metagenome_id: str | None, query_length: int
+    path: Path | None,
+    metagenome_id: str | None,
+    query_length: int,
+    query_id: str | None = None,
 ) -> list[dict[str, int]]:
     if path is None:
         return []
@@ -374,6 +377,7 @@ def _truth_intervals(
         if not isinstance(rows, list):
             raise NormalizationError("truth JSON must be a list or an object with intervals")
     else:
+        csv.field_size_limit(1024 * 1024 * 1024)
         with path.open(encoding="utf-8", newline="") as handle:
             rows = list(csv.DictReader(handle, delimiter="\t"))
     intervals: list[dict[str, int]] = []
@@ -381,8 +385,33 @@ def _truth_intervals(
         if not isinstance(row, dict):
             raise NormalizationError("truth records must be objects")
         row_id = row.get("metagenome_id") or row.get("assembly_id") or row.get("sample_id")
-        if metagenome_id is not None and row_id not in {None, metagenome_id}:
+        if metagenome_id is not None:
+            exact_id = row_id == metagenome_id
+            stem_id = any(
+                metagenome_id.endswith(suffix)
+                and metagenome_id[: -len(suffix)] == row_id
+                for suffix in (".fa", ".fasta", ".fna", ".fastq", ".fq")
+            )
+            if not exact_id and not stem_id:
+                continue
+        row_query_id = row.get("query_id") or row.get("plasmid_id") or row.get("reference_id")
+        if query_id is not None and row_query_id not in {None, query_id}:
             continue
+        declared_length = row.get("query_length")
+        if declared_length is not None and str(declared_length).strip():
+            try:
+                if isinstance(declared_length, bool):
+                    raise TypeError
+                if isinstance(declared_length, int):
+                    parsed_length = declared_length
+                elif isinstance(declared_length, str):
+                    parsed_length = int(declared_length.strip())
+                else:
+                    raise TypeError
+            except (TypeError, ValueError) as exc:
+                raise NormalizationError(f"invalid truth query_length: {row!r}") from exc
+            if parsed_length != query_length:
+                continue
         nested = row.get("intervals")
         if isinstance(nested, list):
             for interval in nested:
@@ -396,6 +425,27 @@ def _truth_intervals(
                     )
                 except (KeyError, TypeError, ValueError) as exc:
                     raise NormalizationError(f"invalid truth interval: {row!r}") from exc
+            continue
+        encoded_intervals = row.get("query_intervals_json")
+        if encoded_intervals is not None:
+            if isinstance(encoded_intervals, str):
+                try:
+                    encoded_intervals = json.loads(encoded_intervals)
+                except json.JSONDecodeError as exc:
+                    raise NormalizationError(f"invalid query_intervals_json: {row!r}") from exc
+            if not isinstance(encoded_intervals, list):
+                raise NormalizationError(f"query_intervals_json must be a list: {row!r}")
+            for interval in encoded_intervals:
+                if (
+                    not isinstance(interval, (list, tuple))
+                    or len(interval) != 2
+                ):
+                    raise NormalizationError(f"invalid query interval: {row!r}")
+                try:
+                    start, end = (int(value) for value in interval)
+                    intervals.extend(_checked_interval(start, end, query_length))
+                except (TypeError, ValueError) as exc:
+                    raise NormalizationError(f"invalid query interval: {row!r}") from exc
             continue
         start_value = next(
             (
@@ -511,7 +561,11 @@ def normalize_file(
             raise NormalizationError("jam JSONL query identity or length disagrees with arguments")
     else:
         raise NormalizationError(f"unsupported input format: {input_format}")
-    truth = _truth_intervals(truth_path, metagenome_id, query_length) if truth_path else None
+    truth = (
+        _truth_intervals(truth_path, metagenome_id, query_length, query_id)
+        if truth_path
+        else None
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "format": input_format,
@@ -552,7 +606,11 @@ def main() -> int:
             query_id = args.query_id or selected
             if args.query_length is not None and args.query_length != query_length:
                 raise NormalizationError("--query-length disagrees with jam JSONL header")
-            truth = _truth_intervals(args.truth, args.metagenome_id, query_length) if args.truth else None
+            truth = (
+                _truth_intervals(args.truth, args.metagenome_id, query_length, query_id)
+                if args.truth
+                else None
+            )
             result = {
                 "schema_version": SCHEMA_VERSION,
                 "format": args.format,
