@@ -235,10 +235,57 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def load_truth(path: Path | None, metagenome_id: str, query_length: int) -> list[dict[str, int]] | None:
+def _truth_rows(path: Path) -> list[dict[str, str]]:
+    if path.suffix.lower() == ".json":
+        value = json.loads(path.read_text(encoding="utf-8"))
+        rows = value.get("intervals", value) if isinstance(value, dict) else value
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    csv.field_size_limit(1024 * 1024 * 1024)
+    with path.open(encoding="utf-8", newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle, delimiter="\t")]
+
+
+def _truth_query_filter(path: Path | None, query_id: str | None) -> str | None:
+    """Select an exact truth query ID without rejecting suffixed controlled IDs."""
+
+    if path is None or query_id is None:
+        return None
+    try:
+        rows = _truth_rows(path)
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return None
+    exact = {
+        row.get("query_id") or row.get("plasmid_id") or row.get("reference_id")
+        for row in rows
+    }
+    if query_id in exact:
+        return query_id
+    aliases = {
+        row.get("query_id")
+        for row in rows
+        if row.get("query_id")
+        and (
+            row.get("source_query_id") == query_id
+            or query_id.startswith(f"{row.get('source_query_id', '')}__")
+        )
+    }
+    return next(iter(aliases)) if len(aliases) == 1 else None
+
+
+def load_truth(
+    path: Path | None,
+    metagenome_id: str,
+    query_length: int,
+    query_id: str | None = None,
+) -> list[dict[str, int]] | None:
     if path is None:
         return None
-    return _truth_intervals(path, metagenome_id, query_length)
+    return _truth_intervals(
+        path,
+        metagenome_id,
+        query_length,
+        _truth_query_filter(path, query_id),
+    )
 
 
 def result_for_records(
@@ -249,8 +296,9 @@ def result_for_records(
     command: list[str],
     version: str | None,
     extra: dict | None = None,
+    query_id: str | None = None,
 ) -> dict:
-    truth = load_truth(truth_path, assembly.metagenome_id, query_length)
+    truth = load_truth(truth_path, assembly.metagenome_id, query_length, query_id)
     coverage = normalize_records(records, query_length, truth)
     output = {
         "metagenome_id": assembly.metagenome_id,
@@ -387,7 +435,17 @@ def run_alignment_tool(
                 records = parse_blast6(completed.stdout, query_id, query_length, assembly.metagenome_id, args.min_pident)
             else:
                 records = parse_paf(completed.stdout, query_id, query_length, assembly.metagenome_id, args.min_mapq)
-            results.append(result_for_records(assembly, records, query_length, truth_path, command, version))
+            results.append(
+                result_for_records(
+                    assembly,
+                    records,
+                    query_length,
+                    truth_path,
+                    command,
+                    version,
+                    query_id=query_id,
+                )
+            )
         except (OSError, NormalizationError, UnicodeError) as exc:
             results.append(failed_result(assembly, query_length, str(exc), command, version))
     return results, commands
@@ -417,7 +475,18 @@ def jam_result_records(
     for assembly in assemblies:
         source = by_id.get(assembly.metagenome_id)
         if source is None:
-            results.append(failed_result(assembly, query_length, "jam trace emitted no result for selected assembly", command, version))
+            results.append(
+                result_for_records(
+                    assembly,
+                    [],
+                    query_length,
+                    truth_path,
+                    command,
+                    version,
+                    {"jam_status": "not_selected"},
+                    query_id=query_id,
+                )
+            )
             continue
         intervals = []
         for interval in (source.get("coverage") or {}).get("primary_intervals", []):
@@ -437,6 +506,7 @@ def jam_result_records(
             command,
             version,
             {"jam_status": source.get("status")},
+            query_id,
         )
         results.append(result)
     return results
