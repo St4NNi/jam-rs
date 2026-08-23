@@ -178,10 +178,10 @@ def _run_measure(
 
 def _write_catalog(path: Path, archives: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
-        handle.write("metagenome_id\tjma\traw\n")
+        handle.write("metagenome_id\tjma\tjma_index\traw\n")
         for entry in archives:
             handle.write(
-                f"{entry['id']}\t{entry['jma']}\t{entry['raw']}\n"
+                f"{entry['id']}\t{entry['jma']}\t{entry['jma_index']}\t{entry['raw']}\n"
             )
 
 
@@ -268,6 +268,7 @@ def run_study(args: argparse.Namespace) -> int:
         build_measurements: list[dict[str, Any]] = []
         for assembly in assemblies:
             archive_path = archive_dir / f"{assembly['id']}.jma"
+            index_path = Path(f"{archive_path}.idx.json")
             build_dir = raw_dir / f"archive_b{archive_block}" / f"build__{assembly['id']}"
             command = [
                 str(jam),
@@ -296,14 +297,18 @@ def run_study(args: argparse.Namespace) -> int:
                 continue
             build_measurements.append(measurement)
             failed += int(measurement.get("exit_code") != 0)
-            if measurement.get("exit_code") == 0 and archive_path.is_file():
-                built.append(
-                    {
-                        "id": assembly["id"],
-                        "jma": archive_path.resolve(),
-                        "raw": assembly["path"].resolve(),
-                    }
-                )
+            if measurement.get("exit_code") == 0:
+                if archive_path.is_file() and index_path.is_file():
+                    built.append(
+                        {
+                            "id": assembly["id"],
+                            "jma": archive_path.resolve(),
+                            "jma_index": index_path.resolve(),
+                            "raw": assembly["path"].resolve(),
+                        }
+                    )
+                else:
+                    failed += 1
         if not built:
             continue
         catalog = archive_dir / "catalog.tsv"
