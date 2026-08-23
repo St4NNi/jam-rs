@@ -24,6 +24,7 @@ fn catalog_tsv_resolves_relative_resources_and_preserves_order() {
             .unwrap()
             .ends_with("archives/b.jma")
     );
+    assert!(!catalog.entries()[0].preferred_resource().unwrap().1);
     assert!(catalog.entries()[1].jma.is_none());
     assert_eq!(
         catalog
@@ -39,16 +40,52 @@ fn catalog_tsv_resolves_relative_resources_and_preserves_order() {
 }
 
 #[test]
+fn catalog_resolves_a_jma_index_with_the_archive() {
+    let directory = tempdir().unwrap();
+    let catalog_path = directory.path().join("catalog.tsv");
+    std::fs::write(
+        &catalog_path,
+        "metagenome_id\tjma\tjma_index\nmg\tarchives/mg.jma\tindexes/mg.idx\n",
+    )
+    .unwrap();
+
+    let catalog = TraceCatalog::from_path(&catalog_path).unwrap();
+    let entry = catalog.get("mg").unwrap();
+    assert!(entry.jma.as_deref().unwrap().ends_with("archives/mg.jma"));
+    assert!(
+        entry
+            .jma_index
+            .as_deref()
+            .unwrap()
+            .ends_with("indexes/mg.idx")
+    );
+    assert!(entry.preferred_resource().unwrap().1);
+}
+
+#[test]
+fn catalog_rejects_an_index_without_a_jma_archive() {
+    let result = TraceCatalog::from_entries(vec![CatalogEntry {
+        metagenome_id: "mg".to_string(),
+        jma: None,
+        jma_index: Some("mg.idx".to_string()),
+        raw: Some("mg.fa".to_string()),
+    }]);
+    assert!(matches!(result, Err(CatalogError::Invalid { .. })));
+}
+
+#[test]
 fn catalog_rejects_duplicate_ids_and_missing_resources() {
     let duplicate = TraceCatalog::from_entries(vec![
         CatalogEntry {
             metagenome_id: "mg".to_string(),
             jma: Some("a.jma".to_string()),
+            jma_index: None,
             raw: None,
         },
         CatalogEntry {
             metagenome_id: "mg".to_string(),
             jma: None,
+            jma_index: None,
             raw: Some("a.fa".to_string()),
         },
     ]);
@@ -57,6 +94,7 @@ fn catalog_rejects_duplicate_ids_and_missing_resources() {
     let missing = TraceCatalog::from_entries(vec![CatalogEntry {
         metagenome_id: "mg".to_string(),
         jma: None,
+        jma_index: None,
         raw: None,
     }]);
     assert!(matches!(missing, Err(CatalogError::Invalid { .. })));

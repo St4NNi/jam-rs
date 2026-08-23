@@ -556,39 +556,43 @@ impl TraceRunner {
         let started = Instant::now();
         let database = resolve_candidate_database(&query.database, &self.config.resources)?;
         let searcher = CandidateSearcher::open(&database.path)?;
-        let search = searcher.search_sequence(&query.plasmid_sequence, &self.config.candidates)?;
+        let positional_candidate_limit =
+            usize::try_from(self.config.sensitivity.max_candidates).unwrap_or(usize::MAX);
+        let mut candidate_config = self.config.candidates.clone();
+        candidate_config.top_candidates = candidate_config
+            .top_candidates
+            .min(positional_candidate_limit);
+        let mut search = searcher.search_sequence(&query.plasmid_sequence, &candidate_config)?;
+        // CandidateSearchConfig bounds the sketch result, while the
+        // sensitivity profile bounds positional work.  Apply both limits
+        // before constructing the worker input so a pathological search
+        // result cannot create an unbounded queue or result vector.
+        search.candidates.truncate(positional_candidate_limit);
         let mut counters = TracePerformanceCounters {
             candidate_queries: 1,
             candidates_considered: search.candidates.len() as u64,
             ..TracePerformanceCounters::default()
         };
 
-        let tasks = search
-            .candidates
-            .iter()
-            .map(|candidate| {
-                let entry = query.catalog.get(candidate.metagenome_id()).cloned();
-                (candidate.clone(), entry)
-            })
-            .collect::<Vec<_>>();
         let run_config = &self.config;
         let plasmid_id = &query.plasmid_id;
         let plasmid_sequence = &query.plasmid_sequence;
+        let worker_count = self
+            .config
+            .threads
+            .min(self.config.sensitivity.max_concurrent_candidates as usize)
+            .max(1);
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.config.threads)
+            .num_threads(worker_count)
             .build()
             .map_err(|error| RunnerError::InvalidConfig(error.to_string()))?;
         let mut work = pool.install(|| {
-            tasks
+            search
+                .candidates
                 .par_iter()
-                .map(|(candidate, entry)| {
-                    process_candidate(
-                        plasmid_id,
-                        plasmid_sequence,
-                        candidate,
-                        entry.as_ref(),
-                        run_config,
-                    )
+                .map(|candidate| {
+                    let entry = query.catalog.get(candidate.metagenome_id());
+                    process_candidate(plasmid_id, plasmid_sequence, candidate, entry, run_config)
                 })
                 .collect::<Vec<_>>()
         });
@@ -665,29 +669,50 @@ fn process_candidate(
     let mut failures = Vec::new();
     let indexed = entry.jma.as_deref();
     let mut result = if let Some(jma) = indexed {
-        match process_jma(plasmid_id, plasmid, candidate, jma, config, &mut counters) {
-            Ok(result) => result,
-            Err(error) if entry.fallback_raw().is_some() => {
-                failures.push(failure_for_error("jma", jma, &error));
-                process_raw(
-                    plasmid_id,
-                    plasmid,
-                    candidate,
-                    entry.raw.as_deref().unwrap_or_default(),
-                    config,
-                    &mut counters,
-                )
-            }
-            Err(error) => failed_result(
+        if entry.jma_index.is_none() && !config.resources.allow_full_download_fallback {
+            failed_result(
                 plasmid_id,
                 candidate,
                 config,
-                "jma",
-                error.code(),
-                &error.to_string(),
-                error.retryable(),
+                "jma_index",
+                "jma_index_required",
+                "indexed JMA access requires a catalog jma_index; enable full-download fallback explicitly to use an archive without one",
+                false,
                 Some(jma),
-            ),
+            )
+        } else {
+            match process_jma(
+                plasmid_id,
+                plasmid,
+                candidate,
+                jma,
+                entry.jma_index.as_deref(),
+                config,
+                &mut counters,
+            ) {
+                Ok(result) => result,
+                Err(error) if entry.fallback_raw().is_some() => {
+                    failures.push(failure_for_error("jma", jma, &error));
+                    process_raw(
+                        plasmid_id,
+                        plasmid,
+                        candidate,
+                        entry.raw.as_deref().unwrap_or_default(),
+                        config,
+                        &mut counters,
+                    )
+                }
+                Err(error) => failed_result(
+                    plasmid_id,
+                    candidate,
+                    config,
+                    "jma",
+                    error.code(),
+                    &error.to_string(),
+                    error.retryable(),
+                    Some(jma),
+                ),
+            }
         }
     } else if let Some(raw) = entry.raw.as_deref() {
         process_raw(plasmid_id, plasmid, candidate, raw, config, &mut counters)
@@ -703,6 +728,25 @@ fn process_candidate(
             None,
         )
     };
+    if indexed.is_some()
+        && entry.jma_index.is_none()
+        && config.resources.allow_full_download_fallback
+    {
+        result.failures.push(TraceFailure {
+            stage: "jma_index".to_string(),
+            code: "jma_full_download_fallback".to_string(),
+            message: "catalog row has no jma_index; archive was opened eagerly because full-download fallback is enabled".to_string(),
+            resource: indexed.map(redact_resource),
+            retryable: false,
+        });
+        result.resource_metrics.full_object_fallbacks = result
+            .resource_metrics
+            .full_object_fallbacks
+            .saturating_add(1);
+        if result.status == TraceStatus::Complete {
+            result.status = TraceStatus::Partial;
+        }
+    }
     result.failures.splice(0..0, failures);
     if !result.failures.is_empty() && result.status == TraceStatus::Complete {
         result.status = TraceStatus::Partial;
@@ -715,11 +759,18 @@ fn process_jma(
     plasmid: &[u8],
     candidate: &RankedCandidate,
     locator: &str,
+    index_locator: Option<&str>,
     config: &TraceRunnerConfig,
     counters: &mut TracePerformanceCounters,
 ) -> Result<TraceMetagenomeResult, RunnerError> {
     let resource = open_resource(locator, config.resources.clone())?;
-    let reader = JmaReader::open(resource)?;
+    let reader = match index_locator {
+        Some(index_locator) => {
+            let index = open_resource(index_locator, config.resources.clone())?;
+            JmaReader::open_indexed(resource, index)?
+        }
+        None => JmaReader::open(resource)?,
+    };
     if reader.header().algorithm_id.as_deref() != Some(crate::trace::TRACE_ALGORITHM_ID)
         || reader.header().algorithm_version != Some(crate::trace::TRACE_ALGORITHM_VERSION)
     {
@@ -793,7 +844,7 @@ fn process_jma(
         alignments,
         coverage: Some(coverage),
         failures: Vec::new(),
-        resource_metrics: reader.resource().metrics(),
+        resource_metrics: reader.metrics(),
     })
 }
 

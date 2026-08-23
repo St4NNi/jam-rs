@@ -22,6 +22,10 @@ pub struct CatalogEntry {
     /// resources are present.
     #[serde(default, alias = "archive", alias = "jma_path")]
     pub jma: Option<String>,
+    /// Optional checksum-bound JMA range index. Indexed production access
+    /// requires this resource; archives without it use explicit fallback.
+    #[serde(default, alias = "index", alias = "jma_index_path")]
+    pub jma_index: Option<String>,
     /// Optional raw FASTA/FASTQ assembly, including compressed input.
     #[serde(
         default,
@@ -40,7 +44,7 @@ impl CatalogEntry {
     pub fn preferred_resource(&self) -> Option<(&str, bool)> {
         self.jma
             .as_deref()
-            .map(|resource| (resource, true))
+            .map(|resource| (resource, self.jma_index.is_some()))
             .or_else(|| self.raw.as_deref().map(|resource| (resource, false)))
     }
 
@@ -91,6 +95,10 @@ impl TraceCatalog {
             validate_entry(entry, path)?;
             entry.jma = entry
                 .jma
+                .take()
+                .map(|resource| resolve_resource(base, resource));
+            entry.jma_index = entry
+                .jma_index
                 .take()
                 .map(|resource| resolve_resource(base, resource));
             entry.raw = entry
@@ -217,6 +225,7 @@ fn parse_tsv(text: &str, path: &Path) -> Result<Vec<CatalogEntry>, CatalogError>
             message: "TSV catalog requires a metagenome_id column".to_string(),
         })?;
     let jma_column = find_column(&columns, &["jma", "jma_path", "archive"]);
+    let jma_index_column = find_column(&columns, &["jma_index", "jma_index_path", "index"]);
     let raw_column = find_column(
         &columns,
         &["raw", "raw_path", "assembly", "fasta", "fastq", "resource"],
@@ -238,6 +247,7 @@ fn parse_tsv(text: &str, path: &Path) -> Result<Vec<CatalogEntry>, CatalogError>
         rows.push(CatalogEntry {
             metagenome_id,
             jma: get(jma_column),
+            jma_index: get(jma_index_column),
             raw: get(raw_column),
         });
     }
@@ -268,6 +278,15 @@ fn validate_entry(entry: &CatalogEntry, path: &Path) -> Result<(), CatalogError>
             path: path.to_path_buf(),
             message: format!(
                 "catalog row {:?} has neither a jma nor raw resource",
+                entry.metagenome_id
+            ),
+        });
+    }
+    if entry.jma_index.is_some() && entry.jma.is_none() {
+        return Err(CatalogError::Invalid {
+            path: path.to_path_buf(),
+            message: format!(
+                "catalog row {:?} has a jma_index without a jma resource",
                 entry.metagenome_id
             ),
         });

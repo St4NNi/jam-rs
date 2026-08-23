@@ -39,7 +39,7 @@ fn records(path: &Path) -> Vec<Value> {
         .collect()
 }
 
-fn assert_supported_trace(path: &Path) {
+fn assert_supported_trace(path: &Path, expect_fallback: bool) {
     let records = records(path);
     assert_eq!(records.first().unwrap()["record_type"], "run_header");
     assert_eq!(records.last().unwrap()["record_type"], "run_footer");
@@ -51,6 +51,14 @@ fn assert_supported_trace(path: &Path) {
     assert!(result["candidate"]["uniform_hash_e_value"].is_number());
     assert!(!result["alignments"].as_array().unwrap().is_empty());
     assert!(result["coverage"]["supported_fraction"].as_f64().unwrap() > 0.95);
+    if expect_fallback {
+        assert_eq!(result["status"], "partial");
+        assert_eq!(result["failures"][0]["code"], "jma_full_download_fallback");
+        assert_eq!(result["resource_metrics"]["full_object_fallbacks"], 1);
+    } else {
+        assert_eq!(result["status"], "complete");
+        assert!(result["failures"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]
@@ -128,7 +136,36 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
             .arg("--top-candidates")
             .arg("1"),
     );
-    assert_supported_trace(&indexed_output);
+    assert_supported_trace(&indexed_output, true);
+
+    let strict_output = directory.path().join("strict.jsonl");
+    run_ok(
+        jam()
+            .arg("--silent")
+            .arg("trace")
+            .arg("--plasmid")
+            .arg(&plasmid)
+            .arg("--database")
+            .arg(&database)
+            .arg("--catalog")
+            .arg(&indexed_catalog)
+            .arg("--output")
+            .arg(&strict_output)
+            .arg("--sensitivity")
+            .arg("sensitive")
+            .arg("--min-shared")
+            .arg("1")
+            .arg("--top-candidates")
+            .arg("1")
+            .arg("--no-full-download-fallback"),
+    );
+    let strict_records = records(&strict_output);
+    let strict_result = strict_records
+        .iter()
+        .find(|record| record["record_type"] == "metagenome_result")
+        .unwrap();
+    assert_eq!(strict_result["status"], "failed");
+    assert_eq!(strict_result["failures"][0]["code"], "jma_index_required");
 
     let raw_catalog = directory.path().join("raw.tsv");
     fs::write(
@@ -156,5 +193,52 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
             .arg("--top-candidates")
             .arg("1"),
     );
-    assert_supported_trace(&raw_output);
+    assert_supported_trace(&raw_output, false);
+
+    let raw_parallel_output = directory.path().join("raw-parallel.jsonl");
+    run_ok(
+        jam()
+            .arg("--silent")
+            .arg("--threads")
+            .arg("4")
+            .arg("trace")
+            .arg("--plasmid")
+            .arg(&plasmid)
+            .arg("--database")
+            .arg(&database)
+            .arg("--catalog")
+            .arg(&raw_catalog)
+            .arg("--output")
+            .arg(&raw_parallel_output)
+            .arg("--sensitivity")
+            .arg("sensitive")
+            .arg("--min-shared")
+            .arg("1")
+            .arg("--top-candidates")
+            .arg("1"),
+    );
+    let raw_result = records(&raw_output)
+        .into_iter()
+        .find(|record| record["record_type"] == "metagenome_result")
+        .unwrap();
+    let raw_parallel_result = records(&raw_parallel_output)
+        .into_iter()
+        .find(|record| record["record_type"] == "metagenome_result")
+        .unwrap();
+    for field in [
+        "schema_version",
+        "plasmid_id",
+        "metagenome_id",
+        "algorithm",
+        "status",
+        "candidate",
+        "alignments",
+        "coverage",
+        "failures",
+    ] {
+        assert_eq!(
+            raw_result[field], raw_parallel_result[field],
+            "parallel trace changed biological field {field}"
+        );
+    }
 }
