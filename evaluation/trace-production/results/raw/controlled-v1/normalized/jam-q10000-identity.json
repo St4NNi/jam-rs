@@ -1,0 +1,2122 @@
+{
+  "commands": [
+    [
+      "target/release/jam",
+      "trace",
+      "(precomputed output)",
+      "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+    ]
+  ],
+  "failed_count": 0,
+  "input_manifest_sha256": null,
+  "metrics": {
+    "assemblies_total": 36,
+    "assemblies_with_records": 19,
+    "base_precision": 1.0,
+    "base_recall": 0.68237106918239,
+    "gap_error_bases": 50503,
+    "gap_error_fraction": 0.1402861111111111,
+    "intersection_bases": 108497,
+    "interval_precision": 1.0,
+    "interval_recall": 0.5277777777777778,
+    "observed_bases": 108497,
+    "truth_bases": 159000,
+    "truth_status": "measured"
+  },
+  "query_id": "NC_001735.1__q10000",
+  "query_length": 10000,
+  "results": [
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i100__c100__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 10000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 10000,
+          "truth_bases": 10000
+        },
+        "supported_bases": 10000,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c100__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c100__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i100__c10__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 4567,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 5567
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 1000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 1000,
+          "truth_bases": 1000
+        },
+        "supported_bases": 1000,
+        "supported_fraction": 0.1,
+        "supported_intervals": [
+          {
+            "end": 5567,
+            "start": 4567
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 5567,
+            "start": 4567
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c10__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 5567,
+              "start": 4567
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c10__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i100__c20__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 3752,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 5752
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 2000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 2000,
+          "truth_bases": 2000
+        },
+        "supported_bases": 2000,
+        "supported_fraction": 0.2,
+        "supported_intervals": [
+          {
+            "end": 5752,
+            "start": 3752
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 5752,
+            "start": 3752
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c20__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 5752,
+              "start": 3752
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c20__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i100__c50__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 1051,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 6051
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 5000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 5000,
+          "truth_bases": 5000
+        },
+        "supported_bases": 5000,
+        "supported_fraction": 0.5,
+        "supported_intervals": [
+          {
+            "end": 6051,
+            "start": 1051
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 6051,
+            "start": 1051
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c50__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 6051,
+              "start": 1051
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c50__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i100__c5__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 9179,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9679
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 500,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 500,
+          "truth_bases": 500
+        },
+        "supported_bases": 500,
+        "supported_fraction": 0.05,
+        "supported_intervals": [
+          {
+            "end": 9679,
+            "start": 9179
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 9679,
+            "start": 9179
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c5__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 9679,
+              "start": 9179
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c5__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i100__c80__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 6624,
+            "start": 4624
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 8000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 8000,
+          "truth_bases": 8000
+        },
+        "supported_bases": 8000,
+        "supported_fraction": 0.8,
+        "supported_intervals": [
+          {
+            "end": 4624,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 6624
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 4624,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 6624
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c80__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 4624,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 6624
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i85__c100__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 10000,
+          "gap_error_fraction": 1.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 10000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i85__c100__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i85__c10__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 1000,
+          "gap_error_fraction": 0.1,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 1000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 8818,
+            "start": 7818
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i85__c10__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i85__c20__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 2000,
+          "gap_error_fraction": 0.2,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 2000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 6286,
+            "start": 4286
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i85__c20__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i85__c50__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 5000,
+          "gap_error_fraction": 0.5,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 5000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 4684,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9684
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i85__c50__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i85__c5__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 500,
+          "gap_error_fraction": 0.05,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 500
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 2110,
+            "start": 1610
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i85__c5__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i85__c80__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 8000,
+          "gap_error_fraction": 0.8,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 8000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 7601,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9601
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i85__c80__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i90__c100__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 10000,
+          "gap_error_fraction": 1.0,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 10000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i90__c100__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i90__c10__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 1000,
+          "gap_error_fraction": 0.1,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 1000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 4761,
+            "start": 3761
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i90__c10__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i90__c20__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 2000,
+          "gap_error_fraction": 0.2,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 2000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 6138,
+            "start": 4138
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i90__c20__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i90__c50__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 5000,
+          "gap_error_fraction": 0.5,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 5000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 4768,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9768
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i90__c50__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i90__c5__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 500,
+          "gap_error_fraction": 0.05,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 500
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 6668,
+            "start": 6168
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i90__c5__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i90__c80__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 1376,
+            "start": 1375
+          },
+          {
+            "end": 5033,
+            "start": 3033
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 0.999875,
+          "gap_error_bases": 1,
+          "gap_error_fraction": 0.0001,
+          "intersection_bases": 7999,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 7999,
+          "truth_bases": 8000
+        },
+        "supported_bases": 7999,
+        "supported_fraction": 0.7999,
+        "supported_intervals": [
+          {
+            "end": 1375,
+            "start": 0
+          },
+          {
+            "end": 3033,
+            "start": 1376
+          },
+          {
+            "end": 10000,
+            "start": 5033
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 3033,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 5033
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i90__c80__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 1375,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i90__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 3033,
+              "start": 1376
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i90__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 5033
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i90__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i95__c100__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 10000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 10000,
+          "truth_bases": 10000
+        },
+        "supported_bases": 10000,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i95__c100__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i95__c100__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i95__c10__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 1000,
+          "gap_error_fraction": 0.1,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 1000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 9293,
+            "start": 8293
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i95__c10__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i95__c20__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 2000,
+          "gap_error_fraction": 0.2,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 2000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 8868,
+            "start": 6868
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i95__c20__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i95__c50__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 9321,
+            "start": 4321
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 5000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 5000,
+          "truth_bases": 5000
+        },
+        "supported_bases": 5000,
+        "supported_fraction": 0.5,
+        "supported_intervals": [
+          {
+            "end": 4321,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9321
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 4321,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9321
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i95__c50__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 4321,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i95__c50__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 9321
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i95__c50__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i95__c5__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 500,
+          "gap_error_fraction": 0.05,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 500
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 3849,
+            "start": 3349
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i95__c5__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i95__c80__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 313,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 8313
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 8000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 8000,
+          "truth_bases": 8000
+        },
+        "supported_bases": 8000,
+        "supported_fraction": 0.8,
+        "supported_intervals": [
+          {
+            "end": 8313,
+            "start": 313
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 8313,
+            "start": 313
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i95__c80__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 8313,
+              "start": 313
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i95__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i97__c100__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 1476,
+            "start": 1475
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 0.9999,
+          "gap_error_bases": 1,
+          "gap_error_fraction": 0.0001,
+          "intersection_bases": 9999,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 9999,
+          "truth_bases": 10000
+        },
+        "supported_bases": 9999,
+        "supported_fraction": 0.9999,
+        "supported_intervals": [
+          {
+            "end": 1475,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 1476
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i97__c100__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 1475,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c100__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 1476
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c100__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i97__c10__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 3910,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 4910
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 1000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 1000,
+          "truth_bases": 1000
+        },
+        "supported_bases": 1000,
+        "supported_fraction": 0.1,
+        "supported_intervals": [
+          {
+            "end": 4910,
+            "start": 3910
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 4910,
+            "start": 3910
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i97__c10__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 4910,
+              "start": 3910
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c10__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i97__c20__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 7706,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9706
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 2000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 2000,
+          "truth_bases": 2000
+        },
+        "supported_bases": 2000,
+        "supported_fraction": 0.2,
+        "supported_intervals": [
+          {
+            "end": 9706,
+            "start": 7706
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 9706,
+            "start": 7706
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i97__c20__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 9706,
+              "start": 7706
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c20__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i97__c50__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 4172,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9172
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 5000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 5000,
+          "truth_bases": 5000
+        },
+        "supported_bases": 5000,
+        "supported_fraction": 0.5,
+        "supported_intervals": [
+          {
+            "end": 9172,
+            "start": 4172
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 9172,
+            "start": 4172
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i97__c50__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 9172,
+              "start": 4172
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c50__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i97__c5__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 500,
+          "gap_error_fraction": 0.05,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 500
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 9621,
+            "start": 9121
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i97__c5__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i97__c80__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 1211,
+            "start": 0
+          },
+          {
+            "end": 3272,
+            "start": 3271
+          },
+          {
+            "end": 10000,
+            "start": 9211
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 0.999875,
+          "gap_error_bases": 1,
+          "gap_error_fraction": 0.0001,
+          "intersection_bases": 7999,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 7999,
+          "truth_bases": 8000
+        },
+        "supported_bases": 7999,
+        "supported_fraction": 0.7999,
+        "supported_intervals": [
+          {
+            "end": 3271,
+            "start": 1211
+          },
+          {
+            "end": 9211,
+            "start": 3272
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 9211,
+            "start": 1211
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i97__c80__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 3271,
+              "start": 1211
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 9211,
+              "start": 3272
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i97__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i99__c100__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 10000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 10000,
+          "truth_bases": 10000
+        },
+        "supported_bases": 10000,
+        "supported_fraction": 1.0,
+        "supported_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i99__c100__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i99__c100__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i99__c10__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 1000,
+          "gap_error_fraction": 0.1,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 1000
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 1845,
+            "start": 845
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i99__c10__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i99__c20__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 2993,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 4993
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 2000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 2000,
+          "truth_bases": 2000
+        },
+        "supported_bases": 2000,
+        "supported_fraction": 0.2,
+        "supported_intervals": [
+          {
+            "end": 4993,
+            "start": 2993
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 4993,
+            "start": 2993
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i99__c20__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 4993,
+              "start": 2993
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i99__c20__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i99__c50__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 3797,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 8797
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 5000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 5000,
+          "truth_bases": 5000
+        },
+        "supported_bases": 5000,
+        "supported_fraction": 0.5,
+        "supported_intervals": [
+          {
+            "end": 8797,
+            "start": 3797
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 8797,
+            "start": 3797
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i99__c50__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 8797,
+              "start": 3797
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i99__c50__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i99__c5__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 10000,
+            "start": 0
+          }
+        ],
+        "metrics": {
+          "base_precision": null,
+          "base_recall": 0.0,
+          "gap_error_bases": 500,
+          "gap_error_fraction": 0.05,
+          "intersection_bases": 0,
+          "interval_precision": null,
+          "interval_recall": 0.0,
+          "observed_bases": 0,
+          "truth_bases": 500
+        },
+        "supported_bases": 0,
+        "supported_fraction": 0.0,
+        "supported_intervals": [],
+        "truth_intervals": [
+          {
+            "end": 2228,
+            "start": 1728
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "not_selected",
+      "metagenome_id": "q10000__NC_001735.1__i99__c5__n1__forward__none__bg_background_only.fasta",
+      "records": [],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    },
+    {
+      "assembly": "tools/out/trace-production-controlled-release-run-v1/inputs/identity-q10000/q10000__NC_001735.1__i99__c80__n1__forward__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 3376,
+            "start": 1376
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 8000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 8000,
+          "truth_bases": 8000
+        },
+        "supported_bases": 8000,
+        "supported_fraction": 0.8,
+        "supported_intervals": [
+          {
+            "end": 1376,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 3376
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 1376,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 3376
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i99__c80__n1__forward__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 1376,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i99__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 3376
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i99__c80__n1__forward__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "scope": "direct_full",
+  "selection": {
+    "effective_scope": "direct_full",
+    "ids": [
+      "q10000__NC_001735.1__i100__c100__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i100__c10__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i100__c20__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i100__c50__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i100__c5__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i100__c80__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i85__c100__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i85__c10__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i85__c20__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i85__c50__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i85__c5__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i85__c80__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i90__c100__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i90__c10__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i90__c20__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i90__c50__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i90__c5__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i90__c80__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i95__c100__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i95__c10__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i95__c20__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i95__c50__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i95__c5__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i95__c80__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i97__c100__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i97__c10__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i97__c20__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i97__c50__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i97__c5__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i97__c80__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i99__c100__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i99__c10__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i99__c20__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i99__c50__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i99__c5__n1__forward__none__bg_background_only.fasta",
+      "q10000__NC_001735.1__i99__c80__n1__forward__none__bg_background_only.fasta"
+    ],
+    "limit": null,
+    "selected_count": 36,
+    "source": "assemblies_dir",
+    "total_count": 36
+  },
+  "status": "measured",
+  "tool": "jam",
+  "truth_manifest_sha256": "0635b72b34efadcb1272f94f25edb08cad50054cfaa0d4dc718885956cf358a5",
+  "version": "jam 0.10.0"
+}

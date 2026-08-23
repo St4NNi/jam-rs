@@ -1,0 +1,114 @@
+{
+  "background_policy": {
+    "background_use_counts": {
+      "background_only": 1
+    },
+    "backgrounds_are_source_objects": true,
+    "controlled_derivatives_are_not_independent_metagenomes": true
+  },
+  "cases": [
+    {
+      "assembly_path": "assemblies/q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only.fasta",
+      "assembly_sha256": "185f6e9d4726ca2383b6ffb7ad37febbe15956b86af4577c81be8f00d58d94b7",
+      "background_id": "background_only",
+      "background_reused": true,
+      "background_sha256": "6d67e653381dd38dbb4fcfc694189d961edef0b536720ee0eeb00a4dfd710903",
+      "case_id": "q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only",
+      "coverage_target_bases": 2000,
+      "coverage_target_percent": 20,
+      "fragment_count": 2,
+      "identity_target_percent": 100,
+      "indel_profile": "none",
+      "label": "origin_crossing",
+      "metagenome_id": "q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only",
+      "orientation": "reverse",
+      "overlap_bases": 21,
+      "query_id": "NC_001735.1",
+      "query_length": 10000,
+      "query_sha256": "c143f368b4e3319bf45afba274c0f17a6aaa80040231c71698f8d84eb22bbf09",
+      "query_source_id": "NC_001735.1",
+      "query_source_interval": [
+        24366,
+        34366
+      ],
+      "schema_version": "jam-trace-controlled-truth-v1",
+      "source_manifest_sha256": "c37919238c230b7541bdf764886130660e64c78d2cdc3f763d8985352a7f5ed2",
+      "truth_rows": 2
+    }
+  ],
+  "generation_parameters": {
+    "background_id": null,
+    "case_id": null,
+    "coverages": [
+      20
+    ],
+    "fragment_counts": [
+      2
+    ],
+    "identities": [
+      100
+    ],
+    "indel_profiles": [
+      "none"
+    ],
+    "label": "origin_crossing",
+    "limit": null,
+    "orientations": [
+      "reverse"
+    ],
+    "query_lengths": [
+      10000
+    ]
+  },
+  "generator": "controlled-track-a-v1",
+  "limitations": [
+    "controlled cases reuse named source backgrounds and are not independent real metagenomes",
+    "identity is applied by deterministic substitutions before optional indels",
+    "unsupported matrix cells remain in status.tsv instead of being silently omitted",
+    "read-derived assemblies and natural independently supported positives are separate benchmark tracks"
+  ],
+  "materialized_cells": 1,
+  "matrix_manifest": "/home/beavis/projects/jam-rs/evaluation/trace-production/manifests/controlled-matrix-v1.json",
+  "matrix_manifest_sha256": "2e0d952b5443c64e49ed197bf99000eaaf6b11249ff79152432b11609a198e32",
+  "matrix_schema_version": "jam-trace-controlled-matrix-v1",
+  "planned_cells": 1,
+  "queries": [
+    {
+      "id": "NC_001735.1__q10000",
+      "length": 10000,
+      "path": "queries/NC_001735.1__q10000.fasta",
+      "sha256": "c143f368b4e3319bf45afba274c0f17a6aaa80040231c71698f8d84eb22bbf09",
+      "source_id": "NC_001735.1",
+      "source_interval": [
+        24366,
+        34366
+      ],
+      "source_sha256": "997fe17322005c563a824ed176c80d5646d9eba3a8cd62aa41925faa5e8638a8"
+    }
+  ],
+  "schema_version": "jam-trace-controlled-truth-v1",
+  "seed": 5350642856845460293,
+  "seed_hex": "0x4a414d5452414345",
+  "source_background_files": [
+    {
+      "id": "background_only",
+      "path": "source/background_background_only.fasta",
+      "sha256": "6d67e653381dd38dbb4fcfc694189d961edef0b536720ee0eeb00a4dfd710903"
+    }
+  ],
+  "source_catalog_files": [
+    {
+      "id": "version_pinned_plasmid_catalog",
+      "path": "source/catalog_00_version_pinned_plasmid_catalog.fasta",
+      "sha256": "f56dad56d648c57c5e7bfd40d98b003283078130e31fdf0a831da77135d287b8"
+    }
+  ],
+  "source_dataset_id": "accession-spike-v1-d4e0df21d0a5",
+  "source_manifest": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-source/source.json",
+  "source_manifest_sha256": "c37919238c230b7541bdf764886130660e64c78d2cdc3f763d8985352a7f5ed2",
+  "source_root": "/home/beavis/projects/jam-rs/tools/out/spike-in/accession-v1-release-d4e0df2-20260823/dataset",
+  "status_path": "status.tsv",
+  "truth_path": "truth.tsv",
+  "truth_rows": 2,
+  "unsupported_cells": 0
+}

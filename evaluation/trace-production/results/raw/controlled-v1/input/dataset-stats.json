@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "assembly_files": 148,
+  "contigs": 158749,
+  "assembly_bases": 2239344218,
+  "query_records": 3,
+  "query_bases": 62000,
+  "controlled_positive_pairs": 149,
+  "unique_controlled_assemblies": 148,
+  "background_sources": 1,
+  "background_reused": true,
+  "independent_metagenomes": false,
+  "notes": [
+    "The 108 identity/coverage cases, 40 fragment/indel cases, and one origin-crossing case contain one duplicate controlled assembly.",
+    "Every derivative reuses the same accession-backed chromosome-fragment background and must not be counted as an independent metagenome."
+  ]
+}

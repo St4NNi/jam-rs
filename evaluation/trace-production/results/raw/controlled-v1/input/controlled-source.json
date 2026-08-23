@@ -1,0 +1,25 @@
+{
+  "schema_version": "jam-trace-controlled-source-v1",
+  "dataset_id": "accession-spike-v1-d4e0df21d0a5",
+  "dataset_kind": "accession_backed_semisynthetic_reused_background",
+  "catalog_files": [
+    {
+      "id": "version_pinned_plasmid_catalog",
+      "path": "catalog.fasta",
+      "sha256": "f56dad56d648c57c5e7bfd40d98b003283078130e31fdf0a831da77135d287b8",
+      "role": "checksum_verified_query_sources"
+    }
+  ],
+  "backgrounds": [
+    {
+      "id": "background_only",
+      "path": "assemblies/background_only.fasta",
+      "sha256": "6d67e653381dd38dbb4fcfc694189d961edef0b536720ee0eeb00a4dfd710903",
+      "role": "reused_accession_backed_chromosome_fragment_background",
+      "labels": [
+        "semisynthetic",
+        "not_independent_metagenomes"
+      ]
+    }
+  ]
+}

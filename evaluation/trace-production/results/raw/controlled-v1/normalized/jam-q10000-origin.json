@@ -1,0 +1,125 @@
+{
+  "commands": [
+    [
+      "target/release/jam",
+      "trace",
+      "(precomputed output)",
+      "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+    ]
+  ],
+  "failed_count": 0,
+  "input_manifest_sha256": null,
+  "metrics": {
+    "assemblies_total": 1,
+    "assemblies_with_records": 1,
+    "base_precision": 1.0,
+    "base_recall": 1.0,
+    "gap_error_bases": 0,
+    "gap_error_fraction": 0.0,
+    "intersection_bases": 2000,
+    "interval_precision": 1.0,
+    "interval_recall": 1.0,
+    "observed_bases": 2000,
+    "truth_bases": 2000,
+    "truth_status": "measured"
+  },
+  "query_id": "NC_001735.1__q10000",
+  "query_length": 10000,
+  "results": [
+    {
+      "assembly": "tools/out/trace-production-controlled-origin/assemblies/q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only.fasta",
+      "command": [
+        "target/release/jam",
+        "trace",
+        "(precomputed output)",
+        "tools/out/trace-production-controlled-release-run-v1/outputs/q10000_balanced_t8.jsonl"
+      ],
+      "coverage": {
+        "gaps": [
+          {
+            "end": 9334,
+            "start": 1334
+          }
+        ],
+        "metrics": {
+          "base_precision": 1.0,
+          "base_recall": 1.0,
+          "gap_error_bases": 0,
+          "gap_error_fraction": 0.0,
+          "intersection_bases": 2000,
+          "interval_precision": 1.0,
+          "interval_recall": 1.0,
+          "observed_bases": 2000,
+          "truth_bases": 2000
+        },
+        "supported_bases": 2000,
+        "supported_fraction": 0.2,
+        "supported_intervals": [
+          {
+            "end": 1334,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9334
+          }
+        ],
+        "truth_intervals": [
+          {
+            "end": 1334,
+            "start": 0
+          },
+          {
+            "end": 10000,
+            "start": 9334
+          }
+        ],
+        "truth_status": "measured"
+      },
+      "jam_status": "complete",
+      "metagenome_id": "q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only.fasta",
+      "records": [
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 1334,
+              "start": 0
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only.fasta",
+          "strand": "unknown"
+        },
+        {
+          "contig_id": "jam-primary",
+          "intervals": [
+            {
+              "end": 10000,
+              "start": 9334
+            }
+          ],
+          "metagenome_id": "q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only.fasta",
+          "strand": "unknown"
+        }
+      ],
+      "status": "measured",
+      "version": "jam 0.10.0"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "scope": "direct_full",
+  "selection": {
+    "effective_scope": "direct_full",
+    "ids": [
+      "q10000__NC_001735.1__i100__c20__n2__reverse__none__bg_background_only.fasta"
+    ],
+    "limit": null,
+    "selected_count": 1,
+    "source": "assemblies_dir",
+    "total_count": 1
+  },
+  "status": "measured",
+  "tool": "jam",
+  "truth_manifest_sha256": "41a25e3e9d1c829242ccbc92bafa7b634312d14264d2691293a59c99a44c10f5",
+  "version": "jam 0.10.0"
+}

@@ -1,3 +1,4 @@
 *.fa -linguist-detectable
 *.fasta -linguist-detectable
 *.sig -linguist-detectable
+evaluation/trace-production/results/raw/controlled-v1/truth/*.tsv binary
