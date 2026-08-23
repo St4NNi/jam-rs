@@ -706,7 +706,13 @@ fn process_candidate(
                 &mut counters,
             ) {
                 Ok(result) => result,
-                Err(error) if entry.fallback_raw().is_some() => {
+                Err(error)
+                    if entry.fallback_raw().is_some()
+                        && !matches!(
+                            error.error.as_ref(),
+                            RunnerError::SeedLevelMismatch { .. }
+                        ) =>
+                {
                     failures.push(failure_for_error("jma", jma, error.error.as_ref()));
                     let mut fallback = process_raw(
                         plasmid_id,

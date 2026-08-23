@@ -1,3 +1,4 @@
+use jam_rs::jma::builder::{ArchiveBuildConfig, write_archive_from_fasta};
 use jam_rs::resource::ResourceOpenOptions;
 use jam_rs::trace::catalog::{CatalogEntry, TraceCatalog};
 use jam_rs::trace::config::{SensitivityConfig, SensitivityProfile};
@@ -275,4 +276,63 @@ fn jma_failure_falls_back_to_raw_and_merges_available_metrics() {
     assert_eq!(result.failures[0].code, "jma_invalid_magic");
     assert!(!result.alignments.is_empty());
     assert!(result.resource_metrics.stream_requests > 0);
+}
+
+#[test]
+fn seed_level_mismatch_does_not_fall_back_to_raw() {
+    let directory = tempfile::Builder::new()
+        .prefix("trace-runner-seed-mismatch-")
+        .tempdir_in("target")
+        .unwrap();
+    let sequence = dna(37, 2_000);
+    let database = build_database(directory.path(), &sequence);
+    let raw = directory.path().join("assembly.fa");
+    fs::write(
+        &raw,
+        format!(
+            ">candidate\n{}\n",
+            String::from_utf8(sequence.clone()).unwrap()
+        ),
+    )
+    .unwrap();
+    let jma_input = directory.path().join("jma-input.fa");
+    fs::copy(&raw, &jma_input).unwrap();
+    let jma = directory.path().join("scale-200.jma");
+    write_archive_from_fasta(
+        &jma_input,
+        &jma,
+        ArchiveBuildConfig {
+            block_bases: 512,
+            k31_scale: 200,
+            k21_scale: Some(200),
+            ..ArchiveBuildConfig::default()
+        },
+    )
+    .unwrap();
+    let catalog = TraceCatalog::from_entries(vec![CatalogEntry {
+        metagenome_id: "candidate".to_string(),
+        jma: Some(jma.to_string_lossy().into_owned()),
+        jma_index: Some(
+            jam_rs::jma::index::sidecar_path(&jma)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        raw: Some(raw.to_string_lossy().into_owned()),
+    }])
+    .unwrap();
+    let result = TraceRunner::new(runner_config(1))
+        .unwrap()
+        .run(&TraceQuery {
+            plasmid_id: "trace-plasmid".to_string(),
+            plasmid_sequence: sequence,
+            database: database.to_string_lossy().into_owned(),
+            catalog,
+        })
+        .unwrap();
+    let result = &result.metagenomes[0];
+    assert_eq!(result.status, jam_rs::trace::model::TraceStatus::Failed);
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].code, "seed_level_mismatch");
+    assert!(result.alignments.is_empty());
+    assert!(result.coverage.is_none());
 }
