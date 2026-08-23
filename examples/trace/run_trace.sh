@@ -67,13 +67,13 @@ esac
 
 # Non-singleton mode gives one sample per input file. The resulting sample
 # name is the input file basename, which is also the catalog metagenome_id.
-"$JAM" --force --threads "$THREADS" --memory "$MEMORY_GB" sketch \
+"$JAM" --force --threads "$THREADS" --memory-target "$MEMORY_GB" sketch \
   "${ASSEMBLIES[@]}" \
   --output "$DATABASE" \
   --kmer-size 21 \
   --fscale 100
 
-printf 'metagenome_id\tjma\traw\n' > "$CATALOG"
+printf 'metagenome_id\tjma\tjma_index\traw\n' > "$CATALOG"
 declare -A seen_ids=()
 for assembly in "${ASSEMBLIES[@]}"; do
   assembly_abs=$(realpath "$assembly")
@@ -90,16 +90,17 @@ for assembly in "${ASSEMBLIES[@]}"; do
     --output "$archive" \
     --primary-scale 100 \
     --rescue-scale 200
-  printf '%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\n' \
     "$metagenome_id" \
     "archives/$metagenome_id.jma" \
+    "archives/$metagenome_id.jma.idx.json" \
     "$assembly_abs" >> "$CATALOG"
 done
 
 # The trace command records its own run header/footer and redacted input
 # checksums. A plain .jsonl output keeps this example usable without a zstd
 # command; set TRACE_OUTPUT to a .jsonl.zst path in a wrapper when desired.
-"$JAM" --force --threads "$THREADS" --memory "$MEMORY_GB" trace \
+"$JAM" --force --threads "$THREADS" --memory-target "$MEMORY_GB" trace \
   --plasmid "$PLASMID" \
   --database "$DATABASE" \
   --catalog "$CATALOG" \
@@ -135,7 +136,7 @@ done
   printf 'key\tvalue\n'
   printf 'jam_executable\t%s\n' "$JAM"
   printf 'threads\t%s\n' "$THREADS"
-  printf 'memory_gb\t%s\n' "$MEMORY_GB"
+  printf 'memory_target_gib\t%s\n' "$MEMORY_GB"
   printf 'sensitivity\t%s\n' "$SENSITIVITY"
   printf 'candidate_database\t%s\n' "$DATABASE"
   printf 'catalog\t%s\n' "$CATALOG"

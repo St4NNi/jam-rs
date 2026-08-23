@@ -44,3 +44,8 @@ object-store behavior, or a general performance advantage. Production
 measurements require versioned real backgrounds, coordinate-level truth,
 complete input checksums, storage details, pinned comparator versions, and
 matched accuracy thresholds.
+
+`block_size_study.py` records the 16 KiB, 64 KiB, 256 KiB, and 1 MiB range
+cache cases. `memory_matrix.py` records the thread/profile/query/candidate
+matrix. Both require a new output directory and retain their raw measurement
+records; they do not choose a production default by themselves.

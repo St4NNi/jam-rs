@@ -35,7 +35,7 @@ jam sketch assemblies/sample_001.fasta assemblies/sample_002.fasta \
   --kmer-size 21 \
   --fscale 100 \
   --threads 8 \
-  --memory 4
+  --memory-target 4
 ```
 
 Keep the generated `metagenomes.jam.json` sidecar with the `.jam` file. It
@@ -55,13 +55,16 @@ jam archive \
   --complexity 0.0
 ```
 
+This writes `archives/sample_001.jma` and the checksum-bound range index
+`archives/sample_001.jma.idx.json`. Keep and version them together.
+
 Create a catalog beside the archive directory. Relative resource paths are
 resolved relative to the catalog file:
 
 ```text
-metagenome_id	jma	raw
-sample_001.fasta	archives/sample_001.jma	../assemblies/sample_001.fasta
-sample_002.fasta	archives/sample_002.jma	../assemblies/sample_002.fasta
+metagenome_id	jma	jma_index	raw
+sample_001.fasta	archives/sample_001.jma	archives/sample_001.jma.idx.json	../assemblies/sample_001.fasta
+sample_002.fasta	archives/sample_002.jma	archives/sample_002.jma.idx.json	../assemblies/sample_002.fasta
 ```
 
 Run one plasmid query across all catalog candidates:
@@ -77,7 +80,7 @@ jam trace \
   --min-plasmid-containment 0.0 \
   --min-metagenome-containment 0.0 \
   --threads 8 \
-  --memory 4
+  --memory-target 4
 ```
 
 The `.zst` suffix selects the same JSONL record stream in a Zstandard frame.
@@ -117,16 +120,24 @@ the retained candidate list. The `.jam` stage remains sketch evidence.
 For each retained candidate, the runner prefers JMA when a catalog row has
 one. It validates the JMA header, section directory, checksums, seed identity,
 and sequence ranges, then performs bounded positional seeding, chaining, and
-banded alignment. If JMA fails and a raw resource is present, the runner keeps
-the JMA failure as a structured record and retries the candidate through the
-raw resource. A catalog row with only raw data uses that path directly.
+banded alignment. An incompatible JMA seed level is a structured
+`seed_level_mismatch` failure and never falls back to unanchored raw alignment.
+Other JMA access failures may retain the JMA failure and retry through a raw
+resource when one is present. A catalog row with only raw data uses that path
+directly.
 
 JMA v1 stores k=31 primary and optional k=21 rescue positional seeds. The
 primary k=31 value is a specificity-oriented workflow contract, not a claim
 that k=31 is universally optimal. The k=21 rescue level helps short or more
 divergent represented traces. Profiles and their bounds are described in
-[SENSITIVITY.md](SENSITIVITY.md); no new below-21 collision analysis is part
-of this release.
+[SENSITIVITY.md](SENSITIVITY.md), and the exact seed, chain, alignment, and
+coverage rules are specified in [ALGORITHM.md](ALGORITHM.md). No new below-21
+collision analysis is part of this release.
+
+An archive must be at least as dense as the requested profile. Build k=31 at
+scale 100 and k=21 at scale 200 when the same archive must support all three
+shipped profiles; a sparser archive cannot satisfy `sensitive` and fails
+closed.
 
 ## Reading evidence
 
@@ -167,17 +178,18 @@ the cached file. Objects without an ETag or Last-Modified token are downloaded
 again before a content-addressed cache entry is selected, rather than being
 silently reused by locator and size alone.
 
-The JMA reader validates its header, directory, and payload sections when
-opened; the current v1 implementation decodes those sections before serving
-sequence-range requests. Raw resources are streamed through the FASTA/FASTQ
-parser, so a raw fallback can read the complete assembly resource. A JMA
-archive still provides checked sequence-range semantics; this release does not
-claim remote window-only transfer.
+With a `jma_index` catalog resource, the reader validates the JMA header,
+directory, contig table, and checksum-bound sidecar, then fetches only seed
+buckets matching plasmid seeds and sequence blocks intersecting accepted
+chains. Raw resources are streamed through the FASTA/FASTQ parser, so a raw
+fallback can read the complete assembly resource. A JMA row without an index
+uses eager full-section access only when full-download fallback is enabled and
+records that fallback explicitly.
 
-`--threads` bounds candidate processing, while global `--memory` sets the
+`--threads` bounds candidate processing, while global `--memory-target` sets the
 resource/cache budget used by the command. Seed occurrences, anchors, chains,
 alignment windows, retained alignments, and output records are bounded. The
-memory value is an operational budget, not a hard RSS ceiling: allocator,
+memory target is not a hard RSS ceiling: allocator,
 thread-stack, parser, mmap, and operating-system overhead remain.
 
 ## Reproducibility and compatibility
@@ -185,7 +197,7 @@ thread-stack, parser, mmap, and operating-system overhead remain.
 Record the catalog, `.jam` sidecar, JMA source checksums, raw-resource versions,
 trace JSONL, and command line together. JMA archives are format version 1;
 existing `.jam` files remain version 3 and are not rewritten by `jam trace`.
-The trace JSON schema is version `1.0.0`. A legacy `.jam` without a sidecar may
+The trace JSON schema is version `1.2.0`. A legacy `.jam` without a sidecar may
 still be readable, but its original catalog provenance cannot be reconstructed.
 
 Bias-assisted `.jam` retrieval is optional and catalog-specific. In bias mode,

@@ -15,6 +15,10 @@ https://objects.example.org/metagenomes/sample_001.jma
 s3://surveillance-catalog/metagenomes/sample_001.jma
 ```
 
+Production JMA rows also provide the checksum-bound `jma_index` object. The
+index identifies exact archive ranges and is not guessed from a signed archive
+URL.
+
 Relative local paths are resolved relative to the catalog file. Absolute local
 paths and `file://` paths are accepted as written. HTTP, HTTPS, and S3
 locators require a host/bucket and object key as appropriate.
@@ -58,10 +62,10 @@ mistaken for an atomically completed remote object.
 The minimum TSV form is:
 
 ```text
-metagenome_id	jma	raw
-sample_001	https://objects.example.org/m/sample_001.jma	https://objects.example.org/m/sample_001.fasta.gz
-sample_002	s3://surveillance-catalog/m/sample_002.jma	s3://surveillance-catalog/m/sample_002.fasta.gz
-sample_003		file:///data/m/sample_003.fasta
+metagenome_id	jma	jma_index	raw
+sample_001	https://objects.example.org/m/sample_001.jma	https://objects.example.org/m/sample_001.jma.idx.json	https://objects.example.org/m/sample_001.fasta.gz
+sample_002	s3://surveillance-catalog/m/sample_002.jma	s3://surveillance-catalog/m/sample_002.jma.idx.json	s3://surveillance-catalog/m/sample_002.fasta.gz
+sample_003			file:///data/m/sample_003.fasta
 ```
 
 The equivalent JSON is either an array or an object with an `entries` array:
@@ -71,11 +75,13 @@ The equivalent JSON is either an array or an object with an `entries` array:
   {
     "metagenome_id": "sample_001",
     "jma": "https://objects.example.org/m/sample_001.jma",
+    "jma_index": "https://objects.example.org/m/sample_001.jma.idx.json",
     "raw": "https://objects.example.org/m/sample_001.fasta.gz"
   },
   {
     "metagenome_id": "sample_002",
-    "jma": "s3://surveillance-catalog/m/sample_002.jma"
+    "jma": "s3://surveillance-catalog/m/sample_002.jma",
+    "jma_index": "s3://surveillance-catalog/m/sample_002.jma.idx.json"
   }
 ]
 ```
@@ -93,21 +99,20 @@ allocation or transport, offset-plus-length overflow and out-of-bounds ranges
 are rejected. Metadata records object size, version information (ETag or
 last-modified when available), and whether ranges are advertised.
 
-HTTP(S) and S3 readers retry a bounded number of failed requests. A range
-response must have the requested length. If a server returns a complete object
-instead, the reader can slice it only when full-download fallback is enabled.
-When range support is unavailable and fallback is disabled, the candidate is a
-structured failure rather than an empty result. Resource metrics in each trace
-result report metadata requests, range requests, stream requests, remote bytes,
-cache bytes, cache hits, and retries.
+HTTP(S) and S3 readers retry a bounded number of failed requests. A ranged
+response must be `206 Partial Content` with the exact requested
+`Content-Range`. A `200` response is accepted only through the configured,
+size-bounded full-object fallback. When range support is unavailable and
+fallback is disabled, the candidate is a structured failure rather than an
+empty result.
 
-JMA v1 validates the complete header, section directory, contig table,
-sequence blocks, and seed sections when the archive is opened. The current
-reader decodes those sections before serving its checked sequence-range API;
-therefore this release does not promise that a remote JMA request transfers
-only the final alignment windows. Raw FASTA/FASTQ resources are streamed into
-the parser and may require the complete input stream. These are observable
-transport semantics, not biological evidence differences.
+Indexed JMA opening reads the fixed header, section directory, contig table,
+and the bounded sidecar. Subsequent reads fetch only matching seed buckets and
+sequence blocks intersecting accepted chain windows. Resource metrics report
+HEAD/GET/range/stream counts, requested/returned/decoded bytes, cache behavior,
+retries, fallbacks, seed buckets, and sequence blocks. Raw FASTA/FASTQ resources
+are streamed into the parser and may require the complete input stream.
+Semantic seed-level mismatch is never eligible for raw fallback.
 
 ## Cache and redaction rules
 
@@ -117,8 +122,12 @@ instead of being mixed with the new object. Cache block size, total cache size,
 timeout, retry count, and full-download fallback are part of the resource
 opening contract. `--cache-block-bytes`, `--request-timeout-seconds`,
 `--max-retries`, and `--no-full-download-fallback` expose those controls;
-global `--memory` derives the in-memory cache budget. `--cache-dir` is the disk
+global `--memory-target` derives the in-memory cache target. `--cache-dir` is the disk
 location used only when a remote candidate `.jam` must be materialized.
+
+Indexed archive blocks are cached by redacted locator, object version, size,
+and exact byte range. A sidecar whose archive identity or block checksum does
+not match is rejected before its content is used.
 
 Only the redacted locator is safe for logs and JSON. The redaction removes URL
 user-info and query/fragment suffixes, for example:

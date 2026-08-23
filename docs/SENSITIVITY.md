@@ -25,6 +25,9 @@ insufficient. A denser archive can serve a sparser query level, subject to the
 archive's available k and scale sections. A missing or incompatible seed
 level is an explicit error, not a zero-evidence result.
 
+A seed-level mismatch is not eligible for raw fallback. This prevents an
+incompatible indexed request from becoming unanchored local-alignment evidence.
+
 ## Choosing a profile
 
 Use `fast` for exploratory work where lower I/O and fewer candidates matter.
@@ -43,7 +46,7 @@ must not be silently treated as a clean negative.
 ## Archive settings
 
 Build JMA v1 with seed levels that cover the profiles you intend to run. For
-the shipped defaults:
+`balanced`:
 
 ```bash
 jam archive \
@@ -52,6 +55,9 @@ jam archive \
   --primary-scale 200 \
   --rescue-scale 500
 ```
+
+Use `--primary-scale 100 --rescue-scale 200` when one archive must also support
+`sensitive`; those denser nested levels can serve the sparser profiles.
 
 The archive command always creates the fixed k=31 primary section and creates
 k=21 rescue data unless `--no-rescue` is supplied. An archive built without
@@ -79,11 +85,11 @@ collision analysis below k=21.
 
 ## Resource controls
 
-Global `--threads` bounds parallel candidate processing. Global `--memory`
+Global `--threads` bounds parallel candidate processing. Global `--memory-target`
 sets the resource cache budget used by `jam trace`; seed occurrence, anchor,
 chain, alignment-window, retained-alignment, and JSON output buffers are
 bounded by the selected profile and runner configuration. The value is an
-operational budget, not a hard process RSS limit because mmap pages, allocator
+internal target, not a hard process RSS limit because mmap pages, allocator
 arenas, thread stacks, parser buffers, and the runtime can add overhead.
 
 For a reproducible run, preserve the complete `run_header`, including the

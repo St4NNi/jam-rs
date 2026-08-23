@@ -1,6 +1,6 @@
 # Trace JSONL schema and consumer guide
 
-`jam trace` writes schema version `1.0.0` as newline-delimited JSON. The
+`jam trace` writes schema version `1.2.0` as newline-delimited JSON. The
 logical stream is:
 
 ```text
@@ -20,7 +20,7 @@ The first record has `record_type="run_header"` and contains:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Trace record schema, currently `1.0.0`. |
+| `schema_version` | Trace record schema, currently `1.2.0`. |
 | `run_id` | Identifier shared by all records in the stream. |
 | `jam_rs_version` | Binary version. |
 | `source_commit` | Source commit when available, otherwise `null`. |
@@ -29,6 +29,7 @@ The first record has `record_type="run_header"` and contains:
 | `plasmid_id` | Query plasmid identifier. |
 | `plasmid_length` | Query length in bases. |
 | `sensitivity` | Profile, fixed k=31 primary/k=21 rescue settings, scoring, and resource bounds. |
+| `algorithm` | Stable algorithm identifier, version, and all resolved seed, chain, alignment, and coverage parameters. |
 | `inputs` | Redacted database, catalog, and plasmid locators with optional SHA-256 values. |
 
 Locators in `inputs` are redacted. Do not infer a credential, signed URL, or
@@ -43,11 +44,12 @@ Each `metagenome_result` is independently consumable:
 | --- | --- |
 | `status` | `complete`, `partial`, `no_candidate`, or `failed`. |
 | `plasmid_id`, `metagenome_id` | Stable query and candidate identifiers. |
+| `algorithm` | The same resolved algorithm identity and parameters as the run header. |
 | `candidate` | Existing `.jam` sketch evidence, or `null`. |
 | `alignments` | Positional alignment records, possibly empty. |
 | `coverage` | Nonredundant query coverage and circular gaps, or `null`. |
 | `failures` | Structured stage/code/message records; resources are redacted. |
-| `resource_metrics` | Metadata, range, stream, byte, cache, and retry counters. |
+| `resource_metrics` | HEAD/GET/range/stream, requested/returned/decoded byte, cache, retry, fallback, seed-bucket, and sequence-block counters. |
 
 Candidate fields use explicit denominators:
 
@@ -116,7 +118,7 @@ The footer contains bounded totals:
 ```json
 {
   "record_type": "run_footer",
-  "schema_version": "1.0.0",
+  "schema_version": "1.2.0",
   "run_id": "trace-...",
   "completed_at_utc": "...",
   "metagenomes_total": 2,
