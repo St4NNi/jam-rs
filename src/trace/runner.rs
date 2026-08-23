@@ -639,6 +639,21 @@ struct CandidateWork {
     counters: TracePerformanceCounters,
 }
 
+#[derive(Debug)]
+struct TraceProcessingFailure {
+    error: Box<RunnerError>,
+    metrics: Box<ResourceMetrics>,
+}
+
+impl TraceProcessingFailure {
+    fn new(error: RunnerError, metrics: ResourceMetrics) -> Self {
+        Self {
+            error: Box::new(error),
+            metrics: Box::new(metrics),
+        }
+    }
+}
+
 fn process_candidate(
     plasmid_id: &str,
     plasmid: &[u8],
@@ -692,25 +707,29 @@ fn process_candidate(
             ) {
                 Ok(result) => result,
                 Err(error) if entry.fallback_raw().is_some() => {
-                    failures.push(failure_for_error("jma", jma, &error));
-                    process_raw(
+                    failures.push(failure_for_error("jma", jma, error.error.as_ref()));
+                    let mut fallback = process_raw(
                         plasmid_id,
                         plasmid,
                         candidate,
                         entry.raw.as_deref().unwrap_or_default(),
                         config,
                         &mut counters,
-                    )
+                    );
+                    fallback.resource_metrics =
+                        add_resource_metrics(*error.metrics, fallback.resource_metrics);
+                    fallback
                 }
-                Err(error) => failed_result(
+                Err(error) => failed_result_with_metrics(
                     plasmid_id,
                     candidate,
                     config,
                     "jma",
-                    error.code(),
-                    &error.to_string(),
-                    error.retryable(),
+                    error.error.code(),
+                    &error.error.to_string(),
+                    error.error.retryable(),
                     Some(jma),
+                    *error.metrics,
                 ),
             }
         }
@@ -762,26 +781,37 @@ fn process_jma(
     index_locator: Option<&str>,
     config: &TraceRunnerConfig,
     counters: &mut TracePerformanceCounters,
-) -> Result<TraceMetagenomeResult, RunnerError> {
-    let resource = open_resource(locator, config.resources.clone())?;
+) -> Result<TraceMetagenomeResult, TraceProcessingFailure> {
+    let resource = open_resource(locator, config.resources.clone())
+        .map_err(|error| TraceProcessingFailure::new(error.into(), ResourceMetrics::default()))?;
     let reader = match index_locator {
         Some(index_locator) => {
-            let index = open_resource(index_locator, config.resources.clone())?;
-            JmaReader::open_indexed(resource, index)?
+            let index =
+                open_resource(index_locator, config.resources.clone()).map_err(|error| {
+                    TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
+                })?;
+            JmaReader::open_indexed(resource, index).map_err(|error| {
+                TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
+            })?
         }
-        None => JmaReader::open(resource)?,
+        None => JmaReader::open(resource).map_err(|error| {
+            TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
+        })?,
     };
     if reader.header().algorithm_id.as_deref() != Some(crate::trace::TRACE_ALGORITHM_ID)
         || reader.header().algorithm_version != Some(crate::trace::TRACE_ALGORITHM_VERSION)
     {
-        return Err(JmaError::CorruptSection(format!(
-            "JMA algorithm metadata is missing or incompatible; expected {} version {}",
-            crate::trace::TRACE_ALGORITHM_ID,
-            crate::trace::TRACE_ALGORITHM_VERSION
-        ))
-        .into());
+        return Err(TraceProcessingFailure::new(
+            RunnerError::from(JmaError::CorruptSection(format!(
+                "JMA algorithm metadata is missing or incompatible; expected {} version {}",
+                crate::trace::TRACE_ALGORITHM_ID,
+                crate::trace::TRACE_ALGORITHM_VERSION
+            ))),
+            reader.metrics(),
+        ));
     }
-    let chains = indexed_chains(&reader, plasmid, &config.sensitivity)?;
+    let chains = indexed_chains(&reader, plasmid, &config.sensitivity)
+        .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
     let mut alignments = Vec::new();
     let mut workspace = AlignmentWorkspace::new();
     let mut seen_contigs = HashSet::new();
@@ -791,7 +821,8 @@ fn process_jma(
             .contigs()
             .iter()
             .find(|contig| contig.id == chain.contig_id)
-            .ok_or(JmaError::UnknownContig(chain.contig_id))?;
+            .ok_or(JmaError::UnknownContig(chain.contig_id))
+            .map_err(|error| TraceProcessingFailure::new(error.into(), reader.metrics()))?;
         if seen_contigs.insert(contig.id) {
             counters.contigs_considered = counters.contigs_considered.saturating_add(1);
         }
@@ -800,8 +831,10 @@ fn process_jma(
             contig.length,
             plasmid.len(),
             config.sensitivity.max_alignment_window_bases,
-        )?;
-        let coordinates = chain_alignment_coordinates(&chain, range, plasmid.len() as u64)?;
+        )
+        .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
+        let coordinates = chain_alignment_coordinates(&chain, range, plasmid.len() as u64)
+            .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
         let strand_rank = match chain.strand {
             Strand::Forward => 0,
             Strand::Reverse => 1,
@@ -809,7 +842,9 @@ fn process_jma(
         if !seen_windows.insert((contig.id, range.start, range.end, strand_rank)) {
             continue;
         }
-        let sequence = reader.read_sequence(contig.id, range)?;
+        let sequence = reader
+            .read_sequence(contig.id, range)
+            .map_err(|error| TraceProcessingFailure::new(error.into(), reader.metrics()))?;
         counters.windows_retrieved = counters.windows_retrieved.saturating_add(1);
         align_window(
             plasmid_id,
@@ -827,10 +862,12 @@ fn process_jma(
             coordinates.diagonal_offset,
             &mut alignments,
             counters,
-        )?;
+        )
+        .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
         retain_best_alignments(&mut alignments, config.max_alignments_per_candidate);
     }
-    let coverage = finalize_coverage(plasmid.len() as u64, &mut alignments)?;
+    let coverage = finalize_coverage(plasmid.len() as u64, &mut alignments)
+        .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
     Ok(TraceMetagenomeResult {
         schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
         run_id: String::new(),
@@ -856,18 +893,19 @@ fn process_raw(
     config: &TraceRunnerConfig,
     counters: &mut TracePerformanceCounters,
 ) -> TraceMetagenomeResult {
-    let resource = match RawAssembly::open(locator, config.resources.clone()) {
+    let resource = match RawAssembly::open_with_metrics(locator, config.resources.clone()) {
         Ok(resource) => resource,
-        Err(error) => {
-            return failed_result(
+        Err(failure) => {
+            return failed_result_with_metrics(
                 plasmid_id,
                 candidate,
                 config,
                 "raw",
-                raw_error_code(&error),
-                &error.to_string(),
-                raw_error_retryable(&error),
+                raw_error_code(failure.error.as_ref()),
+                &failure.error.to_string(),
+                raw_error_retryable(failure.error.as_ref()),
                 Some(locator),
+                *failure.metrics,
             );
         }
     };
@@ -882,7 +920,7 @@ fn process_raw(
         ) {
             Ok(windows) => windows,
             Err(error) => {
-                return failed_result(
+                return failed_result_with_metrics(
                     plasmid_id,
                     candidate,
                     config,
@@ -891,6 +929,7 @@ fn process_raw(
                     &error.to_string(),
                     error.retryable(),
                     Some(locator),
+                    resource.metrics,
                 );
             }
         };
@@ -914,7 +953,7 @@ fn process_raw(
                 &mut alignments,
                 counters,
             ) {
-                return failed_result(
+                return failed_result_with_metrics(
                     plasmid_id,
                     candidate,
                     config,
@@ -923,6 +962,7 @@ fn process_raw(
                     &error.to_string(),
                     error.retryable(),
                     Some(locator),
+                    resource.metrics,
                 );
             }
             retain_best_alignments(&mut alignments, config.max_alignments_per_candidate);
@@ -931,7 +971,7 @@ fn process_raw(
     let coverage = match finalize_coverage(plasmid.len() as u64, &mut alignments) {
         Ok(coverage) => coverage,
         Err(error) => {
-            return failed_result(
+            return failed_result_with_metrics(
                 plasmid_id,
                 candidate,
                 config,
@@ -940,6 +980,7 @@ fn process_raw(
                 &error.to_string(),
                 false,
                 Some(locator),
+                resource.metrics,
             );
         }
     };
@@ -1307,6 +1348,31 @@ fn failed_result(
     retryable: bool,
     resource: Option<&str>,
 ) -> TraceMetagenomeResult {
+    failed_result_with_metrics(
+        plasmid_id,
+        candidate,
+        config,
+        stage,
+        code,
+        message,
+        retryable,
+        resource,
+        ResourceMetrics::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn failed_result_with_metrics(
+    plasmid_id: &str,
+    candidate: &RankedCandidate,
+    config: &TraceRunnerConfig,
+    stage: &str,
+    code: &str,
+    message: &str,
+    retryable: bool,
+    resource: Option<&str>,
+    resource_metrics: ResourceMetrics,
+) -> TraceMetagenomeResult {
     TraceMetagenomeResult {
         schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
         run_id: String::new(),
@@ -1326,7 +1392,7 @@ fn failed_result(
             resource: resource.map(redact_resource),
             retryable,
         }],
-        resource_metrics: ResourceMetrics::default(),
+        resource_metrics,
     }
 }
 
@@ -1348,14 +1414,58 @@ fn redact_resource(resource: &str) -> String {
 
 fn raw_error_code(error: &RawError) -> &'static str {
     match error {
-        RawError::Resource(_) => "resource_error",
+        RawError::Resource(error) => resource_error_code(error),
         RawError::Parse { .. } => "raw_parse_error",
         RawError::Io { .. } => "raw_io_error",
     }
 }
 
 fn raw_error_retryable(error: &RawError) -> bool {
-    matches!(error, RawError::Resource(ResourceError::Transport { .. }))
+    match error {
+        RawError::Resource(error) => resource_error_retryable(error),
+        RawError::Parse { .. } | RawError::Io { .. } => false,
+    }
+}
+
+fn resource_error_code(error: &ResourceError) -> &'static str {
+    match error {
+        ResourceError::HttpStatus {
+            status: 401 | 403, ..
+        } => "access_denied",
+        ResourceError::HttpStatus { status: 404, .. } => "missing_object",
+        ResourceError::HttpStatus { status, .. }
+            if matches!(*status, 408 | 425 | 429 | 500..=599) =>
+        {
+            "retryable_server_error"
+        }
+        ResourceError::HttpStatus { .. } => "http_status_error",
+        ResourceError::Timeout { .. } => "timeout",
+        ResourceError::Transport { .. } => "retryable_resource_error",
+        ResourceError::CacheIdentityChanged(_) => "stale_cache",
+        ResourceError::RangeUnsupported(_) => "range_unsupported",
+        ResourceError::InvalidLocator(_) => "invalid_resource",
+        ResourceError::UnsupportedScheme(_) => "unsupported_resource",
+        ResourceError::RangeOverflow { .. } | ResourceError::RangeOutOfBounds { .. } => {
+            "resource_range_error"
+        }
+        ResourceError::Io { .. } => "resource_io_error",
+    }
+}
+
+fn resource_error_retryable(error: &ResourceError) -> bool {
+    match error {
+        ResourceError::HttpStatus { status, .. } => {
+            matches!(*status, 408 | 425 | 429 | 500..=599)
+        }
+        ResourceError::Timeout { .. } | ResourceError::Transport { .. } => true,
+        ResourceError::InvalidLocator(_)
+        | ResourceError::UnsupportedScheme(_)
+        | ResourceError::RangeOverflow { .. }
+        | ResourceError::RangeOutOfBounds { .. }
+        | ResourceError::CacheIdentityChanged(_)
+        | ResourceError::RangeUnsupported(_)
+        | ResourceError::Io { .. } => false,
+    }
 }
 
 impl RunnerError {
@@ -1363,12 +1473,14 @@ impl RunnerError {
         match self {
             Self::Candidate(_) => "candidate_error",
             Self::Catalog(_) => "catalog_error",
-            Self::Resource(_) => "resource_error",
-            Self::Raw(_) => "raw_error",
+            Self::Resource(error) => resource_error_code(error),
+            Self::Raw(error) => raw_error_code(error),
             Self::Jma(error) => match error {
-                JmaError::Resource(_) => "resource_error",
+                JmaError::Resource(error) => resource_error_code(error),
                 JmaError::ChecksumMismatch(_) => "jma_checksum_mismatch",
                 JmaError::CorruptSection(_) => "jma_corrupt_section",
+                JmaError::UnsupportedVersion(_) => "jma_unsupported_version",
+                JmaError::InvalidMagic => "jma_invalid_magic",
                 _ => "jma_error",
             },
             Self::Alignment(_) => "alignment_error",
@@ -1383,12 +1495,12 @@ impl RunnerError {
     }
 
     fn retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::Resource(ResourceError::Transport { .. })
-                | Self::Raw(RawError::Resource(ResourceError::Transport { .. }))
-                | Self::Jma(JmaError::Resource(ResourceError::Transport { .. }))
-        )
+        match self {
+            Self::Resource(error) => resource_error_retryable(error),
+            Self::Raw(RawError::Resource(error)) => resource_error_retryable(error),
+            Self::Jma(JmaError::Resource(error)) => resource_error_retryable(error),
+            _ => false,
+        }
     }
 }
 
@@ -1523,5 +1635,77 @@ mod coordinate_tests {
             vec![BaseInterval::new(120, 320).unwrap()]
         );
         assert_eq!(result.matches, 200);
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn resource_failure_codes_and_retryability_are_stable() {
+        let cases = [
+            (
+                ResourceError::HttpStatus {
+                    locator: "https://example.test/object".to_string(),
+                    status: 403,
+                },
+                "access_denied",
+                false,
+            ),
+            (
+                ResourceError::HttpStatus {
+                    locator: "https://example.test/object".to_string(),
+                    status: 404,
+                },
+                "missing_object",
+                false,
+            ),
+            (
+                ResourceError::Timeout {
+                    locator: "https://example.test/object".to_string(),
+                },
+                "timeout",
+                true,
+            ),
+            (
+                ResourceError::HttpStatus {
+                    locator: "https://example.test/object".to_string(),
+                    status: 503,
+                },
+                "retryable_server_error",
+                true,
+            ),
+            (
+                ResourceError::CacheIdentityChanged("https://example.test/object".to_string()),
+                "stale_cache",
+                false,
+            ),
+        ];
+        for (error, expected_code, expected_retryable) in cases {
+            let runner_error = RunnerError::Resource(error);
+            assert_eq!(runner_error.code(), expected_code);
+            assert_eq!(runner_error.retryable(), expected_retryable);
+        }
+    }
+
+    #[test]
+    fn jma_corruption_failure_codes_remain_specific() {
+        assert_eq!(
+            RunnerError::Jma(JmaError::ChecksumMismatch("header".to_string())).code(),
+            "jma_checksum_mismatch"
+        );
+        assert_eq!(
+            RunnerError::Jma(JmaError::UnsupportedVersion(99)).code(),
+            "jma_unsupported_version"
+        );
+        assert_eq!(
+            RunnerError::Jma(JmaError::InvalidMagic).code(),
+            "jma_invalid_magic"
+        );
+        assert_eq!(
+            RunnerError::Jma(JmaError::CorruptSection("truncated".to_string())).code(),
+            "jma_corrupt_section"
+        );
     }
 }

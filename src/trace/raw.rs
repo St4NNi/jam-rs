@@ -117,19 +117,55 @@ pub struct RawAssembly {
     pub metrics: ResourceMetrics,
 }
 
+/// A raw-resource failure together with the counters observed before parsing
+/// stopped.  The runner uses this only on failure paths so HTTP, cache, and
+/// stream metrics are not lost when the resource handle is consumed by the
+/// parser.
+#[derive(Debug)]
+pub(crate) struct RawOpenFailure {
+    pub(crate) error: Box<RawError>,
+    pub(crate) metrics: Box<ResourceMetrics>,
+}
+
 impl RawAssembly {
     /// Parse one FASTA/FASTQ resource, including parser-supported compression.
     pub fn open(locator: impl AsRef<str>, options: ResourceOpenOptions) -> Result<Self, RawError> {
-        let resource = open_resource(locator, options)?;
-        Self::from_resource(resource)
+        Self::open_with_metrics(locator, options).map_err(|failure| *failure.error)
+    }
+
+    /// Parse one resource while retaining counters when opening or parsing
+    /// fails.  This is crate-visible because trace result records include
+    /// resource metrics for failed candidates as well as successful ones.
+    pub(crate) fn open_with_metrics(
+        locator: impl AsRef<str>,
+        options: ResourceOpenOptions,
+    ) -> Result<Self, RawOpenFailure> {
+        let resource = open_resource(locator, options).map_err(|error| RawOpenFailure {
+            error: Box::new(error),
+            metrics: Box::new(ResourceMetrics::default()),
+        })?;
+        Self::from_resource_with_metrics(resource)
     }
 
     /// Parse an already opened resource.  This is also used by tests with
     /// mock resource implementations routed through the shared enum.
     pub fn from_resource(resource: AssemblyResource) -> Result<Self, RawError> {
+        Self::from_resource_with_metrics(resource).map_err(|failure| *failure.error)
+    }
+
+    /// Parse an already opened resource and retain its counters on failure.
+    pub(crate) fn from_resource_with_metrics(
+        resource: AssemblyResource,
+    ) -> Result<Self, RawOpenFailure> {
         let redacted_locator = resource.locator().redacted();
-        let stream = resource.stream()?;
-        let contigs = parse_stream(stream, &redacted_locator)?;
+        let stream = resource.stream().map_err(|error| RawOpenFailure {
+            error: Box::new(error.into()),
+            metrics: Box::new(resource.metrics()),
+        })?;
+        let contigs = parse_stream(stream, &redacted_locator).map_err(|error| RawOpenFailure {
+            error: Box::new(error),
+            metrics: Box::new(resource.metrics()),
+        })?;
         let metrics = resource.metrics();
         Ok(Self {
             redacted_locator,
