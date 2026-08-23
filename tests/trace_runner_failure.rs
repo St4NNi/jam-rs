@@ -256,12 +256,12 @@ fn jma_failure_falls_back_to_raw_and_merges_available_metrics() {
         ),
     )
     .unwrap();
-    let invalid_jma = directory.path().join("invalid.jma");
-    fs::write(&invalid_jma, vec![0_u8; 160]).unwrap();
+    let missing_jma = directory.path().join("missing.jma");
+    let missing_index = directory.path().join("missing.jma.idx.json");
     let catalog = TraceCatalog::from_entries(vec![CatalogEntry {
         metagenome_id: "candidate".to_string(),
-        jma: Some(invalid_jma.to_string_lossy().into_owned()),
-        jma_index: None,
+        jma: Some(missing_jma.to_string_lossy().into_owned()),
+        jma_index: Some(missing_index.to_string_lossy().into_owned()),
         raw: Some(raw.to_string_lossy().into_owned()),
     }])
     .unwrap();
@@ -277,7 +277,7 @@ fn jma_failure_falls_back_to_raw_and_merges_available_metrics() {
     let result = &result.metagenomes[0];
     assert_eq!(result.status, jam_rs::trace::model::TraceStatus::Partial);
     assert_eq!(result.failures[0].stage, "jma");
-    assert_eq!(result.failures[0].code, "jma_invalid_magic");
+    assert_eq!(result.failures[0].code, "resource_io_error");
     assert!(!result.alignments.is_empty());
     assert!(result.resource_metrics.stream_requests > 0);
 }
@@ -337,6 +337,66 @@ fn seed_level_mismatch_does_not_fall_back_to_raw() {
     assert_eq!(result.status, jam_rs::trace::model::TraceStatus::Failed);
     assert_eq!(result.failures.len(), 1);
     assert_eq!(result.failures[0].code, "seed_level_mismatch");
+    assert!(result.alignments.is_empty());
+    assert!(result.coverage.is_none());
+}
+
+#[test]
+fn incompatible_jma_index_does_not_fall_back_to_raw() {
+    let directory = tempfile::Builder::new()
+        .prefix("trace-runner-index-mismatch-")
+        .tempdir_in("target")
+        .unwrap();
+    let sequence = dna(41, 2_000);
+    let database = build_database(directory.path(), &sequence);
+    let raw = directory.path().join("assembly.fa");
+    fs::write(
+        &raw,
+        format!(
+            ">candidate\n{}\n",
+            String::from_utf8(sequence.clone()).unwrap()
+        ),
+    )
+    .unwrap();
+    let jma_input = directory.path().join("jma-input.fa");
+    fs::copy(&raw, &jma_input).unwrap();
+    let jma = directory.path().join("indexed.jma");
+    write_archive_from_fasta(
+        &jma_input,
+        &jma,
+        ArchiveBuildConfig {
+            block_bases: 512,
+            k31_scale: 100,
+            k21_scale: Some(200),
+            ..ArchiveBuildConfig::default()
+        },
+    )
+    .unwrap();
+    let index = jam_rs::jma::index::sidecar_path(&jma);
+    let mut index_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&index).unwrap()).unwrap();
+    index_json["archive_size"] = serde_json::json!(0);
+    fs::write(&index, serde_json::to_vec_pretty(&index_json).unwrap()).unwrap();
+    let catalog = TraceCatalog::from_entries(vec![CatalogEntry {
+        metagenome_id: "candidate".to_string(),
+        jma: Some(jma.to_string_lossy().into_owned()),
+        jma_index: Some(index.to_string_lossy().into_owned()),
+        raw: Some(raw.to_string_lossy().into_owned()),
+    }])
+    .unwrap();
+    let result = TraceRunner::new(runner_config(1))
+        .unwrap()
+        .run(&TraceQuery {
+            plasmid_id: "trace-plasmid".to_string(),
+            plasmid_sequence: sequence,
+            database: database.to_string_lossy().into_owned(),
+            catalog,
+        })
+        .unwrap();
+    let result = &result.metagenomes[0];
+    assert_eq!(result.status, jam_rs::trace::model::TraceStatus::Failed);
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].code, "jma_corrupt_section");
     assert!(result.alignments.is_empty());
     assert!(result.coverage.is_none());
 }

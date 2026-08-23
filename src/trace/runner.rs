@@ -791,10 +791,7 @@ fn process_candidate(
                 Ok(result) => result,
                 Err(error)
                     if entry.fallback_raw().is_some()
-                        && !matches!(
-                            error.error.as_ref(),
-                            RunnerError::SeedLevelMismatch { .. }
-                        ) =>
+                        && jma_error_allows_raw_fallback(error.error.as_ref()) =>
                 {
                     failures.push(failure_for_error("jma", jma, error.error.as_ref()));
                     let mut fallback = process_raw(
@@ -860,6 +857,15 @@ fn process_candidate(
         result.status = TraceStatus::Partial;
     }
     CandidateWork { result, counters }
+}
+
+fn jma_error_allows_raw_fallback(error: &RunnerError) -> bool {
+    match error {
+        RunnerError::SeedLevelMismatch { .. } => false,
+        RunnerError::Jma(JmaError::Resource(_)) => true,
+        RunnerError::Jma(_) => false,
+        _ => true,
+    }
 }
 
 fn process_jma(
@@ -959,6 +965,7 @@ fn process_jma(
             terminal_seed_evidence: round_terminal_seed_evidence,
         } = round;
         terminal_seed_evidence |= round_terminal_seed_evidence;
+        let protected_alignments = alignments.len();
         let alignment_windows_attempted = align_indexed_chains(
             &reader,
             plasmid_id,
@@ -988,6 +995,11 @@ fn process_jma(
             counters,
         )
         .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
+        retain_new_alignments(
+            &mut alignments,
+            protected_alignments,
+            config.max_alignments_per_candidate,
+        );
 
         let topology = assess_topology(
             query_length,
@@ -1005,6 +1017,7 @@ fn process_jma(
             .collect();
         let after_metrics = reader.metrics();
         let metric_delta = subtract_resource_metrics(after_metrics, before_metrics);
+        let new_query_bases_supported = supported_after.saturating_sub(supported_before);
         rescue_rounds.push(RescueRoundMetrics {
             round: u8::try_from(round_index + 1).unwrap_or(u8::MAX),
             seed_k: seed_config.k,
@@ -1016,13 +1029,13 @@ fn process_jma(
             chains_accepted,
             sequence_blocks_fetched: metric_delta.sequence_blocks_read,
             alignment_windows_attempted,
-            new_query_bases_supported: supported_after.saturating_sub(supported_before),
+            new_query_bases_supported,
             elapsed_millis: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         });
-        supported_before = supported_after;
-        if supported_after == query_length {
+        if (round_index > 0 && new_query_bases_supported == 0) || supported_after == query_length {
             break;
         }
+        supported_before = supported_after;
     }
 
     let finalized = finalize_evidence(query_length, config, &mut alignments)
@@ -1320,7 +1333,7 @@ fn chains_for_level<R: RangeReader>(
     let seed_keys_tested = level.seeds.len() as u64;
     let mut groups = Vec::with_capacity(level.seeds.len());
     for seed in level.seeds {
-        let occurrences = reader.seed_occurrences(seed.query(level.k))?;
+        let occurrences = reader.seed_occurrences_at_scale(seed.query(level.k), available_scale)?;
         if !occurrences.is_empty() {
             groups.push(SeedOccurrenceGroup {
                 seed,
@@ -1510,7 +1523,6 @@ fn align_indexed_chains<R: RangeReader>(
             alignments,
             counters,
         )?;
-        retain_best_alignments(alignments, config.max_alignments_per_candidate);
     }
     Ok(attempted)
 }
@@ -1813,13 +1825,31 @@ fn window_ranges(
 
 fn retain_best_alignments(alignments: &mut Vec<BaseAlignment>, limit: usize) {
     alignments.sort_by(compare_alignments);
-    alignments.dedup_by(|right, left| {
-        right.contig_id == left.contig_id
-            && right.strand == left.strand
-            && right.target_interval == left.target_interval
-            && right.query_segments == left.query_segments
-    });
+    alignments.dedup_by(|right, left| same_alignment(right, left));
     alignments.truncate(limit);
+}
+
+fn retain_new_alignments(
+    alignments: &mut Vec<BaseAlignment>,
+    protected_count: usize,
+    limit: usize,
+) {
+    let protected_count = protected_count.min(alignments.len());
+    let mut newly_added = alignments.split_off(protected_count);
+    newly_added.retain(|alignment| {
+        !alignments
+            .iter()
+            .any(|existing| same_alignment(alignment, existing))
+    });
+    retain_best_alignments(&mut newly_added, limit);
+    alignments.extend(newly_added);
+}
+
+fn same_alignment(left: &BaseAlignment, right: &BaseAlignment) -> bool {
+    left.contig_id == right.contig_id
+        && left.strand == right.strand
+        && left.target_interval == right.target_interval
+        && left.query_segments == right.query_segments
 }
 
 fn compare_alignments(left: &BaseAlignment, right: &BaseAlignment) -> Ordering {
@@ -2179,6 +2209,42 @@ mod coordinate_tests {
 mod failure_tests {
     use super::*;
 
+    fn alignment(id: &str, score: i64, target_start: u64) -> BaseAlignment {
+        BaseAlignment {
+            alignment_id: id.to_string(),
+            plasmid_id: "query".to_string(),
+            metagenome_id: "sample".to_string(),
+            contig_id: "contig".to_string(),
+            strand: Strand::Forward,
+            query_segments: vec![BaseInterval {
+                start: target_start,
+                end: target_start + 4,
+            }],
+            target_interval: BaseInterval {
+                start: target_start,
+                end: target_start + 4,
+            },
+            query_length: 100,
+            target_length: 4,
+            origin_crossing: false,
+            score,
+            matches: 4,
+            substitutions: 0,
+            insertions: 0,
+            deletions: 0,
+            cigar: "4=".to_string(),
+            edit_script: Vec::new(),
+            chain_score: score,
+            identity: 1.0,
+            seed_evidence: SeedEvidence::default(),
+            primary_supported_bases: 0,
+            secondary_supported_bases: 0,
+            newly_supported_bases: 0,
+            role: crate::trace::model::AlignmentRole::AlternativeMapping,
+            primary: false,
+        }
+    }
+
     #[test]
     fn resource_failure_codes_and_retryability_are_stable() {
         let cases = [
@@ -2244,5 +2310,19 @@ mod failure_tests {
             RunnerError::Jma(JmaError::CorruptSection("truncated".to_string())).code(),
             "jma_corrupt_section"
         );
+    }
+
+    #[test]
+    fn rescue_retention_preserves_earlier_alignments_and_caps_new_evidence() {
+        let earlier = alignment("earlier-exact", 1, 0);
+        let later_low = alignment("later-low", 10, 10);
+        let later_high = alignment("later-high", 20, 20);
+        let mut alignments = vec![earlier, later_low, later_high];
+
+        retain_new_alignments(&mut alignments, 1, 1);
+
+        assert_eq!(alignments.len(), 2);
+        assert_eq!(alignments[0].alignment_id, "earlier-exact");
+        assert_eq!(alignments[1].alignment_id, "later-high");
     }
 }
