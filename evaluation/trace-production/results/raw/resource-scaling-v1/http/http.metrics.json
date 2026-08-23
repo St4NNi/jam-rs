@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0.0",
+  "requests": 194,
+  "head_requests": 4,
+  "get_requests": 190,
+  "range_requests": 190,
+  "bytes_served": 12420860,
+  "responses_206": 190,
+  "responses_200": 4,
+  "status_404": 0,
+  "status_416": 0
+}

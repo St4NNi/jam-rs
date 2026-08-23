@@ -1,0 +1,45 @@
+{
+  "manifest_path": "/home/beavis/projects/jam-rs/tools/out/trace-memory-input-production-v1/memory-manifest-sensitive.json",
+  "manifest_sha256": "c7d4c7a8c7dfb6d8b5d3f193bff1a03478a398b4b381c38a2eba086d5bacb6fd",
+  "database": "/home/beavis/projects/jam-rs/tools/out/trace-memory-input-production-v1/metagenomes.jam",
+  "catalog": "/home/beavis/projects/jam-rs/tools/out/trace-memory-input-production-v1/catalog-sensitive.tsv",
+  "queries": [
+    {
+      "id": "J01749.1__q2000",
+      "class": "small",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-identity-coverage/queries/J01749.1__q2000.fasta"
+    },
+    {
+      "id": "NC_001735.1__q50000",
+      "class": "large",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-identity-coverage/queries/NC_001735.1__q50000.fasta"
+    },
+    {
+      "id": "repeat-rich-proxy",
+      "class": "repeat-rich",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-benchmark/release-standard-a67c468/dataset/assemblies/sample_ambiguous.fasta"
+    }
+  ],
+  "threads": [
+    1,
+    4,
+    8,
+    16
+  ],
+  "profiles": [
+    "fast",
+    "balanced",
+    "sensitive"
+  ],
+  "candidate_limits": [
+    1,
+    100
+  ],
+  "cache_block_bytes": [
+    16384,
+    65536,
+    262144,
+    1048576
+  ],
+  "repeats": 1
+}

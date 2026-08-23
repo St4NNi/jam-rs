@@ -1,0 +1,16 @@
+{
+  "schema_version": "1.0.0",
+  "operating_system": "Linux 7.1.8-arch1-3 x86_64",
+  "libc": "glibc 2.44",
+  "cpu_model": "AMD Ryzen 9 7945HX with Radeon Graphics",
+  "physical_cores": 16,
+  "logical_cpus": 32,
+  "rustc": "1.98.0 (88d9e12ae 2026-08-18)",
+  "cargo": "1.98.0 (797e8a9bc 2026-08-05)",
+  "compiler_target": "x86_64-unknown-linux-gnu",
+  "storage": "local Btrfs on SSD-backed NVMe storage through /dev/mapper/root",
+  "filesystem_block_bytes": 4096,
+  "cache_policy": "process-cold starts a new process but does not evict the Linux kernel page cache; warm repeats reuse server/kernel cache state but Jam block caches remain process-local",
+  "release_flags": "cargo build --release --locked",
+  "software_identity_note": "Each raw measurement or Jam run header records the exact source commit used for that command."
+}

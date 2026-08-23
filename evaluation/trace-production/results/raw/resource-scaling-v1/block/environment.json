@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "created_at_utc": "2026-08-23T16:13:55.935353+00:00",
+  "platform": "Linux-7.1.8-arch1-3-x86_64-with-glibc2.44",
+  "machine": "x86_64",
+  "processor": "",
+  "python": "3.14.7",
+  "cpu_count": 32,
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8",
+  "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "jam": "jam 0.10.0",
+  "source_commit": "63ff84401632d46cc4dce3657eaec315df8c89fc",
+  "storage": {
+    "filesystem_block_bytes": 4096,
+    "available_bytes_at_start": 324167798784
+  },
+  "timing_policy": "compiler, installation, environment setup, and comparator setup are outside timed commands"
+}

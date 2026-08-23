@@ -1,0 +1,51 @@
+{
+  "manifest_path": "/home/beavis/projects/jam-rs/tools/out/trace-memory-input-production-v1/block-manifest.json",
+  "manifest_sha256": "af1274bea2b389c9558e137179d8cdd052b65e0bbac1f65138d572cb513974de",
+  "database": "/home/beavis/projects/jam-rs/tools/out/trace-memory-input-production-v1/metagenomes.jam",
+  "source_catalog": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-release-run-v1/catalog.local.tsv",
+  "assemblies": [
+    {
+      "id": "q2000__J01749.1__i100__c100__n1__forward__none__bg_background_only.fasta",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-identity-coverage/assemblies/q2000__J01749.1__i100__c100__n1__forward__none__bg_background_only.fasta"
+    },
+    {
+      "id": "q50000__NC_001735.1__i100__c100__n1__forward__none__bg_background_only.fasta",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-identity-coverage/assemblies/q50000__NC_001735.1__i100__c100__n1__forward__none__bg_background_only.fasta"
+    },
+    {
+      "id": "sample_ambiguous.fasta",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-benchmark/release-standard-a67c468/dataset/assemblies/sample_ambiguous.fasta"
+    }
+  ],
+  "queries": [
+    {
+      "id": "J01749.1__q2000",
+      "class": "small",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-identity-coverage/queries/J01749.1__q2000.fasta"
+    },
+    {
+      "id": "NC_001735.1__q50000",
+      "class": "large",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-production-controlled-identity-coverage/queries/NC_001735.1__q50000.fasta"
+    },
+    {
+      "id": "repeat-rich-proxy",
+      "class": "repeat-rich",
+      "path": "/home/beavis/projects/jam-rs/tools/out/trace-benchmark/release-standard-a67c468/dataset/assemblies/sample_ambiguous.fasta"
+    }
+  ],
+  "archive_block_bases": [
+    16384,
+    65536,
+    262144,
+    1048576
+  ],
+  "cache_block_bytes": [
+    16384,
+    65536,
+    262144,
+    1048576
+  ],
+  "threads": 8,
+  "profile": "balanced"
+}

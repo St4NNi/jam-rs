@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0.0",
+  "tracks": [
+    {
+      "id": "actual_s3_cold_warm",
+      "status": "unavailable",
+      "reason": "No S3 endpoint, AWS CLI, or AWS/S3 credential environment was available."
+    },
+    {
+      "id": "read_derived_assemblies",
+      "status": "unavailable",
+      "reason": "No checksummed metagenomic read set, abundance design, pinned mixer/assembler, or assembled-coordinate extractor was available."
+    },
+    {
+      "id": "independently_supported_natural_positives",
+      "status": "unavailable",
+      "reason": "No checksummed long-read, isolate-match, or assembly-graph support manifest was available."
+    },
+    {
+      "id": "release_scale",
+      "status": "unavailable",
+      "reason": "The requested 1,000 independent real assembly backgrounds and 100 plasmid queries were not available."
+    }
+  ]
+}
