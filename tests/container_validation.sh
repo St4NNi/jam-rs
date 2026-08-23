@@ -8,10 +8,10 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="$1"
-OUTPUT="${2:-$ROOT/tools/out/container-smoke-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUTPUT="${2:-$ROOT/tools/out/container-validation-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 if [[ -e "$OUTPUT" ]]; then
-    echo "Refusing to reuse existing container-smoke directory: $OUTPUT" >&2
+    echo "Refusing to reuse existing container-validation directory: $OUTPUT" >&2
     exit 1
 fi
 mkdir -p "$OUTPUT/tmp"
@@ -62,16 +62,18 @@ docker run --rm \
     --rescue-scale 1 \
     --block-bases 256 \
     --silent
-printf 'metagenome_id\tjma\traw\nshort.fa\t/output/short.jma\t/workspace/tests/testfiles/short.fa\n' > "$OUTPUT/metagenomes.tsv"
+printf 'metagenome_id\tjma\tjma_index\traw\nshort.fa\t/output/short.jma\t/output/short.jma.idx.json\t/workspace/tests/testfiles/short.fa\n' > "$OUTPUT/metagenomes.tsv"
 docker run --rm \
     --user "$(id -u):$(id -g)" \
     --env TMPDIR=/output/tmp \
     --volume "$ROOT:/workspace:ro" \
     --volume "$OUTPUT:/output" \
     "$IMAGE" trace \
-    --plasmid /workspace/tests/testfiles/short.fa \
+    --query /workspace/tests/testfiles/short.fa \
+    --query-kind other \
+    --topology linear \
     --database /output/metagenomes.jam \
-    --catalog /output/metagenomes.tsv \
+    --metagenomes /output/metagenomes.tsv \
     --output /output/trace.jsonl.zst \
     --sensitivity sensitive \
     --min-shared 1 \
@@ -102,4 +104,4 @@ test -s "$OUTPUT/catalog.jam.json"
 test -s "$OUTPUT/run.json"
 test -s "$OUTPUT/trace.jsonl.zst"
 
-echo "Container smoke test passed: $OUTPUT"
+echo "Container validation passed: $OUTPUT"

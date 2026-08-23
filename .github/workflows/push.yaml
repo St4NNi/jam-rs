@@ -26,5 +26,5 @@ jobs:
         run: cargo test --test trace_http_remote --test trace_s3_remote --test trace_remote_database
       - name: Container build
         run: docker build --build-arg JAM_RS_SOURCE_COMMIT="${GITHUB_SHA}" --tag jam-rs-ci .
-      - name: Container smoke test
-        run: tests/container_smoke.sh jam-rs-ci "$GITHUB_WORKSPACE/tools/out/container-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Container validation
+        run: tests/container_validation.sh jam-rs-ci "$GITHUB_WORKSPACE/tools/out/container-validation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
