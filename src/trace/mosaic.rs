@@ -92,7 +92,11 @@ pub fn select_primary(
         let supported = circular_union(&projection.supported_intervals, plasmid_length)
             .map_err(CoverageError::from)
             .map_err(|source| MosaicError::AlignmentProjection { index, source })?;
-        projections.push((supported, projection.supported_bases));
+        // Rank by nonredundant query support.  The edit-script counter is
+        // deliberately kept for per-alignment diagnostics, rather than being
+        // treated as a coordinate-union measure.
+        let supported_bases = covered_bases(&supported);
+        projections.push((supported, supported_bases));
     }
 
     let mut order: Vec<usize> = (0..alignments.len()).collect();
@@ -257,7 +261,30 @@ fn compare_alignment(
         .then_with(|| left.contig_id.cmp(&right.contig_id))
         .then_with(|| left.target_interval.start.cmp(&right.target_interval.start))
         .then_with(|| left.target_interval.end.cmp(&right.target_interval.end))
+        .then_with(|| strand_key(left).cmp(&strand_key(right)))
+        .then_with(|| compare_query_segments(&left.query_segments, &right.query_segments))
         .then_with(|| left_index.cmp(&right_index))
+}
+
+fn strand_key(alignment: &BaseAlignment) -> u8 {
+    match alignment.strand {
+        crate::trace::model::Strand::Forward => 0,
+        crate::trace::model::Strand::Reverse => 1,
+    }
+}
+
+fn compare_query_segments(left: &[BaseInterval], right: &[BaseInterval]) -> Ordering {
+    for (left_segment, right_segment) in left.iter().zip(right) {
+        match left_segment.start.cmp(&right_segment.start) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+        match left_segment.end.cmp(&right_segment.end) {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    left.len().cmp(&right.len())
 }
 
 fn overlap_class(left: &[BaseInterval], right: &[BaseInterval]) -> OverlapClass {

@@ -1240,6 +1240,8 @@ pub fn handle_trace_command(
     result.set_run_id(&run_id);
 
     let source_commit = provenance::source_commit();
+    let algorithm =
+        crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(sensitivity.clone());
     let header = crate::trace::model::TraceRunHeader {
         schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
         run_id: run_id.clone(),
@@ -1250,6 +1252,7 @@ pub fn handle_trace_command(
         plasmid_id,
         plasmid_length: record.sequence.len() as u64,
         sensitivity,
+        algorithm,
         inputs: vec![
             trace_input("plasmid", &plasmid)?,
             result.database_input.clone(),

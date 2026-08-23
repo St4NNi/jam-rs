@@ -14,6 +14,8 @@ use crate::jma::{
 };
 use crate::resource::{ByteRange, RangeReader};
 
+const MAX_SECTION_COUNT: u32 = 1 << 20;
+
 /// A fully validated JMA archive backed by a range-readable resource.
 pub struct JmaReader<R> {
     resource: R,
@@ -32,6 +34,22 @@ impl<R: RangeReader> JmaReader<R> {
         let metadata = resource.metadata()?;
         let header_bytes = read_exact(&resource, ByteRange::new(0, HEADER_SIZE as u64)?)?;
         let parsed = parse_header(&header_bytes)?;
+        if parsed.section_count > MAX_SECTION_COUNT {
+            return Err(JmaError::CorruptSection(format!(
+                "section count {} exceeds the JMA v1 limit {MAX_SECTION_COUNT}",
+                parsed.section_count
+            )));
+        }
+        let directory_end = checked_end(
+            parsed.section_directory_offset,
+            parsed.section_directory_length,
+        )?;
+        if directory_end > metadata.size {
+            return Err(JmaError::CorruptSection(format!(
+                "section directory ends at {directory_end}, resource has {} bytes",
+                metadata.size
+            )));
+        }
         let directory_length =
             checked_usize(parsed.section_directory_length, "section directory length")?;
         let directory = read_exact(

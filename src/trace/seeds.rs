@@ -265,6 +265,25 @@ mod tests {
     }
 
     #[test]
+    fn extracted_hash_zero_windows_are_counted_but_not_emitted() {
+        for (k, window_count) in [(PRIMARY_K, 34u64), (RESCUE_K, 44u64)] {
+            let sequence = vec![b'A'; 64];
+            let level = extract_seed_level(
+                &sequence,
+                SeedSensitivity {
+                    k,
+                    scale: 1,
+                    max_occurrences: 1,
+                },
+            )
+            .unwrap();
+            assert!(level.seeds.is_empty());
+            assert_eq!(level.skipped_hash_zero, window_count);
+            assert_eq!(level.skipped_by_density, 0);
+        }
+    }
+
+    #[test]
     fn levels_are_ordered_dense_to_sparse() {
         let sketch = extract_seed_levels(
             b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
@@ -326,5 +345,18 @@ mod tests {
             },
         );
         assert_eq!(invalid_scale, Err(SeedError::ZeroScale));
+    }
+
+    #[test]
+    fn duplicate_levels_are_rejected() {
+        let config = SeedSensitivity {
+            k: PRIMARY_K,
+            scale: 1,
+            max_occurrences: 1,
+        };
+        assert_eq!(
+            extract_seed_levels(b"ACGTACGTACGTACGTACGTACGTACGTACGT", &[config, config]),
+            Err(SeedError::DuplicateLevel)
+        );
     }
 }

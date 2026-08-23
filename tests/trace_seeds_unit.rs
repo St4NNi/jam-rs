@@ -13,6 +13,24 @@ fn trace_seed_identity_and_zero_rule_are_explicit() {
 }
 
 #[test]
+fn all_zero_hash_windows_are_skipped_at_both_supported_kmers() {
+    for (k, windows) in [(31, 34u64), (21, 44u64)] {
+        let sequence = vec![b'A'; 64];
+        let level = extract_seed_level(
+            &sequence,
+            SeedSensitivity {
+                k,
+                scale: 1,
+                max_occurrences: 1,
+            },
+        )
+        .unwrap();
+        assert!(level.seeds.is_empty());
+        assert_eq!(level.skipped_hash_zero, windows);
+    }
+}
+
+#[test]
 fn exact_packed_seeds_are_positioned_and_levels_are_nested() {
     let sequence = b"ACGTGCACTGATCGTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGCTAGC";
     let sketch = extract_seed_levels(
@@ -89,4 +107,17 @@ fn unsupported_k_and_zero_scale_fail_before_hashing() {
         },
     );
     assert_eq!(invalid_scale, Err(SeedError::ZeroScale));
+}
+
+#[test]
+fn duplicate_seed_levels_are_rejected() {
+    let config = SeedSensitivity {
+        k: 31,
+        scale: 1,
+        max_occurrences: 1,
+    };
+    assert_eq!(
+        extract_seed_levels(b"ACGTACGTACGTACGTACGTACGTACGTACGT", &[config, config]),
+        Err(SeedError::DuplicateLevel)
+    );
 }

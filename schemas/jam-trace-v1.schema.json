@@ -11,7 +11,7 @@
       "enum": ["run_header", "metagenome_result", "run_footer"]
     },
     "schema_version": {
-      "const": "1.0.0"
+      "const": "1.1.0"
     },
     "run_id": {
       "type": "string",
@@ -32,6 +32,7 @@
         "plasmid_id": {"type": "string", "minLength": 1},
         "plasmid_length": {"type": "integer", "minimum": 0},
         "sensitivity": {"$ref": "#/$defs/sensitivity_config"},
+        "algorithm": {"$ref": "#/$defs/algorithm_metadata"},
         "inputs": {
           "type": "array",
           "items": {"$ref": "#/$defs/input_resource"}
@@ -48,6 +49,7 @@
         "plasmid_id",
         "plasmid_length",
         "sensitivity",
+        "algorithm",
         "inputs"
       ]
     },
@@ -56,6 +58,7 @@
         "record_type": {"const": "metagenome_result"},
         "plasmid_id": {"type": "string", "minLength": 1},
         "metagenome_id": {"type": "string", "minLength": 1},
+        "algorithm": {"$ref": "#/$defs/algorithm_metadata"},
         "status": {
           "type": "string",
           "enum": ["complete", "partial", "no_candidate", "failed"]
@@ -88,6 +91,7 @@
         "run_id",
         "plasmid_id",
         "metagenome_id",
+        "algorithm",
         "status",
         "candidate",
         "alignments",
@@ -192,6 +196,46 @@
         "max_alignment_window_bases": {"type": "integer", "minimum": 1},
         "max_concurrent_candidates": {"type": "integer", "minimum": 1},
         "alignment": {"$ref": "#/$defs/alignment_scoring"}
+      },
+      "additionalProperties": false
+    },
+    "algorithm_parameters": {
+      "type": "object",
+      "required": [
+        "hash_id",
+        "seed_selection",
+        "sensitivity",
+        "max_chain_predecessors",
+        "max_query_gap",
+        "max_target_gap",
+        "chain_gap_penalty",
+        "alignment_mode",
+        "x_drop",
+        "band_widening",
+        "coverage_mode"
+      ],
+      "properties": {
+        "hash_id": {"const": "jamhash_u64_v1"},
+        "seed_selection": {"const": "all_canonical_kmers_fracminhash"},
+        "sensitivity": {"$ref": "#/$defs/sensitivity_config"},
+        "max_chain_predecessors": {"type": "integer", "minimum": 1},
+        "max_query_gap": {"type": "integer", "minimum": 1},
+        "max_target_gap": {"type": "integer", "minimum": 1},
+        "chain_gap_penalty": {"type": "integer", "minimum": 0},
+        "alignment_mode": {"const": "local_affine_gap_fixed_band"},
+        "x_drop": {"type": ["integer", "null"]},
+        "band_widening": {"const": false},
+        "coverage_mode": {"const": "nonredundant_supported_query_union"}
+      },
+      "additionalProperties": false
+    },
+    "algorithm_metadata": {
+      "type": "object",
+      "required": ["id", "version", "parameters"],
+      "properties": {
+        "id": {"const": "jam-seed-chain-align-v1"},
+        "version": {"const": 1},
+        "parameters": {"$ref": "#/$defs/algorithm_parameters"}
       },
       "additionalProperties": false
     },

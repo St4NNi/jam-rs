@@ -141,7 +141,11 @@ pub fn chain_anchors(
     // The grouping key is explicit, keeping primary and rescue coordinates
     // from being mixed when both seed levels are present in one candidate.
     validated.sort_by_key(|(_, anchor)| anchor_sort_key(anchor));
-    let mut all_chains = Vec::new();
+    let max_chains = usize::try_from(config.max_chains).unwrap_or(usize::MAX);
+    // Keep the cross-group result bounded.  Retaining only the best global
+    // `max_chains` candidates after each insertion is sufficient because the
+    // final ordering is total and deterministic.
+    let mut all_chains = Vec::with_capacity(validated.len().min(max_chains));
     let mut group_start = 0usize;
     while group_start < validated.len() {
         let current_group_key = group_key(&validated[group_start].1);
@@ -160,12 +164,13 @@ pub fn chain_anchors(
                 used[*source_index] = true;
             }
             all_chains.push(chain.chain);
+            all_chains.sort_by(chain_sort_key);
+            all_chains.truncate(max_chains);
         }
         group_start = group_end;
     }
 
     all_chains.sort_by(chain_sort_key);
-    let max_chains = usize::try_from(config.max_chains).unwrap_or(usize::MAX);
     all_chains.truncate(max_chains);
     Ok(all_chains)
 }
@@ -236,6 +241,10 @@ fn best_chain(
         let mut j = i;
         while j > 0 && examined < config.max_predecessors {
             j -= 1;
+            // Count every candidate examined, including same-source and
+            // non-monotone candidates.  Otherwise a repeat-heavy group could
+            // scan the whole preceding vector despite the predecessor cap.
+            examined += 1;
             let previous = expanded[j];
             if current.query_position <= previous.query_position {
                 continue;
@@ -264,7 +273,6 @@ fn best_chain(
             if target_gap == 0 || target_gap > config.max_target_gap {
                 continue;
             }
-            examined += 1;
             if scores[j] == i64::MIN {
                 continue;
             }
@@ -640,5 +648,91 @@ mod tests {
             chain_anchors(&[bad], 100, config()),
             Err(ChainError::AnchorOutsideQuery { .. })
         ));
+    }
+
+    #[test]
+    fn predecessor_limit_counts_rejected_candidates() {
+        let anchors = [
+            anchor(5, 100, Strand::Forward),
+            anchor(15, 150, Strand::Forward),
+            anchor(25, 150, Strand::Forward),
+            anchor(35, 130, Strand::Forward),
+        ];
+        let mut limited = config();
+        limited.max_predecessors = 2;
+        limited.min_anchors = 3;
+        assert!(chain_anchors(&anchors, 200, limited).unwrap().is_empty());
+    }
+
+    #[test]
+    fn global_chain_limit_is_applied_across_contigs() {
+        let anchors = [
+            anchor(5, 100, Strand::Forward),
+            anchor(15, 110, Strand::Forward),
+            Anchor {
+                contig_id: 1,
+                ..anchor(5, 300, Strand::Forward)
+            },
+            Anchor {
+                contig_id: 1,
+                ..anchor(15, 310, Strand::Forward)
+            },
+        ];
+        let mut limited = config();
+        limited.max_chains = 1;
+        let chains = chain_anchors(&anchors, 200, limited).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].contig_id, 0);
+    }
+
+    #[test]
+    fn predecessor_limit_bounds_repeat_heavy_groups() {
+        let anchors = (0..512)
+            .map(|index| anchor(5 + index * 3, 100, Strand::Forward))
+            .collect::<Vec<_>>();
+        let mut repeat_config = config();
+        repeat_config.max_predecessors = 4;
+        repeat_config.max_query_gap = 10_000;
+        assert!(
+            chain_anchors(&anchors, 10_000, repeat_config)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn large_target_offsets_are_checked_without_wrapping() {
+        let near_limit = u64::MAX - 20;
+        let anchors = [
+            anchor(5, near_limit, Strand::Forward),
+            anchor(15, near_limit + 10, Strand::Forward),
+        ];
+        let chains = chain_anchors(&anchors, u64::MAX - 100, config()).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].target_interval.start, near_limit);
+        assert_eq!(chains[0].target_interval.end, near_limit + 13);
+
+        let overflowing = anchor(5, u64::MAX - 1, Strand::Forward);
+        assert!(matches!(
+            chain_anchors(&[overflowing], 100, config()),
+            Err(ChainError::CoordinateOverflow)
+        ));
+    }
+
+    #[test]
+    fn rearranged_target_order_is_split_into_separate_chains() {
+        let anchors = [
+            anchor(5, 100, Strand::Forward),
+            anchor(15, 115, Strand::Forward),
+            anchor(25, 90, Strand::Forward),
+            anchor(35, 105, Strand::Forward),
+        ];
+        let mut chain_config = config();
+        chain_config.max_chains = 2;
+        let chains = chain_anchors(&anchors, 200, chain_config).unwrap();
+        assert_eq!(chains.len(), 2);
+        assert!(chains.iter().all(|chain| chain.anchors.len() == 2));
+        assert_eq!(chains[0].target_interval.start, 100);
+        assert_eq!(chains[1].target_interval.start, 90);
     }
 }

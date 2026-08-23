@@ -18,6 +18,7 @@ pub mod writer;
 
 pub const JMA_MAGIC: [u8; 4] = *b"JMA\0";
 pub const JMA_FORMAT_VERSION: u16 = 1;
+pub const JMA_TRACE_ALGORITHM_TAG: [u8; 8] = *b"JAMSCA1\0";
 pub type ContigId = u32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -51,7 +52,7 @@ pub struct SeedLevel {
     pub scale: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveHeader {
     pub format_version: u16,
     pub flags: u32,
@@ -59,6 +60,9 @@ pub struct ArchiveHeader {
     pub total_bases: u64,
     pub source_sha256: [u8; 32],
     pub seed_levels: Vec<SeedLevel>,
+    pub algorithm_id: Option<String>,
+    pub algorithm_version: Option<u16>,
+    pub min_entropy: Option<f64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

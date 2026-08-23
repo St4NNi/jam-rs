@@ -311,6 +311,9 @@ mod tests {
             plasmid_id: "plasmid-1".to_string(),
             plasmid_length: 12,
             sensitivity: SensitivityConfig::default(),
+            algorithm: crate::trace::TraceAlgorithmMetadata::for_sensitivity(
+                SensitivityConfig::default(),
+            ),
             inputs: vec![InputResource {
                 role: "plasmid".to_string(),
                 redacted_locator: "file:///plasmid.fa".to_string(),
@@ -325,6 +328,9 @@ mod tests {
             run_id: "run-1".to_string(),
             plasmid_id: "plasmid-1".to_string(),
             metagenome_id: "sample-1".to_string(),
+            algorithm: crate::trace::TraceAlgorithmMetadata::for_sensitivity(
+                SensitivityConfig::default(),
+            ),
             status: TraceStatus::NoCandidate,
             candidate: None,
             alignments: Vec::new(),

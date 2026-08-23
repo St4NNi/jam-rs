@@ -1,6 +1,6 @@
 //! Shared coordinate, alignment, coverage, and JSON record models.
 
-use super::config::SensitivityConfig;
+use super::config::{SensitivityConfig, TraceAlgorithmMetadata};
 use crate::resource::ResourceMetrics;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -143,6 +143,7 @@ pub struct TraceRunHeader {
     pub plasmid_id: String,
     pub plasmid_length: u64,
     pub sensitivity: SensitivityConfig,
+    pub algorithm: TraceAlgorithmMetadata,
     pub inputs: Vec<InputResource>,
 }
 
@@ -152,6 +153,7 @@ pub struct TraceMetagenomeResult {
     pub run_id: String,
     pub plasmid_id: String,
     pub metagenome_id: String,
+    pub algorithm: TraceAlgorithmMetadata,
     pub status: TraceStatus,
     pub candidate: Option<CandidateResult>,
     pub alignments: Vec<BaseAlignment>,

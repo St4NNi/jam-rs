@@ -314,4 +314,63 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn circular_operations_reject_invalid_coordinates() {
+        assert!(matches!(
+            circular_union(&[BaseInterval { start: 0, end: 11 }], 10),
+            Err(IntervalError::OutOfBounds { .. })
+        ));
+        assert!(matches!(
+            circular_union(&[BaseInterval { start: 8, end: 2 }], 10),
+            Err(IntervalError::Reversed { .. })
+        ));
+        assert!(matches!(
+            split_circular(11, 0, 10),
+            Err(IntervalError::OutOfBounds { .. })
+        ));
+        assert!(matches!(full_circle(0), Err(IntervalError::ZeroLength)));
+    }
+
+    #[test]
+    fn circular_union_bounds_coverage_and_handles_full_or_zero_cases() {
+        let empty = circular_union(&[], 10).unwrap();
+        assert_eq!(covered_length(&empty), 0);
+
+        let full = circular_union(
+            &[
+                BaseInterval { start: 0, end: 6 },
+                BaseInterval { start: 5, end: 10 },
+            ],
+            10,
+        )
+        .unwrap();
+        assert_eq!(full, vec![BaseInterval { start: 0, end: 10 }]);
+        assert_eq!(covered_length(&full), 10);
+    }
+
+    #[test]
+    fn circular_gap_complement_is_origin_rotation_invariant_in_length() {
+        let source = [
+            BaseInterval { start: 10, end: 12 },
+            BaseInterval { start: 0, end: 3 },
+        ];
+        let reference = circular_gap_complement(&source, 12).unwrap();
+        assert_eq!(covered_length(&reference), 7);
+
+        // Exercise every possible stored-origin rotation without a random
+        // dependency.  The coordinates rotate, but covered and gap lengths
+        // remain invariant.
+        for shift in 0..12 {
+            let mut rotated = Vec::new();
+            for interval in source {
+                let start = (interval.start + shift) % 12;
+                let end = (start + interval.len()) % 12;
+                rotated.extend(split_circular(start, end, 12).unwrap());
+            }
+            let gaps = circular_gap_complement(&rotated, 12).unwrap();
+            assert_eq!(covered_length(&gaps), 7);
+            assert_eq!(gaps.iter().map(|interval| interval.len()).sum::<u64>(), 7);
+        }
+    }
 }

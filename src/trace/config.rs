@@ -41,6 +41,53 @@ pub struct SensitivityConfig {
     pub alignment: AlignmentScoring,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TraceAlgorithmParameters {
+    pub hash_id: String,
+    pub seed_selection: String,
+    pub sensitivity: SensitivityConfig,
+    pub max_chain_predecessors: u32,
+    pub max_query_gap: u64,
+    pub max_target_gap: u64,
+    pub chain_gap_penalty: i64,
+    pub alignment_mode: String,
+    pub x_drop: Option<i32>,
+    pub band_widening: bool,
+    pub coverage_mode: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TraceAlgorithmMetadata {
+    pub id: String,
+    pub version: u16,
+    pub parameters: TraceAlgorithmParameters,
+}
+
+impl TraceAlgorithmMetadata {
+    #[must_use]
+    pub fn for_sensitivity(sensitivity: SensitivityConfig) -> Self {
+        let max_chain_predecessors = sensitivity.max_anchors_per_candidate.min(256);
+        let max_gap = sensitivity.max_alignment_window_bases;
+        Self {
+            id: super::TRACE_ALGORITHM_ID.to_string(),
+            version: super::TRACE_ALGORITHM_VERSION,
+            parameters: TraceAlgorithmParameters {
+                hash_id: "jamhash_u64_v1".to_string(),
+                seed_selection: "all_canonical_kmers_fracminhash".to_string(),
+                sensitivity,
+                max_chain_predecessors,
+                max_query_gap: max_gap,
+                max_target_gap: max_gap,
+                chain_gap_penalty: 1,
+                alignment_mode: "local_affine_gap_fixed_band".to_string(),
+                x_drop: None,
+                band_widening: false,
+                coverage_mode: "nonredundant_supported_query_union".to_string(),
+            },
+        }
+    }
+}
+
 impl SensitivityConfig {
     #[must_use]
     pub fn for_profile(profile: SensitivityProfile) -> Self {
@@ -184,5 +231,29 @@ mod tests {
         let config = SensitivityConfig::default();
         assert_eq!(config.primary.k, 31);
         assert_eq!(config.rescue.unwrap().k, 21);
+    }
+
+    #[test]
+    fn algorithm_metadata_resolves_every_fixed_parameter() {
+        let metadata = TraceAlgorithmMetadata::for_sensitivity(SensitivityConfig::default());
+        assert_eq!(metadata.id, super::super::TRACE_ALGORITHM_ID);
+        assert_eq!(metadata.version, super::super::TRACE_ALGORITHM_VERSION);
+        assert_eq!(metadata.parameters.hash_id, "jamhash_u64_v1");
+        assert_eq!(
+            metadata.parameters.seed_selection,
+            "all_canonical_kmers_fracminhash"
+        );
+        assert_eq!(metadata.parameters.max_chain_predecessors, 256);
+        assert_eq!(metadata.parameters.chain_gap_penalty, 1);
+        assert_eq!(
+            metadata.parameters.alignment_mode,
+            "local_affine_gap_fixed_band"
+        );
+        assert_eq!(metadata.parameters.x_drop, None);
+        assert!(!metadata.parameters.band_widening);
+        assert_eq!(
+            metadata.parameters.coverage_mode,
+            "nonredundant_supported_query_union"
+        );
     }
 }

@@ -826,6 +826,13 @@ fn circular_segments(
         ]);
     }
     let end = absolute_end % circular_length;
+    if start == end {
+        return Ok(vec![
+            BaseInterval::new(start, circular_length)
+                .map_err(|_| AlignmentError::LengthOverflow)?,
+            BaseInterval::new(0, start).map_err(|_| AlignmentError::LengthOverflow)?,
+        ]);
+    }
     if start <= end {
         return Ok(vec![
             BaseInterval::new(start, end).map_err(|_| AlignmentError::LengthOverflow)?,

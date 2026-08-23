@@ -18,6 +18,9 @@ fn header() -> TraceRunHeader {
         plasmid_id: "plasmid-fixture".to_string(),
         plasmid_length: 32,
         sensitivity: SensitivityConfig::default(),
+        algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
+            SensitivityConfig::default(),
+        ),
         inputs: vec![InputResource {
             role: "plasmid".to_string(),
             redacted_locator: "https://example.org/catalog/plasmid.fa".to_string(),
@@ -32,6 +35,9 @@ fn result() -> TraceMetagenomeResult {
         run_id: "fixture-run".to_string(),
         plasmid_id: "plasmid-fixture".to_string(),
         metagenome_id: "metagenome-fixture".to_string(),
+        algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
+            SensitivityConfig::default(),
+        ),
         status: TraceStatus::NoCandidate,
         candidate: None,
         alignments: Vec::new(),
@@ -82,6 +88,10 @@ fn schema_fixture_declares_all_record_kinds_and_shared_fields() {
         schema["$defs"]["coverage"]["properties"]["gaps"]["type"],
         "array"
     );
+    assert_eq!(
+        schema["$defs"]["algorithm_metadata"]["properties"]["id"]["const"],
+        jam_rs::trace::TRACE_ALGORITHM_ID
+    );
     let kinds = schema["properties"]["record_type"]["enum"]
         .as_array()
         .unwrap();
@@ -109,6 +119,15 @@ fn serialized_fixture_records_have_schema_and_required_payloads() {
     assert_eq!(
         values[0]["inputs"][0]["redacted_locator"],
         "https://example.org/catalog/plasmid.fa"
+    );
+    assert_eq!(
+        values[0]["algorithm"]["id"],
+        jam_rs::trace::TRACE_ALGORITHM_ID
+    );
+    assert_eq!(values[0]["algorithm"], values[1]["algorithm"]);
+    assert_eq!(
+        values[0]["algorithm"]["parameters"]["alignment_mode"],
+        "local_affine_gap_fixed_band"
     );
     assert!(values[1].get("alignments").unwrap().is_array());
     assert!(values[2].get("resource_metrics").unwrap().is_object());

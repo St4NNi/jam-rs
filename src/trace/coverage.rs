@@ -84,12 +84,28 @@ pub enum CoverageError {
     LengthOverflow { offset: usize },
     #[error("query segment [{start}, {end}) is reversed")]
     ReversedQuerySegment { start: u64, end: u64 },
+    #[error("query segments [{left_start}, {left_end}) and [{right_start}, {right_end}) overlap")]
+    OverlappingQuerySegments {
+        left_start: u64,
+        left_end: u64,
+        right_start: u64,
+        right_end: u64,
+    },
     #[error("edit script consumes {consumed} query bases but segments contain {available}")]
     QueryLengthMismatch { consumed: u64, available: u64 },
     #[error(
         "edit script consumes {consumed} target bases but alignment target length is {expected}"
     )]
     TargetLengthMismatch { consumed: u64, expected: u64 },
+    #[error("alignment target interval [{start}, {end}) is reversed")]
+    ReversedTargetInterval { start: u64, end: u64 },
+    #[error(
+        "alignment target interval length {interval_length} differs from declared target length {declared_length}"
+    )]
+    TargetIntervalLengthMismatch {
+        interval_length: u64,
+        declared_length: u64,
+    },
     #[error("edit run has zero length")]
     ZeroLengthEditRun,
     #[error("coordinate arithmetic overflow while projecting an edit script")]
@@ -176,9 +192,10 @@ pub fn cigar_from_edit_script(edit_script: &[EditRun]) -> String {
 }
 
 /// Project an edit script whose query sequence is represented by one or more
-/// ordinary circular segments.  Target coordinates begin at zero because the
-/// projection is about query coverage; the resulting spans are relative to
-/// the supplied target alignment window.
+/// non-overlapping ordinary circular segments.  Touching segments are valid;
+/// they are useful for explicit origin-crossing representations.  Target
+/// coordinates begin at zero because the projection is about query coverage;
+/// the resulting spans are relative to the supplied target alignment window.
 pub fn project_edit_script(
     query_segments: &[BaseInterval],
     edit_script: &[EditRun],
@@ -188,6 +205,21 @@ pub fn project_edit_script(
             return Err(CoverageError::ReversedQuerySegment {
                 start: segment.start,
                 end: segment.end,
+            });
+        }
+    }
+    let mut sorted_segments = query_segments.to_vec();
+    sorted_segments.sort_unstable_by_key(|segment| (segment.start, segment.end));
+    for pair in sorted_segments.windows(2) {
+        let [left, right] = pair else {
+            continue;
+        };
+        if left.end > right.start {
+            return Err(CoverageError::OverlappingQuerySegments {
+                left_start: left.start,
+                left_end: left.end,
+                right_start: right.start,
+                right_end: right.end,
             });
         }
     }
@@ -357,6 +389,19 @@ pub fn project_cigar(
 
 /// Project a complete frozen alignment and validate its query/target lengths.
 pub fn project_alignment(alignment: &BaseAlignment) -> Result<CoverageProjection, CoverageError> {
+    if alignment.target_interval.start > alignment.target_interval.end {
+        return Err(CoverageError::ReversedTargetInterval {
+            start: alignment.target_interval.start,
+            end: alignment.target_interval.end,
+        });
+    }
+    let target_interval_length = alignment.target_interval.end - alignment.target_interval.start;
+    if target_interval_length != alignment.target_length {
+        return Err(CoverageError::TargetIntervalLengthMismatch {
+            interval_length: target_interval_length,
+            declared_length: alignment.target_length,
+        });
+    }
     let projection = project_edit_script(&alignment.query_segments, &alignment.edit_script)?;
     if projection.query_consumed != alignment.query_length {
         return Err(CoverageError::QueryLengthMismatch {
@@ -428,7 +473,7 @@ pub fn summary_from_intervals(
         })
         .collect::<Vec<_>>();
     let supported_bases = covered_length(&primary);
-    let largest_gap = gaps.iter().map(|gap| gap.length).max().unwrap_or(0);
+    let largest_gap = largest_circular_gap(&gaps, plasmid_length)?;
     Ok(CoverageSummary {
         plasmid_length,
         supported_bases,
@@ -438,6 +483,27 @@ pub fn summary_from_intervals(
         gaps,
         largest_gap,
     })
+}
+
+/// Return the largest unsupported run on a circular plasmid while preserving
+/// the serialized gap representation as ordinary, non-wrapping pieces.
+fn largest_circular_gap(gaps: &[GapRecord], plasmid_length: u64) -> Result<u64, CoverageError> {
+    let largest_linear = gaps.iter().map(|gap| gap.length).max().unwrap_or(0);
+    if gaps.len() < 2 {
+        return Ok(largest_linear);
+    }
+    let (Some(first), Some(last)) = (gaps.first(), gaps.last()) else {
+        return Ok(largest_linear);
+    };
+    if first.interval.start == 0 && last.interval.end == plasmid_length {
+        let wrapped = first
+            .length
+            .checked_add(last.length)
+            .ok_or(CoverageError::CoordinateOverflow)?;
+        Ok(largest_linear.max(wrapped))
+    } else {
+        Ok(largest_linear)
+    }
 }
 
 /// Return the query pieces covered by a linear query offset and length.
@@ -616,5 +682,32 @@ mod tests {
             vec![BaseInterval { start: 0, end: 7 }]
         );
         assert_eq!(summary.gaps[0].interval, BaseInterval { start: 7, end: 10 });
+    }
+
+    #[test]
+    fn largest_circular_gap_combines_terminal_gap_pieces() {
+        let gaps = vec![
+            GapRecord {
+                interval: BaseInterval { start: 0, end: 2 },
+                length: 2,
+            },
+            GapRecord {
+                interval: BaseInterval { start: 6, end: 10 },
+                length: 4,
+            },
+        ];
+        assert_eq!(largest_circular_gap(&gaps, 10).unwrap(), 6);
+        assert_eq!(largest_circular_gap(&[], 10).unwrap(), 0);
+        assert_eq!(
+            largest_circular_gap(
+                &[GapRecord {
+                    interval: BaseInterval { start: 0, end: 10 },
+                    length: 10,
+                }],
+                10,
+            )
+            .unwrap(),
+            10
+        );
     }
 }

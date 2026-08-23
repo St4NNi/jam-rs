@@ -661,6 +661,7 @@ fn process_candidate(
             result: failed_result(
                 plasmid_id,
                 candidate,
+                config,
                 "catalog",
                 "missing_catalog_entry",
                 "candidate is absent from the resource catalog",
@@ -690,6 +691,7 @@ fn process_candidate(
             Err(error) => failed_result(
                 plasmid_id,
                 candidate,
+                config,
                 "jma",
                 error.code(),
                 &error.to_string(),
@@ -703,6 +705,7 @@ fn process_candidate(
         failed_result(
             plasmid_id,
             candidate,
+            config,
             "catalog",
             "missing_resource",
             "catalog row has neither a JMA nor raw assembly resource",
@@ -727,6 +730,16 @@ fn process_jma(
 ) -> Result<TraceMetagenomeResult, RunnerError> {
     let resource = open_resource(locator, config.resources.clone())?;
     let reader = JmaReader::open(resource)?;
+    if reader.header().algorithm_id.as_deref() != Some(crate::trace::TRACE_ALGORITHM_ID)
+        || reader.header().algorithm_version != Some(crate::trace::TRACE_ALGORITHM_VERSION)
+    {
+        return Err(JmaError::CorruptSection(format!(
+            "JMA algorithm metadata is missing or incompatible; expected {} version {}",
+            crate::trace::TRACE_ALGORITHM_ID,
+            crate::trace::TRACE_ALGORITHM_VERSION
+        ))
+        .into());
+    }
     let chains = indexed_chains(&reader, plasmid, &config.sensitivity)?;
     let mut alignments = Vec::new();
     let mut workspace = AlignmentWorkspace::new();
@@ -782,6 +795,9 @@ fn process_jma(
         run_id: String::new(),
         plasmid_id: plasmid_id.to_string(),
         metagenome_id: candidate.metagenome_id().to_string(),
+        algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
+            config.sensitivity.clone(),
+        ),
         status: TraceStatus::Complete,
         candidate: Some(candidate.candidate.clone()),
         alignments,
@@ -805,6 +821,7 @@ fn process_raw(
             return failed_result(
                 plasmid_id,
                 candidate,
+                config,
                 "raw",
                 raw_error_code(&error),
                 &error.to_string(),
@@ -827,6 +844,7 @@ fn process_raw(
                 return failed_result(
                     plasmid_id,
                     candidate,
+                    config,
                     "raw",
                     error.code(),
                     &error.to_string(),
@@ -858,6 +876,7 @@ fn process_raw(
                 return failed_result(
                     plasmid_id,
                     candidate,
+                    config,
                     "alignment",
                     error.code(),
                     &error.to_string(),
@@ -874,6 +893,7 @@ fn process_raw(
             return failed_result(
                 plasmid_id,
                 candidate,
+                config,
                 "coverage",
                 error.code(),
                 &error.to_string(),
@@ -887,6 +907,9 @@ fn process_raw(
         run_id: String::new(),
         plasmid_id: plasmid_id.to_string(),
         metagenome_id: candidate.metagenome_id().to_string(),
+        algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
+            config.sensitivity.clone(),
+        ),
         status: TraceStatus::Complete,
         candidate: Some(candidate.candidate.clone()),
         alignments,
@@ -1232,9 +1255,11 @@ fn strand_key(alignment: &BaseAlignment) -> u8 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn failed_result(
     plasmid_id: &str,
     candidate: &RankedCandidate,
+    config: &TraceRunnerConfig,
     stage: &str,
     code: &str,
     message: &str,
@@ -1246,6 +1271,9 @@ fn failed_result(
         run_id: String::new(),
         plasmid_id: plasmid_id.to_string(),
         metagenome_id: candidate.metagenome_id().to_string(),
+        algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
+            config.sensitivity.clone(),
+        ),
         status: TraceStatus::Failed,
         candidate: Some(candidate.candidate.clone()),
         alignments: Vec::new(),

@@ -91,6 +91,13 @@ pub fn generate_anchors(
 
     for group in groups {
         let occurrence_count = group.occurrences.len();
+        // Hash zero is excluded at seed extraction and JMA construction. Keep
+        // the anchor boundary defensive as well so a malformed or manually
+        // assembled group cannot turn the sentinel into evidence.
+        if group.seed.hash == 0 {
+            skipped_occurrences += occurrence_count as u64;
+            continue;
+        }
         if occurrence_count > usize::try_from(max_occurrences_per_seed).unwrap_or(usize::MAX) {
             repetitive_seeds += 1;
             skipped_occurrences += occurrence_count as u64;
@@ -238,5 +245,53 @@ mod tests {
         };
         let anchors = generate_anchors(&[group], 4, 20);
         assert_eq!(anchors.anchors.len(), 1);
+    }
+
+    #[test]
+    fn hash_zero_groups_are_not_promoted_to_anchors() {
+        let group = SeedOccurrenceGroup {
+            seed: QuerySeed {
+                position: 4,
+                hash: 0,
+                canonical_kmer: 7,
+                reverse: false,
+            },
+            k: 31,
+            occurrences: vec![occurrence(0, 10, false)],
+        };
+        let anchors = generate_anchors(&[group], 4, 20);
+        assert!(anchors.anchors.is_empty());
+        assert_eq!(anchors.repetitive_seeds, 0);
+        assert_eq!(anchors.skipped_occurrences, 1);
+    }
+
+    #[test]
+    fn anchor_order_is_independent_of_group_and_occurrence_order() {
+        let first = SeedOccurrenceGroup {
+            seed: seed(8, false),
+            k: 31,
+            occurrences: vec![occurrence(1, 40, false), occurrence(0, 20, true)],
+        };
+        let second = SeedOccurrenceGroup {
+            seed: seed(2, true),
+            k: 21,
+            occurrences: vec![occurrence(0, 10, false), occurrence(0, 2, true)],
+        };
+        let ordered = generate_anchors(&[first.clone(), second.clone()], 4, 20);
+        let reversed = generate_anchors(
+            &[
+                SeedOccurrenceGroup {
+                    occurrences: first.occurrences.iter().rev().copied().collect(),
+                    ..first
+                },
+                SeedOccurrenceGroup {
+                    occurrences: second.occurrences.iter().rev().copied().collect(),
+                    ..second
+                },
+            ],
+            4,
+            20,
+        );
+        assert_eq!(ordered, reversed);
     }
 }

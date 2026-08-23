@@ -159,6 +159,9 @@ fn example_header() -> TraceRunHeader {
         plasmid_id: "query".to_string(),
         plasmid_length: 4_000,
         sensitivity: SensitivityConfig::default(),
+        algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
+            SensitivityConfig::default(),
+        ),
         inputs: vec![InputResource {
             role: "plasmid".to_string(),
             redacted_locator: "query.fasta".to_string(),
@@ -173,6 +176,9 @@ fn example_result() -> TraceMetagenomeResult {
         run_id: "bench-run".to_string(),
         plasmid_id: "query".to_string(),
         metagenome_id: "sample".to_string(),
+        algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
+            SensitivityConfig::default(),
+        ),
         status: TraceStatus::Complete,
         candidate: Some(CandidateResult {
             metagenome_id: "sample".to_string(),

@@ -226,6 +226,16 @@ pub fn decode_seed_section(bytes: &[u8]) -> JmaResult<SeedSection> {
 /// Encodes an entire JMA v1 archive in memory. The output order and all
 /// record ordering are deterministic for a deterministic `ArchiveParts` input.
 pub fn encode_archive(parts: &ArchiveParts) -> JmaResult<Vec<u8>> {
+    encode_archive_with_min_entropy(parts, None)
+}
+
+/// Encodes an archive and records the entropy threshold used while building
+/// its positional seed sections.  The public `encode_archive` entry point
+/// remains compatible for callers that do not have a threshold to record.
+pub fn encode_archive_with_min_entropy(
+    parts: &ArchiveParts,
+    min_entropy: Option<f64>,
+) -> JmaResult<Vec<u8>> {
     let contig_count = u32::try_from(parts.contigs.len()).map_err(|_| JmaError::OffsetOverflow)?;
     let total_bases = parts.contigs.iter().try_fold(0u64, |total, contig| {
         total
@@ -308,6 +318,9 @@ pub fn encode_archive(parts: &ArchiveParts) -> JmaResult<Vec<u8>> {
         total_bases,
         source_sha256: parts.source_sha256,
         seed_levels,
+        algorithm_id: Some("jam-seed-chain-align-v1".to_string()),
+        algorithm_version: Some(1),
+        min_entropy,
     };
     let header = encode_header(
         &archive_header,
@@ -329,7 +342,17 @@ pub fn encode_archive(parts: &ArchiveParts) -> JmaResult<Vec<u8>> {
 /// Streams an already encoded archive to a writer. The JMA error type keeps
 /// I/O details redacted and leaves the caller's writer ownership untouched.
 pub fn write_archive<W: Write>(writer: &mut W, parts: &ArchiveParts) -> JmaResult<()> {
-    let bytes = encode_archive(parts)?;
+    write_archive_with_min_entropy(writer, parts, None)
+}
+
+/// Streams an archive while recording the threshold used for its seed
+/// sections.  This is the builder-facing form of [`write_archive`].
+pub fn write_archive_with_min_entropy<W: Write>(
+    writer: &mut W,
+    parts: &ArchiveParts,
+    min_entropy: Option<f64>,
+) -> JmaResult<()> {
+    let bytes = encode_archive_with_min_entropy(parts, min_entropy)?;
     writer
         .write_all(&bytes)
         .map_err(|error| JmaError::CorruptSection(format!("archive write failed: {error}")))

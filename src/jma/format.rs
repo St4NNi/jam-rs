@@ -5,7 +5,10 @@
 //! length. This module contains no `unsafe` layout casts, so the on-disk
 //! representation is independent of the compiler and target platform.
 
-use crate::jma::{ArchiveHeader, JMA_FORMAT_VERSION, JMA_MAGIC, JmaError, JmaResult, SeedLevel};
+use crate::jma::{
+    ArchiveHeader, JMA_FORMAT_VERSION, JMA_MAGIC, JMA_TRACE_ALGORITHM_TAG, JmaError, JmaResult,
+    SeedLevel,
+};
 use sha2::{Digest, Sha256};
 
 /// Number of bytes in the fixed JMA v1 header.
@@ -24,6 +27,12 @@ pub const SECTION_SEEDS_K31: u32 = 3;
 /// Section containing k=21 seed occurrences.
 pub const SECTION_SEEDS_K21: u32 = 4;
 
+const TRACE_ALGORITHM_ID: &str = "jam-seed-chain-align-v1";
+const TRACE_ALGORITHM_VERSION: u16 = 1;
+const HEADER_METADATA_OFFSET: usize = 144;
+const HEADER_ALGORITHM_TAG_END: usize = HEADER_METADATA_OFFSET + JMA_TRACE_ALGORITHM_TAG.len();
+const HEADER_ENTROPY_OFFSET: usize = HEADER_ALGORITHM_TAG_END;
+
 /// A checked section-directory entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SectionDescriptor {
@@ -36,7 +45,7 @@ pub struct SectionDescriptor {
 }
 
 /// Header fields that are not part of the public shared `ArchiveHeader`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ParsedHeader {
     pub archive: ArchiveHeader,
     pub section_count: u32,
@@ -110,6 +119,8 @@ pub fn encode_header(
         put_u64(&mut bytes, offset + 8, level.scale);
     }
 
+    encode_trace_metadata(archive, &mut bytes)?;
+
     // Header checksum covers all fixed fields and reserved bytes. The
     // checksum field itself is zero while calculating its value.
     let digest = checksum(&bytes);
@@ -173,6 +184,7 @@ pub fn decode_header(bytes: &[u8]) -> JmaResult<ParsedHeader> {
     let section_directory_offset = get_u64(bytes, 64)?;
     let section_directory_length = get_u64(bytes, 72)?;
     checked_end(section_directory_offset, section_directory_length)?;
+    let (algorithm_id, algorithm_version, min_entropy) = decode_trace_metadata(bytes)?;
     let archive = ArchiveHeader {
         format_version: version,
         flags: get_u32(bytes, 8)?,
@@ -180,6 +192,9 @@ pub fn decode_header(bytes: &[u8]) -> JmaResult<ParsedHeader> {
         total_bases: get_u64(bytes, 16)?,
         source_sha256: array_32(bytes, 32)?,
         seed_levels,
+        algorithm_id,
+        algorithm_version,
+        min_entropy,
     };
     Ok(ParsedHeader {
         archive,
@@ -187,6 +202,95 @@ pub fn decode_header(bytes: &[u8]) -> JmaResult<ParsedHeader> {
         section_directory_offset,
         section_directory_length,
     })
+}
+
+fn encode_trace_metadata(archive: &ArchiveHeader, bytes: &mut [u8]) -> JmaResult<()> {
+    let has_algorithm_id = archive.algorithm_id.is_some();
+    let has_algorithm_version = archive.algorithm_version.is_some();
+    if has_algorithm_id != has_algorithm_version {
+        return Err(JmaError::CorruptSection(
+            "algorithm ID and version must be supplied together".to_string(),
+        ));
+    }
+
+    if let Some(algorithm_id) = archive.algorithm_id.as_deref()
+        && algorithm_id != TRACE_ALGORITHM_ID
+    {
+        return Err(JmaError::CorruptSection(format!(
+            "unsupported JMA algorithm ID {algorithm_id}"
+        )));
+    }
+    if let Some(algorithm_version) = archive.algorithm_version
+        && algorithm_version != TRACE_ALGORITHM_VERSION
+    {
+        return Err(JmaError::CorruptSection(format!(
+            "unsupported JMA algorithm version {algorithm_version}"
+        )));
+    }
+
+    // A tagged archive uses all-one bits as the explicit "not configured"
+    // sentinel so an explicit finite 0.0 threshold remains distinguishable.
+    // Legacy archives use an all-zero tag and all-zero entropy bytes.
+    let entropy_bits = match archive.min_entropy {
+        None if has_algorithm_id => u64::MAX,
+        None => 0,
+        Some(value) if value.is_finite() && (0.0..=2.0).contains(&value) => value.to_bits(),
+        Some(value) => {
+            return Err(JmaError::CorruptSection(format!(
+                "minimum entropy {value} is not finite and between 0.0 and 2.0"
+            )));
+        }
+    };
+
+    if !has_algorithm_id && entropy_bits != 0 {
+        return Err(JmaError::CorruptSection(
+            "minimum entropy requires a JMA algorithm tag".to_string(),
+        ));
+    }
+    if has_algorithm_id {
+        bytes[HEADER_METADATA_OFFSET..HEADER_ALGORITHM_TAG_END]
+            .copy_from_slice(&JMA_TRACE_ALGORITHM_TAG);
+    }
+    put_u64(bytes, HEADER_ENTROPY_OFFSET, entropy_bits);
+    Ok(())
+}
+
+fn decode_trace_metadata(bytes: &[u8]) -> JmaResult<(Option<String>, Option<u16>, Option<f64>)> {
+    let tag = bytes
+        .get(HEADER_METADATA_OFFSET..HEADER_ALGORITHM_TAG_END)
+        .ok_or_else(|| JmaError::CorruptSection("truncated JMA metadata tag".to_string()))?;
+    let entropy_bits = get_u64(bytes, HEADER_ENTROPY_OFFSET)?;
+
+    if tag.iter().all(|byte| *byte == 0) {
+        if entropy_bits != 0 {
+            return Err(JmaError::CorruptSection(
+                "minimum entropy is present without a JMA algorithm tag".to_string(),
+            ));
+        }
+        return Ok((None, None, None));
+    }
+    if tag != JMA_TRACE_ALGORITHM_TAG.as_slice() {
+        return Err(JmaError::CorruptSection(
+            "unknown JMA algorithm tag".to_string(),
+        ));
+    }
+
+    let min_entropy = if entropy_bits == u64::MAX {
+        None
+    } else {
+        let value = f64::from_bits(entropy_bits);
+        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+            return Err(JmaError::CorruptSection(format!(
+                "invalid JMA minimum entropy {value}"
+            )));
+        }
+        Some(value)
+    };
+    Ok((
+        Some(TRACE_ALGORITHM_ID.to_string()),
+        Some(TRACE_ALGORITHM_VERSION),
+        min_entropy,
+    ))
 }
 
 /// Encodes a section directory and checks every offset/length arithmetic.

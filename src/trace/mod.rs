@@ -15,10 +15,15 @@ pub mod runner;
 pub mod screen;
 pub mod seeds;
 
-pub use config::{AlignmentScoring, SeedSensitivity, SensitivityConfig, SensitivityProfile};
+pub use config::{
+    AlignmentScoring, SeedSensitivity, SensitivityConfig, SensitivityProfile,
+    TraceAlgorithmMetadata, TraceAlgorithmParameters,
+};
 pub use model::{
     BaseAlignment, BaseInterval, CandidateResult, CoverageSummary, EditOperation, EditRun, Strand,
     TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader,
 };
 
-pub const TRACE_JSON_SCHEMA_VERSION: &str = "1.0.0";
+pub const TRACE_ALGORITHM_ID: &str = "jam-seed-chain-align-v1";
+pub const TRACE_ALGORITHM_VERSION: u16 = 1;
+pub const TRACE_JSON_SCHEMA_VERSION: &str = "1.1.0";
