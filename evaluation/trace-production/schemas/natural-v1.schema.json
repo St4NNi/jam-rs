@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/natural-v1.schema.json",
+  "title": "jam-rs production trace Track C manifest",
+  "description": "Manifest for natural or independently supported metagenome observations. Support evidence is supplied separately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "track", "dataset_id", "license", "support_manifest_id", "support_manifest_sha256", "query_plasmids", "metagenomes", "jam"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "track": {"const": "C"},
+    "dataset_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ready", "unavailable"]},
+    "missing_prerequisites": {"type": "array", "items": {"type": "string"}},
+    "license": {"$ref": "#/$defs/license"},
+    "support_manifest_id": {"type": "string", "minLength": 1},
+    "support_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "query_plasmids": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["plasmid_id", "fasta", "sha256", "license"],
+        "properties": {
+          "plasmid_id": {"type": "string", "minLength": 1},
+          "fasta": {"type": "string", "minLength": 1},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "license": {"$ref": "#/$defs/license"}
+        }
+      }
+    },
+    "metagenomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metagenome_id", "assembly", "sha256", "license"],
+        "properties": {
+          "metagenome_id": {"type": "string", "minLength": 1},
+          "assembly": {"type": "string", "minLength": 1},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "license": {"$ref": "#/$defs/license"}
+        }
+      }
+    },
+    "jam": {"anyOf": [{"$ref": "#/$defs/tool"}, {"type": "null"}]},
+    "support_schema": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdx_id", "source", "redistribution"],
+      "properties": {
+        "spdx_id": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "redistribution": {"type": "string", "minLength": 1}
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "image", "image_digest", "command"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "image": {"type": "string", "minLength": 1},
+        "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
+        "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

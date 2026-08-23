@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0.0",
+  "track": "C",
+  "dataset_id": "natural-example-unavailable",
+  "status": "unavailable",
+  "missing_prerequisites": [
+    "licensed natural metagenome assemblies with verified SHA-256 checksums",
+    "licensed query plasmid sequences with verified SHA-256 checksums",
+    "at least one independent support record",
+    "a pinned jam command"
+  ],
+  "license": {
+    "spdx_id": "NOASSERTION",
+    "source": "not supplied",
+    "redistribution": "unknown"
+  },
+  "support_manifest_id": "natural-example-support",
+  "support_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "query_plasmids": [],
+  "metagenomes": [],
+  "jam": null,
+  "support_schema": "../schemas/natural-support-v1.schema.json"
+}

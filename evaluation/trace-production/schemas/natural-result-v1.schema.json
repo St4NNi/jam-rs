@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/natural-result-v1.schema.json",
+  "title": "jam-rs Track C result record",
+  "type": "object",
+  "required": ["schema_version", "track", "record_type", "run_id", "status"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "track": {"const": "C"},
+    "record_type": {"enum": ["run_status", "natural_result"]},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["complete", "failed", "unavailable"]},
+    "missing_prerequisites": {"type": "array", "items": {"type": "string"}},
+    "job_id": {"type": "string", "minLength": 1},
+    "query_id": {"type": "string", "minLength": 1},
+    "metagenome_id": {"type": "string", "minLength": 1},
+    "trace_output": {"type": ["string", "null"]},
+    "trace_summary": {"$ref": "#/$defs/trace_summary"},
+    "commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+    "independent_support": {"type": ["object", "null"]},
+    "support_status": {"enum": ["supported", "not_provided"]},
+    "biological_interpretation": {"enum": ["supported_by_independent_evidence", "unresolved_no_independent_support"]},
+    "failure": {"type": ["string", "null"]},
+    "note": {"type": "string"}
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "required": ["tool", "command", "exit_code"],
+      "properties": {
+        "tool": {"type": "object"},
+        "command": {"type": "array", "items": {"type": "string"}},
+        "exit_code": {"type": ["integer", "null"]}
+      }
+    },
+    "trace_summary": {
+      "type": "object",
+      "required": ["records", "candidate_records", "alignment_count"],
+      "properties": {
+        "records": {"type": "integer", "minimum": 0},
+        "candidate_records": {"type": "integer", "minimum": 0},
+        "alignment_count": {"type": "integer", "minimum": 0},
+        "mean_supported_fraction": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

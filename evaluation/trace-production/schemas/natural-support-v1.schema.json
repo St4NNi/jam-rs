@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/natural-support-v1.schema.json",
+  "title": "jam-rs Track C independent support manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "support_manifest_id", "license", "support_records"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "support_manifest_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ready", "unavailable"]},
+    "license": {"$ref": "#/$defs/license"},
+    "support_records": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["metagenome_id", "plasmid_id", "support_type", "evidence_id", "evidence_source", "evidence_sha256", "license"],
+        "properties": {
+          "metagenome_id": {"type": "string", "minLength": 1},
+          "plasmid_id": {"type": "string", "minLength": 1},
+          "support_type": {"type": "string", "minLength": 1},
+          "evidence_id": {"type": "string", "minLength": 1},
+          "evidence_source": {"type": "string", "minLength": 1},
+          "evidence_path": {"type": ["string", "null"]},
+          "evidence_uri": {"type": ["string", "null"]},
+          "evidence_sha256": {"$ref": "#/$defs/sha256"},
+          "license": {"$ref": "#/$defs/license"},
+          "notes": {"type": "string"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdx_id", "source", "redistribution"],
+      "properties": {
+        "spdx_id": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "redistribution": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
