@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 
@@ -33,8 +34,8 @@ def main() -> int:
         if not index.is_file():
             raise SystemExit(f"missing JMA range index for {assembly.name}: {index}")
         if args.mode == "local":
-            resource = str(archive.relative_to(args.output.parent))
-            index_resource = str(index.relative_to(args.output.parent))
+            resource = os.path.relpath(archive, args.output.parent)
+            index_resource = os.path.relpath(index, args.output.parent)
         else:
             resource = f"{args.base_url.rstrip('/')}/{archive_name}"
             index_resource = f"{args.base_url.rstrip('/')}/{index_name}"
@@ -43,7 +44,7 @@ def main() -> int:
                 assembly.name,
                 resource,
                 index_resource,
-                str(assembly.relative_to(args.output.parent)),
+                os.path.relpath(assembly, args.output.parent),
             )
         )
     if not rows:
