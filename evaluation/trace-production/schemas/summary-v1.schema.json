@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/schemas/trace-production-summary-v1.schema.json",
+  "title": "jam trace production benchmark summary",
+  "type": "object",
+  "required": ["schema_version", "generated_at_utc", "raw_measurement_count", "raw_measurements", "groups"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "generated_at_utc": {"type": "string", "format": "date-time"},
+    "raw_directory": {"type": "string"},
+    "raw_measurement_count": {"type": "integer", "minimum": 0},
+    "raw_measurements": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "groups": {"type": "array", "items": {"$ref": "#/$defs/group"}},
+    "statistics": {"type": "object"},
+    "accuracy_note": {"type": "string"}
+  },
+  "$defs": {
+    "group": {
+      "type": "object",
+      "required": ["schema_version", "track", "resource_mode", "cache_state", "cpu_threads", "io_tasks", "sweep_dimension", "status"],
+      "properties": {
+        "schema_version": {"const": "1.0.0"},
+        "track": {"type": "string"},
+        "resource_mode": {"type": "string"},
+        "cache_state": {"type": "string"},
+        "cpu_threads": {"type": "integer", "minimum": 1},
+        "io_tasks": {"type": "integer", "minimum": 1},
+        "sweep_dimension": {"type": "string"},
+        "sweep_value": {},
+        "status": {"enum": ["complete", "failed", "unavailable"]}
+      },
+      "additionalProperties": true
+    }
+  }
+}

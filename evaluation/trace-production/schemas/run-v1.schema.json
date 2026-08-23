@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/schemas/trace-production-run-v1.schema.json",
+  "title": "jam trace production benchmark run",
+  "type": "object",
+  "required": ["schema_version", "status", "created_at_utc", "manifest_sha256", "case_count", "executed_count", "failed_count", "unavailable_count"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "status": {"enum": ["complete", "failed", "unavailable"]},
+    "created_at_utc": {"type": "string", "format": "date-time"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "tracks": {"type": "array", "items": {"type": "string"}},
+    "resource_modes": {"type": "array", "items": {"type": "string"}},
+    "cpu_threads": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "io_tasks": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+    "orders": {"type": "integer", "minimum": 1},
+    "repeats": {"type": "integer", "minimum": 1},
+    "case_count": {"type": "integer", "minimum": 0},
+    "executed_count": {"type": "integer", "minimum": 0},
+    "failed_count": {"type": "integer", "minimum": 0},
+    "unavailable_count": {"type": "integer", "minimum": 0},
+    "sweep_dimensions": {"type": "array", "items": {"type": "string"}},
+    "cache_policy": {"type": "string"},
+    "output_policy": {"type": "string"}
+  },
+  "additionalProperties": true
+}
