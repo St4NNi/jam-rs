@@ -223,6 +223,77 @@ pub fn decode_seed_section(bytes: &[u8]) -> JmaResult<SeedSection> {
     Ok(section)
 }
 
+/// Decodes a byte range containing only fixed-size seed records.  This is
+/// intentionally separate from [`decode_seed_section`], which also expects a
+/// complete section header and all density levels.
+pub(crate) fn decode_seed_records(bytes: &[u8], k: u8) -> JmaResult<Vec<SeedRecord>> {
+    if !(1..=32).contains(&k) {
+        return Err(JmaError::CorruptSection(format!("invalid seed k={k}")));
+    }
+    if !bytes.len().is_multiple_of(SEED_RECORD_SIZE) {
+        return Err(JmaError::CorruptSection(
+            "seed record range is not a whole number of records".to_string(),
+        ));
+    }
+    let mut records = Vec::with_capacity(bytes.len() / SEED_RECORD_SIZE);
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let hash = u64::from_le_bytes(
+            bytes[cursor..cursor + 8]
+                .try_into()
+                .expect("record range checked"),
+        );
+        let canonical_kmer = u64::from_le_bytes(
+            bytes[cursor + 8..cursor + 16]
+                .try_into()
+                .expect("record range checked"),
+        );
+        let contig_id = u32::from_le_bytes(
+            bytes[cursor + 16..cursor + 20]
+                .try_into()
+                .expect("record range checked"),
+        );
+        let reverse = match bytes[cursor + 20] {
+            0 => false,
+            1 => true,
+            value => {
+                return Err(JmaError::CorruptSection(format!(
+                    "invalid seed orientation flag {value}"
+                )));
+            }
+        };
+        if bytes[cursor + 21] != 0 || bytes[cursor + 22] != 0 || bytes[cursor + 23] != 0 {
+            return Err(JmaError::CorruptSection(
+                "non-zero seed record reserved bytes".to_string(),
+            ));
+        }
+        let position = u64::from_le_bytes(
+            bytes[cursor + 24..cursor + 32]
+                .try_into()
+                .expect("record range checked"),
+        );
+        if !valid_canonical_kmer(k, canonical_kmer) {
+            return Err(JmaError::CorruptSection(
+                "seed record contains an invalid packed k-mer".to_string(),
+            ));
+        }
+        records.push(SeedRecord {
+            query: SeedQuery {
+                k,
+                hash,
+                canonical_kmer,
+            },
+            occurrence: SeedOccurrence {
+                contig_id,
+                position,
+                reverse,
+            },
+        });
+        cursor += SEED_RECORD_SIZE;
+    }
+    Ok(records)
+}
+
 /// Encodes an entire JMA v1 archive in memory. The output order and all
 /// record ordering are deterministic for a deterministic `ArchiveParts` input.
 pub fn encode_archive(parts: &ArchiveParts) -> JmaResult<Vec<u8>> {

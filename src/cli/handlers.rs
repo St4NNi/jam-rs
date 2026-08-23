@@ -1114,6 +1114,7 @@ pub fn handle_archive_command(
             input.display()
         ));
     }
+    let index_output = crate::jma::index::sidecar_path(&output);
     if output.exists() {
         if !output.is_file() {
             return Err(anyhow::anyhow!(
@@ -1125,6 +1126,20 @@ pub fn handle_archive_command(
             return Err(anyhow::anyhow!(
                 "Archive output already exists: {}. Use --force to overwrite.",
                 output.display()
+            ));
+        }
+    }
+    if index_output.exists() {
+        if !index_output.is_file() {
+            return Err(anyhow::anyhow!(
+                "Archive index output is not a file: {}",
+                index_output.display()
+            ));
+        }
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Archive index output already exists: {}. Use --force to overwrite.",
+                index_output.display()
             ));
         }
     }
@@ -1141,9 +1156,10 @@ pub fn handle_archive_command(
     )?;
     if !silent {
         eprintln!(
-            "Created JMA v{} archive {}: {} contigs, {} bases, {} k=31 seeds, {} k=21 seeds",
+            "Created JMA v{} archive {} with range index {}: {} contigs, {} bases, {} k=31 seeds, {} k=21 seeds",
             crate::jma::JMA_FORMAT_VERSION,
             output.display(),
+            index_output.display(),
             stats.contig_count,
             stats.total_bases,
             stats.k31_seed_count,

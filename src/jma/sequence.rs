@@ -135,6 +135,20 @@ pub fn decode_sequence_blocks(bytes: &[u8]) -> JmaResult<Vec<SequenceBlock>> {
     Ok(blocks)
 }
 
+/// Decodes one encoded sequence block without requiring the surrounding
+/// sequence-section header. Indexed JMA readers use this after fetching one
+/// checksum-bound block range.
+pub fn decode_sequence_block(bytes: &[u8]) -> JmaResult<SequenceBlock> {
+    let mut section = Vec::with_capacity(8usize.saturating_add(bytes.len()));
+    section.extend_from_slice(&SECTION_VERSION.to_le_bytes());
+    section.extend_from_slice(&1u32.to_le_bytes());
+    section.extend_from_slice(bytes);
+    let mut blocks = decode_sequence_blocks(&section)?;
+    blocks
+        .pop()
+        .ok_or_else(|| JmaError::CorruptSection("encoded sequence block is empty".to_string()))
+}
+
 /// Verifies block ordering, packed lengths, and optional contig bounds.
 pub fn validate_blocks(blocks: &[SequenceBlock], contigs: &[ContigMetadata]) -> JmaResult<()> {
     let mut previous = None;

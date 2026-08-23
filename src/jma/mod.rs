@@ -10,6 +10,7 @@ pub mod builder;
 pub mod contigs;
 pub mod format;
 pub mod header;
+pub mod index;
 pub mod reader;
 pub mod seed_builder;
 pub mod sequence;
@@ -93,6 +94,9 @@ pub trait ArchiveReader: Send + Sync {
     fn contigs(&self) -> &[ContigMetadata];
     fn read_sequence(&self, contig_id: ContigId, range: SequenceRange) -> JmaResult<Vec<u8>>;
     fn seed_occurrences(&self, query: SeedQuery) -> JmaResult<Vec<SeedOccurrence>>;
+    fn metrics(&self) -> crate::resource::ResourceMetrics {
+        self.resource().metrics()
+    }
 }
 
 pub type JmaResult<T> = Result<T, JmaError>;

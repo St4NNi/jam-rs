@@ -7,11 +7,12 @@
 //! compressed FASTA/FASTQ path is supplied); it is not the checksum of the JMA
 //! container.
 
+use crate::jma::index::write_sidecar;
 use crate::jma::seed_builder::{
     EmbeddedSampleSketch, SeedBuildConfig, SeedInput, build_seed_sections,
 };
 use crate::jma::sequence_builder::{SequenceBuildConfig, build_sequence_blocks};
-use crate::jma::writer::{ArchiveParts, write_archive_with_min_entropy};
+use crate::jma::writer::{ArchiveParts, encode_archive_with_min_entropy};
 use crate::jma::{ContigMetadata, JmaError, JmaResult};
 use needletail::{Sequence, parse_fastx_file};
 use sha2::{Digest, Sha256};
@@ -170,9 +171,12 @@ pub fn write_archive_from_fasta<P: AsRef<Path>, Q: AsRef<Path>>(
     let built = build_archive_from_fasta(input, config)?;
     let mut file = File::create(output.as_ref())
         .map_err(|error| JmaError::CorruptSection(format!("cannot create JMA output: {error}")))?;
-    write_archive_with_min_entropy(&mut file, &built.parts, config.min_entropy)?;
+    let encoded = encode_archive_with_min_entropy(&built.parts, config.min_entropy)?;
+    file.write_all(&encoded)
+        .map_err(|error| JmaError::CorruptSection(format!("archive write failed: {error}")))?;
     file.flush()
         .map_err(|error| JmaError::CorruptSection(format!("cannot flush JMA output: {error}")))?;
+    write_sidecar(output.as_ref(), &encoded)?;
     Ok(built.stats)
 }
 
