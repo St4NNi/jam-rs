@@ -125,6 +125,7 @@ pub fn run() -> Result<()> {
             database,
             catalog,
             output,
+            upload_to,
             plasmid_id,
             sensitivity,
             min_shared,
@@ -142,6 +143,7 @@ pub fn run() -> Result<()> {
             database,
             catalog,
             output,
+            upload_to,
             plasmid_id,
             match sensitivity {
                 TraceSensitivityArg::Fast => trace::config::SensitivityProfile::Fast,

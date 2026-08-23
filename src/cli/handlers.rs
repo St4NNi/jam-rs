@@ -1175,6 +1175,7 @@ pub fn handle_trace_command(
     database: String,
     catalog_path: PathBuf,
     output: PathBuf,
+    upload_to: Option<String>,
     plasmid_id: Option<String>,
     profile: crate::trace::config::SensitivityProfile,
     min_shared_hashes: u32,
@@ -1264,7 +1265,7 @@ pub fn handle_trace_command(
         jam_rs_version: env!("CARGO_PKG_VERSION").to_string(),
         source_commit: (source_commit != "unknown").then_some(source_commit),
         started_at_utc: format!("unix:{started}"),
-        command: provenance::command_line(),
+        command: provenance::redacted_command_line(),
         plasmid_id,
         plasmid_length: record.sequence.len() as u64,
         sensitivity,
@@ -1315,6 +1316,19 @@ pub fn handle_trace_command(
     }
     writer.write_footer(&footer)?;
     writer.finish()?;
+    let upload = upload_to
+        .as_deref()
+        .map(|locator| {
+            crate::resource::upload::upload_file(
+                locator,
+                &output,
+                crate::resource::upload::UploadOptions {
+                    request_timeout_seconds,
+                    max_retries,
+                },
+            )
+        })
+        .transpose()?;
     if !silent {
         eprintln!(
             "Trace output {}: {} candidates, {} aligned metagenomes, {} alignments",
@@ -1323,6 +1337,13 @@ pub fn handle_trace_command(
             footer.metagenomes_aligned,
             footer.alignments_total
         );
+        if let (Some(locator), Some(upload)) = (upload_to.as_deref(), upload.as_ref()) {
+            let redacted = crate::resource::ResourceLocator::parse(locator)?.redacted();
+            eprintln!(
+                "Uploaded {} bytes to {} in {} attempt(s), HTTP status {}",
+                upload.bytes_uploaded, redacted, upload.attempts, upload.status
+            );
+        }
     }
     Ok(())
 }

@@ -153,6 +153,9 @@ pub enum Commands {
         /// JSONL output; .zst or .zstd enables Zstandard compression
         #[arg(short, long)]
         output: PathBuf,
+        /// Upload the finalized local output once to an HTTP(S) or S3 object
+        #[arg(long)]
+        upload_to: Option<String>,
         /// Override the plasmid FASTA record identifier
         #[arg(long)]
         plasmid_id: Option<String>,
