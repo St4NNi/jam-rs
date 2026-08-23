@@ -22,9 +22,15 @@ pub struct Cli {
     /// Only errors and output files will be printed
     #[arg(short, long, global = true, default_value = "false")]
     pub silent: bool,
-    /// Maximum memory usage in GiB
-    #[arg(short, long, global = true, default_value = "2")]
-    pub memory: Option<usize>,
+    /// Internal memory target in GiB; process RSS may include additional overhead
+    #[arg(
+        short = 'm',
+        long = "memory-target",
+        visible_alias = "memory",
+        global = true,
+        default_value = "2"
+    )]
+    pub memory_target: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

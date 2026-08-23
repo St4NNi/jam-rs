@@ -28,12 +28,12 @@ use cli::{BiasCommands, Cli, Commands, TraceSensitivityArg};
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let threads = cli.threads.unwrap_or(1);
-    let memory = cli.memory.unwrap_or(2);
+    let memory_target = cli.memory_target.unwrap_or(2);
     if threads == 0 {
         anyhow::bail!("--threads must be > 0");
     }
-    if memory == 0 {
-        anyhow::bail!("--memory must be > 0");
+    if memory_target == 0 {
+        anyhow::bail!("--memory-target must be > 0");
     }
 
     rayon::ThreadPoolBuilder::new()
@@ -60,7 +60,7 @@ pub fn run() -> Result<()> {
                 fscale,
                 singleton,
                 threads,
-                memory,
+                memory_target,
                 cli.force,
                 cli.silent,
                 complexity,
@@ -95,7 +95,7 @@ pub fn run() -> Result<()> {
                 top_per_contig,
                 top_references,
                 threads,
-                memory_gb: memory,
+                memory_gb: memory_target,
                 force: cli.force,
             },
             cli.silent,
@@ -154,7 +154,7 @@ pub fn run() -> Result<()> {
             top_candidates,
             max_alignments,
             threads,
-            memory,
+            memory_target,
             cache_dir,
             cache_block_bytes,
             request_timeout_seconds,
@@ -208,7 +208,14 @@ pub fn run() -> Result<()> {
             cutoff,
             singleton,
         } => handle_distance_command(
-            input, database, output, cutoff, singleton, cli.force, cli.silent, memory,
+            input,
+            database,
+            output,
+            cutoff,
+            singleton,
+            cli.force,
+            cli.silent,
+            memory_target,
         ),
 
         Commands::Stats {
