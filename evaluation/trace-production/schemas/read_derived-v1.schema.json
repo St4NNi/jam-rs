@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/read_derived-v1.schema.json",
+  "title": "jam-rs production trace Track B manifest",
+  "description": "Manifest for read-derived metagenomic assemblies. The executable harness applies additional checksum and path checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "track",
+    "dataset_id",
+    "license",
+    "read_manifest_id",
+    "read_manifest_sha256",
+    "abundance_grid",
+    "plasmids",
+    "mixer",
+    "assembler",
+    "coordinate_extractor",
+    "jam"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "track": {"const": "B"},
+    "dataset_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ready", "unavailable"]},
+    "missing_prerequisites": {"type": "array", "items": {"type": "string"}},
+    "license": {"$ref": "#/$defs/license"},
+    "read_manifest_id": {"type": "string", "minLength": 1},
+    "read_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "abundance_grid": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "fraction"],
+        "properties": {
+          "label": {"type": "string", "minLength": 1},
+          "fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+        }
+      }
+    },
+    "plasmids": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["plasmid_id", "fasta", "sha256", "license"],
+        "properties": {
+          "plasmid_id": {"type": "string", "minLength": 1},
+          "fasta": {"type": "string", "minLength": 1},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "length": {"type": "integer", "minimum": 1},
+          "license": {"$ref": "#/$defs/license"}
+        }
+      }
+    },
+    "mixer": {"anyOf": [{"$ref": "#/$defs/tool"}, {"type": "null"}]},
+    "assembler": {"anyOf": [{"$ref": "#/$defs/tool"}, {"type": "null"}]},
+    "coordinate_extractor": {"anyOf": [{"$ref": "#/$defs/tool"}, {"type": "null"}]},
+    "jam": {"anyOf": [{"$ref": "#/$defs/tool"}, {"type": "null"}]},
+    "truth_schema": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdx_id", "source", "redistribution"],
+      "properties": {
+        "spdx_id": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "redistribution": {"type": "string", "minLength": 1}
+      }
+    },
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "image", "image_digest", "command"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "image": {"type": "string", "minLength": 1},
+        "image_digest": {"type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$"},
+        "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

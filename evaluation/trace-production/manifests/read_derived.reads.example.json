@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0.0",
+  "manifest_id": "read-derived-example-reads",
+  "status": "unavailable",
+  "license": {
+    "spdx_id": "NOASSERTION",
+    "source": "not supplied",
+    "redistribution": "unknown"
+  },
+  "read_sets": []
+}

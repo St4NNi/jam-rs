@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/read_derived-result-v1.schema.json",
+  "title": "jam-rs Track B result record",
+  "type": "object",
+  "required": ["schema_version", "track", "record_type", "run_id", "status"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "track": {"const": "B"},
+    "record_type": {"enum": ["run_status", "job_result"]},
+    "run_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["complete", "failed", "unavailable"]},
+    "missing_prerequisites": {"type": "array", "items": {"type": "string"}},
+    "job_id": {"type": "string", "minLength": 1},
+    "read_set_id": {"type": "string", "minLength": 1},
+    "plasmid_id": {"type": "string", "minLength": 1},
+    "abundance_label": {"type": "string", "minLength": 1},
+    "abundance_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+    "commands": {"type": "array", "items": {"$ref": "#/$defs/command"}},
+    "failure": {"type": ["string", "null"]},
+    "assembled_plasmid_sequence": {"$ref": "#/$defs/sequence"},
+    "assembled_coordinates": {"type": "array", "items": {"$ref": "#/$defs/coordinate"}},
+    "assembled_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+    "trace_evidence": {"$ref": "#/$defs/trace_evidence"},
+    "measurement_scope": {"type": "string", "minLength": 1},
+    "note": {"type": "string"}
+  },
+  "$defs": {
+    "command": {
+      "type": "object",
+      "required": ["tool", "command", "exit_code"],
+      "properties": {
+        "tool": {"type": "object"},
+        "command": {"type": "array", "items": {"type": "string"}},
+        "exit_code": {"type": ["integer", "null"]}
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "required": ["path", "sha256", "length"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "length": {"type": "integer", "minimum": 1}
+      }
+    },
+    "coordinate": {
+      "type": "object",
+      "required": ["contig_id", "plasmid_start", "plasmid_end"],
+      "properties": {
+        "contig_id": {"type": "string", "minLength": 1},
+        "plasmid_start": {"type": "integer", "minimum": 0},
+        "plasmid_end": {"type": "integer", "minimum": 1},
+        "assembly_start": {"type": "integer", "minimum": 0},
+        "assembly_end": {"type": "integer", "minimum": 1},
+        "identity": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "interval": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1}
+      }
+    },
+    "trace_evidence": {
+      "type": "object",
+      "required": ["supported_intervals", "assembled_intervals", "supported_bases_in_assembled_sequence", "assembled_plasmid_bases"],
+      "properties": {
+        "supported_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "assembled_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "supported_bases_in_assembled_sequence": {"type": "integer", "minimum": 0},
+        "assembled_plasmid_bases": {"type": "integer", "minimum": 0},
+        "supported_fraction_of_assembled_sequence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "supported_fraction_of_plasmid": {"type": ["number", "null"], "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

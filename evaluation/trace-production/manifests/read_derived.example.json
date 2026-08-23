@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0.0",
+  "track": "B",
+  "dataset_id": "read-derived-example-unavailable",
+  "status": "unavailable",
+  "missing_prerequisites": [
+    "an explicit read manifest with licensed read files and verified SHA-256 checksums",
+    "at least one plasmid FASTA with a licensed source and verified SHA-256 checksum",
+    "pinned mixer, assembler, coordinate extractor, and jam commands"
+  ],
+  "license": {
+    "spdx_id": "NOASSERTION",
+    "source": "not supplied",
+    "redistribution": "unknown"
+  },
+  "read_manifest_id": "read-derived-example-reads",
+  "read_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "abundance_grid": [
+    {"label": "low", "fraction": 0.0001},
+    {"label": "medium", "fraction": 0.001},
+    {"label": "high", "fraction": 0.01}
+  ],
+  "plasmids": [],
+  "mixer": null,
+  "assembler": null,
+  "coordinate_extractor": null,
+  "jam": null,
+  "truth_schema": "../truth/read_derived-v1.tsv"
+}

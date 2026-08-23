@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/evaluation/trace-production/schemas/read_derived-read-manifest-v1.schema.json",
+  "title": "jam-rs Track B explicit read manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_id", "license", "read_sets"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "manifest_id": {"type": "string", "minLength": 1},
+    "status": {"enum": ["ready", "unavailable"]},
+    "license": {"$ref": "#/$defs/license"},
+    "read_sets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["read_set_id", "r1", "r1_sha256", "license"],
+        "properties": {
+          "read_set_id": {"type": "string", "minLength": 1},
+          "r1": {"type": "string", "minLength": 1},
+          "r1_sha256": {"$ref": "#/$defs/sha256"},
+          "r2": {"type": ["string", "null"]},
+          "r2_sha256": {"type": ["string", "null"]},
+          "license": {"$ref": "#/$defs/license"},
+          "bases": {"type": "integer", "minimum": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spdx_id", "source", "redistribution"],
+      "properties": {
+        "spdx_id": {"type": "string", "minLength": 1},
+        "source": {"type": "string", "minLength": 1},
+        "redistribution": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}
