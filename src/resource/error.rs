@@ -40,6 +40,26 @@ pub(crate) fn transport_error(
     }
 }
 
+pub(crate) fn http_status_error(locator: &ResourceLocator, status: u16) -> ResourceError {
+    ResourceError::HttpStatus {
+        locator: locator.redacted(),
+        status,
+    }
+}
+
+pub(crate) fn timeout_error(locator: &ResourceLocator) -> ResourceError {
+    ResourceError::Timeout {
+        locator: locator.redacted(),
+    }
+}
+
+pub(crate) fn is_retryable(error: &ResourceError) -> bool {
+    matches!(
+        error,
+        ResourceError::Timeout { .. } | ResourceError::Transport { .. }
+    ) || matches!(error, ResourceError::HttpStatus { status, .. } if (500..600).contains(status))
+}
+
 pub(crate) fn redact_message(message: &str) -> String {
     // Curl and HTTP stacks may include a complete request URL in diagnostics.
     // Keep the stable error useful while removing query strings and userinfo.

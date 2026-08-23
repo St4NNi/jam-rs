@@ -377,6 +377,13 @@ fn http_status_failures_are_recorded_without_leaking_locator_credentials() {
         let message = error.to_string();
         assert!(!message.contains("secret"));
         assert!(!message.contains("do-not-leak"));
+        assert!(matches!(
+            error,
+            ResourceError::HttpStatus {
+                status: error_status,
+                ..
+            } if error_status == status
+        ));
         assert_eq!(fixture.statuses().last().copied(), Some(status));
     }
 }
@@ -393,6 +400,9 @@ fn delayed_http_response_exercises_timeout_path() {
         },
     )
     .unwrap();
-    assert!(resource.metadata().is_err());
+    assert!(matches!(
+        resource.metadata(),
+        Err(ResourceError::Timeout { .. })
+    ));
     assert!(!fixture.requests().is_empty());
 }

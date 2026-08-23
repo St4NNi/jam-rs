@@ -7,7 +7,9 @@
 //! returned lengths before handing bytes to callers.
 
 use super::cache::BlockCache;
-use super::error::{redact_message, retry_count, transport_error, validate_range};
+use super::error::{
+    http_status_error, is_retryable, retry_count, timeout_error, transport_error, validate_range,
+};
 use super::metrics::MetricsCounter;
 use super::{
     ByteRange, CacheIdentity, RangeReader, ResourceError, ResourceLocator, ResourceMetadata,
@@ -112,29 +114,53 @@ impl ObjectResource {
             if let Some(bytes) = requested_bytes {
                 self.metrics.requested_bytes(bytes);
             }
-            let mut child = command
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|error| {
-                    transport_error(&self.locator, format!("unable to execute curl: {error}"))
-                })?;
-            let mut stdout = child.stdout.take().ok_or_else(|| {
-                transport_error(&self.locator, "curl did not provide a readable stdout")
-            })?;
+            let mut child = match command.stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let resource_error =
+                        transport_error(&self.locator, format!("unable to execute curl: {error}"));
+                    if is_retryable(&resource_error) && attempt + 1 < attempts {
+                        self.metrics.retry();
+                        last_error = Some(resource_error);
+                        continue;
+                    }
+                    return Err(resource_error);
+                }
+            };
+            let mut stdout = match child.stdout.take() {
+                Some(stdout) => stdout,
+                None => {
+                    let resource_error =
+                        transport_error(&self.locator, "curl did not provide a readable stdout");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if is_retryable(&resource_error) && attempt + 1 < attempts {
+                        self.metrics.retry();
+                        last_error = Some(resource_error);
+                        continue;
+                    }
+                    return Err(resource_error);
+                }
+            };
             let max_output_bytes = usize::try_from(max_output_bytes).unwrap_or(usize::MAX);
             let mut output = Vec::new();
             let mut buffer = [0_u8; 8192];
+            let mut read_error = None;
             loop {
                 let count = match stdout.read(&mut buffer) {
                     Ok(count) => count,
                     Err(error) => {
                         let _ = child.kill();
                         let _ = child.wait();
-                        return Err(transport_error(
-                            &self.locator,
-                            format!("unable to read curl response: {error}"),
-                        ));
+                        read_error = Some(if error.kind() == io::ErrorKind::TimedOut {
+                            timeout_error(&self.locator)
+                        } else {
+                            transport_error(
+                                &self.locator,
+                                format!("unable to read curl response: {error}"),
+                            )
+                        });
+                        break;
                     }
                 };
                 if count == 0 {
@@ -143,28 +169,60 @@ impl ObjectResource {
                 if output.len().saturating_add(count) > max_output_bytes {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(transport_error(
+                    read_error = Some(transport_error(
                         &self.locator,
                         format!("response exceeds configured limit of {max_output_bytes} bytes"),
                     ));
+                    break;
                 }
                 output.extend_from_slice(&buffer[..count]);
             }
-            let status = child.wait().map_err(|error| {
-                transport_error(&self.locator, format!("unable to wait for curl: {error}"))
-            })?;
+            if let Some(resource_error) = read_error {
+                if is_retryable(&resource_error) && attempt + 1 < attempts {
+                    self.metrics.retry();
+                    last_error = Some(resource_error);
+                    continue;
+                }
+                return Err(resource_error);
+            }
+            let status = match child.wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let resource_error =
+                        transport_error(&self.locator, format!("unable to wait for curl: {error}"));
+                    if is_retryable(&resource_error) && attempt + 1 < attempts {
+                        self.metrics.retry();
+                        last_error = Some(resource_error);
+                        continue;
+                    }
+                    return Err(resource_error);
+                }
+            };
+            if let Some(http_status) = response_status(&output).filter(|status| *status >= 400) {
+                let resource_error = http_status_error(&self.locator, http_status);
+                if is_retryable(&resource_error) && attempt + 1 < attempts {
+                    self.metrics.retry();
+                    last_error = Some(resource_error);
+                    continue;
+                }
+                return Err(resource_error);
+            }
             if status.success() {
                 return Ok(output);
             }
-            if attempt + 1 < attempts {
+            let resource_error = if status.code() == Some(28) {
+                timeout_error(&self.locator)
+            } else {
+                transport_error(&self.locator, format!("curl exited with status {status}"))
+            };
+            if is_retryable(&resource_error) && attempt + 1 < attempts {
                 self.metrics.retry();
+                last_error = Some(resource_error);
+                continue;
             }
-            last_error = Some(format!("curl exited with status {status}"));
+            return Err(resource_error);
         }
-        Err(transport_error(
-            &self.locator,
-            redact_message(&last_error.unwrap_or_else(|| "curl request failed".to_string())),
-        ))
+        Err(last_error.unwrap_or_else(|| transport_error(&self.locator, "curl request failed")))
     }
 
     fn execute_headers(
@@ -184,6 +242,12 @@ impl ObjectResource {
         let (mut metadata, mut head_error) =
             match self.execute_headers(&["--head".to_string()], None) {
                 Ok(headers) => (parse_metadata_headers(&headers), None),
+                Err(error @ ResourceError::HttpStatus { status, .. })
+                    if status == 403 || status == 404 || (500..600).contains(&status) =>
+                {
+                    return Err(error);
+                }
+                Err(error @ ResourceError::Timeout { .. }) => return Err(error),
                 Err(error) => (ParsedHeaders::default(), Some(error)),
             };
         if metadata.size.is_none() {
@@ -479,6 +543,10 @@ impl RangeReader for ObjectResource {
 
     fn stream(&self) -> ResourceResult<Box<dyn Read + Send>> {
         self.metrics.stream_request();
+        // Probe metadata before handing out a streaming handle.  This turns
+        // HTTP authorization/not-found failures into structured resource
+        // errors instead of hiding them behind a later parser I/O error.
+        self.metadata()?;
         self.metrics.get_request();
         let mut command = Command::new(CURL);
         command
@@ -555,6 +623,25 @@ struct HttpResponse {
     status: u16,
     headers: ParsedHeaders,
     body: Vec<u8>,
+}
+
+fn response_status(bytes: &[u8]) -> Option<u16> {
+    let mut cursor = 0;
+    loop {
+        let relative_start = find_http_status(bytes, cursor)?;
+        let start = cursor + relative_start;
+        let relative_end = find_bytes(&bytes[start..], b"\r\n\r\n")?;
+        let header_end = start + relative_end + 4;
+        let headers = parse_header_block(&bytes[start..header_end]);
+        if headers.status == 0 {
+            return None;
+        }
+        if headers.status == 100 || (300..400).contains(&headers.status) {
+            cursor = header_end;
+            continue;
+        }
+        return Some(headers.status);
+    }
 }
 
 fn parse_http_response(bytes: &[u8], locator: &ResourceLocator) -> ResourceResult<HttpResponse> {

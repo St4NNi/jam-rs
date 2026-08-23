@@ -157,6 +157,42 @@ fn full_object_fallback_is_counted_and_bounded() {
     assert_eq!(bounded.metrics().full_object_fallbacks, 0);
 }
 
+#[test]
+fn http_statuses_are_structured_and_retry_only_for_server_errors() {
+    let forbidden = remote_fixture(b"unavailable".to_vec()).with_status(403);
+    let resource = ObjectResource::open(
+        forbidden.url("/forbidden?token=secret"),
+        ResourceOpenOptions {
+            max_retries: 4,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    let error = resource.metadata().expect_err("403 must fail");
+    assert!(matches!(
+        error,
+        jam_rs::resource::ResourceError::HttpStatus { status: 403, .. }
+    ));
+    assert_eq!(forbidden.requests().len(), 1);
+
+    let unavailable = remote_fixture(b"unavailable".to_vec()).with_status(503);
+    let resource = ObjectResource::open(
+        unavailable.url("/unavailable"),
+        ResourceOpenOptions {
+            max_retries: 2,
+            ..ResourceOpenOptions::default()
+        },
+    )
+    .unwrap();
+    let error = resource.metadata().expect_err("503 must fail");
+    assert!(matches!(
+        error,
+        jam_rs::resource::ResourceError::HttpStatus { status: 503, .. }
+    ));
+    assert_eq!(unavailable.requests().len(), 3);
+    assert_eq!(resource.metrics().retries, 2);
+}
+
 fn remote_fixture(body: Vec<u8>) -> remote::HttpFixture {
     // Keep this test file self-contained while sharing the canonical fixture
     // behavior used by the trace remote integration tests.

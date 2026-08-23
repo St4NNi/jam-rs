@@ -28,6 +28,13 @@ pub struct RequestRecord {
     pub returned_bytes: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UploadRecord {
+    pub method: String,
+    pub path: String,
+    pub body: Vec<u8>,
+}
+
 #[derive(Clone, Debug)]
 struct FixtureState {
     body: Vec<u8>,
@@ -47,6 +54,9 @@ struct FixtureState {
     fail_all_requests: usize,
     fail_range_requests: usize,
     truncate_range_after: Option<usize>,
+    upload_status: Option<u16>,
+    interrupt_upload: bool,
+    uploaded: Vec<UploadRecord>,
     requests: Vec<RequestRecord>,
 }
 
@@ -72,6 +82,9 @@ impl HttpFixture {
             fail_all_requests: 0,
             fail_range_requests: 0,
             truncate_range_after: None,
+            upload_status: None,
+            interrupt_upload: false,
+            uploaded: Vec::new(),
             requests: Vec::new(),
         })
     }
@@ -125,6 +138,16 @@ impl HttpFixture {
         self
     }
 
+    pub fn with_upload_status(self, status: u16) -> Self {
+        self.state.lock().unwrap().upload_status = Some(status);
+        self
+    }
+
+    pub fn interrupt_upload(self) -> Self {
+        self.state.lock().unwrap().interrupt_upload = true;
+        self
+    }
+
     pub fn set_body(&self, body: impl Into<Vec<u8>>, etag: impl Into<String>) {
         let mut state = self.state.lock().unwrap();
         state.body = body.into();
@@ -155,6 +178,10 @@ impl HttpFixture {
             .into_iter()
             .filter(|request| request.range.is_some())
             .collect()
+    }
+
+    pub fn uploads(&self) -> Vec<UploadRecord> {
+        self.state.lock().unwrap().uploaded.clone()
     }
 
     fn with_state(state: FixtureState) -> Self {
@@ -215,7 +242,32 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<FixtureState>>) {
         }
     }
 
-    let request_text = String::from_utf8_lossy(&request);
+    let Some(header_end) = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|offset| offset + 4)
+    else {
+        return;
+    };
+    let header = &request[..header_end];
+    let content_length = String::from_utf8_lossy(header)
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Content-Length:")
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(0);
+    let mut request_body = request[header_end..].to_vec();
+    let mut body_buffer = [0_u8; 8192];
+    while request_body.len() < content_length {
+        match stream.read(&mut body_buffer) {
+            Ok(0) => break,
+            Ok(count) => request_body.extend_from_slice(&body_buffer[..count]),
+            Err(_) => return,
+        }
+    }
+    request_body.truncate(content_length.min(request_body.len()));
+    let request_text = String::from_utf8_lossy(header);
     let mut request_line = request_text.lines();
     let Some(first_line) = request_line.next() else {
         return;
@@ -270,6 +322,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<FixtureState>>) {
                 fixture.ignore_range,
                 fixture.response_delay,
                 fixture.truncate_range_after,
+                fixture.upload_status,
+                fixture.interrupt_upload,
             ))
         };
         (record_index, response)
@@ -283,6 +337,8 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<FixtureState>>) {
         ignore_range,
         response_delay,
         truncate_range_after,
+        upload_status,
+        interrupt_upload,
     )) = response
     else {
         // Dropping the connection makes curl report a transport failure and
@@ -318,6 +374,38 @@ fn handle_connection(mut stream: TcpStream, state: &Arc<Mutex<FixtureState>>) {
             } else {
                 response_body.len()
             };
+        }
+        return;
+    }
+
+    if method.eq_ignore_ascii_case("PUT") || method.eq_ignore_ascii_case("POST") {
+        if interrupt_upload {
+            let mut fixture = state.lock().unwrap();
+            fixture.uploaded.push(UploadRecord {
+                method: method.to_string(),
+                path: recorded_path.to_string(),
+                body: request_body,
+            });
+            if let Some(record) = fixture.requests.get_mut(record_index) {
+                record.status = 0;
+            }
+            return;
+        }
+        let status = upload_status.unwrap_or(200);
+        let status_text = status_reason(status);
+        let headers = format!(
+            "HTTP/1.1 {status} {status_text}\r\nContent-Length: 0\r\nETag: \"{etag}\"\r\nConnection: close\r\n\r\n"
+        );
+        let _ = stream.write_all(headers.as_bytes());
+        let _ = stream.flush();
+        let mut fixture = state.lock().unwrap();
+        fixture.uploaded.push(UploadRecord {
+            method: method.to_string(),
+            path: recorded_path.to_string(),
+            body: request_body,
+        });
+        if let Some(record) = fixture.requests.get_mut(record_index) {
+            record.status = status;
         }
         return;
     }
@@ -418,6 +506,8 @@ fn status_code(status: &str) -> u16 {
 fn status_reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
+        204 => "No Content",
         206 => "Partial Content",
         403 => "Forbidden",
         404 => "Not Found",

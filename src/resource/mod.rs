@@ -11,6 +11,7 @@ pub mod local;
 pub mod locator;
 pub mod metrics;
 pub mod object;
+pub mod upload;
 
 /// URI scheme understood by the trace resource layer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -229,6 +230,10 @@ pub enum ResourceError {
     RangeUnsupported(String),
     #[error("resource transport failed for {locator}: {message}")]
     Transport { locator: String, message: String },
+    #[error("resource request returned HTTP status {status} for {locator}")]
+    HttpStatus { locator: String, status: u16 },
+    #[error("resource request timed out for {locator}")]
+    Timeout { locator: String },
     #[error("resource I/O failed for {locator}: {message}")]
     Io { locator: String, message: String },
 }
