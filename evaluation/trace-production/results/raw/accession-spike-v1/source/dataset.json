@@ -1,0 +1,178 @@
+{
+  "assemblies": [
+    {
+      "background_source_accessions": [
+        "NC_000913.3",
+        "NC_000964.3",
+        "NC_002516.2"
+      ],
+      "bases": 15274687,
+      "contigs": 1073,
+      "controlled_derivative": true,
+      "dataset": "exact_full",
+      "file": "assemblies/exact_full.fasta",
+      "sha256": "90a3786de4c2b8163031dc3aa46e7e357aab3b47eb1fddbbd7d940a3cb955387"
+    },
+    {
+      "background_source_accessions": [
+        "NC_000913.3",
+        "NC_000964.3",
+        "NC_002516.2"
+      ],
+      "bases": 15239180,
+      "contigs": 1077,
+      "controlled_derivative": true,
+      "dataset": "fragmented_trace",
+      "file": "assemblies/fragmented_trace.fasta",
+      "sha256": "a43ff55d4e2893bad6ab36072a3d370b46900da78ea00ba7c7052b1f4e6b4653"
+    },
+    {
+      "background_source_accessions": [
+        "NC_000913.3",
+        "NC_000964.3",
+        "NC_002516.2"
+      ],
+      "bases": 15231914,
+      "contigs": 1077,
+      "controlled_derivative": true,
+      "dataset": "near_known",
+      "file": "assemblies/near_known.fasta",
+      "sha256": "f70debe0a2cf88b826fdfd9cbfb59e22aa43a95a7d04eecb3d73c54832bc2708"
+    },
+    {
+      "background_source_accessions": [
+        "NC_000913.3",
+        "NC_000964.3",
+        "NC_002516.2"
+      ],
+      "bases": 15121662,
+      "contigs": 1070,
+      "controlled_derivative": true,
+      "dataset": "background_only",
+      "file": "assemblies/background_only.fasta",
+      "sha256": "6d67e653381dd38dbb4fcfc694189d961edef0b536720ee0eeb00a4dfd710903"
+    }
+  ],
+  "background_accessions": [
+    "NC_000913.3",
+    "NC_000964.3",
+    "NC_002516.2"
+  ],
+  "catalog_accessions": [
+    "J01749.1",
+    "AP000342.1",
+    "NC_008272.1",
+    "AP001918.1",
+    "NC_001735.1"
+  ],
+  "catalog_bases": 305523,
+  "catalog_sha256": "f56dad56d648c57c5e7bfd40d98b003283078130e31fdf0a831da77135d287b8",
+  "construction_seed": "sha256(accession) first 64 bits for chromosome fragmentation",
+  "generator": "accession_spike.py",
+  "limitations": [
+    "Assembly-level accession spike-in; reads were not simulated and no assembler was run.",
+    "Chromosome contigs are deterministic perfect fragments without sequencing or assembly errors.",
+    "Every controlled assembly reuses the same three supplied chromosome sources; these are not independent natural metagenomes.",
+    "Near-known rows are candidate-retrieval evidence against the declared catalog, not confirmed plasmid presence.",
+    "This dataset does not establish biological sensitivity, specificity, or absence from a metagenome."
+  ],
+  "schema_version": "jam-trace-accession-spike-v1",
+  "source_endpoint": "NCBI nuccore accession-version records; URLs are recorded in the source manifest",
+  "source_fasta": "sources.fasta",
+  "source_fasta_sha256": "67a1e00d38515f51f47db2ca81f34929d7459268a54959b3e15fede8535be837",
+  "source_manifest": "accession-sources-v1.tsv",
+  "source_manifest_sha256": "c30bb4e4d5fb1d026c0e9fbeb695b232be22fd5a182728bc96c47585be48f0b6",
+  "source_records": [
+    {
+      "accession": "J01749.1",
+      "catalog": true,
+      "length": 4361,
+      "name": "pBR322",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/J01749.1",
+      "role": "catalog and exact spike",
+      "sequence_sha256": "536042a7485bdabdf49c4d21a306213a098d77d19bdba57a1c6adc76ce2b8372"
+    },
+    {
+      "accession": "M77789.2",
+      "catalog": false,
+      "length": 2686,
+      "name": "pUC19",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/M77789.2",
+      "role": "near-known spike",
+      "sequence_sha256": "7c1183b16368b1435452d99152d7c95aa04fc4a5412e563a5ef1d0fbf0cf873b"
+    },
+    {
+      "accession": "AP000342.1",
+      "catalog": true,
+      "length": 94281,
+      "name": "R100",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/AP000342.1",
+      "role": "catalog and exact spike",
+      "sequence_sha256": "7c36f5821d8ba6e91910f0be47008647cf52e0d4211113500c8c5b68606ff2dd"
+    },
+    {
+      "accession": "KY749247.1",
+      "catalog": false,
+      "length": 97566,
+      "name": "R1",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/KY749247.1",
+      "role": "near-known spike",
+      "sequence_sha256": "db5a30b7bbcdd9b78ff5e888e6d778896fcb0f4487502b23b4e3d8ff7ebc3c27"
+    },
+    {
+      "accession": "NC_008272.1",
+      "catalog": true,
+      "length": 54383,
+      "name": "pKJK5",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/NC_008272.1",
+      "role": "catalog and exact spike",
+      "sequence_sha256": "92987388d2d472f208f58fc7d4ab3f32fe5cf9fa40f201dc60f42d3da06317df"
+    },
+    {
+      "accession": "AP001918.1",
+      "catalog": true,
+      "length": 99159,
+      "name": "F",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/AP001918.1",
+      "role": "catalog distractor",
+      "sequence_sha256": "e8f9cb8f87c56e14c9562a7de62d15197e4fb6f7bb5af0dd286bc87d766a41ed"
+    },
+    {
+      "accession": "NC_001735.1",
+      "catalog": true,
+      "length": 53339,
+      "name": "R751",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/NC_001735.1",
+      "role": "catalog distractor",
+      "sequence_sha256": "997fe17322005c563a824ed176c80d5646d9eba3a8cd62aa41925faa5e8638a8"
+    },
+    {
+      "accession": "NC_000913.3",
+      "catalog": false,
+      "length": 4641652,
+      "name": "Escherichia coli K-12 MG1655",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/NC_000913.3",
+      "role": "chromosome background",
+      "sequence_sha256": "e999dceccb76562d40e49a10d9e6d4cf1c05d184f4f80b92bb32d4a2420c11d0"
+    },
+    {
+      "accession": "NC_000964.3",
+      "catalog": false,
+      "length": 4215606,
+      "name": "Bacillus subtilis 168",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/NC_000964.3",
+      "role": "chromosome background",
+      "sequence_sha256": "71572ae0b98f44a6382b29e194e56c1f7d87477be8f53915fb06816f886b17b7"
+    },
+    {
+      "accession": "NC_002516.2",
+      "catalog": false,
+      "length": 6264404,
+      "name": "Pseudomonas aeruginosa PAO1",
+      "record_url": "https://www.ncbi.nlm.nih.gov/nuccore/NC_002516.2",
+      "role": "chromosome background",
+      "sequence_sha256": "f969830bbe6aa58beccd852ae6e129a9489a92557ad082283f639b6e8539a340"
+    }
+  ],
+  "truth_targets": 8
+}

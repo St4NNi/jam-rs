@@ -1,0 +1,9 @@
+dataset	spike_accession	expected_reference	truth_class	construction	injected_contigs	injected_bases
+exact_full	J01749.1	J01749.1	exact	complete accession	1	4361
+exact_full	AP000342.1	AP000342.1	exact	complete accession	1	94281
+exact_full	NC_008272.1	NC_008272.1	exact	complete accession	1	54383
+fragmented_trace	J01749.1	J01749.1	reverse_complement	complete reverse complement	1	4361
+fragmented_trace	AP000342.1	AP000342.1	split_overlap	five fragments with 1000 bp boundary overlap	5	102281
+fragmented_trace	NC_008272.1	NC_008272.1	partial	central 20 percent	1	10876
+near_known	M77789.2	J01749.1	near_known_accession	complete pUC19 screened against catalog pBR322	1	2686
+near_known	KY749247.1	AP000342.1	near_known_accession	six R1 fragments with 1000 bp boundary overlap screened against R100	6	107566

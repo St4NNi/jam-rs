@@ -1,0 +1,11 @@
+accession	name	role	catalog	length	sequence_sha256	record_url	verified
+J01749.1	pBR322	catalog and exact spike	true	4361	536042a7485bdabdf49c4d21a306213a098d77d19bdba57a1c6adc76ce2b8372	https://www.ncbi.nlm.nih.gov/nuccore/J01749.1	true
+M77789.2	pUC19	near-known spike	false	2686	7c1183b16368b1435452d99152d7c95aa04fc4a5412e563a5ef1d0fbf0cf873b	https://www.ncbi.nlm.nih.gov/nuccore/M77789.2	true
+AP000342.1	R100	catalog and exact spike	true	94281	7c36f5821d8ba6e91910f0be47008647cf52e0d4211113500c8c5b68606ff2dd	https://www.ncbi.nlm.nih.gov/nuccore/AP000342.1	true
+KY749247.1	R1	near-known spike	false	97566	db5a30b7bbcdd9b78ff5e888e6d778896fcb0f4487502b23b4e3d8ff7ebc3c27	https://www.ncbi.nlm.nih.gov/nuccore/KY749247.1	true
+NC_008272.1	pKJK5	catalog and exact spike	true	54383	92987388d2d472f208f58fc7d4ab3f32fe5cf9fa40f201dc60f42d3da06317df	https://www.ncbi.nlm.nih.gov/nuccore/NC_008272.1	true
+AP001918.1	F	catalog distractor	true	99159	e8f9cb8f87c56e14c9562a7de62d15197e4fb6f7bb5af0dd286bc87d766a41ed	https://www.ncbi.nlm.nih.gov/nuccore/AP001918.1	true
+NC_001735.1	R751	catalog distractor	true	53339	997fe17322005c563a824ed176c80d5646d9eba3a8cd62aa41925faa5e8638a8	https://www.ncbi.nlm.nih.gov/nuccore/NC_001735.1	true
+NC_000913.3	Escherichia coli K-12 MG1655	chromosome background	false	4641652	e999dceccb76562d40e49a10d9e6d4cf1c05d184f4f80b92bb32d4a2420c11d0	https://www.ncbi.nlm.nih.gov/nuccore/NC_000913.3	true
+NC_000964.3	Bacillus subtilis 168	chromosome background	false	4215606	71572ae0b98f44a6382b29e194e56c1f7d87477be8f53915fb06816f886b17b7	https://www.ncbi.nlm.nih.gov/nuccore/NC_000964.3	true
+NC_002516.2	Pseudomonas aeruginosa PAO1	chromosome background	false	6264404	f969830bbe6aa58beccd852ae6e129a9489a92557ad082283f639b6e8539a340	https://www.ncbi.nlm.nih.gov/nuccore/NC_002516.2	true

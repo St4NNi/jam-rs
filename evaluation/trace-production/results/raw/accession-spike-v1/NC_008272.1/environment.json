@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0.0",
+  "created_at_utc": "2026-08-23T16:32:01.117446+00:00",
+  "platform": "Linux-7.1.8-arch1-3-x86_64-with-glibc2.44",
+  "machine": "x86_64",
+  "processor": "",
+  "cpu_count": 32,
+  "cpu": {
+    "model name": "AMD Ryzen 9 7945HX with Radeon Graphics",
+    "siblings": "32",
+    "cpu cores": "16"
+  },
+  "python": "3.14.7",
+  "rustc": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.0\nLLVM version: 22.1.8",
+  "cargo": "cargo 1.98.0 (797e8a9bc 2026-08-05)",
+  "jam": "jam 0.10.0",
+  "source_commit": "ece8508e1e9a4c1207e3c0c9d50cb0874c338b86",
+  "source_dirty": true,
+  "release_flags": {
+    "profile": "release",
+    "opt_level": 3,
+    "lto": true,
+    "codegen_units": 1,
+    "panic": "abort"
+  },
+  "tools": {
+    "blastn": null,
+    "minimap2": null,
+    "curl": "curl 8.21.0 (x86_64-pc-linux-gnu) libcurl/8.21.0 OpenSSL/3.6.3 zlib/1.3.2 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 libssh2/1.11.1 nghttp2/1.70.0 ngtcp2/1.25.0 nghttp3/1.18.0 mit-krb5/1.22.2\nRelease-Date: 2026-06-24\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp scp sftp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli GSS-API HSTS HTTP2 HTTP3 HTTPS-proxy IDN IPv6 Kerberos Largefile libz PSL SPNEGO SSL threadsafe TLS-SRP UnixSockets zstd",
+    "zstd": "*** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***"
+  },
+  "dataset_metadata": {
+    "schema_version": "1.0.0",
+    "dataset_kind": "imported",
+    "source_root": "/home/beavis/projects/jam-rs/tools/out/spike-in/accession-v1-release-d4e0df2-20260823/dataset",
+    "source_dataset_sha256": "33742a7d5fed862eb3ca75772a7286724c218475ba18028f57b044d5d6713cbb",
+    "catalog_path": "/home/beavis/projects/jam-rs/tools/out/spike-in/accession-v1-release-d4e0df2-20260823/dataset/catalog.fasta",
+    "catalog_sha256": "f56dad56d648c57c5e7bfd40d98b003283078130e31fdf0a831da77135d287b8",
+    "query_id": "NC_008272.1",
+    "query_length": 54383,
+    "assembly_count": 4,
+    "source_truth_path": "/home/beavis/projects/jam-rs/tools/out/spike-in/accession-v1-release-d4e0df2-20260823/dataset/truth.tsv"
+  },
+  "cache_policy": "process-cold is the first timed invocation without a harness warm-up; warm is after one unmeasured invocation; kernel page-cache eviction is not attempted",
+  "timing_policy": "compiler, installation, environment creation, and comparator setup are outside timed commands"
+}
