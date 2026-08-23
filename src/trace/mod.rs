@@ -23,9 +23,11 @@ pub use model::{
     AlignmentMosaicEvidence, AlignmentRole, BaseAlignment, BaseInterval,
     CandidatePerformanceCounters, CandidateResult, CoordinateModel, CoverageSummary, EditOperation,
     EditRun, FragmentMosaicSummary, MosaicAtomicInterval, MosaicSelectionComponents,
-    QueryDescriptor, QueryKind, RescueRoundMetrics, SeedEvidence, Strand, TopologyAssessment,
-    TopologyEvidence, TopologyModelEvidence, TopologyModelSummary, TopologyRequested,
-    TraceAlgorithmIdentifiers, TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader,
+    QueryDescriptor, QueryKind, RescueRoundMetrics, SeedEvidence, SeedSchemeDiagnostics, Strand,
+    TopologyAssessment, TopologyEvidence, TopologyModelEvidence, TopologyModelSummary,
+    TopologyRequested, TraceAlgorithmIdentifiers, TraceDiagnosticReport, TraceFailureCategory,
+    TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader, TraceStageMetrics,
+    TruthIntervalDiagnostics,
 };
 
 pub const TRACE_ALGORITHM_ID: &str = "jam-seed-chain-align-v1";

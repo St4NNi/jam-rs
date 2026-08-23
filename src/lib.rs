@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod bias;
 pub mod cli;
 pub mod core_utils;
@@ -9,6 +10,7 @@ pub mod query;
 pub mod reader;
 pub mod resource;
 pub mod screen;
+pub mod sequence;
 pub mod sketch;
 pub mod trace;
 pub mod writer;

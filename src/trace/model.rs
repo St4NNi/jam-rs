@@ -183,6 +183,79 @@ pub struct RescueRoundMetrics {
     pub elapsed_millis: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceFailureCategory {
+    CandidateMiss,
+    NoRetainedSeed,
+    NoMatchingSeed,
+    RepetitiveSeedSuppression,
+    AnchorCap,
+    NoValidChain,
+    ChainLimit,
+    SequenceBudget,
+    AlignmentBandFailure,
+    AlignmentRejection,
+    AlignmentCap,
+    MosaicSelection,
+    Other,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SeedSchemeDiagnostics {
+    pub scheme_id: u32,
+    pub query_seeds_emitted: u64,
+    pub matching_target_keys: u64,
+    pub matching_occurrences_before_limits: u64,
+    pub matching_occurrences_after_limits: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TruthIntervalDiagnostics {
+    pub truth_interval: BaseInterval,
+    pub candidate_selected: bool,
+    pub seed_schemes: Vec<SeedSchemeDiagnostics>,
+    pub anchors_before_limits: u64,
+    pub anchors_after_limits: u64,
+    pub best_chain_anchor_count: u64,
+    pub best_chain_query_span: u64,
+    pub best_chain_target_span: u64,
+    pub sequence_blocks_requested: u64,
+    pub sequence_window_decoded: Option<BaseInterval>,
+    pub alignment_attempted: bool,
+    pub alignment_band_widths: Vec<u32>,
+    pub alignment_band_edge_touched: bool,
+    pub alignment_accepted: bool,
+    pub alignment_query_span: u64,
+    pub mosaic_supported_bases: u64,
+    pub alignment_or_output_cap_reached: bool,
+    pub failure_category: Option<TraceFailureCategory>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TraceStageMetrics {
+    pub stage: u8,
+    pub name: String,
+    pub seed_pages_read: u64,
+    pub keys_tested: u64,
+    pub occurrences_decoded: u64,
+    pub anchors_retained: u64,
+    pub chains_retained: u64,
+    pub sequence_blocks_read: u64,
+    pub alignment_attempts: u64,
+    pub new_query_bases_supported: u64,
+    pub wall_micros: u64,
+    pub cpu_micros: u64,
+    pub bytes_read: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TraceDiagnosticReport {
+    pub metagenome_id: String,
+    pub truth_intervals: Vec<TruthIntervalDiagnostics>,
+    pub stages: Vec<TraceStageMetrics>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CandidatePerformanceCounters {
     pub candidates_processed: u64,
