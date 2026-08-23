@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/evidence-summary-v1.schema.json",
+  "title": "jam trace production evidence summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "raw_root",
+    "raw_file_count",
+    "raw_checksums_file",
+    "validation",
+    "row_count",
+    "rows",
+    "availability_note"
+  ],
+  "properties": {
+    "schema_version": {"const": "evidence-summary-v1"},
+    "raw_root": {"type": "string", "minLength": 1},
+    "raw_file_count": {"type": "integer", "minimum": 0},
+    "raw_checksums_file": {"const": "raw-checksums.json"},
+    "validation": {"$ref": "#/$defs/validation"},
+    "row_count": {"type": "integer", "minimum": 1},
+    "rows": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/row"}
+    },
+    "availability_note": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["section", "case", "metric", "value", "unit", "status", "note", "source_files"],
+      "properties": {
+        "section": {"type": "string", "minLength": 1},
+        "case": {"type": "string", "minLength": 1},
+        "metric": {"type": "string", "minLength": 1},
+        "value": {"type": ["number", "string", "null"]},
+        "unit": {"type": "string", "minLength": 1},
+        "status": {"enum": ["measured", "failed", "unavailable"]},
+        "note": {"type": "string", "minLength": 1},
+        "source_files": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "json_file_count", "tsv_file_count", "jsonl_file_count", "errors"],
+      "properties": {
+        "status": {"const": "valid"},
+        "json_file_count": {"type": "integer", "minimum": 0},
+        "tsv_file_count": {"type": "integer", "minimum": 0},
+        "jsonl_file_count": {"type": "integer", "minimum": 0},
+        "errors": {"type": "array", "maxItems": 0}
+      }
+    }
+  }
+}
