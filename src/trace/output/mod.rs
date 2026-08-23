@@ -10,6 +10,7 @@ use serde::Serialize;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 use thiserror::Error;
 
 /// The JSONL schema emitted by this module.
@@ -196,16 +197,83 @@ impl<W: Write> TraceJsonlWriter<W> {
 
 /// A file-backed trace writer. A `.zst` or `.zstd` suffix selects a
 /// Zstandard stream; every other suffix writes plain UTF-8 JSONL.
-pub enum TraceFileWriter {
-    Plain(TraceJsonlWriter<File>),
-    Zstd(TraceJsonlWriter<zstd::stream::write::Encoder<'static, File>>),
+pub struct TraceFileWriter {
+    inner: TraceFileWriterInner,
+}
+
+enum TraceFileWriterInner {
+    Plain {
+        writer: TraceJsonlWriter<File>,
+        output: AtomicOutput,
+    },
+    Zstd {
+        writer: TraceJsonlWriter<zstd::stream::write::Encoder<'static, File>>,
+        output: AtomicOutput,
+    },
+}
+
+/// A temporary output in the destination directory that is published only
+/// after a complete JSONL stream has been finalized successfully.
+struct AtomicOutput {
+    destination: PathBuf,
+    temporary: Option<NamedTempFile>,
+    committed: bool,
+}
+
+impl AtomicOutput {
+    fn create(destination: &Path) -> TraceOutputResult<(Self, File)> {
+        let parent = destination
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let temporary = tempfile::Builder::new()
+            .prefix(".jam-trace-output-")
+            .tempfile_in(parent)?;
+        let file = temporary.reopen()?;
+        Ok((
+            Self {
+                destination: destination.to_path_buf(),
+                temporary: Some(temporary),
+                committed: false,
+            },
+            file,
+        ))
+    }
+
+    fn commit(mut self, file: File) -> TraceOutputResult<()> {
+        file.sync_all()?;
+        drop(file);
+        let temporary = self.temporary.take().ok_or_else(|| {
+            TraceOutputError::Io(io::Error::other("atomic output temporary file is missing"))
+        })?;
+        match temporary.persist(&self.destination) {
+            Ok(_) => {
+                self.committed = true;
+                Ok(())
+            }
+            Err(error) => {
+                self.temporary = Some(error.file);
+                Err(error.error.into())
+            }
+        }
+    }
+}
+
+impl Drop for AtomicOutput {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // Dropping the retained NamedTempFile removes the unpublished file.
+        let _ = self.temporary.take();
+    }
 }
 
 impl TraceFileWriter {
     /// Open a plain or Zstandard-compressed JSONL output file.
     pub fn create(path: impl AsRef<Path>) -> TraceOutputResult<Self> {
         let path = path.as_ref();
-        let file = File::create(path)?;
+        let (output, file) = AtomicOutput::create(path)?;
         let is_zstd = path
             .extension()
             .and_then(|extension| extension.to_str())
@@ -214,23 +282,33 @@ impl TraceFileWriter {
             });
         if is_zstd {
             let encoder = zstd::stream::write::Encoder::new(file, 0)?;
-            Ok(Self::Zstd(TraceJsonlWriter::new(encoder)))
+            Ok(Self {
+                inner: TraceFileWriterInner::Zstd {
+                    writer: TraceJsonlWriter::new(encoder),
+                    output,
+                },
+            })
         } else {
-            Ok(Self::Plain(TraceJsonlWriter::new(file)))
+            Ok(Self {
+                inner: TraceFileWriterInner::Plain {
+                    writer: TraceJsonlWriter::new(file),
+                    output,
+                },
+            })
         }
     }
 
     pub fn write_record(&mut self, record: &TraceRecord) -> TraceOutputResult<()> {
-        match self {
-            Self::Plain(writer) => writer.write_record(record),
-            Self::Zstd(writer) => writer.write_record(record),
+        match &mut self.inner {
+            TraceFileWriterInner::Plain { writer, .. } => writer.write_record(record),
+            TraceFileWriterInner::Zstd { writer, .. } => writer.write_record(record),
         }
     }
 
     pub fn write_header(&mut self, header: &TraceRunHeader) -> TraceOutputResult<()> {
-        match self {
-            Self::Plain(writer) => writer.write_header(header),
-            Self::Zstd(writer) => writer.write_header(header),
+        match &mut self.inner {
+            TraceFileWriterInner::Plain { writer, .. } => writer.write_header(header),
+            TraceFileWriterInner::Zstd { writer, .. } => writer.write_header(header),
         }
     }
 
@@ -238,38 +316,38 @@ impl TraceFileWriter {
         &mut self,
         result: &TraceMetagenomeResult,
     ) -> TraceOutputResult<()> {
-        match self {
-            Self::Plain(writer) => writer.write_metagenome_result(result),
-            Self::Zstd(writer) => writer.write_metagenome_result(result),
+        match &mut self.inner {
+            TraceFileWriterInner::Plain { writer, .. } => writer.write_metagenome_result(result),
+            TraceFileWriterInner::Zstd { writer, .. } => writer.write_metagenome_result(result),
         }
     }
 
     pub fn write_footer(&mut self, footer: &TraceRunFooter) -> TraceOutputResult<()> {
-        match self {
-            Self::Plain(writer) => writer.write_footer(footer),
-            Self::Zstd(writer) => writer.write_footer(footer),
+        match &mut self.inner {
+            TraceFileWriterInner::Plain { writer, .. } => writer.write_footer(footer),
+            TraceFileWriterInner::Zstd { writer, .. } => writer.write_footer(footer),
         }
     }
 
     pub fn flush(&mut self) -> TraceOutputResult<()> {
-        match self {
-            Self::Plain(writer) => writer.flush(),
-            Self::Zstd(writer) => writer.flush(),
+        match &mut self.inner {
+            TraceFileWriterInner::Plain { writer, .. } => writer.flush(),
+            TraceFileWriterInner::Zstd { writer, .. } => writer.flush(),
         }
     }
 
     /// Finish the JSONL record stream and, for compressed output, the zstd
     /// frame as well.
     pub fn finish(self) -> TraceOutputResult<()> {
-        match self {
-            Self::Plain(writer) => {
-                let _file = writer.finish()?;
-                Ok(())
+        match self.inner {
+            TraceFileWriterInner::Plain { writer, output } => {
+                let file = writer.finish()?;
+                output.commit(file)
             }
-            Self::Zstd(writer) => {
+            TraceFileWriterInner::Zstd { writer, output } => {
                 let encoder = writer.finish()?;
-                let _file = encoder.finish()?;
-                Ok(())
+                let file = encoder.finish()?;
+                output.commit(file)
             }
         }
     }
