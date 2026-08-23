@@ -1,4 +1,6 @@
-use jam_rs::trace::model::{BaseAlignment, BaseInterval, EditOperation, EditRun, Strand};
+use jam_rs::trace::model::{
+    AlignmentRole, BaseAlignment, BaseInterval, EditOperation, EditRun, SeedEvidence, Strand,
+};
 use jam_rs::trace::mosaic::{OverlapClass, SupportClass, classify_overlap, select_primary};
 
 fn alignment(contig: &str, start: u64, end: u64) -> BaseAlignment {
@@ -11,6 +13,7 @@ fn alignment_segments(contig: &str, query_segments: Vec<BaseInterval>) -> BaseAl
         .map(|segment| segment.len())
         .sum::<u64>();
     BaseAlignment {
+        alignment_id: format!("{contig}:{length}"),
         plasmid_id: "p".to_string(),
         metagenome_id: "m".to_string(),
         contig_id: contig.to_string(),
@@ -34,6 +37,12 @@ fn alignment_segments(contig: &str, query_segments: Vec<BaseInterval>) -> BaseAl
             length: u32::try_from(length).unwrap(),
         }],
         chain_score: length as i64,
+        identity: 1.0,
+        seed_evidence: SeedEvidence::default(),
+        primary_supported_bases: 0,
+        secondary_supported_bases: 0,
+        newly_supported_bases: 0,
+        role: AlignmentRole::AlternativeMapping,
         primary: false,
     }
 }

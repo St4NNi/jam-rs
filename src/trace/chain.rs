@@ -2,12 +2,13 @@
 //!
 //! Chaining is evidence selection only.  It groups anchors by contig, strand,
 //! and k-mer level, scores monotone paths with a bounded predecessor window,
-//! and exposes circular query segments for a path that crosses the plasmid
-//! origin.  It does not perform alignment or make a presence call.
+//! and optionally exposes wrapped query segments for a path that crosses the
+//! stored query origin. It does not perform alignment or make a presence
+//! call.
 
 use crate::trace::anchors::Anchor;
 use crate::trace::config::SensitivityConfig;
-use crate::trace::model::{BaseInterval, CoordinateError, Strand};
+use crate::trace::model::{BaseInterval, CoordinateError, CoordinateModel, Strand};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,6 +21,10 @@ pub struct ChainConfig {
     pub max_query_gap: u64,
     pub max_target_gap: u64,
     pub gap_penalty: i64,
+    /// Query-coordinate handling for the chain DP. Only `Wrap` duplicates
+    /// anchors one query length apart and permits an origin-crossing path.
+    /// `Linear` and `Undetermined` retain the input coordinate line.
+    pub coordinate_model: CoordinateModel,
 }
 
 impl ChainConfig {
@@ -32,7 +37,18 @@ impl ChainConfig {
             max_query_gap: config.max_alignment_window_bases,
             max_target_gap: config.max_alignment_window_bases,
             gap_penalty: 1,
+            // Preserve the pre-topology chain behavior for callers that do
+            // not yet resolve a model. The runner selects Linear or Wrap
+            // explicitly when it has a topology model to evaluate.
+            coordinate_model: CoordinateModel::Wrap,
         }
+    }
+
+    /// Return this configuration with explicit query-coordinate handling.
+    #[must_use]
+    pub const fn with_coordinate_model(mut self, coordinate_model: CoordinateModel) -> Self {
+        self.coordinate_model = coordinate_model;
+        self
     }
 }
 
@@ -45,6 +61,7 @@ impl Default for ChainConfig {
             max_query_gap: 1_000_000,
             max_target_gap: 1_000_000,
             gap_penalty: 1,
+            coordinate_model: CoordinateModel::Wrap,
         }
     }
 }
@@ -86,7 +103,7 @@ pub enum ChainError {
     #[error("anchor k must be greater than zero")]
     ZeroK,
     #[error(
-        "anchor query interval is outside the circular query: position={position}, k={k}, length={length}"
+        "anchor query interval is outside the query: position={position}, k={k}, length={length}"
     )]
     AnchorOutsideQuery { position: u64, k: u8, length: u64 },
     #[error("chain coordinate overflow")]
@@ -104,10 +121,12 @@ struct ExpandedAnchor {
 
 /// Build up to `config.max_chains` chains per contig/strand/k group.
 ///
-/// Query positions are duplicated one plasmid length apart, allowing one
-/// origin crossing while rejecting paths that use the same source anchor
-/// twice.  The predecessor scan is capped by `max_predecessors`, so runtime
-/// and intermediate state remain bounded by the caller's anchor limit.
+/// For a wrapped coordinate model, query positions are duplicated one query
+/// length apart, allowing one origin crossing while rejecting paths that use
+/// the same source anchor twice. Linear and undetermined models keep one copy
+/// of each anchor, so they cannot emit origin-crossing chains. The predecessor
+/// scan is capped by `max_predecessors`, so runtime and intermediate state
+/// remain bounded by the caller's anchor limit.
 pub fn chain_anchors(
     anchors: &[Anchor],
     query_length: u64,
@@ -199,10 +218,14 @@ fn best_chain(
         return Ok(None);
     }
 
-    let expanded_capacity = group
-        .len()
-        .checked_mul(2)
-        .ok_or(ChainError::CoordinateOverflow)?;
+    let expanded_capacity = if permits_wrap(config.coordinate_model) {
+        group
+            .len()
+            .checked_mul(2)
+            .ok_or(ChainError::CoordinateOverflow)?
+    } else {
+        group.len()
+    };
     let mut expanded = Vec::with_capacity(expanded_capacity);
     for (group_index, &(source_index, anchor)) in group.iter().enumerate() {
         if used[group_index] {
@@ -213,18 +236,20 @@ fn best_chain(
             query_position: anchor.query_position,
             source_index: group_index,
         });
-        let wrapped = anchor
-            .query_position
-            .checked_add(query_length)
-            .ok_or(ChainError::CoordinateOverflow)?;
         // Keep `source_index` tied to the group position, not the caller's
         // original slice index, so duplicate circular copies can be blocked.
         let _ = source_index;
-        expanded.push(ExpandedAnchor {
-            anchor,
-            query_position: wrapped,
-            source_index: group_index,
-        });
+        if permits_wrap(config.coordinate_model) {
+            let wrapped = anchor
+                .query_position
+                .checked_add(query_length)
+                .ok_or(ChainError::CoordinateOverflow)?;
+            expanded.push(ExpandedAnchor {
+                anchor,
+                query_position: wrapped,
+                source_index: group_index,
+            });
+        }
     }
     expanded.sort_by(|left, right| expanded_cmp(*left, *right));
 
@@ -333,11 +358,17 @@ fn best_chain(
         return Ok(None);
     }
 
-    let query_segments = circular_segments(linear_start, span, query_length)?;
+    let (query_segments, origin_crossing) = if permits_wrap(config.coordinate_model) {
+        let segments = circular_segments(linear_start, span, query_length)?;
+        (segments, true)
+    } else {
+        let interval = BaseInterval::new(linear_start, linear_end)?;
+        (vec![interval], false)
+    };
+    let origin_crossing = origin_crossing && query_segments.len() == 2;
     let query_interval = *query_segments
         .first()
         .expect("non-empty chain has a query segment");
-    let origin_crossing = query_segments.len() == 2;
 
     let (target_start, target_end) =
         path.iter()
@@ -489,6 +520,11 @@ fn circular_segments(
     }
 }
 
+#[must_use]
+const fn permits_wrap(coordinate_model: CoordinateModel) -> bool {
+    matches!(coordinate_model, CoordinateModel::Wrap)
+}
+
 fn group_key(anchor: &Anchor) -> (u32, u8, u8) {
     (anchor.contig_id, strand_rank(anchor.strand), anchor.k)
 }
@@ -567,6 +603,7 @@ mod tests {
             max_query_gap: 100,
             max_target_gap: 100,
             gap_penalty: 1,
+            coordinate_model: CoordinateModel::Wrap,
         }
     }
 

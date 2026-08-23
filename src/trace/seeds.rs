@@ -9,6 +9,7 @@
 use crate::jamhash_u64_v1;
 use crate::jma::SeedQuery;
 use crate::trace::config::SeedSensitivity;
+use crate::trace::model::BaseInterval;
 use needletail::Sequence;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -114,6 +115,10 @@ pub enum SeedError {
         scale: u64,
         denser_scale: u64,
     },
+    #[error("trace seed interval is outside the query: start={start}, end={end}, length={length}")]
+    IntervalOutOfBounds { start: u64, end: u64, length: u64 },
+    #[error("trace seed interval coordinates overflowed")]
+    CoordinateOverflow,
 }
 
 /// Compute the retained-hash threshold used by the existing `.jam` sketch
@@ -136,7 +141,41 @@ pub fn extract_seed_level(
     sequence: &[u8],
     config: SeedSensitivity,
 ) -> Result<SeedLevel, SeedError> {
+    extract_seed_level_in_intervals(
+        sequence,
+        config,
+        &[BaseInterval {
+            start: 0,
+            end: sequence.len() as u64,
+        }],
+        0,
+    )
+}
+
+/// Extract one seed level only from the requested query intervals.
+///
+/// Intervals use zero-based, half-open query coordinates.  Each interval is
+/// expanded by `flank_bases`, clipped to the query, and overlapping expanded
+/// intervals are merged before hashing.  Consequently a rescue round can
+/// pass unresolved gaps without re-emitting duplicate seeds or changing their
+/// global query positions.  A k-mer is emitted only when its complete window
+/// lies inside the merged interval.
+pub fn extract_seed_level_in_intervals(
+    sequence: &[u8],
+    config: SeedSensitivity,
+    intervals: &[BaseInterval],
+    flank_bases: u64,
+) -> Result<SeedLevel, SeedError> {
     validate_config(config)?;
+    let ranges = expanded_seed_intervals(intervals, sequence.len() as u64, flank_bases)?;
+    extract_seed_level_in_ranges(sequence, config, &ranges)
+}
+
+fn extract_seed_level_in_ranges(
+    sequence: &[u8],
+    config: SeedSensitivity,
+    ranges: &[BaseInterval],
+) -> Result<SeedLevel, SeedError> {
     let mut level = SeedLevel {
         k: config.k,
         scale: config.scale,
@@ -147,27 +186,123 @@ pub fn extract_seed_level(
 
     // `normalize(false)` makes U and lower-case bases consistent with the
     // existing sketch path.  `bit_kmers` skips windows containing N or any
-    // other non-ACGT symbol and reports the original sequence position.
-    let normalized = sequence.normalize(false);
-    for (position, kmer, reverse) in normalized.bit_kmers(config.k, true) {
-        let hash = jamhash_u64_v1(kmer.0);
-        if hash == 0 {
-            level.skipped_hash_zero += 1;
-            continue;
+    // other non-ACGT symbol and reports the position within the sliced range.
+    // Hashing each merged range separately keeps gap rescue selective while
+    // adding the range start back to every position.
+    for range in ranges {
+        let start = usize::try_from(range.start).map_err(|_| SeedError::CoordinateOverflow)?;
+        let end = usize::try_from(range.end).map_err(|_| SeedError::CoordinateOverflow)?;
+        let normalized = sequence[start..end].normalize(false);
+        for (position, kmer, reverse) in normalized.bit_kmers(config.k, true) {
+            let position = range
+                .start
+                .checked_add(position as u64)
+                .ok_or(SeedError::CoordinateOverflow)?;
+            let hash = jamhash_u64_v1(kmer.0);
+            if hash == 0 {
+                level.skipped_hash_zero += 1;
+                continue;
+            }
+            if hash >= retention_threshold(config.scale) {
+                level.skipped_by_density += 1;
+                continue;
+            }
+            level.seeds.push(QuerySeed {
+                position,
+                hash,
+                canonical_kmer: kmer.0,
+                reverse,
+            });
         }
-        if hash >= retention_threshold(config.scale) {
-            level.skipped_by_density += 1;
-            continue;
-        }
-        level.seeds.push(QuerySeed {
-            position: position as u64,
-            hash,
-            canonical_kmer: kmer.0,
-            reverse,
-        });
     }
 
     Ok(level)
+}
+
+/// Extract several nested seed levels from selected query intervals.
+pub fn extract_seed_levels_in_intervals(
+    sequence: &[u8],
+    configs: &[SeedSensitivity],
+    intervals: &[BaseInterval],
+    flank_bases: u64,
+) -> Result<SeedSketch, SeedError> {
+    let mut requested = configs.to_vec();
+    for config in &requested {
+        validate_config(*config)?;
+    }
+    requested.sort_by_key(|config| (k_order(config.k), config.scale));
+    for pair in requested.windows(2) {
+        if pair[0].k == pair[1].k && pair[0].scale == pair[1].scale {
+            return Err(SeedError::DuplicateLevel);
+        }
+    }
+
+    let ranges = expanded_seed_intervals(intervals, sequence.len() as u64, flank_bases)?;
+    let mut levels = Vec::with_capacity(requested.len());
+    for config in requested {
+        levels.push(extract_seed_level_in_ranges(sequence, config, &ranges)?);
+    }
+
+    for pair in levels.windows(2) {
+        if pair[0].k == pair[1].k && pair[0].scale > pair[1].scale {
+            return Err(SeedError::NonNestedDensity {
+                k: pair[1].k,
+                scale: pair[1].scale,
+                denser_scale: pair[0].scale,
+            });
+        }
+    }
+
+    Ok(SeedSketch {
+        sequence_length: sequence.len() as u64,
+        levels,
+    })
+}
+
+/// Merge and clip gap-rescue intervals after adding checked flanks.
+///
+/// Empty intervals are ignored.  Invalid or out-of-bounds intervals are
+/// rejected instead of silently changing the requested query coordinates.
+pub fn expanded_seed_intervals(
+    intervals: &[BaseInterval],
+    sequence_length: u64,
+    flank_bases: u64,
+) -> Result<Vec<BaseInterval>, SeedError> {
+    let mut expanded = Vec::with_capacity(intervals.len());
+    for interval in intervals {
+        if interval.start > interval.end || interval.end > sequence_length {
+            return Err(SeedError::IntervalOutOfBounds {
+                start: interval.start,
+                end: interval.end,
+                length: sequence_length,
+            });
+        }
+        if interval.start == interval.end {
+            continue;
+        }
+        let start = interval.start.saturating_sub(flank_bases);
+        let end = interval
+            .end
+            .checked_add(flank_bases)
+            .ok_or(SeedError::CoordinateOverflow)?
+            .min(sequence_length);
+        expanded.push(BaseInterval { start, end });
+    }
+    expanded.sort_by_key(|interval| (interval.start, interval.end));
+
+    let mut merged = Vec::with_capacity(expanded.len());
+    for interval in expanded {
+        let Some(last) = merged.last_mut() else {
+            merged.push(interval);
+            continue;
+        };
+        if interval.start <= last.end {
+            last.end = last.end.max(interval.end);
+        } else {
+            merged.push(interval);
+        }
+    }
+    Ok(merged)
 }
 
 /// Extract deterministic nested levels.  Levels are ordered by k=31 before

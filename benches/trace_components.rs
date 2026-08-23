@@ -16,8 +16,10 @@ use jam_rs::trace::anchors::{Anchor, SeedOccurrenceGroup, generate_anchors};
 use jam_rs::trace::chain::{ChainConfig, chain_anchors};
 use jam_rs::trace::config::{AlignmentScoring, SeedSensitivity, SensitivityConfig};
 use jam_rs::trace::model::{
-    BaseAlignment, BaseInterval, CandidateResult, CoverageSummary, EditOperation, EditRun,
-    InputResource, Strand, TraceMetagenomeResult, TraceRunFooter, TraceRunHeader, TraceStatus,
+    AlignmentRole, BaseAlignment, BaseInterval, CandidatePerformanceCounters, CandidateResult,
+    CoordinateModel, CoverageSummary, EditOperation, EditRun, InputResource, QueryKind,
+    SeedEvidence, Strand, TopologyEvidence, TopologyRequested, TraceMetagenomeResult,
+    TraceRunFooter, TraceRunHeader, TraceStatus,
 };
 use jam_rs::trace::output::TraceJsonlWriter;
 use jam_rs::trace::seeds::extract_seed_level;
@@ -86,6 +88,7 @@ fn bench_chaining(c: &mut Criterion) {
         max_query_gap: 1_000_000,
         max_target_gap: 1_000_000,
         gap_penalty: 1,
+        coordinate_model: jam_rs::trace::model::CoordinateModel::Wrap,
     };
     let mut group = c.benchmark_group("trace_anchor_chaining");
     group.bench_function("500_anchors", |bench| {
@@ -158,7 +161,12 @@ fn example_header() -> TraceRunHeader {
         command: vec!["jam".to_string(), "trace".to_string()],
         plasmid_id: "query".to_string(),
         plasmid_length: 4_000,
+        query_kind: QueryKind::Unknown,
+        topology_requested: TopologyRequested::Auto,
+        threads: 1,
+        io_concurrency: 1,
         sensitivity: SensitivityConfig::default(),
+        algorithms: jam_rs::trace::algorithm_identifiers(),
         algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
             SensitivityConfig::default(),
         ),
@@ -176,6 +184,11 @@ fn example_result() -> TraceMetagenomeResult {
         run_id: "bench-run".to_string(),
         plasmid_id: "query".to_string(),
         metagenome_id: "sample".to_string(),
+        query_kind: QueryKind::Unknown,
+        topology_requested: TopologyRequested::Auto,
+        coordinate_model: CoordinateModel::Undetermined,
+        topology_evidence: TopologyEvidence::Undetermined,
+        algorithms: jam_rs::trace::algorithm_identifiers(),
         algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
             SensitivityConfig::default(),
         ),
@@ -193,6 +206,7 @@ fn example_result() -> TraceMetagenomeResult {
             uniform_hash_e_value: Some(0.01),
         }),
         alignments: vec![BaseAlignment {
+            alignment_id: "alignment-1".to_string(),
             plasmid_id: "query".to_string(),
             metagenome_id: "sample".to_string(),
             contig_id: "contig".to_string(),
@@ -225,8 +239,18 @@ fn example_result() -> TraceMetagenomeResult {
                 },
             ],
             chain_score: 100,
+            identity: 0.9875,
+            seed_evidence: SeedEvidence::default(),
+            primary_supported_bases: 4_000,
+            secondary_supported_bases: 0,
+            newly_supported_bases: 4_000,
+            role: AlignmentRole::PrimaryMosaic,
             primary: true,
         }],
+        primary_fragment_mosaic: None,
+        topology: None,
+        rescue_rounds: Vec::new(),
+        performance_counters: CandidatePerformanceCounters::default(),
         coverage: Some(CoverageSummary {
             plasmid_length: 4_000,
             supported_bases: 4_000,
@@ -239,6 +263,7 @@ fn example_result() -> TraceMetagenomeResult {
             gaps: Vec::new(),
             largest_gap: 0,
         }),
+        warnings: Vec::new(),
         failures: Vec::new(),
         resource_metrics: ResourceMetrics::default(),
     }

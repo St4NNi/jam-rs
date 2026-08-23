@@ -1,13 +1,15 @@
 //! Banded affine-gap alignment for trace candidates.
 //!
-//! The trace workflow aligns a plasmid query against a bounded sequence window
+//! The trace workflow aligns a query sequence against a bounded sequence window
 //! from an assembly. This module deliberately exposes alignment evidence
 //! (intervals, operations, and counters) rather than a presence call. The
 //! dynamic-programming matrix is banded and owned by [`AlignmentWorkspace`] so
 //! callers can reuse its allocations for a stream of candidate windows.
 
 use crate::trace::config::AlignmentScoring;
-use crate::trace::model::{BaseAlignment, BaseInterval, EditOperation, EditRun, Strand};
+use crate::trace::model::{
+    AlignmentRole, BaseAlignment, BaseInterval, EditOperation, EditRun, SeedEvidence, Strand,
+};
 use std::fmt::Write as _;
 use thiserror::Error;
 
@@ -524,7 +526,18 @@ impl AlignmentResult {
         chain_score: i64,
         primary: bool,
     ) -> BaseAlignment {
+        let identity_denominator = self
+            .matches
+            .saturating_add(self.substitutions)
+            .saturating_add(self.insertions)
+            .saturating_add(self.deletions);
+        let identity = if identity_denominator == 0 {
+            0.0
+        } else {
+            self.matches as f64 / identity_denominator as f64
+        };
         BaseAlignment {
+            alignment_id: String::new(),
             plasmid_id: plasmid_id.into(),
             metagenome_id: metagenome_id.into(),
             contig_id: contig_id.into(),
@@ -542,6 +555,12 @@ impl AlignmentResult {
             cigar: self.cigar,
             edit_script: self.edit_script,
             chain_score,
+            identity,
+            seed_evidence: SeedEvidence::default(),
+            primary_supported_bases: 0,
+            secondary_supported_bases: 0,
+            newly_supported_bases: 0,
+            role: AlignmentRole::AlternativeMapping,
             primary,
         }
     }

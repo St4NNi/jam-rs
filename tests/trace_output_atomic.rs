@@ -1,6 +1,8 @@
 use jam_rs::resource::ResourceMetrics;
 use jam_rs::trace::config::SensitivityConfig;
-use jam_rs::trace::model::{InputResource, TraceRunFooter, TraceRunHeader};
+use jam_rs::trace::model::{
+    InputResource, QueryKind, TopologyRequested, TraceRunFooter, TraceRunHeader,
+};
 use jam_rs::trace::output::{SCHEMA_VERSION, TraceFileWriter, TraceJsonlWriter, TraceOutputError};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -15,7 +17,12 @@ fn header() -> TraceRunHeader {
         command: vec!["jam".to_string(), "trace".to_string()],
         plasmid_id: "plasmid-1".to_string(),
         plasmid_length: 12,
+        query_kind: QueryKind::Plasmid,
+        topology_requested: TopologyRequested::Auto,
+        threads: 1,
+        io_concurrency: 1,
         sensitivity: SensitivityConfig::default(),
+        algorithms: jam_rs::trace::algorithm_identifiers(),
         algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
             SensitivityConfig::default(),
         ),

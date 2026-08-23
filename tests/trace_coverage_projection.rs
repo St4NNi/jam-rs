@@ -3,7 +3,9 @@ use jam_rs::trace::coverage::{
     summarize_coverage,
 };
 use jam_rs::trace::intervals::circular_gap_complement;
-use jam_rs::trace::model::{BaseAlignment, BaseInterval, EditOperation, EditRun, Strand};
+use jam_rs::trace::model::{
+    AlignmentRole, BaseAlignment, BaseInterval, EditOperation, EditRun, SeedEvidence, Strand,
+};
 
 #[test]
 fn cigar_projection_excludes_internal_deletion_from_supported_query() {
@@ -75,6 +77,7 @@ fn malformed_cigar_and_length_mismatch_are_explicit() {
     ));
 
     let alignment = BaseAlignment {
+        alignment_id: "malformed".to_string(),
         plasmid_id: "p".to_string(),
         metagenome_id: "m".to_string(),
         contig_id: "c".to_string(),
@@ -95,6 +98,12 @@ fn malformed_cigar_and_length_mismatch_are_explicit() {
             length: 3,
         }],
         chain_score: 1,
+        identity: 1.0,
+        seed_evidence: SeedEvidence::default(),
+        primary_supported_bases: 0,
+        secondary_supported_bases: 0,
+        newly_supported_bases: 0,
+        role: AlignmentRole::PrimaryMosaic,
         primary: true,
     };
     let error = summarize_coverage(10, &[alignment], &[]).unwrap_err();
@@ -124,6 +133,7 @@ fn insertion_and_deletion_projection_keeps_supported_union_bounded() {
 #[test]
 fn alignment_target_coordinates_are_checked_before_coverage() {
     let mut alignment = BaseAlignment {
+        alignment_id: "target-check".to_string(),
         plasmid_id: "p".to_string(),
         metagenome_id: "m".to_string(),
         contig_id: "c".to_string(),
@@ -144,6 +154,12 @@ fn alignment_target_coordinates_are_checked_before_coverage() {
             length: 3,
         }],
         chain_score: 3,
+        identity: 1.0,
+        seed_evidence: SeedEvidence::default(),
+        primary_supported_bases: 3,
+        secondary_supported_bases: 0,
+        newly_supported_bases: 3,
+        role: AlignmentRole::PrimaryMosaic,
         primary: true,
     };
     assert!(matches!(

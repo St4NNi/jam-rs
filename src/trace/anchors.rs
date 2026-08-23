@@ -10,6 +10,7 @@ use crate::jma::{SeedOccurrence, SeedQuery};
 use crate::trace::model::Strand;
 use crate::trace::seeds::QuerySeed;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A query seed and all occurrences returned for its exact JMA lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,6 +25,144 @@ impl SeedOccurrenceGroup {
     pub fn query(&self) -> SeedQuery {
         self.seed.query(self.k)
     }
+
+    #[must_use]
+    pub const fn evidence_key(&self) -> SeedEvidenceKey {
+        SeedEvidenceKey {
+            k: self.k,
+            hash: self.seed.hash,
+            canonical_kmer: self.seed.canonical_kmer,
+        }
+    }
+}
+
+/// Exact identity used to join query-seed and candidate-occurrence evidence.
+///
+/// The packed canonical k-mer is intentionally part of this key.  A hash
+/// match alone is only a lookup candidate and must not be promoted to seed or
+/// common-sequence evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct SeedEvidenceKey {
+    pub k: u8,
+    pub hash: u64,
+    pub canonical_kmer: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SeedOccurrenceEvidence {
+    pub key: SeedEvidenceKey,
+    pub query_occurrence_count: u32,
+    pub candidate_occurrence_count: u32,
+    pub candidate_occurrence_group_count: u32,
+    pub collection_document_frequency: Option<u32>,
+    pub is_common: bool,
+    pub is_repetitive: bool,
+}
+
+/// Evidence joined to one exact positional anchor without changing the
+/// stable `Anchor` wire layout.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AnchorOccurrenceEvidence {
+    pub anchor: Anchor,
+    pub seed: SeedOccurrenceEvidence,
+}
+
+/// Summarize exact seed occurrence evidence in deterministic key order.
+///
+/// Query occurrence frequency is the number of exact seed groups for a key;
+/// candidate occurrence count is the total number of exact JMA occurrences
+/// across those groups.  The repetitive flag is raised when any group
+/// exceeds the caller's occurrence cap.  Collection document frequency is
+/// intentionally left unknown here because it requires a catalog-wide pass.
+/// Hash-zero groups are excluded defensively.
+#[must_use]
+pub fn summarize_occurrence_evidence(
+    groups: &[SeedOccurrenceGroup],
+    max_occurrences_per_seed: u32,
+    common_candidate_occurrence_threshold: u32,
+) -> Vec<SeedOccurrenceEvidence> {
+    #[derive(Default)]
+    struct Accumulator {
+        query_occurrence_count: u32,
+        candidate_occurrence_count: u32,
+        candidate_occurrence_group_count: u32,
+        is_repetitive: bool,
+    }
+
+    let mut by_key = BTreeMap::<SeedEvidenceKey, Accumulator>::new();
+    for group in groups {
+        if group.seed.hash == 0 {
+            continue;
+        }
+        let key = group.evidence_key();
+        let entry = by_key.entry(key).or_default();
+        entry.query_occurrence_count = entry.query_occurrence_count.saturating_add(1);
+        entry.candidate_occurrence_count = entry
+            .candidate_occurrence_count
+            .saturating_add(u32::try_from(group.occurrences.len()).unwrap_or(u32::MAX));
+        entry.candidate_occurrence_group_count =
+            entry.candidate_occurrence_group_count.saturating_add(1);
+        if group.occurrences.len() > usize::try_from(max_occurrences_per_seed).unwrap_or(usize::MAX)
+        {
+            entry.is_repetitive = true;
+        }
+    }
+
+    by_key
+        .into_iter()
+        .map(|(key, evidence)| SeedOccurrenceEvidence {
+            key,
+            query_occurrence_count: evidence.query_occurrence_count,
+            candidate_occurrence_count: evidence.candidate_occurrence_count,
+            candidate_occurrence_group_count: evidence.candidate_occurrence_group_count,
+            collection_document_frequency: None,
+            is_common: common_candidate_occurrence_threshold > 0
+                && evidence.candidate_occurrence_count >= common_candidate_occurrence_threshold,
+            is_repetitive: evidence.is_repetitive,
+        })
+        .collect()
+}
+
+/// Join deterministic seed summaries to exact anchors.
+///
+/// Anchors whose exact key is absent from `groups` are omitted.  This makes a
+/// malformed or collision-only anchor incapable of acquiring positive
+/// occurrence evidence.
+#[must_use]
+pub fn summarize_anchor_evidence(
+    anchors: &[Anchor],
+    groups: &[SeedOccurrenceGroup],
+    max_occurrences_per_seed: u32,
+    common_candidate_occurrence_threshold: u32,
+) -> Vec<AnchorOccurrenceEvidence> {
+    let summaries = summarize_occurrence_evidence(
+        groups,
+        max_occurrences_per_seed,
+        common_candidate_occurrence_threshold,
+    );
+    let by_key = summaries
+        .into_iter()
+        .map(|summary| (summary.key, summary))
+        .collect::<BTreeMap<_, _>>();
+    let mut joined = anchors
+        .iter()
+        .filter_map(|anchor| {
+            let key = SeedEvidenceKey {
+                k: anchor.k,
+                hash: anchor.hash,
+                canonical_kmer: anchor.canonical_kmer,
+            };
+            by_key
+                .get(&key)
+                .cloned()
+                .map(|seed| AnchorOccurrenceEvidence {
+                    anchor: *anchor,
+                    seed,
+                })
+        })
+        .collect::<Vec<_>>();
+    joined.sort_by_key(|evidence| anchor_sort_key(&evidence.anchor));
+    joined
 }
 
 /// One orientation-aware positional correspondence between query and target.
@@ -293,5 +432,21 @@ mod tests {
             20,
         );
         assert_eq!(ordered, reversed);
+    }
+
+    #[test]
+    fn occurrence_evidence_joins_only_exact_anchor_keys() {
+        let group = SeedOccurrenceGroup {
+            seed: seed(4, false),
+            k: 31,
+            occurrences: vec![occurrence(0, 10, false)],
+        };
+        let anchors = generate_anchors(std::slice::from_ref(&group), 4, 20);
+        let mut collision = anchors.anchors[0];
+        collision.canonical_kmer ^= 1;
+        let joined = summarize_anchor_evidence(&[anchors.anchors[0], collision], &[group], 4, 1);
+        assert_eq!(joined.len(), 1);
+        assert_eq!(joined[0].anchor.canonical_kmer, 13);
+        assert!(joined[0].seed.is_common);
     }
 }

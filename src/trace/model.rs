@@ -183,6 +183,17 @@ pub struct RescueRoundMetrics {
     pub elapsed_millis: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CandidatePerformanceCounters {
+    pub candidates_processed: u64,
+    pub contigs_considered: u64,
+    pub windows_retrieved: u64,
+    pub alignments_attempted: u64,
+    pub alignments_succeeded: u64,
+    pub failures: u64,
+    pub elapsed_millis: u64,
+}
+
 impl BaseInterval {
     pub fn new(start: u64, end: u64) -> Result<Self, CoordinateError> {
         if start > end {
@@ -227,6 +238,8 @@ pub struct EditRun {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BaseAlignment {
+    pub alignment_id: String,
+    #[serde(rename = "query_id", alias = "plasmid_id")]
     pub plasmid_id: String,
     pub metagenome_id: String,
     pub contig_id: String,
@@ -245,6 +258,12 @@ pub struct BaseAlignment {
     pub cigar: String,
     pub edit_script: Vec<EditRun>,
     pub chain_score: i64,
+    pub identity: f64,
+    pub seed_evidence: SeedEvidence,
+    pub primary_supported_bases: u64,
+    pub secondary_supported_bases: u64,
+    pub newly_supported_bases: u64,
+    pub role: AlignmentRole,
     pub primary: bool,
 }
 
@@ -252,8 +271,10 @@ pub struct BaseAlignment {
 pub struct CandidateResult {
     pub metagenome_id: String,
     pub shared_hashes: u64,
+    #[serde(rename = "query_hashes", alias = "plasmid_hashes")]
     pub plasmid_hashes: u64,
     pub metagenome_hashes: u64,
+    #[serde(rename = "query_containment", alias = "plasmid_containment")]
     pub plasmid_containment: f64,
     pub metagenome_containment: f64,
     pub rank: u32,
@@ -264,7 +285,11 @@ pub struct CandidateResult {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct GapRecord {
+    /// First ordinary segment retained for one-release compatibility.
     pub interval: BaseInterval,
+    /// One segment for a linear gap; two terminal segments for a gap wrapping origin.
+    pub segments: Vec<BaseInterval>,
+    pub wraps_origin: bool,
     pub length: u64,
 }
 
@@ -312,9 +337,16 @@ pub struct TraceRunHeader {
     pub source_commit: Option<String>,
     pub started_at_utc: String,
     pub command: Vec<String>,
+    #[serde(rename = "query_id", alias = "plasmid_id")]
     pub plasmid_id: String,
+    #[serde(rename = "query_length", alias = "plasmid_length")]
     pub plasmid_length: u64,
+    pub query_kind: QueryKind,
+    pub topology_requested: TopologyRequested,
+    pub threads: usize,
+    pub io_concurrency: usize,
     pub sensitivity: SensitivityConfig,
+    pub algorithms: TraceAlgorithmIdentifiers,
     pub algorithm: TraceAlgorithmMetadata,
     pub inputs: Vec<InputResource>,
 }
@@ -323,13 +355,24 @@ pub struct TraceRunHeader {
 pub struct TraceMetagenomeResult {
     pub schema_version: String,
     pub run_id: String,
+    #[serde(rename = "query_id", alias = "plasmid_id")]
     pub plasmid_id: String,
     pub metagenome_id: String,
+    pub query_kind: QueryKind,
+    pub topology_requested: TopologyRequested,
+    pub coordinate_model: CoordinateModel,
+    pub topology_evidence: TopologyEvidence,
+    pub algorithms: TraceAlgorithmIdentifiers,
     pub algorithm: TraceAlgorithmMetadata,
     pub status: TraceStatus,
     pub candidate: Option<CandidateResult>,
     pub alignments: Vec<BaseAlignment>,
+    pub primary_fragment_mosaic: Option<FragmentMosaicSummary>,
+    pub topology: Option<TopologyAssessment>,
+    pub rescue_rounds: Vec<RescueRoundMetrics>,
+    pub performance_counters: CandidatePerformanceCounters,
     pub coverage: Option<CoverageSummary>,
+    pub warnings: Vec<String>,
     pub failures: Vec<TraceFailure>,
     pub resource_metrics: ResourceMetrics,
 }

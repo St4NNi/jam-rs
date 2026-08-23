@@ -1278,7 +1278,12 @@ pub fn handle_trace_command(
         command: provenance::redacted_command_line(),
         plasmid_id: query_id,
         plasmid_length: record.sequence.len() as u64,
+        query_kind,
+        topology_requested,
+        threads,
+        io_concurrency,
         sensitivity,
+        algorithms: crate::trace::config::algorithm_identifiers(),
         algorithm,
         inputs: vec![
             trace_input("query", &query_path)?,

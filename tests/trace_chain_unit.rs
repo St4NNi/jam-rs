@@ -1,6 +1,6 @@
 use jam_rs::trace::anchors::Anchor;
 use jam_rs::trace::chain::{ChainConfig, ChainError, chain_anchors};
-use jam_rs::trace::model::{BaseInterval, Strand};
+use jam_rs::trace::model::{BaseInterval, CoordinateModel, Strand};
 
 fn anchor(query_position: u64, target_position: u64, strand: Strand) -> Anchor {
     Anchor {
@@ -24,6 +24,7 @@ fn config() -> ChainConfig {
         max_query_gap: 100,
         max_target_gap: 100,
         gap_penalty: 1,
+        coordinate_model: CoordinateModel::Wrap,
     }
 }
 

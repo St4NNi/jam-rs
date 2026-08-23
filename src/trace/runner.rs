@@ -10,26 +10,30 @@ use crate::jma::reader::JmaReader;
 use crate::jma::{ArchiveReader, JmaError, SequenceRange};
 use crate::resource::{RangeReader, ResourceError, ResourceMetrics, ResourceOpenOptions};
 use crate::trace::alignment::{AlignmentError, AlignmentOptions, AlignmentWorkspace};
-use crate::trace::anchors::{SeedOccurrenceGroup, generate_anchors};
+use crate::trace::anchors::{
+    AnchorOccurrenceEvidence, SeedOccurrenceGroup, generate_anchors, summarize_anchor_evidence,
+};
 use crate::trace::catalog::{CatalogEntry, CatalogError, TraceCatalog};
 use crate::trace::chain::{AnchorChain, ChainConfig, ChainError, chain_anchors};
 use crate::trace::config::{SeedSensitivity, SensitivityConfig};
 use crate::trace::model::{
-    BaseAlignment, CoverageSummary, InputResource, QueryKind, Strand, TopologyRequested,
-    TraceFailure, TraceMetagenomeResult, TraceStatus,
+    AlignmentRole, BaseAlignment, BaseInterval, CandidatePerformanceCounters, CoordinateModel,
+    CoverageSummary, FragmentMosaicSummary, InputResource, QueryKind, RescueRoundMetrics,
+    SeedEvidence, Strand, TopologyAssessment, TopologyEvidence, TopologyRequested, TraceFailure,
+    TraceMetagenomeResult, TraceStatus,
 };
-use crate::trace::mosaic::{MosaicError, select_primary};
+use crate::trace::mosaic::{MosaicError, assess_topology, assign_alignment_ids};
 use crate::trace::raw::{AssemblyResource, RawAssembly, RawError, open_resource};
 use crate::trace::screen::{
     CandidateError, CandidateSearchConfig, CandidateSearchResult, CandidateSearcher,
     RankedCandidate,
 };
-use crate::trace::seeds::{SeedError, extract_seed_level};
+use crate::trace::seeds::{SeedError, extract_seed_level, extract_seed_level_in_intervals};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -186,6 +190,18 @@ impl TracePerformanceCounters {
             .alignments_succeeded
             .saturating_add(other.alignments_succeeded);
         self.failures = self.failures.saturating_add(other.failures);
+    }
+
+    fn candidate_snapshot(self) -> CandidatePerformanceCounters {
+        CandidatePerformanceCounters {
+            candidates_processed: self.candidates_processed,
+            contigs_considered: self.contigs_considered,
+            windows_retrieved: self.windows_retrieved,
+            alignments_attempted: self.alignments_attempted,
+            alignments_succeeded: self.alignments_succeeded,
+            failures: self.failures,
+            elapsed_millis: self.elapsed_millis,
+        }
     }
 }
 
@@ -553,6 +569,39 @@ fn add_resource_metrics(left: ResourceMetrics, right: ResourceMetrics) -> Resour
     left.saturating_add(right)
 }
 
+fn subtract_resource_metrics(after: ResourceMetrics, before: ResourceMetrics) -> ResourceMetrics {
+    ResourceMetrics {
+        metadata_requests: after
+            .metadata_requests
+            .saturating_sub(before.metadata_requests),
+        head_requests: after.head_requests.saturating_sub(before.head_requests),
+        get_requests: after.get_requests.saturating_sub(before.get_requests),
+        range_requests: after.range_requests.saturating_sub(before.range_requests),
+        stream_requests: after.stream_requests.saturating_sub(before.stream_requests),
+        requested_bytes: after.requested_bytes.saturating_sub(before.requested_bytes),
+        returned_bytes: after.returned_bytes.saturating_sub(before.returned_bytes),
+        decoded_bytes: after.decoded_bytes.saturating_sub(before.decoded_bytes),
+        remote_bytes: after.remote_bytes.saturating_sub(before.remote_bytes),
+        cache_bytes: after.cache_bytes.saturating_sub(before.cache_bytes),
+        cache_hits: after.cache_hits.saturating_sub(before.cache_hits),
+        cache_misses: after.cache_misses.saturating_sub(before.cache_misses),
+        cache_evictions: after.cache_evictions.saturating_sub(before.cache_evictions),
+        stale_cache_rejections: after
+            .stale_cache_rejections
+            .saturating_sub(before.stale_cache_rejections),
+        retries: after.retries.saturating_sub(before.retries),
+        full_object_fallbacks: after
+            .full_object_fallbacks
+            .saturating_sub(before.full_object_fallbacks),
+        seed_buckets_read: after
+            .seed_buckets_read
+            .saturating_sub(before.seed_buckets_read),
+        sequence_blocks_read: after
+            .sequence_blocks_read
+            .saturating_sub(before.sequence_blocks_read),
+    }
+}
+
 /// Executes candidate retrieval and bounded positional processing.
 pub struct TraceRunner {
     config: TraceRunnerConfig,
@@ -610,8 +659,23 @@ impl TraceRunner {
                 .candidates
                 .par_iter()
                 .map(|candidate| {
+                    let candidate_started = Instant::now();
                     let entry = query.catalog.get(candidate.metagenome_id());
-                    process_candidate(plasmid_id, plasmid_sequence, candidate, entry, run_config)
+                    let mut work = process_candidate(
+                        plasmid_id,
+                        plasmid_sequence,
+                        candidate,
+                        entry,
+                        run_config,
+                    );
+                    work.counters.failures = work.result.failures.len() as u64;
+                    work.counters.elapsed_millis = candidate_started
+                        .elapsed()
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    work.result.performance_counters = work.counters.candidate_snapshot();
+                    work
                 })
                 .collect::<Vec<_>>()
         });
@@ -835,76 +899,157 @@ fn process_jma(
             reader.metrics(),
         ));
     }
-    let chains = indexed_chains(&reader, plasmid, &config.sensitivity)
-        .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
     let mut alignments = Vec::new();
     let mut workspace = AlignmentWorkspace::new();
     let mut seen_contigs = HashSet::new();
     let mut seen_windows = HashSet::new();
-    for chain in chains {
-        let contig = reader
-            .contigs()
-            .iter()
-            .find(|contig| contig.id == chain.contig_id)
-            .ok_or(JmaError::UnknownContig(chain.contig_id))
-            .map_err(|error| TraceProcessingFailure::new(error.into(), reader.metrics()))?;
-        if seen_contigs.insert(contig.id) {
-            counters.contigs_considered = counters.contigs_considered.saturating_add(1);
+    let mut seen_seed_keys = HashSet::new();
+    let chain_model = chaining_coordinate_model(config.topology_requested);
+    let mut round_configs = vec![config.sensitivity.primary];
+    if let Some(dense_primary) = config.sensitivity.gap_rescue.dense_primary
+        && dense_primary != config.sensitivity.primary
+    {
+        round_configs.push(dense_primary);
+    }
+    if let Some(rescue) = config.sensitivity.rescue {
+        round_configs.push(rescue);
+    }
+    round_configs.truncate(usize::from(config.sensitivity.gap_rescue.max_rounds));
+
+    let query_length = plasmid.len() as u64;
+    let mut rescue_rounds = Vec::new();
+    let mut target_gaps = vec![BaseInterval {
+        start: 0,
+        end: query_length,
+    }];
+    let mut supported_before = 0_u64;
+    let mut terminal_seed_evidence = false;
+
+    for (round_index, seed_config) in round_configs.into_iter().enumerate() {
+        if round_index > 0 {
+            target_gaps.retain(|gap| gap.len() >= config.sensitivity.gap_rescue.min_gap_bases);
+            if matches!(config.topology_requested, TopologyRequested::Auto)
+                && !terminal_seed_evidence
+            {
+                target_gaps.retain(|gap| gap.start != 0 && gap.end != query_length);
+            }
+            if target_gaps.is_empty() {
+                break;
+            }
         }
-        let range = chain_window(
-            &chain,
-            contig.length,
-            plasmid.len(),
-            config.sensitivity.max_alignment_window_bases,
+        let round_target_gaps = target_gaps.clone();
+
+        let started = Instant::now();
+        let before_metrics = reader.metrics();
+        let round = chains_for_level(
+            &reader,
+            plasmid,
+            seed_config,
+            &config.sensitivity,
+            chain_model,
+            (round_index > 0).then_some(target_gaps.as_slice()),
+            &mut seen_seed_keys,
         )
         .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
-        let coordinates = chain_alignment_coordinates(&chain, range, plasmid.len() as u64)
-            .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
-        let strand_rank = match chain.strand {
-            Strand::Forward => 0,
-            Strand::Reverse => 1,
-        };
-        if !seen_windows.insert((contig.id, range.start, range.end, strand_rank)) {
-            continue;
-        }
-        let sequence = reader
-            .read_sequence(contig.id, range)
-            .map_err(|error| TraceProcessingFailure::new(error.into(), reader.metrics()))?;
-        counters.windows_retrieved = counters.windows_retrieved.saturating_add(1);
-        align_window(
+        let LevelChainResult {
+            chains,
+            seed_keys_tested,
+            anchors_created,
+            chains_accepted,
+            terminal_seed_evidence: round_terminal_seed_evidence,
+        } = round;
+        terminal_seed_evidence |= round_terminal_seed_evidence;
+        let alignment_windows_attempted = align_indexed_chains(
+            &reader,
             plasmid_id,
-            candidate,
-            &mut workspace,
             plasmid,
-            &sequence,
-            range.start,
-            &contig.name,
+            candidate,
             config,
-            chain.score,
-            Some(chain.strand),
-            coordinates.query_start,
-            coordinates.query_span,
-            coordinates.diagonal_offset,
+            chains,
+            if round_index == 0 {
+                u64::MAX
+            } else {
+                u64::from(
+                    config
+                        .sensitivity
+                        .gap_rescue
+                        .max_alignment_windows_per_round,
+                )
+            },
+            if round_index == 0 {
+                u64::MAX
+            } else {
+                u64::from(config.sensitivity.gap_rescue.max_sequence_blocks_per_round)
+            },
+            &mut workspace,
+            &mut seen_contigs,
+            &mut seen_windows,
             &mut alignments,
             counters,
         )
         .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
-        retain_best_alignments(&mut alignments, config.max_alignments_per_candidate);
+
+        let topology = assess_topology(
+            query_length,
+            config.topology_requested,
+            config.topology_margin_bases,
+            &alignments,
+        )
+        .map_err(|error| TraceProcessingFailure::new(error.into(), reader.metrics()))?;
+        let selected = selected_mosaic(&topology);
+        let supported_after = selected.base_covered_bases;
+        target_gaps = selected
+            .unsupported_gaps
+            .iter()
+            .map(|gap| gap.interval)
+            .collect();
+        let after_metrics = reader.metrics();
+        let metric_delta = subtract_resource_metrics(after_metrics, before_metrics);
+        rescue_rounds.push(RescueRoundMetrics {
+            round: u8::try_from(round_index + 1).unwrap_or(u8::MAX),
+            seed_k: seed_config.k,
+            seed_scale: seed_config.scale,
+            target_gaps: round_target_gaps,
+            seed_buckets_requested: metric_delta.seed_buckets_read,
+            seed_keys_tested,
+            anchors_created,
+            chains_accepted,
+            sequence_blocks_fetched: metric_delta.sequence_blocks_read,
+            alignment_windows_attempted,
+            new_query_bases_supported: supported_after.saturating_sub(supported_before),
+            elapsed_millis: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        });
+        supported_before = supported_after;
+        if supported_after == query_length {
+            break;
+        }
     }
-    let coverage = finalize_coverage(plasmid.len() as u64, &mut alignments)
+
+    let finalized = finalize_evidence(query_length, config, &mut alignments)
         .map_err(|error| TraceProcessingFailure::new(error, reader.metrics()))?;
+    let warnings = evidence_warnings(&finalized);
     Ok(TraceMetagenomeResult {
         schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
         run_id: String::new(),
         plasmid_id: plasmid_id.to_string(),
         metagenome_id: candidate.metagenome_id().to_string(),
+        query_kind: config.query_kind,
+        topology_requested: config.topology_requested,
+        coordinate_model: finalized.topology.coordinate_model,
+        topology_evidence: finalized.topology.topology_evidence,
+        algorithms: crate::trace::config::algorithm_identifiers(),
         algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
             config.sensitivity.clone(),
         ),
         status: TraceStatus::Complete,
         candidate: Some(candidate.candidate.clone()),
         alignments,
-        coverage: Some(coverage),
+        primary_fragment_mosaic: Some(finalized.primary_mosaic),
+        topology: Some(finalized.topology),
+        rescue_rounds,
+        performance_counters: CandidatePerformanceCounters::default(),
+        coverage: Some(finalized.coverage),
+        warnings,
         failures: Vec::new(),
         resource_metrics: reader.metrics(),
     })
@@ -971,6 +1116,7 @@ fn process_raw(
                 &contig.id,
                 config,
                 0,
+                SeedEvidence::default(),
                 None,
                 0,
                 plasmid.len() as u64,
@@ -993,8 +1139,8 @@ fn process_raw(
             retain_best_alignments(&mut alignments, config.max_alignments_per_candidate);
         }
     }
-    let coverage = match finalize_coverage(plasmid.len() as u64, &mut alignments) {
-        Ok(coverage) => coverage,
+    let finalized = match finalize_evidence(plasmid.len() as u64, config, &mut alignments) {
+        Ok(finalized) => finalized,
         Err(error) => {
             return failed_result_with_metrics(
                 plasmid_id,
@@ -1009,18 +1155,31 @@ fn process_raw(
             );
         }
     };
+    let mut warnings = evidence_warnings(&finalized);
+    warnings
+        .push("raw assembly mode does not provide indexed gap-directed seed rescue".to_string());
     TraceMetagenomeResult {
         schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
         run_id: String::new(),
         plasmid_id: plasmid_id.to_string(),
         metagenome_id: candidate.metagenome_id().to_string(),
+        query_kind: config.query_kind,
+        topology_requested: config.topology_requested,
+        coordinate_model: finalized.topology.coordinate_model,
+        topology_evidence: finalized.topology.topology_evidence,
+        algorithms: crate::trace::config::algorithm_identifiers(),
         algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
             config.sensitivity.clone(),
         ),
         status: TraceStatus::Complete,
         candidate: Some(candidate.candidate.clone()),
         alignments,
-        coverage: Some(coverage),
+        primary_fragment_mosaic: Some(finalized.primary_mosaic),
+        topology: Some(finalized.topology),
+        rescue_rounds: Vec::new(),
+        performance_counters: CandidatePerformanceCounters::default(),
+        coverage: Some(finalized.coverage),
+        warnings,
         failures: Vec::new(),
         resource_metrics: resource.metrics,
     }
@@ -1037,6 +1196,7 @@ fn align_window(
     contig_id: &str,
     config: &TraceRunnerConfig,
     chain_score: i64,
+    seed_evidence: SeedEvidence,
     strand_hint: Option<Strand>,
     query_start: u64,
     query_span: u64,
@@ -1079,13 +1239,14 @@ fn align_window(
         ) {
             Ok(result) => {
                 counters.alignments_succeeded = counters.alignments_succeeded.saturating_add(1);
-                let alignment = result.into_base_alignment(
+                let mut alignment = result.into_base_alignment(
                     plasmid_id,
                     candidate.metagenome_id(),
                     contig_id,
                     chain_score,
                     true,
                 );
+                alignment.seed_evidence = seed_evidence.clone();
                 if alignment.matches > 0 {
                     alignments.push(alignment);
                 }
@@ -1097,19 +1258,17 @@ fn align_window(
     Ok(())
 }
 
-fn indexed_chains<R: RangeReader>(
-    reader: &JmaReader<R>,
-    plasmid: &[u8],
-    sensitivity: &SensitivityConfig,
-) -> Result<Vec<AnchorChain>, RunnerError> {
-    let primary = chains_for_level(reader, plasmid, sensitivity.primary, sensitivity)?;
-    if !primary.is_empty() {
-        return Ok(primary);
-    }
-    match sensitivity.rescue {
-        Some(rescue) => chains_for_level(reader, plasmid, rescue, sensitivity),
-        None => Ok(Vec::new()),
-    }
+struct EvidencedChain {
+    chain: AnchorChain,
+    seed_evidence: SeedEvidence,
+}
+
+struct LevelChainResult {
+    chains: Vec<EvidencedChain>,
+    seed_keys_tested: u64,
+    anchors_created: u64,
+    chains_accepted: u64,
+    terminal_seed_evidence: bool,
 }
 
 fn chains_for_level<R: RangeReader>(
@@ -1117,7 +1276,10 @@ fn chains_for_level<R: RangeReader>(
     plasmid: &[u8],
     seed_config: SeedSensitivity,
     sensitivity: &SensitivityConfig,
-) -> Result<Vec<AnchorChain>, RunnerError> {
+    coordinate_model: CoordinateModel,
+    intervals: Option<&[BaseInterval]>,
+    seen_seed_keys: &mut HashSet<(u8, u64, u64, u64)>,
+) -> Result<LevelChainResult, RunnerError> {
     let available_scale = reader
         .header()
         .seed_levels
@@ -1137,7 +1299,25 @@ fn chains_for_level<R: RangeReader>(
             available_scale: Some(available_scale),
         });
     }
-    let level = extract_seed_level(plasmid, seed_config)?;
+    let mut level = match intervals {
+        Some(intervals) => extract_seed_level_in_intervals(
+            plasmid,
+            seed_config,
+            intervals,
+            sensitivity.gap_rescue.flank_bases,
+        )?,
+        None => extract_seed_level(plasmid, seed_config)?,
+    };
+    level.seeds.retain(|seed| {
+        seen_seed_keys.insert((level.k, seed.hash, seed.canonical_kmer, seed.position))
+    });
+    if intervals.is_some() {
+        level.seeds.truncate(
+            usize::try_from(sensitivity.gap_rescue.max_seed_buckets_per_round)
+                .unwrap_or(usize::MAX),
+        );
+    }
+    let seed_keys_tested = level.seeds.len() as u64;
     let mut groups = Vec::with_capacity(level.seeds.len());
     for seed in level.seeds {
         let occurrences = reader.seed_occurrences(seed.query(level.k))?;
@@ -1154,12 +1334,194 @@ fn chains_for_level<R: RangeReader>(
         seed_config.max_occurrences,
         sensitivity.max_anchors_per_candidate,
     );
-    chain_anchors(
+    let anchor_evidence = summarize_anchor_evidence(
+        &anchors.anchors,
+        &groups,
+        seed_config.max_occurrences,
+        sensitivity.common_seed_candidate_occurrence_threshold,
+    );
+    let terminal_seed_evidence = has_terminal_seed_pair(
+        &anchor_evidence,
+        plasmid.len() as u64,
+        sensitivity
+            .gap_rescue
+            .flank_bases
+            .max(u64::from(seed_config.k)),
+    );
+    let chains = chain_anchors(
         &anchors.anchors,
         plasmid.len() as u64,
-        ChainConfig::from_sensitivity(sensitivity),
+        ChainConfig::from_sensitivity(sensitivity).with_coordinate_model(coordinate_model),
     )
-    .map_err(RunnerError::from)
+    .map_err(RunnerError::from)?;
+    let chains_accepted = chains.len() as u64;
+    let chains = chains
+        .into_iter()
+        .map(|chain| EvidencedChain {
+            seed_evidence: evidence_for_chain(&chain, &anchor_evidence),
+            chain,
+        })
+        .collect();
+    Ok(LevelChainResult {
+        chains,
+        seed_keys_tested,
+        anchors_created: anchors.anchors.len() as u64,
+        chains_accepted,
+        terminal_seed_evidence,
+    })
+}
+
+fn evidence_for_chain(chain: &AnchorChain, evidence: &[AnchorOccurrenceEvidence]) -> SeedEvidence {
+    let mut result = SeedEvidence::default();
+    for anchor in &chain.anchors {
+        if anchor.k == crate::trace::seeds::PRIMARY_K {
+            result.primary_anchor_count = result.primary_anchor_count.saturating_add(1);
+        } else if anchor.k == crate::trace::seeds::RESCUE_K {
+            result.rescue_anchor_count = result.rescue_anchor_count.saturating_add(1);
+        }
+        if let Some(item) = evidence.iter().find(|item| item.anchor == *anchor) {
+            result.query_occurrence_max = result
+                .query_occurrence_max
+                .max(item.seed.query_occurrence_count);
+            result.candidate_occurrence_max = result
+                .candidate_occurrence_max
+                .max(item.seed.candidate_occurrence_count);
+            result.collection_document_frequency_max = match (
+                result.collection_document_frequency_max,
+                item.seed.collection_document_frequency,
+            ) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                (None, value) | (value, None) => value,
+            };
+            if item.seed.is_repetitive {
+                result.repetitive_seed_count = result.repetitive_seed_count.saturating_add(1);
+            } else if item.seed.is_common {
+                result.common_anchor_count = result.common_anchor_count.saturating_add(1);
+            } else {
+                result.nonrepetitive_anchor_count =
+                    result.nonrepetitive_anchor_count.saturating_add(1);
+            }
+        }
+    }
+    result
+}
+
+fn has_terminal_seed_pair(
+    evidence: &[AnchorOccurrenceEvidence],
+    query_length: u64,
+    terminal_width: u64,
+) -> bool {
+    let mut by_target = BTreeMap::<(u32, u8), (bool, bool)>::new();
+    for item in evidence {
+        if item.seed.is_repetitive {
+            continue;
+        }
+        let strand = match item.anchor.strand {
+            Strand::Forward => 0,
+            Strand::Reverse => 1,
+        };
+        let flags = by_target
+            .entry((item.anchor.contig_id, strand))
+            .or_default();
+        flags.0 |= item.anchor.query_position <= terminal_width;
+        flags.1 |= item
+            .anchor
+            .query_position
+            .saturating_add(u64::from(item.anchor.k))
+            >= query_length.saturating_sub(terminal_width);
+    }
+    by_target.values().any(|(start, end)| *start && *end)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn align_indexed_chains<R: RangeReader>(
+    reader: &JmaReader<R>,
+    query_id: &str,
+    query: &[u8],
+    candidate: &RankedCandidate,
+    config: &TraceRunnerConfig,
+    chains: Vec<EvidencedChain>,
+    max_windows: u64,
+    max_sequence_blocks: u64,
+    workspace: &mut AlignmentWorkspace,
+    seen_contigs: &mut HashSet<u32>,
+    seen_windows: &mut HashSet<(u32, u64, u64, u8)>,
+    alignments: &mut Vec<BaseAlignment>,
+    counters: &mut TracePerformanceCounters,
+) -> Result<u64, RunnerError> {
+    let mut attempted = 0_u64;
+    let blocks_before = reader.metrics().sequence_blocks_read;
+    for evidenced in chains {
+        if attempted >= max_windows
+            || reader
+                .metrics()
+                .sequence_blocks_read
+                .saturating_sub(blocks_before)
+                >= max_sequence_blocks
+        {
+            break;
+        }
+        let chain = evidenced.chain;
+        let contig = reader
+            .contigs()
+            .iter()
+            .find(|contig| contig.id == chain.contig_id)
+            .ok_or(JmaError::UnknownContig(chain.contig_id))?;
+        if seen_contigs.insert(contig.id) {
+            counters.contigs_considered = counters.contigs_considered.saturating_add(1);
+        }
+        let range = chain_window(
+            &chain,
+            contig.length,
+            query.len(),
+            config.sensitivity.max_alignment_window_bases,
+        )?;
+        let coordinates = chain_alignment_coordinates(
+            &chain,
+            range,
+            query.len() as u64,
+            chaining_coordinate_model(config.topology_requested),
+        )?;
+        let strand_rank = match chain.strand {
+            Strand::Forward => 0,
+            Strand::Reverse => 1,
+        };
+        if !seen_windows.insert((contig.id, range.start, range.end, strand_rank)) {
+            continue;
+        }
+        let sequence = reader.read_sequence(contig.id, range)?;
+        counters.windows_retrieved = counters.windows_retrieved.saturating_add(1);
+        attempted = attempted.saturating_add(1);
+        align_window(
+            query_id,
+            candidate,
+            workspace,
+            query,
+            &sequence,
+            range.start,
+            &contig.name,
+            config,
+            chain.score,
+            evidenced.seed_evidence,
+            Some(chain.strand),
+            coordinates.query_start,
+            coordinates.query_span,
+            coordinates.diagonal_offset,
+            alignments,
+            counters,
+        )?;
+        retain_best_alignments(alignments, config.max_alignments_per_candidate);
+    }
+    Ok(attempted)
+}
+
+const fn chaining_coordinate_model(topology: TopologyRequested) -> CoordinateModel {
+    match topology {
+        TopologyRequested::Linear => CoordinateModel::Linear,
+        TopologyRequested::Circular | TopologyRequested::Auto | TopologyRequested::Unknown => {
+            CoordinateModel::Wrap
+        }
+    }
 }
 
 fn chain_window(
@@ -1216,6 +1578,7 @@ fn chain_alignment_coordinates(
     chain: &AnchorChain,
     range: SequenceRange,
     query_length: u64,
+    coordinate_model: CoordinateModel,
 ) -> Result<ChainAlignmentCoordinates, RunnerError> {
     if query_length == 0 || range.is_empty() {
         return Err(RunnerError::InvalidConfig(
@@ -1252,6 +1615,23 @@ fn chain_alignment_coordinates(
                 )
             })?,
     };
+    if matches!(
+        coordinate_model,
+        CoordinateModel::Linear | CoordinateModel::Undetermined
+    ) {
+        let query_anchor = chain.linear_query_start % query_length;
+        let diagonal_offset = isize::try_from(i128::from(target_offset) - i128::from(query_anchor))
+            .map_err(|_| {
+                RunnerError::InvalidConfig(
+                    "linear chain diagonal exceeds alignment coordinate range".to_string(),
+                )
+            })?;
+        return Ok(ChainAlignmentCoordinates {
+            query_start: 0,
+            query_span: query_length,
+            diagonal_offset,
+        });
+    }
     let left_context = target_offset.min(query_length - chain_span);
     let query_origin = chain.linear_query_start % query_length;
     let query_start = if left_context <= query_origin {
@@ -1275,20 +1655,119 @@ fn chain_alignment_coordinates(
     })
 }
 
-fn finalize_coverage(
-    plasmid_length: u64,
+struct FinalEvidence {
+    topology: TopologyAssessment,
+    primary_mosaic: FragmentMosaicSummary,
+    coverage: CoverageSummary,
+}
+
+fn finalize_evidence(
+    query_length: u64,
+    config: &TraceRunnerConfig,
     alignments: &mut [BaseAlignment],
-) -> Result<CoverageSummary, RunnerError> {
-    let selection = select_primary(plasmid_length, alignments)?;
-    for alignment in alignments.iter_mut() {
-        alignment.primary = false;
-    }
-    for index in selection.primary_indices {
-        if let Some(alignment) = alignments.get_mut(index) {
-            alignment.primary = true;
+) -> Result<FinalEvidence, RunnerError> {
+    assign_alignment_ids(alignments);
+    let topology = assess_topology(
+        query_length,
+        config.topology_requested,
+        config.topology_margin_bases,
+        alignments,
+    )?;
+    let primary_mosaic = selected_mosaic(&topology).clone();
+    let mut selected_by_id = primary_mosaic
+        .alignment_evidence
+        .iter()
+        .map(|evidence| (evidence.alignment_id.as_str(), evidence))
+        .collect::<BTreeMap<_, _>>();
+    if let Some(wrap) = topology.wrap_model.as_ref() {
+        for evidence in &wrap.mosaic.alignment_evidence {
+            selected_by_id
+                .entry(evidence.alignment_id.as_str())
+                .or_insert(evidence);
         }
     }
-    Ok(selection.coverage)
+    for alignment in alignments.iter_mut() {
+        alignment.primary = false;
+        alignment.primary_supported_bases = 0;
+        alignment.secondary_supported_bases = 0;
+        alignment.newly_supported_bases = 0;
+        alignment.role = AlignmentRole::AlternativeMapping;
+        if let Some(evidence) = selected_by_id.get(alignment.alignment_id.as_str()) {
+            alignment.primary_supported_bases = evidence.primary_supported_bases;
+            alignment.secondary_supported_bases = evidence.secondary_supported_bases;
+            alignment.newly_supported_bases = evidence.newly_supported_bases;
+            alignment.role = evidence.role;
+            alignment.primary = evidence.primary_supported_bases > 0;
+        }
+    }
+    let coverage = coverage_from_mosaic(&primary_mosaic, query_length);
+    Ok(FinalEvidence {
+        topology,
+        primary_mosaic,
+        coverage,
+    })
+}
+
+fn selected_mosaic(topology: &TopologyAssessment) -> &FragmentMosaicSummary {
+    if topology.coordinate_model == CoordinateModel::Wrap {
+        topology
+            .wrap_model
+            .as_ref()
+            .map_or(&topology.linear_model.mosaic, |model| &model.mosaic)
+    } else {
+        &topology.linear_model.mosaic
+    }
+}
+
+fn coverage_from_mosaic(mosaic: &FragmentMosaicSummary, query_length: u64) -> CoverageSummary {
+    let mut largest_gap = mosaic
+        .unsupported_gaps
+        .iter()
+        .map(|gap| gap.length)
+        .max()
+        .unwrap_or(0);
+    if mosaic.coordinate_model == CoordinateModel::Wrap
+        && mosaic.unsupported_gaps.len() >= 2
+        && let (Some(first), Some(last)) = (
+            mosaic.unsupported_gaps.first(),
+            mosaic.unsupported_gaps.last(),
+        )
+        && first.interval.start == 0
+        && last.interval.end == query_length
+    {
+        largest_gap = largest_gap.max(first.length.saturating_add(last.length));
+    }
+    CoverageSummary {
+        plasmid_length: query_length,
+        supported_bases: mosaic.base_covered_bases,
+        supported_fraction: mosaic.base_coverage_fraction,
+        primary_intervals: mosaic.covered_intervals.clone(),
+        secondary_intervals: Vec::new(),
+        gaps: mosaic.unsupported_gaps.clone(),
+        largest_gap,
+    }
+}
+
+fn evidence_warnings(finalized: &FinalEvidence) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if finalized.topology.coordinate_model == CoordinateModel::Undetermined {
+        warnings.push(
+            "coordinate model is undetermined; wrapped coordinates do not establish biological topology"
+                .to_string(),
+        );
+    }
+    if finalized.primary_mosaic.supporting_contigs.len() > 1 {
+        warnings.push(
+            "supporting contigs are independent sequence observations and are not physically joined"
+                .to_string(),
+        );
+    }
+    if finalized.primary_mosaic.repeat_only_supported_bases > 0
+        && finalized.primary_mosaic.nonrepetitive_supported_bases == 0
+    {
+        warnings.push("all retained support is common or repetitive sequence evidence".to_string());
+    }
+    warnings
 }
 
 fn window_ranges(
@@ -1403,13 +1882,31 @@ fn failed_result_with_metrics(
         run_id: String::new(),
         plasmid_id: plasmid_id.to_string(),
         metagenome_id: candidate.metagenome_id().to_string(),
+        query_kind: config.query_kind,
+        topology_requested: config.topology_requested,
+        coordinate_model: match config.topology_requested {
+            TopologyRequested::Linear => CoordinateModel::Linear,
+            TopologyRequested::Circular => CoordinateModel::Wrap,
+            TopologyRequested::Auto | TopologyRequested::Unknown => CoordinateModel::Undetermined,
+        },
+        topology_evidence: if config.topology_requested == TopologyRequested::Unknown {
+            TopologyEvidence::Undetermined
+        } else {
+            TopologyEvidence::Insufficient
+        },
+        algorithms: crate::trace::config::algorithm_identifiers(),
         algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
             config.sensitivity.clone(),
         ),
         status: TraceStatus::Failed,
         candidate: Some(candidate.candidate.clone()),
         alignments: Vec::new(),
+        primary_fragment_mosaic: None,
+        topology: None,
+        rescue_rounds: Vec::new(),
+        performance_counters: CandidatePerformanceCounters::default(),
         coverage: None,
+        warnings: Vec::new(),
         failures: vec![TraceFailure {
             stage: stage.to_string(),
             code: code.to_string(),
@@ -1606,8 +2103,13 @@ mod coordinate_tests {
     #[test]
     fn split_chain_translation_uses_query_start_and_local_target_offset() {
         let range = SequenceRange::new(0, 20_856).unwrap();
-        let coordinates =
-            chain_alignment_coordinates(&chain(Strand::Forward, 5_000), range, 94_281).unwrap();
+        let coordinates = chain_alignment_coordinates(
+            &chain(Strand::Forward, 5_000),
+            range,
+            94_281,
+            CoordinateModel::Wrap,
+        )
+        .unwrap();
         assert_eq!(coordinates.query_start, 13_856);
         assert_eq!(coordinates.query_span, 20_856);
         assert_eq!(coordinates.diagonal_offset, 0);
@@ -1616,8 +2118,13 @@ mod coordinate_tests {
     #[test]
     fn reverse_chain_translation_uses_reversed_window_origin() {
         let range = SequenceRange::new(10_000, 30_856).unwrap();
-        let coordinates =
-            chain_alignment_coordinates(&chain(Strand::Reverse, 15_000), range, 94_281).unwrap();
+        let coordinates = chain_alignment_coordinates(
+            &chain(Strand::Reverse, 15_000),
+            range,
+            94_281,
+            CoordinateModel::Wrap,
+        )
+        .unwrap();
         assert_eq!(coordinates.query_start, 3_031);
         assert_eq!(coordinates.query_span, 20_856);
         assert_eq!(coordinates.diagonal_offset, 0);
@@ -1640,8 +2147,13 @@ mod coordinate_tests {
             linear_query_start: 150,
             linear_query_end: 181,
         };
-        let coordinates =
-            chain_alignment_coordinates(&chain, SequenceRange::new(0, 200).unwrap(), 400).unwrap();
+        let coordinates = chain_alignment_coordinates(
+            &chain,
+            SequenceRange::new(0, 200).unwrap(),
+            400,
+            CoordinateModel::Wrap,
+        )
+        .unwrap();
         let mut workspace = AlignmentWorkspace::new();
         let result = workspace
             .align_circular(

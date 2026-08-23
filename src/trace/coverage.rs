@@ -1,4 +1,4 @@
-//! Projection of alignment operations onto circular plasmid coordinates.
+//! Projection of alignment operations onto query-coordinate models.
 //!
 //! Equal and substitution operations support query bases.  Deletions consume
 //! query bases but do not support them, while insertions consume only target
@@ -6,10 +6,11 @@
 //! deletion cannot silently become coverage in a downstream summary.
 
 use crate::trace::intervals::{
-    IntervalError, circular_gap_complement, circular_union, covered_length,
+    IntervalError, circular_gap_complement, circular_union, covered_length, linear_gap_complement,
 };
 use crate::trace::model::{
-    BaseAlignment, BaseInterval, CoverageSummary, EditOperation, EditRun, GapRecord,
+    BaseAlignment, BaseInterval, CoordinateModel, CoverageSummary, EditOperation, EditRun,
+    GapRecord,
 };
 use std::fmt::Write as _;
 use thiserror::Error;
@@ -468,6 +469,8 @@ pub fn summary_from_intervals(
     let gaps = circular_gap_complement(&primary, plasmid_length)?
         .into_iter()
         .map(|interval| GapRecord {
+            segments: vec![interval],
+            wraps_origin: false,
             length: interval.len(),
             interval,
         })
@@ -483,6 +486,70 @@ pub fn summary_from_intervals(
         gaps,
         largest_gap,
     })
+}
+
+/// Build a coverage summary using an explicit query coordinate model.  The
+/// legacy [`summary_from_intervals`] API remains circular for compatibility;
+/// new query-centered callers should use this function when linear and wrap
+/// coordinates must be distinguished.
+pub fn summary_from_intervals_model(
+    query_length: u64,
+    coordinate_model: CoordinateModel,
+    primary_intervals: &[BaseInterval],
+    secondary_intervals: &[BaseInterval],
+) -> Result<CoverageSummary, CoverageError> {
+    if query_length == 0 {
+        return Err(CoverageError::Interval(IntervalError::ZeroLength));
+    }
+    // circular_union provides shared bounds/reversal validation for both
+    // coordinate models.  Its result is also the correct ordinary union.
+    let primary = circular_union(primary_intervals, query_length)?;
+    let secondary = circular_union(secondary_intervals, query_length)?;
+    let gaps = match coordinate_model {
+        CoordinateModel::Wrap => circular_gap_complement(&primary, query_length)?,
+        CoordinateModel::Linear | CoordinateModel::Undetermined => {
+            linear_gap_complement(&primary, query_length)
+        }
+    }
+    .into_iter()
+    .map(|interval| GapRecord {
+        segments: vec![interval],
+        wraps_origin: false,
+        length: interval.len(),
+        interval,
+    })
+    .collect::<Vec<_>>();
+    let supported_bases = covered_length(&primary);
+    let largest_gap = if matches!(coordinate_model, CoordinateModel::Wrap) {
+        largest_circular_gap(&gaps, query_length)?
+    } else {
+        gaps.iter().map(|gap| gap.length).max().unwrap_or(0)
+    };
+    Ok(CoverageSummary {
+        plasmid_length: query_length,
+        supported_bases,
+        supported_fraction: supported_bases as f64 / query_length as f64,
+        primary_intervals: primary,
+        secondary_intervals: secondary,
+        gaps,
+        largest_gap,
+    })
+}
+
+/// Alias for callers that describe the operation as model-aware coverage
+/// summarisation.
+pub fn summarize_coverage_model(
+    query_length: u64,
+    coordinate_model: CoordinateModel,
+    primary_intervals: &[BaseInterval],
+    secondary_intervals: &[BaseInterval],
+) -> Result<CoverageSummary, CoverageError> {
+    summary_from_intervals_model(
+        query_length,
+        coordinate_model,
+        primary_intervals,
+        secondary_intervals,
+    )
 }
 
 /// Return the largest unsupported run on a circular plasmid while preserving
@@ -682,6 +749,11 @@ mod tests {
             vec![BaseInterval { start: 0, end: 7 }]
         );
         assert_eq!(summary.gaps[0].interval, BaseInterval { start: 7, end: 10 });
+        assert_eq!(
+            summary.gaps[0].segments,
+            vec![BaseInterval { start: 7, end: 10 }]
+        );
+        assert!(!summary.gaps[0].wraps_origin);
     }
 
     #[test]
@@ -689,10 +761,14 @@ mod tests {
         let gaps = vec![
             GapRecord {
                 interval: BaseInterval { start: 0, end: 2 },
+                segments: vec![BaseInterval { start: 0, end: 2 }],
+                wraps_origin: false,
                 length: 2,
             },
             GapRecord {
                 interval: BaseInterval { start: 6, end: 10 },
+                segments: vec![BaseInterval { start: 6, end: 10 }],
+                wraps_origin: false,
                 length: 4,
             },
         ];
@@ -702,6 +778,8 @@ mod tests {
             largest_circular_gap(
                 &[GapRecord {
                     interval: BaseInterval { start: 0, end: 10 },
+                    segments: vec![BaseInterval { start: 0, end: 10 }],
+                    wraps_origin: false,
                     length: 10,
                 }],
                 10,

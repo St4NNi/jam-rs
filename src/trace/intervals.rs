@@ -259,6 +259,15 @@ pub fn complement(covered: &[BaseInterval], length: u64) -> Vec<BaseInterval> {
     gaps
 }
 
+/// Compute the complement of a linear interval union in `[0, length)`.
+/// Inputs are normalized internally so callers may provide overlapping or
+/// out-of-order support pieces.  This is the linear counterpart to
+/// [`circular_gap_complement`].
+#[must_use]
+pub fn linear_gap_complement(covered: &[BaseInterval], length: u64) -> Vec<BaseInterval> {
+    complement(&union(covered.iter().copied()), length)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,5 +381,23 @@ mod tests {
             assert_eq!(covered_length(&gaps), 7);
             assert_eq!(gaps.iter().map(|interval| interval.len()).sum::<u64>(), 7);
         }
+    }
+
+    #[test]
+    fn linear_gap_complement_normalizes_input_order_and_overlap() {
+        assert_eq!(
+            linear_gap_complement(
+                &[
+                    BaseInterval { start: 8, end: 10 },
+                    BaseInterval { start: 2, end: 6 },
+                    BaseInterval { start: 4, end: 9 },
+                ],
+                12,
+            ),
+            vec![
+                BaseInterval { start: 0, end: 2 },
+                BaseInterval { start: 10, end: 12 },
+            ]
+        );
     }
 }

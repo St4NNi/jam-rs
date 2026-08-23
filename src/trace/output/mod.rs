@@ -375,7 +375,10 @@ mod tests {
     use super::*;
     use crate::resource::ResourceMetrics;
     use crate::trace::config::SensitivityConfig;
-    use crate::trace::model::{InputResource, TraceStatus};
+    use crate::trace::model::{
+        CandidatePerformanceCounters, CoordinateModel, InputResource, QueryKind, TopologyEvidence,
+        TopologyRequested, TraceStatus,
+    };
     use std::io::Cursor;
 
     fn header() -> TraceRunHeader {
@@ -388,7 +391,12 @@ mod tests {
             command: vec!["jam".to_string(), "trace".to_string()],
             plasmid_id: "plasmid-1".to_string(),
             plasmid_length: 12,
+            query_kind: QueryKind::Plasmid,
+            topology_requested: TopologyRequested::Auto,
+            threads: 1,
+            io_concurrency: 1,
             sensitivity: SensitivityConfig::default(),
+            algorithms: crate::trace::algorithm_identifiers(),
             algorithm: crate::trace::TraceAlgorithmMetadata::for_sensitivity(
                 SensitivityConfig::default(),
             ),
@@ -406,13 +414,23 @@ mod tests {
             run_id: "run-1".to_string(),
             plasmid_id: "plasmid-1".to_string(),
             metagenome_id: "sample-1".to_string(),
+            query_kind: QueryKind::Plasmid,
+            topology_requested: TopologyRequested::Auto,
+            coordinate_model: CoordinateModel::Undetermined,
+            topology_evidence: TopologyEvidence::Insufficient,
+            algorithms: crate::trace::algorithm_identifiers(),
             algorithm: crate::trace::TraceAlgorithmMetadata::for_sensitivity(
                 SensitivityConfig::default(),
             ),
             status: TraceStatus::NoCandidate,
             candidate: None,
             alignments: Vec::new(),
+            primary_fragment_mosaic: None,
+            topology: None,
+            rescue_rounds: Vec::new(),
+            performance_counters: CandidatePerformanceCounters::default(),
             coverage: None,
+            warnings: Vec::new(),
             failures: Vec::new(),
             resource_metrics: ResourceMetrics::default(),
         }

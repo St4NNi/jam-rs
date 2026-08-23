@@ -14,6 +14,9 @@ use crate::jma::header::{parse_header, parse_section_directory};
 use crate::jma::sequence::decode_sequence_block;
 use crate::jma::writer::decode_seed_section;
 use crate::jma::{ArchiveHeader, ContigMetadata, JmaError, JmaResult, SeedLevel};
+use crate::trace::config::{
+    LOCAL_ALIGNMENT_ALGORITHM_ID, MOSAIC_ALGORITHM_ID, SCREEN_ALGORITHM_ID, TRACE_WORKFLOW_ID,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,6 +80,34 @@ pub struct SeedBucketIndex {
     pub checksum: [u8; 32],
 }
 
+/// Workflow identifiers recorded by a checksum-bound sidecar.
+///
+/// These identifiers describe the query screening and trace layers which
+/// consume the indexed archive.  They are sidecar metadata rather than JMA
+/// header fields so adding them does not alter JMA v1 bytes.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct JmaWorkflowIdentifiers {
+    pub screen_algorithm: String,
+    pub local_alignment_algorithm: String,
+    pub mosaic_algorithm: String,
+    pub trace_workflow: String,
+}
+
+impl JmaWorkflowIdentifiers {
+    fn current() -> Self {
+        Self {
+            screen_algorithm: SCREEN_ALGORITHM_ID.to_string(),
+            local_alignment_algorithm: LOCAL_ALIGNMENT_ALGORITHM_ID.to_string(),
+            mosaic_algorithm: MOSAIC_ALGORITHM_ID.to_string(),
+            trace_workflow: TRACE_WORKFLOW_ID.to_string(),
+        }
+    }
+
+    fn is_current(&self) -> bool {
+        self == &Self::current()
+    }
+}
+
 /// JSON sidecar metadata for one JMA v1 archive.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct JmaSidecarIndex {
@@ -91,6 +122,11 @@ pub struct JmaSidecarIndex {
     pub archive_source_sha256: [u8; 32],
     pub algorithm_id: Option<String>,
     pub algorithm_version: Option<u16>,
+    /// Workflow identifiers were added to the v1 sidecar as an additive
+    /// field.  `None` decodes legacy sidecars, but indexed opening rejects
+    /// them because their workflow provenance is incomplete.
+    #[serde(default)]
+    pub workflow_identifiers: Option<JmaWorkflowIdentifiers>,
     pub hash_prefix_bits: u8,
     pub sequence_blocks: Vec<SequenceBlockIndex>,
     pub seed_levels: Vec<SeedLevelIndex>,
@@ -142,6 +178,7 @@ pub fn build_index(bytes: &[u8]) -> JmaResult<JmaSidecarIndex> {
         archive_source_sha256: parsed.archive.source_sha256,
         algorithm_id: parsed.archive.algorithm_id,
         algorithm_version: parsed.archive.algorithm_version,
+        workflow_identifiers: Some(JmaWorkflowIdentifiers::current()),
         hash_prefix_bits: HASH_PREFIX_BITS,
         sequence_blocks,
         seed_levels,
@@ -249,6 +286,17 @@ pub fn validate_against_archive(
     if index.archive_source_sha256 != archive.source_sha256 {
         return Err(JmaError::CorruptSection(
             "JMA sidecar source checksum does not match archive".to_string(),
+        ));
+    }
+    let workflow_identifiers = index.workflow_identifiers.as_ref().ok_or_else(|| {
+        JmaError::CorruptSection(
+            "JMA sidecar is missing workflow identifiers; rebuild the sidecar with the current JMA builder".to_string(),
+        )
+    })?;
+    if !workflow_identifiers.is_current() {
+        return Err(JmaError::CorruptSection(
+            "JMA sidecar workflow identifiers are incompatible with this trace workflow"
+                .to_string(),
         ));
     }
     if index.algorithm_id != archive.algorithm_id

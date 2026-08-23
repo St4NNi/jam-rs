@@ -1,3 +1,5 @@
+use jam_rs::jma::SeedOccurrence;
+use jam_rs::trace::anchors::{SeedOccurrenceGroup, summarize_occurrence_evidence};
 use jam_rs::trace::config::SeedSensitivity;
 use jam_rs::trace::seeds::{
     HASH_ID, PRIMARY_K, RESCUE_K, SeedError, extract_for_sensitivity, extract_seed_level,
@@ -120,4 +122,86 @@ fn duplicate_seed_levels_are_rejected() {
         extract_seed_levels(b"ACGTACGTACGTACGTACGTACGTACGTACGT", &[config, config]),
         Err(SeedError::DuplicateLevel)
     );
+}
+
+#[test]
+fn occurrence_evidence_is_exact_keyed_and_marks_common_repetitive_seeds() {
+    let repeated = jam_rs::trace::seeds::QuerySeed {
+        position: 5,
+        hash: 11,
+        canonical_kmer: 22,
+        reverse: false,
+    };
+    let second_query_occurrence = jam_rs::trace::seeds::QuerySeed {
+        position: 37,
+        ..repeated
+    };
+    let groups = [
+        SeedOccurrenceGroup {
+            seed: repeated,
+            k: 31,
+            occurrences: vec![
+                SeedOccurrence {
+                    contig_id: 0,
+                    position: 8,
+                    reverse: false,
+                },
+                SeedOccurrence {
+                    contig_id: 1,
+                    position: 12,
+                    reverse: true,
+                },
+                SeedOccurrence {
+                    contig_id: 1,
+                    position: 44,
+                    reverse: false,
+                },
+            ],
+        },
+        SeedOccurrenceGroup {
+            seed: second_query_occurrence,
+            k: 31,
+            occurrences: vec![SeedOccurrence {
+                contig_id: 0,
+                position: 64,
+                reverse: false,
+            }],
+        },
+        SeedOccurrenceGroup {
+            seed: jam_rs::trace::seeds::QuerySeed {
+                position: 10,
+                hash: 12,
+                canonical_kmer: 23,
+                reverse: false,
+            },
+            k: 31,
+            occurrences: vec![],
+        },
+        SeedOccurrenceGroup {
+            seed: jam_rs::trace::seeds::QuerySeed {
+                position: 1,
+                hash: 0,
+                canonical_kmer: 99,
+                reverse: false,
+            },
+            k: 31,
+            occurrences: vec![SeedOccurrence {
+                contig_id: 0,
+                position: 0,
+                reverse: false,
+            }],
+        },
+    ];
+    let evidence = summarize_occurrence_evidence(&groups, 2, 3);
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence[0].key.canonical_kmer, 22);
+    assert_eq!(evidence[0].query_occurrence_count, 2);
+    assert_eq!(evidence[0].candidate_occurrence_count, 4);
+    assert_eq!(evidence[0].candidate_occurrence_group_count, 2);
+    assert!(evidence[0].is_common);
+    assert!(evidence[0].is_repetitive);
+    assert_eq!(evidence[0].collection_document_frequency, None);
+    assert_eq!(evidence[1].candidate_occurrence_count, 0);
+    assert!(!evidence[1].is_common);
+    assert!(!evidence[1].is_repetitive);
 }

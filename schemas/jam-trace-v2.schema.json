@@ -1,0 +1,728 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/St4NNi/jam-rs/schemas/jam-trace-v2.schema.json",
+  "title": "jam-rs trace JSONL record",
+  "description": "One-query-to-many-metagenomes fragment mosaic evidence. A JSONL stream contains one run_header, zero or more metagenome_result records, and one run_footer.",
+  "type": "object",
+  "required": ["record_type", "schema_version", "run_id"],
+  "properties": {
+    "record_type": {
+      "type": "string",
+      "enum": ["run_header", "metagenome_result", "run_footer"]
+    },
+    "schema_version": {
+      "const": "2.0.0"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "record_type": {"const": "run_header"},
+        "jam_rs_version": {"type": "string", "minLength": 1},
+        "source_commit": {"type": ["string", "null"]},
+        "started_at_utc": {"type": "string", "minLength": 1},
+        "command": {
+          "type": "array",
+          "items": {"type": "string"}
+        },
+        "query_id": {"type": "string", "minLength": 1},
+        "query_length": {"type": "integer", "minimum": 1},
+        "query_kind": {"$ref": "#/$defs/query_kind"},
+        "topology_requested": {"$ref": "#/$defs/topology_requested"},
+        "threads": {"type": "integer", "minimum": 1},
+        "io_concurrency": {"type": "integer", "minimum": 1},
+        "sensitivity": {"$ref": "#/$defs/sensitivity_config"},
+        "algorithms": {"$ref": "#/$defs/algorithm_identifiers"},
+        "algorithm": {"$ref": "#/$defs/algorithm_metadata"},
+        "inputs": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/input_resource"}
+        }
+      },
+      "required": [
+        "record_type",
+        "schema_version",
+        "run_id",
+        "jam_rs_version",
+        "source_commit",
+        "started_at_utc",
+        "command",
+        "query_id",
+        "query_length",
+        "query_kind",
+        "topology_requested",
+        "threads",
+        "io_concurrency",
+        "sensitivity",
+        "algorithms",
+        "algorithm",
+        "inputs"
+      ]
+    },
+    {
+      "properties": {
+        "record_type": {"const": "metagenome_result"},
+        "query_id": {"type": "string", "minLength": 1},
+        "metagenome_id": {"type": "string", "minLength": 1},
+        "query_kind": {"$ref": "#/$defs/query_kind"},
+        "topology_requested": {"$ref": "#/$defs/topology_requested"},
+        "coordinate_model": {"$ref": "#/$defs/coordinate_model"},
+        "topology_evidence": {"$ref": "#/$defs/topology_evidence"},
+        "algorithms": {"$ref": "#/$defs/algorithm_identifiers"},
+        "algorithm": {"$ref": "#/$defs/algorithm_metadata"},
+        "status": {
+          "type": "string",
+          "enum": ["complete", "partial", "no_candidate", "failed"]
+        },
+        "candidate": {
+          "anyOf": [
+            {"$ref": "#/$defs/candidate"},
+            {"type": "null"}
+          ]
+        },
+        "alignments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/alignment"}
+        },
+        "primary_fragment_mosaic": {
+          "anyOf": [
+            {"$ref": "#/$defs/fragment_mosaic"},
+            {"type": "null"}
+          ]
+        },
+        "topology": {
+          "anyOf": [
+            {"$ref": "#/$defs/topology_assessment"},
+            {"type": "null"}
+          ]
+        },
+        "rescue_rounds": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/rescue_round"}
+        },
+        "performance_counters": {"$ref": "#/$defs/performance_counters"},
+        "coverage": {
+          "anyOf": [
+            {"$ref": "#/$defs/coverage"},
+            {"type": "null"}
+          ]
+        },
+        "failures": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/failure"}
+        },
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "resource_metrics": {"$ref": "#/$defs/resource_metrics"}
+      },
+      "required": [
+        "record_type",
+        "schema_version",
+        "run_id",
+        "query_id",
+        "metagenome_id",
+        "query_kind",
+        "topology_requested",
+        "coordinate_model",
+        "topology_evidence",
+        "algorithms",
+        "algorithm",
+        "status",
+        "candidate",
+        "alignments",
+        "primary_fragment_mosaic",
+        "topology",
+        "rescue_rounds",
+        "performance_counters",
+        "coverage",
+        "warnings",
+        "failures",
+        "resource_metrics"
+      ]
+    },
+    {
+      "properties": {
+        "record_type": {"const": "run_footer"},
+        "completed_at_utc": {"type": "string", "minLength": 1},
+        "metagenomes_total": {"type": "integer", "minimum": 0},
+        "metagenomes_with_candidates": {"type": "integer", "minimum": 0},
+        "metagenomes_aligned": {"type": "integer", "minimum": 0},
+        "metagenomes_failed": {"type": "integer", "minimum": 0},
+        "alignments_total": {"type": "integer", "minimum": 0},
+        "resource_metrics": {"$ref": "#/$defs/resource_metrics"}
+      },
+      "required": [
+        "record_type",
+        "schema_version",
+        "run_id",
+        "completed_at_utc",
+        "metagenomes_total",
+        "metagenomes_with_candidates",
+        "metagenomes_aligned",
+        "metagenomes_failed",
+        "alignments_total",
+        "resource_metrics"
+      ]
+    }
+  ],
+  "$defs": {
+    "query_kind": {
+      "type": "string",
+      "enum": ["plasmid", "phage", "other", "unknown"]
+    },
+    "topology_requested": {
+      "type": "string",
+      "enum": ["linear", "circular", "auto", "unknown"]
+    },
+    "coordinate_model": {
+      "type": "string",
+      "enum": ["linear", "wrap", "undetermined"]
+    },
+    "topology_evidence": {
+      "type": "string",
+      "enum": ["linear_supported", "wrap_supported", "both_compatible", "insufficient", "undetermined"]
+    },
+    "alignment_role": {
+      "type": "string",
+      "enum": ["primary_mosaic", "overlapping_support", "alternative_mapping", "common_sequence", "repeat_only", "origin_crossing"]
+    },
+    "algorithm_identifiers": {
+      "type": "object",
+      "required": ["screen_algorithm", "local_alignment_algorithm", "mosaic_algorithm", "trace_workflow"],
+      "properties": {
+        "screen_algorithm": {"const": "jam-fracminhash-screen-v1"},
+        "local_alignment_algorithm": {"const": "jam-exact-seed-chain-banded-v1"},
+        "mosaic_algorithm": {"const": "jam-fragment-mosaic-v1"},
+        "trace_workflow": {"const": "jam-trace-v1"}
+      },
+      "additionalProperties": false
+    },
+    "interval": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "seed_sensitivity": {
+      "type": "object",
+      "required": ["k", "scale", "max_occurrences"],
+      "properties": {
+        "k": {"type": "integer", "minimum": 1},
+        "scale": {"type": "integer", "minimum": 1},
+        "max_occurrences": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "alignment_scoring": {
+      "type": "object",
+      "required": [
+        "match_score",
+        "mismatch_score",
+        "gap_open_score",
+        "gap_extend_score",
+        "band_width"
+      ],
+      "properties": {
+        "match_score": {"type": "integer"},
+        "mismatch_score": {"type": "integer"},
+        "gap_open_score": {"type": "integer"},
+        "gap_extend_score": {"type": "integer"},
+        "band_width": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "gap_rescue_config": {
+      "type": "object",
+      "required": [
+        "max_rounds",
+        "dense_primary",
+        "min_gap_bases",
+        "flank_bases",
+        "max_seed_buckets_per_round",
+        "max_sequence_blocks_per_round",
+        "max_alignment_windows_per_round"
+      ],
+      "properties": {
+        "max_rounds": {"type": "integer", "minimum": 1},
+        "dense_primary": {
+          "anyOf": [
+            {"$ref": "#/$defs/seed_sensitivity"},
+            {"type": "null"}
+          ]
+        },
+        "min_gap_bases": {"type": "integer", "minimum": 1},
+        "flank_bases": {"type": "integer", "minimum": 0},
+        "max_seed_buckets_per_round": {"type": "integer", "minimum": 0},
+        "max_sequence_blocks_per_round": {"type": "integer", "minimum": 0},
+        "max_alignment_windows_per_round": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "sensitivity_config": {
+      "type": "object",
+      "required": [
+        "profile",
+        "primary",
+        "rescue",
+        "max_candidates",
+        "max_anchors_per_candidate",
+        "max_chains_per_candidate",
+        "min_chain_anchors",
+        "max_alignment_window_bases",
+        "max_concurrent_candidates",
+        "alignment",
+        "gap_rescue",
+        "common_seed_candidate_occurrence_threshold",
+        "auto_topology_margin_bases"
+      ],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "enum": ["fast", "balanced", "sensitive"]
+        },
+        "primary": {"$ref": "#/$defs/seed_sensitivity"},
+        "rescue": {
+          "anyOf": [
+            {"$ref": "#/$defs/seed_sensitivity"},
+            {"type": "null"}
+          ]
+        },
+        "max_candidates": {"type": "integer", "minimum": 1},
+        "max_anchors_per_candidate": {"type": "integer", "minimum": 1},
+        "max_chains_per_candidate": {"type": "integer", "minimum": 1},
+        "min_chain_anchors": {"type": "integer", "minimum": 1},
+        "max_alignment_window_bases": {"type": "integer", "minimum": 1},
+        "max_concurrent_candidates": {"type": "integer", "minimum": 1},
+        "alignment": {"$ref": "#/$defs/alignment_scoring"},
+        "gap_rescue": {"$ref": "#/$defs/gap_rescue_config"},
+        "common_seed_candidate_occurrence_threshold": {"type": "integer", "minimum": 1},
+        "auto_topology_margin_bases": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "algorithm_parameters": {
+      "type": "object",
+      "required": [
+        "hash_id",
+        "seed_selection",
+        "sensitivity",
+        "max_chain_predecessors",
+        "max_query_gap",
+        "max_target_gap",
+        "chain_gap_penalty",
+        "alignment_mode",
+        "x_drop",
+        "band_widening",
+        "coverage_mode"
+      ],
+      "properties": {
+        "hash_id": {"const": "jamhash_u64_v1"},
+        "seed_selection": {"const": "all_canonical_kmers_fracminhash"},
+        "sensitivity": {"$ref": "#/$defs/sensitivity_config"},
+        "max_chain_predecessors": {"type": "integer", "minimum": 1},
+        "max_query_gap": {"type": "integer", "minimum": 1},
+        "max_target_gap": {"type": "integer", "minimum": 1},
+        "chain_gap_penalty": {"type": "integer", "minimum": 0},
+        "alignment_mode": {"const": "local_affine_gap_fixed_band"},
+        "x_drop": {"type": ["integer", "null"]},
+        "band_widening": {"const": false},
+        "coverage_mode": {"const": "nonredundant_supported_query_union"}
+      },
+      "additionalProperties": false
+    },
+    "algorithm_metadata": {
+      "type": "object",
+      "required": ["id", "version", "parameters"],
+      "properties": {
+        "id": {"const": "jam-seed-chain-align-v1"},
+        "version": {"const": 1},
+        "parameters": {"$ref": "#/$defs/algorithm_parameters"}
+      },
+      "additionalProperties": false
+    },
+    "input_resource": {
+      "type": "object",
+      "required": ["role", "redacted_locator", "sha256"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "redacted_locator": {"type": "string", "minLength": 1},
+        "sha256": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "required": [
+        "metagenome_id",
+        "shared_hashes",
+        "query_hashes",
+        "metagenome_hashes",
+        "query_containment",
+        "metagenome_containment",
+        "rank",
+        "score_mode",
+        "bias_weighted_plasmid_containment",
+        "uniform_hash_e_value"
+      ],
+      "properties": {
+        "metagenome_id": {"type": "string", "minLength": 1},
+        "shared_hashes": {"type": "integer", "minimum": 0},
+        "query_hashes": {"type": "integer", "minimum": 0},
+        "metagenome_hashes": {"type": "integer", "minimum": 0},
+        "query_containment": {"type": "number", "minimum": 0, "maximum": 1},
+        "metagenome_containment": {"type": "number", "minimum": 0, "maximum": 1},
+        "rank": {"type": "integer", "minimum": 1},
+        "score_mode": {"type": "string", "enum": ["uniform", "bias"]},
+        "bias_weighted_plasmid_containment": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "uniform_hash_e_value": {"type": ["number", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "edit_run": {
+      "type": "object",
+      "required": ["operation", "length"],
+      "properties": {
+        "operation": {
+          "type": "string",
+          "enum": ["equal", "substitution", "insertion", "deletion", "soft_clip"]
+        },
+        "length": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "seed_evidence": {
+      "type": "object",
+      "required": [
+        "primary_anchor_count",
+        "rescue_anchor_count",
+        "nonrepetitive_anchor_count",
+        "common_anchor_count",
+        "repetitive_seed_count",
+        "query_occurrence_max",
+        "candidate_occurrence_max",
+        "collection_document_frequency_max"
+      ],
+      "properties": {
+        "primary_anchor_count": {"type": "integer", "minimum": 0},
+        "rescue_anchor_count": {"type": "integer", "minimum": 0},
+        "nonrepetitive_anchor_count": {"type": "integer", "minimum": 0},
+        "common_anchor_count": {"type": "integer", "minimum": 0},
+        "repetitive_seed_count": {"type": "integer", "minimum": 0},
+        "query_occurrence_max": {"type": "integer", "minimum": 0},
+        "candidate_occurrence_max": {"type": "integer", "minimum": 0},
+        "collection_document_frequency_max": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "alignment": {
+      "type": "object",
+      "required": [
+        "alignment_id",
+        "query_id",
+        "metagenome_id",
+        "contig_id",
+        "strand",
+        "query_segments",
+        "target_interval",
+        "query_length",
+        "target_length",
+        "origin_crossing",
+        "score",
+        "matches",
+        "substitutions",
+        "insertions",
+        "deletions",
+        "cigar",
+        "edit_script",
+        "chain_score",
+        "identity",
+        "seed_evidence",
+        "primary_supported_bases",
+        "secondary_supported_bases",
+        "newly_supported_bases",
+        "role",
+        "primary"
+      ],
+      "properties": {
+        "alignment_id": {"type": "string", "minLength": 1},
+        "query_id": {"type": "string", "minLength": 1},
+        "metagenome_id": {"type": "string", "minLength": 1},
+        "contig_id": {"type": "string", "minLength": 1},
+        "strand": {"type": "string", "enum": ["forward", "reverse"]},
+        "query_segments": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "target_interval": {"$ref": "#/$defs/interval"},
+        "query_length": {"type": "integer", "minimum": 0},
+        "target_length": {"type": "integer", "minimum": 0},
+        "origin_crossing": {"type": "boolean"},
+        "score": {"type": "integer"},
+        "matches": {"type": "integer", "minimum": 0},
+        "substitutions": {"type": "integer", "minimum": 0},
+        "insertions": {"type": "integer", "minimum": 0},
+        "deletions": {"type": "integer", "minimum": 0},
+        "cigar": {"type": "string"},
+        "edit_script": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/edit_run"}
+        },
+        "chain_score": {"type": "integer"},
+        "identity": {"type": "number", "minimum": 0, "maximum": 1},
+        "seed_evidence": {"$ref": "#/$defs/seed_evidence"},
+        "primary_supported_bases": {"type": "integer", "minimum": 0},
+        "secondary_supported_bases": {"type": "integer", "minimum": 0},
+        "newly_supported_bases": {"type": "integer", "minimum": 0},
+        "role": {"$ref": "#/$defs/alignment_role"},
+        "primary": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "gap": {
+      "type": "object",
+      "required": ["interval", "segments", "wraps_origin", "length"],
+      "properties": {
+        "interval": {"$ref": "#/$defs/interval"},
+        "segments": {"type": "array", "minItems": 1, "maxItems": 2, "items": {"$ref": "#/$defs/interval"}},
+        "wraps_origin": {"type": "boolean"},
+        "length": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "alignment_mosaic_evidence": {
+      "type": "object",
+      "required": ["alignment_id", "primary_supported_bases", "secondary_supported_bases", "newly_supported_bases", "role"],
+      "properties": {
+        "alignment_id": {"type": "string", "minLength": 1},
+        "primary_supported_bases": {"type": "integer", "minimum": 0},
+        "secondary_supported_bases": {"type": "integer", "minimum": 0},
+        "newly_supported_bases": {"type": "integer", "minimum": 0},
+        "role": {"$ref": "#/$defs/alignment_role"}
+      },
+      "additionalProperties": false
+    },
+    "mosaic_atomic_interval": {
+      "type": "object",
+      "required": ["interval", "primary_alignment_id", "alternative_alignment_ids"],
+      "properties": {
+        "interval": {"$ref": "#/$defs/interval"},
+        "primary_alignment_id": {"type": ["string", "null"]},
+        "alternative_alignment_ids": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "mosaic_selection_components": {
+      "type": "object",
+      "required": ["local_alignment_score_sum", "newly_supported_query_bases", "nonrepetitive_anchor_evidence", "redundant_overlap_bases", "coordinate_contradictions", "sequence_contradictions", "fragment_count"],
+      "properties": {
+        "local_alignment_score_sum": {"type": "integer"},
+        "newly_supported_query_bases": {"type": "integer", "minimum": 0},
+        "nonrepetitive_anchor_evidence": {"type": "integer", "minimum": 0},
+        "redundant_overlap_bases": {"type": "integer", "minimum": 0},
+        "coordinate_contradictions": {"type": "integer", "minimum": 0},
+        "sequence_contradictions": {"type": "integer", "minimum": 0},
+        "fragment_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "fragment_mosaic": {
+      "type": "object",
+      "required": [
+        "mosaic_algorithm", "coordinate_model", "base_covered_bases", "base_coverage_fraction",
+        "aligned_span_bases", "aligned_span_fraction", "covered_intervals", "unsupported_gaps",
+        "alignment_deletions", "common_sequence_intervals", "repeat_only_intervals",
+        "supporting_contigs", "accepted_alignment_count", "alternative_alignment_count",
+        "nonrepetitive_supported_bases", "common_sequence_supported_bases",
+        "repeat_only_supported_bases", "atomic_intervals", "alignment_evidence", "selection_components"
+      ],
+      "properties": {
+        "mosaic_algorithm": {"const": "jam-fragment-mosaic-v1"},
+        "coordinate_model": {"$ref": "#/$defs/coordinate_model"},
+        "base_covered_bases": {"type": "integer", "minimum": 0},
+        "base_coverage_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "aligned_span_bases": {"type": "integer", "minimum": 0},
+        "aligned_span_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "covered_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "unsupported_gaps": {"type": "array", "items": {"$ref": "#/$defs/gap"}},
+        "alignment_deletions": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "common_sequence_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "repeat_only_intervals": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "supporting_contigs": {"type": "array", "items": {"type": "string"}},
+        "accepted_alignment_count": {"type": "integer", "minimum": 0},
+        "alternative_alignment_count": {"type": "integer", "minimum": 0},
+        "nonrepetitive_supported_bases": {"type": "integer", "minimum": 0},
+        "common_sequence_supported_bases": {"type": "integer", "minimum": 0},
+        "repeat_only_supported_bases": {"type": "integer", "minimum": 0},
+        "atomic_intervals": {"type": "array", "items": {"$ref": "#/$defs/mosaic_atomic_interval"}},
+        "alignment_evidence": {"type": "array", "items": {"$ref": "#/$defs/alignment_mosaic_evidence"}},
+        "selection_components": {"$ref": "#/$defs/mosaic_selection_components"}
+      },
+      "additionalProperties": false
+    },
+    "topology_model_evidence": {
+      "type": "object",
+      "required": ["newly_supported_query_bases", "alignment_quality_sum", "nonrepetitive_anchor_support", "origin_crossing_alignment_count", "unexplained_terminal_gap_bases", "contradictory_alignment_count", "fragment_count"],
+      "properties": {
+        "newly_supported_query_bases": {"type": "integer", "minimum": 0},
+        "alignment_quality_sum": {"type": "integer"},
+        "nonrepetitive_anchor_support": {"type": "integer", "minimum": 0},
+        "origin_crossing_alignment_count": {"type": "integer", "minimum": 0},
+        "unexplained_terminal_gap_bases": {"type": "integer", "minimum": 0},
+        "contradictory_alignment_count": {"type": "integer", "minimum": 0},
+        "fragment_count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "topology_model": {
+      "type": "object",
+      "required": ["coordinate_model", "mosaic", "evidence"],
+      "properties": {
+        "coordinate_model": {"$ref": "#/$defs/coordinate_model"},
+        "mosaic": {"$ref": "#/$defs/fragment_mosaic"},
+        "evidence": {"$ref": "#/$defs/topology_model_evidence"}
+      },
+      "additionalProperties": false
+    },
+    "topology_assessment": {
+      "type": "object",
+      "required": ["topology_requested", "coordinate_model", "topology_evidence", "selection_margin_bases", "linear_model", "wrap_model"],
+      "properties": {
+        "topology_requested": {"$ref": "#/$defs/topology_requested"},
+        "coordinate_model": {"$ref": "#/$defs/coordinate_model"},
+        "topology_evidence": {"$ref": "#/$defs/topology_evidence"},
+        "selection_margin_bases": {"type": "integer", "minimum": 1},
+        "linear_model": {"$ref": "#/$defs/topology_model"},
+        "wrap_model": {"anyOf": [{"$ref": "#/$defs/topology_model"}, {"type": "null"}]}
+      },
+      "additionalProperties": false
+    },
+    "rescue_round": {
+      "type": "object",
+      "required": ["round", "seed_k", "seed_scale", "target_gaps", "seed_buckets_requested", "seed_keys_tested", "anchors_created", "chains_accepted", "sequence_blocks_fetched", "alignment_windows_attempted", "new_query_bases_supported", "elapsed_millis"],
+      "properties": {
+        "round": {"type": "integer", "minimum": 1},
+        "seed_k": {"type": "integer", "enum": [21, 31]},
+        "seed_scale": {"type": "integer", "minimum": 1},
+        "target_gaps": {"type": "array", "items": {"$ref": "#/$defs/interval"}},
+        "seed_buckets_requested": {"type": "integer", "minimum": 0},
+        "seed_keys_tested": {"type": "integer", "minimum": 0},
+        "anchors_created": {"type": "integer", "minimum": 0},
+        "chains_accepted": {"type": "integer", "minimum": 0},
+        "sequence_blocks_fetched": {"type": "integer", "minimum": 0},
+        "alignment_windows_attempted": {"type": "integer", "minimum": 0},
+        "new_query_bases_supported": {"type": "integer", "minimum": 0},
+        "elapsed_millis": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "performance_counters": {
+      "type": "object",
+      "required": ["candidates_processed", "contigs_considered", "windows_retrieved", "alignments_attempted", "alignments_succeeded", "failures", "elapsed_millis"],
+      "properties": {
+        "candidates_processed": {"type": "integer", "minimum": 0},
+        "contigs_considered": {"type": "integer", "minimum": 0},
+        "windows_retrieved": {"type": "integer", "minimum": 0},
+        "alignments_attempted": {"type": "integer", "minimum": 0},
+        "alignments_succeeded": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0},
+        "elapsed_millis": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "required": [
+        "plasmid_length",
+        "supported_bases",
+        "supported_fraction",
+        "primary_intervals",
+        "secondary_intervals",
+        "gaps",
+        "largest_gap"
+      ],
+      "properties": {
+        "plasmid_length": {"type": "integer", "minimum": 0},
+        "supported_bases": {"type": "integer", "minimum": 0},
+        "supported_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "primary_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "secondary_intervals": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/interval"}
+        },
+        "gaps": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/gap"}
+        },
+        "largest_gap": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "failure": {
+      "type": "object",
+      "required": ["stage", "code", "message", "resource", "retryable"],
+      "properties": {
+        "stage": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "minLength": 1},
+        "message": {"type": "string"},
+        "resource": {"type": ["string", "null"]},
+        "retryable": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "resource_metrics": {
+      "type": "object",
+      "required": [
+        "metadata_requests",
+        "head_requests",
+        "get_requests",
+        "range_requests",
+        "stream_requests",
+        "requested_bytes",
+        "returned_bytes",
+        "decoded_bytes",
+        "remote_bytes",
+        "cache_bytes",
+        "cache_hits",
+        "cache_misses",
+        "cache_evictions",
+        "stale_cache_rejections",
+        "retries",
+        "full_object_fallbacks",
+        "seed_buckets_read",
+        "sequence_blocks_read"
+      ],
+      "properties": {
+        "metadata_requests": {"type": "integer", "minimum": 0},
+        "head_requests": {"type": "integer", "minimum": 0},
+        "get_requests": {"type": "integer", "minimum": 0},
+        "range_requests": {"type": "integer", "minimum": 0},
+        "stream_requests": {"type": "integer", "minimum": 0},
+        "requested_bytes": {"type": "integer", "minimum": 0},
+        "returned_bytes": {"type": "integer", "minimum": 0},
+        "decoded_bytes": {"type": "integer", "minimum": 0},
+        "remote_bytes": {"type": "integer", "minimum": 0},
+        "cache_bytes": {"type": "integer", "minimum": 0},
+        "cache_hits": {"type": "integer", "minimum": 0},
+        "cache_misses": {"type": "integer", "minimum": 0},
+        "cache_evictions": {"type": "integer", "minimum": 0},
+        "stale_cache_rejections": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "full_object_fallbacks": {"type": "integer", "minimum": 0},
+        "seed_buckets_read": {"type": "integer", "minimum": 0},
+        "sequence_blocks_read": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  }
+}

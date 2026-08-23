@@ -20,14 +20,14 @@ pub use config::{
     TraceAlgorithmMetadata, TraceAlgorithmParameters, algorithm_identifiers,
 };
 pub use model::{
-    AlignmentMosaicEvidence, AlignmentRole, BaseAlignment, BaseInterval, CandidateResult,
-    CoordinateModel, CoverageSummary, EditOperation, EditRun, FragmentMosaicSummary,
-    MosaicAtomicInterval, MosaicSelectionComponents, QueryDescriptor, QueryKind,
-    RescueRoundMetrics, SeedEvidence, Strand, TopologyAssessment, TopologyEvidence,
-    TopologyModelEvidence, TopologyModelSummary, TopologyRequested, TraceAlgorithmIdentifiers,
-    TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader,
+    AlignmentMosaicEvidence, AlignmentRole, BaseAlignment, BaseInterval,
+    CandidatePerformanceCounters, CandidateResult, CoordinateModel, CoverageSummary, EditOperation,
+    EditRun, FragmentMosaicSummary, MosaicAtomicInterval, MosaicSelectionComponents,
+    QueryDescriptor, QueryKind, RescueRoundMetrics, SeedEvidence, Strand, TopologyAssessment,
+    TopologyEvidence, TopologyModelEvidence, TopologyModelSummary, TopologyRequested,
+    TraceAlgorithmIdentifiers, TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader,
 };
 
 pub const TRACE_ALGORITHM_ID: &str = "jam-seed-chain-align-v1";
 pub const TRACE_ALGORITHM_VERSION: u16 = 1;
-pub const TRACE_JSON_SCHEMA_VERSION: &str = "1.2.0";
+pub const TRACE_JSON_SCHEMA_VERSION: &str = "2.0.0";

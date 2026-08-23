@@ -1,7 +1,9 @@
 use jam_rs::resource::ResourceMetrics;
 use jam_rs::trace::config::SensitivityConfig;
 use jam_rs::trace::model::{
-    InputResource, TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader, TraceStatus,
+    CandidatePerformanceCounters, CoordinateModel, InputResource, QueryKind, TopologyEvidence,
+    TopologyRequested, TraceMetagenomeResult, TraceRecord, TraceRunFooter, TraceRunHeader,
+    TraceStatus,
 };
 use jam_rs::trace::output::{SCHEMA_VERSION, TraceFileWriter, TraceJsonlWriter, TraceOutputError};
 use serde_json::Value;
@@ -17,7 +19,12 @@ fn header() -> TraceRunHeader {
         command: vec!["jam".to_string(), "trace".to_string()],
         plasmid_id: "plasmid-fixture".to_string(),
         plasmid_length: 32,
+        query_kind: QueryKind::Plasmid,
+        topology_requested: TopologyRequested::Auto,
+        threads: 1,
+        io_concurrency: 1,
         sensitivity: SensitivityConfig::default(),
+        algorithms: jam_rs::trace::algorithm_identifiers(),
         algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
             SensitivityConfig::default(),
         ),
@@ -35,13 +42,23 @@ fn result() -> TraceMetagenomeResult {
         run_id: "fixture-run".to_string(),
         plasmid_id: "plasmid-fixture".to_string(),
         metagenome_id: "metagenome-fixture".to_string(),
+        query_kind: QueryKind::Plasmid,
+        topology_requested: TopologyRequested::Auto,
+        coordinate_model: CoordinateModel::Undetermined,
+        topology_evidence: TopologyEvidence::Insufficient,
+        algorithms: jam_rs::trace::algorithm_identifiers(),
         algorithm: jam_rs::trace::TraceAlgorithmMetadata::for_sensitivity(
             SensitivityConfig::default(),
         ),
         status: TraceStatus::NoCandidate,
         candidate: None,
         alignments: Vec::new(),
+        primary_fragment_mosaic: None,
+        topology: None,
+        rescue_rounds: Vec::new(),
+        performance_counters: CandidatePerformanceCounters::default(),
         coverage: None,
+        warnings: Vec::new(),
         failures: Vec::new(),
         resource_metrics: ResourceMetrics::default(),
     }
@@ -75,7 +92,7 @@ fn record_values() -> Vec<Value> {
 #[test]
 fn schema_fixture_declares_all_record_kinds_and_shared_fields() {
     let schema: Value =
-        serde_json::from_str(include_str!("../schemas/jam-trace-v1.schema.json")).unwrap();
+        serde_json::from_str(include_str!("../schemas/jam-trace-v2.schema.json")).unwrap();
     assert_eq!(
         schema["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
@@ -91,6 +108,14 @@ fn schema_fixture_declares_all_record_kinds_and_shared_fields() {
     assert_eq!(
         schema["$defs"]["algorithm_metadata"]["properties"]["id"]["const"],
         jam_rs::trace::TRACE_ALGORITHM_ID
+    );
+    assert_eq!(
+        schema["$defs"]["algorithm_identifiers"]["properties"]["trace_workflow"]["const"],
+        jam_rs::trace::config::TRACE_WORKFLOW_ID
+    );
+    assert_eq!(
+        schema["$defs"]["fragment_mosaic"]["properties"]["mosaic_algorithm"]["const"],
+        jam_rs::trace::config::MOSAIC_ALGORITHM_ID
     );
     let kinds = schema["properties"]["record_type"]["enum"]
         .as_array()
@@ -125,6 +150,12 @@ fn serialized_fixture_records_have_schema_and_required_payloads() {
         jam_rs::trace::TRACE_ALGORITHM_ID
     );
     assert_eq!(values[0]["algorithm"], values[1]["algorithm"]);
+    assert_eq!(values[0]["query_id"], "plasmid-fixture");
+    assert!(values[0].get("plasmid_id").is_none());
+    assert_eq!(values[0]["query_kind"], "plasmid");
+    assert_eq!(values[0]["topology_requested"], "auto");
+    assert_eq!(values[1]["coordinate_model"], "undetermined");
+    assert_eq!(values[0]["algorithms"], values[1]["algorithms"]);
     assert_eq!(
         values[0]["algorithm"]["parameters"]["alignment_mode"],
         "local_affine_gap_fixed_band"

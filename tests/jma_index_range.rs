@@ -139,20 +139,20 @@ fn fixture() -> Vec<u8> {
 #[test]
 fn indexed_open_reads_only_metadata_until_ranges_are_requested() {
     let archive_bytes = fixture();
-    let index = build_index(&archive_bytes).unwrap();
+    let archive_index = build_index(&archive_bytes).unwrap();
     let mut digest = Sha256::new();
     digest.update(&archive_bytes);
     let mut archive_sha256 = [0u8; 32];
     archive_sha256.copy_from_slice(&digest.finalize());
-    assert_eq!(index.archive_sha256, archive_sha256);
-    let sidecar_bytes = encode_index(&index).unwrap();
+    assert_eq!(archive_index.archive_sha256, archive_sha256);
+    let sidecar_bytes = encode_index(&archive_index).unwrap();
     let archive = TrackingResource::new("archive.jma", archive_bytes);
-    let index = TrackingResource::new("archive.jma.idx.json", sidecar_bytes);
-    let reader = JmaReader::open_indexed(archive.clone(), index.clone()).unwrap();
+    let index_resource = TrackingResource::new("archive.jma.idx.json", sidecar_bytes);
+    let reader = JmaReader::open_indexed(archive.clone(), index_resource.clone()).unwrap();
 
     let open_ranges = archive.ranges();
     assert!(open_ranges.iter().all(|range| range.length < 1024));
-    assert!(index.ranges().iter().any(|range| range.length > 0));
+    assert!(index_resource.ranges().iter().any(|range| range.length > 0));
 
     let sequence = reader
         .read_sequence(0, SequenceRange::new(1, 5).unwrap())
@@ -176,6 +176,64 @@ fn indexed_open_reads_only_metadata_until_ranges_are_requested() {
     let fetched = archive.ranges();
     assert_eq!(fetched.len(), open_ranges.len() + 2);
     assert!(fetched.iter().any(|range| range.length > 36));
+
+    // The query above selects exactly one seed bucket and the first sequence
+    // block. The other bucket and block remain unread.
+    let selected_seed = archive_index.seed_buckets[0].clone();
+    let unrelated_seed = archive_index.seed_buckets[1].clone();
+    let selected_sequence = archive_index.sequence_blocks[0].clone();
+    let unrelated_sequence = archive_index.sequence_blocks[1].clone();
+    assert!(fetched.contains(&ByteRange::new(selected_seed.offset, selected_seed.length).unwrap()));
+    assert!(
+        !fetched.contains(&ByteRange::new(unrelated_seed.offset, unrelated_seed.length).unwrap())
+    );
+    assert!(
+        fetched
+            .contains(&ByteRange::new(selected_sequence.offset, selected_sequence.length).unwrap())
+    );
+    assert!(
+        !fetched.contains(
+            &ByteRange::new(unrelated_sequence.offset, unrelated_sequence.length).unwrap()
+        )
+    );
+}
+
+#[test]
+fn indexed_open_rejects_legacy_sidecar_without_workflow_identifiers() {
+    let archive_bytes = fixture();
+    let index = build_index(&archive_bytes).unwrap();
+    let mut sidecar: serde_json::Value =
+        serde_json::from_slice(&encode_index(&index).unwrap()).unwrap();
+    sidecar
+        .as_object_mut()
+        .unwrap()
+        .remove("workflow_identifiers");
+    let sidecar_bytes = serde_json::to_vec(&sidecar).unwrap();
+    let archive = TrackingResource::new("archive.jma", archive_bytes);
+    let sidecar = TrackingResource::new("archive.jma.idx.json", sidecar_bytes);
+    let error = match JmaReader::open_indexed(archive, sidecar) {
+        Ok(_) => panic!("legacy sidecar unexpectedly opened in indexed mode"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("missing workflow identifiers"));
+}
+
+#[test]
+fn indexed_open_rejects_sidecar_with_incompatible_workflow_identifiers() {
+    let archive_bytes = fixture();
+    let mut index = build_index(&archive_bytes).unwrap();
+    index.workflow_identifiers.as_mut().unwrap().trace_workflow = "jam-trace-v0".to_string();
+    let archive = TrackingResource::new("archive.jma", archive_bytes);
+    let sidecar = TrackingResource::new("archive.jma.idx.json", encode_index(&index).unwrap());
+    let error = match JmaReader::open_indexed(archive, sidecar) {
+        Ok(_) => panic!("incompatible workflow sidecar unexpectedly opened"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("workflow identifiers are incompatible")
+    );
 }
 
 #[test]
@@ -212,4 +270,20 @@ fn builder_writes_only_the_derived_sidecar() {
     let parsed: serde_json::Value =
         serde_json::from_slice(&std::fs::read(sidecar).unwrap()).unwrap();
     assert_eq!(parsed["index_version"], 1);
+    assert_eq!(
+        parsed["workflow_identifiers"]["screen_algorithm"],
+        "jam-fracminhash-screen-v1"
+    );
+    assert_eq!(
+        parsed["workflow_identifiers"]["local_alignment_algorithm"],
+        "jam-exact-seed-chain-banded-v1"
+    );
+    assert_eq!(
+        parsed["workflow_identifiers"]["mosaic_algorithm"],
+        "jam-fragment-mosaic-v1"
+    );
+    assert_eq!(
+        parsed["workflow_identifiers"]["trace_workflow"],
+        "jam-trace-v1"
+    );
 }
