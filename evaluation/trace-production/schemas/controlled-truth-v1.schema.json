@@ -1,0 +1,174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/jam-trace-controlled-truth-v1.schema.json",
+  "title": "jam trace controlled Track A truth row",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "case_id",
+    "metagenome_id",
+    "query_id",
+    "source_query_id",
+    "source_query_sha256",
+    "reference_id",
+    "background_id",
+    "background_source_sha256",
+    "source_manifest_sha256",
+    "truth_class",
+    "query_length",
+    "source_query_start",
+    "source_query_end",
+    "identity_target_percent",
+    "substitution_identity_percent",
+    "coverage_target_percent",
+    "coverage_target_bases",
+    "coverage_union_bases",
+    "fragment_count",
+    "fragment_id",
+    "orientation",
+    "origin_crossing",
+    "indel_profile",
+    "mutation_events_json",
+    "query_intervals_json",
+    "contig_id",
+    "contig_start",
+    "contig_end",
+    "query_sha256",
+    "contig_sha256",
+    "background_reused",
+    "label"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "jam-trace-controlled-truth-v1"
+    },
+    "case_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "metagenome_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "query_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_query_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_query_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "reference_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "background_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "background_source_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "truth_class": {
+      "const": "controlled_spike_in"
+    },
+    "query_length": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source_query_start": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "source_query_end": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "identity_target_percent": {
+      "type": "integer",
+      "enum": [100, 99, 97, 95, 90, 85]
+    },
+    "substitution_identity_percent": {
+      "type": "string"
+    },
+    "coverage_target_percent": {
+      "type": "integer",
+      "enum": [5, 10, 20, 50, 80, 100]
+    },
+    "coverage_target_bases": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coverage_union_bases": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "fragment_count": {
+      "type": "integer",
+      "enum": [1, 2, 5, 20]
+    },
+    "fragment_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "orientation": {
+      "enum": ["forward", "reverse"]
+    },
+    "origin_crossing": {
+      "type": "boolean"
+    },
+    "indel_profile": {
+      "enum": [
+        "none",
+        "short_insertion",
+        "short_deletion",
+        "long_insertion",
+        "long_deletion"
+      ]
+    },
+    "mutation_events_json": {
+      "type": "string"
+    },
+    "query_intervals_json": {
+      "type": "string"
+    },
+    "contig_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contig_start": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "contig_end": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "query_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "contig_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "background_reused": {
+      "type": "boolean"
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    }
+  },
+  "additionalProperties": false
+}

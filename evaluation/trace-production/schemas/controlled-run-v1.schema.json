@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/jam-trace-controlled-run-v1.schema.json",
+  "title": "jam trace controlled Track A generated run manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generator",
+    "seed",
+    "matrix_schema_version",
+    "matrix_manifest_sha256",
+    "source_manifest",
+    "source_manifest_sha256",
+    "source_catalog_files",
+    "source_background_files",
+    "background_policy",
+    "planned_cells",
+    "materialized_cells",
+    "unsupported_cells",
+    "truth_rows",
+    "queries",
+    "cases",
+    "status_path",
+    "truth_path",
+    "generation_parameters",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "jam-trace-controlled-truth-v1"
+    },
+    "generator": {
+      "const": "controlled-track-a-v1"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "seed_hex": {
+      "type": "string"
+    },
+    "matrix_schema_version": {
+      "const": "jam-trace-controlled-matrix-v1"
+    },
+    "matrix_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_root": {
+      "type": "string"
+    },
+    "source_manifest": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_dataset_id": {
+      "type": ["string", "null"]
+    },
+    "source_catalog_files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "source_background_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/file"
+      }
+    },
+    "background_policy": {
+      "type": "object",
+      "required": [
+        "backgrounds_are_source_objects",
+        "controlled_derivatives_are_not_independent_metagenomes",
+        "background_use_counts"
+      ],
+      "properties": {
+        "backgrounds_are_source_objects": {
+          "const": true
+        },
+        "controlled_derivatives_are_not_independent_metagenomes": {
+          "const": true
+        },
+        "background_use_counts": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "planned_cells": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "materialized_cells": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "unsupported_cells": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "truth_rows": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "queries": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "status_path": {
+      "const": "status.tsv"
+    },
+    "truth_path": {
+      "const": "truth.tsv"
+    },
+    "generation_parameters": {
+      "type": "object"
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "file": {
+      "type": "object",
+      "required": ["id", "path", "sha256"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

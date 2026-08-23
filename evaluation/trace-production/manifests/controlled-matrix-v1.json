@@ -1,0 +1,73 @@
+{
+  "schema_version": "jam-trace-controlled-matrix-v1",
+  "matrix_id": "track-a-controlled-v1",
+  "seed": "0x4A414D5452414345",
+  "purpose": "coordinate-truth controlled spike-in cases derived from verified source sequences",
+  "query_lengths": [
+    2000,
+    10000,
+    50000,
+    100000,
+    200000
+  ],
+  "identities": [
+    100,
+    99,
+    97,
+    95,
+    90,
+    85
+  ],
+  "coverages": [
+    5,
+    10,
+    20,
+    50,
+    80,
+    100
+  ],
+  "fragment_counts": [
+    1,
+    2,
+    5,
+    20
+  ],
+  "orientations": [
+    "forward",
+    "reverse"
+  ],
+  "indel_profiles": [
+    "none",
+    "short_insertion",
+    "short_deletion",
+    "long_insertion",
+    "long_deletion"
+  ],
+  "labels": [
+    "standard",
+    "origin_crossing",
+    "shared_mobile_element",
+    "chromosome_shared",
+    "repeat_rich"
+  ],
+  "unsupported_policy": {
+    "shorter_than_k21": "record_status",
+    "missing_query_length": "record_status",
+    "missing_label_annotation": "record_status",
+    "missing_clean_background": "reject_source_manifest"
+  },
+  "coordinate_convention": {
+    "sequence_coordinates": "zero_based_half_open",
+    "circular_query_intervals": "forward_coordinates_split_at_origin",
+    "contig_coordinates": "zero_based_half_open",
+    "identity": "substitution identity before optional indel events",
+    "coverage": "union of source query coordinates, not sum of fragment lengths"
+  },
+  "source_requirements": [
+    "catalog records must be checksum verified",
+    "background files must be checksum verified and explicitly declared as real assembly backgrounds",
+    "controlled derivatives carry the source background identifier and checksum",
+    "duplicated source backgrounds are not independent metagenomes",
+    "source annotations are required before shared mobile-element, chromosome-shared, or repeat-rich labels are emitted"
+  ]
+}

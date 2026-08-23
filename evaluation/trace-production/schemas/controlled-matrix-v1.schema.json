@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/jam-trace-controlled-matrix-v1.schema.json",
+  "title": "jam trace controlled Track A matrix",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "matrix_id",
+    "seed",
+    "query_lengths",
+    "identities",
+    "coverages",
+    "fragment_counts",
+    "orientations",
+    "indel_profiles",
+    "labels",
+    "unsupported_policy",
+    "coordinate_convention",
+    "source_requirements"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "jam-trace-controlled-matrix-v1"
+    },
+    "matrix_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "seed": {
+      "type": "string",
+      "pattern": "^0x[0-9A-Fa-f]+$"
+    },
+    "query_lengths": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 2000
+      },
+      "minItems": 1
+    },
+    "identities": {
+      "type": "array",
+      "const": [100, 99, 97, 95, 90, 85]
+    },
+    "coverages": {
+      "type": "array",
+      "const": [5, 10, 20, 50, 80, 100]
+    },
+    "fragment_counts": {
+      "type": "array",
+      "const": [1, 2, 5, 20]
+    },
+    "orientations": {
+      "type": "array",
+      "const": ["forward", "reverse"]
+    },
+    "indel_profiles": {
+      "type": "array",
+      "contains": {
+        "const": "short_insertion"
+      },
+      "minItems": 5,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "none",
+          "short_insertion",
+          "short_deletion",
+          "long_insertion",
+          "long_deletion"
+        ]
+      }
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "contains": {
+        "const": "shared_mobile_element"
+      }
+    },
+    "unsupported_policy": {
+      "type": "object",
+      "additionalProperties": {
+        "enum": ["record_status", "reject_source_manifest"]
+      }
+    },
+    "coordinate_convention": {
+      "type": "object",
+      "required": [
+        "sequence_coordinates",
+        "circular_query_intervals",
+        "contig_coordinates",
+        "identity",
+        "coverage"
+      ],
+      "properties": {
+        "sequence_coordinates": {
+          "const": "zero_based_half_open"
+        },
+        "circular_query_intervals": {
+          "const": "forward_coordinates_split_at_origin"
+        },
+        "contig_coordinates": {
+          "const": "zero_based_half_open"
+        },
+        "identity": {
+          "type": "string"
+        },
+        "coverage": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "source_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": true
+}

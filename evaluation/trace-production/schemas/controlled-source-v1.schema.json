@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stanni.github.io/jam-rs/schemas/jam-trace-controlled-source-v1.schema.json",
+  "title": "jam trace controlled Track A source manifest",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "catalog_files",
+    "backgrounds"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "jam-trace-controlled-source-v1"
+    },
+    "dataset_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "dataset_kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "catalog_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/sequenceFile"
+      }
+    },
+    "backgrounds": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/sequenceFile"
+      }
+    },
+    "source_records": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sourceRecord"
+      }
+    }
+  },
+  "$defs": {
+    "sequenceFile": {
+      "type": "object",
+      "required": [
+        "id",
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "role": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "sourceRecord": {
+      "type": "object",
+      "required": [
+        "id",
+        "sequence_sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accession": {
+          "type": "string"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sequence_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "catalog": {
+          "type": "boolean"
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}
