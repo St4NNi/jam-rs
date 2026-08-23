@@ -5,7 +5,7 @@
 
 # jam-rs
 
-`jam-rs` is a high-speed candidate finder for known and near-known plasmid traces in metagenomic assemblies. It reports contig-level and assembly-level sketch evidence against a fixed plasmid catalog. Optional target-aware sampling may improve retrieval of represented targets, but final presence calls require independent confirmation.
+`jam-rs` provides reference-guided sketch screening and query-centered positional follow-up for metagenomic assemblies. `jam screen` reports contig-level and assembly-level evidence against a fixed plasmid catalog. `jam trace` follows one plasmid, phage, other mobile element, synthetic construct, or unknown nucleotide reference across candidate metagenomes. Optional target-aware sampling may improve retrieval of represented catalog targets, but final presence calls require independent confirmation.
 
 The intended workflow is:
 
@@ -101,7 +101,7 @@ jam stats --input plasmids.jam --json
 
 ## Positional follow-up with `jam trace`
 
-`jam trace` is an optional follow-up for one plasmid query across many candidate
+`jam trace` is an optional follow-up for one query sequence across many candidate
 metagenomes. It uses an existing `.jam` metagenome index, then retrieves
 positional evidence from JMA v1 archives or raw assembly resources:
 
@@ -113,15 +113,23 @@ jam archive \
   --rescue-scale 500
 
 jam trace \
-  --plasmid plasmid.fasta \
+  --query element.fasta \
+  --query-kind plasmid \
+  --topology auto \
   --database metagenomes.jam \
-  --catalog metagenomes.tsv \
-  --output plasmid.trace.jsonl.zst \
+  --metagenomes metagenomes.tsv \
+  --output element.trace.jsonl.zst \
   --sensitivity balanced \
   --min-shared 3 \
   --threads 8 \
+  --io-concurrency 8 \
   --memory-target 4
 ```
+
+`--query` accepts exactly one FASTA record. `--plasmid` remains a deprecated
+one-release alias that implies `--query-kind plasmid`. Linear, circular, auto,
+and unknown topology settings control coordinate handling. A wrapped coordinate
+model does not prove that the biological molecule is circular.
 
 The archive command writes `assembly.jma` and its checksum-bound range index
 `assembly.jma.idx.json`. Production catalog rows identify both objects; strict
@@ -139,15 +147,18 @@ identity-checked cache before mmap:
 
 ```bash
 jam trace \
-  --plasmid plasmid.fasta \
+  --query phage.fasta \
+  --query-kind phage \
+  --topology linear \
   --database https://objects.example.org/metagenomes.jam \
   --cache-dir cache/jam \
-  --catalog metagenomes.tsv \
-  --output plasmid.trace.jsonl
+  --metagenomes metagenomes.tsv \
+  --output phage.trace.jsonl
 ```
 
-Alignment and nonredundant plasmid-coordinate coverage are `supported`
-evidence, not confirmation of plasmid presence or fragment linkage. See
+Alignment and nonredundant query-coordinate fragment mosaics are `supported`
+evidence, not confirmation of autonomous element presence or physical linkage
+between separate contigs. See
 [docs/TRACE.md](docs/TRACE.md), [docs/ALGORITHM.md](docs/ALGORITHM.md),
 [docs/REMOTE_RESOURCES.md](docs/REMOTE_RESOURCES.md), and
 [examples/trace/run_trace.sh](examples/trace/run_trace.sh).
@@ -188,16 +199,17 @@ versions, hardware and storage, raw measurements, checksums, and summary
 generation.
 
 The bounded release evidence and exact limitations are under
-[evaluation/trace-production/](evaluation/trace-production/). On the recorded
-40-case fragment/indel track, the sensitive Jam path selected all 40 cases and
-recovered 79.1% of truth bases; BLASTn recovered 98.3% and minimap2 86.9% under
-the recorded comparator settings. Jam completed that local task sooner, but
-the methods did not reach matched interval accuracy, so this is not a general
-speed claim. The accession-backed spike track additionally covers exact,
-reverse-complement, split, partial, and near-known traces in chromosome
-backgrounds. Actual S3, read-derived assemblies, independently supported
-natural positives, and the requested 1,000-assembly/100-query scale remain
-unmeasured.
+[evaluation/trace-production/](evaluation/trace-production/). The current MGE
+accession track uses 10 checksum-verified plasmid/phage queries and 28
+controlled derivatives of three reused chromosome backgrounds. At scale 200
+and `min-shared=3`, 27/28 inserted positive pairs were retrieved; the missed
+case was an isolated 160 bp T7 terminal repeat. Scale 20 retrieved all three T7
+cases, with a 242 MiB rather than 25 MiB JAM index. Two sequential one-thread
+collections took 359.24 s and 353.24 s; the eight-thread collection took
+99.18 s and reached 2.20 GiB peak RSS. These are measurements of this local
+task, not a general speed or accuracy claim. Actual S3, read-derived
+assemblies, independently supported natural positives, and the requested
+1,000-assembly/100-query scale remain unmeasured.
 
 ## Compatibility and provenance
 
@@ -206,6 +218,8 @@ unmeasured.
 - The released hash identity is `jamhash_u64_v1`, provided by the exactly pinned crates.io dependency `jamhash = 0.1.2`.
 - Hash zero is excluded consistently during catalog construction and query construction.
 - Screening TSV and metadata schemas are version `1.0.0`.
+- Trace JSONL uses schema `2.0.0`; schema `1.x` remains a documented older
+  output contract rather than being silently reinterpreted.
 
 See [docs/TRACE.md](docs/TRACE.md) before interpreting trace results. The
 pipeline example is [examples/trace/run_trace.sh](examples/trace/run_trace.sh).

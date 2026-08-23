@@ -22,9 +22,11 @@ k=21 seed section (optional only for an explicitly incomplete archive)
 The fixed header contains the magic `JMA\0`, format version `1`, flags, contig
 count, total bases, source SHA-256, directory offset and length, a SHA-256
 header checksum, and up to two seed-level identities. New archives also store
-the `jam-seed-chain-align-v1` tag, algorithm version `1`, and the optional
-finite entropy threshold used for seed construction. Header checksum coverage
-includes those metadata bytes with the checksum field zeroed.
+the existing `jam-seed-chain-align-v1` tag, algorithm version `1`, and the
+optional finite entropy threshold used for seed construction. That binary tag
+is retained for JMA v1 compatibility; the generic query workflow identifiers
+are recorded in the sidecar described below. Header checksum coverage includes
+those metadata bytes with the checksum field zeroed.
 
 Legacy JMA v1 headers with zeroed metadata bytes can still be decoded, but
 production `jam trace` requires the algorithm tag and version so an archive
@@ -87,13 +89,55 @@ and algorithm identity. It contains:
 - absolute fixed-record ranges and SHA-256 values for nonempty 16-bit hash
   prefix buckets at each `(k, scale)` seed level;
 - the contig, seed-level, and algorithm identities needed to validate those
-  ranges against the JMA header and section directory.
+  ranges against the JMA header and section directory;
+- the additive `workflow_identifiers` object:
 
-Indexed opening reads the JMA header, section directory, contig table, and the
-bounded sidecar. A seed query then reads only its matching prefix bucket and
-still compares the complete hash and packed canonical k-mer. Sequence reads
-fetch only blocks intersecting the accepted chain window. Every fetched range
-is checked against its sidecar checksum before decoding.
+  ```json
+  {
+    "screen_algorithm": "jam-fracminhash-screen-v1",
+    "local_alignment_algorithm": "jam-exact-seed-chain-banded-v1",
+    "mosaic_algorithm": "jam-fragment-mosaic-v1",
+    "trace_workflow": "jam-trace-v1"
+  }
+  ```
+
+These identifiers describe the screening, local alignment, fragment mosaic,
+and end-to-end workflow layers. They do not alter the JMA header or payload.
+
+Indexed opening follows this bounded sequence:
+
+```text
+fixed JMA header
+    -> section directory
+    -> contig table
+    -> checksum-bound sidecar
+    -> seed buckets for the current query seeds
+    -> accepted seed chains
+    -> sequence blocks intersecting those chains
+    -> optional buckets and blocks for unresolved-gap rescue
+```
+
+A seed query reads only its matching prefix bucket and still compares the
+complete hash and packed canonical k-mer. Sequence reads fetch only blocks
+intersecting an accepted chain window. Every fetched range is checked against
+its sidecar checksum before decoding. Local JMA resources use positional file
+reads through this same range contract; the local `.jam` candidate index is
+materialized for memory-mapped sketch search.
+
+The run and candidate records expose the corresponding resource counters:
+`metadata_requests`, `head_requests`, `get_requests`, `range_requests`,
+`stream_requests`, `requested_bytes`, `returned_bytes`, `decoded_bytes`,
+`cache_bytes`, `retries`, `full_object_fallbacks`, `seed_buckets_read`, and
+`sequence_blocks_read`. Gap-rescue records additionally report buckets
+requested, keys tested, anchors, chains, blocks fetched, alignment windows, and
+newly supported query bases per round.
+
+The sidecar is bound to the archive size, header checksum, source checksum,
+format version, and binary algorithm identity. A legacy sidecar that lacks
+`workflow_identifiers` remains JSON-decodable for inspection, but indexed
+opening rejects it with a compatibility error because its workflow provenance
+is incomplete. Rebuild the sidecar with the current archive builder. A sidecar
+with incompatible identifiers is rejected before any payload range is used.
 
 A JMA v1 archive without a sidecar remains decodable through the eager reader.
 `jam trace` uses that path only when full-download fallback is enabled and

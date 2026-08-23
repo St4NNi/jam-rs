@@ -38,7 +38,8 @@ it. `jam trace` bridges a remote locator through an explicit disk cache:
 
 ```bash
 jam trace \
-  --plasmid p.fasta \
+  --query p.fasta \
+  --query-kind plasmid \
   --database https://objects.example.org/metagenomes.jam \
   --cache-dir cache/jam \
   --catalog metagenomes.tsv \
@@ -88,8 +89,10 @@ The equivalent JSON is either an array or an object with an `entries` array:
 
 `metagenome_id` must be unique and must match the sample name in the `.jam`
 candidate database. At least one of `jma` or `raw` is required. When both are
-present, JMA is preferred. A JMA error is retained as a structured failure and
-the raw path is attempted as an explicit fallback. A raw-only row is valid but
+present, JMA is preferred. A permitted resource-level JMA failure is retained
+as a structured failure before an explicit raw fallback is attempted.
+Structural, checksum, format, sidecar-identity, and seed-level compatibility
+failures do not trigger unanchored raw fallback. A raw-only row is valid but
 does not provide indexed archive access.
 
 ## Range and streaming behavior
@@ -104,25 +107,49 @@ response must be `206 Partial Content` with the exact requested
 `Content-Range`. A `200` response is accepted only through the configured,
 size-bounded full-object fallback. When range support is unavailable and
 fallback is disabled, the candidate is a structured failure rather than an
-empty result.
+empty result. The fallback is explicit in the result counters and does not
+make a complete-object read look like selective access.
 
-Indexed JMA opening reads the fixed header, section directory, contig table,
-and the bounded sidecar. Subsequent reads fetch only matching seed buckets and
-sequence blocks intersecting accepted chain windows. Resource metrics report
-HEAD/GET/range/stream counts, requested/returned/decoded bytes, cache behavior,
-retries, fallbacks, seed buckets, and sequence blocks. Raw FASTA/FASTQ resources
-are streamed into the parser and may require the complete input stream.
-Semantic seed-level mismatch is never eligible for raw fallback.
+Indexed JMA opening uses this request sequence:
+
+```text
+fixed header -> section directory -> contig table -> sidecar
+    -> query-intersecting seed buckets
+    -> accepted chains
+    -> chain-implicated sequence blocks
+    -> optional unresolved-gap rescue buckets and blocks
+```
+
+The local implementation performs positional reads from the archive and
+sidecar files. HTTP and S3 use the same byte-range contract. They must not read
+the complete seed payload, complete sequence payload, unrelated contigs, or a
+noncandidate resource in indexed mode. Resource metrics report
+`metadata_requests`, `head_requests`, `get_requests`, `range_requests`,
+`stream_requests`, `requested_bytes`, `returned_bytes`, `decoded_bytes`,
+`cache_bytes`, `retries`, `full_object_fallbacks`, `seed_buckets_read`, and
+`sequence_blocks_read`. Gap rescue adds per-round counts for seed buckets,
+tested keys, anchors, chains, sequence blocks, alignment windows, and newly
+supported query bases.
+
+Raw FASTA/FASTQ resources are streamed into the parser and may require the
+complete input stream; the current raw candidate path retains parsed contigs,
+so it may also materialize the complete assembly in memory. Semantic
+seed-level, format, checksum, and sidecar-identity failures are never eligible
+for raw fallback. A resource transport failure may use a catalog raw fallback
+only where the configured failure policy permits it; the failure is retained
+in the result.
 
 ## Cache and redaction rules
 
 Cache identities combine the redacted locator, resource version token, and
 object size. If a remote object changes identity, old blocks are invalidated
-instead of being mixed with the new object. Cache block size, total cache size,
-timeout, retry count, and full-download fallback are part of the resource
-opening contract. `--cache-block-bytes`, `--request-timeout-seconds`,
-`--max-retries`, and `--no-full-download-fallback` expose those controls;
-global `--memory-target` derives the in-memory cache target. `--cache-dir` is the disk
+instead of being mixed with the new object. Indexed JMA blocks are additionally
+bound to their exact byte range and sidecar checksum. Cache block size, total
+cache size, timeout, retry count, and full-download fallback are part of the
+resource opening contract. `--cache-block-bytes`,
+`--request-timeout-seconds`, `--max-retries`, and
+`--no-full-download-fallback` expose those controls; global
+`--memory-target` derives the in-memory cache target. `--cache-dir` is the disk
 location used only when a remote candidate `.jam` must be materialized.
 
 Indexed archive blocks are cached by redacted locator, object version, size,
@@ -149,3 +176,18 @@ access with a small archive before a large run. A transport failure, checksum
 failure, cache identity change, or malformed resource should remain visible in
 the `failures` array and must not be interpreted as a negative biological
 result. See [TRACE_JSON.md](TRACE_JSON.md) for consumer behavior.
+
+## Current measurement limits
+
+The current snapshot includes local and mock range-read evidence, but no actual
+S3 cold-cache or warm-cache measurement. S3 deployment should preflight range
+support, object size/version metadata, endpoint behavior, credentials, and the
+chosen cache block size before a production run. A block-size study on a small
+fixture does not establish the best value for a large object collection.
+
+The indexed path is selective only when the JMA sidecar is present and the
+object honors ranges. Without a sidecar, strict mode stops with
+`jma_index_required`; explicit full-download fallback is bounded and recorded.
+Raw FASTA/FASTQ fallback is a separate complete-stream path and does not provide
+indexed byte selectivity. None of these fallbacks turns sketch or alignment
+evidence into a biological presence call.
