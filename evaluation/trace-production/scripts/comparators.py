@@ -312,7 +312,10 @@ def _truth_query_filter(path: Path | None, query_id: str | None) -> str | None:
     except (OSError, json.JSONDecodeError, UnicodeError):
         return None
     exact = {
-        row.get("query_id") or row.get("plasmid_id") or row.get("reference_id")
+        row.get("query_id")
+        or row.get("query_accession")
+        or row.get("plasmid_id")
+        or row.get("reference_id")
         for row in rows
     }
     if query_id in exact:
@@ -663,9 +666,9 @@ def run_lexicmap(
             "--align-min-match-pident",
             str(args.lexicmap_min_pident),
             "--min-qcov-per-hsp",
-            str(args.lexicmap_min_qcov_hsp),
+            str(args.lexicmap_min_qcov_per_hsp),
             "--min-qcov-per-genome",
-            str(args.lexicmap_min_qcov_genome),
+            str(args.lexicmap_min_qcov_per_genome),
             "--align-min-match-len",
             str(args.lexicmap_min_align_len),
             "--top-n-genomes",
@@ -731,7 +734,9 @@ def jam_result_records(
     header = next((record for record in records if record.get("record_type") == "run_header"), None)
     if header is None:
         raise NormalizationError("jam JSONL has no run_header record")
-    if header.get("plasmid_id") != query_id or int(header.get("plasmid_length", 0)) != query_length:
+    header_query_id = header.get("query_id", header.get("plasmid_id"))
+    header_query_length = int(header.get("query_length", header.get("plasmid_length", 0)))
+    if header_query_id != query_id or header_query_length != query_length:
         raise NormalizationError("jam JSONL query identity or length disagrees with the selected query")
     by_id = {
         record.get("metagenome_id"): record
@@ -756,7 +761,9 @@ def jam_result_records(
             )
             continue
         intervals = []
-        for interval in (source.get("coverage") or {}).get("primary_intervals", []):
+        mosaic = source.get("primary_fragment_mosaic") or {}
+        coverage = source.get("coverage") or {}
+        for interval in mosaic.get("covered_intervals") or coverage.get("primary_intervals", []):
             intervals.append(
                 {
                     "metagenome_id": assembly.metagenome_id,
@@ -896,7 +903,7 @@ def main() -> int:
     parser.add_argument("--lexicmap-min-pident", type=float, default=70.0)
     parser.add_argument("--lexicmap-min-qcov-per-hsp", type=float, default=0.0)
     parser.add_argument("--lexicmap-min-qcov-per-genome", type=float, default=0.0)
-    parser.add_argument("--lexicmap-min-align-len", type=int, default=1)
+    parser.add_argument("--lexicmap-min-align-len", type=int, default=17)
     args = parser.parse_args()
     try:
         query_id, query_length = read_fasta_length(args.query, args.query_id)

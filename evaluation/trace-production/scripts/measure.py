@@ -433,6 +433,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--trace-output", type=Path)
+    parser.add_argument(
+        "--output-kind",
+        choices=("trace", "json", "none"),
+        default="trace",
+        help="validate a Jam JSONL trace, a JSON command artifact, or no command artifact",
+    )
     parser.add_argument("--truth", type=Path)
     parser.add_argument("--stdout", type=Path)
     parser.add_argument("--stderr", type=Path)
@@ -485,16 +491,27 @@ def main() -> int:
     trace_exists = bool(args.trace_output and args.trace_output.is_file())
     records: list[dict[str, Any]] = []
     trace_error: str | None = None
-    if trace_exists:
+    if args.output_kind == "trace" and trace_exists:
         try:
             records = read_jsonl(args.trace_output)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             trace_error = f"trace output could not be parsed: {error}"
         if not records:
             trace_error = "trace output contained no JSON records"
-    elif completed.returncode == 0:
+    elif args.output_kind == "json" and trace_exists:
+        try:
+            value = json.loads(args.trace_output.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                trace_error = "JSON command artifact was not an object"
+        except (OSError, ValueError) as error:
+            trace_error = f"JSON command artifact could not be parsed: {error}"
+    elif args.output_kind != "none" and completed.returncode == 0:
         trace_error = "trace output was not created"
-    result = result_metrics(records, args.truth) if records else result_metrics([], args.truth)
+    result = (
+        result_metrics(records, args.truth)
+        if args.output_kind == "trace" and records
+        else result_metrics([], None)
+    )
     metadata: dict[str, Any] = {}
     if args.metadata and args.metadata.is_file():
         try:

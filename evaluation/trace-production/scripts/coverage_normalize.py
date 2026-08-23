@@ -883,6 +883,8 @@ def _truth_intervals(
         if not isinstance(row, dict):
             raise NormalizationError("truth records must be objects")
         row_id = row.get("metagenome_id") or row.get("assembly_id") or row.get("sample_id")
+        if row_id is None and row.get("assembly_path"):
+            row_id = Path(str(row["assembly_path"])).name
         if metagenome_id is not None:
             exact_id = row_id == metagenome_id
             stem_id = any(
@@ -892,7 +894,12 @@ def _truth_intervals(
             )
             if not exact_id and not stem_id:
                 continue
-        row_query_id = row.get("query_id") or row.get("plasmid_id") or row.get("reference_id")
+        row_query_id = (
+            row.get("query_id")
+            or row.get("query_accession")
+            or row.get("plasmid_id")
+            or row.get("reference_id")
+        )
         if query_id is not None and row_query_id not in {None, query_id}:
             continue
         declared_length = row.get("query_length")
