@@ -1,14 +1,16 @@
 {
   "schema_version": "jam-index-scorecard-v1",
   "measured_at": "2026-08-24",
-  "measurement_source_commit": "871b0d14eeca52205242c0b493caa3e2ee5e0367",
+  "measurement_source_commit": "0439fa6b5f41ed95cb77aad253800093a6d9d71e",
   "system": {
     "name": "Jam Index",
     "format_version": 1,
     "policy_id": "contig-minhash-v1",
     "local_only": true,
+    "sequence_payload": false,
     "position_postings": false,
-    "jamhash_id": "jamhash_u64_v1"
+    "jamhash_id": "jamhash_u64_v1",
+    "sequence_access": ["plain_fasta_fai", "bgzf_fai_gzi", "candidate_gzip_stream"]
   },
   "host": {
     "os": "Linux 7.1.8-arch1-3 x86_64",
@@ -23,26 +25,73 @@
     "process_policy": "fresh process; operating-system page cache not dropped",
     "query_threads": 4,
     "memory_target_gib": 2,
-    "sensitivity": "sensitive"
+    "sensitivity": "sensitive",
+    "paired_order": "three embedded-first pairs followed by three external-first pairs"
   },
   "collection": {
     "metagenomes": 40,
     "contigs": 43080,
     "source_bases": 605224880,
-    "parts": 7
+    "selected_parts": 20
   },
-  "build": {
-    "wall_seconds": 13.012331,
-    "peak_rss_kib": 88976,
+  "embedded_baseline": {
+    "source_commit": "07a9b3c05a7f0b8812d4ac00829ca8d696cb52ee",
+    "binary_sha256": "8611bd99c731243d17e4468515f8ed9e82a1c6851f165ea3c6e88a9947f8cfa9",
+    "parts": 7,
     "total_index_bytes": 183144518,
     "index_bytes_per_source_base": 0.302605732,
     "screen_jam_bytes": 13409898,
     "contig_signature_bytes": 11528960,
     "packed_sequence_bytes": 151321656,
-    "persistent_positional_seed_bytes": 0
+    "packed_sequence_bytes_read": 89656,
+    "source_sequence_bytes_read": 0
   },
+  "part_layouts": [
+    {
+      "parts": 20,
+      "build_wall_seconds": 14.20305276,
+      "build_peak_rss_kib": 88312,
+      "total_index_bytes": 40729419,
+      "index_bytes_per_source_base": 0.067296340,
+      "screen_jam_bytes": 21220970,
+      "contig_posting_bytes": 12760826,
+      "metagenome_contig_metadata_bytes": 6728156,
+      "source_reference_bytes": 7680,
+      "packed_sequence_bytes": 0,
+      "query_wall_seconds": 4.265422480,
+      "query_peak_rss_kib": 371900
+    },
+    {
+      "parts": 24,
+      "build_wall_seconds": 11.537224108,
+      "build_peak_rss_kib": 89892,
+      "total_index_bytes": 44968711,
+      "index_bytes_per_source_base": 0.074300830,
+      "screen_jam_bytes": 25464426,
+      "contig_posting_bytes": 12752378,
+      "source_reference_bytes": 7680,
+      "packed_sequence_bytes": 0,
+      "query_wall_seconds": 4.309041375,
+      "query_peak_rss_kib": 383976
+    },
+    {
+      "parts": 30,
+      "build_wall_seconds": 10.818544023,
+      "build_peak_rss_kib": 61820,
+      "total_index_bytes": 51327697,
+      "index_bytes_per_source_base": 0.084807645,
+      "screen_jam_bytes": 31829610,
+      "contig_posting_bytes": 12739706,
+      "source_reference_bytes": 7680,
+      "packed_sequence_bytes": 0,
+      "query_wall_seconds": 4.168531344,
+      "query_peak_rss_kib": 393448
+    }
+  ],
   "controlled_40_case": {
     "candidate_recovery": "40/40",
+    "contig_recall": 1.0,
+    "contig_recall_against_embedded": 1.0,
     "selected_candidates": 40,
     "selected_contigs": 280,
     "selected_contig_bases": 358400,
@@ -52,17 +101,36 @@
     "interval_precision": 1.0,
     "interval_recall": 1.0,
     "alignment_count": 321,
+    "biological_output_identical_to_embedded": true,
+    "source_sequence_bytes_read": 362712,
     "paired_process_cold": {
-      "wall_seconds": [4.364000581001164, 4.356519488996128, 4.378405446012039],
-      "wall_median_seconds": 4.364000581001164,
-      "peak_rss_kib": [311100, 313300, 389244],
-      "peak_rss_median_kib": 313300
+      "embedded_wall_seconds": [4.932635799, 4.611514730, 5.200906981, 4.345851088, 4.323096966, 4.420031715],
+      "external_wall_seconds": [4.593554704, 4.683760952, 4.607588956, 4.826962958, 4.716063720, 4.616149728],
+      "embedded_wall_median_seconds": 4.515773223,
+      "external_wall_median_seconds": 4.649955340,
+      "embedded_peak_rss_kib": [361600, 363584, 361120, 387604, 368656, 304344],
+      "external_peak_rss_kib": [372452, 364700, 410092, 355712, 313676, 357116],
+      "embedded_peak_rss_median_kib": 362592,
+      "external_peak_rss_median_kib": 360908
     },
     "stage_process_peaks_kib": {
-      "screening_no_candidate": 25892,
-      "one_alignment_worker": 162688,
-      "complete_query_conservative": 389244
+      "embedded_screening_no_candidate": 25892,
+      "external_screening_no_candidate": 26264,
+      "embedded_one_alignment_worker": 162688,
+      "external_one_alignment_worker": 162188
     }
+  },
+  "gzip_access": {
+    "parts": 20,
+    "total_index_bytes": 40719399,
+    "build_wall_seconds": 16.001212378,
+    "build_peak_rss_kib": 63376,
+    "query_wall_seconds": 5.644260477,
+    "query_peak_rss_kib": 354952,
+    "source_bytes_read": 210645647,
+    "candidate_recovery": "40/40",
+    "alignment_count": 321,
+    "biological_output_identical_to_indexed_fasta": true
   },
   "short_trace_matrix": {
     "lengths": [80, 100, 160, 250, 500, 1000],
@@ -72,59 +140,39 @@
     "candidate_cases": 62,
     "aligned_cases": 62,
     "candidate_recall": 0.96875,
+    "contig_recall": 0.9701492537313433,
+    "alignment_recall": 0.96875,
     "truth_base_recall": 0.9927027027027027,
     "exact_160_standalone_candidate": true,
-    "exact_160_standalone_aligned": true,
-    "missed_cases": [
-      {
-        "trace_length": 80,
-        "target_identity": 0.90,
-        "orientations": ["forward", "reverse"],
-        "reason": "no retained exact k21 witness"
-      }
-    ],
-    "special_cases_full": [
-      "origin_crossing",
-      "separate_fragments",
-      "overlap",
-      "rare_standalone"
-    ],
-    "biological_negative_evidence": {
-      "repeat_shared_selected_and_aligned": true,
-      "integrated_selected_and_aligned": true,
-      "unrelated_selected": false,
-      "interpretation": "sequence evidence is not an autonomous-element call"
-    }
+    "exact_160_standalone_aligned": true
   },
   "sequence_backed_alias_matrix": {
     "query_cases": 10,
-    "query_length_min": 2686,
-    "query_length_max": 168903,
     "expected_full_constructions": 27,
     "expected_full_recovered": 27,
-    "reverse_cases_recovered": true,
-    "origin_crossing_cases_recovered": true,
+    "reverse_cases": 10,
+    "reverse_cases_recovered": 10,
+    "origin_crossing_cases": 7,
+    "origin_crossing_cases_recovered": 7,
     "terminal_repeat_evidence_retained": true,
-    "wall_seconds_min": 0.06538278599327896,
-    "wall_seconds_max": 139.41585755100823,
-    "peak_rss_kib_max": 488556
+    "wall_seconds_min": 0.058794535,
+    "wall_seconds_max": 141.294752296,
+    "peak_rss_kib_max": 483124
   },
-  "component_removal": {
-    "name": "smaller contig signatures",
-    "total_index_bytes": 168608829,
-    "index_bytes_per_source_base": 0.278588727,
-    "screen_jam_bytes": 7429738,
-    "contig_signature_bytes": 2973440,
-    "packed_sequence_bytes": 151321656,
-    "controlled_base_precision": 1.0,
-    "controlled_base_recall": 0.9510875,
-    "controlled_interval_recall": 1.0,
-    "short_candidate_recall": 0.90625,
-    "selected": false
+  "acceptance": {
+    "accuracy_unchanged": true,
+    "index_materially_smaller": true,
+    "complete_query_median_rss_not_increased": true,
+    "indexed_fasta_time_competitive": true,
+    "selected": true,
+    "limits": [
+      "screen-only RSS was 372 KiB above the embedded screen-only run",
+      "external peak-RSS distributions overlap and the largest external sample was 410092 KiB",
+      "normal gzip reads each selected candidate assembly sequentially",
+      "the largest anonymous queries remain CPU-bound"
+    ]
   },
   "not_measured": [
-    "cloud Jam Index operation because Jam Index is local-only",
-    "batch Jam Index throughput",
     "read-derived assemblies",
     "independently supported natural positives",
     "1000-metagenome by 100-query release scale"
