@@ -7,7 +7,7 @@ use super::CliError;
 use crate::decide::QueryCoverage;
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
-use crate::report::{ContigInfo, Ending, Record, ReportError, ShardRecord, paf_lines};
+use crate::report::{Ending, Record, ReportError, ShardRecord, paf_lines};
 use crate::search::{
     Completion, EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
 };
@@ -376,7 +376,9 @@ impl Sink {
             .ok_or(ReportError::UnknownEntry(index))?;
         let record = ShardRecord {
             shard: open.name.clone(),
-            record: Record::from_event(query, &entry.name, event, || contigs_of(shard, index))?,
+            record: Record::from_event(query, &entry.name, event, || {
+                Ok::<_, CliError>(shard.packed(index)?.contigs()?)
+            })?,
         };
         self.write_lines(&record_lines(format, &record)?)
     }
@@ -422,18 +424,4 @@ fn json_line(shard: &str, record: Record) -> Result<String, CliError> {
         record,
     };
     Ok(serde_json::to_string(&record)?)
-}
-
-/// The names and lengths of the contigs of an entry.
-fn contigs_of(shard: &Shard, entry: u32) -> Result<Vec<ContigInfo>, CliError> {
-    let packed = shard.packed(entry)?;
-    (0..packed.contig_count())
-        .map(|contig| {
-            let range = packed.contig_range(contig)?;
-            Ok(ContigInfo {
-                name: String::from_utf8_lossy(&packed.contig_name(contig)?).into_owned(),
-                length: range.end - range.start,
-            })
-        })
-        .collect()
 }

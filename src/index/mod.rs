@@ -24,7 +24,7 @@ use thiserror::Error;
 pub use build::{BuildOptions, EntryInput, build_shard};
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
-pub use packed::PackedSequence;
+pub use packed::{Contig, PackedSequence};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
 pub use shard::{Shard, ShardStats};

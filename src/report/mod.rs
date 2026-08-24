@@ -7,7 +7,7 @@ mod decision;
 mod event;
 mod paf;
 
-pub use decision::{ContigInfo, DecisionRecord, FragmentRecord, Span, Strand};
+pub use decision::{DecisionRecord, FragmentRecord, Span, Strand};
 pub use event::{
     AlignWorkRecord, Confirmed, Dropped, Ending, LocateWorkRecord, Located, Possible, Record,
     ShardRecord, SketchWorkRecord, Summary, Unfinished,

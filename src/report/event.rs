@@ -2,7 +2,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{ContigInfo, DecisionRecord, ReportError};
+use super::{DecisionRecord, ReportError};
+use crate::index::Contig;
 use crate::search::align_stage::AlignedEntry;
 use crate::search::{Completion, DropReason, EntryEvent, SearchStage, SearchSummary, Stopped};
 use serde::{Deserialize, Serialize};
@@ -153,7 +154,7 @@ impl Record {
         query: &str,
         entry: &str,
         event: &EntryEvent,
-        contigs: impl FnOnce() -> Result<Vec<ContigInfo>, E>,
+        contigs: impl FnOnce() -> Result<Vec<Contig>, E>,
     ) -> Result<Self, E> {
         let (query, entry) = (query.to_string(), entry.to_string());
         Ok(match event {

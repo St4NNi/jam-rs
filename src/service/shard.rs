@@ -6,7 +6,7 @@ use super::ServiceError;
 use super::protocol::{Reply, SearchRequest};
 use crate::index::Shard;
 use crate::loss::MissModel;
-use crate::report::{ContigInfo, Record, ReportError};
+use crate::report::{Record, ReportError};
 use crate::search::{EntryEvent, SearchConfig, SearchControl, Searcher};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::sync_channel;
@@ -87,20 +87,8 @@ impl ServedShard {
         let index = event.entry();
         let entry = (self.shard.manifest().entries.get(index as usize))
             .ok_or(ReportError::UnknownEntry(index))?;
-        Record::from_event(query, &entry.name, event, || self.contigs(index))
-    }
-
-    /// The names and lengths of the contigs of an entry.
-    fn contigs(&self, entry: u32) -> Result<Vec<ContigInfo>, ServiceError> {
-        let packed = self.shard.packed(entry)?;
-        (0..packed.contig_count())
-            .map(|contig| {
-                let range = packed.contig_range(contig)?;
-                Ok(ContigInfo {
-                    name: String::from_utf8_lossy(&packed.contig_name(contig)?).into_owned(),
-                    length: range.end - range.start,
-                })
-            })
-            .collect()
+        Record::from_event(query, &entry.name, event, || {
+            Ok::<_, ServiceError>(self.shard.packed(index)?.contigs()?)
+        })
     }
 }

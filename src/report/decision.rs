@@ -6,6 +6,7 @@
 use super::ReportError;
 use crate::align::{Alignment, EditRun, Strand as AlignStrand, format_cigar};
 use crate::decide::{Decision, Fragment};
+use crate::index::Contig;
 use serde::{Deserialize, Serialize};
 
 /// A half-open range of positions, `start..end`.
@@ -30,13 +31,6 @@ impl From<AlignStrand> for Strand {
             AlignStrand::Reverse => Self::Reverse,
         }
     }
-}
-
-/// The name and length of one contig of an entry.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ContigInfo {
-    pub name: String,
-    pub length: u64,
 }
 
 /// One fragment of a mosaic, placed on the query and on a named contig.
@@ -88,7 +82,7 @@ impl FragmentRecord {
     pub fn new(
         fragment: &Fragment,
         new_bases: u64,
-        contigs: &[ContigInfo],
+        contigs: &[Contig],
     ) -> Result<Self, ReportError> {
         let contig = contigs
             .get(fragment.contig_index as usize)
@@ -151,7 +145,7 @@ impl DecisionRecord {
     pub fn new(
         query_length: u64,
         decision: &Decision,
-        contigs: &[ContigInfo],
+        contigs: &[Contig],
     ) -> Result<Self, ReportError> {
         let mosaic = &decision.mosaic;
         let counts = decision.counts;
@@ -187,8 +181,8 @@ mod tests {
     use crate::align::{Interval, parse_cigar};
     use crate::decide::DecisionRule;
 
-    fn contigs() -> Vec<ContigInfo> {
-        vec![ContigInfo {
+    fn contigs() -> Vec<Contig> {
+        vec![Contig {
             name: "plasmid_1".into(),
             length: 5_000,
         }]

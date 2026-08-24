@@ -141,6 +141,13 @@ pub struct PackedFile {
     pub packed_bases: Vec<u8>,
 }
 
+/// The name and length of one contig of an entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Contig {
+    pub name: String,
+    pub length: u64,
+}
+
 /// An open packed sequence. Contig starts, runs and block checksums stay in memory; names and
 /// bases are read on request.
 pub struct PackedSequence {
@@ -225,6 +232,19 @@ impl PackedSequence {
             return Err(IndexError::format("contig name"));
         }
         Ok(name)
+    }
+
+    /// The names and lengths of all contigs, in order; the names are read from the source.
+    pub fn contigs(&self) -> Result<Vec<Contig>, IndexError> {
+        (0..self.contig_count())
+            .map(|contig| {
+                let name = self.contig_name(contig)?;
+                Ok(Contig {
+                    name: String::from_utf8_lossy(&name).into_owned(),
+                    length: self.starts[contig + 1] - self.starts[contig],
+                })
+            })
+            .collect()
     }
 
     /// Entry coordinates of a contig.
