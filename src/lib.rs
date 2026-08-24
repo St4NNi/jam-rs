@@ -25,7 +25,10 @@ pub use jamhash::jamhash_u64 as jamhash_u64_v1;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::{BiasCommands, Cli, Commands, QueryKindArg, TopologyArg, TraceSensitivityArg};
+use cli::{
+    ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
+    QueryKindArg, TopologyArg, TraceSensitivityArg,
+};
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -107,6 +110,12 @@ pub fn run() -> Result<()> {
             input,
             output,
             block_bases,
+            sequence_block_policy,
+            sequence_block_codec,
+            gear_min_bases,
+            gear_target_bases,
+            gear_max_bases,
+            gear_table,
             primary_scale,
             rescue_scale,
             no_rescue,
@@ -114,7 +123,29 @@ pub fn run() -> Result<()> {
         } => handle_archive_command(
             input,
             output,
-            block_bases,
+            match sequence_block_policy {
+                ArchiveBlockPolicyArg::Fixed => {
+                    crate::sequence::SequenceBlockPolicy::Fixed { block_bases }
+                }
+                ArchiveBlockPolicyArg::Gear => crate::sequence::SequenceBlockPolicy::Gear {
+                    min_bases: gear_min_bases,
+                    target_bases: gear_target_bases,
+                    max_bases: gear_max_bases,
+                    table: match gear_table {
+                        ArchiveGearTableArg::SingleBase => crate::sequence::GearTable::SingleBase,
+                        ArchiveGearTableArg::Dinucleotide => {
+                            crate::sequence::GearTable::Dinucleotide
+                        }
+                        ArchiveGearTableArg::PackedFourBase => {
+                            crate::sequence::GearTable::PackedFourBase
+                        }
+                    },
+                },
+            },
+            match sequence_block_codec {
+                ArchiveBlockCodecArg::Raw2bit => crate::sequence::BlockCodec::Raw2Bit,
+                ArchiveBlockCodecArg::Zstd2bit => crate::sequence::BlockCodec::Zstd2Bit,
+            },
             primary_scale,
             (!no_rescue).then_some(rescue_scale),
             complexity,

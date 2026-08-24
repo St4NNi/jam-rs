@@ -69,7 +69,7 @@ fn remote_candidate_database_is_identity_cached_before_mmap() {
         &assembly,
         &archive,
         ArchiveBuildConfig {
-            block_bases: 512,
+            sequence_policy: jam_rs::sequence::SequenceBlockPolicy::Fixed { block_bases: 512 },
             k31_scale: 1,
             k21_scale: Some(1),
             ..ArchiveBuildConfig::default()
@@ -200,7 +200,7 @@ fn local_and_remote_jma_inputs_produce_identical_biological_evidence() {
         &assembly,
         &archive,
         ArchiveBuildConfig {
-            block_bases: 128,
+            sequence_policy: jam_rs::sequence::SequenceBlockPolicy::Fixed { block_bases: 128 },
             k31_scale: 1,
             k21_scale: Some(1),
             ..ArchiveBuildConfig::default()

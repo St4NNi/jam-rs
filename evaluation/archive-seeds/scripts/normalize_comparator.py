@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
+from common import ExperimentError, ensure_new_output, workspace_path
 from tools.trace_failure_analysis.comparators import ComparatorError, normalize_comparator
 from tools.trace_failure_analysis.intervals import IntervalError, parse_intervals
 
@@ -40,22 +41,25 @@ def main() -> int:
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
     try:
+        input_path = workspace_path(args.input, field="input")
+        output_path = ensure_new_output(args.output)
         truth = []
         if args.truth:
-            truth = parse_intervals(json.loads(args.truth.read_text(encoding="utf-8")), field="truth")
+            truth_path = workspace_path(args.truth, field="truth")
+            truth = parse_intervals(json.loads(truth_path.read_text(encoding="utf-8")), field="truth")
         result = normalize_comparator(
-            _read(args.input),
+            _read(input_path),
             args.query_length,
             truth_intervals=truth,
             query_deletion_operation=args.query_deletion_operation,
         )
-        args.output.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         serialized = json.dumps(result, indent=2 if args.pretty else None, sort_keys=True) + "\n"
-        with args.output.open("x", encoding="utf-8") as handle:
+        with output_path.open("x", encoding="utf-8") as handle:
             handle.write(serialized)
-    except (ComparatorError, IntervalError, OSError, json.JSONDecodeError) as exc:
+    except (ComparatorError, ExperimentError, IntervalError, OSError, json.JSONDecodeError) as exc:
         parser.exit(1, f"comparator normalization failed: {exc}\n")
-    print(json.dumps({"status": "pass", "output": args.output.as_posix()}))
+    print(json.dumps({"status": "pass", "output": output_path.as_posix()}))
     return 0
 
 

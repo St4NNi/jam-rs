@@ -104,6 +104,14 @@
           "type": "array",
           "items": {"$ref": "#/$defs/rescue_round"}
         },
+        "stages": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/stage_metrics"}
+        },
+        "alignment_retries": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/alignment_retry"}
+        },
         "performance_counters": {"$ref": "#/$defs/performance_counters"},
         "coverage": {
           "anyOf": [
@@ -136,6 +144,8 @@
         "primary_fragment_mosaic",
         "topology",
         "rescue_rounds",
+        "stages",
+        "alignment_retries",
         "performance_counters",
         "coverage",
         "warnings",
@@ -323,15 +333,15 @@
       ],
       "properties": {
         "hash_id": {"const": "jamhash_u64_v1"},
-        "seed_selection": {"const": "all_canonical_kmers_fracminhash"},
+        "seed_selection": {"const": "gap_directed_fracminhash_k31_k21"},
         "sensitivity": {"$ref": "#/$defs/sensitivity_config"},
         "max_chain_predecessors": {"type": "integer", "minimum": 1},
         "max_query_gap": {"type": "integer", "minimum": 1},
         "max_target_gap": {"type": "integer", "minimum": 1},
         "chain_gap_penalty": {"type": "integer", "minimum": 0},
-        "alignment_mode": {"const": "local_affine_gap_fixed_band"},
+        "alignment_mode": {"const": "local_affine_chain_corridor_with_semiglobal_refinement"},
         "x_drop": {"type": ["integer", "null"]},
-        "band_widening": {"const": false},
+        "band_widening": {"const": true},
         "coverage_mode": {"const": "nonredundant_supported_query_union"}
       },
       "additionalProperties": false
@@ -620,6 +630,44 @@
         "alignment_windows_attempted": {"type": "integer", "minimum": 0},
         "new_query_bases_supported": {"type": "integer", "minimum": 0},
         "elapsed_millis": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "stage_metrics": {
+      "type": "object",
+      "required": ["stage", "name", "seed_pages_read", "keys_tested", "occurrences_decoded", "anchors_retained", "chains_retained", "sequence_blocks_read", "alignment_attempts", "new_query_bases_supported", "wall_micros", "cpu_micros", "bytes_read"],
+      "properties": {
+        "stage": {"type": "integer", "minimum": 0},
+        "name": {"type": "string", "minLength": 1},
+        "seed_pages_read": {"type": "integer", "minimum": 0},
+        "keys_tested": {"type": "integer", "minimum": 0},
+        "occurrences_decoded": {"type": "integer", "minimum": 0},
+        "anchors_retained": {"type": "integer", "minimum": 0},
+        "chains_retained": {"type": "integer", "minimum": 0},
+        "sequence_blocks_read": {"type": "integer", "minimum": 0},
+        "alignment_attempts": {"type": "integer", "minimum": 0},
+        "new_query_bases_supported": {"type": "integer", "minimum": 0},
+        "wall_micros": {"type": "integer", "minimum": 0},
+        "cpu_micros": {"type": "integer", "minimum": 0},
+        "bytes_read": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "alignment_retry": {
+      "type": "object",
+      "required": ["attempted_widths", "selected_width", "retries", "band_edge_touched", "predicted_drift", "chain_span_under_explained", "retry_cap_reached", "memory_bound_reached", "corridor_used", "semiglobal_attempted", "semiglobal_accepted"],
+      "properties": {
+        "attempted_widths": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "selected_width": {"type": "integer", "minimum": 0},
+        "retries": {"type": "integer", "minimum": 0},
+        "band_edge_touched": {"type": "boolean"},
+        "predicted_drift": {"type": "boolean"},
+        "chain_span_under_explained": {"type": "boolean"},
+        "retry_cap_reached": {"type": "boolean"},
+        "memory_bound_reached": {"type": "boolean"},
+        "corridor_used": {"type": "boolean"},
+        "semiglobal_attempted": {"type": "boolean"},
+        "semiglobal_accepted": {"type": "boolean"}
       },
       "additionalProperties": false
     },

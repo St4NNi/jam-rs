@@ -56,6 +56,8 @@ fn result() -> TraceMetagenomeResult {
         primary_fragment_mosaic: None,
         topology: None,
         rescue_rounds: Vec::new(),
+        stages: Vec::new(),
+        alignment_retries: Vec::new(),
         performance_counters: CandidatePerformanceCounters::default(),
         coverage: None,
         warnings: Vec::new(),
@@ -158,7 +160,7 @@ fn serialized_fixture_records_have_schema_and_required_payloads() {
     assert_eq!(values[0]["algorithms"], values[1]["algorithms"]);
     assert_eq!(
         values[0]["algorithm"]["parameters"]["alignment_mode"],
-        "local_affine_gap_fixed_band"
+        "local_affine_chain_corridor_with_semiglobal_refinement"
     );
     assert!(values[1].get("alignments").unwrap().is_array());
     assert!(values[2].get("resource_metrics").unwrap().is_object());

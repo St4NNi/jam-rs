@@ -80,6 +80,14 @@ harness = false
 name = "gear_variants"
 harness = false
 
+[[bench]]
+name = "archive_policies"
+harness = false
+
+[[bench]]
+name = "trace_seed_methods"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true

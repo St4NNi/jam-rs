@@ -1,10 +1,72 @@
 {
   "schema_version": "archive-seeds-experiment-manifest-v1",
-  "name": "seed-screen-example",
+  "name": "seed-ablation-matrix-example",
   "kind": "seed_screen",
   "cases": [
-    {"name": "fracminhash-k31-k21", "command": ["jam", "trace", "--seed-scheme", "fracminhash-k31-k21"], "metadata": {"screen": "small_correctness"}},
-    {"name": "gear-fragment-exact", "command": ["jam", "trace", "--seed-scheme", "gear-fragment-exact"], "metadata": {"screen": "small_correctness"}},
-    {"name": "syncmer-k31", "command": ["jam", "trace", "--seed-scheme", "syncmer-k31"], "metadata": {"screen": "small_correctness"}}
+    {
+      "name": "fracminhash-k31-primary",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "fracminhash-k31", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "fracminhash-k31", "family": "fracminhash", "screen": "small-correctness-and-conservation", "timeout_seconds": 60}
+    },
+    {
+      "name": "fracminhash-k21-rescue",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "fracminhash-k21", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "fracminhash-k21", "family": "fracminhash", "screen": "small-correctness-and-conservation", "timeout_seconds": 60}
+    },
+    {
+      "name": "denser-gap-k21",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "denser-k21-gap", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "denser-k21-gap", "family": "gap-rescue", "screen": "40-case-accuracy", "timeout_seconds": 60}
+    },
+    {
+      "name": "mixed-k31-k21-chain",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "mixed-k31-k21", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "mixed-k31-k21", "family": "cascade", "screen": "40-case-accuracy", "timeout_seconds": 60}
+    },
+    {
+      "name": "gear-fragment-exact",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "gear-fragment-exact", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "gear-fragment-exact", "family": "gear", "variant": "A-exact-fragments", "screen": "small-correctness-and-boundary-distribution", "timeout_seconds": 60}
+    },
+    {
+      "name": "gear-selected-k31-anchor",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "gear-anchor-k31", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "gear-anchor-k31", "family": "gear", "variant": "B-selected-anchors", "screen": "40-case-accuracy", "timeout_seconds": 60}
+    },
+    {
+      "name": "gear-selected-k21-rescue-anchor",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "gear-anchor-k21-rescue", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "gear-anchor-k21-rescue", "family": "gear", "variant": "B-selected-anchors", "screen": "40-case-accuracy", "timeout_seconds": 60}
+    },
+    {
+      "name": "gear-fragment-mini-sketch",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "gear-fragment-mini-sketch", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "gear-fragment-mini-sketch", "family": "gear", "variant": "C-mini-sketch", "screen": "repeat-heavy-and-short-fragments", "timeout_seconds": 60}
+    },
+    {
+      "name": "syncmer-k31-closed",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "syncmer-k31", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "syncmer-k31", "family": "syncmer", "screen": "small-correctness-and-conservation", "timeout_seconds": 60}
+    },
+    {
+      "name": "syncmer-k21-rescue",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "syncmer-k21-rescue", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "syncmer-k21-rescue", "family": "syncmer", "screen": "40-case-accuracy", "timeout_seconds": 60}
+    },
+    {
+      "name": "spaced-31-weight21",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "spaced-31-weight21", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "spaced-31-weight21", "family": "spaced", "screen": "repeat-heavy-and-short-fragments", "timeout_seconds": 60}
+    },
+    {
+      "name": "strobemer-21x2",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "strobemer-21x2", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "strobemer-21x2", "family": "strobemer", "screen": "40-case-accuracy", "timeout_seconds": 60}
+    },
+    {
+      "name": "selected-gap-directed-cascade",
+      "command": ["cargo", "bench", "--bench", "trace_seed_methods", "selected-mixed-fracminhash", "--", "--sample-size", "10"],
+      "metadata": {"scheme": "cascade", "family": "cascade", "stages": ["fracminhash-k31", "gap-directed-mixed-k31-k21"], "screen": "staged-selection", "timeout_seconds": 60}
+    }
   ]
 }

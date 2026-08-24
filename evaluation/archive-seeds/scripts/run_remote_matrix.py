@@ -5,12 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(ROOT))
-from tools.trace_failure_analysis.experiment import ExperimentError, load_manifest, run_manifest, write_new
+from common import ExperimentError, ensure_new_output, load_manifest, run_manifest, write_new
 
 
 def main() -> int:
@@ -19,9 +16,15 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument("--pretty", action="store_true")
+    parser.add_argument("--max-case-seconds", type=float, default=60.0)
     args = parser.parse_args()
     try:
-        result = run_manifest(load_manifest(args.manifest, "remote_matrix"), execute=args.execute)
+        ensure_new_output(args.output)
+        result = run_manifest(
+            load_manifest(args.manifest, "remote_matrix"),
+            execute=args.execute,
+            max_case_seconds=args.max_case_seconds,
+        )
         write_new(args.output, result, pretty=args.pretty)
     except (ExperimentError, OSError) as exc:
         parser.exit(1, f"remote matrix failed: {exc}\n")

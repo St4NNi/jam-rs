@@ -10,6 +10,7 @@ use crate::trace::config::AlignmentScoring;
 use crate::trace::model::{
     AlignmentRole, BaseAlignment, BaseInterval, EditOperation, EditRun, SeedEvidence, Strand,
 };
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use thiserror::Error;
 
@@ -208,6 +209,9 @@ impl AlignmentCorridor {
             let left = pair[0];
             let right = pair[1];
             let left_query_end = left.query_end().ok_or(AlignmentError::LengthOverflow)?;
+            if query_index >= left.query_position && query_index <= left_query_end {
+                return signed_add(left.target_position, query_index, left.query_position);
+            }
             let right_query = right.query_position;
             if query_index > right_query {
                 continue;
@@ -300,7 +304,7 @@ fn band_bounds(
 }
 
 /// Details of bounded band retries and anchored refinement.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AlignmentRetryMetadata {
     pub attempted_widths: Vec<u32>,
     pub selected_width: u32,

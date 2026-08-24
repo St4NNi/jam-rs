@@ -16,7 +16,7 @@ use crate::jma::sequence_builder::{
 use crate::jma::writer::{ArchiveParts, encode_archive_with_min_entropy};
 use crate::jma::{ContigMetadata, JmaError, JmaResult};
 use crate::sequence::{BlockCodec, SequenceBlockPolicy};
-use needletail::{Sequence, parse_fastx_file};
+use needletail::parse_fastx_file;
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -29,7 +29,8 @@ pub const DEFAULT_FLAGS: u32 = 0;
 /// Configuration for a complete JMA archive build.
 #[derive(Clone, Copy, Debug)]
 pub struct ArchiveBuildConfig {
-    pub block_bases: usize,
+    pub sequence_policy: SequenceBlockPolicy,
+    pub sequence_codec: BlockCodec,
     pub k31_scale: u64,
     pub k21_scale: Option<u64>,
     pub min_entropy: Option<f64>,
@@ -39,7 +40,10 @@ pub struct ArchiveBuildConfig {
 impl Default for ArchiveBuildConfig {
     fn default() -> Self {
         Self {
-            block_bases: DEFAULT_BLOCK_BASES,
+            sequence_policy: SequenceBlockPolicy::Fixed {
+                block_bases: DEFAULT_BLOCK_BASES,
+            },
+            sequence_codec: BlockCodec::Raw2Bit,
             k31_scale: SeedBuildConfig::default().k31_scale,
             k21_scale: SeedBuildConfig::default().k21_scale,
             min_entropy: SeedBuildConfig::default().min_entropy,
@@ -103,10 +107,8 @@ pub fn build_archive_from_fasta<P: AsRef<Path>>(
             id,
             &record.sequence,
             IndexedSequenceBuildConfig {
-                policy: SequenceBlockPolicy::Fixed {
-                    block_bases: config.block_bases,
-                },
-                codec: BlockCodec::Raw2Bit,
+                policy: config.sequence_policy,
+                codec: config.sequence_codec,
             },
         )?);
         seed_inputs.push(SeedInput {
@@ -173,11 +175,8 @@ pub fn build<P: AsRef<Path>>(
 }
 
 fn validate_config(config: ArchiveBuildConfig) -> JmaResult<()> {
-    if config.block_bases == 0 {
-        return Err(JmaError::CorruptSection(
-            "sequence block size must be greater than zero".to_string(),
-        ));
-    }
+    crate::sequence::split_contig(b"A", config.sequence_policy)
+        .map_err(|error| JmaError::CorruptSection(error.to_string()))?;
     if config.k31_scale == 0 || config.k21_scale == Some(0) {
         return Err(JmaError::CorruptSection(
             "seed scales must be greater than zero".to_string(),
@@ -250,7 +249,11 @@ fn read_contigs(path: &Path) -> JmaResult<Vec<InputContig>> {
                 "input contains a contig with an empty name".to_string(),
             ));
         }
-        let sequence = record.normalize(false).into_owned();
+        let sequence = record
+            .seq()
+            .iter()
+            .map(|base| base.to_ascii_uppercase())
+            .collect();
         records.push(InputContig { name, sequence });
     }
     Ok(records)
@@ -331,7 +334,7 @@ mod tests {
             b">first\nACGTNacgt\n>second\nACGTTGCATGTCAGTAGGCATCAGTACCGATGCTAGCTAGGCTAACGTTACGATCGATGCA\n",
         );
         let config = ArchiveBuildConfig {
-            block_bases: 4,
+            sequence_policy: SequenceBlockPolicy::Fixed { block_bases: 4 },
             k31_scale: 1,
             k21_scale: Some(1),
             ..ArchiveBuildConfig::default()

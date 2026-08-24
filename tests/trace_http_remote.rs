@@ -32,7 +32,7 @@ fn archive_bytes() -> Vec<u8> {
         &input,
         &output,
         ArchiveBuildConfig {
-            block_bases: 32,
+            sequence_policy: jam_rs::sequence::SequenceBlockPolicy::Fixed { block_bases: 32 },
             k31_scale: 1,
             k21_scale: Some(1),
             ..ArchiveBuildConfig::default()

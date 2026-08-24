@@ -3,7 +3,20 @@
   "name": "matched-recall-comparators-example",
   "kind": "comparators",
   "cases": [
-    {"name": "blastn-candidate", "command": ["blastn", "-query", "query.fa", "-db", "candidate.fa"], "metadata": {"tool": "blastn", "scope": "candidate"}},
-    {"name": "minimap2-candidate", "command": ["minimap2", "-x", "asm20", "candidate.fa", "query.fa"], "metadata": {"tool": "minimap2", "scope": "candidate"}}
+    {
+      "name": "blastn-candidate-json2",
+      "command": ["blastn", "-query", "tests/data/trace_mge/query_linear_plasmid.fa", "-subject", "tools/out/archive-seeds/candidate.fa", "-outfmt", "15", "-max_target_seqs", "50"],
+      "metadata": {"tool": "blastn", "scope": "jam-selected-candidate", "comparator_format": "blast-json", "normalization": {"format": "blast-json", "query_length": 6, "truth_path": "tests/data/archive_seeds/comparator_truth.json", "query_deletion_operation": "I"}, "target_recall": 0.95, "recall_tolerance": 0.01, "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tools/out/archive-seeds/candidate.fa"], "measurement": "matched-recall-wall-cpu-rss"}
+    },
+    {
+      "name": "minimap2-candidate-paf",
+      "command": ["minimap2", "-x", "asm20", "-c", "--cs=long", "tools/out/archive-seeds/candidate.fa", "tests/data/trace_mge/query_linear_plasmid.fa"],
+      "metadata": {"tool": "minimap2", "scope": "jam-selected-candidate", "comparator_format": "paf", "normalization": {"format": "paf", "query_length": 6, "truth_path": "tests/data/archive_seeds/comparator_truth.json", "query_deletion_operation": "I"}, "target_recall": 0.95, "recall_tolerance": 0.01, "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tools/out/archive-seeds/candidate.fa"], "measurement": "matched-recall-wall-cpu-rss"}
+    },
+    {
+      "name": "jam-normalized-reference",
+      "command": ["python3", "-c", "import json; print(json.dumps(json.load(open('tests/data/archive_seeds/comparator_input.json'))))"],
+      "metadata": {"tool": "jam", "scope": "candidate", "comparator_format": "json", "normalization": {"format": "json", "query_length": 6, "truth_path": "tests/data/archive_seeds/comparator_truth.json", "query_deletion_operation": "I"}, "target_recall": 0.95, "recall_tolerance": 0.01, "input_paths": ["tests/data/archive_seeds/comparator_input.json"], "measurement": "shared-interval-normalization-reference"}
+    }
   ]
 }

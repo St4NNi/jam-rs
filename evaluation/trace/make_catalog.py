@@ -4,8 +4,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 from pathlib import Path
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def main() -> int:
@@ -18,7 +27,7 @@ def main() -> int:
     args = parser.parse_args()
     if args.mode == "http" and not args.base_url:
         parser.error("--base-url is required in HTTP mode")
-    rows: list[tuple[str, str, str, str]] = []
+    rows: list[tuple[str, str, str]] = []
     assemblies = sorted(
         path
         for path in args.assemblies_dir.iterdir()
@@ -27,32 +36,19 @@ def main() -> int:
     for assembly in assemblies:
         archive_name = f"{assembly.name}.jma"
         archive = args.jma_dir / archive_name
-        index_name = f"{archive_name}.idx.json"
-        index = args.jma_dir / index_name
         if not archive.is_file():
             raise SystemExit(f"missing JMA archive for {assembly.name}: {archive}")
-        if not index.is_file():
-            raise SystemExit(f"missing JMA range index for {assembly.name}: {index}")
         if args.mode == "local":
             resource = os.path.relpath(archive, args.output.parent)
-            index_resource = os.path.relpath(index, args.output.parent)
         else:
             resource = f"{args.base_url.rstrip('/')}/{archive_name}"
-            index_resource = f"{args.base_url.rstrip('/')}/{index_name}"
-        rows.append(
-            (
-                assembly.name,
-                resource,
-                index_resource,
-                os.path.relpath(assembly, args.output.parent),
-            )
-        )
+        rows.append((assembly.name, resource, sha256(archive)))
     if not rows:
         raise SystemExit(f"no assemblies found in {args.assemblies_dir}")
     with args.output.open("w", encoding="utf-8") as handle:
-        handle.write("metagenome_id\tjma\tjma_index\traw\n")
-        for metagenome_id, jma, jma_index, raw in rows:
-            handle.write(f"{metagenome_id}\t{jma}\t{jma_index}\t{raw}\n")
+        handle.write("metagenome_id\tresource_uri\tsha256\n")
+        for metagenome_id, resource_uri, checksum in rows:
+            handle.write(f"{metagenome_id}\t{resource_uri}\t{checksum}\n")
     return 0
 
 

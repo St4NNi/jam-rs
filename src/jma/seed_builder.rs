@@ -37,8 +37,8 @@ pub struct SeedBuildConfig {
 impl Default for SeedBuildConfig {
     fn default() -> Self {
         Self {
-            k31_scale: 200,
-            k21_scale: Some(500),
+            k31_scale: 100,
+            k21_scale: Some(100),
             min_entropy: None,
         }
     }

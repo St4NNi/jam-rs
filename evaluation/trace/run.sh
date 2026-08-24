@@ -154,7 +154,7 @@ measure_command \
     jma_index catalog_index jma-archive none none "$THREADS" "" "" \
     "$PYTHON" "$ROOT/evaluation/trace/build_archives.py" --jam "$JAM" \
     --assemblies-dir "$WORK/dataset/assemblies" --output-dir "$WORK/indexes/jma" \
-    --primary-scale 100 --rescue-scale 200 --threads "$THREADS" --memory-target 4
+    --primary-scale 100 --rescue-scale 100 --threads "$THREADS" --memory-target 4
 
 "$PYTHON" "$ROOT/evaluation/trace/make_catalog.py" \
     --assemblies-dir "$WORK/dataset/assemblies" --jma-dir "$WORK/indexes/jma" \

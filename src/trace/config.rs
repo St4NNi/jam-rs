@@ -94,15 +94,16 @@ impl TraceAlgorithmMetadata {
             version: super::TRACE_ALGORITHM_VERSION,
             parameters: TraceAlgorithmParameters {
                 hash_id: "jamhash_u64_v1".to_string(),
-                seed_selection: "all_canonical_kmers_fracminhash".to_string(),
+                seed_selection: "gap_directed_fracminhash_k31_k21".to_string(),
                 sensitivity,
                 max_chain_predecessors,
                 max_query_gap: max_gap,
                 max_target_gap: max_gap,
                 chain_gap_penalty: 1,
-                alignment_mode: "local_affine_gap_fixed_band".to_string(),
+                alignment_mode: "local_affine_chain_corridor_with_semiglobal_refinement"
+                    .to_string(),
                 x_drop: None,
-                band_widening: false,
+                band_widening: true,
                 coverage_mode: "nonredundant_supported_query_union".to_string(),
             },
         }
@@ -206,7 +207,7 @@ impl SensitivityConfig {
                 },
                 rescue: Some(SeedSensitivity {
                     k: 21,
-                    scale: 200,
+                    scale: 100,
                     max_occurrences: 256,
                 }),
                 max_candidates: 250,
@@ -339,16 +340,16 @@ mod tests {
         assert_eq!(metadata.parameters.hash_id, "jamhash_u64_v1");
         assert_eq!(
             metadata.parameters.seed_selection,
-            "all_canonical_kmers_fracminhash"
+            "gap_directed_fracminhash_k31_k21"
         );
         assert_eq!(metadata.parameters.max_chain_predecessors, 256);
         assert_eq!(metadata.parameters.chain_gap_penalty, 1);
         assert_eq!(
             metadata.parameters.alignment_mode,
-            "local_affine_gap_fixed_band"
+            "local_affine_chain_corridor_with_semiglobal_refinement"
         );
         assert_eq!(metadata.parameters.x_drop, None);
-        assert!(!metadata.parameters.band_widening);
+        assert!(metadata.parameters.band_widening);
         assert_eq!(
             metadata.parameters.coverage_mode,
             "nonredundant_supported_query_union"

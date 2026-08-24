@@ -62,7 +62,7 @@ fn build_archive(
         assembly,
         archive,
         ArchiveBuildConfig {
-            block_bases,
+            sequence_policy: jam_rs::sequence::SequenceBlockPolicy::Fixed { block_bases },
             k31_scale,
             k21_scale: Some(k21_scale),
             ..ArchiveBuildConfig::default()

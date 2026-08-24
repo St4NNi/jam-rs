@@ -266,6 +266,8 @@ fn example_result() -> TraceMetagenomeResult {
         primary_fragment_mosaic: None,
         topology: None,
         rescue_rounds: Vec::new(),
+        stages: Vec::new(),
+        alignment_retries: Vec::new(),
         performance_counters: CandidatePerformanceCounters::default(),
         coverage: Some(CoverageSummary {
             plasmid_length: 4_000,

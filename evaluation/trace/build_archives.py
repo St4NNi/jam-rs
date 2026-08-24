@@ -29,7 +29,18 @@ def main() -> int:
     parser.add_argument("--assemblies-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--primary-scale", type=int, default=100)
-    parser.add_argument("--rescue-scale", type=int, default=200)
+    parser.add_argument("--rescue-scale", type=int, default=100)
+    parser.add_argument("--sequence-block-policy", choices=("fixed", "gear"), default="fixed")
+    parser.add_argument("--sequence-block-codec", choices=("raw2bit", "zstd2bit"), default="raw2bit")
+    parser.add_argument("--block-bases", type=int, default=1024 * 1024)
+    parser.add_argument("--gear-min-bases", type=int, default=16 * 1024)
+    parser.add_argument("--gear-target-bases", type=int, default=64 * 1024)
+    parser.add_argument("--gear-max-bases", type=int, default=256 * 1024)
+    parser.add_argument(
+        "--gear-table",
+        choices=("single-base", "dinucleotide", "packed-four-base"),
+        default="single-base",
+    )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--memory-target", type=int, default=4)
     args = parser.parse_args()
@@ -62,22 +73,32 @@ def main() -> int:
             str(args.primary_scale),
             "--rescue-scale",
             str(args.rescue_scale),
+            "--sequence-block-policy",
+            args.sequence_block_policy,
+            "--sequence-block-codec",
+            args.sequence_block_codec,
+            "--block-bases",
+            str(args.block_bases),
+            "--gear-min-bases",
+            str(args.gear_min_bases),
+            "--gear-target-bases",
+            str(args.gear_target_bases),
+            "--gear-max-bases",
+            str(args.gear_max_bases),
+            "--gear-table",
+            args.gear_table,
         ]
         subprocess.run(command, check=True)
-        index = Path(f"{output}.idx.json")
-        if not index.is_file():
-            raise SystemExit(f"archive command did not create range index: {index}")
+        if not output.is_file():
+            raise SystemExit(f"archive command did not create JMA object: {output}")
         built.append(
             {
                 "metagenome_id": assembly.name,
-                "assembly": str(assembly.resolve()),
-                "assembly_sha256": sha256(assembly),
-                "jma": str(output.resolve()),
-                "jma_bytes": output.stat().st_size,
-                "jma_sha256": sha256(output),
-                "jma_index": str(index.resolve()),
-                "jma_index_bytes": index.stat().st_size,
-                "jma_index_sha256": sha256(index),
+                "source_assembly": str(assembly.resolve()),
+                "source_assembly_sha256": sha256(assembly),
+                "resource_uri": str(output.resolve()),
+                "archive_bytes": output.stat().st_size,
+                "sha256": sha256(output),
             }
         )
     (args.output_dir / "build_manifest.json").write_text(
@@ -88,6 +109,8 @@ def main() -> int:
                 "rescue_k": 21,
                 "primary_scale": args.primary_scale,
                 "rescue_scale": args.rescue_scale,
+                "sequence_block_policy": args.sequence_block_policy,
+                "sequence_block_codec": args.sequence_block_codec,
                 "archives": built,
             },
             indent=2,

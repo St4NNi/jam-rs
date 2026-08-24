@@ -58,6 +58,28 @@ pub enum TopologyArg {
     Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ArchiveBlockPolicyArg {
+    #[default]
+    Fixed,
+    Gear,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ArchiveBlockCodecArg {
+    #[default]
+    Raw2bit,
+    Zstd2bit,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum ArchiveGearTableArg {
+    #[default]
+    SingleBase,
+    Dinucleotide,
+    PackedFourBase,
+}
+
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
     /// Sketch one or more files and write the result to an output file
@@ -130,7 +152,7 @@ pub enum Commands {
         top_references: usize,
     },
 
-    /// Build a JMA v1 positional archive for trace searches
+    /// Build a self-contained JMA format 1 archive for trace searches
     #[command(arg_required_else_help = true)]
     Archive {
         /// Metagenomic assembly FASTA/FASTQ input
@@ -142,11 +164,29 @@ pub enum Commands {
         /// Maximum decoded bases per packed sequence block
         #[arg(long, default_value = "1048576")]
         block_bases: usize,
+        /// Sequence-block boundary policy
+        #[arg(long, value_enum, default_value = "fixed")]
+        sequence_block_policy: ArchiveBlockPolicyArg,
+        /// Independently decodable two-bit block codec
+        #[arg(long, value_enum, default_value = "raw2bit")]
+        sequence_block_codec: ArchiveBlockCodecArg,
+        /// Minimum bases in a Gear sequence block
+        #[arg(long, default_value = "16384")]
+        gear_min_bases: usize,
+        /// Target bases in a Gear sequence block
+        #[arg(long, default_value = "65536")]
+        gear_target_bases: usize,
+        /// Maximum bases in a Gear sequence block
+        #[arg(long, default_value = "262144")]
+        gear_max_bases: usize,
+        /// DNA Gear table used only for sequence-block boundaries
+        #[arg(long, value_enum, default_value = "single-base")]
+        gear_table: ArchiveGearTableArg,
         /// Primary k=31 FracMinHash scale
-        #[arg(long, default_value = "200")]
+        #[arg(long, default_value = "100")]
         primary_scale: u64,
         /// Rescue k=21 FracMinHash scale
-        #[arg(long, default_value = "500")]
+        #[arg(long, default_value = "100")]
         rescue_scale: u64,
         /// Omit the k=21 rescue seed section
         #[arg(long)]

@@ -1,9 +1,8 @@
-//! Raw FASTA/FASTQ resource access for trace candidates.
+//! Raw FASTA/FASTQ access for query parsing and explicit diagnostics.
 //!
-//! The indexed path is preferred by the runner.  This module is the explicit
-//! fallback for a catalog row without JMA, and uses the same resource
-//! abstraction so local paths, file URLs, HTTP(S), S3, and compressed parser
-//! input have identical redaction and metric behavior.
+//! Production candidate tracing uses self-contained archives. This parser
+//! remains available for archive construction tests and correctness
+//! comparisons without becoming an automatic candidate fallback.
 
 use crate::resource::local::LocalResource;
 use crate::resource::object::ObjectResource;

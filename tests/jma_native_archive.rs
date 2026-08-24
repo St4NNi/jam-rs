@@ -35,7 +35,7 @@ fn native_archive_uses_mmap_and_batches_sequence_ranges() {
         &fasta,
         &archive,
         ArchiveBuildConfig {
-            block_bases: 4096,
+            sequence_policy: jam_rs::sequence::SequenceBlockPolicy::Fixed { block_bases: 4096 },
             k31_scale: 1,
             k21_scale: Some(1),
             ..ArchiveBuildConfig::default()

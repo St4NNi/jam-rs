@@ -1,9 +1,37 @@
 {
   "schema_version": "archive-seeds-experiment-manifest-v1",
-  "name": "remote-range-example",
+  "name": "mock-range-remote-cache-concurrency-matrix-example",
   "kind": "remote_matrix",
   "cases": [
-    {"name": "mock-http-cold-concurrency-2", "command": ["jam", "trace", "--resource-mode", "remote-range", "--io-concurrency", "2", "--cache-state", "cold"], "metadata": {"source": "mock_http_range", "cache": "cold", "io_concurrency": 2}},
-    {"name": "mock-http-warm-concurrency-8", "command": ["jam", "trace", "--resource-mode", "remote-range", "--io-concurrency", "8", "--cache-state", "warm"], "metadata": {"source": "mock_http_range", "cache": "warm", "io_concurrency": 8}}
+    {
+      "name": "mock-http-cold-concurrency-1",
+      "command": ["jam", "--threads", "4", "trace", "--query", "tests/data/trace_mge/query_linear_plasmid.fa", "--database", "tests/data/trace/catalog.jam", "--metagenomes", "tools/out/archive-seeds/remote-catalog.tsv", "--output", "tools/out/archive-seeds/remote-cold-c1.jsonl", "--sensitivity", "sensitive", "--io-concurrency", "1", "--cache-dir", "tools/out/archive-seeds/jam-cache-cold-c1"],
+      "metadata": {"backend": "native_jma", "source": "mock_http_range", "cache_state": "cold", "cache_policy": "empty checksum-bound cache; mock server page cache is not controlled", "io_concurrency": 1, "head_requests": true, "range_only_required": true, "output_paths": ["tools/out/archive-seeds/remote-cold-c1.jsonl"], "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tests/data/trace/catalog.jam", "tools/out/archive-seeds/remote-catalog.tsv"], "measurement": "remote-ranges-bytes-requests-and-latency"}
+    },
+    {
+      "name": "mock-http-cold-concurrency-4",
+      "command": ["jam", "--threads", "4", "trace", "--query", "tests/data/trace_mge/query_linear_plasmid.fa", "--database", "tests/data/trace/catalog.jam", "--metagenomes", "tools/out/archive-seeds/remote-catalog.tsv", "--output", "tools/out/archive-seeds/remote-cold-c4.jsonl", "--sensitivity", "sensitive", "--io-concurrency", "4", "--cache-dir", "tools/out/archive-seeds/jam-cache-cold-c4"],
+      "metadata": {"backend": "native_jma", "source": "mock_http_range", "cache_state": "cold", "cache_policy": "empty checksum-bound cache; mock server page cache is not controlled", "io_concurrency": 4, "head_requests": true, "range_only_required": true, "output_paths": ["tools/out/archive-seeds/remote-cold-c4.jsonl"], "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tests/data/trace/catalog.jam", "tools/out/archive-seeds/remote-catalog.tsv"], "measurement": "remote-ranges-bytes-requests-and-latency"}
+    },
+    {
+      "name": "mock-http-cold-concurrency-8",
+      "command": ["jam", "--threads", "8", "trace", "--query", "tests/data/trace_mge/query_linear_plasmid.fa", "--database", "tests/data/trace/catalog.jam", "--metagenomes", "tools/out/archive-seeds/remote-catalog.tsv", "--output", "tools/out/archive-seeds/remote-cold-c8.jsonl", "--sensitivity", "sensitive", "--io-concurrency", "8", "--cache-dir", "tools/out/archive-seeds/jam-cache-cold-c8"],
+      "metadata": {"backend": "native_jma", "source": "mock_http_range", "cache_state": "cold", "cache_policy": "empty checksum-bound cache; mock server page cache is not controlled", "io_concurrency": 8, "head_requests": true, "range_only_required": true, "output_paths": ["tools/out/archive-seeds/remote-cold-c8.jsonl"], "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tests/data/trace/catalog.jam", "tools/out/archive-seeds/remote-catalog.tsv"], "measurement": "remote-ranges-bytes-requests-and-latency"}
+    },
+    {
+      "name": "mock-http-warm-concurrency-1",
+      "command": ["jam", "--threads", "4", "trace", "--query", "tests/data/trace_mge/query_linear_plasmid.fa", "--database", "tests/data/trace/catalog.jam", "--metagenomes", "tools/out/archive-seeds/remote-catalog.tsv", "--output", "tools/out/archive-seeds/remote-warm-c1.jsonl", "--sensitivity", "sensitive", "--io-concurrency", "1", "--cache-dir", "tools/out/archive-seeds/jam-cache-warm-c1"],
+      "metadata": {"backend": "native_jma", "source": "mock_http_range", "cache_state": "warm", "cache_policy": "same checksum-bound cache populated by a preceding query; mock server page cache is not controlled", "io_concurrency": 1, "head_requests": true, "range_only_required": true, "output_paths": ["tools/out/archive-seeds/remote-warm-c1.jsonl"], "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tests/data/trace/catalog.jam", "tools/out/archive-seeds/remote-catalog.tsv"], "measurement": "remote-ranges-bytes-requests-and-latency"}
+    },
+    {
+      "name": "mock-http-warm-concurrency-4",
+      "command": ["jam", "--threads", "4", "trace", "--query", "tests/data/trace_mge/query_linear_plasmid.fa", "--database", "tests/data/trace/catalog.jam", "--metagenomes", "tools/out/archive-seeds/remote-catalog.tsv", "--output", "tools/out/archive-seeds/remote-warm-c4.jsonl", "--sensitivity", "sensitive", "--io-concurrency", "4", "--cache-dir", "tools/out/archive-seeds/jam-cache-warm-c4"],
+      "metadata": {"backend": "native_jma", "source": "mock_http_range", "cache_state": "warm", "cache_policy": "same checksum-bound cache populated by a preceding query; mock server page cache is not controlled", "io_concurrency": 4, "head_requests": true, "range_only_required": true, "output_paths": ["tools/out/archive-seeds/remote-warm-c4.jsonl"], "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tests/data/trace/catalog.jam", "tools/out/archive-seeds/remote-catalog.tsv"], "measurement": "remote-ranges-bytes-requests-and-latency"}
+    },
+    {
+      "name": "mock-http-warm-concurrency-8",
+      "command": ["jam", "--threads", "8", "trace", "--query", "tests/data/trace_mge/query_linear_plasmid.fa", "--database", "tests/data/trace/catalog.jam", "--metagenomes", "tools/out/archive-seeds/remote-catalog.tsv", "--output", "tools/out/archive-seeds/remote-warm-c8.jsonl", "--sensitivity", "sensitive", "--io-concurrency", "8", "--cache-dir", "tools/out/archive-seeds/jam-cache-warm-c8"],
+      "metadata": {"backend": "native_jma", "source": "mock_http_range", "cache_state": "warm", "cache_policy": "same checksum-bound cache populated by a preceding query; mock server page cache is not controlled", "io_concurrency": 8, "head_requests": true, "range_only_required": true, "output_paths": ["tools/out/archive-seeds/remote-warm-c8.jsonl"], "input_paths": ["tests/data/trace_mge/query_linear_plasmid.fa", "tests/data/trace/catalog.jam", "tools/out/archive-seeds/remote-catalog.tsv"], "measurement": "remote-ranges-bytes-requests-and-latency"}
+    }
   ]
 }

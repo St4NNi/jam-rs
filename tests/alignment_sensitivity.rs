@@ -18,6 +18,18 @@ fn corridor(anchors: impl Into<Vec<CorridorAnchor>>, safety: u32) -> AlignmentCo
     AlignmentCorridor::new(anchors, safety).unwrap()
 }
 
+fn dna(length: usize, seed: u64) -> Vec<u8> {
+    let mut state = seed;
+    (0..length)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            b"ACGT"[(state >> 62) as usize]
+        })
+        .collect()
+}
+
 #[test]
 fn exact_corridor_alignment_keeps_fast_local_result() {
     let query = b"ACGTACGT";
@@ -36,6 +48,33 @@ fn exact_corridor_alignment_keeps_fast_local_result() {
     assert_eq!(result.retry_metadata.attempted_widths, vec![64]);
     assert_eq!(result.retry_metadata.retries, 0);
     assert!(!result.retry_metadata.band_edge_touched);
+}
+
+#[test]
+fn exact_corridor_accepts_overlapping_dense_anchors() {
+    let query = dna(2_000, 77);
+    let corridor = AlignmentCorridor::new(
+        [
+            CorridorAnchor::new(161, 161, 31),
+            CorridorAnchor::new(173, 173, 31),
+            CorridorAnchor::new(1_042, 1_042, 31),
+            CorridorAnchor::new(1_048, 1_048, 31),
+            CorridorAnchor::new(1_856, 1_856, 31),
+        ],
+        64,
+    )
+    .unwrap();
+    let mut workspace = AlignmentWorkspace::new();
+    let result = workspace
+        .align_with_retries(
+            &query,
+            &query,
+            &corridor,
+            AlignmentOptions::new(jam_rs::trace::SensitivityConfig::default().alignment),
+        )
+        .unwrap();
+    assert_eq!(result.matches, 2_000);
+    assert_eq!(result.cigar, "2000=");
 }
 
 #[test]

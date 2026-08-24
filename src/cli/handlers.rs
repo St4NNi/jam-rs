@@ -1101,7 +1101,8 @@ pub fn handle_stats_command(
 pub fn handle_archive_command(
     input: PathBuf,
     output: PathBuf,
-    block_bases: usize,
+    sequence_policy: crate::sequence::SequenceBlockPolicy,
+    sequence_codec: crate::sequence::BlockCodec,
     primary_scale: u64,
     rescue_scale: Option<u64>,
     complexity: Option<f64>,
@@ -1132,7 +1133,8 @@ pub fn handle_archive_command(
         &input,
         &output,
         crate::jma::builder::ArchiveBuildConfig {
-            block_bases,
+            sequence_policy,
+            sequence_codec,
             k31_scale: primary_scale,
             k21_scale: rescue_scale,
             min_entropy: complexity,

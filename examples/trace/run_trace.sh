@@ -73,7 +73,7 @@ esac
   --kmer-size 21 \
   --fscale 100
 
-printf 'metagenome_id\tjma\tjma_index\traw\n' > "$CATALOG"
+printf 'metagenome_id\tresource_uri\tsha256\n' > "$CATALOG"
 declare -A seen_ids=()
 for assembly in "${ASSEMBLIES[@]}"; do
   assembly_abs=$(realpath "$assembly")
@@ -89,12 +89,12 @@ for assembly in "${ASSEMBLIES[@]}"; do
     --input "$assembly_abs" \
     --output "$archive" \
     --primary-scale 100 \
-    --rescue-scale 200
-  printf '%s\t%s\t%s\t%s\n' \
+    --rescue-scale 100
+  archive_sha256=$(sha256sum "$archive" | awk '{print $1}')
+  printf '%s\t%s\t%s\n' \
     "$metagenome_id" \
     "archives/$metagenome_id.jma" \
-    "archives/$metagenome_id.jma.idx.json" \
-    "$assembly_abs" >> "$CATALOG"
+    "$archive_sha256" >> "$CATALOG"
 done
 
 # The trace command records its own run header/footer and redacted input

@@ -5,7 +5,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod native;
+pub mod pithos;
 pub use native::NativeJmaArchive;
+pub use pithos::{
+    PithosArchiveOptions, PithosBiosequenceArchive, PithosBiosequenceSource, PithosProfile,
+    PithosSequenceOrganization,
+};
 
 pub const JAMHASH_ALGORITHM_ID: &str = "jamhash_u64_v1";
 

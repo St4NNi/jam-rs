@@ -443,6 +443,8 @@ pub struct TraceMetagenomeResult {
     pub primary_fragment_mosaic: Option<FragmentMosaicSummary>,
     pub topology: Option<TopologyAssessment>,
     pub rescue_rounds: Vec<RescueRoundMetrics>,
+    pub stages: Vec<TraceStageMetrics>,
+    pub alignment_retries: Vec<super::alignment::AlignmentRetryMetadata>,
     pub performance_counters: CandidatePerformanceCounters,
     pub coverage: Option<CoverageSummary>,
     pub warnings: Vec<String>,

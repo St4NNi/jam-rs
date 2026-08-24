@@ -1,10 +1,72 @@
 {
   "schema_version": "archive-seeds-experiment-manifest-v1",
-  "name": "archive-policy-example",
+  "name": "archive-policy-matrix-example",
   "kind": "archive_matrix",
   "cases": [
-    {"name": "native-jma-raw2bit-fixed-64k", "command": ["jam", "archive", "--sequence-codec", "raw2bit", "--block-bases", "65536"], "metadata": {"backend": "native_jma", "codec": "raw2bit", "policy": "fixed"}},
-    {"name": "native-jma-zstd2bit-fixed-64k", "command": ["jam", "archive", "--sequence-codec", "zstd2bit", "--block-bases", "65536"], "metadata": {"backend": "native_jma", "codec": "zstd2bit", "policy": "fixed"}},
-    {"name": "pithos-packed-slabs", "command": ["jam", "archive", "--backend", "pithos", "--sequence-policy", "packed-slabs"], "metadata": {"backend": "pithos", "policy": "packed_slabs"}}
+    {
+      "name": "native-jma-raw2bit-fixed-16k",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-raw2bit-fixed-16k.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "raw2bit", "--block-bases", "16384"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "raw2bit", "policy": "fixed", "block_bases": 16384, "output_paths": ["tools/out/archive-seeds/native-raw2bit-fixed-16k.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-raw2bit-fixed-64k",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-raw2bit-fixed-64k.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "raw2bit", "--block-bases", "65536"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "raw2bit", "policy": "fixed", "block_bases": 65536, "output_paths": ["tools/out/archive-seeds/native-raw2bit-fixed-64k.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-raw2bit-fixed-256k",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-raw2bit-fixed-256k.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "raw2bit", "--block-bases", "262144"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "raw2bit", "policy": "fixed", "block_bases": 262144, "output_paths": ["tools/out/archive-seeds/native-raw2bit-fixed-256k.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-raw2bit-fixed-1m",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-raw2bit-fixed-1m.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "raw2bit", "--block-bases", "1048576"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "raw2bit", "policy": "fixed", "block_bases": 1048576, "output_paths": ["tools/out/archive-seeds/native-raw2bit-fixed-1m.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-zstd2bit-fixed-16k",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-zstd2bit-fixed-16k.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "zstd2bit", "--block-bases", "16384"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "zstd2bit", "policy": "fixed", "block_bases": 16384, "output_paths": ["tools/out/archive-seeds/native-zstd2bit-fixed-16k.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-zstd2bit-fixed-64k",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-zstd2bit-fixed-64k.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "zstd2bit", "--block-bases", "65536"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "zstd2bit", "policy": "fixed", "block_bases": 65536, "output_paths": ["tools/out/archive-seeds/native-zstd2bit-fixed-64k.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-zstd2bit-fixed-256k",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-zstd2bit-fixed-256k.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "zstd2bit", "--block-bases", "262144"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "zstd2bit", "policy": "fixed", "block_bases": 262144, "output_paths": ["tools/out/archive-seeds/native-zstd2bit-fixed-256k.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-zstd2bit-fixed-1m",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-zstd2bit-fixed-1m.jma", "--sequence-block-policy", "fixed", "--sequence-block-codec", "zstd2bit", "--block-bases", "1048576"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "zstd2bit", "policy": "fixed", "block_bases": 1048576, "output_paths": ["tools/out/archive-seeds/native-zstd2bit-fixed-1m.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-raw2bit-gear-single-base",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-raw2bit-gear-single-base.jma", "--sequence-block-policy", "gear", "--sequence-block-codec", "raw2bit", "--gear-min-bases", "16384", "--gear-target-bases", "65536", "--gear-max-bases", "262144", "--gear-table", "single-base"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "raw2bit", "policy": "gear", "gear_min_bases": 16384, "gear_target_bases": 65536, "gear_max_bases": 262144, "gear_table": "single-base", "output_paths": ["tools/out/archive-seeds/native-raw2bit-gear-single-base.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-zstd2bit-gear-dinucleotide",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-zstd2bit-gear-dinucleotide.jma", "--sequence-block-policy", "gear", "--sequence-block-codec", "zstd2bit", "--gear-min-bases", "16384", "--gear-target-bases", "65536", "--gear-max-bases", "262144", "--gear-table", "dinucleotide"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "zstd2bit", "policy": "gear", "gear_min_bases": 16384, "gear_target_bases": 65536, "gear_max_bases": 262144, "gear_table": "dinucleotide", "output_paths": ["tools/out/archive-seeds/native-zstd2bit-gear-dinucleotide.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "native-jma-zstd2bit-gear-packed-four-base",
+      "command": ["jam", "archive", "--input", "tests/data/trace_mge/assembly_linear.fa", "--output", "tools/out/archive-seeds/native-zstd2bit-gear-packed-four-base.jma", "--sequence-block-policy", "gear", "--sequence-block-codec", "zstd2bit", "--gear-min-bases", "32768", "--gear-target-bases", "131072", "--gear-max-bases", "524288", "--gear-table", "packed-four-base"],
+      "metadata": {"backend": "native_jma", "archive_layout": "jma-format-1", "codec": "zstd2bit", "policy": "gear", "gear_min_bases": 32768, "gear_target_bases": 131072, "gear_max_bases": 524288, "gear_table": "packed-four-base", "output_paths": ["tools/out/archive-seeds/native-zstd2bit-gear-packed-four-base.jma"], "input_paths": ["tests/data/trace_mge/assembly_linear.fa"], "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "pithos-fixed-contig-members-optional",
+      "command": ["pithos-biosequence-bench", "--organization", "contig-members", "--block-policy", "fixed", "--block-bases", "65536"],
+      "metadata": {"backend": "pithos", "availability": "optional", "organization": "one-logical-member-per-contig", "policy": "fixed", "block_bases": 65536, "measurement": "archive-build-and-size"}
+    },
+    {
+      "name": "pithos-gear-packed-slabs-optional",
+      "command": ["pithos-biosequence-bench", "--organization", "packed-slabs", "--block-policy", "gear", "--gear-min-bases", "16384", "--gear-target-bases", "65536", "--gear-max-bases", "262144"],
+      "metadata": {"backend": "pithos", "availability": "optional", "organization": "packed-sequence-slabs", "policy": "gear", "gear_min_bases": 16384, "gear_target_bases": 65536, "gear_max_bases": 262144, "measurement": "archive-build-and-size"}
+    }
   ]
 }
