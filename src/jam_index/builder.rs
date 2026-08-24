@@ -4,7 +4,7 @@ use super::manifest::{JamIndexManifest, JamIndexPart, ScreenSelectionPolicy};
 use super::part::{JamIndexPartReader, MetagenomeSource, write_part};
 use crate::provenance;
 use crate::reader::JamReader;
-use crate::writer::{HashSampleInput, build_from_hash_samples};
+use crate::writer::{HashSampleInput, build_hash_samples};
 use needletail::parse_fastx_file;
 use rayon::prelude::*;
 use sha2::{Digest, Sha256};
@@ -291,7 +291,7 @@ fn build_part(
             hashes: sample.hashes.clone(),
         })
         .collect::<Vec<_>>();
-    let screen_stats = build_from_hash_samples(&screen_path, &screen_samples, 21, 1)?;
+    let screen_stats = build_hash_samples(&screen_path, &screen_samples, 21, 1)?;
     let screen = JamReader::open(&screen_path)?;
     let data = JamIndexPartReader::open(&data_path)?;
     if screen.sample_names()

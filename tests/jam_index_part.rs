@@ -52,7 +52,7 @@ fn independent_part_roundtrips_directories_signatures_and_complete_sequences() {
     assert_eq!(reader.metagenomes()[0].metagenome_id, "mg-a");
     assert_eq!(reader.contigs()[0].name, "short");
     assert_eq!(reader.read_contig(1).unwrap(), b"ACGTNNRYACGT");
-    assert_eq!(reader.contig_ids_for_metagenome(0).unwrap(), 0..2);
+    assert_eq!(reader.metagenome_contigs(0).unwrap(), 0..2);
     let shared = result.screen_samples[0]
         .hashes
         .iter()

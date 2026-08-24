@@ -44,7 +44,7 @@ impl JamIndexArchive {
                     ))
                 })?;
         let allowed = reader
-            .contig_ids_for_metagenome(metagenome_id)
+            .metagenome_contigs(metagenome_id)
             .map_err(part_error)?;
         let mut contigs = BTreeMap::new();
         let mut packed_bytes = 0u64;

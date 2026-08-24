@@ -243,7 +243,7 @@ fn rank_candidate(
     config: JamIndexContigSearchConfig,
     total_metagenomes: u64,
 ) -> Result<(JamIndexContigPlan, JamIndexContigSearchMetrics), JamIndexContigSearchError> {
-    let contig_range = reader.contig_ids_for_metagenome(candidate.metagenome_local_id)?;
+    let contig_range = reader.metagenome_contigs(candidate.metagenome_local_id)?;
     let mut accumulator = ContigAccumulator::new(config.accumulator_capacity);
     let mut signature_hits_seen = 0u64;
     for shared in &candidate.shared_hashes {

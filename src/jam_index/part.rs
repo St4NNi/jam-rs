@@ -332,13 +332,13 @@ pub fn write_part(
     let signature_offset = sequence_end;
     let signature_bytes = encode_signatures(&merged);
     file.write_all(&signature_bytes)?;
-    let metagenome_offset = align_file_without_hash(&mut file, 8)?;
+    let metagenome_offset = align_file_plain(&mut file, 8)?;
     let metagenome_bytes = encode_metagenomes(&metagenomes);
     file.write_all(&metagenome_bytes)?;
-    let contig_offset = align_file_without_hash(&mut file, 8)?;
+    let contig_offset = align_file_plain(&mut file, 8)?;
     let contig_bytes = encode_contigs(&contigs);
     file.write_all(&contig_bytes)?;
-    let string_offset = align_file_without_hash(&mut file, 8)?;
+    let string_offset = align_file_plain(&mut file, 8)?;
     file.write_all(&strings)?;
     let object_size = file.stream_position()?;
 
@@ -484,7 +484,7 @@ impl JamIndexPartReader {
         Ok(())
     }
 
-    pub fn contig_ids_for_metagenome(
+    pub fn metagenome_contigs(
         &self,
         metagenome_id: u32,
     ) -> Result<std::ops::Range<u32>, JamIndexPartError> {
@@ -551,7 +551,7 @@ fn align_file(
     file.stream_position().map_err(Into::into)
 }
 
-fn align_file_without_hash(file: &mut File, alignment: u64) -> Result<u64, JamIndexPartError> {
+fn align_file_plain(file: &mut File, alignment: u64) -> Result<u64, JamIndexPartError> {
     let offset = file.stream_position()?;
     let padding = (alignment - offset % alignment) % alignment;
     file.write_all(&vec![

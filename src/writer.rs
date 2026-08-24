@@ -95,7 +95,7 @@ pub struct HashSampleInput {
 /// This does not change the format or the existing sketch builder. It is used
 /// by Jam Index parts whose screen-selection policy is recorded by their
 /// surrounding manifest.
-pub fn build_from_hash_samples(
+pub fn build_hash_samples(
     output_path: &Path,
     samples: &[HashSampleInput],
     kmer_size: u8,
