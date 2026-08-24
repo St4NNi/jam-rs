@@ -90,8 +90,9 @@ impl QueryKmers {
         &self.positions[range.start as usize..range.end as usize]
     }
 
-    /// The query starts with a seed hit, divided by the seeds a full exact match would show (query
-    /// k-mers times the seed density 2 / (w + 1)), at most 1.
+    /// The containment estimate: the share of the query held by the entry, as the query starts
+    /// with a seed hit over the seed hits of a full exact match (query k-mers times 2 / (w + 1)),
+    /// at most 1. Mutations remove seed hits, so they lower it.
     pub fn containment_estimate(&self, hit_positions: u64) -> f64 {
         let expected = self.kmers as f64 * 2.0 / (self.window as f64 + 1.0);
         if expected <= 0.0 {

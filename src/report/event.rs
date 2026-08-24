@@ -69,6 +69,8 @@ pub struct Possible {
     pub query: String,
     pub entry: String,
     pub coverage_bound: u64,
+    /// The share of the query held by the entry, 0 to 1, from the seed hits of the sketch (frequent
+    /// seeds count as hit in their color sets); mutations lower it.
     pub containment_estimate: f64,
 }
 
@@ -78,6 +80,8 @@ pub struct Located {
     pub query: String,
     pub entry: String,
     pub coverage_bound: u64,
+    /// The share of the query held by the entry, 0 to 1, from the seed hits with seed locations,
+    /// so false seed hits no longer count; mutations lower it.
     pub containment_estimate: f64,
     /// Alignment windows and their bases together.
     pub windows: u64,

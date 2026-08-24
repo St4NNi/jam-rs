@@ -105,27 +105,27 @@ fn low_bounds_dropped() {
     assert!(kept[2].1 >= 1_500 && kept[2].1 < 2_500, "{kept:?}");
 }
 
+/// The containment estimate of each entry of the 4 entry shard; 0 when it is not a candidate.
+fn estimates(shard: &Shard, query: &[u8], limits: SketchLimits) -> Vec<f64> {
+    let kmers = QueryKmers::new(&Seeder::new(parameters().scheme).unwrap(), query, false);
+    let bound = bound(query.len() as u64, 0);
+    let outcome = sketch_stage(shard.sketch(), &kmers, &bound, limits, no_stop()).unwrap();
+    let mut estimates = vec![0.0; 4];
+    for candidate in &outcome.candidates {
+        estimates[candidate.entry as usize] = candidate.containment_estimate;
+    }
+    estimates
+}
+
 #[test]
 fn containment_follows_share() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
-    let seeder = Seeder::new(parameters().scheme).unwrap();
-    let kmers = QueryKmers::new(&seeder, &query, false);
-    let control = no_stop();
-    let outcome =
-        sketch_stage(shard.sketch(), &kmers, &bound(5_000, 0), UNLIMITED, control).unwrap();
-    let estimate = |entry: u32| {
-        outcome
-            .candidates
-            .iter()
-            .find(|candidate| candidate.entry == entry)
-            .map(|candidate| candidate.containment_estimate)
-    };
-    let (full, partial) = (estimate(0).unwrap(), estimate(2).unwrap());
-    assert!(full > 0.8, "{full}");
-    assert!(partial > 0.15 && partial < 0.45, "{partial}");
+    let estimates = estimates(&shard, &query, UNLIMITED);
+    assert!(estimates[0] > 0.8, "{estimates:?}");
+    assert!(estimates[2] > 0.15 && estimates[2] < 0.45, "{estimates:?}");
     // The unrelated entry has no seed hit, so it is not a candidate at all.
-    assert_eq!(estimate(3), None);
+    assert_eq!(estimates[3], 0.0);
 }
 
 #[test]
@@ -152,6 +152,10 @@ fn frequent_seeds_count() {
         [0, 1, 2]
     );
     assert!(kept.iter().all(|(_, bound)| *bound == 5_000));
+    // Every seed is frequent, and each entry still counts only the seeds of its color sets.
+    let estimates = estimates(&shard, &query, limits);
+    assert!(estimates[0] > 0.8, "{estimates:?}");
+    assert!(estimates[2] > 0.15 && estimates[2] < 0.45, "{estimates:?}");
 }
 
 #[test]

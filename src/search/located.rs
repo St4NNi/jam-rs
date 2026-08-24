@@ -11,7 +11,8 @@ pub struct LocatedEntry {
     pub entry: u32,
     /// The highest query coverage, in bases, that the entry can still reach.
     pub coverage_bound: u64,
-    /// The containment estimate from the seed hits, from 0 to 1.
+    /// The containment estimate again, from the seed hits with seed locations only (frequent
+    /// seeds included, false seed hits removed).
     pub containment_estimate: f64,
     /// The alignment windows, by contig in ascending order.
     pub windows: Vec<ContigWindows>,

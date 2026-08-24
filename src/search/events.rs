@@ -45,9 +45,9 @@ pub enum DropReason {
     Decision,
 }
 
-/// A change of one entry's state. Every possible entry ends with exactly one of `Located` (when
-/// the search stops after stage 2), `Confirmed`, `Dropped` or `Unfinished`, and its events arrive
-/// in order.
+/// A change of one entry's state; the events of an entry arrive in order. Past stage 1, every
+/// possible entry ends with one of `Located` (at the locate level), `Confirmed`, `Dropped` or
+/// `Unfinished`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EntryEvent {
     /// Stage 1 kept the entry.
