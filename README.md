@@ -226,7 +226,8 @@ jam trace \
 Alignment and nonredundant query-coordinate fragment mosaics are `supported`
 evidence, not confirmation of autonomous element presence or physical linkage
 between separate contigs. See
-[docs/TRACE.md](docs/TRACE.md), [docs/ALGORITHM.md](docs/ALGORITHM.md),
+[docs/JAM_INDEX.md](docs/JAM_INDEX.md), [docs/TRACE.md](docs/TRACE.md),
+[docs/ALGORITHM.md](docs/ALGORITHM.md),
 [docs/REMOTE_RESOURCES.md](docs/REMOTE_RESOURCES.md), and
 [examples/trace/run_trace.sh](examples/trace/run_trace.sh).
 
@@ -274,6 +275,8 @@ recall 1.0. Three paired process-cold four-thread runs had a 4.364 s median and
 183,144,518 bytes, or 0.302606 index bytes per source base. The exact standalone
 160-base trace, reverse-complement, origin-crossing, separate-contig, overlap,
 repeat-shared, integrated, and unrelated controls were rerun.
+The machine-readable selected scorecard is
+[evaluation/trace-production/results/summary/jam-index-v1/summary.json](evaluation/trace-production/results/summary/jam-index-v1/summary.json).
 
 These are measurements of one local task, not a general speed or accuracy
 claim. The anonymous edited-fragment matrix missed both 80-base/90%-identity

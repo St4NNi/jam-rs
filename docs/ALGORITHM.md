@@ -53,6 +53,99 @@ not prove physical linkage.
 
 ## Pipeline
 
+### Selected Jam Index path
+
+For `jam trace --index`, the bounded path is:
+
+```text
+read exactly one query FASTA/FASTQ record while preserving IUPAC symbols
+extract every eligible canonical k=21 query hash once
+label each query-hash occurrence with its 256-base query window
+
+for every independent Jam Index part in parallel:
+    search the pure .jam shard
+    update a bounded per-metagenome evidence accumulator
+merge deterministic part-local top candidates
+recount the global shortlist exactly
+retain exact shared-hash occurrences only for selected metagenomes
+
+for each selected metagenome:
+    map shared hashes to contig IDs through the sorted signature table
+    rank and bound contigs by rarity, windows, shared hashes, count, and bases
+    read complete selected contigs
+    if a complete contig is an exact forward, reverse, or circular rotation:
+        emit one direct '=' alignment
+    otherwise:
+        generate dense k=31 and k=21 positions in memory
+        verify packed canonical k-mers
+        run mixed chaining, corridor alignment, and gap rescue
+    expand to weaker signature-mapped contigs only while coverage is incomplete
+    build the nonredundant query-coordinate fragment mosaic
+```
+
+The build-time signature budget for a contig of length `L` is:
+
+```text
+budget = clamp(ceil(L / 1024), 16, 256)
+```
+
+The contig retains the `budget` smallest distinct nonzero k=21 jamhash values.
+The whole metagenome independently retains its 512 smallest distinct nonzero
+values. Their union is the sample stored in `screen.jam`; duplicate hashes are
+stored once. This is fixed-size bottom-k MinHash within each explicitly
+bounded stratum, not one fixed bottom-k sketch shared by all contigs.
+
+Query preparation stores a map from jamhash to exact packed k-mer occurrences,
+query position, canonical orientation, and window ID. Stage 1 uses jamhash to
+search the pure `.jam` shard. Because this is candidate routing, a digest hit
+may admit work but is not an anchor. Stage 3 recreates the canonical k-mer from
+the selected contig and requires packed equality.
+
+The first candidate pass uses a bounded heavy-hitter accumulator. Part-local
+shortlists are merged into a bounded global top-k, followed by an exact recount
+of shared hashes and supported windows. Candidate order is deterministic:
+rarity-weighted hash sum, supported query windows, longest consecutive window
+run, shared hash count, part ID, then metagenome ID. Rarity weight is:
+
+```text
+ln((metagenome_count + 1) / (document_frequency + 1))
+```
+
+It is a ranking weight, not a biological probability.
+
+Stage 2 repeats only the selected exact hash lookups against 16-byte sorted
+`(jamhash, contig_id, flags)` records. A bounded approximate contig pass is
+followed by an exact recount. Contig order is deterministic by rarity weight,
+window spread, longest window run, shared hash count, shorter contig, then
+contig ID. No signature record stores a nucleotide position.
+
+The initial contig set is bounded by count and total bases. Weaker ranked
+contigs are added in fixed batches only when the current mosaic does not cover
+the query. A strong candidate with no mapped contig may scan its contig range
+in fixed batches; evidence is merged between batches and the complete
+metagenome is never loaded as one fallback allocation.
+
+Stage 3 scans every selected contig position for requested dense k=31 and k=21
+keys. Occurrence caps are applied before anchors are allocated. The resulting
+verified anchors enter the same mixed chaining, chain-window, corridor,
+alignment, and mosaic rules documented below. No persistent positional seed
+section participates in Jam Index trace.
+
+Before seed generation, an O(query + contig) exact matcher checks complete
+selected contigs. Equality is case-insensitive, preserves IUPAC identity, and
+normalizes U to T. A complete circular rotation is eligible only when the
+selected contig length equals the query length. Successful matches emit a
+direct `=` CIGAR and skip dense chaining for that candidate.
+
+Candidate alignment parallelism is admitted before work. The selected default
+uses a 512 MiB complete-query envelope, reserves fixed process/index overhead,
+and estimates one width-64 packed matrix from query length. Queries of at least
+95,000 bases run one alignment candidate at a time. The DP workspace reuses
+one score matrix between local and semiglobal passes; three predecessor states
+are stored as one packed byte per matrix position.
+
+### Existing `.jam` and JMA path
+
 The implementation follows this bounded path:
 
 ```text

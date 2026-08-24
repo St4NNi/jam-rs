@@ -79,7 +79,8 @@ jam trace \
 
 Jam Index paths are local directories. `--database`, `--metagenomes`, remote
 resource options, and JMA archives belong to the existing general trace path,
-not to `--index` operation.
+not to `--index` operation. The byte-level contract is documented in
+[JAM_INDEX.md](JAM_INDEX.md).
 
 ## Existing `.jam` and JMA quick start
 

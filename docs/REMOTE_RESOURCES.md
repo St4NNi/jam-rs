@@ -4,6 +4,12 @@ The trace catalog can point to local files or remote assembly resources. The
 resource layer gives JMA and raw FASTA/FASTQ readers one checked interface for
 metadata, byte ranges, streams, retries, and cache accounting.
 
+This document applies to the existing `.jam` plus JMA/raw trace path. Jam
+Index build, append, and trace operation is local-only: `jam trace --index`
+accepts a local directory, memory maps its parts, and does not use remote
+ranges, persistent page caches, object uploads, JMA resources, or full-object
+fallback. See [JAM_INDEX.md](JAM_INDEX.md).
+
 ## Locator syntax
 
 Each catalog resource is one of:

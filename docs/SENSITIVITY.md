@@ -6,6 +6,59 @@ probability of plasmid, phage, or mobile-element recovery and it should not be
 reported as a biological sensitivity estimate. The resolved profile is
 recorded in the JSON `run_header` so a result can be reproduced.
 
+## Jam Index selection and measured boundary
+
+Jam Index candidate sensitivity is determined first by the manifest's fixed
+k=21 screen policy, not by the trace alignment profile. The selected policy
+uses 16 to 256 hashes per contig at one requested hash per 1,024 bases, a
+512-hash whole-metagenome sketch, and 256-base query windows. Build and append
+always use this policy.
+
+For a selected Jam Index candidate, positional hashes are generated from the
+complete selected contigs at scale 1. `fast` uses dense k=31 only; `balanced`
+and `sensitive` can use dense k=31 plus k=21 rescue. The profile still controls
+occurrence caps, chain requirements, window limits, scoring, and rescue work.
+No seed below k=21 is used.
+
+The selected policy and a measured smaller-signature component removal were
+compared on the same 605,224,880-base, 43,080-contig collection:
+
+| Measurement | Selected policy | Smaller signatures |
+| --- | ---: | ---: |
+| Total index bytes | 183,144,518 | 168,608,829 |
+| Index bytes/source base | 0.302606 | 0.278589 |
+| `screen.jam` bytes | 13,409,898 | 7,429,738 |
+| Contig-signature bytes | 11,528,960 | 2,973,440 |
+| Packed-sequence bytes | 151,321,656 | 151,321,656 |
+| 40-case candidate recovery | 40/40 | 40/40 |
+| 40-case base precision | 1.0 | 1.0 |
+| 40-case base recall | 0.981834375 | 0.9510875 |
+| 40-case interval recall | 1.0 | 1.0 |
+| Anonymous short-case candidate recall | 0.96875 | 0.90625 |
+
+The smaller signatures do not meet the selected base-recall gate and are not
+exposed as a build policy.
+
+On three paired process-cold four-thread runs, the selected Jam Index had a
+4.364 s wall median and 313,300 KiB peak-RSS median. Stage-isolated process
+peaks were 25,892 KiB for a no-candidate screen and 162,688 KiB for the
+one-worker alignment condition. The selected run read 280 complete contigs
+totalling 358,400 bases for 40 candidates.
+
+The anonymous edited-fragment matrix covered 80, 100, 160, 250, 500, and
+1,000 bases at target identities 100%, 99%, 97%, 95%, and 90% on both strands.
+The selected policy recovered 62/64 positive candidates and 99.2703% of truth
+bases. Both missed cases were 80 bases at 90% identity: the edited fragments
+contained no retained exact k=21 witness. The exact standalone 160-base case,
+origin crossing, separate fragments, overlap, and rare-fragment controls were
+fully recovered.
+
+These measurements describe the versioned local fixtures, not a calibrated
+probability of recovery. A short edited trace can contain zero exact k=21
+witnesses; Jam Index does not silently claim sensitivity in that condition.
+The selected values are also recorded in the machine-readable
+[`jam-index-v1` scorecard](../evaluation/trace-production/results/summary/jam-index-v1/summary.json).
+
 All profiles use `jamhash_u64_v1`, FracMinHash retention, and fixed seed
 identities:
 

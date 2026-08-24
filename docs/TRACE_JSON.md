@@ -268,6 +268,25 @@ The footer contains stream totals, completion time, and aggregate resource
 metrics. Consumers should require exactly one header first and one footer last
 before treating the run as complete.
 
+## Jam Index records
+
+Jam Index uses the same schema-2.0 JSONL record sequence. Its run header has an
+input with role `jam_index` bound to the root `manifest.json`; it does not add
+JMA or remote-resource inputs. Candidate evidence uses
+`candidate.score_mode="jam_index"`. The candidate's shared-hash counts and
+containment values remain routing evidence, not alignment evidence.
+
+Ordinary dense chaining stages retain their existing names. A verified
+complete selected contig can instead emit stage 0 with
+`name="exact_contig"`, zero DP alignment attempts, and direct `=` alignment
+evidence. `archive_metrics.seed_bytes_read` is zero for Jam Index because no
+persistent positional seed section is read. `sequence_bytes_read` and
+`decoded_sequence_bases` account selected complete contigs.
+
+The output remains one JSONL or JSONL.zst stream. Separate contig IDs remain
+attached to their alignments and mosaic evidence; their appearance in one
+query-coordinate mosaic does not assert physical linkage.
+
 Evidence labels such as `alert` and `supported` are suitable downstream
 reports. `confirmed` requires independent mapping, marker, graph, or
 contextual evidence; `jam trace` does not emit a confirmed biological presence

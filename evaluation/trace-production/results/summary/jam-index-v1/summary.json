@@ -1,0 +1,132 @@
+{
+  "schema_version": "jam-index-scorecard-v1",
+  "measured_at": "2026-08-24",
+  "measurement_source_commit": "871b0d14eeca52205242c0b493caa3e2ee5e0367",
+  "system": {
+    "name": "Jam Index",
+    "format_version": 1,
+    "policy_id": "contig-minhash-v1",
+    "local_only": true,
+    "position_postings": false,
+    "jamhash_id": "jamhash_u64_v1"
+  },
+  "host": {
+    "os": "Linux 7.1.8-arch1-3 x86_64",
+    "cpu": "AMD Ryzen 9 7945HX with Radeon Graphics",
+    "physical_cores": 16,
+    "logical_cpus": 32,
+    "rustc": "1.98.0 (88d9e12ae 2026-08-18)",
+    "filesystem": "btrfs on NVMe-class SSD"
+  },
+  "measurement_policy": {
+    "build": "cargo build --release --locked",
+    "process_policy": "fresh process; operating-system page cache not dropped",
+    "query_threads": 4,
+    "memory_target_gib": 2,
+    "sensitivity": "sensitive"
+  },
+  "collection": {
+    "metagenomes": 40,
+    "contigs": 43080,
+    "source_bases": 605224880,
+    "parts": 7
+  },
+  "build": {
+    "wall_seconds": 13.012331,
+    "peak_rss_kib": 88976,
+    "total_index_bytes": 183144518,
+    "index_bytes_per_source_base": 0.302605732,
+    "screen_jam_bytes": 13409898,
+    "contig_signature_bytes": 11528960,
+    "packed_sequence_bytes": 151321656,
+    "persistent_positional_seed_bytes": 0
+  },
+  "controlled_40_case": {
+    "candidate_recovery": "40/40",
+    "selected_candidates": 40,
+    "selected_contigs": 280,
+    "selected_contig_bases": 358400,
+    "base_precision": 1.0,
+    "base_recall": 0.981834375,
+    "missing_truth_bases": 5813,
+    "interval_precision": 1.0,
+    "interval_recall": 1.0,
+    "alignment_count": 321,
+    "paired_process_cold": {
+      "wall_seconds": [4.364000581001164, 4.356519488996128, 4.378405446012039],
+      "wall_median_seconds": 4.364000581001164,
+      "peak_rss_kib": [311100, 313300, 389244],
+      "peak_rss_median_kib": 313300
+    },
+    "stage_process_peaks_kib": {
+      "screening_no_candidate": 25892,
+      "one_alignment_worker": 162688,
+      "complete_query_conservative": 389244
+    }
+  },
+  "short_trace_matrix": {
+    "lengths": [80, 100, 160, 250, 500, 1000],
+    "target_identities": [1.0, 0.99, 0.97, 0.95, 0.90],
+    "orientations": ["forward", "reverse"],
+    "positive_cases": 64,
+    "candidate_cases": 62,
+    "aligned_cases": 62,
+    "candidate_recall": 0.96875,
+    "truth_base_recall": 0.9927027027027027,
+    "exact_160_standalone_candidate": true,
+    "exact_160_standalone_aligned": true,
+    "missed_cases": [
+      {
+        "trace_length": 80,
+        "target_identity": 0.90,
+        "orientations": ["forward", "reverse"],
+        "reason": "no retained exact k21 witness"
+      }
+    ],
+    "special_cases_full": [
+      "origin_crossing",
+      "separate_fragments",
+      "overlap",
+      "rare_standalone"
+    ],
+    "biological_negative_evidence": {
+      "repeat_shared_selected_and_aligned": true,
+      "integrated_selected_and_aligned": true,
+      "unrelated_selected": false,
+      "interpretation": "sequence evidence is not an autonomous-element call"
+    }
+  },
+  "sequence_backed_alias_matrix": {
+    "query_cases": 10,
+    "query_length_min": 2686,
+    "query_length_max": 168903,
+    "expected_full_constructions": 27,
+    "expected_full_recovered": 27,
+    "reverse_cases_recovered": true,
+    "origin_crossing_cases_recovered": true,
+    "terminal_repeat_evidence_retained": true,
+    "wall_seconds_min": 0.06538278599327896,
+    "wall_seconds_max": 139.41585755100823,
+    "peak_rss_kib_max": 488556
+  },
+  "component_removal": {
+    "name": "smaller contig signatures",
+    "total_index_bytes": 168608829,
+    "index_bytes_per_source_base": 0.278588727,
+    "screen_jam_bytes": 7429738,
+    "contig_signature_bytes": 2973440,
+    "packed_sequence_bytes": 151321656,
+    "controlled_base_precision": 1.0,
+    "controlled_base_recall": 0.9510875,
+    "controlled_interval_recall": 1.0,
+    "short_candidate_recall": 0.90625,
+    "selected": false
+  },
+  "not_measured": [
+    "cloud Jam Index operation because Jam Index is local-only",
+    "batch Jam Index throughput",
+    "read-derived assemblies",
+    "independently supported natural positives",
+    "1000-metagenome by 100-query release scale"
+  ]
+}
