@@ -97,7 +97,7 @@ pub enum IndexCommands {
         #[arg(long, default_value = "1000000")]
         max_part_signatures: u64,
         /// Intended number of independently searchable parts
-        #[arg(long, default_value = "24")]
+        #[arg(long, default_value = "20")]
         parts: usize,
         /// Parts built concurrently
         #[arg(long)]
@@ -118,7 +118,7 @@ pub enum IndexCommands {
         #[arg(long, default_value = "1000000")]
         max_part_signatures: u64,
         /// Intended number of new independently searchable parts
-        #[arg(long, default_value = "24")]
+        #[arg(long, default_value = "20")]
         parts: usize,
         /// New parts built concurrently
         #[arg(long)]

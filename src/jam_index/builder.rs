@@ -32,7 +32,7 @@ impl Default for JamIndexBuildConfig {
             selection_policy: ScreenSelectionPolicy::default_signatures(),
             max_part_bases: 1_000_000_000,
             max_part_signatures: 1_000_000,
-            target_parts: 24,
+            target_parts: 20,
             parallel_parts: 1,
             source_manifest_sha256: "0".repeat(64),
         }
