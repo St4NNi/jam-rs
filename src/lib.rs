@@ -30,7 +30,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
-    IndexCommands, IndexPolicyArg, QueryKindArg, TopologyArg, TraceSensitivityArg,
+    IndexCommands, QueryKindArg, TopologyArg, TraceSensitivityArg,
 };
 
 pub fn run() -> Result<()> {
@@ -156,52 +156,40 @@ pub fn run() -> Result<()> {
             cli.silent,
         ),
 
-        Commands::Index { command } => {
-            let policy = |policy| match policy {
-                IndexPolicyArg::Standard => {
-                    crate::jam_index::ScreenSelectionPolicy::default_signatures()
-                }
-                IndexPolicyArg::Small => {
-                    crate::jam_index::ScreenSelectionPolicy::smaller_signatures()
-                }
-            };
-            match command {
-                IndexCommands::Build {
-                    metagenomes,
-                    output,
-                    policy: selected,
-                    max_part_bases,
-                    max_part_signatures,
-                    parallel_parts,
-                } => handle_index_build(IndexBuildArgs {
-                    metagenomes,
-                    output,
-                    policy: policy(selected),
-                    max_part_bases,
-                    max_part_signatures,
-                    parallel_parts: parallel_parts.unwrap_or(threads),
-                    force: cli.force,
-                    silent: cli.silent,
-                }),
-                IndexCommands::Append {
-                    metagenomes,
-                    output,
-                    policy: selected,
-                    max_part_bases,
-                    max_part_signatures,
-                    parallel_parts,
-                } => handle_index_append(IndexBuildArgs {
-                    metagenomes,
-                    output,
-                    policy: policy(selected),
-                    max_part_bases,
-                    max_part_signatures,
-                    parallel_parts: parallel_parts.unwrap_or(threads),
-                    force: cli.force,
-                    silent: cli.silent,
-                }),
-            }
-        }
+        Commands::Index { command } => match command {
+            IndexCommands::Build {
+                metagenomes,
+                output,
+                max_part_bases,
+                max_part_signatures,
+                parallel_parts,
+            } => handle_index_build(IndexBuildArgs {
+                metagenomes,
+                output,
+                policy: crate::jam_index::ScreenSelectionPolicy::default_signatures(),
+                max_part_bases,
+                max_part_signatures,
+                parallel_parts: parallel_parts.unwrap_or(threads),
+                force: cli.force,
+                silent: cli.silent,
+            }),
+            IndexCommands::Append {
+                metagenomes,
+                output,
+                max_part_bases,
+                max_part_signatures,
+                parallel_parts,
+            } => handle_index_append(IndexBuildArgs {
+                metagenomes,
+                output,
+                policy: crate::jam_index::ScreenSelectionPolicy::default_signatures(),
+                max_part_bases,
+                max_part_signatures,
+                parallel_parts: parallel_parts.unwrap_or(threads),
+                force: cli.force,
+                silent: cli.silent,
+            }),
+        },
 
         Commands::Trace {
             query,

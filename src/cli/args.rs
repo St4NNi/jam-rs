@@ -80,13 +80,6 @@ pub enum ArchiveGearTableArg {
     PackedFourBase,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-pub enum IndexPolicyArg {
-    #[default]
-    Standard,
-    Small,
-}
-
 #[derive(Debug, Subcommand, Clone)]
 pub enum IndexCommands {
     /// Build a new local Jam Index
@@ -97,9 +90,6 @@ pub enum IndexCommands {
         /// New Jam Index directory
         #[arg(short, long)]
         output: PathBuf,
-        /// Contig-signature policy
-        #[arg(long, value_enum, default_value = "standard")]
-        policy: IndexPolicyArg,
         /// Maximum total bases assigned to one part
         #[arg(long, default_value = "1000000000")]
         max_part_bases: u64,
@@ -118,9 +108,6 @@ pub enum IndexCommands {
         /// Existing Jam Index directory
         #[arg(short, long)]
         output: PathBuf,
-        /// Contig-signature policy; must match the existing manifest
-        #[arg(long, value_enum, default_value = "standard")]
-        policy: IndexPolicyArg,
         /// Maximum total bases assigned to one new part
         #[arg(long, default_value = "1000000000")]
         max_part_bases: u64,

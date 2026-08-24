@@ -44,7 +44,6 @@ Build independently searchable parts:
 jam index build \
   --metagenomes sources.tsv \
   --output metagenomes-index \
-  --policy standard \
   --max-part-bases 100000000 \
   --max-part-signatures 250000 \
   --parallel-parts 4
