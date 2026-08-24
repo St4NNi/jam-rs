@@ -5,6 +5,7 @@
 //! and complete two-bit contig sequence. It never stores nucleotide seed
 //! positions.
 
+pub mod archive;
 pub mod builder;
 pub mod contig_search;
 pub mod manifest;
@@ -12,6 +13,7 @@ pub mod part;
 pub mod screen;
 pub mod signature;
 
+pub use archive::JamIndexArchive;
 pub use builder::{
     JamIndexBuildConfig, JamIndexBuildError, JamIndexBuildStats, append_jam_index, build_jam_index,
     load_manifest,
