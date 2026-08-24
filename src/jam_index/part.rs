@@ -3,6 +3,7 @@
 use super::manifest::ScreenSelectionPolicy;
 use super::signature::{MetagenomeSignatureBuilder, SignatureSelectionError};
 use crate::format::bucket_id;
+use crate::jam_index::external::{ContigRequest, read_selected as read_external};
 use crate::jam_index::external::{ExternalError, ExternalSource, SequenceAccess, read_fai};
 use crate::sequence::{
     EncodedContig, SequenceError, decode_ambiguity_payload, decode_range, encode_ambiguity_payload,
@@ -742,6 +743,173 @@ pub struct JamIndexPartReader {
     contigs: Vec<PartContig>,
 }
 
+pub struct ExternalPartReader {
+    mmap: Mmap,
+    header: Header,
+    metagenomes: Vec<PartMetagenome>,
+    contigs: Vec<PartContig>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PartReadResult {
+    pub contigs: BTreeMap<u32, Vec<u8>>,
+    pub source_bytes: u64,
+}
+
+impl ExternalPartReader {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, JamIndexPartError> {
+        let file = File::open(path)?;
+        let mmap = unsafe { Mmap::map(&file)? };
+        if mmap.len() < HEADER_SIZE {
+            return Err(JamIndexPartError::Corrupt("truncated header"));
+        }
+        let header = decode_header(&mmap[..HEADER_SIZE])?;
+        let source = section(&mmap, header.sequence_offset, header.sequence_length)?;
+        let posting = section(&mmap, header.signature_offset, header.signature_length)?;
+        let metagenome = section(&mmap, header.metagenome_offset, header.metagenome_length)?;
+        let contig = section(&mmap, header.contig_offset, header.contig_length)?;
+        let strings = section(&mmap, header.string_offset, header.string_length)?;
+        if sha256(source) != header.sequence_checksum
+            || sha256(posting) != header.signature_checksum
+            || sha256(metagenome) != header.metagenome_checksum
+            || sha256(contig) != header.contig_checksum
+            || sha256(strings) != header.string_checksum
+        {
+            return Err(JamIndexPartError::Corrupt("section checksum mismatch"));
+        }
+        validate_external_lengths(header)?;
+        let sources = decode_sources(source, strings, header.metagenome_count)?;
+        let mut metagenomes = decode_metagenomes(metagenome, strings, header.metagenome_count)?;
+        for (metagenome, source) in metagenomes.iter_mut().zip(sources) {
+            metagenome.source_path = source.path;
+            metagenome.source_size = source.source_size;
+            metagenome.source_sha256 = source.source_sha256;
+            metagenome.access = source.access;
+            metagenome.fai_path = source.fai_path;
+            metagenome.fai_sha256 = source.fai_sha256;
+            metagenome.gzi_path = source.gzi_path;
+            metagenome.gzi_sha256 = source.gzi_sha256;
+        }
+        let contigs = decode_external_contigs(contig, strings, header.contig_count)?;
+        validate_directories(&metagenomes, &contigs, header.total_bases)?;
+        validate_postings(posting, header.signature_count, header.contig_count)?;
+        Ok(Self {
+            mmap,
+            header,
+            metagenomes,
+            contigs,
+        })
+    }
+
+    pub fn metagenomes(&self) -> &[PartMetagenome] {
+        &self.metagenomes
+    }
+
+    pub fn contigs(&self) -> &[PartContig] {
+        &self.contigs
+    }
+
+    pub const fn total_bases(&self) -> u64 {
+        self.header.total_bases
+    }
+
+    pub const fn posting_count(&self) -> u64 {
+        self.header.signature_count
+    }
+
+    pub fn posting(&self, ordinal: u64) -> Result<Vec<u32>, JamIndexPartError> {
+        let bytes = section(
+            &self.mmap,
+            self.header.signature_offset,
+            self.header.signature_length,
+        )?;
+        decode_posting(bytes, self.header.signature_count, ordinal)
+    }
+
+    pub fn metagenome_contigs(
+        &self,
+        metagenome_id: u32,
+    ) -> Result<std::ops::Range<u32>, JamIndexPartError> {
+        let metagenome = self
+            .metagenomes
+            .get(usize::try_from(metagenome_id).map_err(|_| JamIndexPartError::Overflow)?)
+            .ok_or(JamIndexPartError::UnknownMetagenome(metagenome_id))?;
+        Ok(metagenome.first_contig
+            ..metagenome
+                .first_contig
+                .checked_add(metagenome.contig_count)
+                .ok_or(JamIndexPartError::Overflow)?)
+    }
+
+    pub fn read_contigs(
+        &self,
+        metagenome_id: u32,
+        contig_ids: &[u32],
+    ) -> Result<PartReadResult, JamIndexPartError> {
+        let metagenome = self
+            .metagenomes
+            .get(usize::try_from(metagenome_id).map_err(|_| JamIndexPartError::Overflow)?)
+            .ok_or(JamIndexPartError::UnknownMetagenome(metagenome_id))?;
+        let external = ExternalSource::detect(&metagenome.source_path);
+        if std::fs::metadata(&external.path)?.len() != metagenome.source_size
+            || part_access(external.access) != metagenome.access
+            || external.fai_path != metagenome.fai_path
+            || external.gzi_path != metagenome.gzi_path
+        {
+            return Err(JamIndexPartError::SourceIdentity(metagenome_id));
+        }
+        check_sidecar(
+            metagenome.fai_path.as_deref(),
+            metagenome.fai_sha256,
+            metagenome_id,
+        )?;
+        check_sidecar(
+            metagenome.gzi_path.as_deref(),
+            metagenome.gzi_sha256,
+            metagenome_id,
+        )?;
+        let allowed = self.metagenome_contigs(metagenome_id)?;
+        let requests = contig_ids
+            .iter()
+            .copied()
+            .map(|contig_id| {
+                if !allowed.contains(&contig_id) {
+                    return Err(JamIndexPartError::UnknownContig(contig_id));
+                }
+                let contig = self
+                    .contigs
+                    .get(usize::try_from(contig_id).map_err(|_| JamIndexPartError::Overflow)?)
+                    .ok_or(JamIndexPartError::UnknownContig(contig_id))?;
+                Ok(ContigRequest {
+                    contig_id,
+                    source_ordinal: contig.source_ordinal,
+                    name: contig.name.clone(),
+                    length: contig.base_count,
+                    offset: contig.fai_offset,
+                    line_bases: contig.line_bases,
+                    line_width: contig.line_width,
+                })
+            })
+            .collect::<Result<Vec<_>, JamIndexPartError>>()?;
+        let loaded = read_external(&external, &requests)?;
+        let mut contigs = BTreeMap::new();
+        for loaded in loaded.contigs {
+            let descriptor = self
+                .contigs
+                .get(usize::try_from(loaded.contig_id).map_err(|_| JamIndexPartError::Overflow)?)
+                .ok_or(JamIndexPartError::UnknownContig(loaded.contig_id))?;
+            if sha256(&loaded.bases) != descriptor.sequence_sha256 {
+                return Err(JamIndexPartError::ContigChecksum(loaded.contig_id));
+            }
+            contigs.insert(loaded.contig_id, loaded.bases);
+        }
+        Ok(PartReadResult {
+            contigs,
+            source_bytes: loaded.source_bytes,
+        })
+    }
+}
+
 impl JamIndexPartReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JamIndexPartError> {
         let file = File::open(path)?;
@@ -998,6 +1166,250 @@ fn encode_deltas(
         previous = contig_id;
     }
     Ok(())
+}
+
+struct DecodedSource {
+    path: PathBuf,
+    source_size: u64,
+    access: PartAccess,
+    source_sha256: [u8; 32],
+    fai_path: Option<PathBuf>,
+    fai_sha256: Option<[u8; 32]>,
+    gzi_path: Option<PathBuf>,
+    gzi_sha256: Option<[u8; 32]>,
+}
+
+fn decode_sources(
+    bytes: &[u8],
+    strings: &[u8],
+    count: u32,
+) -> Result<Vec<DecodedSource>, JamIndexPartError> {
+    let count = usize::try_from(count).map_err(|_| JamIndexPartError::Overflow)?;
+    if bytes.len() != count * SOURCE_RECORD_SIZE {
+        return Err(JamIndexPartError::Corrupt("source directory length"));
+    }
+    (0..count)
+        .map(|index| {
+            let offset = index * SOURCE_RECORD_SIZE;
+            if bytes[offset + 152..offset + SOURCE_RECORD_SIZE]
+                .iter()
+                .any(|byte| *byte != 0)
+            {
+                return Err(JamIndexPartError::Corrupt("source directory record"));
+            }
+            let access = match get_u32(bytes, offset + 12) {
+                1 => PartAccess::PlainFai,
+                2 => PartAccess::Bgzf,
+                3 => PartAccess::Sequential,
+                _ => return Err(JamIndexPartError::Corrupt("source access mode")),
+            };
+            let fai_path = decode_path(
+                strings,
+                get_u64(bytes, offset + 16),
+                get_u32(bytes, offset + 24),
+            )?;
+            let gzi_path = decode_path(
+                strings,
+                get_u64(bytes, offset + 32),
+                get_u32(bytes, offset + 40),
+            )?;
+            let fai_checksum = array_32(bytes, offset + 88);
+            let gzi_checksum = array_32(bytes, offset + 120);
+            if fai_path.is_none() != (fai_checksum == [0; 32])
+                || gzi_path.is_none() != (gzi_checksum == [0; 32])
+                || matches!(access, PartAccess::PlainFai) && fai_path.is_none()
+                || matches!(access, PartAccess::Bgzf) && (fai_path.is_none() || gzi_path.is_none())
+            {
+                return Err(JamIndexPartError::Corrupt("source sidecar binding"));
+            }
+            Ok(DecodedSource {
+                path: PathBuf::from(decode_string(
+                    strings,
+                    get_u64(bytes, offset),
+                    get_u32(bytes, offset + 8),
+                )?),
+                source_size: get_u64(bytes, offset + 48),
+                access,
+                source_sha256: array_32(bytes, offset + 56),
+                fai_path,
+                fai_sha256: (fai_checksum != [0; 32]).then_some(fai_checksum),
+                gzi_path,
+                gzi_sha256: (gzi_checksum != [0; 32]).then_some(gzi_checksum),
+            })
+        })
+        .collect()
+}
+
+fn decode_external_contigs(
+    bytes: &[u8],
+    strings: &[u8],
+    count: u64,
+) -> Result<Vec<PartContig>, JamIndexPartError> {
+    let count = usize::try_from(count).map_err(|_| JamIndexPartError::Overflow)?;
+    if bytes.len() != count * CONTIG_RECORD_SIZE {
+        return Err(JamIndexPartError::Corrupt("contig directory length"));
+    }
+    (0..count)
+        .map(|id| {
+            let offset = id * CONTIG_RECORD_SIZE;
+            let contig_id = get_u32(bytes, offset);
+            if usize::try_from(contig_id).ok() != Some(id)
+                || bytes[offset + 80..offset + CONTIG_RECORD_SIZE]
+                    .iter()
+                    .any(|byte| *byte != 0)
+            {
+                return Err(JamIndexPartError::Corrupt("contig directory record"));
+            }
+            Ok(PartContig {
+                contig_id,
+                metagenome_id: get_u32(bytes, offset + 4),
+                name: decode_string(
+                    strings,
+                    get_u64(bytes, offset + 8),
+                    get_u32(bytes, offset + 16),
+                )?,
+                base_count: get_u64(bytes, offset + 24),
+                source_ordinal: get_u32(bytes, offset + 20),
+                fai_offset: get_u64(bytes, offset + 32),
+                line_bases: get_u32(bytes, offset + 40),
+                line_width: get_u32(bytes, offset + 44),
+                sequence_sha256: array_32(bytes, offset + 48),
+                signature_count: 0,
+                packed_offset: 0,
+                packed_length: 0,
+                ambiguity_offset: 0,
+                ambiguity_length: 0,
+                sequence_checksum: [0; 32],
+            })
+        })
+        .collect()
+}
+
+fn validate_postings(bytes: &[u8], count: u64, contig_count: u64) -> Result<(), JamIndexPartError> {
+    for ordinal in 0..count {
+        let posting = decode_posting(bytes, count, ordinal)?;
+        if posting.is_empty()
+            || posting
+                .iter()
+                .any(|contig_id| u64::from(*contig_id) >= contig_count)
+        {
+            return Err(JamIndexPartError::Corrupt("contig posting range"));
+        }
+    }
+    Ok(())
+}
+
+fn decode_posting(bytes: &[u8], count: u64, ordinal: u64) -> Result<Vec<u32>, JamIndexPartError> {
+    if ordinal >= count {
+        return Err(JamIndexPartError::UnknownPosting(ordinal));
+    }
+    let header_bytes = usize::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_mul(POSTING_HEADER_SIZE))
+        .ok_or(JamIndexPartError::Overflow)?;
+    if header_bytes > bytes.len() {
+        return Err(JamIndexPartError::Corrupt("posting header range"));
+    }
+    let header = usize::try_from(ordinal)
+        .map_err(|_| JamIndexPartError::Overflow)?
+        .checked_mul(POSTING_HEADER_SIZE)
+        .ok_or(JamIndexPartError::Overflow)?;
+    let start = header_bytes
+        .checked_add(
+            usize::try_from(get_u64(bytes, header)).map_err(|_| JamIndexPartError::Overflow)?,
+        )
+        .ok_or(JamIndexPartError::Overflow)?;
+    let end = start
+        .checked_add(
+            usize::try_from(get_u32(bytes, header + 12))
+                .map_err(|_| JamIndexPartError::Overflow)?,
+        )
+        .ok_or(JamIndexPartError::Overflow)?;
+    let encoded = bytes
+        .get(start..end)
+        .ok_or(JamIndexPartError::Corrupt("posting payload range"))?;
+    let expected =
+        usize::try_from(get_u32(bytes, header + 8)).map_err(|_| JamIndexPartError::Overflow)?;
+    let mut values = Vec::with_capacity(expected);
+    let mut cursor = 0usize;
+    let mut previous = 0u32;
+    while cursor < encoded.len() && values.len() < expected {
+        let mut value = 0u32;
+        let mut shift = 0u32;
+        loop {
+            let byte = *encoded
+                .get(cursor)
+                .ok_or(JamIndexPartError::Corrupt("truncated posting varint"))?;
+            cursor += 1;
+            value |= u32::from(byte & 0x7f)
+                .checked_shl(shift)
+                .ok_or(JamIndexPartError::Overflow)?;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift = shift.checked_add(7).ok_or(JamIndexPartError::Overflow)?;
+            if shift >= 32 {
+                return Err(JamIndexPartError::Corrupt("posting varint overflow"));
+            }
+        }
+        let contig_id = if values.is_empty() {
+            value
+        } else {
+            previous
+                .checked_add(value)
+                .ok_or(JamIndexPartError::Overflow)?
+        };
+        if !values.is_empty() && contig_id <= previous {
+            return Err(JamIndexPartError::Corrupt("posting order"));
+        }
+        values.push(contig_id);
+        previous = contig_id;
+    }
+    if cursor != encoded.len() || values.len() != expected {
+        return Err(JamIndexPartError::Corrupt("posting count"));
+    }
+    Ok(values)
+}
+
+fn validate_external_lengths(header: Header) -> Result<(), JamIndexPartError> {
+    let header_bytes = header
+        .signature_count
+        .checked_mul(POSTING_HEADER_SIZE as u64)
+        .ok_or(JamIndexPartError::Overflow)?;
+    if header.sequence_length != u64::from(header.metagenome_count) * SOURCE_RECORD_SIZE as u64
+        || header.metagenome_length
+            != u64::from(header.metagenome_count) * METAGENOME_RECORD_SIZE as u64
+        || header.contig_length != header.contig_count * CONTIG_RECORD_SIZE as u64
+        || header.signature_length < header_bytes
+    {
+        return Err(JamIndexPartError::Corrupt("section length mismatch"));
+    }
+    Ok(())
+}
+
+fn decode_path(
+    strings: &[u8],
+    offset: u64,
+    length: u32,
+) -> Result<Option<PathBuf>, JamIndexPartError> {
+    if length == 0 {
+        return Ok(None);
+    }
+    decode_string(strings, offset, length)
+        .map(PathBuf::from)
+        .map(Some)
+}
+
+fn check_sidecar(
+    path: Option<&Path>,
+    expected: Option<[u8; 32]>,
+    metagenome_id: u32,
+) -> Result<(), JamIndexPartError> {
+    match (path, expected) {
+        (Some(path), Some(expected)) if sha256_file(path)? == expected => Ok(()),
+        (None, None) => Ok(()),
+        _ => Err(JamIndexPartError::SourceIdentity(metagenome_id)),
+    }
 }
 
 fn align_file(
@@ -1438,6 +1850,12 @@ pub enum JamIndexPartError {
     UnknownMetagenome(u32),
     #[error("unknown Jam Index contig {0}")]
     UnknownContig(u32),
+    #[error("unknown Jam Index posting {0}")]
+    UnknownPosting(u64),
+    #[error("Jam Index source identity changed for metagenome {0}")]
+    SourceIdentity(u32),
+    #[error("Jam Index external contig {0} checksum mismatch")]
+    ContigChecksum(u32),
     #[error("Jam Index part coordinate overflow")]
     Overflow,
 }

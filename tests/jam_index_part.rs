@@ -1,5 +1,6 @@
 use jam_rs::jam_index::{
-    JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy, write_external_part, write_part,
+    ExternalPartReader, JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy,
+    write_external_part, write_part,
 };
 use std::fs;
 use tempfile::Builder;
@@ -115,5 +116,16 @@ fn external_writer_compact() {
         !bytes
             .windows(sequence.len())
             .any(|window| window == sequence)
+    );
+    let reader = ExternalPartReader::open(directory.path().join("external.bin")).unwrap();
+    assert_eq!(reader.posting_count(), result.posting_count);
+    for ordinal in 0..reader.posting_count() {
+        assert!(!reader.posting(ordinal).unwrap().is_empty());
+    }
+    let loaded = reader.read_contigs(0, &[0, 1]).unwrap();
+    assert_eq!(loaded.contigs[&1], b"ACGTNNRYACGT");
+    assert_eq!(
+        loaded.source_bytes,
+        fs::metadata(&sources[0].sequence_path).unwrap().len()
     );
 }

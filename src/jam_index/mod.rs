@@ -30,8 +30,8 @@ pub use manifest::{
     ScreenSelectionPolicy,
 };
 pub use part::{
-    JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome, PartScreenSample,
-    PartWriteResult, SignatureHit, write_external_part, write_part,
+    ExternalPartReader, JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome,
+    PartScreenSample, PartWriteResult, SignatureHit, write_external_part, write_part,
 };
 pub use screen::{
     JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError, JamIndexScreenMetrics,
