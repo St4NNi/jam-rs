@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jam-rs.dev/schemas/archive-seeds-experiment-manifest-v1.schema.json",
+  "title": "Archive and seed experiment manifest",
+  "type": "object",
+  "required": ["schema_version", "kind", "cases"],
+  "properties": {
+    "schema_version": {"const": "archive-seeds-experiment-manifest-v1"},
+    "name": {"type": "string"},
+    "kind": {
+      "enum": ["seed_screen", "archive_matrix", "local_matrix", "remote_matrix", "comparators"]
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "command"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "command": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "cwd": {"type": "string"},
+          "env": {"type": "object", "additionalProperties": {"type": "string"}},
+          "metadata": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

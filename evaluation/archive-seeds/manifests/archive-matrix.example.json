@@ -1,0 +1,10 @@
+{
+  "schema_version": "archive-seeds-experiment-manifest-v1",
+  "name": "archive-policy-example",
+  "kind": "archive_matrix",
+  "cases": [
+    {"name": "native-jma-raw2bit-fixed-64k", "command": ["jam", "archive", "--sequence-codec", "raw2bit", "--block-bases", "65536"], "metadata": {"backend": "native_jma", "codec": "raw2bit", "policy": "fixed"}},
+    {"name": "native-jma-zstd2bit-fixed-64k", "command": ["jam", "archive", "--sequence-codec", "zstd2bit", "--block-bases", "65536"], "metadata": {"backend": "native_jma", "codec": "zstd2bit", "policy": "fixed"}},
+    {"name": "pithos-packed-slabs", "command": ["jam", "archive", "--backend", "pithos", "--sequence-policy", "packed-slabs"], "metadata": {"backend": "pithos", "policy": "packed_slabs"}}
+  ]
+}

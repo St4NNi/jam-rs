@@ -179,7 +179,7 @@ pub enum Commands {
         /// Existing metagenome candidate index (.jam)
         #[arg(short, long)]
         database: String,
-        /// TSV or JSON catalog mapping database sample IDs to JMA/raw resources
+        /// TSV or JSON catalog mapping database sample IDs to self-contained JMA resources
         #[arg(short = 'c', long = "metagenomes", visible_alias = "catalog")]
         metagenomes: PathBuf,
         /// JSONL output; .zst or .zstd enables Zstandard compression
@@ -231,9 +231,6 @@ pub enum Commands {
         /// Number of retries after a failed remote request or database download
         #[arg(long, default_value = "3")]
         max_retries: u32,
-        /// Reject servers that require a complete-object fallback for range reads
-        #[arg(long)]
-        no_full_download_fallback: bool,
     },
 
     /// Estimate containment of a query sequence against a sketch database.

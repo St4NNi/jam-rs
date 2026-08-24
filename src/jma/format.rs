@@ -1,39 +1,53 @@
-//! Explicit, checked encoding primitives for JMA version 1.
+//! The on-disk JMA format 1 primitives.
 //!
-//! The archive format is deliberately boring: all integer fields are encoded
-//! little-endian and all variable-length values are preceded by a checked
-//! length. This module contains no `unsafe` layout casts, so the on-disk
-//! representation is independent of the compiler and target platform.
+//! JMA is intentionally a binary, self-contained container. No Rust struct
+//! layout is used as a disk contract: every field is written explicitly in
+//! little endian order and every range is checked before conversion to a
+//! platform `usize`.
 
-use crate::jma::{
-    ArchiveHeader, JMA_FORMAT_VERSION, JMA_MAGIC, JMA_TRACE_ALGORITHM_TAG, JmaError, JmaResult,
-    SeedLevel,
-};
+use crate::jma::{ArchiveHeader, JMA_FORMAT_VERSION, JmaError, JmaResult};
 use sha2::{Digest, Sha256};
 
-/// Number of bytes in the fixed JMA v1 header.
-pub const HEADER_SIZE: usize = 160;
-/// Number of bytes in one section-directory entry.
+/// Eight bytes that identify the format and prevent accidental decoding by
+/// unrelated binary layouts.
+pub const JMA_FORMAT_MAGIC: [u8; 8] = *b"JMAF1\0\0\0";
+/// Layout identifier is independent of the format version.
+pub const JMA_LAYOUT_IDENTIFIER: u32 = 0x3141_4d4a;
+
+/// Fixed superblock size. It keeps the first remote request bounded.
+pub const SUPERBLOCK_SIZE: usize = 256;
+/// Named alias for callers that only need the fixed prefix length.
+pub const HEADER_SIZE: usize = SUPERBLOCK_SIZE;
+/// Fixed encoded size of a section-directory entry.
 pub const SECTION_ENTRY_SIZE: usize = 64;
-/// Version of each variable-length section payload.
+/// Version of variable-length section payloads.
 pub const SECTION_VERSION: u32 = 1;
 
-/// Section containing the contig table and names.
-pub const SECTION_CONTIGS: u32 = 1;
-/// Section containing packed sequence blocks.
-pub const SECTION_SEQUENCES: u32 = 2;
-/// Section containing k=31 seed occurrences.
-pub const SECTION_SEEDS_K31: u32 = 3;
-/// Section containing k=21 seed occurrences.
-pub const SECTION_SEEDS_K21: u32 = 4;
+/// Unknown sections carrying this bit are fatal.
+pub const SECTION_FLAG_REQUIRED: u32 = 1;
+/// Payload is independently decoded by its codec.
+pub const SECTION_FLAG_COMPRESSED: u32 = 1 << 1;
 
-const TRACE_ALGORITHM_ID: &str = "jam-seed-chain-align-v1";
-const TRACE_ALGORITHM_VERSION: u16 = 1;
-const HEADER_METADATA_OFFSET: usize = 144;
-const HEADER_ALGORITHM_TAG_END: usize = HEADER_METADATA_OFFSET + JMA_TRACE_ALGORITHM_TAG.len();
-const HEADER_ENTROPY_OFFSET: usize = HEADER_ALGORITHM_TAG_END;
+/// Required archive metadata (builder, source commit, checksums, and IDs).
+pub const SECTION_METADATA: u32 = 1;
+/// Contig records followed by the contig-name string table.
+pub const SECTION_CONTIGS: u32 = 2;
+/// Embedded sketch hashes used by candidate screening.
+pub const SECTION_SKETCH: u32 = 3;
+/// Open seed-scheme descriptors, page directories, keys, and occurrences.
+pub const SECTION_SEEDS: u32 = 4;
+/// Fixed sequence-block directory.
+pub const SECTION_SEQUENCE_DIRECTORY: u32 = 5;
+/// Independently addressable sequence block payloads.
+pub const SECTION_SEQUENCE_PAYLOAD: u32 = 6;
+/// Optional content-dependent gear block directory.
+pub const SECTION_GEAR_DIRECTORY: u32 = 7;
 
-/// A checked section-directory entry.
+/// Byte range in the superblock containing the checksum of the complete
+/// section-directory bytes. It is covered by the superblock checksum.
+pub const SECTION_DIRECTORY_CHECKSUM_OFFSET: usize = 160;
+
+/// A checked section-directory entry. Coordinates are absolute object bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SectionDescriptor {
     pub kind: u32,
@@ -44,16 +58,53 @@ pub struct SectionDescriptor {
     pub checksum: [u8; 32],
 }
 
-/// Header fields that are not part of the public shared `ArchiveHeader`.
+/// Archive metadata stored in the required metadata section.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArchiveMetadataFields {
+    pub format_identifier: String,
+    pub format_version: u16,
+    pub layout_identifier: u32,
+    pub source_assembly_sha256: [u8; 32],
+    pub archive_sha256: Option<[u8; 32]>,
+    pub builder_version: String,
+    pub source_commit: String,
+    pub hash_algorithm: String,
+    pub min_entropy: Option<f64>,
+}
+
+impl ArchiveMetadataFields {
+    pub fn for_source(source: [u8; 32]) -> Self {
+        Self {
+            format_identifier: "JMA".to_string(),
+            format_version: JMA_FORMAT_VERSION,
+            layout_identifier: JMA_LAYOUT_IDENTIFIER,
+            source_assembly_sha256: source,
+            archive_sha256: None,
+            builder_version: env!("CARGO_PKG_VERSION").to_string(),
+            source_commit: option_env!("JAM_RS_SOURCE_COMMIT")
+                .unwrap_or("unknown")
+                .to_string(),
+            hash_algorithm: "jamhash_u64_v1".to_string(),
+            min_entropy: None,
+        }
+    }
+}
+
+/// Parsed critical fields from the superblock. Variable metadata is decoded
+/// from `SECTION_METADATA` by the reader after this structure is checked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParsedHeader {
     pub archive: ArchiveHeader,
+    pub layout_identifier: u32,
     pub section_count: u32,
     pub section_directory_offset: u64,
     pub section_directory_length: u64,
+    pub object_size: u64,
+    pub archive_sha256: [u8; 32],
+    pub section_directory_checksum: [u8; 32],
+    pub superblock_checksum: [u8; 32],
 }
 
-/// Computes the SHA-256 checksum used for headers and section payloads.
 #[must_use]
 pub fn checksum(bytes: &[u8]) -> [u8; 32] {
     let digest = Sha256::digest(bytes);
@@ -62,248 +113,182 @@ pub fn checksum(bytes: &[u8]) -> [u8; 32] {
     result
 }
 
-/// Returns an error before converting a potentially large on-disk value to
-/// `usize`.
+/// Computes an object checksum without recursively including the object and
+/// superblock checksum fields. The directory checksum remains authenticated
+/// as part of the object bytes.
+#[must_use]
+pub fn checksum_object(bytes: &[u8]) -> [u8; 32] {
+    let mut copy = bytes.to_vec();
+    if copy.len() >= SUPERBLOCK_SIZE {
+        copy[96..160].fill(0);
+    }
+    checksum(&copy)
+}
+
 pub fn checked_usize(value: u64, what: &str) -> JmaResult<usize> {
     usize::try_from(value)
         .map_err(|_| JmaError::CorruptSection(format!("{what} does not fit in usize: {value}")))
 }
 
-/// Returns the checked end of a half-open byte range.
 pub fn checked_end(offset: u64, length: u64) -> JmaResult<u64> {
     offset.checked_add(length).ok_or(JmaError::OffsetOverflow)
 }
 
-/// Encodes the fixed header. The two 16-byte seed-level slots are enough for
-/// the frozen k=31 primary and k=21 rescue levels in JMA v1.
+/// Encodes a format-1 superblock. The caller supplies final object size and
+/// directory coordinates, so a remote reader can reject truncation early.
 pub fn encode_header(
     archive: &ArchiveHeader,
     section_count: u32,
     section_directory_offset: u64,
     section_directory_length: u64,
+    object_size: u64,
+    section_directory_checksum: [u8; 32],
 ) -> JmaResult<Vec<u8>> {
     if archive.format_version != JMA_FORMAT_VERSION {
         return Err(JmaError::UnsupportedVersion(archive.format_version));
     }
-    if archive.seed_levels.len() > 2 {
+    if object_size < u64::try_from(SUPERBLOCK_SIZE).map_err(|_| JmaError::OffsetOverflow)?
+        || checked_end(section_directory_offset, section_directory_length)? > object_size
+    {
         return Err(JmaError::CorruptSection(
-            "JMA v1 supports at most two seed levels".to_string(),
+            "section directory exceeds declared object size".to_string(),
         ));
     }
-    checked_end(section_directory_offset, section_directory_length)?;
-
-    let mut bytes = vec![0u8; HEADER_SIZE];
-    bytes[0..4].copy_from_slice(&JMA_MAGIC);
-    put_u16(&mut bytes, 4, archive.format_version);
+    let mut bytes = vec![0u8; SUPERBLOCK_SIZE];
+    bytes[0..8].copy_from_slice(&JMA_FORMAT_MAGIC);
+    put_u16(&mut bytes, 8, JMA_FORMAT_VERSION);
     put_u16(
         &mut bytes,
-        6,
-        u16::try_from(HEADER_SIZE).expect("fixed JMA header fits u16"),
+        10,
+        u16::try_from(SUPERBLOCK_SIZE).expect("JMA superblock fits u16"),
     );
-    put_u32(&mut bytes, 8, archive.flags);
-    put_u32(&mut bytes, 12, archive.contig_count);
-    put_u64(&mut bytes, 16, archive.total_bases);
-    put_u32(&mut bytes, 24, section_count);
+    put_u32(&mut bytes, 12, JMA_LAYOUT_IDENTIFIER);
+    put_u32(&mut bytes, 16, archive.flags);
+    put_u32(&mut bytes, 20, section_count);
+    put_u64(&mut bytes, 24, section_directory_offset);
+    put_u64(&mut bytes, 32, section_directory_length);
+    put_u64(&mut bytes, 40, object_size);
+    put_u32(&mut bytes, 48, archive.contig_count);
+    // This is a count hint only. The open descriptor list is authoritative.
     put_u32(
         &mut bytes,
-        28,
+        52,
         u32::try_from(archive.seed_levels.len()).map_err(|_| JmaError::OffsetOverflow)?,
     );
-    bytes[32..64].copy_from_slice(&archive.source_sha256);
-    put_u64(&mut bytes, 64, section_directory_offset);
-    put_u64(&mut bytes, 72, section_directory_length);
-
-    for (index, level) in archive.seed_levels.iter().enumerate() {
-        let offset = 112 + index * 16;
-        bytes[offset] = level.k;
-        put_u64(&mut bytes, offset + 8, level.scale);
-    }
-
-    encode_trace_metadata(archive, &mut bytes)?;
-
-    // Header checksum covers all fixed fields and reserved bytes. The
-    // checksum field itself is zero while calculating its value.
+    put_u64(&mut bytes, 56, archive.total_bases);
+    bytes[64..96].copy_from_slice(&archive.source_sha256);
+    // 96..128: object checksum, filled by the finalizer.
+    // 128..160: superblock checksum, filled below.
+    bytes[SECTION_DIRECTORY_CHECKSUM_OFFSET..SECTION_DIRECTORY_CHECKSUM_OFFSET + 32]
+        .copy_from_slice(&section_directory_checksum);
     let digest = checksum(&bytes);
-    bytes[80..112].copy_from_slice(&digest);
+    bytes[128..160].copy_from_slice(&digest);
     Ok(bytes)
 }
 
-/// Parses and validates the fixed header, including its checksum.
+/// Parses and validates only the fixed superblock.
 pub fn decode_header(bytes: &[u8]) -> JmaResult<ParsedHeader> {
-    if bytes.len() < HEADER_SIZE {
+    if bytes.len() < SUPERBLOCK_SIZE {
         return Err(JmaError::CorruptSection(format!(
-            "header is truncated: {} bytes, expected {HEADER_SIZE}",
+            "superblock is truncated: {} bytes, expected {SUPERBLOCK_SIZE}",
             bytes.len()
         )));
     }
-    if bytes[0] != JMA_MAGIC[0]
-        || bytes[1] != JMA_MAGIC[1]
-        || bytes[2] != JMA_MAGIC[2]
-        || bytes[3] != JMA_MAGIC[3]
-    {
+    if bytes[0..8] != JMA_FORMAT_MAGIC {
         return Err(JmaError::InvalidMagic);
     }
-    let version = get_u16(bytes, 4)?;
+    let version = get_u16(bytes, 8)?;
     if version != JMA_FORMAT_VERSION {
         return Err(JmaError::UnsupportedVersion(version));
     }
-    let header_length = get_u16(bytes, 6)? as usize;
-    if header_length != HEADER_SIZE {
+    let header_length = usize::from(get_u16(bytes, 10)?);
+    if header_length != SUPERBLOCK_SIZE {
         return Err(JmaError::CorruptSection(format!(
-            "unsupported header length {header_length}, expected {HEADER_SIZE}"
+            "unsupported superblock length {header_length}, expected {SUPERBLOCK_SIZE}"
         )));
     }
-
-    let expected_checksum = array_32(bytes, 80)?;
-    let mut checksum_input = bytes[..HEADER_SIZE].to_vec();
-    checksum_input[80..112].fill(0);
-    if checksum(&checksum_input) != expected_checksum {
-        return Err(JmaError::ChecksumMismatch("header".to_string()));
-    }
-
-    let contig_count = get_u32(bytes, 12)?;
-    let seed_count = get_u32(bytes, 28)?;
-    if seed_count > 2 {
+    let layout_identifier = get_u32(bytes, 12)?;
+    if layout_identifier != JMA_LAYOUT_IDENTIFIER {
         return Err(JmaError::CorruptSection(format!(
-            "header declares unsupported seed-level count {seed_count}"
+            "unsupported JMA layout identifier 0x{layout_identifier:08x}"
         )));
     }
-    let mut seed_levels = Vec::with_capacity(seed_count as usize);
-    for index in 0..seed_count as usize {
-        let offset = 112 + index * 16;
-        let k = bytes[offset];
-        let scale = get_u64(bytes, offset + 8)?;
-        if !(1..=32).contains(&k) || scale == 0 {
-            return Err(JmaError::CorruptSection(format!(
-                "invalid seed level k={k}, scale={scale}"
-            )));
-        }
-        seed_levels.push(SeedLevel { k, scale });
+    let expected = array_32(bytes, 128)?;
+    let mut input = bytes[..SUPERBLOCK_SIZE].to_vec();
+    input[128..160].fill(0);
+    if checksum(&input) != expected {
+        return Err(JmaError::ChecksumMismatch("superblock".to_string()));
     }
-
-    let section_directory_offset = get_u64(bytes, 64)?;
-    let section_directory_length = get_u64(bytes, 72)?;
+    let section_directory_offset = get_u64(bytes, 24)?;
+    let section_directory_length = get_u64(bytes, 32)?;
     checked_end(section_directory_offset, section_directory_length)?;
-    let (algorithm_id, algorithm_version, min_entropy) = decode_trace_metadata(bytes)?;
-    let archive = ArchiveHeader {
-        format_version: version,
-        flags: get_u32(bytes, 8)?,
-        contig_count,
-        total_bases: get_u64(bytes, 16)?,
-        source_sha256: array_32(bytes, 32)?,
-        seed_levels,
-        algorithm_id,
-        algorithm_version,
-        min_entropy,
-    };
+    let object_size = get_u64(bytes, 40)?;
+    if object_size < u64::try_from(SUPERBLOCK_SIZE).map_err(|_| JmaError::OffsetOverflow)? {
+        return Err(JmaError::CorruptSection(
+            "declared JMA object size is smaller than the superblock".to_string(),
+        ));
+    }
+    if checked_end(section_directory_offset, section_directory_length)? > object_size {
+        return Err(JmaError::CorruptSection(
+            "section directory exceeds declared object size".to_string(),
+        ));
+    }
     Ok(ParsedHeader {
-        archive,
-        section_count: get_u32(bytes, 24)?,
+        archive: ArchiveHeader {
+            format_version: version,
+            flags: get_u32(bytes, 16)?,
+            contig_count: get_u32(bytes, 48)?,
+            total_bases: get_u64(bytes, 56)?,
+            source_sha256: array_32(bytes, 64)?,
+            // Filled from the open seed descriptor list by the reader.
+            seed_levels: Vec::new(),
+            algorithm_id: Some("jam-seed-chain-align-v1".to_string()),
+            algorithm_version: Some(1),
+            min_entropy: None,
+        },
+        layout_identifier,
+        section_count: get_u32(bytes, 20)?,
         section_directory_offset,
         section_directory_length,
+        object_size,
+        archive_sha256: array_32(bytes, 96)?,
+        section_directory_checksum: array_32(bytes, SECTION_DIRECTORY_CHECKSUM_OFFSET)?,
+        superblock_checksum: expected,
     })
 }
 
-fn encode_trace_metadata(archive: &ArchiveHeader, bytes: &mut [u8]) -> JmaResult<()> {
-    let has_algorithm_id = archive.algorithm_id.is_some();
-    let has_algorithm_version = archive.algorithm_version.is_some();
-    if has_algorithm_id != has_algorithm_version {
-        return Err(JmaError::CorruptSection(
-            "algorithm ID and version must be supplied together".to_string(),
-        ));
-    }
-
-    if let Some(algorithm_id) = archive.algorithm_id.as_deref()
-        && algorithm_id != TRACE_ALGORITHM_ID
-    {
-        return Err(JmaError::CorruptSection(format!(
-            "unsupported JMA algorithm ID {algorithm_id}"
-        )));
-    }
-    if let Some(algorithm_version) = archive.algorithm_version
-        && algorithm_version != TRACE_ALGORITHM_VERSION
-    {
-        return Err(JmaError::CorruptSection(format!(
-            "unsupported JMA algorithm version {algorithm_version}"
-        )));
-    }
-
-    // A tagged archive uses all-one bits as the explicit "not configured"
-    // sentinel so an explicit finite 0.0 threshold remains distinguishable.
-    // Legacy archives use an all-zero tag and all-zero entropy bytes.
-    let entropy_bits = match archive.min_entropy {
-        None if has_algorithm_id => u64::MAX,
-        None => 0,
-        Some(value) if value.is_finite() && (0.0..=2.0).contains(&value) => value.to_bits(),
-        Some(value) => {
-            return Err(JmaError::CorruptSection(format!(
-                "minimum entropy {value} is not finite and between 0.0 and 2.0"
-            )));
-        }
-    };
-
-    if !has_algorithm_id && entropy_bits != 0 {
-        return Err(JmaError::CorruptSection(
-            "minimum entropy requires a JMA algorithm tag".to_string(),
-        ));
-    }
-    if has_algorithm_id {
-        bytes[HEADER_METADATA_OFFSET..HEADER_ALGORITHM_TAG_END]
-            .copy_from_slice(&JMA_TRACE_ALGORITHM_TAG);
-    }
-    put_u64(bytes, HEADER_ENTROPY_OFFSET, entropy_bits);
-    Ok(())
-}
-
-fn decode_trace_metadata(bytes: &[u8]) -> JmaResult<(Option<String>, Option<u16>, Option<f64>)> {
-    let tag = bytes
-        .get(HEADER_METADATA_OFFSET..HEADER_ALGORITHM_TAG_END)
-        .ok_or_else(|| JmaError::CorruptSection("truncated JMA metadata tag".to_string()))?;
-    let entropy_bits = get_u64(bytes, HEADER_ENTROPY_OFFSET)?;
-
-    if tag.iter().all(|byte| *byte == 0) {
-        if entropy_bits != 0 {
-            return Err(JmaError::CorruptSection(
-                "minimum entropy is present without a JMA algorithm tag".to_string(),
-            ));
-        }
-        return Ok((None, None, None));
-    }
-    if tag != JMA_TRACE_ALGORITHM_TAG.as_slice() {
-        return Err(JmaError::CorruptSection(
-            "unknown JMA algorithm tag".to_string(),
-        ));
-    }
-
-    let min_entropy = if entropy_bits == u64::MAX {
-        None
-    } else {
-        let value = f64::from_bits(entropy_bits);
-        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
-            return Err(JmaError::CorruptSection(format!(
-                "invalid JMA minimum entropy {value}"
-            )));
-        }
-        Some(value)
-    };
-    Ok((
-        Some(TRACE_ALGORITHM_ID.to_string()),
-        Some(TRACE_ALGORITHM_VERSION),
-        min_entropy,
-    ))
-}
-
-/// Encodes a section directory and checks every offset/length arithmetic.
+/// Encodes an exact section directory. Required kinds must be unique.
 pub fn encode_section_directory(entries: &[SectionDescriptor]) -> JmaResult<Vec<u8>> {
     let size = entries
         .len()
         .checked_mul(SECTION_ENTRY_SIZE)
         .ok_or(JmaError::OffsetOverflow)?;
     let mut bytes = vec![0u8; size];
+    let mut seen = std::collections::BTreeSet::new();
     for (index, entry) in entries.iter().enumerate() {
+        if entry.flags & !(SECTION_FLAG_REQUIRED | SECTION_FLAG_COMPRESSED) != 0 {
+            return Err(JmaError::CorruptSection(format!(
+                "section kind {} has unsupported flags 0x{:08x}",
+                entry.kind, entry.flags
+            )));
+        }
+        if entry.flags & SECTION_FLAG_COMPRESSED == 0 && entry.uncompressed_length != entry.length {
+            return Err(JmaError::CorruptSection(
+                "uncompressed section has a decoded length different from stored length"
+                    .to_string(),
+            ));
+        }
         checked_end(entry.offset, entry.length)?;
         checked_usize(entry.length, "section length")?;
-        let offset = index * SECTION_ENTRY_SIZE;
+        if entry.flags & SECTION_FLAG_REQUIRED != 0 && !seen.insert(entry.kind) {
+            return Err(JmaError::CorruptSection(format!(
+                "duplicate required section kind {}",
+                entry.kind
+            )));
+        }
+        let offset = index
+            .checked_mul(SECTION_ENTRY_SIZE)
+            .ok_or(JmaError::OffsetOverflow)?;
         put_u32(&mut bytes, offset, entry.kind);
         put_u32(&mut bytes, offset + 4, entry.flags);
         put_u64(&mut bytes, offset + 8, entry.offset);
@@ -314,14 +299,13 @@ pub fn encode_section_directory(entries: &[SectionDescriptor]) -> JmaResult<Vec<
     Ok(bytes)
 }
 
-/// Parses an exact section directory. Extra or truncated entries are both
-/// rejected so a corrupt count cannot shift subsequent data interpretation.
 pub fn decode_section_directory(
     bytes: &[u8],
     section_count: u32,
 ) -> JmaResult<Vec<SectionDescriptor>> {
-    let expected = (section_count as usize)
-        .checked_mul(SECTION_ENTRY_SIZE)
+    let expected = usize::try_from(section_count)
+        .ok()
+        .and_then(|count| count.checked_mul(SECTION_ENTRY_SIZE))
         .ok_or(JmaError::OffsetOverflow)?;
     if bytes.len() != expected {
         return Err(JmaError::CorruptSection(format!(
@@ -329,9 +313,12 @@ pub fn decode_section_directory(
             bytes.len()
         )));
     }
-    let mut entries = Vec::with_capacity(section_count as usize);
-    for index in 0..section_count as usize {
-        let offset = index * SECTION_ENTRY_SIZE;
+    let mut entries = Vec::with_capacity(usize::try_from(section_count).unwrap_or(0));
+    let mut required = std::collections::BTreeSet::new();
+    for index in 0..usize::try_from(section_count).map_err(|_| JmaError::OffsetOverflow)? {
+        let offset = index
+            .checked_mul(SECTION_ENTRY_SIZE)
+            .ok_or(JmaError::OffsetOverflow)?;
         let entry = SectionDescriptor {
             kind: get_u32(bytes, offset)?,
             flags: get_u32(bytes, offset + 4)?,
@@ -341,10 +328,16 @@ pub fn decode_section_directory(
             checksum: array_32_at(bytes, offset + 32)?,
         };
         checked_end(entry.offset, entry.length)?;
-        if entry.uncompressed_length < entry.length {
+        if entry.flags & SECTION_FLAG_COMPRESSED == 0 && entry.uncompressed_length != entry.length {
             return Err(JmaError::CorruptSection(format!(
-                "section {index} has invalid uncompressed length {} < {}",
+                "uncompressed section {index} has decoded length {} != stored length {}",
                 entry.uncompressed_length, entry.length
+            )));
+        }
+        if entry.flags & SECTION_FLAG_REQUIRED != 0 && !required.insert(entry.kind) {
+            return Err(JmaError::CorruptSection(format!(
+                "duplicate required section kind {}",
+                entry.kind
             )));
         }
         entries.push(entry);
@@ -352,14 +345,146 @@ pub fn decode_section_directory(
     Ok(entries)
 }
 
+/// Encodes metadata. Strings are UTF-8 and have checked u32 lengths.
+pub fn encode_metadata(metadata: &ArchiveMetadataFields) -> JmaResult<Vec<u8>> {
+    if metadata.format_version != JMA_FORMAT_VERSION {
+        return Err(JmaError::UnsupportedVersion(metadata.format_version));
+    }
+    if metadata.layout_identifier != JMA_LAYOUT_IDENTIFIER {
+        return Err(JmaError::CorruptSection(
+            "metadata layout identifier does not match JMA format 1".to_string(),
+        ));
+    }
+    let fields = [
+        metadata.format_identifier.as_bytes(),
+        metadata.builder_version.as_bytes(),
+        metadata.source_commit.as_bytes(),
+        metadata.hash_algorithm.as_bytes(),
+    ];
+    let mut bytes = Vec::with_capacity(108 + fields.iter().map(|field| field.len()).sum::<usize>());
+    bytes.extend_from_slice(&SECTION_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&metadata.format_version.to_le_bytes());
+    bytes.extend_from_slice(&u16::from(metadata.min_entropy.is_some()).to_le_bytes());
+    bytes.extend_from_slice(&metadata.layout_identifier.to_le_bytes());
+    bytes.extend_from_slice(&metadata.source_assembly_sha256);
+    bytes.extend_from_slice(&metadata.archive_sha256.unwrap_or([0; 32]));
+    let entropy_bits = match metadata.min_entropy {
+        None => 0,
+        Some(value) if value.is_finite() && (0.0..=2.0).contains(&value) => value.to_bits(),
+        Some(value) => {
+            return Err(JmaError::CorruptSection(format!(
+                "minimum entropy {value} is not finite and between 0.0 and 2.0"
+            )));
+        }
+    };
+    bytes.extend_from_slice(&entropy_bits.to_le_bytes());
+    for field in fields {
+        bytes.extend_from_slice(
+            &u32::try_from(field.len())
+                .map_err(|_| JmaError::OffsetOverflow)?
+                .to_le_bytes(),
+        );
+    }
+    for field in fields {
+        bytes.extend_from_slice(field);
+    }
+    Ok(bytes)
+}
+
+pub fn decode_metadata(bytes: &[u8]) -> JmaResult<ArchiveMetadataFields> {
+    // 4 version + 2 version + 2 reserved + 4 layout + 32 source + 32 object
+    // + entropy bits + 4 string lengths.
+    if bytes.len() < 100 {
+        return Err(JmaError::CorruptSection(
+            "metadata section header is truncated".to_string(),
+        ));
+    }
+    if get_u32(bytes, 0)? != SECTION_VERSION {
+        return Err(JmaError::CorruptSection(
+            "unsupported metadata section version".to_string(),
+        ));
+    }
+    let format_version = get_u16(bytes, 4)?;
+    if format_version != JMA_FORMAT_VERSION {
+        return Err(JmaError::UnsupportedVersion(format_version));
+    }
+    let layout_identifier = get_u32(bytes, 8)?;
+    if layout_identifier != JMA_LAYOUT_IDENTIFIER {
+        return Err(JmaError::CorruptSection(
+            "metadata layout identifier does not match JMA format 1".to_string(),
+        ));
+    }
+    let source = array_32(bytes, 12)?;
+    let archive = array_32(bytes, 44)?;
+    let reserved = get_u16(bytes, 6)?;
+    if reserved & !1 != 0 {
+        return Err(JmaError::CorruptSection(
+            "metadata reserved flags are non-zero".to_string(),
+        ));
+    }
+    let entropy_bits = get_u64(bytes, 76)?;
+    let min_entropy = if reserved & 1 == 0 {
+        if entropy_bits != 0 {
+            return Err(JmaError::CorruptSection(
+                "minimum entropy is present without a metadata flag".to_string(),
+            ));
+        }
+        None
+    } else {
+        let value = f64::from_bits(entropy_bits);
+        if !value.is_finite() || !(0.0..=2.0).contains(&value) {
+            return Err(JmaError::CorruptSection(format!(
+                "invalid JMA minimum entropy {value}"
+            )));
+        }
+        Some(value)
+    };
+    let mut cursor = 84usize;
+    let mut lengths = [0u32; 4];
+    for length in &mut lengths {
+        *length = get_u32(bytes, cursor)?;
+        cursor = cursor.checked_add(4).ok_or(JmaError::OffsetOverflow)?;
+    }
+    let mut strings = Vec::with_capacity(4);
+    for length in lengths {
+        let end = cursor
+            .checked_add(usize::try_from(length).map_err(|_| JmaError::OffsetOverflow)?)
+            .ok_or(JmaError::OffsetOverflow)?;
+        let value = bytes
+            .get(cursor..end)
+            .ok_or_else(|| JmaError::CorruptSection("metadata string is truncated".to_string()))?;
+        let value = std::str::from_utf8(value)
+            .map_err(|_| JmaError::CorruptSection("metadata string is not UTF-8".to_string()))?
+            .to_string();
+        strings.push(value);
+        cursor = end;
+    }
+    if cursor != bytes.len() {
+        return Err(JmaError::CorruptSection(format!(
+            "metadata section has {} trailing bytes",
+            bytes.len() - cursor
+        )));
+    }
+    let archive_sha256 = (archive != [0; 32]).then_some(archive);
+    Ok(ArchiveMetadataFields {
+        format_identifier: strings.remove(0),
+        format_version,
+        layout_identifier,
+        source_assembly_sha256: source,
+        archive_sha256,
+        builder_version: strings.remove(0),
+        source_commit: strings.remove(0),
+        hash_algorithm: strings.remove(0),
+        min_entropy,
+    })
+}
+
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
-
 fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
-
 fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
@@ -370,14 +495,12 @@ pub(crate) fn get_u16(bytes: &[u8], offset: usize) -> JmaResult<u16> {
         .ok_or_else(|| JmaError::CorruptSection("truncated u16".to_string()))?;
     Ok(u16::from_le_bytes([value[0], value[1]]))
 }
-
 pub(crate) fn get_u32(bytes: &[u8], offset: usize) -> JmaResult<u32> {
     let value = bytes
         .get(offset..offset + 4)
         .ok_or_else(|| JmaError::CorruptSection("truncated u32".to_string()))?;
     Ok(u32::from_le_bytes([value[0], value[1], value[2], value[3]]))
 }
-
 pub(crate) fn get_u64(bytes: &[u8], offset: usize) -> JmaResult<u64> {
     let value = bytes
         .get(offset..offset + 8)
@@ -386,11 +509,9 @@ pub(crate) fn get_u64(bytes: &[u8], offset: usize) -> JmaResult<u64> {
         value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],
     ]))
 }
-
 pub(crate) fn array_32(bytes: &[u8], offset: usize) -> JmaResult<[u8; 32]> {
     array_32_at(bytes, offset)
 }
-
 pub(crate) fn array_32_at(bytes: &[u8], offset: usize) -> JmaResult<[u8; 32]> {
     let value = bytes
         .get(offset..offset + 32)
@@ -399,7 +520,6 @@ pub(crate) fn array_32_at(bytes: &[u8], offset: usize) -> JmaResult<[u8; 32]> {
     result.copy_from_slice(value);
     Ok(result)
 }
-
 pub(crate) fn checked_slice<'a>(
     bytes: &'a [u8],
     offset: usize,
@@ -411,4 +531,19 @@ pub(crate) fn checked_slice<'a>(
     bytes
         .get(offset..end)
         .ok_or_else(|| JmaError::CorruptSection(format!("truncated {what}")))
+}
+
+/// Checks a packed k-mer before it is used as exact verification material.
+pub fn valid_canonical_kmer(k: u8, value: u64) -> bool {
+    k == 32 || (1..=32).contains(&k) && value < (1u64 << (2 * u32::from(k)))
+}
+
+/// Returns a high-order hash prefix for an embedded seed page.
+pub fn hash_prefix(hash: u64, bucket_bits: u8) -> JmaResult<u32> {
+    if !(1..=32).contains(&bucket_bits) {
+        return Err(JmaError::CorruptSection(format!(
+            "invalid seed bucket width {bucket_bits}"
+        )));
+    }
+    u32::try_from(hash >> (64 - u32::from(bucket_bits))).map_err(|_| JmaError::OffsetOverflow)
 }

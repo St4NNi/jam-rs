@@ -6,11 +6,11 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use jam_rs::jma::sequence::{decode_range, decode_sequence_blocks, encode_sequence_blocks};
-use jam_rs::jma::sequence_builder::{SequenceBuildConfig, build_sequence_blocks};
-use jam_rs::jma::writer::{decode_seed_section, encode_seed_section};
-use jam_rs::jma::{ContigMetadata, SeedOccurrence, SequenceRange};
+use jam_rs::jma::SeedOccurrence;
+use jam_rs::jma::index::{decode_seed_index_directory, encode_seed_index};
+use jam_rs::jma::sequence_builder::{IndexedSequenceBuildConfig, build_indexed_sequence_blocks};
 use jam_rs::resource::ResourceMetrics;
+use jam_rs::sequence::{BlockCodec, SequenceBlockPolicy, decode_block_range};
 use jam_rs::trace::alignment::{AlignmentOptions, AlignmentWorkspace};
 use jam_rs::trace::anchors::{Anchor, SeedOccurrenceGroup, generate_anchors};
 use jam_rs::trace::chain::{ChainConfig, chain_anchors};
@@ -59,10 +59,10 @@ fn bench_bucket_decoding(c: &mut Criterion) {
     let section = jam_rs::jma::seed_builder::build_seed_section(&[input], 31, 1, None)
         .unwrap()
         .section;
-    let encoded = encode_seed_section(&section).unwrap();
+    let encoded = encode_seed_index(&[section]).unwrap();
     let mut group = c.benchmark_group("trace_bucket_decoding");
     group.bench_function("k31_scale1", |bench| {
-        bench.iter(|| decode_seed_section(black_box(&encoded)).unwrap())
+        bench.iter(|| decode_seed_index_directory(black_box(&encoded)).unwrap())
     });
     group.finish();
 }
@@ -132,20 +132,36 @@ fn bench_alignment(c: &mut Criterion) {
 
 fn bench_sequence_decoding(c: &mut Criterion) {
     let sequence = dna(100_000);
-    let blocks =
-        build_sequence_blocks(0, &sequence, SequenceBuildConfig { block_bases: 4096 }).unwrap();
-    let encoded = encode_sequence_blocks(&blocks).unwrap();
-    let contigs = [ContigMetadata {
-        id: 0,
-        name: "contig-0".to_string(),
-        length: sequence.len() as u64,
-    }];
-    let range = SequenceRange::new(12_345, 67_890).unwrap();
+    let blocks = build_indexed_sequence_blocks(
+        0,
+        &sequence,
+        IndexedSequenceBuildConfig {
+            policy: SequenceBlockPolicy::Fixed { block_bases: 4096 },
+            codec: BlockCodec::Raw2Bit,
+        },
+    )
+    .unwrap();
+    let range = 12_345u64..67_890u64;
     let mut group = c.benchmark_group("trace_sequence_decoding");
     group.bench_function("decode_blocks_and_55kb_range", |bench| {
         bench.iter(|| {
-            let decoded = decode_sequence_blocks(black_box(&encoded)).unwrap();
-            decode_range(&decoded, &contigs, 0, range).unwrap()
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    let start = range.start.max(block.record.base_start);
+                    let end = range.end.min(block.record.base_end()?);
+                    (start < end).then(|| {
+                        decode_block_range(
+                            &block.record,
+                            black_box(&block.payload),
+                            &block.ambiguity_payload,
+                            start..end,
+                        )
+                        .unwrap()
+                    })
+                })
+                .flatten()
+                .collect::<Vec<_>>()
         })
     });
     group.finish();

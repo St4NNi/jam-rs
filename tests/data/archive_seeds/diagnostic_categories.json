@@ -1,0 +1,22 @@
+{
+  "schema_version": "trace-diagnostics-v1",
+  "metagenome_id": "fixture-all-failure-categories",
+  "truth_intervals": [
+    {"truth_interval": {"start": 0, "end": 10}, "candidate_selected": false, "mosaic_supported_bases": 0, "failure_category": "candidate_miss", "seed_schemes": []},
+    {"truth_interval": {"start": 10, "end": 20}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "no_retained_seed", "seed_schemes": []},
+    {"truth_interval": {"start": 20, "end": 30}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "no_matching_seed", "seed_schemes": []},
+    {"truth_interval": {"start": 30, "end": 40}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "repetitive_seed_suppression", "seed_schemes": []},
+    {"truth_interval": {"start": 40, "end": 50}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "anchor_cap", "seed_schemes": []},
+    {"truth_interval": {"start": 50, "end": 60}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "no_valid_chain", "seed_schemes": []},
+    {"truth_interval": {"start": 60, "end": 70}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "chain_limit", "seed_schemes": []},
+    {"truth_interval": {"start": 70, "end": 80}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "sequence_budget", "seed_schemes": []},
+    {"truth_interval": {"start": 80, "end": 90}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "alignment_band_failure", "seed_schemes": []},
+    {"truth_interval": {"start": 90, "end": 100}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "alignment_rejection", "seed_schemes": []},
+    {"truth_interval": {"start": 100, "end": 110}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "alignment_cap", "seed_schemes": []},
+    {"truth_interval": {"start": 110, "end": 120}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "mosaic_selection", "seed_schemes": []},
+    {"truth_interval": {"start": 120, "end": 130}, "candidate_selected": true, "mosaic_supported_bases": 0, "failure_category": "other", "seed_schemes": []}
+  ],
+  "stages": [
+    {"stage": 0, "name": "exact", "seed_pages_read": 2, "keys_tested": 4, "occurrences_decoded": 5, "anchors_retained": 3, "chains_retained": 1, "sequence_blocks_read": 1, "alignment_attempts": 1, "new_query_bases_supported": 10, "wall_micros": 12, "cpu_micros": 8, "bytes_read": 128}
+  ]
+}

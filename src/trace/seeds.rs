@@ -14,6 +14,11 @@ use needletail::Sequence;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod gear;
+pub mod spaced;
+pub mod strobemer;
+pub mod syncmer;
+
 /// Stable hash identity for trace seeds.
 pub const HASH_ID: &str = "jamhash_u64_v1";
 /// Primary trace seeds are fixed at k=31 by the frozen workflow contract.

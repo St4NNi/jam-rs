@@ -8,6 +8,7 @@ use jam_rs::trace::config::{SensitivityConfig, SensitivityProfile};
 use jam_rs::trace::runner::{RunnerError, TraceQuery, TraceRunner, TraceRunnerConfig};
 use jam_rs::trace::screen::CandidateSearchConfig;
 use remote::HttpFixture;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::process::Command;
 
@@ -22,6 +23,18 @@ fn deterministic_dna(seed: u64, length: usize) -> String {
             bases[(state >> 62) as usize] as char
         })
         .collect()
+}
+
+fn catalog_entry(metagenome_id: &str, resource_uri: String, bytes: &[u8]) -> CatalogEntry {
+    CatalogEntry {
+        metagenome_id: metagenome_id.to_string(),
+        resource_uri,
+        sha256: format!("{:x}", Sha256::digest(bytes)),
+        etag: None,
+        object_version: None,
+        label: None,
+        source_assembly_sha256: None,
+    }
 }
 
 #[test]
@@ -63,12 +76,12 @@ fn remote_candidate_database_is_identity_cached_before_mmap() {
         },
     )
     .unwrap();
-    let catalog = TraceCatalog::from_entries(vec![CatalogEntry {
-        metagenome_id: "assembly.fa".to_string(),
-        jma: Some(archive.to_string_lossy().into_owned()),
-        jma_index: None,
-        raw: None,
-    }])
+    let archive_bytes = fs::read(&archive).unwrap();
+    let catalog = TraceCatalog::from_entries(vec![catalog_entry(
+        "assembly.fa",
+        archive.to_string_lossy().into_owned(),
+        &archive_bytes,
+    )])
     .unwrap();
     let fixture = HttpFixture::new(fs::read(&database).unwrap());
     let database_url = fixture.url("/metagenomes.jam?token=do-not-record");
@@ -195,27 +208,25 @@ fn local_and_remote_jma_inputs_produce_identical_biological_evidence() {
     )
     .unwrap();
 
-    let local_catalog = TraceCatalog::from_entries(vec![CatalogEntry {
-        metagenome_id: "assembly.fa".to_string(),
-        jma: Some(archive.to_string_lossy().into_owned()),
-        jma_index: None,
-        raw: None,
-    }])
+    let archive_bytes = fs::read(&archive).unwrap();
+    let local_catalog = TraceCatalog::from_entries(vec![catalog_entry(
+        "assembly.fa",
+        archive.to_string_lossy().into_owned(),
+        &archive_bytes,
+    )])
     .unwrap();
-    let fixture = HttpFixture::new(fs::read(&archive).unwrap());
+    let fixture = HttpFixture::new(archive_bytes.clone());
     let remote_catalog = TraceCatalog::from_entries(vec![
-        CatalogEntry {
-            metagenome_id: "assembly.fa".to_string(),
-            jma: Some(fixture.url("/assembly.jma?token=not-recorded")),
-            jma_index: None,
-            raw: None,
-        },
-        CatalogEntry {
-            metagenome_id: "not-a-candidate.fa".to_string(),
-            jma: Some(fixture.url("/noncandidate.jma?token=not-recorded")),
-            jma_index: None,
-            raw: None,
-        },
+        catalog_entry(
+            "assembly.fa",
+            fixture.url("/assembly.jma?token=not-recorded"),
+            &archive_bytes,
+        ),
+        catalog_entry(
+            "not-a-candidate.fa",
+            fixture.url("/noncandidate.jma?token=not-recorded"),
+            &archive_bytes,
+        ),
     ])
     .unwrap();
     let config = TraceRunnerConfig {

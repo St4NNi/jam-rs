@@ -37,6 +37,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -57,10 +58,14 @@ pub struct TraceRunnerConfig {
 
 impl Default for TraceRunnerConfig {
     fn default() -> Self {
+        let resources = ResourceOpenOptions {
+            allow_full_download_fallback: false,
+            ..ResourceOpenOptions::default()
+        };
         Self {
             sensitivity: SensitivityConfig::default(),
             candidates: CandidateSearchConfig::default(),
-            resources: ResourceOpenOptions::default(),
+            resources,
             threads: 1,
             io_concurrency: 1,
             max_alignments_per_candidate: 256,
@@ -581,6 +586,8 @@ fn subtract_resource_metrics(after: ResourceMetrics, before: ResourceMetrics) ->
         requested_bytes: after.requested_bytes.saturating_sub(before.requested_bytes),
         returned_bytes: after.returned_bytes.saturating_sub(before.returned_bytes),
         decoded_bytes: after.decoded_bytes.saturating_sub(before.decoded_bytes),
+        mapped_bytes: after.mapped_bytes.saturating_sub(before.mapped_bytes),
+        resident_bytes: after.resident_bytes.saturating_sub(before.resident_bytes),
         remote_bytes: after.remote_bytes.saturating_sub(before.remote_bytes),
         cache_bytes: after.cache_bytes.saturating_sub(before.cache_bytes),
         cache_hits: after.cache_hits.saturating_sub(before.cache_hits),
@@ -764,108 +771,30 @@ fn process_candidate(
         };
     };
 
-    let mut failures = Vec::new();
-    let indexed = entry.jma.as_deref();
-    let mut result = if let Some(jma) = indexed {
-        if entry.jma_index.is_none() && !config.resources.allow_full_download_fallback {
-            failed_result(
-                plasmid_id,
-                candidate,
-                config,
-                "jma_index",
-                "jma_index_required",
-                "indexed JMA access requires a catalog jma_index; enable full-download fallback explicitly to use an archive without one",
-                false,
-                Some(jma),
-            )
-        } else {
-            match process_jma(
-                plasmid_id,
-                plasmid,
-                candidate,
-                jma,
-                entry.jma_index.as_deref(),
-                config,
-                &mut counters,
-            ) {
-                Ok(result) => result,
-                Err(error)
-                    if entry.fallback_raw().is_some()
-                        && jma_error_allows_raw_fallback(error.error.as_ref()) =>
-                {
-                    failures.push(failure_for_error("jma", jma, error.error.as_ref()));
-                    let mut fallback = process_raw(
-                        plasmid_id,
-                        plasmid,
-                        candidate,
-                        entry.raw.as_deref().unwrap_or_default(),
-                        config,
-                        &mut counters,
-                    );
-                    fallback.resource_metrics =
-                        add_resource_metrics(*error.metrics, fallback.resource_metrics);
-                    fallback
-                }
-                Err(error) => failed_result_with_metrics(
-                    plasmid_id,
-                    candidate,
-                    config,
-                    "jma",
-                    error.error.code(),
-                    &error.error.to_string(),
-                    error.error.retryable(),
-                    Some(jma),
-                    *error.metrics,
-                ),
-            }
-        }
-    } else if let Some(raw) = entry.raw.as_deref() {
-        process_raw(plasmid_id, plasmid, candidate, raw, config, &mut counters)
-    } else {
-        failed_result(
+    let resource = entry.resource();
+    let result = match process_jma(
+        plasmid_id,
+        plasmid,
+        candidate,
+        resource,
+        &entry.sha256,
+        config,
+        &mut counters,
+    ) {
+        Ok(result) => result,
+        Err(error) => failed_result_with_metrics(
             plasmid_id,
             candidate,
             config,
-            "catalog",
-            "missing_resource",
-            "catalog row has neither a JMA nor raw assembly resource",
-            false,
-            None,
-        )
+            "jma",
+            error.error.code(),
+            &error.error.to_string(),
+            error.error.retryable(),
+            Some(resource),
+            *error.metrics,
+        ),
     };
-    if indexed.is_some()
-        && entry.jma_index.is_none()
-        && config.resources.allow_full_download_fallback
-    {
-        result.failures.push(TraceFailure {
-            stage: "jma_index".to_string(),
-            code: "jma_full_download_fallback".to_string(),
-            message: "catalog row has no jma_index; archive was opened eagerly because full-download fallback is enabled".to_string(),
-            resource: indexed.map(redact_resource),
-            retryable: false,
-        });
-        result.resource_metrics.full_object_fallbacks = result
-            .resource_metrics
-            .full_object_fallbacks
-            .saturating_add(1);
-        if result.status == TraceStatus::Complete {
-            result.status = TraceStatus::Partial;
-        }
-    }
-    result.failures.splice(0..0, failures);
-    if !result.failures.is_empty() && result.status == TraceStatus::Complete {
-        result.status = TraceStatus::Partial;
-    }
     CandidateWork { result, counters }
-}
-
-fn jma_error_allows_raw_fallback(error: &RunnerError) -> bool {
-    match error {
-        RunnerError::SeedLevelMismatch { .. } => false,
-        RunnerError::Jma(JmaError::Resource(_)) => true,
-        RunnerError::Jma(_) => false,
-        _ => true,
-    }
 }
 
 fn process_jma(
@@ -873,26 +802,21 @@ fn process_jma(
     plasmid: &[u8],
     candidate: &RankedCandidate,
     locator: &str,
-    index_locator: Option<&str>,
+    expected_sha256: &str,
     config: &TraceRunnerConfig,
     counters: &mut TracePerformanceCounters,
 ) -> Result<TraceMetagenomeResult, TraceProcessingFailure> {
-    let resource = open_resource(locator, config.resources.clone())
-        .map_err(|error| TraceProcessingFailure::new(error.into(), ResourceMetrics::default()))?;
-    let reader = match index_locator {
-        Some(index_locator) => {
-            let index =
-                open_resource(index_locator, config.resources.clone()).map_err(|error| {
-                    TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
-                })?;
-            JmaReader::open_indexed(resource, index).map_err(|error| {
-                TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
-            })?
-        }
-        None => JmaReader::open(resource).map_err(|error| {
-            TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
-        })?,
+    let archive_options = ResourceOpenOptions {
+        allow_full_download_fallback: false,
+        expected_sha256: Some(expected_sha256.to_string()),
+        ..config.resources.clone()
     };
+    let resource =
+        Arc::new(open_resource(locator, archive_options).map_err(|error| {
+            TraceProcessingFailure::new(error.into(), ResourceMetrics::default())
+        })?);
+    let reader = JmaReader::open(Arc::clone(&resource))
+        .map_err(|error| TraceProcessingFailure::new(error.into(), resource.metrics()))?;
     if reader.header().algorithm_id.as_deref() != Some(crate::trace::TRACE_ALGORITHM_ID)
         || reader.header().algorithm_version != Some(crate::trace::TRACE_ALGORITHM_VERSION)
     {
@@ -1066,136 +990,6 @@ fn process_jma(
         failures: Vec::new(),
         resource_metrics: reader.metrics(),
     })
-}
-
-fn process_raw(
-    plasmid_id: &str,
-    plasmid: &[u8],
-    candidate: &RankedCandidate,
-    locator: &str,
-    config: &TraceRunnerConfig,
-    counters: &mut TracePerformanceCounters,
-) -> TraceMetagenomeResult {
-    let resource = match RawAssembly::open_with_metrics(locator, config.resources.clone()) {
-        Ok(resource) => resource,
-        Err(failure) => {
-            return failed_result_with_metrics(
-                plasmid_id,
-                candidate,
-                config,
-                "raw",
-                raw_error_code(failure.error.as_ref()),
-                &failure.error.to_string(),
-                raw_error_retryable(failure.error.as_ref()),
-                Some(locator),
-                *failure.metrics,
-            );
-        }
-    };
-    let mut alignments = Vec::new();
-    let mut workspace = AlignmentWorkspace::new();
-    for contig in &resource.contigs {
-        counters.contigs_considered = counters.contigs_considered.saturating_add(1);
-        let windows = match window_ranges(
-            contig.sequence.len(),
-            plasmid.len(),
-            config.sensitivity.max_alignment_window_bases,
-        ) {
-            Ok(windows) => windows,
-            Err(error) => {
-                return failed_result_with_metrics(
-                    plasmid_id,
-                    candidate,
-                    config,
-                    "raw",
-                    error.code(),
-                    &error.to_string(),
-                    error.retryable(),
-                    Some(locator),
-                    resource.metrics,
-                );
-            }
-        };
-        for (start, end) in windows {
-            counters.windows_retrieved = counters.windows_retrieved.saturating_add(1);
-            let sequence = &contig.sequence[start..end];
-            if let Err(error) = align_window(
-                plasmid_id,
-                candidate,
-                &mut workspace,
-                plasmid,
-                sequence,
-                start as u64,
-                &contig.id,
-                config,
-                0,
-                SeedEvidence::default(),
-                None,
-                0,
-                plasmid.len() as u64,
-                0,
-                &mut alignments,
-                counters,
-            ) {
-                return failed_result_with_metrics(
-                    plasmid_id,
-                    candidate,
-                    config,
-                    "alignment",
-                    error.code(),
-                    &error.to_string(),
-                    error.retryable(),
-                    Some(locator),
-                    resource.metrics,
-                );
-            }
-            retain_best_alignments(&mut alignments, config.max_alignments_per_candidate);
-        }
-    }
-    let finalized = match finalize_evidence(plasmid.len() as u64, config, &mut alignments) {
-        Ok(finalized) => finalized,
-        Err(error) => {
-            return failed_result_with_metrics(
-                plasmid_id,
-                candidate,
-                config,
-                "coverage",
-                error.code(),
-                &error.to_string(),
-                false,
-                Some(locator),
-                resource.metrics,
-            );
-        }
-    };
-    let mut warnings = evidence_warnings(&finalized);
-    warnings
-        .push("raw assembly mode does not provide indexed gap-directed seed rescue".to_string());
-    TraceMetagenomeResult {
-        schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
-        run_id: String::new(),
-        plasmid_id: plasmid_id.to_string(),
-        metagenome_id: candidate.metagenome_id().to_string(),
-        query_kind: config.query_kind,
-        topology_requested: config.topology_requested,
-        coordinate_model: finalized.topology.coordinate_model,
-        topology_evidence: finalized.topology.topology_evidence,
-        algorithms: crate::trace::config::algorithm_identifiers(),
-        algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
-            config.sensitivity.clone(),
-        ),
-        status: TraceStatus::Complete,
-        candidate: Some(candidate.candidate.clone()),
-        alignments,
-        primary_fragment_mosaic: Some(finalized.primary_mosaic),
-        topology: Some(finalized.topology),
-        rescue_rounds: Vec::new(),
-        performance_counters: CandidatePerformanceCounters::default(),
-        coverage: Some(finalized.coverage),
-        warnings,
-        failures: Vec::new(),
-        resource_metrics: resource.metrics,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1782,47 +1576,6 @@ fn evidence_warnings(finalized: &FinalEvidence) -> Vec<String> {
     warnings
 }
 
-fn window_ranges(
-    contig_length: usize,
-    query_length: usize,
-    max_window_bases: u64,
-) -> Result<Vec<(usize, usize)>, RunnerError> {
-    if contig_length == 0 {
-        return Ok(Vec::new());
-    }
-    let max_window = usize::try_from(max_window_bases)
-        .map_err(|_| RunnerError::InvalidConfig("alignment window exceeds platform".to_string()))?;
-    if max_window == 0 {
-        return Err(RunnerError::InvalidConfig(
-            "max_alignment_window_bases must be greater than zero".to_string(),
-        ));
-    }
-    if query_length > max_window {
-        return Err(RunnerError::WindowTooLarge {
-            query_length,
-            max_window,
-        });
-    }
-    let span = contig_length.min(max_window);
-    let overlap = query_length.min(span.saturating_sub(1)).max(1);
-    let step = span.saturating_sub(overlap).max(1);
-    let mut ranges = Vec::new();
-    let mut start = 0usize;
-    loop {
-        let end = start.saturating_add(span).min(contig_length);
-        ranges.push((start, end));
-        if end == contig_length {
-            break;
-        }
-        let next = start.saturating_add(step);
-        if next <= start {
-            break;
-        }
-        start = next.min(contig_length - 1);
-    }
-    Ok(ranges)
-}
-
 fn retain_best_alignments(alignments: &mut Vec<BaseAlignment>, limit: usize) {
     alignments.sort_by(compare_alignments);
     alignments.dedup_by(|right, left| same_alignment(right, left));
@@ -1948,16 +1701,6 @@ fn failed_result_with_metrics(
     }
 }
 
-fn failure_for_error(stage: &str, resource: &str, error: &RunnerError) -> TraceFailure {
-    TraceFailure {
-        stage: stage.to_string(),
-        code: error.code().to_string(),
-        message: error.to_string(),
-        resource: Some(redact_resource(resource)),
-        retryable: error.retryable(),
-    }
-}
-
 fn redact_resource(resource: &str) -> String {
     crate::resource::ResourceLocator::parse(resource)
         .map(|locator| locator.redacted())
@@ -1969,13 +1712,6 @@ fn raw_error_code(error: &RawError) -> &'static str {
         RawError::Resource(error) => resource_error_code(error),
         RawError::Parse { .. } => "raw_parse_error",
         RawError::Io { .. } => "raw_io_error",
-    }
-}
-
-fn raw_error_retryable(error: &RawError) -> bool {
-    match error {
-        RawError::Resource(error) => resource_error_retryable(error),
-        RawError::Parse { .. } | RawError::Io { .. } => false,
     }
 }
 

@@ -1,36 +1,36 @@
+use jam_rs::jma::ContigMetadata;
 use jam_rs::jma::JmaError;
-use jam_rs::jma::contigs::decode_contigs;
 use jam_rs::jma::format::{
-    HEADER_SIZE, SECTION_ENTRY_SIZE, checksum, decode_header, decode_section_directory,
+    HEADER_SIZE, SECTION_ENTRY_SIZE, SECTION_FLAG_COMPRESSED, SECTION_FLAG_REQUIRED,
+    SECTION_SEQUENCE_PAYLOAD, SectionDescriptor, checksum, decode_header, decode_section_directory,
+    encode_section_directory,
 };
+use jam_rs::jma::header::{parse_section_directory, validate_known_sections};
 use jam_rs::jma::reader::JmaReader;
-use jam_rs::jma::sequence::{decode_sequence_blocks, unpack_bases};
-use jam_rs::jma::writer::decode_seed_section;
 use jam_rs::jma::writer::{ArchiveParts, encode_archive};
+use jam_rs::jma::{ArchiveReader, SequenceRange};
 use jam_rs::resource::{
     ByteRange, RangeReader, ResourceError, ResourceLocator, ResourceMetadata, ResourceMetrics,
 };
+use jam_rs::sequence::{BlockCodec, encode_sequence_block};
 use std::io::{Cursor, Read};
 
 struct BytesResource {
     locator: ResourceLocator,
     bytes: Vec<u8>,
 }
-
 impl BytesResource {
     fn new(bytes: Vec<u8>) -> Self {
         Self {
-            locator: ResourceLocator::parse("file://jma-corrupt").unwrap(),
+            locator: ResourceLocator::parse("file:///jma-corrupt").unwrap(),
             bytes,
         }
     }
 }
-
 impl RangeReader for BytesResource {
     fn locator(&self) -> &ResourceLocator {
         &self.locator
     }
-
     fn metadata(&self) -> Result<ResourceMetadata, ResourceError> {
         Ok(ResourceMetadata {
             size: self.bytes.len() as u64,
@@ -39,7 +39,6 @@ impl RangeReader for BytesResource {
             accepts_ranges: true,
         })
     }
-
     fn read_range(&self, range: ByteRange) -> Result<Vec<u8>, ResourceError> {
         let end = range.end()?;
         if end > self.bytes.len() as u64 {
@@ -51,165 +50,189 @@ impl RangeReader for BytesResource {
         }
         Ok(self.bytes[range.offset as usize..end as usize].to_vec())
     }
-
     fn stream(&self) -> Result<Box<dyn Read + Send>, ResourceError> {
         Ok(Box::new(Cursor::new(self.bytes.clone())))
     }
-
     fn metrics(&self) -> ResourceMetrics {
         ResourceMetrics::default()
     }
 }
 
 fn fixture() -> ArchiveParts {
+    let sequence = b"ACGTACGTACGTACGT";
+    let sequence_block = encode_sequence_block(0, 0, sequence, BlockCodec::Raw2Bit).unwrap();
     ArchiveParts {
         flags: 0,
-        source_sha256: [0; 32],
-        contigs: Vec::new(),
-        sequence_blocks: Vec::new(),
+        source_sha256: [1; 32],
+        contigs: vec![ContigMetadata {
+            id: 0,
+            name: "c".into(),
+            length: sequence.len() as u64,
+        }],
+        sequence_blocks: vec![sequence_block],
         seed_sections: Vec::new(),
     }
 }
 
 #[test]
-fn header_corruption_is_rejected_by_checksum() {
-    let mut bytes = encode_archive(&fixture()).unwrap();
-    bytes[8] ^= 1;
+fn superblock_and_section_checksum_corruption_fails_closed() {
+    let bytes = encode_archive(&fixture()).unwrap();
+    let mut bad_header = bytes.clone();
+    bad_header[16] ^= 1;
     assert!(matches!(
-        decode_header(&bytes[..HEADER_SIZE]),
-        Err(JmaError::ChecksumMismatch(section)) if section == "header"
+        decode_header(&bad_header[..HEADER_SIZE]),
+        Err(JmaError::ChecksumMismatch(_))
     ));
-}
 
-#[test]
-fn section_payload_corruption_is_rejected_by_checksum() {
-    let mut bytes = encode_archive(&fixture()).unwrap();
-    let directory_offset = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
-    let first_section_offset = u64::from_le_bytes(
-        bytes[directory_offset + 8..directory_offset + 16]
+    let mut bad_section = bytes;
+    let directory_offset = u64::from_le_bytes(bad_section[24..32].try_into().unwrap()) as usize;
+    let section_offset = u64::from_le_bytes(
+        bad_section[directory_offset + 8..directory_offset + 16]
             .try_into()
             .unwrap(),
     ) as usize;
-    bytes[first_section_offset] ^= 1;
+    bad_section[section_offset] ^= 1;
     assert!(matches!(
-        JmaReader::from_resource(BytesResource::new(bytes)),
-        Err(JmaError::ChecksumMismatch(section)) if section.contains("section kind")
+        JmaReader::open(BytesResource::new(bad_section)),
+        Err(JmaError::ChecksumMismatch(_))
+    ));
+
+    let mut bad_directory = encode_archive(&fixture()).unwrap();
+    let directory_offset = u64::from_le_bytes(bad_directory[24..32].try_into().unwrap()) as usize;
+    bad_directory[directory_offset] ^= 1;
+    assert!(matches!(
+        JmaReader::open(BytesResource::new(bad_directory)),
+        Err(JmaError::ChecksumMismatch(section)) if section == "section directory"
     ));
 }
 
 #[test]
-fn malformed_directory_length_and_truncated_entry_are_rejected() {
-    assert!(decode_section_directory(&[], 1).is_err());
+fn section_directory_rejects_bounds_overlap_and_unknown_required() {
     assert!(decode_section_directory(&[0; SECTION_ENTRY_SIZE - 1], 1).is_err());
-}
-
-fn refresh_header_checksum(bytes: &mut [u8]) {
-    bytes[80..112].fill(0);
-    let digest = checksum(&bytes[..HEADER_SIZE]);
-    bytes[80..112].copy_from_slice(&digest);
-}
-
-#[test]
-fn unsupported_version_and_truncated_header_are_rejected() {
-    let bytes = encode_archive(&fixture()).unwrap();
-    assert!(matches!(
-        decode_header(&bytes[..HEADER_SIZE - 1]),
-        Err(JmaError::CorruptSection(message)) if message.contains("truncated")
-    ));
-
-    let mut unsupported = bytes;
-    unsupported[4..6].copy_from_slice(&2u16.to_le_bytes());
-    refresh_header_checksum(&mut unsupported);
-    assert!(matches!(
-        decode_header(&unsupported[..HEADER_SIZE]),
-        Err(JmaError::UnsupportedVersion(2))
-    ));
+    let entry = SectionDescriptor {
+        kind: 99,
+        flags: SECTION_FLAG_REQUIRED,
+        offset: 400,
+        length: 4,
+        uncompressed_length: 4,
+        checksum: checksum(b"test"),
+    };
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(&entry.kind.to_le_bytes());
+    encoded.extend_from_slice(&entry.flags.to_le_bytes());
+    encoded.extend_from_slice(&entry.offset.to_le_bytes());
+    encoded.extend_from_slice(&entry.length.to_le_bytes());
+    encoded.extend_from_slice(&entry.uncompressed_length.to_le_bytes());
+    encoded.extend_from_slice(&entry.checksum);
+    let parsed = parse_section_directory(&encoded, 1, 256, 512).unwrap();
+    assert!(validate_known_sections(&parsed).is_err());
+    assert!(parse_section_directory(&encoded, 1, 256, 302).is_err());
 }
 
 #[test]
-fn unknown_algorithm_tag_and_invalid_entropy_are_rejected() {
-    let mut unknown_tag = encode_archive(&fixture()).unwrap();
-    unknown_tag[144] = b'X';
-    refresh_header_checksum(&mut unknown_tag);
-    assert!(matches!(
-        decode_header(&unknown_tag[..HEADER_SIZE]),
-        Err(JmaError::CorruptSection(message)) if message.contains("unknown JMA algorithm tag")
-    ));
-
-    let mut invalid_entropy = encode_archive(&fixture()).unwrap();
-    invalid_entropy[152..160].copy_from_slice(&f64::NAN.to_bits().to_le_bytes());
-    refresh_header_checksum(&mut invalid_entropy);
-    assert!(matches!(
-        decode_header(&invalid_entropy[..HEADER_SIZE]),
-        Err(JmaError::CorruptSection(message)) if message.contains("invalid JMA minimum entropy")
-    ));
-
-    let mut entropy_without_tag = encode_archive(&fixture()).unwrap();
-    entropy_without_tag[144..152].fill(0);
-    entropy_without_tag[152..160].copy_from_slice(&1.0f64.to_le_bytes());
-    refresh_header_checksum(&mut entropy_without_tag);
-    assert!(matches!(
-        decode_header(&entropy_without_tag[..HEADER_SIZE]),
-        Err(JmaError::CorruptSection(message)) if message.contains("without a JMA algorithm tag")
-    ));
-}
-
-#[test]
-fn section_offsets_outside_resource_are_rejected() {
-    let mut bytes = encode_archive(&fixture()).unwrap();
-    let directory_offset = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
-    let invalid_offset = bytes.len() as u64 + 1;
-    bytes[directory_offset + 8..directory_offset + 16]
-        .copy_from_slice(&invalid_offset.to_le_bytes());
-    refresh_header_checksum(&mut bytes);
-    assert!(matches!(
-        JmaReader::from_resource(BytesResource::new(bytes)),
-        Err(JmaError::CorruptSection(message)) if message.contains("ends at")
-    ));
-}
-
-#[test]
-fn oversized_declared_counts_and_lengths_do_not_allocate_or_panic() {
-    let mut contig_header = Vec::new();
-    contig_header.extend_from_slice(&1u32.to_le_bytes());
-    contig_header.extend_from_slice(&u32::MAX.to_le_bytes());
-    assert!(decode_contigs(&contig_header, u32::MAX).is_err());
-
-    let mut sequence_header = Vec::new();
-    sequence_header.extend_from_slice(&1u32.to_le_bytes());
-    sequence_header.extend_from_slice(&u32::MAX.to_le_bytes());
-    assert!(decode_sequence_blocks(&sequence_header).is_err());
-
-    let mut seed_header = Vec::new();
-    seed_header.extend_from_slice(&1u32.to_le_bytes());
-    seed_header.push(31);
-    seed_header.extend_from_slice(&[0; 3]);
-    seed_header.extend_from_slice(&u32::MAX.to_le_bytes());
-    assert!(decode_seed_section(&seed_header).is_err());
-
-    assert!(unpack_bases(&[], &[], u64::MAX).is_err());
-
-    let mut archive = encode_archive(&fixture()).unwrap();
-    let excessive_count = (1u32 << 20) + 1;
-    archive[24..28].copy_from_slice(&excessive_count.to_le_bytes());
-    archive[72..80]
-        .copy_from_slice(&(u64::from(excessive_count) * SECTION_ENTRY_SIZE as u64).to_le_bytes());
-    refresh_header_checksum(&mut archive);
-    assert!(matches!(
-        JmaReader::from_resource(BytesResource::new(archive)),
-        Err(JmaError::CorruptSection(message)) if message.contains("section count")
-    ));
-}
-
-#[test]
-fn single_byte_mutations_never_panic_in_archive_reader() {
-    let bytes = encode_archive(&fixture()).unwrap();
-    for index in 0..bytes.len() {
-        let mut mutated = bytes.clone();
-        mutated[index] ^= 0x01;
-        let result = std::panic::catch_unwind(|| {
-            let _ = JmaReader::from_resource(BytesResource::new(mutated));
-        });
-        assert!(result.is_ok(), "mutation at byte {index} panicked");
+fn sequence_block_checksum_rejects_corrupt_raw_or_zstd_payload() {
+    for codec in [BlockCodec::Raw2Bit, BlockCodec::Zstd2Bit] {
+        let block = encode_sequence_block(0, 0, b"ACGTRYKMBVDHN", codec).unwrap();
+        let mut bytes = encode_archive(&ArchiveParts {
+            flags: 0,
+            source_sha256: [2; 32],
+            contigs: vec![ContigMetadata {
+                id: 0,
+                name: "c".into(),
+                length: 13,
+            }],
+            sequence_blocks: vec![block],
+            seed_sections: Vec::new(),
+        })
+        .unwrap();
+        let header = decode_header(&bytes[..HEADER_SIZE]).unwrap();
+        let directory_start = usize::try_from(header.section_directory_offset).unwrap();
+        let directory_end =
+            directory_start + usize::try_from(header.section_directory_length).unwrap();
+        let sections =
+            decode_section_directory(&bytes[directory_start..directory_end], header.section_count)
+                .unwrap();
+        let payload = sections
+            .iter()
+            .find(|section| section.kind == SECTION_SEQUENCE_PAYLOAD)
+            .unwrap();
+        bytes[usize::try_from(payload.offset).unwrap()] ^= 1;
+        let reader = JmaReader::open(BytesResource::new(bytes)).unwrap();
+        assert!(
+            reader
+                .read_sequence(0, SequenceRange::new(0, 13).unwrap())
+                .is_err()
+        );
     }
+}
+
+#[test]
+fn required_section_flags_and_compression_lengths_are_checked_conditionally() {
+    let compressed = SectionDescriptor {
+        kind: 99,
+        flags: SECTION_FLAG_COMPRESSED,
+        offset: 400,
+        length: 4,
+        uncompressed_length: 128,
+        checksum: checksum(b"test"),
+    };
+    let encoded = encode_section_directory(&[compressed]).unwrap();
+    assert!(decode_section_directory(&encoded, 1).is_ok());
+
+    let mut uncompressed = compressed;
+    uncompressed.flags = 0;
+    assert!(encode_section_directory(&[uncompressed]).is_err());
+
+    let missing_required = [
+        SectionDescriptor {
+            kind: 1,
+            flags: 0,
+            ..compressed
+        },
+        SectionDescriptor {
+            kind: 2,
+            flags: 0,
+            ..compressed
+        },
+        SectionDescriptor {
+            kind: 3,
+            flags: 0,
+            ..compressed
+        },
+        SectionDescriptor {
+            kind: 4,
+            flags: 0,
+            ..compressed
+        },
+        SectionDescriptor {
+            kind: 5,
+            flags: 0,
+            ..compressed
+        },
+        SectionDescriptor {
+            kind: 6,
+            flags: 0,
+            ..compressed
+        },
+    ];
+    assert!(validate_known_sections(&missing_required).is_err());
+    let duplicate = [
+        SectionDescriptor {
+            kind: 1,
+            flags: SECTION_FLAG_REQUIRED,
+            ..compressed
+        },
+        SectionDescriptor {
+            kind: 1,
+            flags: 0,
+            ..compressed
+        },
+    ];
+    assert!(validate_known_sections(&duplicate).is_err());
+    let unsupported_flags = [SectionDescriptor {
+        kind: 1,
+        flags: 8,
+        ..compressed
+    }];
+    assert!(validate_known_sections(&unsupported_flags).is_err());
 }

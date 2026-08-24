@@ -1,17 +1,14 @@
-use jam_rs::jma::format::{HEADER_SIZE, decode_header, encode_header};
+use jam_rs::jma::ArchiveReader;
+use jam_rs::jma::format::JMA_FORMAT_MAGIC;
+use jam_rs::jma::index::{decode_seed_index_directory, encode_seed_index};
 use jam_rs::jma::reader::JmaReader;
-use jam_rs::jma::sequence::{SequenceBlock, pack_bases};
-use jam_rs::jma::writer::{
-    ArchiveParts, SeedLevelData, SeedRecord, SeedSection, encode_archive,
-    encode_archive_with_min_entropy,
-};
-use jam_rs::jma::{
-    ArchiveHeader, ArchiveReader, ContigMetadata, JMA_FORMAT_VERSION, JmaResult, SeedLevel,
-    SeedOccurrence, SeedQuery, SequenceRange,
-};
+use jam_rs::jma::writer::{ArchiveParts, SeedLevelData, SeedRecord, SeedSection, encode_archive};
+use jam_rs::jma::{ContigMetadata, SeedLevel, SeedOccurrence, SeedQuery, SequenceRange};
 use jam_rs::resource::{
     ByteRange, RangeReader, ResourceError, ResourceLocator, ResourceMetadata, ResourceMetrics,
 };
+use jam_rs::sequence::{BlockCodec, encode_sequence_block};
+use jam_rs::sequence::{decode_reverse_complement_range, encode_contig};
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
@@ -23,9 +20,7 @@ struct MemoryResource {
 impl MemoryResource {
     fn new(bytes: Vec<u8>) -> Self {
         Self {
-            locator: ResourceLocator::parse("memory://jma-fixture").unwrap_or_else(|_| {
-                ResourceLocator::parse("file://jma-fixture").expect("file locator")
-            }),
+            locator: ResourceLocator::parse("file:///jma-format-roundtrip").unwrap(),
             bytes: Arc::new(bytes),
         }
     }
@@ -35,16 +30,14 @@ impl RangeReader for MemoryResource {
     fn locator(&self) -> &ResourceLocator {
         &self.locator
     }
-
     fn metadata(&self) -> Result<ResourceMetadata, ResourceError> {
         Ok(ResourceMetadata {
             size: self.bytes.len() as u64,
-            etag: Some("fixture".to_string()),
+            etag: None,
             last_modified: None,
             accepts_ranges: true,
         })
     }
-
     fn read_range(&self, range: ByteRange) -> Result<Vec<u8>, ResourceError> {
         let end = range.end()?;
         if end > self.bytes.len() as u64 {
@@ -56,65 +49,39 @@ impl RangeReader for MemoryResource {
         }
         Ok(self.bytes[range.offset as usize..end as usize].to_vec())
     }
-
     fn stream(&self) -> Result<Box<dyn Read + Send>, ResourceError> {
         Ok(Box::new(Cursor::new(self.bytes.as_ref().clone())))
     }
-
     fn metrics(&self) -> ResourceMetrics {
         ResourceMetrics::default()
     }
 }
 
 fn fixture() -> ArchiveParts {
-    let first = b"ACGTNNACGTAC";
-    let second = b"TTTTGCA";
-    let (packed_first, mask_first) = pack_bases(first);
-    let (packed_second, mask_second) = pack_bases(second);
+    let sequence = b"ACGTNNACGTACGTTTGCAACGTACGTACGT";
+    let sequence_block = encode_sequence_block(0, 0, sequence, BlockCodec::Raw2Bit).unwrap();
     ArchiveParts {
         flags: 7,
-        source_sha256: [9u8; 32],
-        contigs: vec![
-            ContigMetadata {
-                id: 0,
-                name: "contig-a".to_string(),
-                length: first.len() as u64,
-            },
-            ContigMetadata {
-                id: 1,
-                name: "contig-b".to_string(),
-                length: second.len() as u64,
-            },
-        ],
-        sequence_blocks: vec![
-            SequenceBlock {
-                contig_id: 0,
-                start: 0,
-                base_length: first.len() as u64,
-                packed: packed_first,
-                unknown_mask: mask_first,
-            },
-            SequenceBlock {
-                contig_id: 1,
-                start: 0,
-                base_length: second.len() as u64,
-                packed: packed_second,
-                unknown_mask: mask_second,
-            },
-        ],
+        source_sha256: [9; 32],
+        contigs: vec![ContigMetadata {
+            id: 0,
+            name: "contig-a".into(),
+            length: sequence.len() as u64,
+        }],
+        sequence_blocks: vec![sequence_block],
         seed_sections: vec![
             SeedSection {
                 k: 21,
                 levels: vec![SeedLevelData {
-                    level: SeedLevel { k: 21, scale: 500 },
+                    level: SeedLevel { k: 21, scale: 1 },
                     records: vec![SeedRecord {
                         query: SeedQuery {
                             k: 21,
-                            hash: 11,
+                            hash: 0x1000,
                             canonical_kmer: 3,
                         },
                         occurrence: SeedOccurrence {
-                            contig_id: 1,
+                            contig_id: 0,
                             position: 2,
                             reverse: true,
                         },
@@ -122,14 +89,14 @@ fn fixture() -> ArchiveParts {
                 }],
             },
             SeedSection {
-                k: 31,
+                k: 22,
                 levels: vec![SeedLevelData {
-                    level: SeedLevel { k: 31, scale: 200 },
+                    level: SeedLevel { k: 22, scale: 2 },
                     records: vec![SeedRecord {
                         query: SeedQuery {
-                            k: 31,
-                            hash: 17,
-                            canonical_kmer: 5,
+                            k: 22,
+                            hash: 0x2000,
+                            canonical_kmer: 7,
                         },
                         occurrence: SeedOccurrence {
                             contig_id: 0,
@@ -144,127 +111,125 @@ fn fixture() -> ArchiveParts {
 }
 
 #[test]
-fn roundtrip_preserves_header_contigs_sequences_and_exact_seeds() -> JmaResult<()> {
-    let bytes = encode_archive(&fixture())?;
-    assert_eq!(&bytes[0..4], b"JMA\0");
-    assert_eq!(&bytes[144..152], b"JAMSCA1\0");
-    let reader = JmaReader::from_resource(MemoryResource::new(bytes))?;
-    assert_eq!(reader.header().format_version, 1);
-    assert_eq!(reader.header().flags, 7);
+fn format_one_is_deterministic_and_self_contained() {
+    let first = encode_archive(&fixture()).unwrap();
+    let second = encode_archive(&fixture()).unwrap();
+    assert_eq!(first, second);
+    assert_eq!(&first[..JMA_FORMAT_MAGIC.len()], &JMA_FORMAT_MAGIC);
+    let reader = JmaReader::open(MemoryResource::new(first)).unwrap();
+    assert_eq!(reader.metadata_fields().source_assembly_sha256, [9; 32]);
+    assert_eq!(reader.metadata_fields().hash_algorithm, "jamhash_u64_v1");
+    assert!(reader.metadata_fields().archive_sha256.is_some());
+    assert_eq!(reader.seed_schemes().count(), 2);
     assert_eq!(
-        reader.header().algorithm_id.as_deref(),
-        Some("jam-seed-chain-align-v1")
+        reader
+            .read_sequence(0, SequenceRange::new(4, 12).unwrap())
+            .unwrap(),
+        b"NNACGTAC"
     );
-    assert_eq!(reader.header().algorithm_version, Some(1));
-    assert_eq!(reader.header().min_entropy, None);
-    assert_eq!(reader.contigs()[0].name, "contig-a");
-    assert_eq!(
-        reader.read_sequence(0, SequenceRange::new(2, 10)?)?,
-        b"GTNNACGT".to_vec()
-    );
-    assert_eq!(
-        reader.seed_occurrences(SeedQuery {
-            k: 31,
-            hash: 17,
-            canonical_kmer: 5,
-        })?,
-        vec![SeedOccurrence {
-            contig_id: 0,
-            position: 4,
-            reverse: false,
-        }]
-    );
-    Ok(())
 }
 
 #[test]
-fn archive_header_roundtrip_preserves_entropy_and_legacy_zero_metadata() -> JmaResult<()> {
-    let no_entropy_bytes = encode_archive(&fixture())?;
-    assert_eq!(
-        u64::from_le_bytes(no_entropy_bytes[152..160].try_into().unwrap()),
-        u64::MAX
-    );
-    let no_entropy_reader = JmaReader::from_resource(MemoryResource::new(no_entropy_bytes))?;
-    assert_eq!(no_entropy_reader.header().min_entropy, None);
-
-    let zero_entropy_bytes = encode_archive_with_min_entropy(&fixture(), Some(0.0))?;
-    assert_eq!(
-        u64::from_le_bytes(zero_entropy_bytes[152..160].try_into().unwrap()),
-        0
-    );
-    let zero_entropy_reader = JmaReader::from_resource(MemoryResource::new(zero_entropy_bytes))?;
-    assert_eq!(zero_entropy_reader.header().min_entropy, Some(0.0));
-
-    let bytes = encode_archive_with_min_entropy(&fixture(), Some(1.25))?;
-    let reader = JmaReader::from_resource(MemoryResource::new(bytes))?;
-    assert_eq!(reader.header().min_entropy, Some(1.25));
-
-    let legacy = ArchiveHeader {
-        format_version: JMA_FORMAT_VERSION,
-        flags: 0,
-        contig_count: 0,
-        total_bases: 0,
-        source_sha256: [0; 32],
-        seed_levels: Vec::new(),
-        algorithm_id: None,
-        algorithm_version: None,
-        min_entropy: None,
-    };
-    let legacy_bytes = encode_header(&legacy, 0, HEADER_SIZE as u64, 0)?;
-    let parsed = decode_header(&legacy_bytes)?;
-    assert_eq!(parsed.archive.algorithm_id, None);
-    assert_eq!(parsed.archive.algorithm_version, None);
-    assert_eq!(parsed.archive.min_entropy, None);
-    Ok(())
-}
-
-#[test]
-fn packed_sequence_roundtrip_handles_ambiguity_and_lowercase() {
-    let input = b"acgtnuX";
-    let (packed, mask) = pack_bases(input);
-    let decoded = jam_rs::jma::sequence::unpack_bases(&packed, &mask, input.len() as u64).unwrap();
-    assert_eq!(decoded, b"ACGTNTN");
-}
-
-#[test]
-fn seed_lookup_requires_exact_packed_kmer_after_hash_match() -> JmaResult<()> {
+fn seed_lookup_checks_exact_key_after_digest() {
     let mut parts = fixture();
-    parts.seed_sections[1].levels[0].records.push(SeedRecord {
+    parts.seed_sections[0].levels[0].records.push(SeedRecord {
         query: SeedQuery {
-            k: 31,
-            hash: 17,
-            canonical_kmer: 6,
+            k: 21,
+            hash: 0x1000,
+            canonical_kmer: 4,
         },
         occurrence: SeedOccurrence {
             contig_id: 0,
-            position: 9,
-            reverse: true,
+            position: 7,
+            reverse: false,
         },
     });
-    let reader = JmaReader::from_resource(MemoryResource::new(encode_archive(&parts)?))?;
-    assert_eq!(
-        reader.seed_occurrences(SeedQuery {
-            k: 31,
-            hash: 17,
-            canonical_kmer: 5,
-        })?,
-        vec![SeedOccurrence {
-            contig_id: 0,
-            position: 4,
-            reverse: false,
-        }]
+    let reader = JmaReader::open(MemoryResource::new(encode_archive(&parts).unwrap())).unwrap();
+    let matches = reader
+        .seed_occurrences(SeedQuery {
+            k: 21,
+            hash: 0x1000,
+            canonical_kmer: 3,
+        })
+        .unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].position, 2);
+}
+
+#[test]
+fn seed_pages_never_cross_hash_prefix_boundaries() {
+    let records = (0..4097u64)
+        .map(|index| {
+            let prefix = if index < 4096 { 0x100u64 } else { 0x101u64 };
+            SeedRecord {
+                query: SeedQuery {
+                    k: 21,
+                    hash: (prefix << 52) | index,
+                    canonical_kmer: index & ((1u64 << 42) - 1),
+                },
+                occurrence: SeedOccurrence {
+                    contig_id: 0,
+                    position: index,
+                    reverse: false,
+                },
+            }
+        })
+        .collect();
+    let bytes = encode_seed_index(&[SeedSection {
+        k: 21,
+        levels: vec![SeedLevelData {
+            level: SeedLevel { k: 21, scale: 1 },
+            records,
+        }],
+    }])
+    .unwrap();
+    let index = decode_seed_index_directory(&bytes).unwrap();
+    let pages = &index.schemes[0].pages;
+    assert_eq!(pages.len(), 2);
+    assert!(
+        pages
+            .iter()
+            .all(|page| page.first_hash >> 52 == page.last_hash >> 52)
     );
+}
+
+#[test]
+fn mixed_raw_zstd_blocks_preserve_iupac_and_reverse_complement() {
+    let left = b"ACGTRYK";
+    let right = b"MBDHVNAC";
+    let mut complete = left.to_vec();
+    complete.extend_from_slice(right);
+    let raw = encode_sequence_block(0, 0, left, BlockCodec::Raw2Bit).unwrap();
+    let zstd = encode_sequence_block(0, left.len() as u64, right, BlockCodec::Zstd2Bit).unwrap();
+    let reader = JmaReader::open(MemoryResource::new(
+        encode_archive(&ArchiveParts {
+            flags: 0,
+            source_sha256: [4; 32],
+            contigs: vec![ContigMetadata {
+                id: 0,
+                name: "mixed".into(),
+                length: complete.len() as u64,
+            }],
+            sequence_blocks: vec![raw, zstd],
+            seed_sections: Vec::new(),
+        })
+        .unwrap(),
+    ))
+    .unwrap();
     assert_eq!(
-        reader.seed_occurrences(SeedQuery {
-            k: 31,
-            hash: 17,
-            canonical_kmer: 6,
-        })?,
-        vec![SeedOccurrence {
-            contig_id: 0,
-            position: 9,
-            reverse: true,
-        }]
+        reader
+            .read_sequence(0, SequenceRange::new(0, complete.len() as u64).unwrap())
+            .unwrap(),
+        complete
     );
-    Ok(())
+    let encoded = encode_contig(&complete).unwrap();
+    assert_eq!(
+        reader
+            .read_sequence_reverse_complement(
+                0,
+                SequenceRange::new(0, complete.len() as u64).unwrap(),
+            )
+            .unwrap(),
+        decode_reverse_complement_range(&encoded, 0..complete.len() as u64).unwrap()
+    );
 }

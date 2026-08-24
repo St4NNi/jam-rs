@@ -281,12 +281,17 @@ impl ObjectResource {
     fn identity(&self, metadata: &ResourceMetadata) -> CacheIdentity {
         CacheIdentity {
             redacted_locator: self.locator.redacted(),
-            version: metadata
-                .etag
-                .as_deref()
-                .or(metadata.last_modified.as_deref())
-                .unwrap_or("unknown")
-                .to_string(),
+            version: self.options.expected_sha256.as_ref().map_or_else(
+                || {
+                    metadata
+                        .etag
+                        .as_deref()
+                        .or(metadata.last_modified.as_deref())
+                        .unwrap_or("unknown")
+                        .to_string()
+                },
+                |checksum| format!("sha256:{checksum}"),
+            ),
             size: metadata.size,
         }
     }
@@ -790,8 +795,28 @@ fn request_url(locator: &ResourceLocator) -> ResourceResult<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_http_response, parse_metadata_headers, request_url};
-    use crate::resource::ResourceLocator;
+    use super::{ObjectResource, parse_http_response, parse_metadata_headers, request_url};
+    use crate::resource::{ResourceLocator, ResourceMetadata, ResourceOpenOptions};
+
+    #[test]
+    fn expected_checksum_binds_cache_identity() {
+        let locator = ResourceLocator::parse("https://example.org/object.jma").unwrap();
+        let resource = ObjectResource::from_locator(
+            locator,
+            ResourceOpenOptions {
+                expected_sha256: Some("ab".repeat(32)),
+                ..ResourceOpenOptions::default()
+            },
+        )
+        .unwrap();
+        let identity = resource.identity(&ResourceMetadata {
+            size: 42,
+            etag: Some("mutable-etag".to_string()),
+            last_modified: None,
+            accepts_ranges: true,
+        });
+        assert_eq!(identity.version, format!("sha256:{}", "ab".repeat(32)));
+    }
 
     #[test]
     fn parses_final_redirect_headers() {

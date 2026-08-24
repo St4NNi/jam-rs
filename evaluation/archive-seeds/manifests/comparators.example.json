@@ -1,0 +1,9 @@
+{
+  "schema_version": "archive-seeds-experiment-manifest-v1",
+  "name": "matched-recall-comparators-example",
+  "kind": "comparators",
+  "cases": [
+    {"name": "blastn-candidate", "command": ["blastn", "-query", "query.fa", "-db", "candidate.fa"], "metadata": {"tool": "blastn", "scope": "candidate"}},
+    {"name": "minimap2-candidate", "command": ["minimap2", "-x", "asm20", "candidate.fa", "query.fa"], "metadata": {"tool": "minimap2", "scope": "candidate"}}
+  ]
+}

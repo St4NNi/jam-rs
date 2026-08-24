@@ -1,4 +1,5 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -39,7 +40,7 @@ fn records(path: &Path) -> Vec<Value> {
         .collect()
 }
 
-fn assert_supported_trace(path: &Path, expect_fallback: bool) {
+fn assert_supported_trace(path: &Path) {
     let records = records(path);
     assert_eq!(records.first().unwrap()["record_type"], "run_header");
     assert_eq!(records.last().unwrap()["record_type"], "run_footer");
@@ -51,18 +52,13 @@ fn assert_supported_trace(path: &Path, expect_fallback: bool) {
     assert!(result["candidate"]["uniform_hash_e_value"].is_number());
     assert!(!result["alignments"].as_array().unwrap().is_empty());
     assert!(result["coverage"]["supported_fraction"].as_f64().unwrap() > 0.95);
-    if expect_fallback {
-        assert_eq!(result["status"], "partial");
-        assert_eq!(result["failures"][0]["code"], "jma_full_download_fallback");
-        assert_eq!(result["resource_metrics"]["full_object_fallbacks"], 1);
-    } else {
-        assert_eq!(result["status"], "complete");
-        assert!(result["failures"].as_array().unwrap().is_empty());
-    }
+    assert_eq!(result["status"], "complete");
+    assert!(result["failures"].as_array().unwrap().is_empty());
+    assert_eq!(result["resource_metrics"]["full_object_fallbacks"], 0);
 }
 
 #[test]
-fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
+fn local_self_contained_jma_trace_is_thread_deterministic() {
     let directory = tempfile::Builder::new()
         .prefix("trace-local-")
         .tempdir_in("target")
@@ -111,9 +107,12 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
     );
 
     let indexed_catalog = directory.path().join("indexed.tsv");
+    let archive_sha256 = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
     fs::write(
         &indexed_catalog,
-        "metagenome_id\tjma\traw\nassembly.fa\tassembly.jma\tassembly.fa\n",
+        format!(
+            "metagenome_id\tresource_uri\tsha256\nassembly.fa\tassembly.jma\t{archive_sha256}\n"
+        ),
     )
     .unwrap();
     let indexed_output = directory.path().join("indexed.jsonl");
@@ -136,66 +135,10 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
             .arg("--top-candidates")
             .arg("1"),
     );
-    assert_supported_trace(&indexed_output, true);
+    assert_supported_trace(&indexed_output);
+    assert!(!directory.path().join("assembly.jma.idx.json").exists());
 
-    let strict_output = directory.path().join("strict.jsonl");
-    run_ok(
-        jam()
-            .arg("--silent")
-            .arg("trace")
-            .arg("--plasmid")
-            .arg(&plasmid)
-            .arg("--database")
-            .arg(&database)
-            .arg("--catalog")
-            .arg(&indexed_catalog)
-            .arg("--output")
-            .arg(&strict_output)
-            .arg("--sensitivity")
-            .arg("sensitive")
-            .arg("--min-shared")
-            .arg("1")
-            .arg("--top-candidates")
-            .arg("1")
-            .arg("--no-full-download-fallback"),
-    );
-    let strict_records = records(&strict_output);
-    let strict_result = strict_records
-        .iter()
-        .find(|record| record["record_type"] == "metagenome_result")
-        .unwrap();
-    assert_eq!(strict_result["status"], "failed");
-    assert_eq!(strict_result["failures"][0]["code"], "jma_index_required");
-
-    let raw_catalog = directory.path().join("raw.tsv");
-    fs::write(
-        &raw_catalog,
-        "metagenome_id\traw\nassembly.fa\tassembly.fa\n",
-    )
-    .unwrap();
-    let raw_output = directory.path().join("raw.jsonl");
-    run_ok(
-        jam()
-            .arg("--silent")
-            .arg("trace")
-            .arg("--plasmid")
-            .arg(&plasmid)
-            .arg("--database")
-            .arg(&database)
-            .arg("--catalog")
-            .arg(&raw_catalog)
-            .arg("--output")
-            .arg(&raw_output)
-            .arg("--sensitivity")
-            .arg("sensitive")
-            .arg("--min-shared")
-            .arg("1")
-            .arg("--top-candidates")
-            .arg("1"),
-    );
-    assert_supported_trace(&raw_output, false);
-
-    let raw_parallel_output = directory.path().join("raw-parallel.jsonl");
+    let parallel_output = directory.path().join("parallel.jsonl");
     run_ok(
         jam()
             .arg("--silent")
@@ -207,9 +150,9 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
             .arg("--database")
             .arg(&database)
             .arg("--catalog")
-            .arg(&raw_catalog)
+            .arg(&indexed_catalog)
             .arg("--output")
-            .arg(&raw_parallel_output)
+            .arg(&parallel_output)
             .arg("--sensitivity")
             .arg("sensitive")
             .arg("--min-shared")
@@ -217,11 +160,12 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
             .arg("--top-candidates")
             .arg("1"),
     );
-    let raw_result = records(&raw_output)
+    assert_supported_trace(&parallel_output);
+    let indexed_result = records(&indexed_output)
         .into_iter()
         .find(|record| record["record_type"] == "metagenome_result")
         .unwrap();
-    let raw_parallel_result = records(&raw_parallel_output)
+    let parallel_result = records(&parallel_output)
         .into_iter()
         .find(|record| record["record_type"] == "metagenome_result")
         .unwrap();
@@ -237,7 +181,7 @@ fn local_jma_and_raw_trace_paths_emit_coverage_jsonl() {
         "failures",
     ] {
         assert_eq!(
-            raw_result[field], raw_parallel_result[field],
+            indexed_result[field], parallel_result[field],
             "parallel trace changed biological field {field}"
         );
     }

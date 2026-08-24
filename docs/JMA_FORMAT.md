@@ -1,149 +1,95 @@
-# JMA v1 archive format
+# JMA format 1
 
-JMA is the positional archive used by the trace workflow. It is separate from
-the existing `.jam` sketch database: `.jam` remains format version 3 and is
-never parsed as JMA.
+JMA format 1 is a deterministic, self-contained archive for one metagenome.
+One catalog row points at one `.jma` object and its checksum. Query-time trace
+does not use a companion index or a text file.
 
-## Layout
+## Object envelope
 
-All integers are unsigned little-endian values. The writer never serializes a
-Rust structure directly, and the reader checks every addition, conversion,
-offset, length, and slice before using it.
+The first 256 bytes are the fixed little-endian superblock. It contains the
+format identifier (`JMAF1\0\0\0`), format version `1`, layout identifier
+`0x31414d4a`, flags, section count, directory offset and length, object size,
+contig count, total bases, the source-assembly SHA-256, an object checksum,
+the section-directory checksum, and the superblock checksum. All offsets and
+lengths are unsigned 64-bit half-open byte coordinates. The checksum fields
+are finalized without recursively including themselves, so archive output is
+deterministic.
 
-```text
-fixed header (160 bytes)
-section directory (64 bytes per entry)
-contig table and UTF-8 names
-packed sequence blocks
-k=31 seed section (optional only for an explicitly incomplete archive)
-k=21 seed section (optional only for an explicitly incomplete archive)
-```
-
-The fixed header contains the magic `JMA\0`, format version `1`, flags, contig
-count, total bases, source SHA-256, directory offset and length, a SHA-256
-header checksum, and up to two seed-level identities. New archives also store
-the existing `jam-seed-chain-align-v1` tag, algorithm version `1`, and the
-optional finite entropy threshold used for seed construction. That binary tag
-is retained for JMA v1 compatibility; the generic query workflow identifiers
-are recorded in the sidecar described below. Header checksum coverage includes
-those metadata bytes with the checksum field zeroed.
-
-Legacy JMA v1 headers with zeroed metadata bytes can still be decoded, but
-production `jam trace` requires the algorithm tag and version so an archive
-with unknown positional semantics is not silently interpreted as current
-evidence. An explicit entropy threshold of `0.0` is distinct from an absent
-threshold.
-
-Each directory entry contains a section kind, flags, byte offset, stored
-length, uncompressed length, and a SHA-256 checksum. Version 1 stores sections
-uncompressed, so stored and uncompressed lengths must match. Section ranges may
-not overlap the header, directory, or another section.
-
-## Contigs and sequences
-
-The contig section stores strictly increasing IDs, base lengths, and checked
-UTF-8 names. Sequence data is divided into sorted blocks. Each block stores its
-contig ID, zero-based start, base length, two-bit packed bases, and a one-bit
-ambiguity mask. A set ambiguity bit decodes as `N`; lowercase bases are
-uppercased and `U` is treated as `T`. A reader rejects an uncovered range or
-conflicting overlapping blocks.
-
-Ranges use the workflow-wide zero-based half-open convention `[start, end)`.
-
-## Seeds
-
-Seed sections contain a k-mer size, one or more explicit density levels, and
-fixed-size records with:
+The section directory contains 64-byte records:
 
 ```text
-hash, exact packed canonical k-mer, contig ID, orientation, position
+kind u32, flags u32, offset u64, stored_length u64,
+decoded_length u64, sha256[32]
 ```
 
-The exact packed k-mer is compared after the hash. A hash collision therefore
-cannot by itself create a seed occurrence. The frozen production identities
-are k=31 primary seeds and optional k=21 rescue seeds. Density levels are
-ordered from densest (lowest scale) to sparsest and can be selected explicitly
-by scale. The default lookup uses the densest level represented by the
-archive.
+Required records are unique. A required unknown kind, overlapping range,
+range outside the declared object, integer overflow, or duplicate required
+kind is rejected. Optional unknown kinds are skipped. Every known section is
+checksummed before it is decoded. The superblock's section-directory checksum
+covers the complete directory bytes, so descriptors cannot be changed without
+invalidating the superblock. The seed-section descriptor checksum intentionally
+covers only the seed directory prefix (scheme records and page records); the
+key and occurrence payloads are independently checked by each selected page.
+Other section descriptor checksums cover their complete section payload.
 
-## Integrity and compatibility
+## Required sections
 
-Header and every loaded section have SHA-256 checksums. Corrupt magic,
-versions, lengths, offsets, section overlap, names, sequence blocks, seed
-records, or checksums are reported as JMA errors; malformed data is never
-reported as an empty archive. The source checksum identifies the input used to
-build the archive and is retained as provenance; it is not a checksum of the
-JMA container itself.
+The writer emits these sections in deterministic order:
 
-JMA v1 is a new format and does not alter or migrate existing `.jam` files.
-Future incompatible JMA changes must use a new format version.
+1. metadata: `JMA`, version/layout identifiers, source checksum, builder
+   version, source commit, `jamhash_u64_v1`, and the optional entropy filter
+   setting used to create positional seeds.
+2. contigs: fixed-width contig records followed by one UTF-8 name string
+   table. Names are not parsed by seed lookup.
+3. embedded sketch: sorted unique retained hash values.
+4. seeds: an open list of scheme descriptors, fixed page directories, fixed
+   key records, and fixed occurrence records.
+5. sequence directory: one fixed record per independent block.
+6. sequence payload: complete two-bit assembly blocks and IUPAC ambiguity
+   records.
 
-## Range index
+An optional gear directory can be added without changing the required section
+set. Unknown optional sections are safely ignored.
 
-`jam archive` also writes `archive.jma.idx.json`. The sidecar does not change
-JMA v1 bytes. It records the complete archive SHA-256 and is bound at runtime
-to the archive's size, fixed-header SHA-256, source SHA-256, format version,
-and algorithm identity. It contains:
+## Seed pages
 
-- absolute byte ranges and SHA-256 values for each encoded sequence block;
-- absolute fixed-record ranges and SHA-256 values for nonempty 16-bit hash
-  prefix buckets at each `(k, scale)` seed level;
-- the contig, seed-level, and algorithm identities needed to validate those
-  ranges against the JMA header and section directory;
-- the additive `workflow_identifiers` object:
+The seed section begins with its own directory. Each scheme descriptor records
+its numeric scheme identity, algorithm identity, span, informative-base count,
+density parameter, bucket width, key encoding, occurrence encoding, and flags.
+There is no two-scheme header limit. Every seed page contains a separate key
+range and occurrence range. Keys store the digest, exact packed canonical
+selected bases, and an occurrence index. Occurrences store contig, position,
+span, and strand.
 
-  ```json
-  {
-    "screen_algorithm": "jam-fracminhash-screen-v1",
-    "local_alignment_algorithm": "jam-exact-seed-chain-banded-v1",
-    "mosaic_algorithm": "jam-fragment-mosaic-v1",
-    "trace_workflow": "jam-trace-v1"
-  }
-  ```
+A lookup selects pages by the high hash prefix, reads only those key and
+occurrence ranges, verifies the page checksum, then compares the exact packed
+key. A digest collision can increase work but cannot create an anchor.
 
-These identifiers describe the screening, local alignment, fragment mosaic,
-and end-to-end workflow layers. They do not alter the JMA header or payload.
+## Sequence blocks
 
-Indexed opening follows this bounded sequence:
+Sequence directory records contain contig ID, base start/count, absolute object
+payload offset, stored and decoded byte lengths, codec, ambiguity range, and checksum.
+The shared sequence codec writes `raw2bit` or `zstd2bit` blocks: A/C/G/T use
+two bits and every non-ACGT base remains an IUPAC ambiguity record. Blocks are
+independently addressable and cannot cross a contig boundary. The directory is
+read when the archive opens; payload and adjacent ambiguity bytes are fetched
+only for requested sequence ranges.
 
-```text
-fixed JMA header
-    -> section directory
-    -> contig table
-    -> checksum-bound sidecar
-    -> seed buckets for the current query seeds
-    -> accepted seed chains
-    -> sequence blocks intersecting those chains
-    -> optional buckets and blocks for unresolved-gap rescue
-```
+One archive may mix `raw2bit` and `zstd2bit` blocks. Fixed-size and Gear
+content-dependent boundary policies use the same directory and per-block
+checksum rules; their boundary parameters are independent of Gear seed
+fragment parameters.
 
-A seed query reads only its matching prefix bucket and still compares the
-complete hash and packed canonical k-mer. Sequence reads fetch only blocks
-intersecting an accepted chain window. Every fetched range is checked against
-its sidecar checksum before decoding. Local JMA resources use positional file
-reads through this same range contract; the local `.jam` candidate index is
-materialized for memory-mapped sketch search.
+## Access model
 
-The run and candidate records expose the corresponding resource counters:
-`metadata_requests`, `head_requests`, `get_requests`, `range_requests`,
-`stream_requests`, `requested_bytes`, `returned_bytes`, `decoded_bytes`,
-`cache_bytes`, `retries`, `full_object_fallbacks`, `seed_buckets_read`, and
-`sequence_blocks_read`. Gap-rescue records additionally report buckets
-requested, keys tested, anchors, chains, blocks fetched, alignment windows, and
-newly supported query bases per round.
+Opening a range resource reads the superblock, section directory, metadata,
+contig/name table, seed directory, and sequence directory. It does not read
+seed occurrences or sequence payloads. Local readers map the object once and
+borrow selected section/page slices; remote readers use bounded byte ranges.
+Selected key/occurrence pages and selected sequence blocks are fetched on
+demand, and counters expose mapped, resident, decoded, and transferred bytes
+plus request counts.
 
-The sidecar is bound to the archive size, header checksum, source checksum,
-format version, and binary algorithm identity. A legacy sidecar that lacks
-`workflow_identifiers` remains JSON-decodable for inspection, but indexed
-opening rejects it with a compatibility error because its workflow provenance
-is incomplete. Rebuild the sidecar with the current archive builder. A sidecar
-with incompatible identifiers is rejected before any payload range is used.
-
-A JMA v1 archive without a sidecar remains decodable through the eager reader.
-`jam trace` uses that path only when full-download fallback is enabled and
-records `jma_full_download_fallback`; strict mode emits
-`jma_index_required` instead.
-
-Seed density is part of compatibility. A requested profile may use an equal or
-denser stored seed level, but a sparser archive produces
-`seed_level_mismatch` and no raw positional evidence.
+JMA stores complete contigs but does not imply physical linkage between
+separate contigs. Trace evidence is not proof of an autonomous plasmid or
+phage.

@@ -130,6 +130,8 @@ pub struct ResourceMetrics {
     pub requested_bytes: u64,
     pub returned_bytes: u64,
     pub decoded_bytes: u64,
+    pub mapped_bytes: u64,
+    pub resident_bytes: u64,
     pub remote_bytes: u64,
     pub cache_bytes: u64,
     pub cache_hits: u64,
@@ -156,6 +158,8 @@ impl ResourceMetrics {
             requested_bytes: self.requested_bytes.saturating_add(other.requested_bytes),
             returned_bytes: self.returned_bytes.saturating_add(other.returned_bytes),
             decoded_bytes: self.decoded_bytes.saturating_add(other.decoded_bytes),
+            mapped_bytes: self.mapped_bytes.max(other.mapped_bytes),
+            resident_bytes: self.resident_bytes.saturating_add(other.resident_bytes),
             remote_bytes: self.remote_bytes.saturating_add(other.remote_bytes),
             cache_bytes: self.cache_bytes.saturating_add(other.cache_bytes),
             cache_hits: self.cache_hits.saturating_add(other.cache_hits),
@@ -182,6 +186,7 @@ impl ResourceMetrics {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceOpenOptions {
     pub cache_dir: Option<PathBuf>,
+    pub expected_sha256: Option<String>,
     pub cache_block_bytes: u64,
     pub max_cache_bytes: u64,
     pub request_timeout_seconds: u64,
@@ -193,6 +198,7 @@ impl Default for ResourceOpenOptions {
     fn default() -> Self {
         Self {
             cache_dir: None,
+            expected_sha256: None,
             cache_block_bytes: 1024 * 1024,
             max_cache_bytes: 4 * 1024 * 1024 * 1024,
             request_timeout_seconds: 60,
@@ -207,8 +213,51 @@ pub trait RangeReader: Send + Sync {
     fn locator(&self) -> &ResourceLocator;
     fn metadata(&self) -> ResourceResult<ResourceMetadata>;
     fn read_range(&self, range: ByteRange) -> ResourceResult<Vec<u8>>;
+    fn read_range_bytes(&self, range: ByteRange) -> ResourceResult<RangeBytes<'_>> {
+        self.read_range(range).map(RangeBytes::Owned)
+    }
     fn stream(&self) -> ResourceResult<Box<dyn Read + Send>>;
     fn metrics(&self) -> ResourceMetrics;
+}
+
+pub enum RangeBytes<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+}
+
+impl AsRef<[u8]> for RangeBytes<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+impl<T: RangeReader + ?Sized> RangeReader for std::sync::Arc<T> {
+    fn locator(&self) -> &ResourceLocator {
+        (**self).locator()
+    }
+
+    fn metadata(&self) -> ResourceResult<ResourceMetadata> {
+        (**self).metadata()
+    }
+
+    fn read_range(&self, range: ByteRange) -> ResourceResult<Vec<u8>> {
+        (**self).read_range(range)
+    }
+
+    fn read_range_bytes(&self, range: ByteRange) -> ResourceResult<RangeBytes<'_>> {
+        (**self).read_range_bytes(range)
+    }
+
+    fn stream(&self) -> ResourceResult<Box<dyn Read + Send>> {
+        (**self).stream()
+    }
+
+    fn metrics(&self) -> ResourceMetrics {
+        (**self).metrics()
+    }
 }
 
 pub type ResourceResult<T> = Result<T, ResourceError>;

@@ -9,6 +9,7 @@
 /tools/out
 /tools/target
 /tools/Cargo.lock
+__pycache__/
 tests/testfiles/all*
 tests/testfiles/plas*
 tests/testfiles/chrom*

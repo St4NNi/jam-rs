@@ -144,7 +144,6 @@ pub fn run() -> Result<()> {
             cache_block_bytes,
             request_timeout_seconds,
             max_retries,
-            no_full_download_fallback,
         } => {
             let used_plasmid_alias = plasmid.is_some();
             let query = query
@@ -197,7 +196,6 @@ pub fn run() -> Result<()> {
                 cache_block_bytes,
                 request_timeout_seconds,
                 max_retries,
-                !no_full_download_fallback,
                 cli.force,
                 cli.silent,
             )

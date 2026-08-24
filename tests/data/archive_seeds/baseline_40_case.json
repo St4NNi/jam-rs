@@ -1,0 +1,18 @@
+{
+  "schema_version": "archive-seeds-baseline-v1",
+  "description": "Frozen aggregate assertion for the committed 40-case fragment and indel matrix.",
+  "normalization_schema": "normalized-mge-v1",
+  "case_count": 40,
+  "selected_candidates": 40,
+  "assemblies_with_records": 40,
+  "truth_bases": 320000,
+  "observed_bases": 253162,
+  "intersection_bases": 253162,
+  "missing_truth_bases": 66838,
+  "base_precision": 1.0,
+  "base_recall": 0.79113125,
+  "interval_precision": 1.0,
+  "interval_recall": 0.95,
+  "tolerance": 1e-12,
+  "source_artifact": "trace-production-controlled-release-run-v1/normalized/jam_fragments_sensitive_s1_t8.json"
+}

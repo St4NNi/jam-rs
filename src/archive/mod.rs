@@ -4,6 +4,9 @@ use crate::resource::ResourceMetrics;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod native;
+pub use native::NativeJmaArchive;
+
 pub const JAMHASH_ALGORITHM_ID: &str = "jamhash_u64_v1";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -167,6 +170,8 @@ pub enum ArchiveError {
     CorruptMetadata(String),
     #[error("archive checksum mismatch in {0}")]
     ChecksumMismatch(String),
+    #[error("archive backend failed: {0}")]
+    Backend(String),
     #[error(transparent)]
     Resource(#[from] crate::resource::ResourceError),
 }

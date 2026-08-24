@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jam-rs.dev/schemas/trace-diagnostics-v1.schema.json",
+  "title": "Trace diagnostic report",
+  "type": "object",
+  "required": ["metagenome_id", "truth_intervals", "stages"],
+  "properties": {
+    "schema_version": {"type": "string"},
+    "metagenome_id": {"type": "string", "minLength": 1},
+    "supported_intervals": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/interval"}
+    },
+    "truth_intervals": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/truthInterval"}
+    },
+    "stages": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/stage"}
+    }
+  },
+  "$defs": {
+    "interval": {
+      "type": "object",
+      "required": ["start", "end"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "seedScheme": {
+      "type": "object",
+      "required": [
+        "scheme_id",
+        "query_seeds_emitted",
+        "matching_target_keys",
+        "matching_occurrences_before_limits",
+        "matching_occurrences_after_limits"
+      ],
+      "properties": {
+        "scheme_id": {"type": "integer", "minimum": 0},
+        "query_seeds_emitted": {"type": "integer", "minimum": 0},
+        "matching_target_keys": {"type": "integer", "minimum": 0},
+        "matching_occurrences_before_limits": {"type": "integer", "minimum": 0},
+        "matching_occurrences_after_limits": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "truthInterval": {
+      "type": "object",
+      "required": ["truth_interval", "candidate_selected", "seed_schemes"],
+      "properties": {
+        "truth_interval": {"$ref": "#/$defs/interval"},
+        "candidate_selected": {"type": "boolean"},
+        "seed_schemes": {"type": "array", "items": {"$ref": "#/$defs/seedScheme"}},
+        "anchors_before_limits": {"type": "integer", "minimum": 0},
+        "anchors_after_limits": {"type": "integer", "minimum": 0},
+        "best_chain_anchor_count": {"type": "integer", "minimum": 0},
+        "best_chain_query_span": {"type": "integer", "minimum": 0},
+        "best_chain_target_span": {"type": "integer", "minimum": 0},
+        "sequence_blocks_requested": {"type": "integer", "minimum": 0},
+        "sequence_window_decoded": {"anyOf": [{"$ref": "#/$defs/interval"}, {"type": "null"}]},
+        "alignment_attempted": {"type": "boolean"},
+        "alignment_band_widths": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+        "alignment_band_edge_touched": {"type": "boolean"},
+        "alignment_accepted": {"type": "boolean"},
+        "alignment_query_span": {"type": "integer", "minimum": 0},
+        "mosaic_supported_bases": {"type": "integer", "minimum": 0},
+        "alignment_or_output_cap_reached": {"type": "boolean"},
+        "failure_category": {
+          "type": ["string", "null"],
+          "enum": [
+            "candidate_miss",
+            "no_retained_seed",
+            "no_matching_seed",
+            "repetitive_seed_suppression",
+            "anchor_cap",
+            "no_valid_chain",
+            "chain_limit",
+            "sequence_budget",
+            "alignment_band_failure",
+            "alignment_rejection",
+            "alignment_cap",
+            "mosaic_selection",
+            "other",
+            null
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "stage": {
+      "type": "object",
+      "required": [
+        "stage",
+        "name",
+        "seed_pages_read",
+        "keys_tested",
+        "occurrences_decoded",
+        "anchors_retained",
+        "chains_retained",
+        "sequence_blocks_read",
+        "alignment_attempts",
+        "new_query_bases_supported",
+        "wall_micros",
+        "cpu_micros",
+        "bytes_read"
+      ],
+      "properties": {
+        "stage": {"type": "integer", "minimum": 0},
+        "name": {"type": "string"},
+        "seed_pages_read": {"type": "integer", "minimum": 0},
+        "keys_tested": {"type": "integer", "minimum": 0},
+        "occurrences_decoded": {"type": "integer", "minimum": 0},
+        "anchors_retained": {"type": "integer", "minimum": 0},
+        "chains_retained": {"type": "integer", "minimum": 0},
+        "sequence_blocks_read": {"type": "integer", "minimum": 0},
+        "alignment_attempts": {"type": "integer", "minimum": 0},
+        "new_query_bases_supported": {"type": "integer", "minimum": 0},
+        "wall_micros": {"type": "integer", "minimum": 0},
+        "cpu_micros": {"type": "integer", "minimum": 0},
+        "bytes_read": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,5 +1,7 @@
 use jam_rs::jma::builder::{ArchiveBuildConfig, write_archive_from_fasta};
-use jam_rs::jma::index::{JmaSidecarIndex, build_index, sidecar_path};
+use jam_rs::jma::index::SeedIndexDirectory;
+use jam_rs::jma::reader::JmaReader;
+use jam_rs::resource::local::LocalResource;
 use jam_rs::resource::{ResourceMetrics, ResourceOpenOptions};
 use jam_rs::trace::catalog::{CatalogEntry, TraceCatalog};
 use jam_rs::trace::config::{SeedSensitivity, SensitivityConfig, SensitivityProfile};
@@ -7,6 +9,7 @@ use jam_rs::trace::model::{QueryKind, TopologyRequested};
 use jam_rs::trace::runner::{TraceQuery, TraceRunner, TraceRunnerConfig};
 use jam_rs::trace::screen::CandidateSearchConfig;
 use jam_rs::trace::seeds::extract_seed_level;
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -54,7 +57,7 @@ fn build_archive(
     block_bases: usize,
     k31_scale: u64,
     k21_scale: u64,
-) -> (Vec<u8>, Vec<u8>, JmaSidecarIndex) {
+) -> (Vec<u8>, SeedIndexDirectory) {
     write_archive_from_fasta(
         assembly,
         archive,
@@ -67,10 +70,12 @@ fn build_archive(
     )
     .expect("build indexed metagenome archive");
     let archive_bytes = fs::read(archive).expect("read JMA archive");
-    let sidecar = sidecar_path(archive);
-    let sidecar_bytes = fs::read(sidecar).expect("read JMA sidecar");
-    let index = build_index(&archive_bytes).expect("build JMA sidecar index");
-    (archive_bytes, sidecar_bytes, index)
+    let reader = JmaReader::from_resource(
+        LocalResource::from_path(archive, ResourceOpenOptions::default())
+            .expect("open local JMA resource"),
+    )
+    .expect("open embedded JMA index");
+    (archive_bytes, reader.seed_index().clone())
 }
 
 fn runner(sensitivity: SensitivityConfig) -> TraceRunner {
@@ -100,38 +105,37 @@ fn runner(sensitivity: SensitivityConfig) -> TraceRunner {
     .expect("construct trace runner")
 }
 
-fn local_catalog(archive: &Path, sidecar: &Path, missing_root: &Path) -> TraceCatalog {
+fn local_catalog(archive: &Path, archive_bytes: &[u8], missing_root: &Path) -> TraceCatalog {
     TraceCatalog::from_entries(vec![
         CatalogEntry {
             metagenome_id: "target.fa".to_string(),
-            jma: Some(archive.to_string_lossy().into_owned()),
-            jma_index: Some(sidecar.to_string_lossy().into_owned()),
-            raw: None,
+            resource_uri: archive.to_string_lossy().into_owned(),
+            sha256: format!("{:x}", Sha256::digest(archive_bytes)),
+            etag: None,
+            object_version: None,
+            label: None,
+            source_assembly_sha256: None,
         },
         CatalogEntry {
             // This resource is intentionally absent. It must not be opened
             // because it is not present in the candidate .jam result.
             metagenome_id: "not-a-candidate.fa".to_string(),
-            jma: Some(
-                missing_root
-                    .join("never-opened.jma")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            jma_index: Some(
-                missing_root
-                    .join("never-opened.jma.idx.json")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            raw: None,
+            resource_uri: missing_root
+                .join("never-opened.jma")
+                .to_string_lossy()
+                .into_owned(),
+            sha256: "00".repeat(32),
+            etag: None,
+            object_version: None,
+            label: None,
+            source_assembly_sha256: None,
         },
     ])
     .expect("construct local resource catalog")
 }
 
 fn expected_seed_bucket_reads(
-    index: &JmaSidecarIndex,
+    index: &SeedIndexDirectory,
     query: &[u8],
     levels: &[SeedSensitivity],
 ) -> u64 {
@@ -148,10 +152,13 @@ fn expected_seed_bucket_reads(
                 seed.position,
             );
             if seen.insert(key)
-                && index.seed_buckets.iter().any(|bucket| {
-                    bucket.k == level.k
-                        && bucket.scale == level.scale
-                        && (seed.hash >> 48) as u16 == bucket.hash_prefix
+                && index.schemes.iter().any(|scheme| {
+                    scheme.descriptor.span == u16::from(level.k)
+                        && u64::from(scheme.descriptor.density_parameter) == level.scale
+                        && scheme.pages.iter().any(|page| {
+                            (seed.hash >> (64 - u32::from(scheme.descriptor.bucket_bits))) as u32
+                                == page.hash_prefix
+                        })
                 })
             {
                 expected = expected.saturating_add(1);
@@ -169,7 +176,6 @@ fn rounded_bytes(length: usize, block_bytes: u64) -> u64 {
 fn assert_selective_metrics(
     metrics: ResourceMetrics,
     archive_len: usize,
-    sidecar_len: usize,
     cache_block_bytes: u64,
     expected_seed_reads: u64,
     expected_sequence_reads: u64,
@@ -195,15 +201,11 @@ fn assert_selective_metrics(
     assert!(metrics.seed_buckets_read <= expected_seed_reads);
     assert_eq!(metrics.sequence_blocks_read, expected_sequence_reads);
 
-    // The sidecar itself is read completely, but the archive payload must
-    // remain below the rounded full-archive cost. Both local resources use
-    // the same fixed block size in this fixture.
-    let sidecar_cost = rounded_bytes(sidecar_len, cache_block_bytes);
     let archive_cost = rounded_bytes(archive_len, cache_block_bytes);
-    let archive_requested = metrics.requested_bytes.saturating_sub(sidecar_cost);
     assert!(
-        archive_requested < archive_cost,
-        "indexed archive requested {archive_requested} bytes of {archive_cost}"
+        metrics.requested_bytes < archive_cost,
+        "indexed archive requested {} bytes of {archive_cost}",
+        metrics.requested_bytes
     );
 }
 
@@ -228,14 +230,8 @@ fn generic_query_uses_local_indexed_jma_and_skips_missing_noncandidate() {
     let database = directory.path().join("metagenomes.jam");
     build_database(&assembly, &database);
     let archive_path = directory.path().join("target.jma");
-    let (archive, sidecar_bytes, index) = build_archive(&assembly, &archive_path, 4_096, 100, 200);
-    let sidecar_path = sidecar_path(&archive_path);
-    assert_eq!(sidecar_bytes, fs::read(&sidecar_path).unwrap());
-    let catalog = local_catalog(
-        &archive_path,
-        &sidecar_path,
-        &directory.path().join("missing"),
-    );
+    let (archive, index) = build_archive(&assembly, &archive_path, 4_096, 100, 200);
+    let catalog = local_catalog(&archive_path, &archive, &directory.path().join("missing"));
     let sensitivity = SensitivityConfig::for_profile(SensitivityProfile::Sensitive);
     let expected_seed_reads = expected_seed_bucket_reads(
         &index,
@@ -260,7 +256,6 @@ fn generic_query_uses_local_indexed_jma_and_skips_missing_noncandidate() {
     assert_selective_metrics(
         result.resource_metrics,
         archive.len(),
-        sidecar_bytes.len(),
         64,
         expected_seed_reads,
         1,
@@ -291,13 +286,8 @@ fn gap_rescue_uses_only_local_fragment_blocks() {
     let database = directory.path().join("metagenomes.jam");
     build_database(&assembly, &database);
     let archive_path = directory.path().join("target.jma");
-    let (archive, sidecar_bytes, index) = build_archive(&assembly, &archive_path, 128, 1, 1);
-    let sidecar_path = sidecar_path(&archive_path);
-    let catalog = local_catalog(
-        &archive_path,
-        &sidecar_path,
-        &directory.path().join("missing"),
-    );
+    let (archive, index) = build_archive(&assembly, &archive_path, 128, 1, 1);
+    let catalog = local_catalog(&archive_path, &archive, &directory.path().join("missing"));
 
     let mut sensitivity = SensitivityConfig::for_profile(SensitivityProfile::Sensitive);
     sensitivity.primary = SeedSensitivity {
@@ -346,7 +336,6 @@ fn gap_rescue_uses_only_local_fragment_blocks() {
     assert_selective_metrics(
         result.resource_metrics,
         archive.len(),
-        sidecar_bytes.len(),
         64,
         expected_seed_reads,
         2,

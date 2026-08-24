@@ -1,0 +1,9 @@
+{
+  "schema_version": "archive-seeds-experiment-manifest-v1",
+  "name": "remote-range-example",
+  "kind": "remote_matrix",
+  "cases": [
+    {"name": "mock-http-cold-concurrency-2", "command": ["jam", "trace", "--resource-mode", "remote-range", "--io-concurrency", "2", "--cache-state", "cold"], "metadata": {"source": "mock_http_range", "cache": "cold", "io_concurrency": 2}},
+    {"name": "mock-http-warm-concurrency-8", "command": ["jam", "trace", "--resource-mode", "remote-range", "--io-concurrency", "8", "--cache-state", "warm"], "metadata": {"source": "mock_http_range", "cache": "warm", "io_concurrency": 8}}
+  ]
+}

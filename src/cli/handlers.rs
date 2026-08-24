@@ -1114,7 +1114,6 @@ pub fn handle_archive_command(
             input.display()
         ));
     }
-    let index_output = crate::jma::index::sidecar_path(&output);
     if output.exists() {
         if !output.is_file() {
             return Err(anyhow::anyhow!(
@@ -1126,20 +1125,6 @@ pub fn handle_archive_command(
             return Err(anyhow::anyhow!(
                 "Archive output already exists: {}. Use --force to overwrite.",
                 output.display()
-            ));
-        }
-    }
-    if index_output.exists() {
-        if !index_output.is_file() {
-            return Err(anyhow::anyhow!(
-                "Archive index output is not a file: {}",
-                index_output.display()
-            ));
-        }
-        if !force {
-            return Err(anyhow::anyhow!(
-                "Archive index output already exists: {}. Use --force to overwrite.",
-                index_output.display()
             ));
         }
     }
@@ -1156,10 +1141,9 @@ pub fn handle_archive_command(
     )?;
     if !silent {
         eprintln!(
-            "Created JMA v{} archive {} with range index {}: {} contigs, {} bases, {} k=31 seeds, {} k=21 seeds",
+            "Created JMA format {} archive {}: {} contigs, {} bases, {} k=31 seeds, {} k=21 seeds",
             crate::jma::JMA_FORMAT_VERSION,
             output.display(),
-            index_output.display(),
             stats.contig_count,
             stats.total_bases,
             stats.k31_seed_count,
@@ -1193,7 +1177,6 @@ pub fn handle_trace_command(
     cache_block_bytes: u64,
     request_timeout_seconds: u64,
     max_retries: u32,
-    allow_full_download_fallback: bool,
     force: bool,
     silent: bool,
 ) -> Result<()> {
@@ -1214,6 +1197,7 @@ pub fn handle_trace_command(
 
     let resources = crate::resource::ResourceOpenOptions {
         cache_dir,
+        expected_sha256: None,
         cache_block_bytes,
         max_cache_bytes: (memory_gb as u64)
             .saturating_mul(1024 * 1024 * 1024)
@@ -1221,7 +1205,7 @@ pub fn handle_trace_command(
             / 10,
         request_timeout_seconds,
         max_retries,
-        allow_full_download_fallback,
+        allow_full_download_fallback: false,
     };
     let catalog = crate::trace::catalog::TraceCatalog::from_path(&metagenomes_path)?;
     let parsed_query =

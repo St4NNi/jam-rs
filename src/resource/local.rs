@@ -4,9 +4,11 @@ use super::cache::BlockCache;
 use super::error::{io_error, validate_range};
 use super::metrics::MetricsCounter;
 use super::{
-    ByteRange, CacheIdentity, RangeReader, ResourceError, ResourceLocator, ResourceMetadata,
-    ResourceOpenOptions, ResourceResult, ResourceScheme,
+    ByteRange, CacheIdentity, RangeBytes, RangeReader, ResourceError, ResourceLocator,
+    ResourceMetadata, ResourceOpenOptions, ResourceResult, ResourceScheme,
 };
+use memmap2::{Mmap, MmapOptions};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,8 @@ pub struct LocalResource {
     cache: Arc<BlockCache>,
     metrics: Arc<MetricsCounter>,
     metadata: Mutex<Option<ResourceMetadata>>,
+    mmap: Option<Mmap>,
+    resident_pages: Mutex<HashSet<u64>>,
 }
 
 impl std::fmt::Debug for LocalResource {
@@ -56,15 +60,34 @@ impl LocalResource {
         let path = path_from_locator(&locator)?;
         // Opening is intentionally lazy with respect to file contents, but a
         // metadata call here gives callers an immediate and useful path error.
-        std::fs::metadata(&path).map_err(|error| io_error(&locator, error))?;
+        let file = File::open(&path).map_err(|error| io_error(&locator, error))?;
+        let file_size = file
+            .metadata()
+            .map_err(|error| io_error(&locator, error))?
+            .len();
+        let mmap = if file_size == 0 {
+            None
+        } else {
+            // SAFETY: the read-only mapping owns its virtual-memory region for
+            // the lifetime of this resource and the file is never mutated by
+            // the resource implementation.
+            Some(
+                unsafe { MmapOptions::new().map(&file) }
+                    .map_err(|error| io_error(&locator, error))?,
+            )
+        };
         let cache = BlockCache::new(options.cache_block_bytes, options.max_cache_bytes)?;
+        let metrics = Arc::new(MetricsCounter::default());
+        metrics.mapped_bytes(file_size);
         Ok(Self {
             locator,
             path,
             options,
             cache: Arc::new(cache),
-            metrics: Arc::new(MetricsCounter::default()),
+            metrics,
             metadata: Mutex::new(None),
+            mmap,
+            resident_pages: Mutex::new(HashSet::new()),
         })
     }
 
@@ -102,12 +125,17 @@ impl LocalResource {
     fn identity(&self, metadata: &ResourceMetadata) -> CacheIdentity {
         CacheIdentity {
             redacted_locator: self.locator.redacted(),
-            version: metadata
-                .etag
-                .as_deref()
-                .or(metadata.last_modified.as_deref())
-                .unwrap_or("unknown")
-                .to_string(),
+            version: self.options.expected_sha256.as_ref().map_or_else(
+                || {
+                    metadata
+                        .etag
+                        .as_deref()
+                        .or(metadata.last_modified.as_deref())
+                        .unwrap_or("unknown")
+                        .to_string()
+                },
+                |checksum| format!("sha256:{checksum}"),
+            ),
             size: metadata.size,
         }
     }
@@ -195,6 +223,29 @@ impl LocalResource {
             .decoded_bytes(u64::try_from(output.len()).unwrap_or(u64::MAX));
         Ok(output)
     }
+
+    fn record_resident_pages(&self, range: ByteRange, file_size: u64) -> ResourceResult<()> {
+        if range.is_empty() {
+            return Ok(());
+        }
+        const PAGE_BYTES: u64 = 4096;
+        let end = range.end()?;
+        let first = range.offset / PAGE_BYTES;
+        let last = (end - 1) / PAGE_BYTES;
+        let mut pages = self.resident_pages.lock().map_err(|_| ResourceError::Io {
+            locator: self.locator.redacted(),
+            message: "mapped-page counter lock poisoned".to_string(),
+        })?;
+        let mut added = 0u64;
+        for page in first..=last {
+            if pages.insert(page) {
+                let start = page.saturating_mul(PAGE_BYTES);
+                added = added.saturating_add(file_size.saturating_sub(start).min(PAGE_BYTES));
+            }
+        }
+        self.metrics.resident_bytes(added);
+        Ok(())
+    }
 }
 
 impl RangeReader for LocalResource {
@@ -222,6 +273,36 @@ impl RangeReader for LocalResource {
         }
         let identity = self.identity(&metadata);
         self.read_cached(range, &metadata, &identity)
+    }
+
+    fn read_range_bytes(&self, range: ByteRange) -> ResourceResult<RangeBytes<'_>> {
+        self.metrics.range_request();
+        let metadata = self.metadata()?;
+        validate_range(&self.locator, range, metadata.size)?;
+        if range.is_empty() {
+            return Ok(RangeBytes::Borrowed(&[]));
+        }
+        let mmap = self.mmap.as_ref().ok_or_else(|| ResourceError::Io {
+            locator: self.locator.redacted(),
+            message: "non-empty local resource has no memory map".to_string(),
+        })?;
+        let start = usize::try_from(range.offset).map_err(|_| ResourceError::Io {
+            locator: self.locator.redacted(),
+            message: "mapped range offset does not fit this platform".to_string(),
+        })?;
+        let end = usize::try_from(range.end()?).map_err(|_| ResourceError::Io {
+            locator: self.locator.redacted(),
+            message: "mapped range end does not fit this platform".to_string(),
+        })?;
+        let bytes = mmap.get(start..end).ok_or_else(|| ResourceError::Io {
+            locator: self.locator.redacted(),
+            message: "mapped range exceeds the local file".to_string(),
+        })?;
+        self.metrics.requested_bytes(range.length);
+        self.metrics.returned_bytes(range.length);
+        self.metrics.decoded_bytes(range.length);
+        self.record_resident_pages(range, metadata.size)?;
+        Ok(RangeBytes::Borrowed(bytes))
     }
 
     fn stream(&self) -> ResourceResult<Box<dyn Read + Send>> {

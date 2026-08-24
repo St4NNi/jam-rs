@@ -1,4 +1,5 @@
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -38,11 +39,15 @@ fn directory_entries(directory: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-fn write_catalog(directory: &Path, raw: &Path) -> PathBuf {
+fn write_catalog(directory: &Path, resource: &Path) -> PathBuf {
     let catalog = directory.join("metagenomes.tsv");
+    let sha256 = format!("{:x}", Sha256::digest(fs::read(resource).unwrap()));
     fs::write(
         &catalog,
-        format!("metagenome_id\traw\nassembly.fa\t{}\n", raw.display()),
+        format!(
+            "metagenome_id\tresource_uri\tsha256\nassembly.fa\t{}\t{sha256}\n",
+            resource.display()
+        ),
     )
     .expect("write metagenome catalog");
     catalog
@@ -185,7 +190,16 @@ fn query_trace_writes_one_v2_jsonl_stream_without_default_side_files() {
             .arg(&database)
             .args(["--kmer-size", "21", "--fscale", "1"]),
     );
-    let catalog = write_catalog(directory.path(), &assembly);
+    let archive = directory.path().join("assembly.jma");
+    run_ok(
+        jam()
+            .args(["--silent", "archive", "--input"])
+            .arg(&assembly)
+            .args(["--output"])
+            .arg(&archive)
+            .args(["--primary-scale", "1", "--rescue-scale", "1"]),
+    );
+    let catalog = write_catalog(directory.path(), &archive);
     let output = directory.path().join("result.jsonl");
     let before_trace = directory_entries(directory.path());
 

@@ -62,7 +62,8 @@ docker run --rm \
     --rescue-scale 1 \
     --block-bases 256 \
     --silent
-printf 'metagenome_id\tjma\tjma_index\traw\nshort.fa\t/output/short.jma\t/output/short.jma.idx.json\t/workspace/tests/testfiles/short.fa\n' > "$OUTPUT/metagenomes.tsv"
+archive_sha256="$(sha256sum "$OUTPUT/short.jma" | awk '{print $1}')"
+printf 'metagenome_id\tresource_uri\tsha256\nshort.fa\t/output/short.jma\t%s\n' "$archive_sha256" > "$OUTPUT/metagenomes.tsv"
 docker run --rm \
     --user "$(id -u):$(id -g)" \
     --env TMPDIR=/output/tmp \

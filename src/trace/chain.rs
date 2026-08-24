@@ -1,8 +1,8 @@
 //! Bounded, deterministic chaining of positional trace anchors.
 //!
-//! Chaining is evidence selection only.  It groups anchors by contig, strand,
-//! and k-mer level, scores monotone paths with a bounded predecessor window,
-//! and optionally exposes wrapped query segments for a path that crosses the
+//! Chaining is evidence selection only. It groups anchors by contig and
+//! strand, scores mixed seed classes with a bounded predecessor window, and
+//! optionally exposes wrapped query segments for a path that crosses the
 //! stored query origin. It does not perform alignment or make a presence
 //! call.
 
@@ -25,6 +25,124 @@ pub struct ChainConfig {
     /// anchors one query length apart and permits an origin-crossing path.
     /// `Linear` and `Undetermined` retain the input coordinate line.
     pub coordinate_model: CoordinateModel,
+}
+
+/// Evidence class used by the mixed seed-chain scorer.
+///
+/// The class is deliberately carried beside the stable `Anchor` wire type so
+/// callers that still use the legacy k=31/k=21 anchor constructor do not need
+/// to rewrite their serialized records.  Experimental schemes can attach a
+/// class through [`WeightedAnchor`] without changing the physical anchor
+/// layout.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum AnchorClass {
+    /// A verified adjacent run produced by exact Gear fragments.
+    ExactGearRun,
+    /// A low-occurrence canonical k=31 seed.
+    SpecificK31,
+    /// A low-occurrence spaced exact seed.
+    SpecificSpaced,
+    /// A low-occurrence paired or strobemer seed.
+    SpecificPaired,
+    /// A low-occurrence canonical k=21 rescue seed.
+    SpecificK21,
+    /// An occurrence retained only for bounded repeat-aware diagnostics.
+    Repetitive,
+}
+
+impl AnchorClass {
+    #[must_use]
+    pub const fn score(self) -> i64 {
+        match self {
+            Self::ExactGearRun => 400,
+            Self::SpecificK31 => 140,
+            Self::SpecificSpaced => 120,
+            Self::SpecificPaired => 115,
+            Self::SpecificK21 => 80,
+            Self::Repetitive => 10,
+        }
+    }
+
+    #[must_use]
+    pub const fn high_specificity(self) -> bool {
+        matches!(self, Self::ExactGearRun | Self::SpecificK31)
+    }
+
+    #[must_use]
+    pub const fn lower_specificity(self) -> bool {
+        !matches!(self, Self::ExactGearRun | Self::SpecificK31)
+    }
+}
+
+/// An anchor with explicit seed evidence class and optional occurrence count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WeightedAnchor {
+    pub anchor: Anchor,
+    pub class: AnchorClass,
+    /// Verified span in query and target coordinates. Exact Gear runs may
+    /// exceed the one-byte `Anchor.k` seed width.
+    pub span: u64,
+    /// Number of exact occurrences represented by the seed.  This is used
+    /// only for diagnostics and never substitutes for exact key checking.
+    pub occurrence_count: u32,
+}
+
+impl WeightedAnchor {
+    #[must_use]
+    pub const fn new(anchor: Anchor, class: AnchorClass) -> Self {
+        Self {
+            anchor,
+            class,
+            span: anchor.k as u64,
+            occurrence_count: 1,
+        }
+    }
+
+    /// Attach an exact verified run span, retaining at least the seed width.
+    #[must_use]
+    pub const fn with_span(mut self, span: u64) -> Self {
+        self.span = if span < self.anchor.k as u64 {
+            self.anchor.k as u64
+        } else {
+            span
+        };
+        self
+    }
+
+    #[must_use]
+    pub const fn with_occurrence_count(mut self, occurrence_count: u32) -> Self {
+        self.occurrence_count = occurrence_count;
+        self
+    }
+}
+
+/// Mixed chain output retaining the classes used by the bounded scorer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct WeightedAnchorChain {
+    pub contig_id: u32,
+    pub strand: Strand,
+    pub anchors: Vec<WeightedAnchor>,
+    pub score: i64,
+    pub query_interval: BaseInterval,
+    pub query_segments: Vec<BaseInterval>,
+    pub target_interval: BaseInterval,
+    pub origin_crossing: bool,
+    pub linear_query_start: u64,
+    pub linear_query_end: u64,
+}
+
+impl WeightedAnchorChain {
+    #[must_use]
+    pub fn anchor_count(&self) -> usize {
+        self.anchors.len()
+    }
+
+    #[must_use]
+    pub fn has_high_specificity_anchor(&self) -> bool {
+        self.anchors
+            .iter()
+            .any(|anchor| anchor.class.high_specificity())
+    }
 }
 
 impl ChainConfig {
@@ -102,6 +220,8 @@ pub enum ChainError {
     NegativeGapPenalty,
     #[error("anchor k must be greater than zero")]
     ZeroK,
+    #[error("anchor span {span} is shorter than k={k}")]
+    InvalidAnchorSpan { span: u64, k: u8 },
     #[error(
         "anchor query interval is outside the query: position={position}, k={k}, length={length}"
     )]
@@ -114,12 +234,12 @@ pub enum ChainError {
 
 #[derive(Clone, Copy)]
 struct ExpandedAnchor {
-    anchor: Anchor,
+    weighted: WeightedAnchor,
     query_position: u64,
     source_index: usize,
 }
 
-/// Build up to `config.max_chains` chains per contig/strand/k group.
+/// Build up to `config.max_chains` chains per contig/strand group.
 ///
 /// For a wrapped coordinate model, query positions are duplicated one query
 /// length apart, allowing one origin crossing while rejecting paths that use
@@ -132,16 +252,62 @@ pub fn chain_anchors(
     query_length: u64,
     config: ChainConfig,
 ) -> Result<Vec<AnchorChain>, ChainError> {
+    let weighted = anchors
+        .iter()
+        .copied()
+        .map(|anchor| WeightedAnchor::new(anchor, class_for_legacy_anchor(anchor)))
+        .collect::<Vec<_>>();
+    Ok(chain_weighted_internal(&weighted, query_length, config)?
+        .into_iter()
+        .map(|chain| chain.base)
+        .collect())
+}
+
+/// Build mixed weighted chains while retaining the seed classes used by the
+/// scorer. At least one high-specificity anchor, or several consistent
+/// lower-specificity anchors, is required for an accepted chain.
+pub fn chain_weighted_anchors(
+    anchors: &[WeightedAnchor],
+    query_length: u64,
+    config: ChainConfig,
+) -> Result<Vec<WeightedAnchorChain>, ChainError> {
+    Ok(chain_weighted_internal(anchors, query_length, config)?
+        .into_iter()
+        .map(|chain| chain.weighted)
+        .collect())
+}
+
+/// Alias for callers that use the shorter mixed-chain operation name.
+pub fn build_weighted_chains(
+    anchors: &[WeightedAnchor],
+    query_length: u64,
+    config: ChainConfig,
+) -> Result<Vec<WeightedAnchorChain>, ChainError> {
+    chain_weighted_anchors(anchors, query_length, config)
+}
+
+fn chain_weighted_internal(
+    anchors: &[WeightedAnchor],
+    query_length: u64,
+    config: ChainConfig,
+) -> Result<Vec<WeightedChainResult>, ChainError> {
     validate_config(config, query_length)?;
 
     let mut validated = Vec::with_capacity(anchors.len());
-    for (source_index, &anchor) in anchors.iter().enumerate() {
+    for (source_index, &weighted) in anchors.iter().enumerate() {
+        let anchor = weighted.anchor;
         if anchor.k == 0 {
             return Err(ChainError::ZeroK);
         }
+        if weighted.span < u64::from(anchor.k) {
+            return Err(ChainError::InvalidAnchorSpan {
+                span: weighted.span,
+                k: anchor.k,
+            });
+        }
         let end = anchor
             .query_position
-            .checked_add(u64::from(anchor.k))
+            .checked_add(weighted.span)
             .ok_or(ChainError::CoordinateOverflow)?;
         if end > query_length {
             return Err(ChainError::AnchorOutsideQuery {
@@ -152,24 +318,23 @@ pub fn chain_anchors(
         }
         anchor
             .target_position
-            .checked_add(u64::from(anchor.k))
+            .checked_add(weighted.span)
             .ok_or(ChainError::CoordinateOverflow)?;
-        validated.push((source_index, anchor));
+        validated.push((source_index, weighted));
     }
 
-    // The grouping key is explicit, keeping primary and rescue coordinates
-    // from being mixed when both seed levels are present in one candidate.
-    validated.sort_by_key(|(_, anchor)| anchor_sort_key(anchor));
+    // Primary and rescue coordinates intentionally share a group. Class and
+    // k-mer size influence score and tie breaks, but never prevent a mixed
+    // monotone path from joining compatible evidence.
+    validated.sort_by_key(|(_, weighted)| weighted_anchor_sort_key(weighted));
     let max_chains = usize::try_from(config.max_chains).unwrap_or(usize::MAX);
-    // Keep the cross-group result bounded.  Retaining only the best global
-    // `max_chains` candidates after each insertion is sufficient because the
-    // final ordering is total and deterministic.
     let mut all_chains = Vec::with_capacity(validated.len().min(max_chains));
     let mut group_start = 0usize;
     while group_start < validated.len() {
-        let current_group_key = group_key(&validated[group_start].1);
+        let current_group_key = group_key(&validated[group_start].1.anchor);
         let mut group_end = group_start + 1;
-        while group_end < validated.len() && group_key(&validated[group_end].1) == current_group_key
+        while group_end < validated.len()
+            && group_key(&validated[group_end].1.anchor) == current_group_key
         {
             group_end += 1;
         }
@@ -182,14 +347,14 @@ pub fn chain_anchors(
             for source_index in &chain.source_indices {
                 used[*source_index] = true;
             }
-            all_chains.push(chain.chain);
-            all_chains.sort_by(chain_sort_key);
+            all_chains.push(chain);
+            all_chains.sort_by(weighted_chain_sort_key);
             all_chains.truncate(max_chains);
         }
         group_start = group_end;
     }
 
-    all_chains.sort_by(chain_sort_key);
+    all_chains.sort_by(weighted_chain_sort_key);
     all_chains.truncate(max_chains);
     Ok(all_chains)
 }
@@ -203,17 +368,29 @@ pub fn build_chains(
     chain_anchors(anchors, query_length, config)
 }
 
-struct BestChain {
-    chain: AnchorChain,
+struct WeightedChainResult {
+    base: AnchorChain,
+    weighted: WeightedAnchorChain,
     source_indices: Vec<usize>,
 }
 
+fn class_for_legacy_anchor(anchor: Anchor) -> AnchorClass {
+    match anchor.k {
+        crate::trace::seeds::PRIMARY_K => AnchorClass::SpecificK31,
+        crate::trace::seeds::RESCUE_K => AnchorClass::SpecificK21,
+        // Synthetic and future legacy anchors do not carry a class. Keep
+        // their historical chain behavior; callers that know a seed is
+        // repetitive should use `chain_weighted_anchors` explicitly.
+        _ => AnchorClass::SpecificPaired,
+    }
+}
+
 fn best_chain(
-    group: &[(usize, Anchor)],
+    group: &[(usize, WeightedAnchor)],
     used: &[bool],
     query_length: u64,
     config: ChainConfig,
-) -> Result<Option<BestChain>, ChainError> {
+) -> Result<Option<WeightedChainResult>, ChainError> {
     if group.is_empty() {
         return Ok(None);
     }
@@ -227,12 +404,13 @@ fn best_chain(
         group.len()
     };
     let mut expanded = Vec::with_capacity(expanded_capacity);
-    for (group_index, &(source_index, anchor)) in group.iter().enumerate() {
+    for (group_index, &(source_index, weighted)) in group.iter().enumerate() {
         if used[group_index] {
             continue;
         }
+        let anchor = weighted.anchor;
         expanded.push(ExpandedAnchor {
-            anchor,
+            weighted,
             query_position: anchor.query_position,
             source_index: group_index,
         });
@@ -245,7 +423,7 @@ fn best_chain(
                 .checked_add(query_length)
                 .ok_or(ChainError::CoordinateOverflow)?;
             expanded.push(ExpandedAnchor {
-                anchor,
+                weighted,
                 query_position: wrapped,
                 source_index: group_index,
             });
@@ -260,7 +438,7 @@ fn best_chain(
 
     for i in 0..length {
         let current = expanded[i];
-        scores[i] = anchor_base_score(current.anchor);
+        scores[i] = anchor_base_score(current.weighted);
         counts[i] = 1;
         let mut examined = 0u32;
         let mut j = i;
@@ -281,18 +459,24 @@ fn best_chain(
             if current.source_index == previous.source_index {
                 continue;
             }
-            let target_gap = match current.anchor.strand {
+            let target_gap = match current.weighted.anchor.strand {
                 Strand::Forward => {
-                    if current.anchor.target_position <= previous.anchor.target_position {
+                    if current.weighted.anchor.target_position
+                        <= previous.weighted.anchor.target_position
+                    {
                         continue;
                     }
-                    current.anchor.target_position - previous.anchor.target_position
+                    current.weighted.anchor.target_position
+                        - previous.weighted.anchor.target_position
                 }
                 Strand::Reverse => {
-                    if current.anchor.target_position >= previous.anchor.target_position {
+                    if current.weighted.anchor.target_position
+                        >= previous.weighted.anchor.target_position
+                    {
                         continue;
                     }
-                    previous.anchor.target_position - current.anchor.target_position
+                    previous.weighted.anchor.target_position
+                        - current.weighted.anchor.target_position
                 }
             };
             if target_gap == 0 || target_gap > config.max_target_gap {
@@ -302,7 +486,7 @@ fn best_chain(
                 continue;
             }
             let gap = query_gap.abs_diff(target_gap);
-            let extension = gap_extension(gap, config.gap_penalty);
+            let extension = gap_extension(current.weighted.class, gap, config.gap_penalty);
             let candidate_score = scores[j].saturating_add(extension);
             let candidate_count = counts[j].saturating_add(1);
             if better_predecessor(
@@ -324,6 +508,10 @@ fn best_chain(
     let mut endpoint: Option<usize> = None;
     for index in 0..length {
         if counts[index] < config.min_anchors {
+            if !path_has_required_evidence(index, &predecessors, &expanded, config) {
+                continue;
+            }
+        } else if !path_has_required_evidence(index, &predecessors, &expanded, config) {
             continue;
         }
         let replace = endpoint
@@ -345,12 +533,14 @@ fn best_chain(
     path.reverse();
 
     let first = expanded[path[0]];
-    let last = expanded[*path.last().expect("non-empty chain")];
     let linear_start = first.query_position;
-    let linear_end = last
-        .query_position
-        .checked_add(u64::from(last.anchor.k))
-        .ok_or(ChainError::CoordinateOverflow)?;
+    let linear_end = path.iter().try_fold(linear_start, |end, &index| {
+        let anchor_end = expanded[index]
+            .query_position
+            .checked_add(expanded[index].weighted.span)
+            .ok_or(ChainError::CoordinateOverflow)?;
+        Ok::<_, ChainError>(end.max(anchor_end))
+    })?;
     let span = linear_end
         .checked_sub(linear_start)
         .ok_or(ChainError::CoordinateOverflow)?;
@@ -373,26 +563,46 @@ fn best_chain(
     let (target_start, target_end) =
         path.iter()
             .try_fold((u64::MAX, 0u64), |(start, end), &index| {
-                let anchor = expanded[index].anchor;
+                let anchor = expanded[index].weighted.anchor;
                 let anchor_end = anchor
                     .target_position
-                    .checked_add(u64::from(anchor.k))
+                    .checked_add(expanded[index].weighted.span)
                     .ok_or(ChainError::CoordinateOverflow)?;
                 Ok::<_, ChainError>((start.min(anchor.target_position), end.max(anchor_end)))
             })?;
     let target_interval = BaseInterval::new(target_start, target_end)?;
-    let anchors = path.iter().map(|&index| expanded[index].anchor).collect();
+    let weighted_anchors = path
+        .iter()
+        .map(|&index| expanded[index].weighted)
+        .collect::<Vec<_>>();
+    let anchors = weighted_anchors
+        .iter()
+        .map(|weighted| weighted.anchor)
+        .collect::<Vec<_>>();
     let source_indices = path
         .iter()
         .map(|&index| expanded[index].source_index)
         .collect();
-    Ok(Some(BestChain {
-        chain: AnchorChain {
-            contig_id: first.anchor.contig_id,
-            strand: first.anchor.strand,
-            k: first.anchor.k,
+    let score = scores[endpoint];
+    Ok(Some(WeightedChainResult {
+        base: AnchorChain {
+            contig_id: first.weighted.anchor.contig_id,
+            strand: first.weighted.anchor.strand,
+            k: first.weighted.anchor.k,
             anchors,
-            score: scores[endpoint],
+            score,
+            query_interval,
+            query_segments: query_segments.clone(),
+            target_interval,
+            origin_crossing,
+            linear_query_start: linear_start,
+            linear_query_end: linear_end,
+        },
+        weighted: WeightedAnchorChain {
+            contig_id: first.weighted.anchor.contig_id,
+            strand: first.weighted.anchor.strand,
+            anchors: weighted_anchors,
+            score,
             query_interval,
             query_segments,
             target_interval,
@@ -439,13 +649,15 @@ fn validate_config(config: ChainConfig, query_length: u64) -> Result<(), ChainEr
     Ok(())
 }
 
-fn anchor_base_score(_anchor: Anchor) -> i64 {
-    100
+fn anchor_base_score(anchor: WeightedAnchor) -> i64 {
+    anchor.class.score()
 }
 
-fn gap_extension(gap: u64, gap_penalty: i64) -> i64 {
+fn gap_extension(class: AnchorClass, gap: u64, gap_penalty: i64) -> i64 {
     let gap = i64::try_from(gap).unwrap_or(i64::MAX);
-    100i64.saturating_sub(gap.saturating_mul(gap_penalty))
+    class
+        .score()
+        .saturating_sub(gap.saturating_mul(gap_penalty))
 }
 
 fn better_predecessor(
@@ -485,17 +697,40 @@ fn better_endpoint(
     if counts[candidate] != counts[current] {
         return counts[candidate] > counts[current];
     }
-    let candidate_anchor = expanded[candidate].anchor;
-    let current_anchor = expanded[current].anchor;
+    let candidate_anchor = expanded[candidate].weighted.anchor;
+    let current_anchor = expanded[current].weighted.anchor;
     (
         expanded[candidate].query_position,
         candidate_anchor.target_position,
         candidate_anchor.hash,
+        expanded[candidate].weighted.class,
     ) < (
         expanded[current].query_position,
         current_anchor.target_position,
         current_anchor.hash,
+        expanded[current].weighted.class,
     )
+}
+
+fn path_has_required_evidence(
+    endpoint: usize,
+    predecessors: &[Option<usize>],
+    expanded: &[ExpandedAnchor],
+    config: ChainConfig,
+) -> bool {
+    let mut lower_specificity = 0u32;
+    let mut cursor = Some(endpoint);
+    while let Some(index) = cursor {
+        let class = expanded[index].weighted.class;
+        if class.high_specificity() {
+            return true;
+        }
+        if class.lower_specificity() && !matches!(class, AnchorClass::Repetitive) {
+            lower_specificity = lower_specificity.saturating_add(1);
+        }
+        cursor = predecessors[index];
+    }
+    lower_specificity >= config.min_anchors.max(2)
 }
 
 fn circular_segments(
@@ -525,17 +760,21 @@ const fn permits_wrap(coordinate_model: CoordinateModel) -> bool {
     matches!(coordinate_model, CoordinateModel::Wrap)
 }
 
-fn group_key(anchor: &Anchor) -> (u32, u8, u8) {
-    (anchor.contig_id, strand_rank(anchor.strand), anchor.k)
+fn group_key(anchor: &Anchor) -> (u32, u8) {
+    (anchor.contig_id, strand_rank(anchor.strand))
 }
 
-fn anchor_sort_key(anchor: &Anchor) -> (u32, u8, u8, u64, u64, u64, u64) {
+fn weighted_anchor_sort_key(
+    weighted: &WeightedAnchor,
+) -> (u32, u8, u64, u64, u8, AnchorClass, u64, u64) {
+    let anchor = weighted.anchor;
     (
         anchor.contig_id,
         strand_rank(anchor.strand),
-        anchor.k,
         anchor.query_position,
         anchor.target_position,
+        anchor.k,
+        weighted.class,
         anchor.hash,
         anchor.canonical_kmer,
     )
@@ -544,30 +783,47 @@ fn anchor_sort_key(anchor: &Anchor) -> (u32, u8, u8, u64, u64, u64, u64) {
 fn expanded_cmp(left: ExpandedAnchor, right: ExpandedAnchor) -> std::cmp::Ordering {
     left.query_position
         .cmp(&right.query_position)
-        .then_with(|| match left.anchor.strand {
+        .then_with(|| match left.weighted.anchor.strand {
             Strand::Forward => left
+                .weighted
                 .anchor
                 .target_position
-                .cmp(&right.anchor.target_position),
+                .cmp(&right.weighted.anchor.target_position),
             Strand::Reverse => right
+                .weighted
                 .anchor
                 .target_position
-                .cmp(&left.anchor.target_position),
+                .cmp(&left.weighted.anchor.target_position),
         })
-        .then_with(|| left.anchor.hash.cmp(&right.anchor.hash))
+        .then_with(|| left.weighted.class.cmp(&right.weighted.class))
+        .then_with(|| left.weighted.anchor.hash.cmp(&right.weighted.anchor.hash))
         .then_with(|| left.source_index.cmp(&right.source_index))
 }
 
-fn chain_sort_key(left: &AnchorChain, right: &AnchorChain) -> std::cmp::Ordering {
-    right
+fn weighted_chain_sort_key(
+    left: &WeightedChainResult,
+    right: &WeightedChainResult,
+) -> std::cmp::Ordering {
+    let left_base = &left.base;
+    let right_base = &right.base;
+    right_base
         .score
-        .cmp(&left.score)
-        .then_with(|| right.anchors.len().cmp(&left.anchors.len()))
-        .then_with(|| left.contig_id.cmp(&right.contig_id))
-        .then_with(|| strand_rank(left.strand).cmp(&strand_rank(right.strand)))
-        .then_with(|| left.k.cmp(&right.k))
-        .then_with(|| left.linear_query_start.cmp(&right.linear_query_start))
-        .then_with(|| left.target_interval.start.cmp(&right.target_interval.start))
+        .cmp(&left_base.score)
+        .then_with(|| right_base.anchors.len().cmp(&left_base.anchors.len()))
+        .then_with(|| left_base.contig_id.cmp(&right_base.contig_id))
+        .then_with(|| strand_rank(left_base.strand).cmp(&strand_rank(right_base.strand)))
+        .then_with(|| left_base.k.cmp(&right_base.k))
+        .then_with(|| {
+            left_base
+                .linear_query_start
+                .cmp(&right_base.linear_query_start)
+        })
+        .then_with(|| {
+            left_base
+                .target_interval
+                .start
+                .cmp(&right_base.target_interval.start)
+        })
 }
 
 const fn strand_rank(strand: Strand) -> u8 {
@@ -771,5 +1027,34 @@ mod tests {
         assert!(chains.iter().all(|chain| chain.anchors.len() == 2));
         assert_eq!(chains[0].target_interval.start, 100);
         assert_eq!(chains[1].target_interval.start, 90);
+    }
+
+    #[test]
+    fn linear_end_covers_an_earlier_long_gear_run() {
+        let long_run = WeightedAnchor::new(
+            Anchor {
+                k: 31,
+                ..anchor(10, 110, Strand::Forward)
+            },
+            AnchorClass::ExactGearRun,
+        )
+        .with_span(300);
+        let later_seed = WeightedAnchor::new(
+            Anchor {
+                k: 21,
+                ..anchor(50, 150, Strand::Forward)
+            },
+            AnchorClass::SpecificK21,
+        );
+        let mut chain_config = config();
+        chain_config.coordinate_model = CoordinateModel::Linear;
+        let chains = chain_weighted_anchors(&[long_run, later_seed], 1_000, chain_config).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].linear_query_start, 10);
+        assert_eq!(chains[0].linear_query_end, 310);
+        assert_eq!(
+            chains[0].query_interval,
+            BaseInterval::new(10, 310).unwrap()
+        );
     }
 }

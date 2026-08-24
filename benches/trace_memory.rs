@@ -9,11 +9,11 @@
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use jam_rs::jma::SeedOccurrence;
+use jam_rs::jma::index::{decode_seed_index_directory, encode_seed_index};
 use jam_rs::jma::seed_builder::{SeedInput, build_seed_section};
-use jam_rs::jma::sequence::{decode_range, decode_sequence_blocks, encode_sequence_blocks};
-use jam_rs::jma::sequence_builder::{SequenceBuildConfig, build_sequence_blocks};
-use jam_rs::jma::writer::{decode_seed_section, encode_seed_section};
-use jam_rs::jma::{ContigMetadata, SeedOccurrence, SequenceRange};
+use jam_rs::jma::sequence_builder::{IndexedSequenceBuildConfig, build_indexed_sequence_blocks};
+use jam_rs::sequence::{BlockCodec, SequenceBlockPolicy, decode_stored_block};
 use jam_rs::trace::alignment::{AlignmentOptions, AlignmentWorkspace};
 use jam_rs::trace::anchors::{SeedOccurrenceGroup, generate_anchors};
 use jam_rs::trace::chain::{ChainConfig, chain_anchors};
@@ -148,11 +148,11 @@ fn component_work(
         )
         .expect("fixed bucket config")
         .section;
-        let encoded = encode_seed_section(&section).expect("seed section encodes");
+        let encoded = encode_seed_index(&[section]).expect("seed section encodes");
         return black_box(
-            decode_seed_section(&encoded)
+            decode_seed_index_directory(&encoded)
                 .expect("seed section decodes")
-                .levels
+                .schemes
                 .len(),
         );
     }
@@ -191,19 +191,25 @@ fn component_work(
     }
 
     let block_bases = case.cache_block_bytes.min(target.len().max(1));
-    let blocks = build_sequence_blocks(0, target, SequenceBuildConfig { block_bases })
-        .expect("fixed sequence block config");
-    let encoded_blocks = encode_sequence_blocks(&blocks).expect("sequence blocks encode");
-    let decoded_blocks = decode_sequence_blocks(&encoded_blocks).expect("sequence blocks decode");
+    let blocks = build_indexed_sequence_blocks(
+        0,
+        target,
+        IndexedSequenceBuildConfig {
+            policy: SequenceBlockPolicy::Fixed { block_bases },
+            codec: BlockCodec::Raw2Bit,
+        },
+    )
+    .expect("fixed sequence block config");
+    let decoded_blocks = blocks
+        .iter()
+        .map(|block| {
+            decode_stored_block(&block.record, &block.payload, &block.ambiguity_payload)
+                .expect("sequence block decodes")
+        })
+        .collect::<Vec<_>>();
     if matches!(component, Component::Sequence) {
-        let contigs = [ContigMetadata {
-            id: 0,
-            name: "target".to_string(),
-            length: target.len() as u64,
-        }];
-        let range = SequenceRange::new(0, target.len().min(8_192) as u64).expect("range");
-        let decoded = decode_range(&decoded_blocks, &contigs, 0, range).expect("range decodes");
-        return black_box(decoded.len() + decoded_blocks.len());
+        let decoded = decoded_blocks.iter().map(Vec::len).sum::<usize>();
+        return black_box(decoded + decoded_blocks.len());
     }
 
     let alignment_length = query.len().min(target.len()).min(8_192);

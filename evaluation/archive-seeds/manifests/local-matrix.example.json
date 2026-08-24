@@ -1,0 +1,10 @@
+{
+  "schema_version": "archive-seeds-experiment-manifest-v1",
+  "name": "local-access-example",
+  "kind": "local_matrix",
+  "cases": [
+    {"name": "mmap-process-cold-t1", "command": ["jam", "trace", "--threads", "1", "--cache-state", "process-cold"], "metadata": {"cache": "process-cold", "threads": 1}},
+    {"name": "mmap-process-warm-t4", "command": ["jam", "trace", "--threads", "4", "--cache-state", "process-warm"], "metadata": {"cache": "process-warm", "threads": 4}},
+    {"name": "mmap-process-warm-t8", "command": ["jam", "trace", "--threads", "8", "--cache-state", "process-warm"], "metadata": {"cache": "process-warm", "threads": 8}}
+  ]
+}

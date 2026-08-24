@@ -17,10 +17,14 @@ pub mod sequence;
 pub mod sequence_builder;
 pub mod writer;
 
-pub const JMA_MAGIC: [u8; 4] = *b"JMA\0";
+pub const JMA_MAGIC: [u8; 8] = *b"JMAF1\0\0\0";
 pub const JMA_FORMAT_VERSION: u16 = 1;
-pub const JMA_TRACE_ALGORITHM_TAG: [u8; 8] = *b"JAMSCA1\0";
+pub const JMA_LAYOUT_IDENTIFIER: u32 = 0x3141_4d4a;
 pub type ContigId = u32;
+
+pub use crate::sequence::SequenceBlockRecord;
+pub use format::{ArchiveMetadataFields, SectionDescriptor};
+pub use index::SeedIndexDirectory;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SequenceRange {

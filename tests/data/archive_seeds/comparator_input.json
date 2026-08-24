@@ -1,0 +1,5 @@
+{
+  "alignments": [
+    {"query_segments": [{"start": 0, "end": 6}], "cigar": "3=1I2="}
+  ]
+}

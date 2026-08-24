@@ -1,4 +1,5 @@
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,7 +58,7 @@ fn local_resources() -> LocalResources {
         .arg("1");
     command_ok(&mut sketch);
 
-    let mut catalog = String::from("metagenome_id\tjma\tjma_index\traw\n");
+    let mut catalog = String::from("metagenome_id\tresource_uri\tsha256\n");
     for (file, id) in assemblies {
         let input = fixture(file);
         let archive = directory.path().join(format!("{id}.jma"));
@@ -76,12 +77,9 @@ fn local_resources() -> LocalResources {
             .arg("--block-bases")
             .arg("64");
         command_ok(&mut archive_command);
-        let index = format!("{}.idx.json", archive.display());
-        catalog.push_str(&format!(
-            "{file}\t{}\t{index}\t{}\n",
-            archive.display(),
-            input.display()
-        ));
+        let sha256 = format!("{:x}", Sha256::digest(fs::read(&archive).unwrap()));
+        catalog.push_str(&format!("{file}\t{}\t{sha256}\n", archive.display(),));
+        assert!(!archive.with_extension("jma.idx.json").exists());
     }
     let metagenomes = directory.path().join("metagenomes.tsv");
     fs::write(&metagenomes, catalog).expect("write local metagenome catalog");

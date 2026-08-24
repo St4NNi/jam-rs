@@ -1,60 +1,100 @@
-//! Checked random-access reader for JMA v1 resources.
+//! Checked selective reader for the self-contained JMA format 1 object.
 
 use crate::jma::contigs::decode_contigs;
 use crate::jma::format::{
-    HEADER_SIZE, SECTION_CONTIGS, SECTION_SEEDS_K21, SECTION_SEEDS_K31, SECTION_SEQUENCES,
-    SectionDescriptor, checked_end, checked_usize, checksum,
+    HEADER_SIZE, SECTION_CONTIGS, SECTION_FLAG_COMPRESSED, SECTION_METADATA, SECTION_SEEDS,
+    SECTION_SEQUENCE_DIRECTORY, SECTION_SEQUENCE_PAYLOAD, SectionDescriptor, checked_end,
+    checked_usize, checksum, decode_metadata, get_u32, get_u64,
 };
-use crate::jma::header::{parse_header, parse_section_directory};
+use crate::jma::header::{
+    parse_header, parse_section_directory, unique_section, validate_known_sections,
+};
 use crate::jma::index::{
-    JmaSidecarIndex, SeedLevelIndex, SequenceBlockIndex, bucket_for, decode_index, level_for,
-    validate_against_archive,
+    SEED_DIRECTORY_HEADER_SIZE_U64, SEED_PAGE_RECORD_SIZE_U64, SEED_SCHEME_RECORD_SIZE_U64,
+    SeedIndexDirectory, SeedSchemeIndex, decode_seed_index_directory_with_length, decode_seed_page,
+    decode_shared_sequence_directory,
 };
-use crate::jma::sequence::{
-    SequenceBlock, decode_range, decode_sequence_block, decode_sequence_blocks, validate_blocks,
-};
-use crate::jma::writer::{SeedRecord, SeedSection, decode_seed_records, decode_seed_section};
 use crate::jma::{
-    ArchiveHeader, ArchiveReader, ContigId, ContigMetadata, JmaError, JmaResult, SeedOccurrence,
-    SeedQuery, SequenceRange,
+    ArchiveHeader, ArchiveReader, ContigId, ContigMetadata, JmaError, JmaResult, SeedLevel,
+    SeedOccurrence, SeedQuery, SequenceRange,
 };
-use crate::resource::{ByteRange, RangeReader, ResourceMetrics};
+use crate::resource::{ByteRange, RangeBytes, RangeReader, ResourceMetrics};
+use crate::sequence::{
+    DEFAULT_MAX_DECODED_BLOCK_BYTES, SequenceBlockRecord, decode_block_range_bounded,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_SECTION_COUNT: u32 = 1 << 20;
+const MAX_INDEXED_RANGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// A fully validated JMA archive backed by a range-readable resource.
+/// A validated JMA object. Opening reads the superblock, directories, metadata,
+/// and contig table only. Seed pages and sequence payloads are fetched on use.
 pub struct JmaReader<R> {
     resource: R,
-    index_resource: Option<R>,
     header: ArchiveHeader,
+    metadata_fields: crate::jma::format::ArchiveMetadataFields,
     sections: Vec<SectionDescriptor>,
     contigs: Vec<ContigMetadata>,
-    sequence_blocks: Vec<SequenceBlock>,
-    seed_sections: Vec<SeedSection>,
-    sidecar: Option<JmaSidecarIndex>,
-    sequence_index: Vec<SequenceBlockIndex>,
-    seed_levels_index: Vec<SeedLevelIndex>,
+    sequence_index: Vec<SequenceBlockRecord>,
+    seed_index: SeedIndexDirectory,
     metrics: ReaderMetrics,
 }
 
 #[derive(Default)]
 struct ReaderMetrics {
-    seed_buckets_read: AtomicU64,
+    seed_pages_read: AtomicU64,
     sequence_blocks_read: AtomicU64,
+    seed_bytes_read: AtomicU64,
+    sequence_bytes_read: AtomicU64,
+    decoded_sequence_bases: AtomicU64,
+    coalesced_range_requests: AtomicU64,
     decoded_bytes: AtomicU64,
 }
 
+struct SequenceBlockBytes<'a> {
+    bytes: RangeBytes<'a>,
+    payload: std::ops::Range<usize>,
+    ambiguity: std::ops::Range<usize>,
+}
+
+impl SequenceBlockBytes<'_> {
+    fn parts(&self) -> JmaResult<(&[u8], &[u8])> {
+        let bytes = self.bytes.as_ref();
+        let payload = bytes.get(self.payload.clone()).ok_or_else(|| {
+            JmaError::CorruptSection("coalesced sequence payload is truncated".to_string())
+        })?;
+        let ambiguity = bytes.get(self.ambiguity.clone()).ok_or_else(|| {
+            JmaError::CorruptSection("coalesced ambiguity payload is truncated".to_string())
+        })?;
+        Ok((payload, ambiguity))
+    }
+
+    fn len(&self) -> usize {
+        self.bytes.as_ref().len()
+    }
+}
+
 impl ReaderMetrics {
-    fn add_seed_bucket(&self) {
-        self.seed_buckets_read.fetch_add(1, Ordering::Relaxed);
+    fn add_seed_page(&self, bytes: usize) {
+        self.seed_pages_read.fetch_add(1, Ordering::Relaxed);
+        self.seed_bytes_read
+            .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.coalesced_range_requests
+            .fetch_add(1, Ordering::Relaxed);
+        self.decoded_bytes
+            .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
 
-    fn add_sequence_block(&self) {
+    fn add_sequence_block(&self, bytes: usize, decoded_bases: usize) {
         self.sequence_blocks_read.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn add_decoded_bytes(&self, bytes: usize) {
+        self.sequence_bytes_read
+            .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+        self.decoded_sequence_bases.fetch_add(
+            u64::try_from(decoded_bases).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        self.coalesced_range_requests
+            .fetch_add(1, Ordering::Relaxed);
         self.decoded_bytes
             .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
     }
@@ -62,39 +102,55 @@ impl ReaderMetrics {
     fn snapshot(&self) -> ResourceMetrics {
         ResourceMetrics {
             decoded_bytes: self.decoded_bytes.load(Ordering::Relaxed),
-            seed_buckets_read: self.seed_buckets_read.load(Ordering::Relaxed),
+            seed_buckets_read: self.seed_pages_read.load(Ordering::Relaxed),
             sequence_blocks_read: self.sequence_blocks_read.load(Ordering::Relaxed),
             ..ResourceMetrics::default()
+        }
+    }
+
+    fn archive_snapshot(&self, resource: ResourceMetrics) -> crate::archive::ArchiveMetrics {
+        let seed_bytes_read = self.seed_bytes_read.load(Ordering::Relaxed);
+        let sequence_bytes_read = self.sequence_bytes_read.load(Ordering::Relaxed);
+        crate::archive::ArchiveMetrics {
+            resource,
+            mapped_bytes: resource.mapped_bytes,
+            resident_bytes: resource.resident_bytes,
+            metadata_bytes_read: resource
+                .returned_bytes
+                .saturating_sub(seed_bytes_read.saturating_add(sequence_bytes_read)),
+            seed_bytes_read,
+            sequence_bytes_read,
+            decoded_sequence_bases: self.decoded_sequence_bases.load(Ordering::Relaxed),
+            coalesced_range_requests: self.coalesced_range_requests.load(Ordering::Relaxed),
         }
     }
 }
 
 impl<R: RangeReader> JmaReader<R> {
-    /// Opens and validates the header, directory, required sections, and
-    /// checksums. Sequence and seed payloads are decoded once and then reused
-    /// for subsequent range and lookup operations.
+    /// Opens a local or remote range resource without reading complete seed or
+    /// sequence sections.
     pub fn from_resource(resource: R) -> JmaResult<Self> {
-        let metadata = resource.metadata()?;
-        let header_bytes = read_exact(&resource, ByteRange::new(0, HEADER_SIZE as u64)?)?;
-        let parsed = parse_header(&header_bytes)?;
+        let resource_metadata = resource.metadata()?;
+        let header_size = u64::try_from(HEADER_SIZE).map_err(|_| JmaError::OffsetOverflow)?;
+        if resource_metadata.size < header_size {
+            return Err(JmaError::CorruptSection(
+                "JMA object is shorter than its superblock".to_string(),
+            ));
+        }
+        let header_bytes = read_exact(&resource, ByteRange::new(0, header_size)?)?;
+        let parsed = parse_header(header_bytes.as_ref())?;
+        if parsed.object_size != resource_metadata.size {
+            return Err(JmaError::CorruptSection(format!(
+                "declared object size {} does not match resource size {}",
+                parsed.object_size, resource_metadata.size
+            )));
+        }
         if parsed.section_count > MAX_SECTION_COUNT {
             return Err(JmaError::CorruptSection(format!(
-                "section count {} exceeds the JMA v1 limit {MAX_SECTION_COUNT}",
+                "section count {} exceeds limit {MAX_SECTION_COUNT}",
                 parsed.section_count
             )));
         }
-        let directory_end = checked_end(
-            parsed.section_directory_offset,
-            parsed.section_directory_length,
-        )?;
-        if directory_end > metadata.size {
-            return Err(JmaError::CorruptSection(format!(
-                "section directory ends at {directory_end}, resource has {} bytes",
-                metadata.size
-            )));
-        }
-        let directory_length =
-            checked_usize(parsed.section_directory_length, "section directory length")?;
         let directory = read_exact(
             &resource,
             ByteRange::new(
@@ -102,22 +158,52 @@ impl<R: RangeReader> JmaReader<R> {
                 parsed.section_directory_length,
             )?,
         )?;
-        if directory.len() != directory_length {
-            return Err(JmaError::CorruptSection(
-                "section directory read has an unexpected length".to_string(),
-            ));
+        if checksum(directory.as_ref()) != parsed.section_directory_checksum {
+            return Err(JmaError::ChecksumMismatch("section directory".to_string()));
         }
         let sections = parse_section_directory(
-            &directory,
+            directory.as_ref(),
             parsed.section_count,
             parsed.section_directory_offset,
-            metadata.size,
+            resource_metadata.size,
         )?;
-        validate_section_kinds(&sections)?;
-        let contig_descriptor = find_unique_section(&sections, SECTION_CONTIGS)?;
-        let sequence_descriptor = find_unique_section(&sections, SECTION_SEQUENCES)?;
+        validate_known_sections(&sections)?;
+        let metadata_descriptor = unique_section(&sections, SECTION_METADATA)?;
+        let contig_descriptor = unique_section(&sections, SECTION_CONTIGS)?;
+        let seed_descriptor = unique_section(&sections, SECTION_SEEDS)?;
+        let sequence_directory_descriptor = unique_section(&sections, SECTION_SEQUENCE_DIRECTORY)?;
+        let sequence_payload_descriptor = unique_section(&sections, SECTION_SEQUENCE_PAYLOAD)?;
+
+        let metadata_payload = read_section(&resource, metadata_descriptor)?;
+        let mut metadata_fields = decode_metadata(metadata_payload.as_ref())?;
+        if let Some(metadata_checksum) = metadata_fields.archive_sha256
+            && metadata_checksum != parsed.archive_sha256
+        {
+            return Err(JmaError::CorruptSection(
+                "metadata archive checksum does not match superblock".to_string(),
+            ));
+        }
+        // The fixed superblock owns the object checksum so computing it does
+        // not create a recursive metadata/section checksum dependency.
+        metadata_fields.archive_sha256 =
+            (parsed.archive_sha256 != [0; 32]).then_some(parsed.archive_sha256);
+        if metadata_fields.source_assembly_sha256 != parsed.archive.source_sha256 {
+            return Err(JmaError::CorruptSection(
+                "metadata source checksum does not match superblock".to_string(),
+            ));
+        }
+        if metadata_fields.format_version != parsed.archive.format_version {
+            return Err(JmaError::UnsupportedVersion(metadata_fields.format_version));
+        }
+        if metadata_fields.format_identifier != "JMA"
+            || metadata_fields.hash_algorithm != "jamhash_u64_v1"
+        {
+            return Err(JmaError::CorruptSection(
+                "metadata format or hash algorithm identifier is unsupported".to_string(),
+            ));
+        }
         let contig_payload = read_section(&resource, contig_descriptor)?;
-        let contigs = decode_contigs(&contig_payload, parsed.archive.contig_count)?;
+        let contigs = decode_contigs(contig_payload.as_ref(), parsed.archive.contig_count)?;
         let total_bases = contigs.iter().try_fold(0u64, |total, contig| {
             total
                 .checked_add(contig.length)
@@ -129,137 +215,43 @@ impl<R: RangeReader> JmaReader<R> {
                 parsed.archive.total_bases
             )));
         }
-        let sequence_payload = read_section(&resource, sequence_descriptor)?;
-        let sequence_blocks = decode_sequence_blocks(&sequence_payload)?;
-        validate_blocks(&sequence_blocks, &contigs)?;
+        let seed_directory_prefix = read_seed_directory_prefix(&resource, seed_descriptor)?;
+        let seed_index = decode_seed_index_directory_with_length(
+            seed_directory_prefix.as_ref(),
+            seed_descriptor.length,
+        )?;
+        let sequence_directory_payload = read_section(&resource, sequence_directory_descriptor)?;
+        let sequence_index = decode_shared_sequence_directory(
+            sequence_directory_payload.as_ref(),
+            sequence_payload_descriptor.length,
+            sequence_payload_descriptor.offset,
+            &contigs,
+            resource_metadata.size,
+        )?;
+        validate_sequence_coverage(&sequence_index, &contigs)?;
 
-        let mut seed_sections = Vec::new();
-        for kind in [SECTION_SEEDS_K21, SECTION_SEEDS_K31] {
-            if let Some(descriptor) = sections.iter().find(|entry| entry.kind == kind) {
-                let payload = read_section(&resource, descriptor)?;
-                let section = decode_seed_section(&payload)?;
-                let expected_k = if kind == SECTION_SEEDS_K21 { 21 } else { 31 };
-                if section.k != expected_k {
-                    return Err(JmaError::CorruptSection(format!(
-                        "seed section kind {kind} contains k={}",
-                        section.k
-                    )));
-                }
-                seed_sections.push(section);
-            }
-        }
-        let actual_levels = seed_sections
+        let mut header = parsed.archive;
+        header.min_entropy = metadata_fields.min_entropy;
+        header.seed_levels = seed_index
+            .schemes
             .iter()
-            .flat_map(|section| section.levels.iter().map(|level| level.level))
-            .collect::<Vec<_>>();
-        if actual_levels != parsed.archive.seed_levels {
-            return Err(JmaError::CorruptSection(
-                "header seed levels do not match seed sections".to_string(),
-            ));
-        }
-
+            .map(|scheme| SeedLevel {
+                k: u8::try_from(scheme.descriptor.span).unwrap_or(u8::MAX),
+                scale: u64::from(scheme.descriptor.density_parameter),
+            })
+            .collect();
         Ok(Self {
             resource,
-            index_resource: None,
-            header: parsed.archive,
+            header,
+            metadata_fields,
             sections,
             contigs,
-            sequence_blocks,
-            seed_sections,
-            sidecar: None,
-            sequence_index: Vec::new(),
-            seed_levels_index: Vec::new(),
+            sequence_index,
+            seed_index,
             metrics: ReaderMetrics::default(),
         })
     }
 
-    /// Opens a checksum-bound sidecar without reading the sequence or seed
-    /// payloads. The archive and sidecar use the same concrete range-reader
-    /// type so local, HTTP, and S3 resources retain identical semantics.
-    pub fn open_indexed(archive: R, index: R) -> JmaResult<Self> {
-        let metadata = archive.metadata()?;
-        let header_bytes = read_exact(&archive, ByteRange::new(0, HEADER_SIZE as u64)?)?;
-        let parsed = parse_header(&header_bytes)?;
-        if parsed.section_count > MAX_SECTION_COUNT {
-            return Err(JmaError::CorruptSection(format!(
-                "section count {} exceeds the JMA v1 limit {MAX_SECTION_COUNT}",
-                parsed.section_count
-            )));
-        }
-        let directory_end = checked_end(
-            parsed.section_directory_offset,
-            parsed.section_directory_length,
-        )?;
-        if directory_end > metadata.size {
-            return Err(JmaError::CorruptSection(format!(
-                "section directory ends at {directory_end}, resource has {} bytes",
-                metadata.size
-            )));
-        }
-        let directory = read_exact(
-            &archive,
-            ByteRange::new(
-                parsed.section_directory_offset,
-                parsed.section_directory_length,
-            )?,
-        )?;
-        let sections = parse_section_directory(
-            &directory,
-            parsed.section_count,
-            parsed.section_directory_offset,
-            metadata.size,
-        )?;
-        validate_section_kinds(&sections)?;
-        let contig_descriptor = find_unique_section(&sections, SECTION_CONTIGS)?;
-        let contig_payload = read_section(&archive, contig_descriptor)?;
-        let contigs = decode_contigs(&contig_payload, parsed.archive.contig_count)?;
-        let total_bases = contigs.iter().try_fold(0u64, |total, contig| {
-            total
-                .checked_add(contig.length)
-                .ok_or(JmaError::OffsetOverflow)
-        })?;
-        if total_bases != parsed.archive.total_bases {
-            return Err(JmaError::CorruptSection(format!(
-                "contig bases {total_bases} do not match archive total {}",
-                parsed.archive.total_bases
-            )));
-        }
-
-        let index_metadata = index.metadata()?;
-        if index_metadata.size > crate::jma::index::MAX_INDEX_BYTES {
-            return Err(JmaError::CorruptSection(format!(
-                "JMA sidecar is too large: {} bytes",
-                index_metadata.size
-            )));
-        }
-        let index_bytes = read_exact(&index, ByteRange::new(0, index_metadata.size)?)?;
-        let sidecar = decode_index(&index_bytes)?;
-        validate_against_archive(
-            &sidecar,
-            metadata.size,
-            &header_bytes,
-            &parsed.archive,
-            &sections,
-            &contigs,
-        )?;
-
-        Ok(Self {
-            resource: archive,
-            index_resource: Some(index),
-            header: parsed.archive,
-            sections,
-            contigs,
-            sequence_blocks: Vec::new(),
-            seed_sections: Vec::new(),
-            sequence_index: sidecar.sequence_blocks.clone(),
-            seed_levels_index: sidecar.seed_levels.clone(),
-            sidecar: Some(sidecar),
-            metrics: ReaderMetrics::default(),
-        })
-    }
-
-    /// Alias with an explicit name for callers that construct readers from a
-    /// local or remote `RangeReader`.
     pub fn open(resource: R) -> JmaResult<Self> {
         Self::from_resource(resource)
     }
@@ -269,9 +261,61 @@ impl<R: RangeReader> JmaReader<R> {
         &self.sections
     }
 
-    /// Looks up a seed at an explicit density level. The exact hash and
-    /// canonical packed k-mer are both compared; hash equality alone is not a
-    /// valid occurrence match.
+    #[must_use]
+    pub fn metadata_fields(&self) -> &crate::jma::format::ArchiveMetadataFields {
+        &self.metadata_fields
+    }
+
+    pub fn seed_schemes(&self) -> impl Iterator<Item = &crate::archive::SeedSchemeDescriptor> {
+        self.seed_index
+            .schemes
+            .iter()
+            .map(|scheme| &scheme.descriptor)
+    }
+
+    #[must_use]
+    pub fn seed_index(&self) -> &SeedIndexDirectory {
+        &self.seed_index
+    }
+
+    #[must_use]
+    pub fn sequence_index(&self) -> &[SequenceBlockRecord] {
+        &self.sequence_index
+    }
+
+    #[must_use]
+    pub fn archive_metrics(&self) -> crate::archive::ArchiveMetrics {
+        self.metrics.archive_snapshot(
+            self.resource
+                .metrics()
+                .saturating_add(self.metrics.snapshot()),
+        )
+    }
+
+    pub fn seed_occurrences_for_scheme(
+        &self,
+        scheme_id: crate::archive::SeedSchemeId,
+        query: SeedQuery,
+    ) -> JmaResult<Vec<SeedOccurrence>> {
+        let scheme = self
+            .seed_index
+            .schemes
+            .iter()
+            .find(|scheme| scheme.descriptor.scheme_id == scheme_id.0)
+            .ok_or_else(|| {
+                JmaError::CorruptSection(format!("seed scheme {} is unavailable", scheme_id.0))
+            })?;
+        if scheme.descriptor.span != u16::from(query.k) {
+            return Err(JmaError::CorruptSection(
+                "seed query span does not match its scheme".to_string(),
+            ));
+        }
+        self.lookup_scheme_query(scheme, query)
+    }
+
+    /// Looks up a seed at a density level. Page and occurrence ranges are
+    /// read only after selecting by hash prefix; canonical k-mer equality is
+    /// checked after the digest match.
     pub fn seed_occurrences_at_scale(
         &self,
         query: SeedQuery,
@@ -280,146 +324,193 @@ impl<R: RangeReader> JmaReader<R> {
         if query.hash == 0 {
             return Ok(Vec::new());
         }
-        if self.sidecar.is_some() {
-            return self.indexed_seed_occurrences(query, scale);
-        }
-        let section = self
-            .seed_sections
+        let scheme = self
+            .seed_index
+            .schemes
             .iter()
-            .find(|section| section.k == query.k)
-            .ok_or_else(|| {
-                JmaError::CorruptSection(format!("seed level k={} is unavailable", query.k))
-            })?;
-        let level = section
-            .levels
-            .iter()
-            .find(|level| level.level.scale == scale)
+            .find(|scheme| {
+                scheme.descriptor.span == u16::from(query.k)
+                    && u64::from(scheme.descriptor.density_parameter) == scale
+            })
             .ok_or_else(|| {
                 JmaError::CorruptSection(format!(
                     "seed scale {scale} is unavailable for k={}",
                     query.k
                 ))
             })?;
-        Ok(matching_occurrences(&level.records, query))
+        self.lookup_scheme_query(scheme, query)
     }
 
-    fn indexed_seed_occurrences(
-        &self,
-        query: SeedQuery,
-        scale: u64,
-    ) -> JmaResult<Vec<SeedOccurrence>> {
-        let sidecar = self.sidecar.as_ref().ok_or_else(|| {
-            JmaError::CorruptSection("indexed seed lookup has no sidecar".to_string())
-        })?;
-        let level = level_for(sidecar, query.k, scale).ok_or_else(|| {
-            JmaError::CorruptSection(format!(
-                "seed scale {scale} is unavailable for k={}",
-                query.k
-            ))
-        })?;
-        let Some(bucket) = bucket_for(sidecar, query.k, scale, query.hash) else {
-            return Ok(Vec::new());
-        };
-        let bytes = self.read_indexed_range(bucket.offset, bucket.length)?;
-        if checksum(&bytes) != bucket.checksum {
-            return Err(JmaError::ChecksumMismatch(format!(
-                "seed bucket k={} scale={} prefix={}",
-                bucket.k, bucket.scale, bucket.hash_prefix
-            )));
-        }
-        if bucket.length != bucket.record_count.saturating_mul(32)
-            || bytes.len() != usize::try_from(bucket.length).unwrap_or(usize::MAX)
-        {
-            return Err(JmaError::CorruptSection(
-                "seed bucket byte length does not match record count".to_string(),
-            ));
-        }
-        let records = decode_seed_records(&bytes, query.k)?;
-        if records.len() != usize::try_from(bucket.record_count).unwrap_or(usize::MAX) {
-            return Err(JmaError::CorruptSection(
-                "seed bucket record count does not match payload".to_string(),
-            ));
-        }
-        let prefix = bucket.hash_prefix;
-        if records.iter().any(|record| {
-            record.query.k != query.k
-                || (record.query.hash >> (64 - u32::from(crate::jma::index::HASH_PREFIX_BITS)))
-                    as u16
-                    != prefix
-        }) {
-            return Err(JmaError::CorruptSection(
-                "seed bucket contains a record outside its hash prefix".to_string(),
-            ));
-        }
-        self.metrics.add_seed_bucket();
-        self.metrics.add_decoded_bytes(bytes.len());
-        let _ = level;
-        Ok(matching_occurrences(&records, query))
-    }
-
-    fn read_indexed_sequence(
+    /// Reads and reverse-complements only the requested contig range. The
+    /// range is expressed in forward contig coordinates.
+    pub fn read_sequence_reverse_complement(
         &self,
         contig_id: ContigId,
         range: SequenceRange,
     ) -> JmaResult<Vec<u8>> {
-        let metadata = self
-            .contigs
-            .iter()
-            .find(|contig| contig.id == contig_id)
-            .ok_or(JmaError::UnknownContig(contig_id))?;
-        if range.end > metadata.length {
-            return Err(JmaError::InvalidSequenceRange {
-                start: range.start,
-                end: range.end,
-            });
+        let mut bases = self.read_sequence(contig_id, range)?;
+        bases.reverse();
+        for base in &mut bases {
+            *base = complement_base(*base)?;
         }
-        if range.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut blocks = Vec::new();
-        for entry in self
-            .sequence_index
-            .iter()
-            .filter(|entry| entry.contig_id == contig_id)
-        {
-            let block_end = entry
-                .start
-                .checked_add(entry.base_length)
-                .ok_or(JmaError::OffsetOverflow)?;
-            if entry.start >= range.end || block_end <= range.start {
-                continue;
-            }
-            let bytes = self.read_indexed_range(entry.offset, entry.length)?;
-            if checksum(&bytes) != entry.checksum {
-                return Err(JmaError::ChecksumMismatch(format!(
-                    "sequence block contig={} start={}",
-                    entry.contig_id, entry.start
-                )));
-            }
-            let block = decode_sequence_block(&bytes)?;
-            if block.contig_id != entry.contig_id
-                || block.start != entry.start
-                || block.base_length != entry.base_length
-            {
-                return Err(JmaError::CorruptSection(
-                    "sequence sidecar metadata does not match fetched block".to_string(),
-                ));
-            }
-            self.metrics.add_sequence_block();
-            self.metrics.add_decoded_bytes(bytes.len());
-            blocks.push(block);
-        }
-        decode_range(&blocks, &self.contigs, contig_id, range)
+        Ok(bases)
     }
 
-    fn read_indexed_range(&self, offset: u64, length: u64) -> JmaResult<Vec<u8>> {
-        if length > crate::jma::index::MAX_INDEXED_RANGE_BYTES {
+    fn lookup_scheme_query(
+        &self,
+        scheme: &SeedSchemeIndex,
+        query: SeedQuery,
+    ) -> JmaResult<Vec<SeedOccurrence>> {
+        let prefix = crate::jma::format::hash_prefix(query.hash, scheme.descriptor.bucket_bits)?;
+        let seed_descriptor = unique_section(&self.sections, SECTION_SEEDS)?;
+        let mut matches = Vec::new();
+        for page in scheme.pages.iter().filter(|page| {
+            page.hash_prefix == prefix
+                && page.first_hash <= query.hash
+                && page.last_hash >= query.hash
+        }) {
+            let key_offset = seed_descriptor
+                .offset
+                .checked_add(page.key_offset)
+                .ok_or(JmaError::OffsetOverflow)?;
+            let occurrence_offset = seed_descriptor
+                .offset
+                .checked_add(page.occurrence_offset)
+                .ok_or(JmaError::OffsetOverflow)?;
+            let range_start = key_offset.min(occurrence_offset);
+            let range_end = checked_end(key_offset, page.key_length)?
+                .max(checked_end(occurrence_offset, page.occurrence_length)?);
+            let combined = self.read_indexed_range(
+                range_start,
+                range_end
+                    .checked_sub(range_start)
+                    .ok_or(JmaError::OffsetOverflow)?,
+            )?;
+            let combined = combined.as_ref();
+            let key_start = usize::try_from(
+                key_offset
+                    .checked_sub(range_start)
+                    .ok_or(JmaError::OffsetOverflow)?,
+            )
+            .map_err(|_| JmaError::OffsetOverflow)?;
+            let key_end = key_start
+                .checked_add(
+                    usize::try_from(page.key_length).map_err(|_| JmaError::OffsetOverflow)?,
+                )
+                .ok_or(JmaError::OffsetOverflow)?;
+            let occurrence_start = usize::try_from(
+                occurrence_offset
+                    .checked_sub(range_start)
+                    .ok_or(JmaError::OffsetOverflow)?,
+            )
+            .map_err(|_| JmaError::OffsetOverflow)?;
+            let occurrence_end = occurrence_start
+                .checked_add(
+                    usize::try_from(page.occurrence_length)
+                        .map_err(|_| JmaError::OffsetOverflow)?,
+                )
+                .ok_or(JmaError::OffsetOverflow)?;
+            let key_bytes = combined.get(key_start..key_end).ok_or_else(|| {
+                JmaError::CorruptSection("coalesced seed key range is truncated".to_string())
+            })?;
+            let occurrence_bytes =
+                combined
+                    .get(occurrence_start..occurrence_end)
+                    .ok_or_else(|| {
+                        JmaError::CorruptSection(
+                            "coalesced seed occurrence range is truncated".to_string(),
+                        )
+                    })?;
+            let records = decode_seed_page(
+                key_bytes,
+                occurrence_bytes,
+                page,
+                u8::try_from(scheme.descriptor.span).map_err(|_| JmaError::OffsetOverflow)?,
+            )?;
+            self.metrics
+                .add_seed_page(key_bytes.len().saturating_add(occurrence_bytes.len()));
+            for record in records.into_iter().filter(|record| {
+                record.query.hash == query.hash
+                    && record.query.canonical_kmer == query.canonical_kmer
+            }) {
+                let contig = self
+                    .contigs
+                    .iter()
+                    .find(|contig| contig.id == record.occurrence.contig_id)
+                    .ok_or(JmaError::UnknownContig(record.occurrence.contig_id))?;
+                let end = record
+                    .occurrence
+                    .position
+                    .checked_add(u64::from(query.k))
+                    .ok_or(JmaError::OffsetOverflow)?;
+                if end > contig.length {
+                    return Err(JmaError::CorruptSection(
+                        "seed occurrence exceeds contig length".to_string(),
+                    ));
+                }
+                matches.push(record.occurrence);
+            }
+        }
+        matches.sort_by_key(|occurrence| {
+            (
+                occurrence.contig_id,
+                occurrence.position,
+                occurrence.reverse,
+            )
+        });
+        Ok(matches)
+    }
+
+    fn read_sequence_block_parts<'a>(
+        &'a self,
+        record: &SequenceBlockRecord,
+    ) -> JmaResult<SequenceBlockBytes<'a>> {
+        let payload_end = record.payload_end().ok_or(JmaError::OffsetOverflow)?;
+        let ambiguity_end = record.ambiguity_end().ok_or(JmaError::OffsetOverflow)?;
+        let range_start = record.payload_offset.min(record.ambiguity_offset);
+        let range_end = payload_end.max(ambiguity_end);
+        let range_length = range_end
+            .checked_sub(range_start)
+            .ok_or(JmaError::OffsetOverflow)?;
+        let bytes = self.read_indexed_range(range_start, range_length)?;
+        let payload_start = usize::try_from(
+            record
+                .payload_offset
+                .checked_sub(range_start)
+                .ok_or(JmaError::OffsetOverflow)?,
+        )
+        .map_err(|_| JmaError::OffsetOverflow)?;
+        let payload_end = payload_start
+            .checked_add(
+                usize::try_from(record.stored_length).map_err(|_| JmaError::OffsetOverflow)?,
+            )
+            .ok_or(JmaError::OffsetOverflow)?;
+        let ambiguity_start = usize::try_from(
+            record
+                .ambiguity_offset
+                .checked_sub(range_start)
+                .ok_or(JmaError::OffsetOverflow)?,
+        )
+        .map_err(|_| JmaError::OffsetOverflow)?;
+        let ambiguity_end = ambiguity_start
+            .checked_add(
+                usize::try_from(record.ambiguity_length).map_err(|_| JmaError::OffsetOverflow)?,
+            )
+            .ok_or(JmaError::OffsetOverflow)?;
+        Ok(SequenceBlockBytes {
+            bytes,
+            payload: payload_start..payload_end,
+            ambiguity: ambiguity_start..ambiguity_end,
+        })
+    }
+
+    fn read_indexed_range(&self, offset: u64, length: u64) -> JmaResult<RangeBytes<'_>> {
+        if length > MAX_INDEXED_RANGE_BYTES {
             return Err(JmaError::CorruptSection(
                 "indexed JMA range exceeds the read limit".to_string(),
             ));
         }
-        let range = ByteRange::new(offset, length)?;
-        read_exact(&self.resource, range)
+        read_exact(&self.resource, ByteRange::new(offset, length)?)
     }
 }
 
@@ -437,141 +528,220 @@ impl<R: RangeReader> ArchiveReader for JmaReader<R> {
     }
 
     fn read_sequence(&self, contig_id: ContigId, range: SequenceRange) -> JmaResult<Vec<u8>> {
-        if self.sidecar.is_some() {
-            return self.read_indexed_sequence(contig_id, range);
+        let contig = self
+            .contigs
+            .iter()
+            .find(|contig| contig.id == contig_id)
+            .ok_or(JmaError::UnknownContig(contig_id))?;
+        if range.start > range.end || range.end > contig.length {
+            return Err(JmaError::InvalidSequenceRange {
+                start: range.start,
+                end: range.end,
+            });
         }
-        decode_range(&self.sequence_blocks, &self.contigs, contig_id, range)
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut output =
+            Vec::with_capacity(usize::try_from(range.len()).map_err(|_| JmaError::OffsetOverflow)?);
+        for entry in self.sequence_index.iter().filter(|entry| {
+            entry.contig_id == contig_id
+                && entry.base_start < range.end
+                && entry.base_end().is_some_and(|end| end > range.start)
+        }) {
+            let request_start = range.start.max(entry.base_start);
+            let request_end = range
+                .end
+                .min(entry.base_end().ok_or(JmaError::OffsetOverflow)?);
+            let block = self.read_sequence_block_parts(entry)?;
+            let (payload, ambiguity_payload) = block.parts()?;
+            let decoded = decode_block_range_bounded(
+                entry,
+                payload,
+                ambiguity_payload,
+                request_start..request_end,
+                DEFAULT_MAX_DECODED_BLOCK_BYTES,
+            )
+            .map_err(|error| JmaError::CorruptSection(error.to_string()))?;
+            self.metrics.add_sequence_block(block.len(), decoded.len());
+            output.extend_from_slice(&decoded);
+        }
+        if output.len() != usize::try_from(range.len()).map_err(|_| JmaError::OffsetOverflow)? {
+            return Err(JmaError::CorruptSection(
+                "sequence range is not covered by indexed blocks".to_string(),
+            ));
+        }
+        Ok(output)
     }
 
     fn seed_occurrences(&self, query: SeedQuery) -> JmaResult<Vec<SeedOccurrence>> {
         if query.hash == 0 {
             return Ok(Vec::new());
         }
-        if self.sidecar.is_some() {
-            let level = self
-                .seed_levels_index
-                .iter()
-                .find(|level| level.k == query.k)
-                .ok_or_else(|| {
-                    JmaError::CorruptSection(format!("seed level k={} is unavailable", query.k))
-                })?;
-            return self.seed_occurrences_at_scale(query, level.scale);
-        }
-        let section = self
-            .seed_sections
+        let scheme = self
+            .seed_index
+            .schemes
             .iter()
-            .find(|section| section.k == query.k)
+            .find(|scheme| scheme.descriptor.span == u16::from(query.k))
             .ok_or_else(|| {
                 JmaError::CorruptSection(format!("seed level k={} is unavailable", query.k))
             })?;
-        let level = section.levels.first().ok_or_else(|| {
-            JmaError::CorruptSection(format!("seed level k={} has no density data", query.k))
-        })?;
-        Ok(matching_occurrences(&level.records, query))
+        self.lookup_scheme_query(scheme, query)
     }
 
     fn metrics(&self) -> ResourceMetrics {
-        let mut metrics = self.resource.metrics();
-        if let Some(index_resource) = self.index_resource.as_ref() {
-            metrics = metrics.saturating_add(index_resource.metrics());
-        }
-        metrics.saturating_add(self.metrics.snapshot())
+        self.resource
+            .metrics()
+            .saturating_add(self.metrics.snapshot())
     }
 }
 
-fn read_exact<R: RangeReader>(resource: &R, range: ByteRange) -> JmaResult<Vec<u8>> {
+fn read_exact<'a, R: RangeReader>(resource: &'a R, range: ByteRange) -> JmaResult<RangeBytes<'a>> {
     let expected = checked_usize(range.length, "resource read length")?;
-    let bytes = resource.read_range(range)?;
-    if bytes.len() != expected {
+    let bytes = resource.read_range_bytes(range)?;
+    if bytes.as_ref().len() != expected {
         return Err(JmaError::CorruptSection(format!(
             "resource returned {} bytes for requested {expected}",
-            bytes.len()
+            bytes.as_ref().len()
         )));
     }
     Ok(bytes)
 }
 
-fn read_section<R: RangeReader>(
-    resource: &R,
+fn read_seed_directory_prefix<'a, R: RangeReader>(
+    resource: &'a R,
     descriptor: &SectionDescriptor,
-) -> JmaResult<Vec<u8>> {
+) -> JmaResult<RangeBytes<'a>> {
+    if descriptor.length < SEED_DIRECTORY_HEADER_SIZE_U64 {
+        return Err(JmaError::CorruptSection(
+            "seed directory section is shorter than its header".to_string(),
+        ));
+    }
+    let header = read_exact(
+        resource,
+        ByteRange::new(descriptor.offset, SEED_DIRECTORY_HEADER_SIZE_U64)?,
+    )?;
+    let header = header.as_ref();
+    let scheme_count = get_u32(header, 4)?;
+    let page_count = get_u32(header, 8)?;
+    let scheme_offset = get_u64(header, 16)?;
+    let page_offset = get_u64(header, 24)?;
+    let data_offset = get_u64(header, 32)?;
+    let scheme_end = checked_end(
+        scheme_offset,
+        u64::from(scheme_count)
+            .checked_mul(SEED_SCHEME_RECORD_SIZE_U64)
+            .ok_or(JmaError::OffsetOverflow)?,
+    )?;
+    let page_end = checked_end(
+        page_offset,
+        u64::from(page_count)
+            .checked_mul(SEED_PAGE_RECORD_SIZE_U64)
+            .ok_or(JmaError::OffsetOverflow)?,
+    )?;
+    if scheme_offset < SEED_DIRECTORY_HEADER_SIZE_U64
+        || page_offset < scheme_end
+        || data_offset < page_end
+        || data_offset > descriptor.length
+        || data_offset > MAX_INDEXED_RANGE_BYTES
+    {
+        return Err(JmaError::CorruptSection(
+            "seed directory prefix offsets are invalid".to_string(),
+        ));
+    }
+    let prefix = read_exact(resource, ByteRange::new(descriptor.offset, data_offset)?)?;
+    if checksum(prefix.as_ref()) != descriptor.checksum {
+        return Err(JmaError::ChecksumMismatch(
+            "seed directory prefix".to_string(),
+        ));
+    }
+    Ok(prefix)
+}
+
+fn read_section<'a, R: RangeReader>(
+    resource: &'a R,
+    descriptor: &SectionDescriptor,
+) -> JmaResult<RangeBytes<'a>> {
     checked_end(descriptor.offset, descriptor.length)?;
     let bytes = read_exact(
         resource,
         ByteRange::new(descriptor.offset, descriptor.length)?,
     )?;
-    if checksum(&bytes) != descriptor.checksum {
+    if checksum(bytes.as_ref()) != descriptor.checksum {
         return Err(JmaError::ChecksumMismatch(format!(
             "section kind {}",
             descriptor.kind
         )));
     }
+    if descriptor.flags & SECTION_FLAG_COMPRESSED != 0 {
+        return Err(JmaError::CorruptSection(format!(
+            "compressed section kind {} is not available in this reader",
+            descriptor.kind
+        )));
+    }
     if descriptor.uncompressed_length != descriptor.length {
         return Err(JmaError::CorruptSection(format!(
-            "compressed section kind {} is unsupported in JMA v1",
+            "uncompressed section kind {} has an invalid decoded length",
             descriptor.kind
         )));
     }
     Ok(bytes)
 }
 
-fn find_unique_section(sections: &[SectionDescriptor], kind: u32) -> JmaResult<&SectionDescriptor> {
-    let mut matches = sections.iter().filter(|entry| entry.kind == kind);
-    let first = matches.next().ok_or_else(|| {
-        JmaError::CorruptSection(format!("required section kind {kind} is missing"))
-    })?;
-    if matches.next().is_some() {
-        return Err(JmaError::CorruptSection(format!(
-            "section kind {kind} occurs more than once"
-        )));
-    }
-    Ok(first)
-}
-
-fn validate_section_kinds(sections: &[SectionDescriptor]) -> JmaResult<()> {
-    for section in sections {
-        if !matches!(
-            section.kind,
-            SECTION_CONTIGS | SECTION_SEQUENCES | SECTION_SEEDS_K21 | SECTION_SEEDS_K31
-        ) {
+fn validate_sequence_coverage(
+    blocks: &[SequenceBlockRecord],
+    contigs: &[ContigMetadata],
+) -> JmaResult<()> {
+    let mut cursor = 0usize;
+    for contig in contigs {
+        let mut expected = 0u64;
+        while cursor < blocks.len() && blocks[cursor].contig_id == contig.id {
+            if blocks[cursor].base_start != expected {
+                return Err(JmaError::CorruptSection(format!(
+                    "sequence blocks leave a gap or overlap in contig {} at {}",
+                    contig.id, expected
+                )));
+            }
+            expected = blocks[cursor].base_end().ok_or(JmaError::OffsetOverflow)?;
+            cursor += 1;
+        }
+        if expected != contig.length {
             return Err(JmaError::CorruptSection(format!(
-                "unsupported JMA section kind {}",
-                section.kind
+                "sequence blocks cover {expected} of contig {}, expected {}",
+                contig.id, contig.length
             )));
         }
     }
-    if sections
-        .iter()
-        .filter(|section| section.kind == SECTION_SEEDS_K21)
-        .count()
-        > 1
-        || sections
-            .iter()
-            .filter(|section| section.kind == SECTION_SEEDS_K31)
-            .count()
-            > 1
-    {
+    if cursor != blocks.len() {
         return Err(JmaError::CorruptSection(
-            "seed section kind occurs more than once".to_string(),
+            "sequence directory contains an unknown contig or unsorted block".to_string(),
         ));
     }
     Ok(())
 }
 
-fn matching_occurrences(records: &[SeedRecord], query: SeedQuery) -> Vec<SeedOccurrence> {
-    let mut matches = records
-        .iter()
-        .filter(|record| {
-            record.query.hash == query.hash && record.query.canonical_kmer == query.canonical_kmer
-        })
-        .map(|record| record.occurrence)
-        .collect::<Vec<_>>();
-    matches.sort_by_key(|occurrence| {
-        (
-            occurrence.contig_id,
-            occurrence.position,
-            occurrence.reverse,
-        )
-    });
-    matches
+fn complement_base(base: u8) -> JmaResult<u8> {
+    let value = match base.to_ascii_uppercase() {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' | b'U' => b'A',
+        b'R' => b'Y',
+        b'Y' => b'R',
+        b'S' => b'S',
+        b'W' => b'W',
+        b'K' => b'M',
+        b'M' => b'K',
+        b'B' => b'V',
+        b'D' => b'H',
+        b'H' => b'D',
+        b'V' => b'B',
+        b'N' | b'-' => base.to_ascii_uppercase(),
+        other => {
+            return Err(JmaError::CorruptSection(format!(
+                "unsupported ambiguity base 0x{other:02x}"
+            )));
+        }
+    };
+    Ok(value)
 }

@@ -457,6 +457,8 @@
         "requested_bytes": {"type": "integer", "minimum": 0},
         "returned_bytes": {"type": "integer", "minimum": 0},
         "decoded_bytes": {"type": "integer", "minimum": 0},
+        "mapped_bytes": {"type": "integer", "minimum": 0},
+        "resident_bytes": {"type": "integer", "minimum": 0},
         "remote_bytes": {"type": "integer", "minimum": 0},
         "cache_bytes": {"type": "integer", "minimum": 0},
         "cache_hits": {"type": "integer", "minimum": 0},

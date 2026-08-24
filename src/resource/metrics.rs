@@ -14,6 +14,8 @@ pub struct MetricsCounter {
     requested_bytes: AtomicU64,
     returned_bytes: AtomicU64,
     decoded_bytes: AtomicU64,
+    mapped_bytes: AtomicU64,
+    resident_bytes: AtomicU64,
     remote_bytes: AtomicU64,
     cache_bytes: AtomicU64,
     cache_hits: AtomicU64,
@@ -57,6 +59,14 @@ impl MetricsCounter {
 
     pub fn decoded_bytes(&self, bytes: u64) {
         self.decoded_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+
+    pub fn mapped_bytes(&self, bytes: u64) {
+        self.mapped_bytes.fetch_max(bytes, Ordering::Relaxed);
+    }
+
+    pub fn resident_bytes(&self, bytes: u64) {
+        self.resident_bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
     pub fn remote_bytes(&self, bytes: u64) {
@@ -116,6 +126,8 @@ impl MetricsCounter {
             requested_bytes: self.requested_bytes.load(Ordering::Relaxed),
             returned_bytes: self.returned_bytes.load(Ordering::Relaxed),
             decoded_bytes: self.decoded_bytes.load(Ordering::Relaxed),
+            mapped_bytes: self.mapped_bytes.load(Ordering::Relaxed),
+            resident_bytes: self.resident_bytes.load(Ordering::Relaxed),
             remote_bytes: self.remote_bytes.load(Ordering::Relaxed),
             cache_bytes: self.cache_bytes.load(Ordering::Relaxed),
             cache_hits: self.cache_hits.load(Ordering::Relaxed),

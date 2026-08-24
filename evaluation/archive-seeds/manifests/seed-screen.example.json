@@ -1,0 +1,10 @@
+{
+  "schema_version": "archive-seeds-experiment-manifest-v1",
+  "name": "seed-screen-example",
+  "kind": "seed_screen",
+  "cases": [
+    {"name": "fracminhash-k31-k21", "command": ["jam", "trace", "--seed-scheme", "fracminhash-k31-k21"], "metadata": {"screen": "small_correctness"}},
+    {"name": "gear-fragment-exact", "command": ["jam", "trace", "--seed-scheme", "gear-fragment-exact"], "metadata": {"screen": "small_correctness"}},
+    {"name": "syncmer-k31", "command": ["jam", "trace", "--seed-scheme", "syncmer-k31"], "metadata": {"screen": "small_correctness"}}
+  ]
+}

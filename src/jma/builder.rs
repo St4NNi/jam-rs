@@ -7,13 +7,15 @@
 //! compressed FASTA/FASTQ path is supplied); it is not the checksum of the JMA
 //! container.
 
-use crate::jma::index::write_sidecar;
 use crate::jma::seed_builder::{
     EmbeddedSampleSketch, SeedBuildConfig, SeedInput, build_seed_sections,
 };
-use crate::jma::sequence_builder::{SequenceBuildConfig, build_sequence_blocks};
+use crate::jma::sequence_builder::{
+    DEFAULT_BLOCK_BASES, IndexedSequenceBuildConfig, build_indexed_sequence_blocks,
+};
 use crate::jma::writer::{ArchiveParts, encode_archive_with_min_entropy};
 use crate::jma::{ContigMetadata, JmaError, JmaResult};
+use crate::sequence::{BlockCodec, SequenceBlockPolicy};
 use needletail::{Sequence, parse_fastx_file};
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -37,7 +39,7 @@ pub struct ArchiveBuildConfig {
 impl Default for ArchiveBuildConfig {
     fn default() -> Self {
         Self {
-            block_bases: SequenceBuildConfig::default().block_bases,
+            block_bases: DEFAULT_BLOCK_BASES,
             k31_scale: SeedBuildConfig::default().k31_scale,
             k21_scale: SeedBuildConfig::default().k21_scale,
             min_entropy: SeedBuildConfig::default().min_entropy,
@@ -97,11 +99,14 @@ pub fn build_archive_from_fasta<P: AsRef<Path>>(
             name: record.name.clone(),
             length,
         });
-        sequence_blocks.extend(build_sequence_blocks(
+        sequence_blocks.extend(build_indexed_sequence_blocks(
             id,
             &record.sequence,
-            SequenceBuildConfig {
-                block_bases: config.block_bases,
+            IndexedSequenceBuildConfig {
+                policy: SequenceBlockPolicy::Fixed {
+                    block_bases: config.block_bases,
+                },
+                codec: BlockCodec::Raw2Bit,
             },
         )?);
         seed_inputs.push(SeedInput {
@@ -118,28 +123,8 @@ pub fn build_archive_from_fasta<P: AsRef<Path>>(
             min_entropy: config.min_entropy,
         },
     )?;
-    let k31_seed_count = seed_result
-        .sections
-        .iter()
-        .find(|section| section.k == 31)
-        .map_or(0, |section| {
-            section
-                .levels
-                .iter()
-                .map(|level| level.records.len() as u64)
-                .sum()
-        });
-    let k21_seed_count = seed_result
-        .sections
-        .iter()
-        .find(|section| section.k == 21)
-        .map_or(0, |section| {
-            section
-                .levels
-                .iter()
-                .map(|level| level.records.len() as u64)
-                .sum()
-        });
+    let k31_seed_count = seed_record_count(&seed_result.sections, 31)?;
+    let k21_seed_count = seed_record_count(&seed_result.sections, 21)?;
     let contig_count = u32::try_from(contigs.len()).map_err(|_| JmaError::OffsetOverflow)?;
     let stats = ArchiveBuildStats {
         source_sha256,
@@ -176,7 +161,6 @@ pub fn write_archive_from_fasta<P: AsRef<Path>, Q: AsRef<Path>>(
         .map_err(|error| JmaError::CorruptSection(format!("archive write failed: {error}")))?;
     file.flush()
         .map_err(|error| JmaError::CorruptSection(format!("cannot flush JMA output: {error}")))?;
-    write_sidecar(output.as_ref(), &encoded)?;
     Ok(built.stats)
 }
 
@@ -200,6 +184,20 @@ fn validate_config(config: ArchiveBuildConfig) -> JmaResult<()> {
         ));
     }
     Ok(())
+}
+
+fn seed_record_count(sections: &[crate::jma::writer::SeedSection], k: u8) -> JmaResult<u64> {
+    sections
+        .iter()
+        .filter(|section| section.k == k)
+        .flat_map(|section| &section.levels)
+        .try_fold(0u64, |count, level| {
+            count
+                .checked_add(
+                    u64::try_from(level.records.len()).map_err(|_| JmaError::OffsetOverflow)?,
+                )
+                .ok_or(JmaError::OffsetOverflow)
+        })
 }
 
 fn checksum_file(path: &Path) -> JmaResult<[u8; 32]> {
@@ -262,6 +260,7 @@ fn read_contigs(path: &Path) -> JmaResult<Vec<InputContig>> {
 mod tests {
     use super::*;
     use crate::jma::ArchiveReader;
+    use crate::jma::format::JMA_FORMAT_MAGIC;
     use crate::jma::reader::JmaReader;
     use crate::jma::writer::encode_archive;
     use crate::resource::{
@@ -323,7 +322,7 @@ mod tests {
         assert_eq!(output.stats.contig_count, 0);
         assert_eq!(output.stats.total_bases, 0);
         let bytes = encode_archive(&output.parts).unwrap();
-        assert_eq!(&bytes[..4], b"JMA\0");
+        assert_eq!(&bytes[..JMA_FORMAT_MAGIC.len()], &JMA_FORMAT_MAGIC);
     }
 
     #[test]

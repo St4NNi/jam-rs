@@ -1,7 +1,7 @@
 //! Positional seed construction for JMA v1 archives.
 //!
 //! JMA uses the released `jamhash_u64_v1` identity and the same FracMinHash
-//! threshold convention as the existing `.jam` path.  Hash zero is always
+//! threshold convention as the existing `.jam` path. Hash zero is always
 //! excluded: `jamhash_u64_v1(0) == 0`, and retaining it would make every
 //! zero-valued k-mer an artificial common seed.
 
@@ -12,7 +12,8 @@ use crate::jma::{ContigId, JmaError, JmaResult, SeedLevel, SeedOccurrence, SeedQ
 use needletail::Sequence;
 use std::collections::BTreeSet;
 
-/// The frozen primary and rescue k-mer identities used by JMA v1.
+/// Default primary and rescue k-mer identities used by the local builder.
+/// The archive itself accepts an open list of scheme descriptors.
 pub const PRIMARY_K: u8 = 31;
 pub const RESCUE_K: u8 = 21;
 
@@ -94,9 +95,9 @@ pub fn build_seed_section(
     scale: u64,
     min_entropy: Option<f64>,
 ) -> JmaResult<SeedBuildSectionResult> {
-    if k != PRIMARY_K && k != RESCUE_K {
+    if !(21..=32).contains(&k) {
         return Err(JmaError::CorruptSection(format!(
-            "JMA v1 supports only k={PRIMARY_K} and k={RESCUE_K}, got k={k}"
+            "seed k must be between 21 and 32, got k={k}"
         )));
     }
     if scale == 0 {

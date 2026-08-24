@@ -1,8 +1,8 @@
 //! Catalog records for one-plasmid-to-many-metagenome trace searches.
 //!
 //! The catalog is deliberately small and boring: it maps the stable sample
-//! identifier stored in a `.jam` index to a positional archive and/or a raw
-//! assembly resource.  It is not a second sequence database.  JSON and TSV
+//! identifier stored in a `.jam` index to one self-contained JMA resource.
+//! It is not a second sequence database. JSON and TSV
 //! are accepted so a pipeline can keep the catalog under ordinary version
 //! control without introducing another database format.
 
@@ -14,44 +14,29 @@ use thiserror::Error;
 
 /// One row in a trace resource catalog.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CatalogEntry {
     /// Identifier used as the sample name in the existing `.jam` database.
     #[serde(alias = "id", alias = "sample", alias = "sample_id")]
     pub metagenome_id: String,
-    /// Optional JMA v1 positional archive.  JMA is preferred when both
-    /// resources are present.
-    #[serde(default, alias = "archive", alias = "jma_path")]
-    pub jma: Option<String>,
-    /// Optional checksum-bound JMA range index. Indexed production access
-    /// requires this resource; archives without it use explicit fallback.
-    #[serde(default, alias = "index", alias = "jma_index_path")]
-    pub jma_index: Option<String>,
-    /// Optional raw FASTA/FASTQ assembly, including compressed input.
-    #[serde(
-        default,
-        alias = "assembly",
-        alias = "fasta",
-        alias = "fastq",
-        alias = "raw_path",
-        alias = "resource"
-    )]
-    pub raw: Option<String>,
+    /// URI or local path of the single self-contained JMA object.
+    pub resource_uri: String,
+    /// SHA-256 of the complete JMA object.
+    pub sha256: String,
+    #[serde(default)]
+    pub etag: Option<String>,
+    #[serde(default)]
+    pub object_version: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub source_assembly_sha256: Option<String>,
 }
 
 impl CatalogEntry {
-    /// Returns the preferred resource and whether it is indexed.
     #[must_use]
-    pub fn preferred_resource(&self) -> Option<(&str, bool)> {
-        self.jma
-            .as_deref()
-            .map(|resource| (resource, self.jma_index.is_some()))
-            .or_else(|| self.raw.as_deref().map(|resource| (resource, false)))
-    }
-
-    /// Returns a resource suitable for fallback after an indexed failure.
-    #[must_use]
-    pub fn fallback_raw(&self) -> Option<&str> {
-        self.jma.is_some().then_some(self.raw.as_deref()).flatten()
+    pub fn resource(&self) -> &str {
+        &self.resource_uri
     }
 }
 
@@ -93,18 +78,11 @@ impl TraceCatalog {
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         for entry in &mut entries {
             validate_entry(entry, path)?;
-            entry.jma = entry
-                .jma
-                .take()
-                .map(|resource| resolve_resource(base, resource));
-            entry.jma_index = entry
-                .jma_index
-                .take()
-                .map(|resource| resolve_resource(base, resource));
-            entry.raw = entry
-                .raw
-                .take()
-                .map(|resource| resolve_resource(base, resource));
+            entry.resource_uri = resolve_resource(base, std::mem::take(&mut entry.resource_uri));
+            entry.sha256.make_ascii_lowercase();
+            if let Some(source_sha256) = &mut entry.source_assembly_sha256 {
+                source_sha256.make_ascii_lowercase();
+            }
         }
         let mut index = HashMap::with_capacity(entries.len());
         for (position, entry) in entries.iter().enumerate() {
@@ -127,10 +105,14 @@ impl TraceCatalog {
 
     /// Construct a catalog from already-resolved rows.  This is useful for
     /// callers that receive catalog data from a manifest service.
-    pub fn from_entries(entries: Vec<CatalogEntry>) -> Result<Self, CatalogError> {
+    pub fn from_entries(mut entries: Vec<CatalogEntry>) -> Result<Self, CatalogError> {
         let mut index = HashMap::with_capacity(entries.len());
-        for (position, entry) in entries.iter().enumerate() {
+        for (position, entry) in entries.iter_mut().enumerate() {
             validate_entry(entry, Path::new("<memory>"))?;
+            entry.sha256.make_ascii_lowercase();
+            if let Some(source_sha256) = &mut entry.source_assembly_sha256 {
+                source_sha256.make_ascii_lowercase();
+            }
             if index
                 .insert(entry.metagenome_id.clone(), position)
                 .is_some()
@@ -224,12 +206,38 @@ fn parse_tsv(text: &str, path: &Path) -> Result<Vec<CatalogEntry>, CatalogError>
             path: path.to_path_buf(),
             message: "TSV catalog requires a metagenome_id column".to_string(),
         })?;
-    let jma_column = find_column(&columns, &["jma", "jma_path", "archive"]);
-    let jma_index_column = find_column(&columns, &["jma_index", "jma_index_path", "index"]);
-    let raw_column = find_column(
-        &columns,
-        &["raw", "raw_path", "assembly", "fasta", "fastq", "resource"],
-    );
+    let resource_column =
+        find_column(&columns, &["resource_uri"]).ok_or_else(|| CatalogError::Invalid {
+            path: path.to_path_buf(),
+            message: "TSV catalog requires a resource_uri column".to_string(),
+        })?;
+    let sha256_column =
+        find_column(&columns, &["sha256"]).ok_or_else(|| CatalogError::Invalid {
+            path: path.to_path_buf(),
+            message: "TSV catalog requires a sha256 column".to_string(),
+        })?;
+    let etag_column = find_column(&columns, &["etag"]);
+    let object_version_column = find_column(&columns, &["object_version"]);
+    let label_column = find_column(&columns, &["label"]);
+    let source_sha256_column = find_column(&columns, &["source_assembly_sha256"]);
+    let allowed = [
+        "metagenome_id",
+        "resource_uri",
+        "sha256",
+        "etag",
+        "object_version",
+        "label",
+        "source_assembly_sha256",
+    ];
+    if let Some(column) = columns
+        .iter()
+        .find(|column| !allowed.contains(&column.as_str()))
+    {
+        return Err(CatalogError::Invalid {
+            path: path.to_path_buf(),
+            message: format!("unsupported TSV catalog column {column:?}"),
+        });
+    }
     let mut rows = Vec::new();
     for (line_number, line) in lines {
         let fields = line.split('\t').collect::<Vec<_>>();
@@ -246,9 +254,18 @@ fn parse_tsv(text: &str, path: &Path) -> Result<Vec<CatalogEntry>, CatalogError>
         })?;
         rows.push(CatalogEntry {
             metagenome_id,
-            jma: get(jma_column),
-            jma_index: get(jma_index_column),
-            raw: get(raw_column),
+            resource_uri: get(Some(resource_column)).ok_or_else(|| CatalogError::Invalid {
+                path: path.to_path_buf(),
+                message: format!("line {} has an empty resource_uri", line_number + 1),
+            })?,
+            sha256: get(Some(sha256_column)).ok_or_else(|| CatalogError::Invalid {
+                path: path.to_path_buf(),
+                message: format!("line {} has an empty sha256", line_number + 1),
+            })?,
+            etag: get(etag_column),
+            object_version: get(object_version_column),
+            label: get(label_column),
+            source_assembly_sha256: get(source_sha256_column),
         });
     }
     if rows.is_empty() && header_line == 0 {
@@ -273,25 +290,39 @@ fn validate_entry(entry: &CatalogEntry, path: &Path) -> Result<(), CatalogError>
             message: "metagenome_id must not be empty".to_string(),
         });
     }
-    if entry.preferred_resource().is_none() {
+    if entry.resource_uri.trim().is_empty() {
+        return Err(CatalogError::Invalid {
+            path: path.to_path_buf(),
+            message: format!("catalog row {:?} has no resource_uri", entry.metagenome_id),
+        });
+    }
+    if !valid_sha256(&entry.sha256) {
         return Err(CatalogError::Invalid {
             path: path.to_path_buf(),
             message: format!(
-                "catalog row {:?} has neither a jma nor raw resource",
+                "catalog row {:?} has an invalid sha256",
                 entry.metagenome_id
             ),
         });
     }
-    if entry.jma_index.is_some() && entry.jma.is_none() {
+    if entry
+        .source_assembly_sha256
+        .as_deref()
+        .is_some_and(|checksum| !valid_sha256(checksum))
+    {
         return Err(CatalogError::Invalid {
             path: path.to_path_buf(),
             message: format!(
-                "catalog row {:?} has a jma_index without a jma resource",
+                "catalog row {:?} has an invalid source_assembly_sha256",
                 entry.metagenome_id
             ),
         });
     }
     Ok(())
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn resolve_resource(base: &Path, resource: String) -> String {
