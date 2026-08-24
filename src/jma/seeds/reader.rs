@@ -58,6 +58,8 @@ pub type SeedDirectoryPrefix = (
     Vec<SeedPositionPage>,
 );
 
+pub type SeedKeyLookupPrefix = (SeedHeader, Vec<SeedPrefix>, Vec<SeedKeyPage>);
+
 /// An opened compact section backed by immutable bytes. Remote readers can
 /// use the same directory decoders and fetch only the selected ranges.
 #[derive(Clone, Debug)]
@@ -407,6 +409,81 @@ pub fn decode_directory_prefix(
     Ok((header, prefixes, key_pages, posting_headers, position_pages))
 }
 
+/// Decode only the filter/prefix/key-page directory needed before an exact
+/// key match. Posting and position descriptors remain lazy range reads.
+pub fn decode_key_lookup_prefix(
+    bytes: &[u8],
+    section_length: u64,
+) -> JmaResult<SeedKeyLookupPrefix> {
+    let header = decode_header(bytes, section_length)?;
+    validate_header_offsets(&header)?;
+    let prefixes = decode_prefixes(bytes, &header)?;
+    let key_pages = decode_key_pages(bytes, &header)?;
+    validate_key_directory(&header, &prefixes, &key_pages)?;
+    Ok((header, prefixes, key_pages))
+}
+
+pub fn decode_posting_header_record(
+    bytes: &[u8],
+    key_index: u64,
+    header: &SeedHeader,
+) -> JmaResult<SeedPostingHeader> {
+    if bytes.len() != POSTING_HEADER_RECORD_SIZE {
+        return Err(JmaError::CorruptSection(
+            "compact seed posting header record is truncated".to_string(),
+        ));
+    }
+    let mut decoded = decode_posting_headers(
+        bytes,
+        &SeedHeader {
+            posting_header_offset: 0,
+            posting_header_count: 1,
+            section_length: POSTING_HEADER_RECORD_SIZE as u64,
+            ..*header
+        },
+    )?;
+    let mut posting = decoded.pop().ok_or_else(|| {
+        JmaError::CorruptSection("compact seed posting header is unavailable".to_string())
+    })?;
+    if posting.key_index != key_index {
+        return Err(JmaError::CorruptSection(
+            "compact seed posting header key index mismatch".to_string(),
+        ));
+    }
+    posting.key_index = key_index;
+    Ok(posting)
+}
+
+pub fn decode_position_page_record(
+    bytes: &[u8],
+    page_id: u32,
+    header: &SeedHeader,
+) -> JmaResult<SeedPositionPage> {
+    if bytes.len() != POSITION_PAGE_RECORD_SIZE {
+        return Err(JmaError::CorruptSection(
+            "compact seed position page record is truncated".to_string(),
+        ));
+    }
+    let mut decoded = decode_position_pages(
+        bytes,
+        &SeedHeader {
+            position_page_dir_offset: 0,
+            position_page_count: 1,
+            section_length: POSITION_PAGE_RECORD_SIZE as u64,
+            ..*header
+        },
+    )?;
+    let page = decoded.pop().ok_or_else(|| {
+        JmaError::CorruptSection("compact seed position page is unavailable".to_string())
+    })?;
+    if page.page_id != page_id {
+        return Err(JmaError::CorruptSection(
+            "compact seed position page id mismatch".to_string(),
+        ));
+    }
+    Ok(page)
+}
+
 fn validate_header_offsets(header: &SeedHeader) -> JmaResult<()> {
     let expected_filter =
         u64::try_from(COMPACT_HEADER_SIZE).map_err(|_| JmaError::OffsetOverflow)?;
@@ -604,72 +681,14 @@ fn validate_directory(
     postings: &[SeedPostingHeader],
     position_pages: &[SeedPositionPage],
 ) -> JmaResult<()> {
-    if prefixes
-        .windows(2)
-        .any(|pair| pair[0].hash_prefix >= pair[1].hash_prefix)
-        || key_pages
-            .iter()
-            .enumerate()
-            .any(|(index, page)| page.page_id != u32::try_from(index).unwrap_or(u32::MAX))
-        || position_pages
-            .iter()
-            .enumerate()
-            .any(|(index, page)| page.page_id != u32::try_from(index).unwrap_or(u32::MAX))
+    validate_key_directory(header, prefixes, key_pages)?;
+    if position_pages
+        .iter()
+        .enumerate()
+        .any(|(index, page)| page.page_id != u32::try_from(index).unwrap_or(u32::MAX))
     {
         return Err(JmaError::CorruptSection(
             "compact seed directories are not sorted".to_string(),
-        ));
-    }
-    let mut key_total = 0u64;
-    for prefix in prefixes {
-        if prefix.key_count == 0
-            || prefix.first_key != key_total
-            || prefix.first_page >= header.key_page_count
-            || prefix.page_count == 0
-            || prefix
-                .first_page
-                .checked_add(prefix.page_count)
-                .is_none_or(|end| end > header.key_page_count)
-            || prefix.first_hash > prefix.last_hash
-        {
-            return Err(JmaError::CorruptSection(
-                "compact seed prefix range is invalid".to_string(),
-            ));
-        }
-        key_total = key_total
-            .checked_add(u64::from(prefix.key_count))
-            .ok_or(JmaError::OffsetOverflow)?;
-    }
-    if key_total != header.key_count {
-        return Err(JmaError::CorruptSection(
-            "compact seed prefix count does not match keys".to_string(),
-        ));
-    }
-    let key_record_size =
-        u64::try_from(header.key_encoding.record_size()).map_err(|_| JmaError::OffsetOverflow)?;
-    let mut expected_key = 0u64;
-    for page in key_pages {
-        let page_end = page
-            .data_offset
-            .checked_add(page.data_length)
-            .ok_or(JmaError::OffsetOverflow)?;
-        if page.first_key != expected_key
-            || page.key_count == 0
-            || page.data_length != u64::from(page.key_count) * key_record_size
-            || page.data_offset < header.key_data_offset
-            || page_end > header.key_data_offset + header.key_data_length
-        {
-            return Err(JmaError::CorruptSection(
-                "compact seed key page range is invalid".to_string(),
-            ));
-        }
-        expected_key = expected_key
-            .checked_add(u64::from(page.key_count))
-            .ok_or(JmaError::OffsetOverflow)?;
-    }
-    if expected_key != header.key_count {
-        return Err(JmaError::CorruptSection(
-            "compact seed key pages do not cover all keys".to_string(),
         ));
     }
     for (index, posting) in postings.iter().enumerate() {
@@ -730,6 +749,78 @@ fn validate_directory(
     if expected_header != u32::try_from(postings.len()).map_err(|_| JmaError::OffsetOverflow)? {
         return Err(JmaError::CorruptSection(
             "compact seed position pages do not cover postings".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_key_directory(
+    header: &SeedHeader,
+    prefixes: &[SeedPrefix],
+    key_pages: &[SeedKeyPage],
+) -> JmaResult<()> {
+    if prefixes
+        .windows(2)
+        .any(|pair| pair[0].hash_prefix >= pair[1].hash_prefix)
+        || key_pages
+            .iter()
+            .enumerate()
+            .any(|(index, page)| page.page_id != u32::try_from(index).unwrap_or(u32::MAX))
+    {
+        return Err(JmaError::CorruptSection(
+            "compact seed directories are not sorted".to_string(),
+        ));
+    }
+    let mut key_total = 0u64;
+    for prefix in prefixes {
+        if prefix.key_count == 0
+            || prefix.first_key != key_total
+            || prefix.first_page >= header.key_page_count
+            || prefix.page_count == 0
+            || prefix
+                .first_page
+                .checked_add(prefix.page_count)
+                .is_none_or(|end| end > header.key_page_count)
+            || prefix.first_hash > prefix.last_hash
+        {
+            return Err(JmaError::CorruptSection(
+                "compact seed prefix range is invalid".to_string(),
+            ));
+        }
+        key_total = key_total
+            .checked_add(u64::from(prefix.key_count))
+            .ok_or(JmaError::OffsetOverflow)?;
+    }
+    if key_total != header.key_count {
+        return Err(JmaError::CorruptSection(
+            "compact seed prefix count does not match keys".to_string(),
+        ));
+    }
+    let key_record_size =
+        u64::try_from(header.key_encoding.record_size()).map_err(|_| JmaError::OffsetOverflow)?;
+    let mut expected_key = 0u64;
+    for page in key_pages {
+        let page_end = page
+            .data_offset
+            .checked_add(page.data_length)
+            .ok_or(JmaError::OffsetOverflow)?;
+        if page.first_key != expected_key
+            || page.key_count == 0
+            || page.data_length != u64::from(page.key_count) * key_record_size
+            || page.data_offset < header.key_data_offset
+            || page_end > header.key_data_offset + header.key_data_length
+        {
+            return Err(JmaError::CorruptSection(
+                "compact seed key page range is invalid".to_string(),
+            ));
+        }
+        expected_key = expected_key
+            .checked_add(u64::from(page.key_count))
+            .ok_or(JmaError::OffsetOverflow)?;
+    }
+    if expected_key != header.key_count {
+        return Err(JmaError::CorruptSection(
+            "compact seed key pages do not cover all keys".to_string(),
         ));
     }
     Ok(())

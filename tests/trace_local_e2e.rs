@@ -50,8 +50,23 @@ fn assert_supported_trace(path: &Path) {
         .unwrap();
     assert_eq!(result["candidate"]["score_mode"], "uniform");
     assert!(result["candidate"]["uniform_hash_e_value"].is_number());
-    assert!(!result["alignments"].as_array().unwrap().is_empty());
+    assert!(
+        !result["alignments"].as_array().unwrap().is_empty(),
+        "trace result had no alignments: {result}"
+    );
     assert!(result["coverage"]["supported_fraction"].as_f64().unwrap() > 0.95);
+    assert_eq!(result["performance_counters"]["alignments_attempted"], 0);
+    assert!(
+        result["alignments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|alignment| {
+                alignment["cigar"]
+                    .as_str()
+                    .is_some_and(|cigar| cigar.ends_with('='))
+            })
+    );
     assert_eq!(result["status"], "complete");
     assert!(result["failures"].as_array().unwrap().is_empty());
     assert_eq!(result["resource_metrics"]["full_object_fallbacks"], 0);

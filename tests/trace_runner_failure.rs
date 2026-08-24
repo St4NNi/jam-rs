@@ -43,6 +43,7 @@ fn runner_config(threads: usize) -> TraceRunnerConfig {
         query_kind: jam_rs::trace::model::QueryKind::Unknown,
         topology_requested: jam_rs::trace::model::TopologyRequested::Auto,
         topology_margin_bases: 100,
+        memory_budget_bytes: 1024 * 1024 * 1024,
     }
 }
 

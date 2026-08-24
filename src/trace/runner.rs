@@ -15,6 +15,8 @@ use crate::archive::{
 };
 use crate::jma::{ArchiveReader, JmaError, SequenceRange};
 use crate::resource::{RangeReader, ResourceError, ResourceMetrics, ResourceOpenOptions};
+use crate::trace::TraceMemoryEstimate;
+use crate::trace::alignment::exact_blocks::extend_and_merge_anchors;
 use crate::trace::alignment::{
     AlignmentCorridor, AlignmentError, AlignmentOptions, AlignmentRetryMetadata,
     AlignmentWorkspace, CorridorAnchor,
@@ -29,6 +31,7 @@ use crate::trace::chain::{
     chain_weighted_anchors,
 };
 use crate::trace::config::{SeedSensitivity, SensitivityConfig};
+use crate::trace::memory::TraceMemorySemaphore;
 use crate::trace::model::{
     AlignmentRole, BaseAlignment, BaseInterval, CandidatePerformanceCounters, CoordinateModel,
     CoverageSummary, FragmentMosaicSummary, InputResource, QueryKind, RescueRoundMetrics,
@@ -73,6 +76,12 @@ pub struct TraceRunnerConfig {
     pub query_kind: QueryKind,
     pub topology_requested: TopologyRequested,
     pub topology_margin_bases: u64,
+    #[serde(default = "default_memory_budget_bytes")]
+    pub memory_budget_bytes: u64,
+}
+
+const fn default_memory_budget_bytes() -> u64 {
+    1_400 * 1024 * 1024
 }
 
 impl Default for TraceRunnerConfig {
@@ -91,6 +100,7 @@ impl Default for TraceRunnerConfig {
             query_kind: QueryKind::Unknown,
             topology_requested: TopologyRequested::Auto,
             topology_margin_bases: SensitivityConfig::default().auto_topology_margin_bases,
+            memory_budget_bytes: default_memory_budget_bytes(),
         }
     }
 }
@@ -119,6 +129,11 @@ impl TraceRunnerConfig {
         if self.topology_margin_bases == 0 {
             return Err(RunnerError::InvalidConfig(
                 "topology_margin_bases must be greater than zero".to_string(),
+            ));
+        }
+        if self.memory_budget_bytes == 0 {
+            return Err(RunnerError::InvalidConfig(
+                "memory_budget_bytes must be greater than zero".to_string(),
             ));
         }
         if self.resources.cache_block_bytes == 0 || self.resources.max_cache_bytes == 0 {
@@ -226,6 +241,40 @@ impl TracePerformanceCounters {
             failures: self.failures,
             elapsed_millis: self.elapsed_millis,
         }
+    }
+}
+
+fn candidate_memory_estimate(
+    config: &TraceRunnerConfig,
+    query_length: usize,
+) -> TraceMemoryEstimate {
+    let anchors = u64::from(config.sensitivity.max_anchors_per_candidate);
+    let chains = u64::from(config.sensitivity.max_chains_per_candidate);
+    let band = u64::from(config.sensitivity.alignment.band_width.clamp(64, 512));
+    let row_width = band.saturating_mul(2).saturating_add(1);
+    let query_rows = u64::try_from(query_length)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    TraceMemoryEstimate {
+        candidate_accumulator_bytes: u64::from(config.sensitivity.max_candidates)
+            .saturating_mul(256),
+        router_key_page_bytes: 0,
+        router_posting_bytes: 0,
+        jma_key_page_bytes: config.resources.cache_block_bytes.saturating_mul(4),
+        jma_occurrence_bytes: anchors.saturating_mul(24),
+        anchor_bytes: anchors
+            .saturating_mul(u64::try_from(std::mem::size_of::<Anchor>()).unwrap_or(u64::MAX)),
+        chain_bytes: anchors
+            .saturating_mul(
+                u64::try_from(std::mem::size_of::<WeightedAnchor>()).unwrap_or(u64::MAX),
+            )
+            .saturating_add(chains.saturating_mul(256)),
+        sequence_block_bytes: config.sensitivity.max_alignment_window_bases,
+        alignment_score_bytes: row_width.saturating_mul(2).saturating_mul(32),
+        traceback_bytes: query_rows.saturating_mul(row_width).saturating_mul(24),
+        output_bytes: u64::try_from(config.max_alignments_per_candidate)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(8 * 1024),
     }
 }
 
@@ -891,11 +940,18 @@ impl TraceRunner {
             .num_threads(worker_count)
             .build()
             .map_err(|error| RunnerError::InvalidConfig(error.to_string()))?;
+        let memory = TraceMemorySemaphore::new(self.config.memory_budget_bytes);
+        let memory_estimate = candidate_memory_estimate(&self.config, plasmid_sequence.len());
         let mut work = pool.install(|| {
             search
                 .candidates
                 .par_iter()
                 .map(|candidate| {
+                    let reservation = memory.acquire(memory_estimate).map_err(|error| {
+                        RunnerError::InvalidConfig(format!(
+                            "candidate memory admission failed: {error}"
+                        ))
+                    })?;
                     let candidate_started = Instant::now();
                     let entry = query.catalog.get(candidate.metagenome_id());
                     let mut work = process_candidate(
@@ -912,10 +968,20 @@ impl TraceRunner {
                         .try_into()
                         .unwrap_or(u64::MAX);
                     work.result.performance_counters = work.counters.candidate_snapshot();
-                    work
+                    // Account a complete candidate serialization before the
+                    // permit is released. The public in-memory API writes the
+                    // same record later with its final run identifier.
+                    let serialized = serde_json::to_vec(&work.result).map_err(|error| {
+                        RunnerError::InvalidConfig(format!(
+                            "candidate serialization failed: {error}"
+                        ))
+                    })?;
+                    drop(serialized);
+                    drop(reservation);
+                    Ok(work)
                 })
-                .collect::<Vec<_>>()
-        });
+                .collect::<Result<Vec<_>, RunnerError>>()
+        })?;
         work.sort_by(|left, right| {
             left.result
                 .metagenome_id
@@ -1837,6 +1903,23 @@ fn align_indexed_chains<A: TraceArchive>(
                 RunnerError::InvalidConfig("archive returned no sequence slice".to_string())
             })?
             .bases;
+        counters.windows_retrieved = counters.windows_retrieved.saturating_add(1);
+        if let Some(alignment) = exact_full_query_alignment(
+            query_id,
+            candidate,
+            query,
+            &sequence,
+            range,
+            &contig.name,
+            &weighted_chain,
+            &coordinates,
+            evidenced.seed_evidence.clone(),
+            config.sensitivity.alignment.match_score,
+        )? {
+            counters.alignments_succeeded = counters.alignments_succeeded.saturating_add(1);
+            alignments.push(alignment);
+            continue;
+        }
         let corridor = build_chain_corridor(
             &weighted_chain,
             range,
@@ -1848,7 +1931,6 @@ fn align_indexed_chains<A: TraceArchive>(
                 .band_width
                 .min(crate::trace::alignment::DEFAULT_RETRY_WIDTHS[0]),
         )?;
-        counters.windows_retrieved = counters.windows_retrieved.saturating_add(1);
         attempted = attempted.saturating_add(1);
         align_window(
             query_id,
@@ -1872,6 +1954,95 @@ fn align_indexed_chains<A: TraceArchive>(
         )?;
     }
     Ok(attempted)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exact_full_query_alignment(
+    query_id: &str,
+    candidate: &RankedCandidate,
+    query: &[u8],
+    target: &[u8],
+    target_range: SequenceRange,
+    contig_id: &str,
+    chain: &WeightedAnchorChain,
+    coordinates: &ChainAlignmentCoordinates,
+    seed_evidence: SeedEvidence,
+    match_score: i32,
+) -> Result<Option<BaseAlignment>, RunnerError> {
+    if chain.origin_crossing
+        || coordinates.query_start != 0
+        || coordinates.query_span != query.len() as u64
+    {
+        return Ok(None);
+    }
+    let mut anchors = Vec::with_capacity(chain.anchors.len());
+    for weighted in &chain.anchors {
+        let Some(target_position) = weighted
+            .anchor
+            .target_position
+            .checked_sub(target_range.start)
+        else {
+            return Ok(None);
+        };
+        if target_position >= target_range.len() {
+            return Ok(None);
+        }
+        anchors.push(Anchor {
+            target_position,
+            ..weighted.anchor
+        });
+    }
+    let blocks = extend_and_merge_anchors(query, target, &anchors)
+        .map_err(|error| RunnerError::InvalidConfig(error.to_string()))?;
+    let Some(block) = blocks.into_iter().find(|block| {
+        block.query_interval.start == 0 && block.query_interval.end == query.len() as u64
+    }) else {
+        return Ok(None);
+    };
+    let target_interval = BaseInterval::new(
+        block
+            .target_interval
+            .start
+            .checked_add(target_range.start)
+            .ok_or_else(|| RunnerError::InvalidConfig("exact block target overflow".to_string()))?,
+        block
+            .target_interval
+            .end
+            .checked_add(target_range.start)
+            .ok_or_else(|| RunnerError::InvalidConfig("exact block target overflow".to_string()))?,
+    )
+    .map_err(|error| RunnerError::InvalidConfig(error.to_string()))?;
+    let matches = block.len();
+    let score = i64::from(match_score).saturating_mul(i64::try_from(matches).unwrap_or(i64::MAX));
+    Ok(Some(BaseAlignment {
+        alignment_id: String::new(),
+        plasmid_id: query_id.to_string(),
+        metagenome_id: candidate.metagenome_id().to_string(),
+        contig_id: contig_id.to_string(),
+        strand: block.strand,
+        query_segments: vec![block.query_interval],
+        target_interval,
+        query_length: matches,
+        target_length: matches,
+        origin_crossing: false,
+        score,
+        matches,
+        substitutions: 0,
+        insertions: 0,
+        deletions: 0,
+        cigar: block.cigar(),
+        edit_script: block
+            .edit_runs_checked()
+            .map_err(|error| RunnerError::InvalidConfig(error.to_string()))?,
+        chain_score: chain.score,
+        identity: 1.0,
+        seed_evidence,
+        primary_supported_bases: 0,
+        secondary_supported_bases: 0,
+        newly_supported_bases: 0,
+        role: AlignmentRole::AlternativeMapping,
+        primary: false,
+    }))
 }
 
 fn weighted_to_anchor_chain(chain: &WeightedAnchorChain) -> Result<AnchorChain, RunnerError> {

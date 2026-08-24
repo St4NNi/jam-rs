@@ -108,6 +108,7 @@ fn remote_candidate_database_is_identity_cached_before_mmap() {
         query_kind: jam_rs::trace::model::QueryKind::Unknown,
         topology_requested: jam_rs::trace::model::TopologyRequested::Auto,
         topology_margin_bases: 100,
+        memory_budget_bytes: 1024 * 1024 * 1024,
     })
     .unwrap();
     let query = TraceQuery {
@@ -249,6 +250,7 @@ fn local_and_remote_jma_inputs_produce_identical_biological_evidence() {
         query_kind: jam_rs::trace::model::QueryKind::Unknown,
         topology_requested: jam_rs::trace::model::TopologyRequested::Auto,
         topology_margin_bases: 100,
+        memory_budget_bytes: 1024 * 1024 * 1024,
     };
     let runner = TraceRunner::new(config).unwrap();
     let local = runner

@@ -1240,6 +1240,10 @@ pub fn handle_trace_command(
         query_kind,
         topology_requested,
         topology_margin_bases,
+        memory_budget_bytes: (memory_gb as u64)
+            .saturating_mul(1024 * 1024 * 1024)
+            .saturating_mul(7)
+            / 10,
     })?;
     let query = crate::trace::runner::TraceQuery {
         plasmid_id: query_id.clone(),

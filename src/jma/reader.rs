@@ -465,7 +465,7 @@ impl<R: RangeReader> JmaReader<R> {
         };
         let index = Arc::new(self.seed_collection.open_scheme(scheme_id, Some(binding))?);
         self.metrics
-            .add_metadata_bytes(index.header().key_data_offset);
+            .add_metadata_bytes(index.header().posting_header_offset);
         indexes.insert(scheme_id, Arc::clone(&index));
         Ok(index)
     }

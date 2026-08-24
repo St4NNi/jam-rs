@@ -101,6 +101,7 @@ fn runner(sensitivity: SensitivityConfig) -> TraceRunner {
         query_kind: QueryKind::Phage,
         topology_requested: TopologyRequested::Linear,
         topology_margin_bases: 10,
+        memory_budget_bytes: 1024 * 1024 * 1024,
     })
     .expect("construct trace runner")
 }

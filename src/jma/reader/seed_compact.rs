@@ -4,15 +4,16 @@
 //! only key and position pages selected by exact query hashes.
 
 use crate::jma::seeds::{
-    COLLECTION_HEADER_SIZE, LookupOptions, SeedBinding, SeedCollectionEntry, SeedCollectionHeader,
-    SeedHeader, SeedKeyPage, SeedLookupResult, SeedPositionPage, SeedPostingHeader, SeedPrefix,
-    decode_collection_directory, decode_collection_header, decode_directory_prefix,
-    decode_key_page_records, decode_position_posting, decode_seed_header, membership_contains,
-    validate_collection_entries,
+    COLLECTION_HEADER_SIZE, LookupOptions, POSITION_PAGE_RECORD_SIZE, POSTING_HEADER_RECORD_SIZE,
+    SeedBinding, SeedCollectionEntry, SeedCollectionHeader, SeedHeader, SeedKeyPage,
+    SeedLookupResult, SeedPositionPage, SeedPostingHeader, SeedPrefix, decode_collection_directory,
+    decode_collection_header, decode_key_lookup_prefix, decode_key_page_records,
+    decode_position_page_record, decode_position_posting, decode_posting_header_record,
+    decode_seed_header, membership_contains, validate_collection_entries,
 };
 use crate::jma::{JmaError, JmaResult, SeedOccurrence, SeedQuery};
 use crate::resource::{ByteRange, RangeReader};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 /// A range-backed seed collection directory. Opening the collection reads
 /// only the fixed header and directory; scheme blobs remain unopened.
@@ -106,8 +107,6 @@ pub struct RemoteSeedIndex<R> {
     filter: Vec<u8>,
     prefixes: Vec<SeedPrefix>,
     key_pages: Vec<SeedKeyPage>,
-    posting_headers: Vec<SeedPostingHeader>,
-    position_pages: Vec<SeedPositionPage>,
 }
 
 impl<R: RangeReader> RemoteSeedIndex<R> {
@@ -123,14 +122,13 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
             expected.matches(&header)?;
         }
         let directory_length =
-            usize::try_from(header.key_data_offset).map_err(|_| JmaError::OffsetOverflow)?;
+            usize::try_from(header.posting_header_offset).map_err(|_| JmaError::OffsetOverflow)?;
         let directory = read(
             &resource,
             section_offset,
             u64::try_from(directory_length).map_err(|_| JmaError::OffsetOverflow)?,
         )?;
-        let (header, prefixes, key_pages, posting_headers, position_pages) =
-            decode_directory_prefix(&directory, section_length)?;
+        let (header, prefixes, key_pages) = decode_key_lookup_prefix(&directory, section_length)?;
         let filter_range = range(header.filter_offset, header.filter_length)?;
         let filter = directory
             .get(filter_range)
@@ -145,8 +143,6 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
             filter,
             prefixes,
             key_pages,
-            posting_headers,
-            position_pages,
         })
     }
 
@@ -192,6 +188,7 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
         }
 
         let mut page_cache = BTreeMap::new();
+        let mut posting_cache = BTreeMap::new();
         let mut pending = Vec::new();
         for (page_id, requests) in page_queries {
             let page = *self
@@ -233,14 +230,17 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
                     .first_key
                     .checked_add(u64::try_from(local).map_err(|_| JmaError::OffsetOverflow)?)
                     .ok_or(JmaError::OffsetOverflow)?;
-                let posting = *self
-                    .posting_headers
-                    .get(usize::try_from(global).map_err(|_| JmaError::OffsetOverflow)?)
-                    .ok_or_else(|| {
-                        JmaError::CorruptSection(
-                            "compact seed posting header is unavailable".to_string(),
-                        )
-                    })?;
+                let posting = if let Some(posting) = posting_cache.get(&global) {
+                    *posting
+                } else {
+                    let posting = self.read_posting_header(global)?;
+                    result.metrics.bytes_read = result
+                        .metrics
+                        .bytes_read
+                        .saturating_add(POSTING_HEADER_RECORD_SIZE as u64);
+                    posting_cache.insert(global, posting);
+                    posting
+                };
                 let target = result.matches.get_mut(match_index).ok_or_else(|| {
                     JmaError::CorruptSection("compact seed match index is invalid".to_string())
                 })?;
@@ -262,20 +262,20 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
         }
 
         let mut position_cache = BTreeMap::new();
-        let mut checked_pages = BTreeSet::new();
+        let mut position_descriptors = BTreeMap::new();
         let mut decoded: BTreeMap<u64, Vec<SeedOccurrence>> = BTreeMap::new();
         for (match_index, posting) in pending {
-            let page = *self
-                .position_pages
-                .get(
-                    usize::try_from(posting.position_page_id)
-                        .map_err(|_| JmaError::OffsetOverflow)?,
-                )
-                .ok_or_else(|| {
-                    JmaError::CorruptSection(
-                        "compact seed position page is unavailable".to_string(),
-                    )
-                })?;
+            let page = if let Some(page) = position_descriptors.get(&posting.position_page_id) {
+                *page
+            } else {
+                let page = self.read_position_page(posting.position_page_id)?;
+                result.metrics.bytes_read = result
+                    .metrics
+                    .bytes_read
+                    .saturating_add(POSITION_PAGE_RECORD_SIZE as u64);
+                position_descriptors.insert(posting.position_page_id, page);
+                page
+            };
             if let std::collections::btree_map::Entry::Vacant(entry) =
                 position_cache.entry(page.page_id)
             {
@@ -292,14 +292,12 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
                         page.page_id
                     )));
                 }
-                if checked_pages.insert(page.page_id) {
-                    result.metrics.position_pages_read =
-                        result.metrics.position_pages_read.saturating_add(1);
-                    result.metrics.bytes_read = result
-                        .metrics
-                        .bytes_read
-                        .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-                }
+                result.metrics.position_pages_read =
+                    result.metrics.position_pages_read.saturating_add(1);
+                result.metrics.bytes_read = result
+                    .metrics
+                    .bytes_read
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
                 entry.insert(bytes);
             }
             let bytes = position_cache.get(&page.page_id).ok_or_else(|| {
@@ -349,6 +347,46 @@ impl<R: RangeReader> RemoteSeedIndex<R> {
             .binary_search_by_key(&prefix, |entry| entry.hash_prefix)
             .ok()
             .map(|index| self.prefixes[index]))
+    }
+
+    fn read_posting_header(&self, key_index: u64) -> JmaResult<SeedPostingHeader> {
+        if key_index >= self.header.posting_count {
+            return Err(JmaError::CorruptSection(
+                "compact seed posting header index is out of bounds".to_string(),
+            ));
+        }
+        let relative = key_index
+            .checked_mul(POSTING_HEADER_RECORD_SIZE as u64)
+            .and_then(|offset| self.header.posting_header_offset.checked_add(offset))
+            .ok_or(JmaError::OffsetOverflow)?;
+        let bytes = read(
+            &self.resource,
+            self.section_offset
+                .checked_add(relative)
+                .ok_or(JmaError::OffsetOverflow)?,
+            POSTING_HEADER_RECORD_SIZE as u64,
+        )?;
+        decode_posting_header_record(&bytes, key_index, &self.header)
+    }
+
+    fn read_position_page(&self, page_id: u32) -> JmaResult<SeedPositionPage> {
+        if page_id >= self.header.position_page_count {
+            return Err(JmaError::CorruptSection(
+                "compact seed position page index is out of bounds".to_string(),
+            ));
+        }
+        let relative = u64::from(page_id)
+            .checked_mul(POSITION_PAGE_RECORD_SIZE as u64)
+            .and_then(|offset| self.header.position_page_dir_offset.checked_add(offset))
+            .ok_or(JmaError::OffsetOverflow)?;
+        let bytes = read(
+            &self.resource,
+            self.section_offset
+                .checked_add(relative)
+                .ok_or(JmaError::OffsetOverflow)?,
+            POSITION_PAGE_RECORD_SIZE as u64,
+        )?;
+        decode_position_page_record(&bytes, page_id, &self.header)
     }
 }
 

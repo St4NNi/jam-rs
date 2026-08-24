@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use thiserror::Error;
 
+pub mod exact_blocks;
+pub mod refine;
+
 const STATE_MATCH: u8 = 0;
 const STATE_INSERTION: u8 = 1;
 const STATE_DELETION: u8 = 2;
@@ -525,6 +528,48 @@ impl AlignmentWorkspace {
                     && metadata.selected_width.lt(&corridor.required_half_width())));
         result.retry_metadata = metadata;
         Ok(result)
+    }
+
+    /// Select a corridor width with rolling score rows, then traceback once.
+    pub fn align_with_score_only_retries(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        corridor: &AlignmentCorridor,
+        options: impl Into<AlignmentOptions>,
+    ) -> Result<AlignmentResult, AlignmentError> {
+        let options = options.into();
+        let mut widths = DEFAULT_RETRY_WIDTHS
+            .iter()
+            .map(|width| (*width).min(corridor.max_half_width))
+            .collect::<Vec<_>>();
+        widths.dedup();
+        let mut scratch = refine::ScoreOnlyWorkspace::new();
+        refine::refine_with_score_only(
+            &widths,
+            |width| {
+                let mut scoring = options.scoring;
+                scoring.band_width = width;
+                refine::score_only_corridor_with_scratch(
+                    &mut scratch,
+                    query,
+                    target,
+                    corridor,
+                    AlignmentOptions { scoring, ..options },
+                )
+            },
+            |width| {
+                let mut scoring = options.scoring;
+                scoring.band_width = width;
+                self.align_with_corridor(
+                    query,
+                    target,
+                    corridor,
+                    AlignmentOptions { scoring, ..options },
+                )
+            },
+        )
+        .map(|refined| refined.result)
     }
 
     /// Bounded corridor retries for a forward-stored target on either strand.

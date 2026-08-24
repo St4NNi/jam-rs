@@ -11,6 +11,8 @@ pub mod local;
 pub mod locator;
 pub mod metrics;
 pub mod object;
+pub mod persistent_cache;
+pub mod read_plan;
 pub mod upload;
 
 /// URI scheme understood by the trace resource layer.
@@ -73,7 +75,7 @@ impl Serialize for ResourceLocator {
 }
 
 /// Half-open byte range `[offset, offset + length)`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct ByteRange {
     pub offset: u64,
     pub length: u64,

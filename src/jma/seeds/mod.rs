@@ -23,8 +23,10 @@ pub use format::{
     SeedKeyPage, SeedPositionPage, SeedPostingHeader, SeedPrefix,
 };
 pub use reader::{
-    LookupOptions, SeedDirectoryPrefix, SeedIndex, SeedLookupMetrics, SeedLookupResult, SeedMatch,
-    decode_directory_prefix, decode_key_page_records, decode_position_posting, decode_seed_header,
+    LookupOptions, SeedDirectoryPrefix, SeedIndex, SeedKeyLookupPrefix, SeedLookupMetrics,
+    SeedLookupResult, SeedMatch, decode_directory_prefix, decode_key_lookup_prefix,
+    decode_key_page_records, decode_position_page_record, decode_position_posting,
+    decode_posting_header_record, decode_seed_header,
 };
 
 use crate::jma::{JmaError, JmaResult, SeedOccurrence, SeedQuery};
