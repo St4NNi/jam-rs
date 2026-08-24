@@ -198,6 +198,16 @@ pub enum TraceFailureCategory {
     AlignmentRejection,
     AlignmentCap,
     MosaicSelection,
+    NoRetainedRouterWitness,
+    NoMatchingPositionalWitness,
+    OccurrenceCap,
+    NoAcceptedChain,
+    ChainBridgeAbsent,
+    SequenceWindowAbsent,
+    CorridorEdge,
+    LocalClipping,
+    RefinementFailure,
+    OutputCap,
     Other,
 }
 

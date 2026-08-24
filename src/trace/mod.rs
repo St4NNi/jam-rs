@@ -5,6 +5,7 @@ pub mod anchors;
 pub mod catalog;
 pub mod chain;
 pub mod config;
+pub mod contracts;
 pub mod coverage;
 pub mod intervals;
 pub mod model;
@@ -18,6 +19,10 @@ pub mod seeds;
 pub use config::{
     AlignmentScoring, GapRescueConfig, SeedSensitivity, SensitivityConfig, SensitivityProfile,
     TraceAlgorithmMetadata, TraceAlgorithmParameters, algorithm_identifiers,
+};
+pub use contracts::{
+    BatchCandidateWork, BatchResultKey, CandidateMemoryBudget, MemoryBudgetError,
+    PreparedBatchQuery, TraceMemoryEstimate, WitnessPlanningRequest, WitnessTierPlan,
 };
 pub use model::{
     AlignmentMosaicEvidence, AlignmentRole, BaseAlignment, BaseInterval,

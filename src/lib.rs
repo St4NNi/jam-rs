@@ -9,6 +9,7 @@ pub mod provenance;
 pub mod query;
 pub mod reader;
 pub mod resource;
+pub mod router;
 pub mod screen;
 pub mod sequence;
 pub mod sketch;
