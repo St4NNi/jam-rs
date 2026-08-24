@@ -1,7 +1,6 @@
 use jam_rs::jam_index::{
-    JamIndexBuildConfig, JamIndexCandidate, JamIndexContigSearchConfig, MetagenomeSource,
-    QueryHashOccurrence, ScreenSelectionPolicy, SharedScreenHash, build_jam_index,
-    prepare_screen_query, search_jam_index, select_candidate_contigs,
+    JamIndexBuildConfig, JamIndexContigSearchConfig, MetagenomeSource, ScreenSelectionPolicy,
+    build_jam_index, prepare_screen_query, search_jam_index, select_candidate_contigs,
 };
 use std::fs;
 use tempfile::Builder;
@@ -139,52 +138,29 @@ fn weaker_contigs_are_retained_only_as_a_bounded_expansion_suffix() {
 }
 
 #[test]
-fn only_a_strong_no_hit_candidate_receives_a_sequential_range() {
+fn aligned_postings_prevent_fallback() {
     let (_source, output, query) = fixture();
     let root = output.path().join("index");
     let prepared =
         prepare_screen_query(&query, &ScreenSelectionPolicy::default_signatures()).unwrap();
-    let missing = SharedScreenHash {
-        hash: 1,
-        document_frequency: 1,
-        occurrences: vec![QueryHashOccurrence {
-            packed_kmer: 1,
-            query_position: 0,
-            query_reverse: false,
-            query_window_id: 0,
-        }],
-    };
-    let candidate = |shared_hash_count| JamIndexCandidate {
-        part_id: 0,
-        metagenome_local_id: 0,
-        metagenome_id: "target".to_string(),
-        rank: 1,
-        shared_hash_count,
-        supported_query_windows: 1,
-        longest_supported_window_run: 1,
-        weighted_hash_sum: 1.0,
-        shared_hashes: vec![missing.clone()],
-    };
-    let weak = select_candidate_contigs(
+    let screen = search_jam_index(&root, &prepared, Default::default()).unwrap();
+    let selected = select_candidate_contigs(
         &root,
         &prepared,
-        &[candidate(1)],
-        JamIndexContigSearchConfig {
-            strong_candidate_shared_hashes: 4,
-            ..JamIndexContigSearchConfig::default()
-        },
+        &screen.candidates,
+        JamIndexContigSearchConfig::default(),
     )
     .unwrap();
-    assert!(weak.plans[0].sequential_fallback_range.is_none());
-    let strong = select_candidate_contigs(
-        &root,
-        &prepared,
-        &[candidate(4)],
-        JamIndexContigSearchConfig {
-            strong_candidate_shared_hashes: 4,
-            ..JamIndexContigSearchConfig::default()
-        },
-    )
-    .unwrap();
-    assert!(strong.plans[0].sequential_fallback_range.is_some());
+    assert!(
+        selected
+            .plans
+            .iter()
+            .all(|plan| !plan.ranked_contigs.is_empty())
+    );
+    assert!(
+        selected
+            .plans
+            .iter()
+            .all(|plan| plan.sequential_fallback_range.is_none())
+    );
 }

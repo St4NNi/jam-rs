@@ -1,7 +1,7 @@
 //! Position-free Stage-2 mapping of selected screen hashes to bounded contigs.
 
 use super::builder::{JamIndexBuildError, load_manifest};
-use super::part::{JamIndexPartReader, SignatureHit};
+use super::part::ExternalPartReader;
 use super::screen::{JamIndexCandidate, PreparedJamIndexQuery};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,7 @@ impl JamIndexContigPlan {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct JamIndexContigSearchMetrics {
     pub candidates_processed: u64,
-    pub signature_hits_seen: u64,
+    pub posting_contigs_seen: u64,
     pub maximum_accumulator_entries: u64,
     pub ranked_contigs: u64,
     pub ranked_contig_bases: u64,
@@ -209,7 +209,7 @@ pub fn select_candidate_contigs(
                     )
                     .ok_or(JamIndexContigSearchError::UnknownPart(*part_id))?;
                 let reader =
-                    JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+                    ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
                 candidates
                     .iter()
                     .map(|candidate| {
@@ -237,7 +237,7 @@ pub fn select_candidate_contigs(
 }
 
 fn rank_candidate(
-    reader: &JamIndexPartReader,
+    reader: &ExternalPartReader,
     _query: &PreparedJamIndexQuery,
     candidate: &JamIndexCandidate,
     config: JamIndexContigSearchConfig,
@@ -245,14 +245,14 @@ fn rank_candidate(
 ) -> Result<(JamIndexContigPlan, JamIndexContigSearchMetrics), JamIndexContigSearchError> {
     let contig_range = reader.metagenome_contigs(candidate.metagenome_local_id)?;
     let mut accumulator = ContigAccumulator::new(config.accumulator_capacity);
-    let mut signature_hits_seen = 0u64;
+    let mut posting_contigs_seen = 0u64;
     for shared in &candidate.shared_hashes {
-        reader.visit_signature_hits(shared.hash, &mut |hit| {
-            if in_range(hit, &contig_range) {
-                accumulator.add(hit.contig_id);
-                signature_hits_seen = signature_hits_seen.saturating_add(1);
+        for contig_id in reader.posting(shared.entry_ordinal)? {
+            if in_range(contig_id, &contig_range) {
+                accumulator.add(contig_id);
+                posting_contigs_seen = posting_contigs_seen.saturating_add(1);
             }
-        })?;
+        }
     }
     let shortlist = accumulator.shortlist();
     let mut exact = BTreeMap::<u32, ExactContigCounter>::new();
@@ -263,16 +263,16 @@ fn rank_candidate(
             .iter()
             .map(|occurrence| occurrence.query_window_id)
             .collect::<BTreeSet<_>>();
-        reader.visit_signature_hits(shared.hash, &mut |hit| {
-            if !shortlist.contains(&hit.contig_id) || !in_range(hit, &contig_range) {
-                return;
+        for contig_id in reader.posting(shared.entry_ordinal)? {
+            if !shortlist.contains(&contig_id) || !in_range(contig_id, &contig_range) {
+                continue;
             }
-            let counter = exact.entry(hit.contig_id).or_default();
+            let counter = exact.entry(contig_id).or_default();
             if counter.hashes.insert(shared.hash) {
                 counter.weighted_hash_micros = counter.weighted_hash_micros.saturating_add(weight);
             }
             counter.windows.extend(windows.iter().copied());
-        })?;
+        }
     }
     let mut ranked = exact
         .into_iter()
@@ -315,7 +315,7 @@ fn rank_candidate(
             .map_err(|_| JamIndexContigSearchError::Overflow)?;
     let metrics = JamIndexContigSearchMetrics {
         candidates_processed: 1,
-        signature_hits_seen,
+        posting_contigs_seen,
         maximum_accumulator_entries: u64::try_from(accumulator.entries.len()).unwrap_or(u64::MAX),
         ranked_contigs: u64::try_from(retained.len()).unwrap_or(u64::MAX),
         ranked_contig_bases: retained_bases,
@@ -335,8 +335,8 @@ fn rank_candidate(
     ))
 }
 
-fn in_range(hit: SignatureHit, range: &Range<u32>) -> bool {
-    hit.contig_id >= range.start && hit.contig_id < range.end
+fn in_range(contig_id: u32, range: &Range<u32>) -> bool {
+    contig_id >= range.start && contig_id < range.end
 }
 
 fn contig_cmp(left: &RankedJamIndexContig, right: &RankedJamIndexContig) -> Ordering {
@@ -388,9 +388,9 @@ fn add_metrics(
         candidates_processed: left
             .candidates_processed
             .saturating_add(right.candidates_processed),
-        signature_hits_seen: left
-            .signature_hits_seen
-            .saturating_add(right.signature_hits_seen),
+        posting_contigs_seen: left
+            .posting_contigs_seen
+            .saturating_add(right.posting_contigs_seen),
         maximum_accumulator_entries: left
             .maximum_accumulator_entries
             .max(right.maximum_accumulator_entries),

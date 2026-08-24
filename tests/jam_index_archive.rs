@@ -1,13 +1,14 @@
 use jam_rs::archive::{SeedKey, SeedSchemeId, SequenceRequest, TraceArchive};
 use jam_rs::jam_index::archive::{K21_SCHEME, K31_SCHEME};
 use jam_rs::jam_index::{
-    JamIndexArchive, JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy, write_part,
+    ExternalPartReader, JamIndexArchive, MetagenomeSource, ScreenSelectionPolicy,
+    write_external_part,
 };
 use needletail::Sequence;
 use std::fs;
 use tempfile::Builder;
 
-fn fixture(sequence: &[u8]) -> (tempfile::TempDir, JamIndexPartReader) {
+fn fixture(sequence: &[u8]) -> (tempfile::TempDir, ExternalPartReader) {
     let directory = Builder::new()
         .prefix("jam-index-archive-")
         .tempdir_in("target")
@@ -19,7 +20,7 @@ fn fixture(sequence: &[u8]) -> (tempfile::TempDir, JamIndexPartReader) {
     )
     .unwrap();
     let part = directory.path().join("part.bin");
-    write_part(
+    write_external_part(
         &part,
         &[MetagenomeSource {
             metagenome_id: "target".to_string(),
@@ -28,7 +29,7 @@ fn fixture(sequence: &[u8]) -> (tempfile::TempDir, JamIndexPartReader) {
         &ScreenSelectionPolicy::default_signatures(),
     )
     .unwrap();
-    let reader = JamIndexPartReader::open(part).unwrap();
+    let reader = ExternalPartReader::open(part).unwrap();
     (directory, reader)
 }
 

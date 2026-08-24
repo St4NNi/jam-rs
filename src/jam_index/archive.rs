@@ -1,13 +1,13 @@
 //! Position-free archive adapter that generates dense seeds from selected contigs.
 
-use super::part::JamIndexPartReader;
+use super::part::ExternalPartReader;
 use crate::archive::{
     ArchiveContig, ArchiveError, ArchiveMetadata, ArchiveMetrics, ArchiveResult, SeedKey,
     SeedLookupMetrics, SeedLookupResult, SeedMatch, SeedOccurrence, SeedSchemeDescriptor,
     SeedSchemeId, SequenceRequest, SequenceSlice, TraceArchive,
 };
 use needletail::Sequence;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37,7 +37,7 @@ pub struct JamIndexArchive {
 
 impl JamIndexArchive {
     pub fn load(
-        reader: &JamIndexPartReader,
+        reader: &ExternalPartReader,
         metagenome_id: u32,
         contig_ids: impl IntoIterator<Item = u32>,
     ) -> ArchiveResult<Self> {
@@ -55,15 +55,24 @@ impl JamIndexArchive {
         let allowed = reader
             .metagenome_contigs(metagenome_id)
             .map_err(part_error)?;
-        let mut contigs = BTreeMap::new();
-        let mut packed_bytes = 0u64;
+        let mut selected = BTreeSet::new();
         for contig_id in contig_ids {
             if contig_id < allowed.start || contig_id >= allowed.end {
                 return Err(ArchiveError::UnknownContig(contig_id));
             }
-            if contigs.contains_key(&contig_id) {
-                continue;
-            }
+            selected.insert(contig_id);
+        }
+        if selected.is_empty() {
+            return Err(ArchiveError::CorruptMetadata(
+                "Jam Index candidate has no selected contigs".to_string(),
+            ));
+        }
+        let selected_ids = selected.iter().copied().collect::<Vec<_>>();
+        let loaded = reader
+            .read_contigs(metagenome_id, &selected_ids)
+            .map_err(part_error)?;
+        let mut contigs = BTreeMap::new();
+        for contig_id in selected {
             let descriptor =
                 reader
                     .contigs()
@@ -71,8 +80,11 @@ impl JamIndexArchive {
                         ArchiveError::CorruptMetadata("contig ID overflow".to_string())
                     })?)
                     .ok_or(ArchiveError::UnknownContig(contig_id))?;
-            let sequence = reader.read_contig(contig_id).map_err(part_error)?;
-            packed_bytes = packed_bytes.saturating_add(descriptor.base_count.saturating_add(3) / 4);
+            let sequence = loaded
+                .contigs
+                .get(&contig_id)
+                .cloned()
+                .ok_or(ArchiveError::UnknownContig(contig_id))?;
             contigs.insert(
                 contig_id,
                 LoadedContig {
@@ -81,11 +93,6 @@ impl JamIndexArchive {
                     sequence,
                 },
             );
-        }
-        if contigs.is_empty() {
-            return Err(ArchiveError::CorruptMetadata(
-                "Jam Index candidate has no selected contigs".to_string(),
-            ));
         }
         let archive_contigs = contigs
             .values()
@@ -116,7 +123,7 @@ impl JamIndexArchive {
             },
             contigs,
             metrics: Mutex::new(ArchiveMetrics {
-                sequence_bytes_read: packed_bytes,
+                sequence_bytes_read: loaded.source_bytes,
                 decoded_sequence_bases: total_bases,
                 ..ArchiveMetrics::default()
             }),

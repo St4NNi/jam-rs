@@ -2,7 +2,7 @@
 
 use super::builder::{JamIndexBuildError, load_manifest};
 use super::manifest::{JamIndexManifest, JamIndexPart, ScreenSelectionPolicy};
-use super::part::JamIndexPartReader;
+use super::part::ExternalPartReader;
 use crate::jamhash_u64_v1;
 use crate::reader::{JamReader, ReaderError};
 use needletail::Sequence;
@@ -49,6 +49,7 @@ impl PreparedJamIndexQuery {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SharedScreenHash {
     pub hash: u64,
+    pub entry_ordinal: u64,
     pub document_frequency: u32,
     pub occurrences: Vec<QueryHashOccurrence>,
 }
@@ -481,7 +482,7 @@ fn materialize_part(
     selected: &[CandidateCore],
 ) -> Result<Vec<JamIndexCandidate>, JamIndexScreenError> {
     let screen = open_screen(root, part)?;
-    let data = JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+    let data = ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
     let mut by_sample = selected
         .iter()
         .enumerate()
@@ -489,12 +490,14 @@ fn materialize_part(
         .collect::<HashMap<_, _>>();
     let mut details = vec![Vec::<SharedScreenHash>::new(); selected.len()];
     for (hash, evidence) in &query.hashes {
-        for sample_id in screen.search(*hash) {
+        for hit in screen.search_entries(*hash) {
+            let sample_id = hit.sample_id;
             let Some(index) = by_sample.get(&sample_id).copied() else {
                 continue;
             };
             details[index].push(SharedScreenHash {
                 hash: *hash,
+                entry_ordinal: hit.ordinal,
                 document_frequency: document_frequencies.get(hash).copied().unwrap_or(0),
                 occurrences: evidence.occurrences.clone(),
             });

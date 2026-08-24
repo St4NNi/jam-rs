@@ -6,7 +6,7 @@ use super::contig_search::{
     JamIndexContigPlan, JamIndexContigSearchConfig, JamIndexContigSearchError,
     JamIndexContigSearchMetrics, select_candidate_contigs,
 };
-use super::part::JamIndexPartReader;
+use super::part::ExternalPartReader;
 use super::screen::{
     JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError, JamIndexScreenMetrics,
     prepare_screen_query, search_jam_index,
@@ -119,7 +119,7 @@ pub fn trace_index(
                     .get(usize::try_from(plan.part_id).map_err(|_| JamIndexTraceError::Overflow)?)
                     .ok_or(JamIndexTraceError::CandidateBinding)?;
                 let reader =
-                    JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+                    ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
                 run_plan(
                     &reader,
                     query_id,
@@ -163,7 +163,7 @@ pub fn trace_index(
 
 #[allow(clippy::too_many_arguments)]
 fn run_plan(
-    reader: &JamIndexPartReader,
+    reader: &ExternalPartReader,
     query_id: &str,
     query: &[u8],
     query_hashes: u64,
@@ -237,7 +237,7 @@ fn run_plan(
 
 #[allow(clippy::too_many_arguments)]
 fn run_fallback(
-    reader: &JamIndexPartReader,
+    reader: &ExternalPartReader,
     query_id: &str,
     query: &[u8],
     query_hashes: u64,
@@ -407,7 +407,7 @@ fn equal_runs(mut length: u64) -> Vec<EditRun> {
 }
 
 fn candidate_result(
-    reader: &JamIndexPartReader,
+    reader: &ExternalPartReader,
     candidate: &JamIndexCandidate,
     query_hashes: u64,
 ) -> Result<CandidateResult, JamIndexTraceError> {
@@ -539,7 +539,7 @@ mod tests {
         let manifest = load_manifest(&root).unwrap();
         let part = &manifest.parts[0];
         let reader =
-            JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file)).unwrap();
+            ExternalPartReader::open(root.join(&part.directory).join(&part.data_file)).unwrap();
         let candidate = JamIndexCandidate {
             part_id: 0,
             metagenome_local_id: 0,
