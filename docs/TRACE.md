@@ -6,15 +6,16 @@ element, or an element whose class is unknown. The command is a reference-
 guided candidate and fragment-evidence workflow, not a plasmid or phage
 classifier, assembler, binning method, or proof that an element is autonomous.
 
-The workflow is:
+The selected local collection workflow is:
 
 ```text
 one query FASTA record
-    -> existing .jam candidate index
-    -> metagenome catalog lookup
-    -> indexed JMA resource or raw assembly fallback
-    -> exact positional seeds and contig-specific chains
-    -> local base-level alignments
+    -> every Jam Index screening part in parallel
+    -> globally ranked candidate metagenomes and exact shared hashes
+    -> bounded position-free contig-signature lookup
+    -> complete selected contig sequences only
+    -> dense k=31/k=21 positions generated in memory
+    -> packed-kmer verification, mixed chains, and corridor alignments
     -> nonredundant query-coordinate fragment mosaic
     -> JSONL/JSONL.zst evidence for independent confirmation
 ```
@@ -23,9 +24,65 @@ The query is exactly one FASTA/FASTQ record; zero or multiple records are
 rejected with an input error. A metagenome catalog row maps the sample
 identifier stored in the `.jam` index to a JMA archive, its checksum-bound
 index, a raw assembly, or both. Separate supporting contigs remain separate
-observations; a mosaic does not assert that they are physically linked.
+observations; a mosaic does not assert that they are physically linked. The
+existing `.jam` plus JMA workflow remains available as a separate general
+trace path.
 
-## Quick start
+## Jam Index quick start
+
+A Jam Index source catalog uses local sequence files and checksum binding:
+
+```text
+metagenome_id	resource_uri	sha256
+sample_001	/data/assemblies/sample_001.fasta	<sha256>
+sample_002	/data/assemblies/sample_002.fasta	<sha256>
+```
+
+Build independently searchable parts:
+
+```bash
+jam index build \
+  --metagenomes sources.tsv \
+  --output metagenomes-index \
+  --policy standard \
+  --max-part-bases 100000000 \
+  --max-part-signatures 250000 \
+  --parallel-parts 4
+```
+
+Every metagenome stays within one part. A part contains `screen.jam` and
+`part.bin`; the latter holds the compact contig/signature tables and complete
+two-bit sequences. The root `manifest.json` binds part order, checksums,
+source totals, and the screening policy. Add data without rebuilding existing
+parts:
+
+```bash
+jam index append \
+  --metagenomes new-sources.tsv \
+  --output metagenomes-index \
+  --parallel-parts 4
+```
+
+Trace one query:
+
+```bash
+jam trace \
+  --query elements/query_001.fasta \
+  --query-kind plasmid \
+  --topology auto \
+  --index metagenomes-index \
+  --output query_001.trace.jsonl.zst \
+  --sensitivity sensitive \
+  --min-shared 1 \
+  --threads 4 \
+  --memory-target 2
+```
+
+Jam Index paths are local directories. `--database`, `--metagenomes`, remote
+resource options, and JMA archives belong to the existing general trace path,
+not to `--index` operation.
+
+## Existing `.jam` and JMA quick start
 
 Build a candidate index from the assemblies. With the default non-singleton
 mode, each input file is one `.jam` sample, and the sample identifier is its
@@ -137,6 +194,43 @@ aligned fragment is an autonomous phage.
 
 ## Candidate and positional stages
 
+### Jam Index stages
+
+Stage 1 prepares the query k=21 hashes once and searches every pure `.jam`
+part shard in parallel. The standard policy stores the union of a
+length-dependent bottom-k signature for every contig and a fixed 512-hash
+whole-metagenome sketch. Candidate ranking uses shared-hash count, query-window
+spread, and collection document frequency. Accumulators and final top-k
+selection are bounded; full shared-hash detail is materialized only for the
+globally selected candidates.
+
+Stage 2 maps those same selected hashes to contig IDs in `part.bin`. It stores
+no nucleotide positions. Contigs rank by independent query-window support,
+shared hashes, and rarity weight. The initial set is bounded by count and
+bases; weaker contigs are added only while query coverage remains incomplete.
+A strong candidate with no signature-mapped contig may enter a sequential,
+fixed-batch scan. The scan never loads the complete metagenome at once.
+
+Stage 3 reads complete selected contigs, generates dense canonical k=31 and
+k=21 positions in memory, and verifies packed k-mers before creating anchors.
+The existing mixed chainer, corridor alignment, and fragment mosaic consume
+that evidence. A verified complete forward, reverse-complement, or circularly
+rotated contig emits a direct `=` alignment before dense chaining. No
+position-bearing collection index or positional JMA is used.
+
+The selected standard screening policy is:
+
+| Parameter | Value |
+| --- | ---: |
+| k-mer size | 21 |
+| Minimum hashes per contig | 16 |
+| Maximum hashes per contig | 256 |
+| Bases per requested contig hash | 1,024 |
+| Whole-metagenome hashes | 512 |
+| Query window size | 256 bases |
+
+### Existing `.jam` and JMA stages
+
 The existing `.jam` index is the first, fast retrieval stage. It reports the
 number of shared retained hashes and both containment directions:
 
@@ -239,6 +333,13 @@ autonomous element or a host association.
 
 ## Resource forms and limits
 
+Jam Index build and query operation is local-only. Part screening shards and
+part data are memory mapped; noncandidate sequence data is not decoded.
+Candidate alignment concurrency is selected before allocation from query
+length and the memory envelope. At 95,000 query bases and above, one alignment
+candidate runs at a time under the selected default; part screening can still
+use all requested threads.
+
 Catalog resources accept local paths, `file://`, `http://`, `https://`, and
 `s3://bucket/key` locators. Local paths in a catalog are resolved relative to
 the catalog file. HTTP(S) and S3 access uses the shared range/stream resource
@@ -279,6 +380,11 @@ trace JSONL, and command line together. JMA archives are format version 1;
 existing `.jam` files remain version 3 and are not rewritten by `jam trace`.
 The trace JSON schema is version `2.0.0`. A legacy `.jam` without a sidecar may
 still be readable, but its original catalog provenance cannot be reconstructed.
+
+For Jam Index runs, record the root `manifest.json`, every part directory, the
+source catalog, query checksum, command line, and JSONL output together. Jam
+Index format 1 is an append-only local dataset contract; ordinary `.jam`
+version 3 and JMA format 1 remain independent formats.
 
 Bias-assisted `.jam` retrieval is optional and catalog-specific. In bias mode,
 retained and weighted evidence is labelled separately, and the uniform-hash

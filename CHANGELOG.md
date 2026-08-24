@@ -26,6 +26,16 @@ All notable changes to this project are documented here.
   JSONL records retaining all accepted alignments.
 - Plasmid-plus-phage controlled evaluation inputs and pinned LexicMap v0.9.0
   comparison support alongside BLASTn and minimap2.
+- Local Jam Index format 1 datasets with append-only independent parts. Each
+  part combines a pure version-3 `.jam` screening shard, position-free
+  contig signatures, a compact contig directory, and complete two-bit contig
+  sequences.
+- `jam index build`, `jam index append`, and `jam trace --index` for parallel
+  part screening, bounded contig selection, on-demand dense k=31/k=21 seed
+  generation, and one JSONL/JSONL.zst result.
+- Deterministic anonymous short-trace generation and scoring across 80 to
+  1,000 bases, five identity levels, both strands, origin crossing, separate
+  fragments, overlap, repeat-shared, integrated, rare, and unrelated cases.
 
 ### Changed
 
@@ -39,6 +49,10 @@ All notable changes to this project are documented here.
   unanchored raw-fallback alignments.
 - Structural/index JMA failures no longer trigger unanchored raw fallback;
   rescue rounds use the resolved seed scale and preserve earlier evidence.
+- Alignment refinement reuses one packed traceback matrix, and Jam Index
+  candidate concurrency is admitted before work according to query length.
+- Jam Index query parsing preserves IUPAC symbols so verified complete-contig
+  matches can bypass dense chaining and emit direct `=` alignments.
 
 ### Compatibility
 
@@ -47,12 +61,17 @@ All notable changes to this project are documented here.
 - Uniform `jam dist` columns remain compatible. Bias `dist` column names changed to correct previously ambiguous semantics.
 - JSON manifests are additive sidecars; legacy version-3 databases without sidecars remain readable.
 - JMA is a separate format at version 1; trace JSON records use schema version `2.0.0` and do not change `.jam` v3.
+- Jam Index format 1 is local-only and has no compatibility bridge to another
+  Jam Index layout.
 
 ### Validation status
 
 - Deterministic synthetic truth and local/mock-remote integration tests pass.
-- Accession-backed controlled spike-ins, local range/memory measurements, and
-  pinned BLASTn/minimap2/LexicMap comparisons are recorded with bounded claims.
-- Actual S3, read-derived assemblies, independently supported natural
-  positives, and the 1,000-assembly/100-query release scale remain pending; no
-  general production performance or accuracy claim is made.
+- The selected anonymous 40-case Jam Index run recovered 40/40 candidates at
+  1.0 base precision, 0.981834375 base recall, and 1.0 interval precision and
+  recall. Three paired process-cold four-thread runs had a 4.364 s wall median
+  and 313,300 KiB peak-RSS median.
+- Sequence-backed queries are reported under anonymous aliases. Jam Index
+  operation is local-only; read-derived assemblies, independently supported
+  natural positives, and the 1,000-assembly/100-query release scale remain
+  unmeasured; no general production performance or accuracy claim is made.

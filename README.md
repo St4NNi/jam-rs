@@ -5,7 +5,7 @@
 
 # jam-rs
 
-`jam-rs` provides reference-guided sketch screening and query-centered positional follow-up for metagenomic assemblies. `jam screen` reports contig-level and assembly-level evidence against a fixed plasmid catalog. `jam trace` follows one plasmid, phage, other mobile element, synthetic construct, or unknown nucleotide reference across candidate metagenomes. Optional target-aware sampling may improve retrieval of represented catalog targets, but final presence calls require independent confirmation.
+`jam-rs` provides reference-guided sketch screening and query-centered positional follow-up for metagenomic assemblies. `jam screen` reports contig-level and assembly-level evidence against a fixed plasmid catalog. A local Jam Index searches one plasmid, phage, other mobile element, synthetic construct, or unknown nucleotide reference across a collection without a positional seed archive. Optional target-aware sampling may improve retrieval of represented catalog targets, but final presence calls require independent confirmation.
 
 The intended workflow is:
 
@@ -99,7 +99,75 @@ Inspect a database without parsing human-readable text:
 jam stats --input plasmids.jam --json
 ```
 
-## Positional follow-up with `jam trace`
+## Local collection search with Jam Index
+
+A Jam Index is one logical local dataset with a manifest and independently
+searchable, append-only parts. Each part contains a pure version-3 `.jam`
+screening shard, position-free contig signatures, a compact contig directory,
+and the complete two-bit contig sequences.
+
+The source catalog binds each metagenome ID to one local FASTA/FASTQ and its
+checksum:
+
+```text
+metagenome_id	resource_uri	sha256
+sample_001	/data/assemblies/sample_001.fasta	<sha256>
+sample_002	/data/assemblies/sample_002.fasta	<sha256>
+```
+
+Build the standard index and split parts by both bases and estimated signature
+count:
+
+```bash
+jam index build \
+  --metagenomes sources.tsv \
+  --output metagenomes-index \
+  --policy standard \
+  --max-part-bases 100000000 \
+  --max-part-signatures 250000 \
+  --parallel-parts 4
+```
+
+New metagenomes are added as new independent parts; existing parts are not
+rewritten:
+
+```bash
+jam index append \
+  --metagenomes new-sources.tsv \
+  --output metagenomes-index \
+  --parallel-parts 4
+```
+
+Search every part in parallel and align only globally selected metagenomes and
+contigs:
+
+```bash
+jam trace \
+  --query element.fasta \
+  --query-kind plasmid \
+  --topology auto \
+  --index metagenomes-index \
+  --output element.trace.jsonl.zst \
+  --sensitivity sensitive \
+  --min-shared 1 \
+  --threads 4 \
+  --memory-target 2
+```
+
+The standard policy uses canonical k=21 `jamhash_u64_v1` signatures with a
+length-dependent budget of 16 to 256 hashes per contig, one hash per 1,024
+bases within those bounds, a 512-hash whole-metagenome sketch, and 256-base
+query windows. Exact shared hashes route selected candidates to bounded contig
+sets without storing nucleotide positions. Selected complete contigs generate
+dense k=31 and k=21 positions in memory, verify packed k-mers, and enter the
+existing mixed chaining, corridor alignment, and fragment-mosaic path. An
+exact complete-contig match emits a direct `=` alignment before seed chaining.
+
+Jam Index operation is local-only. It does not open JMA objects, store
+collection-wide positional postings, or change ordinary `.jam` format or
+commands.
+
+## Existing `.jam` and JMA trace path
 
 `jam trace` is an optional follow-up for one query sequence across many candidate
 metagenomes. It uses an existing `.jam` metagenome index, then retrieves
@@ -199,21 +267,26 @@ versions, hardware and storage, raw measurements, checksums, and summary
 generation.
 
 The bounded release evidence and exact limitations are under
-[evaluation/trace-production/](evaluation/trace-production/). The current MGE
-accession track uses 10 checksum-verified plasmid/phage queries and 28
-controlled derivatives of three reused chromosome backgrounds. At scale 200
-and `min-shared=3`, 27/28 inserted positive pairs were retrieved; the missed
-case was an isolated 160 bp T7 terminal repeat. Scale 20 retrieved all three T7
-cases, with a 242 MiB rather than 25 MiB JAM index. Two sequential one-thread
-collections took 359.24 s and 353.24 s; the eight-thread collection took
-99.18 s and reached 2.20 GiB peak RSS. These are measurements of this local
-task, not a general speed or accuracy claim. Actual S3, read-derived
-assemblies, independently supported natural positives, and the requested
-1,000-assembly/100-query scale remain unmeasured.
+[evaluation/trace-production/](evaluation/trace-production/). On the selected
+anonymous 40-case matrix, the standard Jam Index recovered 40/40 candidates
+with base precision 1.0, base recall 0.981834375, and interval precision and
+recall 1.0. Three paired process-cold four-thread runs had a 4.364 s median and
+313,300 KiB median peak RSS. The 605,224,880-base collection occupied
+183,144,518 bytes, or 0.302606 index bytes per source base. The exact standalone
+160-base trace, reverse-complement, origin-crossing, separate-contig, overlap,
+repeat-shared, integrated, and unrelated controls were rerun.
+
+These are measurements of one local task, not a general speed or accuracy
+claim. The anonymous edited-fragment matrix missed both 80-base/90%-identity
+orientations because neither retained an exact k=21 witness. Long related-query
+cases remain CPU-bound, and read-derived assemblies, independently supported
+natural positives, and the 1,000-assembly/100-query release scale remain
+unmeasured.
 
 ## Compatibility and provenance
 
 - `.jam` binary format version remains 3. Existing version-3 files remain readable; the repository tests a fixture created by jam-rs 0.9.11.
+- Jam Index format 1 is a local manifest-and-parts dataset. Its screening shards are ordinary version-3 `.jam` files; adding a part does not rewrite earlier parts.
 - New builds add `<database>.jam.json`; this sidecar does not alter the binary database.
 - The released hash identity is `jamhash_u64_v1`, provided by the exactly pinned crates.io dependency `jamhash = 0.1.2`.
 - Hash zero is excluded consistently during catalog construction and query construction.
