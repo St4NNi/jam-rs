@@ -3,7 +3,7 @@
 use super::manifest::ScreenSelectionPolicy;
 use crate::jamhash_u64_v1;
 use needletail::Sequence;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,6 +17,7 @@ pub struct ContigSignature {
 pub struct MetagenomeSignatureBuilder {
     policy: ScreenSelectionPolicy,
     whole: BottomK,
+    whole_sources: BTreeMap<u64, u32>,
     union: BTreeSet<u64>,
     contig_count: u64,
     total_bases: u64,
@@ -29,6 +30,7 @@ impl MetagenomeSignatureBuilder {
             .map_err(|error| SignatureSelectionError::InvalidPolicy(error.to_string()))?;
         Ok(Self {
             whole: BottomK::new(policy.whole_metagenome_budget as usize)?,
+            whole_sources: BTreeMap::new(),
             policy,
             union: BTreeSet::new(),
             contig_count: 0,
@@ -43,6 +45,8 @@ impl MetagenomeSignatureBuilder {
         let length =
             u64::try_from(sequence.len()).map_err(|_| SignatureSelectionError::Overflow)?;
         let requested_budget = self.policy.contig_budget.budget_for_bases(length);
+        let contig_id =
+            u32::try_from(self.contig_count).map_err(|_| SignatureSelectionError::Overflow)?;
         let mut contig = BottomK::new(requested_budget as usize)?;
         let mut eligible_kmers = 0u64;
         let normalized = sequence.normalize(false);
@@ -53,7 +57,12 @@ impl MetagenomeSignatureBuilder {
             }
             eligible_kmers = eligible_kmers.saturating_add(1);
             contig.insert(hash);
-            self.whole.insert(hash);
+            if let BottomKUpdate::Retained { evicted } = self.whole.insert(hash) {
+                if let Some(evicted) = evicted {
+                    self.whole_sources.remove(&evicted);
+                }
+                self.whole_sources.entry(hash).or_insert(contig_id);
+            }
         }
         let hashes = contig.into_sorted();
         self.union.extend(hashes.iter().copied());
@@ -74,6 +83,7 @@ impl MetagenomeSignatureBuilder {
             contig_count: self.contig_count,
             total_bases: self.total_bases,
             whole_metagenome_hashes,
+            whole_hash_contigs: self.whole_sources.into_iter().collect(),
             union_hashes: self.union.into_iter().collect(),
         }
     }
@@ -84,6 +94,7 @@ pub struct MetagenomeSignatures {
     pub contig_count: u64,
     pub total_bases: u64,
     pub whole_metagenome_hashes: Vec<u64>,
+    pub whole_hash_contigs: Vec<(u64, u32)>,
     pub union_hashes: Vec<u64>,
 }
 
@@ -104,26 +115,36 @@ impl BottomK {
         })
     }
 
-    fn insert(&mut self, hash: u64) {
+    fn insert(&mut self, hash: u64) -> BottomKUpdate {
         if hash == 0 || self.hashes.contains(&hash) {
-            return;
+            return BottomKUpdate::Unchanged;
         }
         if self.hashes.len() < self.capacity {
             self.hashes.insert(hash);
-            return;
+            return BottomKUpdate::Retained { evicted: None };
         }
         let Some(&largest) = self.hashes.last() else {
-            return;
+            return BottomKUpdate::Unchanged;
         };
         if hash < largest {
             self.hashes.remove(&largest);
             self.hashes.insert(hash);
+            return BottomKUpdate::Retained {
+                evicted: Some(largest),
+            };
         }
+        BottomKUpdate::Unchanged
     }
 
     fn into_sorted(self) -> Vec<u64> {
         self.hashes.into_iter().collect()
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BottomKUpdate {
+    Unchanged,
+    Retained { evicted: Option<u64> },
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]

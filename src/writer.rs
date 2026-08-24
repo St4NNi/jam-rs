@@ -84,6 +84,83 @@ pub struct IndexStats {
     pub sample_sizes: Vec<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HashSampleInput {
+    pub sample_name: String,
+    pub hashes: Vec<u64>,
+}
+
+/// Write caller-selected hashes as an ordinary format-3 `.jam` database.
+///
+/// This does not change the format or the existing sketch builder. It is used
+/// by Jam Index parts whose screen-selection policy is recorded by their
+/// surrounding manifest.
+pub fn build_from_hash_samples(
+    output_path: &Path,
+    samples: &[HashSampleInput],
+    kmer_size: u8,
+    num_threads: usize,
+) -> Result<IndexStats, CompactError> {
+    if samples.is_empty() || kmer_size == 0 || kmer_size > 31 || num_threads == 0 {
+        return Err(CompactError::InvalidSamples);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    if samples
+        .iter()
+        .any(|sample| sample.sample_name.is_empty() || !names.insert(sample.sample_name.clone()))
+    {
+        return Err(CompactError::InvalidSamples);
+    }
+    let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
+    let temp_dir = tempfile::Builder::new()
+        .prefix(".jam-hash-samples-")
+        .tempdir_in(parent)?;
+    let mut buckets: [Vec<Entry>; BUCKET_COUNT] = std::array::from_fn(|_| Vec::new());
+    for (sample_index, sample) in samples.iter().enumerate() {
+        let sample_id = u32::try_from(sample_index).map_err(|_| CompactError::InvalidSamples)?;
+        let mut hashes = sample.hashes.clone();
+        hashes.sort_unstable();
+        hashes.dedup();
+        if hashes.contains(&0) {
+            return Err(CompactError::InvalidSamples);
+        }
+        for hash in hashes {
+            buckets[crate::format::bucket_id(hash)].push(Entry::new(hash, sample_id));
+        }
+    }
+    let mut bucket_entry_counts = [0u64; BUCKET_COUNT];
+    for (bucket_id, entries) in buckets.iter_mut().enumerate() {
+        entries.sort_unstable();
+        entries.dedup();
+        bucket_entry_counts[bucket_id] =
+            u64::try_from(entries.len()).map_err(|_| CompactError::InvalidSamples)?;
+        if !entries.is_empty() {
+            write_entries(
+                temp_dir.path().join(format!("bucket_{bucket_id:03}.bin")),
+                entries,
+            )?;
+        }
+    }
+    let sketch_result = SketchResult {
+        sample_count: u32::try_from(samples.len()).map_err(|_| CompactError::InvalidSamples)?,
+        bucket_entry_counts,
+        frac_max: u64::MAX,
+        temp_dir,
+        sample_names: samples
+            .iter()
+            .map(|sample| sample.sample_name.clone())
+            .collect(),
+    };
+    run(
+        output_path,
+        &sketch_result,
+        &CompactConfig { num_threads },
+        kmer_size,
+        None,
+        0.0,
+    )
+}
+
 #[derive(Clone)]
 pub struct BuildConfig {
     pub kmer_size: u8,
@@ -168,6 +245,9 @@ pub enum CompactError {
 
     #[error("Size overflow: {0}")]
     SizeOverflow(String),
+
+    #[error("invalid caller-selected hash samples")]
+    InvalidSamples,
 }
 
 fn checked_add_usize(lhs: usize, rhs: usize, label: &str) -> Result<usize, CompactError> {

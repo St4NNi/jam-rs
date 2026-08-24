@@ -6,10 +6,15 @@
 //! positions.
 
 pub mod manifest;
+pub mod part;
 pub mod signature;
 
 pub use manifest::{
     ContigSignatureBudget, JamIndexManifest, JamIndexManifestError, JamIndexPart,
     ScreenSelectionPolicy,
+};
+pub use part::{
+    JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome, PartScreenSample,
+    PartWriteResult, SignatureHit, write_part,
 };
 pub use signature::{ContigSignature, MetagenomeSignatureBuilder, SignatureSelectionError};
