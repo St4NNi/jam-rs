@@ -1395,6 +1395,12 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
     let candidate_limit = args
         .top_candidates
         .unwrap_or_else(|| usize::try_from(sensitivity.max_candidates).unwrap_or(usize::MAX));
+    let total_memory = (args.memory_gb as u64).saturating_mul(1024 * 1024 * 1024);
+    let worker_memory = total_memory
+        / u64::try_from(args.threads)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(2)
+            .max(1);
     let runner = crate::trace::runner::TraceRunnerConfig {
         sensitivity: sensitivity.clone(),
         candidates: crate::trace::screen::CandidateSearchConfig {
@@ -1412,7 +1418,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
         topology_margin_bases: args
             .topology_margin
             .unwrap_or(sensitivity.auto_topology_margin_bases),
-        memory_budget_bytes: (args.memory_gb as u64).saturating_mul(1024 * 1024 * 1024),
+        memory_budget_bytes: worker_memory,
     };
     let mut result = crate::jam_index::trace_index(
         &args.index,
