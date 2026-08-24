@@ -10,7 +10,7 @@ use super::events::DropReason;
 use super::located::{ContigWindows, LocatedEntry};
 use super::query::QueryKmers;
 use super::sketch_stage::PossibleEntry;
-use crate::index::{PackedSequence, SeedLocation, Shard};
+use crate::index::{SeedLocation, Shard};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
@@ -129,13 +129,13 @@ fn locate(
     }
     bins.sort_unstable();
     bins.dedup();
-    let packed = shard.packed(possible.entry)?;
+    let contig_starts = shard.positions().contig_starts(possible.entry)?;
     let bin_bits = shard.positions().bin_bits();
     Ok(LocateOutcome::Located(LocatedEntry {
         entry: possible.entry,
         coverage_bound,
         containment_estimate: request.query.containment_estimate(positions.len() as u64),
-        windows: alignment_windows(&packed, bins, bin_bits, request.flank)?,
+        windows: alignment_windows(&contig_starts, bins, bin_bits, request.flank),
     }))
 }
 
@@ -180,24 +180,22 @@ fn read_seed_hits(
 }
 
 /// The alignment windows of an entry: each candidate bin widened by `flank` on both sides, cut
-/// at the ends of the contigs it touches, and merged per contig. `bins` must be ascending.
+/// at the ends of the contigs it touches, and merged per contig. `bins` must be ascending, and
+/// contig `i` spans `contig_starts[i]..contig_starts[i + 1]` (the last start is the entry end).
 fn alignment_windows(
-    packed: &PackedSequence,
+    contig_starts: &[u64],
     bins: &[u32],
     bin_bits: u32,
     flank: u64,
-) -> Result<Vec<ContigWindows>, SearchError> {
-    let bases = packed.bases();
+) -> Vec<ContigWindows> {
     let mut windows: Vec<ContigWindows> = Vec::new();
     for &bin in bins {
         let start = u64::from(bin) << bin_bits;
-        let end = (start + (1u64 << bin_bits)).min(bases);
-        let Some(mut contig) = packed.contig_at(start) else {
-            continue;
-        };
-        // A bin can span the end of one contig and the start of the next.
-        while contig < packed.contig_count() {
-            let range = packed.contig_range(contig)?;
+        let end = start + (1u64 << bin_bits);
+        // The first contig that ends after the bin start; a bin can span several contigs.
+        let first = contig_starts.partition_point(|&contig_start| contig_start <= start);
+        for contig in first.saturating_sub(1)..contig_starts.len().saturating_sub(1) {
+            let range = contig_starts[contig]..contig_starts[contig + 1];
             if range.start >= end {
                 break;
             }
@@ -206,10 +204,9 @@ fn alignment_windows(
                 let local = window.start - range.start..window.end - range.start;
                 push_window(&mut windows, contig as u32, local);
             }
-            contig += 1;
         }
     }
-    Ok(windows)
+    windows
 }
 
 /// Appends a window, merging it with the last window of the same contig when they touch.
