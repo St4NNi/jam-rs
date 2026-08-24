@@ -10,9 +10,10 @@ fn catalog(
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let source = directory.join(format!("{id}.fasta"));
     let offset = usize::from(base & 3);
-    let sequence = (0..200)
+    let mut sequence = (0..200)
         .map(|index| b"ACGT"[(index * 13 + index / 7 + offset) & 3] as char)
         .collect::<String>();
+    sequence.replace_range(73..74, "R");
     fs::write(&source, format!(">contig\n{sequence}\n")).unwrap();
     let catalog = directory.join(format!("{id}.tsv"));
     fs::write(
@@ -93,4 +94,5 @@ fn index_builds_parts() {
     let records = fs::read_to_string(trace).unwrap();
     assert!(records.contains("\"record_type\":\"metagenome_result\""));
     assert!(records.contains("\"metagenome_id\":\"mg-a\""));
+    assert!(records.contains("\"cigar\":\"200=\""));
 }

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use needletail::Sequence;
 use std::io::Write;
 use std::{
     fs::remove_file,
@@ -1380,23 +1381,15 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
             args.index.display()
         ));
     }
+    let (record_id, sequence) = index_query(&args.query)?;
+    let query_id = args.query_id.unwrap_or(record_id);
     let resources = crate::resource::ResourceOpenOptions::default();
-    let parsed =
-        crate::trace::raw::RawAssembly::open(args.query.to_string_lossy(), resources.clone())?;
-    if parsed.contigs.len() != 1 {
-        return Err(anyhow::anyhow!(
-            "Query input must contain exactly one FASTA/FASTQ record, got {}",
-            parsed.contigs.len()
-        ));
-    }
-    let record = &parsed.contigs[0];
-    let query_id = args.query_id.unwrap_or_else(|| record.id.clone());
     let sensitivity = index_sensitivity(args.profile);
     let candidate_limit = args
         .top_candidates
         .unwrap_or_else(|| usize::try_from(sensitivity.max_candidates).unwrap_or(usize::MAX));
     let total_memory = (args.memory_gb as u64).saturating_mul(1024 * 1024 * 1024);
-    let alignment_workers = index_workers(args.threads, record.sequence.len(), total_memory);
+    let alignment_workers = index_workers(args.threads, sequence.len(), total_memory);
     let worker_memory = total_memory
         / u64::try_from(args.threads)
             .unwrap_or(u64::MAX)
@@ -1424,7 +1417,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
     let mut result = crate::jam_index::trace_index(
         &args.index,
         &query_id,
-        &record.sequence,
+        &sequence,
         &crate::jam_index::JamIndexTraceConfig {
             screen: crate::jam_index::JamIndexScreenConfig {
                 top_candidates: candidate_limit,
@@ -1459,7 +1452,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
         started_at_utc: format!("unix:{started}"),
         command: provenance::redacted_command_line(),
         plasmid_id: query_id,
-        plasmid_length: record.sequence.len() as u64,
+        plasmid_length: sequence.len() as u64,
         query_kind: args.query_kind,
         topology_requested: args.topology,
         threads: args.threads,
@@ -1533,6 +1526,23 @@ fn index_sensitivity(
     }
     sensitivity.gap_rescue.dense_primary = None;
     sensitivity
+}
+
+fn index_query(path: &Path) -> Result<(String, Vec<u8>)> {
+    let mut reader = needletail::parse_fastx_file(path)?;
+    let record = reader
+        .next()
+        .transpose()?
+        .ok_or_else(|| anyhow::anyhow!("Query input contains no FASTA/FASTQ records"))?;
+    let id = std::str::from_utf8(record.id())?.to_string();
+    let sequence = record.normalize(true).into_owned();
+    if let Some(record) = reader.next() {
+        record?;
+        return Err(anyhow::anyhow!(
+            "Query input must contain exactly one FASTA/FASTQ record"
+        ));
+    }
+    Ok((id, sequence))
 }
 
 fn index_workers(threads: usize, query_length: usize, memory_bytes: u64) -> usize {
