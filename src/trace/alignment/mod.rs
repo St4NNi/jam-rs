@@ -370,6 +370,7 @@ impl From<AlignmentScoring> for AlignmentOptions {
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
     cells: Vec<Cell>,
+    traces: Vec<u8>,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
     row_widths: Vec<usize>,
@@ -1026,9 +1027,12 @@ impl AlignmentWorkspace {
         let default_cell = Cell::default();
         if self.cells.len() < total_cells {
             self.cells.resize(total_cells, default_cell);
+            self.traces.resize(total_cells, 0);
         } else {
             self.cells[..total_cells].fill(default_cell);
             self.cells.truncate(total_cells);
+            self.traces[..total_cells].fill(0);
+            self.traces.truncate(total_cells);
         }
         self.operations.clear();
 
@@ -1043,6 +1047,7 @@ impl AlignmentWorkspace {
 
                 let cell_index = self.cell_index(query_index, target_index);
                 let mut cell = Cell::default();
+                let mut trace = 0;
 
                 if query_index > 0
                     && target_index > 0
@@ -1060,11 +1065,15 @@ impl AlignmentWorkspace {
                     let score = previous_score.saturating_add(substitution);
                     if score > 0 {
                         cell.scores[usize::from(STATE_MATCH)] = score;
-                        cell.previous[usize::from(STATE_MATCH)] = if previous_score == 0 {
-                            STATE_START
-                        } else {
-                            previous_state
-                        };
+                        set_state(
+                            &mut trace,
+                            STATE_MATCH,
+                            if previous_score == 0 {
+                                STATE_START
+                            } else {
+                                previous_state
+                            },
+                        );
                     }
                 }
 
@@ -1086,7 +1095,7 @@ impl AlignmentWorkspace {
                     ]);
                     if score > 0 {
                         cell.scores[usize::from(STATE_INSERTION)] = score;
-                        cell.previous[usize::from(STATE_INSERTION)] = previous_state;
+                        set_state(&mut trace, STATE_INSERTION, previous_state);
                     }
                 }
 
@@ -1108,11 +1117,12 @@ impl AlignmentWorkspace {
                     ]);
                     if score > 0 {
                         cell.scores[usize::from(STATE_DELETION)] = score;
-                        cell.previous[usize::from(STATE_DELETION)] = previous_state;
+                        set_state(&mut trace, STATE_DELETION, previous_state);
                     }
                 }
 
                 self.cells[cell_index] = cell;
+                self.traces[cell_index] = trace;
                 best.consider(query_index, target_index, cell);
             }
         }
@@ -1256,9 +1266,12 @@ impl AlignmentWorkspace {
         let default_cell = Cell::semiglobal();
         if self.cells.len() < total_cells {
             self.cells.resize(total_cells, default_cell);
+            self.traces.resize(total_cells, 0);
         } else {
             self.cells[..total_cells].fill(default_cell);
             self.cells.truncate(total_cells);
+            self.traces[..total_cells].fill(0);
+            self.traces.truncate(total_cells);
         }
 
         for query_index in 0..=query_len {
@@ -1270,10 +1283,11 @@ impl AlignmentWorkspace {
                     // Any target prefix may be skipped at no cost. The match
                     // state is used as the zero-cost start marker.
                     self.cells[cell_index].scores[usize::from(STATE_MATCH)] = 0;
-                    self.cells[cell_index].previous[usize::from(STATE_MATCH)] = STATE_START;
+                    set_state(&mut self.traces[cell_index], STATE_MATCH, STATE_START);
                     continue;
                 }
                 let mut cell = Cell::semiglobal();
+                let mut trace = 0;
                 if target_index > 0
                     && let Some(previous_index) =
                         self.cell_index_checked(query_index - 1, target_index - 1)
@@ -1289,7 +1303,7 @@ impl AlignmentWorkspace {
                             };
                         cell.scores[usize::from(STATE_MATCH)] =
                             previous_score.saturating_add(substitution);
-                        cell.previous[usize::from(STATE_MATCH)] = previous_state;
+                        set_state(&mut trace, STATE_MATCH, previous_state);
                     }
                 }
                 if target_index > 0
@@ -1315,7 +1329,7 @@ impl AlignmentWorkspace {
                         (opened_from_deletion, STATE_DELETION),
                     ]);
                     cell.scores[usize::from(STATE_INSERTION)] = score;
-                    cell.previous[usize::from(STATE_INSERTION)] = previous_state;
+                    set_state(&mut trace, STATE_INSERTION, previous_state);
                 }
                 if let Some(previous_index) = self.cell_index_checked(query_index - 1, target_index)
                 {
@@ -1338,9 +1352,10 @@ impl AlignmentWorkspace {
                         (opened_from_insertion, STATE_INSERTION),
                     ]);
                     cell.scores[usize::from(STATE_DELETION)] = score;
-                    cell.previous[usize::from(STATE_DELETION)] = previous_state;
+                    set_state(&mut trace, STATE_DELETION, previous_state);
                 }
                 self.cells[cell_index] = cell;
+                self.traces[cell_index] = trace;
             }
         }
 
@@ -1404,6 +1419,7 @@ impl AlignmentWorkspace {
                 .cell_index_checked(query_index, target_index)
                 .ok_or(AlignmentError::TracebackOutsideBand)?;
             let cell = self.cells[index];
+            let trace = self.traces[index];
             if state >= STATE_START || cell.scores[usize::from(state)] <= SEMI_NEG_INF {
                 return Err(AlignmentError::InvalidTraceback);
             }
@@ -1419,7 +1435,7 @@ impl AlignmentWorkspace {
                             EditOperation::Substitution
                         },
                     );
-                    let previous = cell.previous[usize::from(STATE_MATCH)];
+                    let previous = get_state(trace, STATE_MATCH);
                     query_index -= 1;
                     target_index -= 1;
                     state = previous;
@@ -1429,13 +1445,13 @@ impl AlignmentWorkspace {
                         return Err(AlignmentError::InvalidTraceback);
                     }
                     operations.push(EditOperation::Insertion);
-                    let previous = cell.previous[usize::from(STATE_INSERTION)];
+                    let previous = get_state(trace, STATE_INSERTION);
                     target_index -= 1;
                     state = previous;
                 }
                 STATE_DELETION => {
                     operations.push(EditOperation::Deletion);
-                    let previous = cell.previous[usize::from(STATE_DELETION)];
+                    let previous = get_state(trace, STATE_DELETION);
                     query_index -= 1;
                     state = previous;
                 }
@@ -1476,6 +1492,7 @@ impl AlignmentWorkspace {
                 .cell_index_checked(query_index, target_index)
                 .ok_or(AlignmentError::TracebackOutsideBand)?;
             let cell = self.cells[index];
+            let trace = self.traces[index];
             let state_index = usize::from(state);
             if state_index >= 3 || cell.scores[state_index] <= 0 {
                 break;
@@ -1492,7 +1509,7 @@ impl AlignmentWorkspace {
                         EditOperation::Substitution
                     };
                     self.operations.push(operation);
-                    let previous = cell.previous[usize::from(STATE_MATCH)];
+                    let previous = get_state(trace, STATE_MATCH);
                     query_index -= 1;
                     target_index -= 1;
                     if previous == STATE_START {
@@ -1505,7 +1522,7 @@ impl AlignmentWorkspace {
                         return Err(AlignmentError::InvalidTraceback);
                     }
                     self.operations.push(EditOperation::Insertion);
-                    let previous = cell.previous[usize::from(STATE_INSERTION)];
+                    let previous = get_state(trace, STATE_INSERTION);
                     target_index -= 1;
                     if previous == STATE_START {
                         break;
@@ -1517,7 +1534,7 @@ impl AlignmentWorkspace {
                         return Err(AlignmentError::InvalidTraceback);
                     }
                     self.operations.push(EditOperation::Deletion);
-                    let previous = cell.previous[usize::from(STATE_DELETION)];
+                    let previous = get_state(trace, STATE_DELETION);
                     query_index -= 1;
                     if previous == STATE_START {
                         break;
@@ -1741,7 +1758,6 @@ pub fn align_circular(
 #[derive(Clone, Copy, Debug, Default)]
 struct Cell {
     scores: [i32; 3],
-    previous: [u8; 3],
 }
 
 const SEMI_NEG_INF: i32 = i32::MIN / 4;
@@ -1750,7 +1766,6 @@ impl Cell {
     fn semiglobal() -> Self {
         Self {
             scores: [SEMI_NEG_INF; 3],
-            previous: [STATE_UNREACHABLE; 3],
         }
     }
 
@@ -1769,6 +1784,18 @@ impl Cell {
             (self.scores[usize::from(STATE_DELETION)], STATE_DELETION),
         ])
     }
+}
+
+#[inline]
+fn set_state(trace: &mut u8, state: u8, previous: u8) {
+    let shift = state.saturating_mul(2);
+    let mask = 0b11_u8 << shift;
+    *trace = (*trace & !mask) | ((previous & 0b11) << shift);
+}
+
+#[inline]
+fn get_state(trace: u8, state: u8) -> u8 {
+    (trace >> state.saturating_mul(2)) & 0b11
 }
 
 #[derive(Clone, Copy, Debug, Default)]
