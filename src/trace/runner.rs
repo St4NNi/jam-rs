@@ -1258,6 +1258,27 @@ fn process_jma(
             archive.metrics().resource,
         ));
     }
+    process_indexed_archive(
+        plasmid_id,
+        plasmid,
+        candidate,
+        &archive,
+        router_candidate,
+        config,
+        counters,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_indexed_archive<A: TraceArchive>(
+    plasmid_id: &str,
+    plasmid: &[u8],
+    candidate: &RankedCandidate,
+    archive: &A,
+    router_candidate: Option<&RoutedCandidate>,
+    config: &TraceRunnerConfig,
+    counters: &mut TracePerformanceCounters,
+) -> Result<ProcessedJma, TraceProcessingFailure> {
     let mut alignments = Vec::new();
     let mut workspace = AlignmentWorkspace::new();
     let mut seen_contigs = HashSet::new();
@@ -1271,7 +1292,7 @@ fn process_jma(
     if let Some(descriptor) = cascade::advertised_exact_gear_scheme(&descriptors) {
         let started = Instant::now();
         let exact = exact_gear_fragment_fast_path(
-            &archive,
+            archive,
             plasmid,
             descriptor,
             config.sensitivity.primary.max_occurrences,
@@ -1320,7 +1341,7 @@ fn process_jma(
         let started = Instant::now();
         let before_metrics = archive.metrics();
         let round = chains_for_configs(
-            &archive,
+            archive,
             plasmid,
             &seed_configs,
             &config.sensitivity,
@@ -1339,7 +1360,7 @@ fn process_jma(
         } = round;
         let protected_alignments = alignments.len();
         let alignment_windows_attempted = align_indexed_chains(
-            &archive,
+            archive,
             plasmid_id,
             plasmid,
             candidate,
@@ -1471,6 +1492,42 @@ fn process_jma(
         resource_metrics: archive.metrics().resource,
     };
     Ok(ProcessedJma { result })
+}
+
+#[allow(dead_code)]
+pub(crate) fn run_index_archive<A: TraceArchive>(
+    query_id: &str,
+    query: &[u8],
+    candidate: CandidateResult,
+    archive: &A,
+    config: &TraceRunnerConfig,
+) -> Result<TraceMetagenomeResult, RunnerError> {
+    let ranked = RankedCandidate {
+        candidate,
+        score_mode: CandidateScoreMode::Witness,
+        bias_weighted_plasmid_containment: None,
+        uniform_hash_e_value: None,
+    };
+    let mut counters = TracePerformanceCounters {
+        candidates_processed: 1,
+        ..TracePerformanceCounters::default()
+    };
+    let started = Instant::now();
+    let mut result = process_indexed_archive(
+        query_id,
+        query,
+        &ranked,
+        archive,
+        None,
+        config,
+        &mut counters,
+    )
+    .map_err(|failure| *failure.error)?
+    .result;
+    counters.failures = result.failures.len() as u64;
+    counters.elapsed_millis = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+    result.performance_counters = counters.candidate_snapshot();
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]

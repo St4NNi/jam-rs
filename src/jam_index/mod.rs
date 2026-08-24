@@ -12,6 +12,7 @@ pub mod manifest;
 pub mod part;
 pub mod screen;
 pub mod signature;
+pub mod trace;
 
 pub use archive::JamIndexArchive;
 pub use builder::{
@@ -37,3 +38,6 @@ pub use screen::{
     prepare_screen_query, search_jam_index,
 };
 pub use signature::{ContigSignature, MetagenomeSignatureBuilder, SignatureSelectionError};
+pub use trace::{
+    JamIndexTraceConfig, JamIndexTraceError, JamIndexTraceMetrics, JamIndexTraceOutput, trace_index,
+};
