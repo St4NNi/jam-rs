@@ -1478,7 +1478,11 @@ fn chains_for_configs<A: TraceArchive>(
         }
         let keys = by_key.keys().cloned().collect::<Vec<_>>();
         let lookup = archive
-            .lookup_seeds(SeedSchemeId(scheme.scheme_id), &keys)
+            .lookup_seeds_bounded(
+                SeedSchemeId(scheme.scheme_id),
+                &keys,
+                Some(seed_config.max_occurrences),
+            )
             .map_err(archive_error)?;
         let mut matches = BTreeMap::new();
         for seed_match in lookup.matches {

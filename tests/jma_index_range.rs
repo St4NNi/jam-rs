@@ -82,7 +82,7 @@ fn fixture() -> ArchiveParts {
                 records: vec![SeedRecord {
                     query: SeedQuery {
                         k: 21,
-                        hash: 0x1000_0000_0000_0000,
+                        hash: jam_rs::jamhash_u64_v1(1),
                         canonical_kmer: 1,
                     },
                     occurrence: SeedOccurrence {
@@ -109,7 +109,7 @@ fn open_reads_directories_but_not_sequence_or_seed_payloads() {
     let occurrences = reader
         .seed_occurrences(SeedQuery {
             k: 21,
-            hash: 0x1000_0000_0000_0000,
+            hash: jam_rs::jamhash_u64_v1(1),
             canonical_kmer: 1,
         })
         .unwrap();
@@ -120,7 +120,7 @@ fn open_reads_directories_but_not_sequence_or_seed_payloads() {
 }
 
 #[test]
-fn seed_directory_prefix_checksum_is_verified_without_reading_pages() {
+fn compact_seed_directory_corruption_is_rejected_without_reading_pages() {
     let mut bytes = encode_archive(&fixture()).unwrap();
     let header = decode_header(&bytes[..256]).unwrap();
     let directory_start = usize::try_from(header.section_directory_offset).unwrap();
@@ -135,6 +135,6 @@ fn seed_directory_prefix_checksum_is_verified_without_reading_pages() {
     bytes[usize::try_from(seed.offset).unwrap()] ^= 1;
     assert!(matches!(
         JmaReader::open(TrackingResource::new(bytes)),
-        Err(JmaError::ChecksumMismatch(message)) if message == "seed directory prefix"
+        Err(JmaError::InvalidMagic)
     ));
 }

@@ -4,6 +4,13 @@ use crate::jamhash_u64_v1;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod format;
+pub mod postings;
+pub mod reader;
+pub mod search;
+pub mod witness;
+pub mod writer;
+
 pub const ROUTER_FORMAT_NAME: &str = "JAM Witness Router";
 pub const ROUTER_FORMAT_VERSION: u16 = 1;
 pub const WITNESS_K: u8 = 21;
@@ -118,6 +125,7 @@ pub enum WitnessClass {
 pub struct QueryWitness {
     pub key: WitnessKey,
     pub query_position: u64,
+    pub query_reverse: bool,
     pub query_window_ids: Vec<u32>,
 }
 
@@ -125,6 +133,7 @@ pub struct QueryWitness {
 pub struct SharedWitness {
     pub key: WitnessKey,
     pub query_position: u64,
+    pub query_reverse: bool,
     pub query_window_id: u32,
     pub document_frequency: u32,
     pub witness_tier: u32,
@@ -133,6 +142,7 @@ pub struct SharedWitness {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PositionalWitnessOccurrence {
+    pub witness: SharedWitness,
     pub contig_id: u32,
     pub position: u64,
     pub reverse: bool,

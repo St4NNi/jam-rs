@@ -96,7 +96,7 @@ fn native_archive_uses_mmap_and_batches_sequence_ranges() {
             .iter()
             .all(|seed_match| !seed_match.occurrences.is_empty())
     );
-    assert_eq!(lookup.metrics.pages_read, 1);
+    assert_eq!(lookup.metrics.pages_read, 2);
 
     let requests = [
         SequenceRequest::new(0, 50, 150, false).unwrap(),

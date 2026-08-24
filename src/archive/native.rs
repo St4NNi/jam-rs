@@ -65,6 +65,15 @@ impl<R: RangeReader> TraceArchive for NativeJmaArchive<R> {
         scheme: SeedSchemeId,
         keys: &[SeedKey],
     ) -> ArchiveResult<SeedLookupResult> {
+        self.lookup_seeds_bounded(scheme, keys, None)
+    }
+
+    fn lookup_seeds_bounded(
+        &self,
+        scheme: SeedSchemeId,
+        keys: &[SeedKey],
+        max_occurrences: Option<u32>,
+    ) -> ArchiveResult<SeedLookupResult> {
         let descriptor = self
             .reader
             .seed_schemes()
@@ -110,13 +119,24 @@ impl<R: RangeReader> TraceArchive for NativeJmaArchive<R> {
                 canonical_kmer,
             });
         }
-        let occurrences = self
+        let compact = self
             .reader
-            .seed_occurrences_for_scheme_batch(scheme, &queries)
+            .compact_seed_lookup_batch(scheme, &queries, max_occurrences)
             .map_err(backend_error)?;
+        let occurrences_before_limits = compact
+            .matches
+            .iter()
+            .map(|seed_match| u64::from(seed_match.occurrence_count))
+            .sum();
+        let occurrences_after_limits = compact
+            .matches
+            .iter()
+            .map(|seed_match| u64::try_from(seed_match.occurrences.len()).unwrap_or(u64::MAX))
+            .sum();
         let mut matches = Vec::new();
-        for (key_index, occurrences) in occurrences.into_iter().enumerate() {
-            let occurrences = occurrences
+        for compact_match in compact.matches {
+            let occurrences = compact_match
+                .occurrences
                 .into_iter()
                 .map(|occurrence| SeedOccurrence {
                     contig_id: occurrence.contig_id,
@@ -125,19 +145,19 @@ impl<R: RangeReader> TraceArchive for NativeJmaArchive<R> {
                     reverse: occurrence.reverse,
                 })
                 .collect::<Vec<_>>();
-            if !occurrences.is_empty() {
-                matches.push(SeedMatch {
-                    key_index,
-                    occurrences,
-                });
+            if occurrences.is_empty() {
+                continue;
+            }
+            for (key_index, query) in queries.iter().enumerate() {
+                if *query == compact_match.query {
+                    matches.push(SeedMatch {
+                        key_index,
+                        occurrences: occurrences.clone(),
+                    });
+                }
             }
         }
         let after = self.reader.archive_metrics();
-        let occurrence_count = matches.iter().try_fold(0u64, |count, seed_match| {
-            count.checked_add(u64::try_from(seed_match.occurrences.len()).ok()?)
-        });
-        let occurrence_count = occurrence_count
-            .ok_or_else(|| ArchiveError::Backend("seed occurrence count overflow".to_string()))?;
         Ok(SeedLookupResult {
             matches,
             metrics: super::SeedLookupMetrics {
@@ -145,9 +165,9 @@ impl<R: RangeReader> TraceArchive for NativeJmaArchive<R> {
                     .resource
                     .seed_buckets_read
                     .saturating_sub(before.resource.seed_buckets_read),
-                keys_tested: u64::try_from(keys.len()).unwrap_or(u64::MAX),
-                occurrences_before_limits: occurrence_count,
-                occurrences_after_limits: occurrence_count,
+                keys_tested: compact.metrics.keys_tested,
+                occurrences_before_limits,
+                occurrences_after_limits,
                 bytes_read: after.seed_bytes_read.saturating_sub(before.seed_bytes_read),
             },
         })

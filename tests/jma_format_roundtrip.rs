@@ -77,7 +77,7 @@ fn fixture() -> ArchiveParts {
                     records: vec![SeedRecord {
                         query: SeedQuery {
                             k: 21,
-                            hash: 0x1000,
+                            hash: jam_rs::jamhash_u64_v1(3),
                             canonical_kmer: 3,
                         },
                         occurrence: SeedOccurrence {
@@ -95,7 +95,7 @@ fn fixture() -> ArchiveParts {
                     records: vec![SeedRecord {
                         query: SeedQuery {
                             k: 22,
-                            hash: 0x2000,
+                            hash: jam_rs::jamhash_u64_v1(7),
                             canonical_kmer: 7,
                         },
                         occurrence: SeedOccurrence {
@@ -131,29 +131,25 @@ fn format_one_is_deterministic_and_self_contained() {
 
 #[test]
 fn seed_lookup_checks_exact_key_after_digest() {
-    let mut parts = fixture();
-    parts.seed_sections[0].levels[0].records.push(SeedRecord {
-        query: SeedQuery {
-            k: 21,
-            hash: 0x1000,
-            canonical_kmer: 4,
-        },
-        occurrence: SeedOccurrence {
-            contig_id: 0,
-            position: 7,
-            reverse: false,
-        },
-    });
-    let reader = JmaReader::open(MemoryResource::new(encode_archive(&parts).unwrap())).unwrap();
+    let reader = JmaReader::open(MemoryResource::new(encode_archive(&fixture()).unwrap())).unwrap();
     let matches = reader
         .seed_occurrences(SeedQuery {
             k: 21,
-            hash: 0x1000,
+            hash: jam_rs::jamhash_u64_v1(3),
             canonical_kmer: 3,
         })
         .unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].position, 2);
+    assert!(
+        reader
+            .seed_occurrences(SeedQuery {
+                k: 21,
+                hash: jam_rs::jamhash_u64_v1(3),
+                canonical_kmer: 4,
+            })
+            .is_err()
+    );
 }
 
 #[test]

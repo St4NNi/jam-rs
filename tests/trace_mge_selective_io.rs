@@ -1,5 +1,5 @@
+use jam_rs::archive::SeedSchemeDescriptor;
 use jam_rs::jma::builder::{ArchiveBuildConfig, write_archive_from_fasta};
-use jam_rs::jma::index::SeedIndexDirectory;
 use jam_rs::jma::reader::JmaReader;
 use jam_rs::resource::local::LocalResource;
 use jam_rs::resource::{ResourceMetrics, ResourceOpenOptions};
@@ -57,7 +57,7 @@ fn build_archive(
     block_bases: usize,
     k31_scale: u64,
     k21_scale: u64,
-) -> (Vec<u8>, SeedIndexDirectory) {
+) -> (Vec<u8>, Vec<SeedSchemeDescriptor>) {
     write_archive_from_fasta(
         assembly,
         archive,
@@ -75,7 +75,7 @@ fn build_archive(
             .expect("open local JMA resource"),
     )
     .expect("open embedded JMA index");
-    (archive_bytes, reader.seed_index().clone())
+    (archive_bytes, reader.seed_schemes().copied().collect())
 }
 
 fn runner(sensitivity: SensitivityConfig) -> TraceRunner {
@@ -135,7 +135,7 @@ fn local_catalog(archive: &Path, archive_bytes: &[u8], missing_root: &Path) -> T
 }
 
 fn expected_seed_bucket_reads(
-    index: &SeedIndexDirectory,
+    schemes: &[SeedSchemeDescriptor],
     query: &[u8],
     levels: &[SeedSensitivity],
 ) -> u64 {
@@ -152,13 +152,9 @@ fn expected_seed_bucket_reads(
                 seed.position,
             );
             if seen.insert(key)
-                && index.schemes.iter().any(|scheme| {
-                    scheme.descriptor.span == u16::from(level.k)
-                        && u64::from(scheme.descriptor.density_parameter) == level.scale
-                        && scheme.pages.iter().any(|page| {
-                            (seed.hash >> (64 - u32::from(scheme.descriptor.bucket_bits))) as u32
-                                == page.hash_prefix
-                        })
+                && schemes.iter().any(|scheme| {
+                    scheme.span == u16::from(level.k)
+                        && u64::from(scheme.density_parameter) == level.scale
                 })
             {
                 expected = expected.saturating_add(1);

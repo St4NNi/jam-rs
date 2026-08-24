@@ -2,7 +2,6 @@ use jam_rs::jma::builder::{ArchiveBuildConfig, write_archive_from_fasta};
 use jam_rs::jma::reader::JmaReader;
 use jam_rs::resource::ResourceOpenOptions;
 use jam_rs::resource::local::LocalResource;
-use jam_rs::trace::anchors::{SeedOccurrenceGroup, generate_anchors};
 use jam_rs::trace::config::SeedSensitivity;
 use jam_rs::trace::seeds::extract_seed_level;
 use std::fs;
@@ -56,15 +55,8 @@ fn unequal_packed_kmers_with_the_same_hash_cannot_become_anchors() {
         hash: seed.hash,
         canonical_kmer: seed.canonical_kmer ^ 1,
     };
-    let collision_occurrences = reader
+    let error = reader
         .seed_occurrences_at_scale(collision_query, 1)
-        .unwrap();
-    assert!(collision_occurrences.is_empty());
-
-    let group = SeedOccurrenceGroup {
-        seed,
-        k: 31,
-        occurrences: collision_occurrences,
-    };
-    assert!(generate_anchors(&[group], 4, 100).anchors.is_empty());
+        .unwrap_err();
+    assert!(error.to_string().contains("hash does not match"));
 }

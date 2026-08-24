@@ -13,6 +13,7 @@ pub mod header;
 pub mod index;
 pub mod reader;
 pub mod seed_builder;
+pub mod seeds;
 pub mod sequence;
 pub mod sequence_builder;
 pub mod writer;
@@ -24,7 +25,6 @@ pub type ContigId = u32;
 
 pub use crate::sequence::SequenceBlockRecord;
 pub use format::{ArchiveMetadataFields, SectionDescriptor};
-pub use index::SeedIndexDirectory;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SequenceRange {

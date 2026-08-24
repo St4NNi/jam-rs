@@ -6,10 +6,8 @@ use crate::jma::format::{
     SECTION_SEQUENCE_DIRECTORY, SECTION_SEQUENCE_PAYLOAD, SECTION_SKETCH, SUPERBLOCK_SIZE,
     SectionDescriptor, checksum_object, encode_header, encode_metadata, encode_section_directory,
 };
-use crate::jma::index::{
-    encode_seed_index, encode_shared_sequence_directory, rebase_shared_sequence_directory,
-    seed_directory_prefix_length,
-};
+use crate::jma::index::{encode_shared_sequence_directory, rebase_shared_sequence_directory};
+use crate::jma::seeds::{SeedBinding, SeedBuildConfig, encode_seed_collection};
 use crate::jma::{
     ArchiveHeader, ContigMetadata, JMA_FORMAT_VERSION, JmaError, JmaResult, SeedLevel,
     SeedOccurrence, SeedQuery,
@@ -17,6 +15,8 @@ use crate::jma::{
 use crate::sequence::EncodedSequenceBlock;
 use std::collections::BTreeSet;
 use std::io::Write;
+
+pub mod seed_compact;
 
 /// One exact seed occurrence retained by an in-memory archive build.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,7 +73,7 @@ pub fn encode_archive_with_min_entropy(
     metadata.min_entropy = min_entropy;
     let metadata_payload = encode_metadata(&metadata)?;
     let contig_payload = encode_contigs(&parts.contigs)?;
-    let seed_payload = encode_seed_index(&parts.seed_sections)?;
+    let seed_payload = encode_compact_seed_index(&parts.seed_sections, parts.source_sha256)?;
     let (sequence_directory_payload, sequence_payload) =
         encode_shared_sequence_directory(&parts.sequence_blocks, &parts.contigs)?;
     let sketch_payload = encode_sketch(&parts.seed_sections)?;
@@ -113,14 +113,7 @@ pub fn encode_archive_with_min_entropy(
     let mut descriptors = Vec::with_capacity(payloads.len());
     for (kind, payload) in &payloads {
         let length = u64::try_from(payload.len()).map_err(|_| JmaError::OffsetOverflow)?;
-        let section_checksum = if *kind == SECTION_SEEDS {
-            let prefix = seed_directory_prefix_length(payload)?;
-            crate::jma::format::checksum(payload.get(..prefix).ok_or_else(|| {
-                JmaError::CorruptSection("seed directory prefix is truncated".to_string())
-            })?)
-        } else {
-            crate::jma::format::checksum(payload)
-        };
+        let section_checksum = crate::jma::format::checksum(payload);
         descriptors.push(SectionDescriptor {
             kind: *kind,
             flags: SECTION_FLAG_REQUIRED,
@@ -221,6 +214,49 @@ fn encode_sketch(sections: &[SeedSection]) -> JmaResult<Vec<u8>> {
         bytes.extend_from_slice(&hash.to_le_bytes());
     }
     Ok(bytes)
+}
+
+fn encode_compact_seed_index(
+    sections: &[SeedSection],
+    source_sha256: [u8; 32],
+) -> JmaResult<Vec<u8>> {
+    let mut levels = sections
+        .iter()
+        .flat_map(|section| section.levels.iter().map(move |level| (section, level)))
+        .collect::<Vec<_>>();
+    levels.sort_by_key(|(section, level)| (section.k, level.level.scale));
+    let mut encoded = Vec::with_capacity(levels.len());
+    for (index, (section, level)) in levels.into_iter().enumerate() {
+        validate_seed_section(section)?;
+        let scheme_id = 0x4a4d_0000u32
+            .checked_add(u32::try_from(index).map_err(|_| JmaError::OffsetOverflow)?)
+            .ok_or(JmaError::OffsetOverflow)?;
+        let scale = u32::try_from(level.level.scale).map_err(|_| {
+            JmaError::CorruptSection("seed scale does not fit compact binding".to_string())
+        })?;
+        let scheme_checksum = compact_scheme_checksum(scheme_id, section.k, scale);
+        let binding = SeedBinding {
+            scheme_id,
+            k: section.k,
+            scale,
+            catalog_checksum: [0; 32],
+            archive_checksum: source_sha256,
+            scheme_checksum,
+        };
+        let blob =
+            seed_compact::encode_seed_level(section, level, binding, SeedBuildConfig::default())?;
+        encoded.push((binding, blob));
+    }
+    encode_seed_collection(&encoded)
+}
+
+pub(crate) fn compact_scheme_checksum(scheme_id: u32, k: u8, scale: u32) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(13);
+    bytes.extend_from_slice(&scheme_id.to_le_bytes());
+    bytes.push(k);
+    bytes.extend_from_slice(&scale.to_le_bytes());
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    crate::jma::format::checksum(&bytes)
 }
 
 fn validate_contig_table(contigs: &[ContigMetadata]) -> JmaResult<()> {

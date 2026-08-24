@@ -156,6 +156,15 @@ pub trait TraceArchive: Send + Sync {
         keys: &[SeedKey],
     ) -> ArchiveResult<SeedLookupResult>;
 
+    fn lookup_seeds_bounded(
+        &self,
+        scheme: SeedSchemeId,
+        keys: &[SeedKey],
+        _max_occurrences: Option<u32>,
+    ) -> ArchiveResult<SeedLookupResult> {
+        self.lookup_seeds(scheme, keys)
+    }
+
     fn read_sequences(&self, requests: &[SequenceRequest]) -> ArchiveResult<Vec<SequenceSlice>>;
 
     fn metrics(&self) -> ArchiveMetrics;

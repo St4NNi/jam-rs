@@ -11,6 +11,7 @@ pub mod intervals;
 pub mod model;
 pub mod mosaic;
 pub mod output;
+pub mod query_plan;
 pub mod raw;
 pub mod runner;
 pub mod screen;
