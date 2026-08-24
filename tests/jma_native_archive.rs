@@ -4,6 +4,7 @@ use jam_rs::resource::ResourceOpenOptions;
 use jam_rs::resource::local::LocalResource;
 use jam_rs::trace::config::SeedSensitivity;
 use jam_rs::trace::seeds::extract_seed_level;
+use std::collections::BTreeMap;
 use std::fs;
 
 fn dna(mut state: u64, length: usize) -> Vec<u8> {
@@ -62,7 +63,7 @@ fn native_archive_uses_mmap_and_batches_sequence_ranges() {
         .into_iter()
         .find(|scheme| scheme.span == 31 && scheme.density_parameter == 1)
         .unwrap();
-    let seed = extract_seed_level(
+    let seeds = extract_seed_level(
         &sequence,
         SeedSensitivity {
             k: 31,
@@ -71,19 +72,31 @@ fn native_archive_uses_mmap_and_batches_sequence_ranges() {
         },
     )
     .unwrap()
-    .seeds[0];
+    .seeds;
+    let mut by_prefix = BTreeMap::<u32, Vec<_>>::new();
+    for seed in seeds {
+        let prefix = jam_rs::jma::format::hash_prefix(seed.hash, scheme.bucket_bits).unwrap();
+        by_prefix.entry(prefix).or_default().push(seed);
+    }
+    let selected = by_prefix.values().find(|seeds| seeds.len() >= 2).unwrap();
+    let keys = selected[..2]
+        .iter()
+        .map(|seed| SeedKey {
+            digest: seed.hash,
+            verification: seed.canonical_kmer.to_be_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
     let lookup = native
-        .lookup_seeds(
-            jam_rs::archive::SeedSchemeId(scheme.scheme_id),
-            &[SeedKey {
-                digest: seed.hash,
-                verification: seed.canonical_kmer.to_be_bytes().to_vec(),
-            }],
-        )
+        .lookup_seeds(jam_rs::archive::SeedSchemeId(scheme.scheme_id), &keys)
         .unwrap();
-    assert_eq!(lookup.matches.len(), 1);
-    assert!(!lookup.matches[0].occurrences.is_empty());
-    assert!(lookup.metrics.pages_read > 0);
+    assert_eq!(lookup.matches.len(), 2);
+    assert!(
+        lookup
+            .matches
+            .iter()
+            .all(|seed_match| !seed_match.occurrences.is_empty())
+    );
+    assert_eq!(lookup.metrics.pages_read, 1);
 
     let requests = [
         SequenceRequest::new(0, 50, 150, false).unwrap(),

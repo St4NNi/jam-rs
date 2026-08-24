@@ -449,6 +449,7 @@ pub struct TraceMetagenomeResult {
     pub coverage: Option<CoverageSummary>,
     pub warnings: Vec<String>,
     pub failures: Vec<TraceFailure>,
+    pub archive_metrics: Option<crate::archive::ArchiveMetrics>,
     pub resource_metrics: ResourceMetrics,
 }
 

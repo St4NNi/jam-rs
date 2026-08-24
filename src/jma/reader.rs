@@ -22,6 +22,7 @@ use crate::resource::{ByteRange, RangeBytes, RangeReader, ResourceMetrics};
 use crate::sequence::{
     DEFAULT_MAX_DECODED_BLOCK_BYTES, SequenceBlockRecord, decode_block_range_bounded,
 };
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_SECTION_COUNT: u32 = 1 << 20;
@@ -42,6 +43,7 @@ pub struct JmaReader<R> {
 
 #[derive(Default)]
 struct ReaderMetrics {
+    metadata_bytes_read: AtomicU64,
     seed_pages_read: AtomicU64,
     sequence_blocks_read: AtomicU64,
     seed_bytes_read: AtomicU64,
@@ -75,6 +77,13 @@ impl SequenceBlockBytes<'_> {
 }
 
 impl ReaderMetrics {
+    fn with_metadata_bytes(bytes: u64) -> Self {
+        Self {
+            metadata_bytes_read: AtomicU64::new(bytes),
+            ..Self::default()
+        }
+    }
+
     fn add_seed_page(&self, bytes: usize) {
         self.seed_pages_read.fetch_add(1, Ordering::Relaxed);
         self.seed_bytes_read
@@ -115,9 +124,7 @@ impl ReaderMetrics {
             resource,
             mapped_bytes: resource.mapped_bytes,
             resident_bytes: resource.resident_bytes,
-            metadata_bytes_read: resource
-                .returned_bytes
-                .saturating_sub(seed_bytes_read.saturating_add(sequence_bytes_read)),
+            metadata_bytes_read: self.metadata_bytes_read.load(Ordering::Relaxed),
             seed_bytes_read,
             sequence_bytes_read,
             decoded_sequence_bases: self.decoded_sequence_bases.load(Ordering::Relaxed),
@@ -229,6 +236,19 @@ impl<R: RangeReader> JmaReader<R> {
             resource_metadata.size,
         )?;
         validate_sequence_coverage(&sequence_index, &contigs)?;
+        let metadata_bytes_read = [
+            header_bytes.as_ref().len(),
+            directory.as_ref().len(),
+            metadata_payload.as_ref().len(),
+            contig_payload.as_ref().len(),
+            seed_directory_prefix.as_ref().len(),
+            sequence_directory_payload.as_ref().len(),
+        ]
+        .into_iter()
+        .try_fold(0u64, |total, length| {
+            let length = u64::try_from(length).map_err(|_| JmaError::OffsetOverflow)?;
+            total.checked_add(length).ok_or(JmaError::OffsetOverflow)
+        })?;
 
         let mut header = parsed.archive;
         header.min_entropy = metadata_fields.min_entropy;
@@ -248,7 +268,7 @@ impl<R: RangeReader> JmaReader<R> {
             contigs,
             sequence_index,
             seed_index,
-            metrics: ReaderMetrics::default(),
+            metrics: ReaderMetrics::with_metadata_bytes(metadata_bytes_read),
         })
     }
 
@@ -313,6 +333,85 @@ impl<R: RangeReader> JmaReader<R> {
         self.lookup_scheme_query(scheme, query)
     }
 
+    /// Looks up exact keys in one scheme while reading every selected page at
+    /// most once. Results retain caller order, including duplicate keys.
+    pub fn seed_occurrences_for_scheme_batch(
+        &self,
+        scheme_id: crate::archive::SeedSchemeId,
+        queries: &[SeedQuery],
+    ) -> JmaResult<Vec<Vec<SeedOccurrence>>> {
+        let scheme = self
+            .seed_index
+            .schemes
+            .iter()
+            .find(|scheme| scheme.descriptor.scheme_id == scheme_id.0)
+            .ok_or_else(|| {
+                JmaError::CorruptSection(format!("seed scheme {} is unavailable", scheme_id.0))
+            })?;
+        let k = u8::try_from(scheme.descriptor.span).map_err(|_| JmaError::OffsetOverflow)?;
+        let mut page_queries = BTreeMap::<usize, Vec<usize>>::new();
+        for (query_index, query) in queries.iter().copied().enumerate() {
+            if query.k != k {
+                return Err(JmaError::CorruptSection(
+                    "seed query span does not match its scheme".to_string(),
+                ));
+            }
+            if query.hash == 0 {
+                continue;
+            }
+            let prefix =
+                crate::jma::format::hash_prefix(query.hash, scheme.descriptor.bucket_bits)?;
+            for (page_index, _page) in scheme.pages.iter().enumerate().filter(|(_, page)| {
+                page.hash_prefix == prefix
+                    && page.first_hash <= query.hash
+                    && page.last_hash >= query.hash
+            }) {
+                page_queries
+                    .entry(page_index)
+                    .or_default()
+                    .push(query_index);
+            }
+        }
+
+        let seed_descriptor = unique_section(&self.sections, SECTION_SEEDS)?;
+        let mut matches = vec![Vec::new(); queries.len()];
+        for (page_index, query_indices) in page_queries {
+            let page = scheme.pages.get(page_index).ok_or_else(|| {
+                JmaError::CorruptSection("selected seed page is unavailable".to_string())
+            })?;
+            let records = self.read_seed_page(seed_descriptor, scheme, page)?;
+            let mut indices_by_key = BTreeMap::<(u64, u64), Vec<usize>>::new();
+            for query_index in query_indices {
+                let query = queries[query_index];
+                indices_by_key
+                    .entry((query.hash, query.canonical_kmer))
+                    .or_default()
+                    .push(query_index);
+            }
+            for record in records {
+                let Some(query_indices) =
+                    indices_by_key.get(&(record.query.hash, record.query.canonical_kmer))
+                else {
+                    continue;
+                };
+                self.validate_seed_occurrence(record.occurrence, k)?;
+                for &query_index in query_indices {
+                    matches[query_index].push(record.occurrence);
+                }
+            }
+        }
+        for occurrences in &mut matches {
+            occurrences.sort_by_key(|occurrence| {
+                (
+                    occurrence.contig_id,
+                    occurrence.position,
+                    occurrence.reverse,
+                )
+            });
+        }
+        Ok(matches)
+    }
+
     /// Looks up a seed at a density level. Page and occurrence ranges are
     /// read only after selecting by hash prefix; canonical k-mer equality is
     /// checked after the digest match.
@@ -369,85 +468,12 @@ impl<R: RangeReader> JmaReader<R> {
                 && page.first_hash <= query.hash
                 && page.last_hash >= query.hash
         }) {
-            let key_offset = seed_descriptor
-                .offset
-                .checked_add(page.key_offset)
-                .ok_or(JmaError::OffsetOverflow)?;
-            let occurrence_offset = seed_descriptor
-                .offset
-                .checked_add(page.occurrence_offset)
-                .ok_or(JmaError::OffsetOverflow)?;
-            let range_start = key_offset.min(occurrence_offset);
-            let range_end = checked_end(key_offset, page.key_length)?
-                .max(checked_end(occurrence_offset, page.occurrence_length)?);
-            let combined = self.read_indexed_range(
-                range_start,
-                range_end
-                    .checked_sub(range_start)
-                    .ok_or(JmaError::OffsetOverflow)?,
-            )?;
-            let combined = combined.as_ref();
-            let key_start = usize::try_from(
-                key_offset
-                    .checked_sub(range_start)
-                    .ok_or(JmaError::OffsetOverflow)?,
-            )
-            .map_err(|_| JmaError::OffsetOverflow)?;
-            let key_end = key_start
-                .checked_add(
-                    usize::try_from(page.key_length).map_err(|_| JmaError::OffsetOverflow)?,
-                )
-                .ok_or(JmaError::OffsetOverflow)?;
-            let occurrence_start = usize::try_from(
-                occurrence_offset
-                    .checked_sub(range_start)
-                    .ok_or(JmaError::OffsetOverflow)?,
-            )
-            .map_err(|_| JmaError::OffsetOverflow)?;
-            let occurrence_end = occurrence_start
-                .checked_add(
-                    usize::try_from(page.occurrence_length)
-                        .map_err(|_| JmaError::OffsetOverflow)?,
-                )
-                .ok_or(JmaError::OffsetOverflow)?;
-            let key_bytes = combined.get(key_start..key_end).ok_or_else(|| {
-                JmaError::CorruptSection("coalesced seed key range is truncated".to_string())
-            })?;
-            let occurrence_bytes =
-                combined
-                    .get(occurrence_start..occurrence_end)
-                    .ok_or_else(|| {
-                        JmaError::CorruptSection(
-                            "coalesced seed occurrence range is truncated".to_string(),
-                        )
-                    })?;
-            let records = decode_seed_page(
-                key_bytes,
-                occurrence_bytes,
-                page,
-                u8::try_from(scheme.descriptor.span).map_err(|_| JmaError::OffsetOverflow)?,
-            )?;
-            self.metrics
-                .add_seed_page(key_bytes.len().saturating_add(occurrence_bytes.len()));
+            let records = self.read_seed_page(seed_descriptor, scheme, page)?;
             for record in records.into_iter().filter(|record| {
                 record.query.hash == query.hash
                     && record.query.canonical_kmer == query.canonical_kmer
             }) {
-                let contig = self
-                    .contigs
-                    .iter()
-                    .find(|contig| contig.id == record.occurrence.contig_id)
-                    .ok_or(JmaError::UnknownContig(record.occurrence.contig_id))?;
-                let end = record
-                    .occurrence
-                    .position
-                    .checked_add(u64::from(query.k))
-                    .ok_or(JmaError::OffsetOverflow)?;
-                if end > contig.length {
-                    return Err(JmaError::CorruptSection(
-                        "seed occurrence exceeds contig length".to_string(),
-                    ));
-                }
+                self.validate_seed_occurrence(record.occurrence, query.k)?;
                 matches.push(record.occurrence);
             }
         }
@@ -459,6 +485,87 @@ impl<R: RangeReader> JmaReader<R> {
             )
         });
         Ok(matches)
+    }
+
+    fn read_seed_page(
+        &self,
+        seed_descriptor: &SectionDescriptor,
+        scheme: &SeedSchemeIndex,
+        page: &crate::jma::index::SeedPageIndex,
+    ) -> JmaResult<Vec<crate::jma::writer::SeedRecord>> {
+        let key_offset = seed_descriptor
+            .offset
+            .checked_add(page.key_offset)
+            .ok_or(JmaError::OffsetOverflow)?;
+        let occurrence_offset = seed_descriptor
+            .offset
+            .checked_add(page.occurrence_offset)
+            .ok_or(JmaError::OffsetOverflow)?;
+        let range_start = key_offset.min(occurrence_offset);
+        let range_end = checked_end(key_offset, page.key_length)?
+            .max(checked_end(occurrence_offset, page.occurrence_length)?);
+        let combined = self.read_indexed_range(
+            range_start,
+            range_end
+                .checked_sub(range_start)
+                .ok_or(JmaError::OffsetOverflow)?,
+        )?;
+        let combined = combined.as_ref();
+        let key_start = usize::try_from(
+            key_offset
+                .checked_sub(range_start)
+                .ok_or(JmaError::OffsetOverflow)?,
+        )
+        .map_err(|_| JmaError::OffsetOverflow)?;
+        let key_end = key_start
+            .checked_add(usize::try_from(page.key_length).map_err(|_| JmaError::OffsetOverflow)?)
+            .ok_or(JmaError::OffsetOverflow)?;
+        let occurrence_start = usize::try_from(
+            occurrence_offset
+                .checked_sub(range_start)
+                .ok_or(JmaError::OffsetOverflow)?,
+        )
+        .map_err(|_| JmaError::OffsetOverflow)?;
+        let occurrence_end = occurrence_start
+            .checked_add(
+                usize::try_from(page.occurrence_length).map_err(|_| JmaError::OffsetOverflow)?,
+            )
+            .ok_or(JmaError::OffsetOverflow)?;
+        let key_bytes = combined.get(key_start..key_end).ok_or_else(|| {
+            JmaError::CorruptSection("coalesced seed key range is truncated".to_string())
+        })?;
+        let occurrence_bytes = combined
+            .get(occurrence_start..occurrence_end)
+            .ok_or_else(|| {
+                JmaError::CorruptSection("coalesced seed occurrence range is truncated".to_string())
+            })?;
+        let records = decode_seed_page(
+            key_bytes,
+            occurrence_bytes,
+            page,
+            u8::try_from(scheme.descriptor.span).map_err(|_| JmaError::OffsetOverflow)?,
+        )?;
+        self.metrics
+            .add_seed_page(key_bytes.len().saturating_add(occurrence_bytes.len()));
+        Ok(records)
+    }
+
+    fn validate_seed_occurrence(&self, occurrence: SeedOccurrence, k: u8) -> JmaResult<()> {
+        let contig = self
+            .contigs
+            .iter()
+            .find(|contig| contig.id == occurrence.contig_id)
+            .ok_or(JmaError::UnknownContig(occurrence.contig_id))?;
+        let end = occurrence
+            .position
+            .checked_add(u64::from(k))
+            .ok_or(JmaError::OffsetOverflow)?;
+        if end > contig.length {
+            return Err(JmaError::CorruptSection(
+                "seed occurrence exceeds contig length".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn read_sequence_block_parts<'a>(

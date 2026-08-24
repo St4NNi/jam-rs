@@ -434,6 +434,7 @@ mod tests {
             coverage: None,
             warnings: Vec::new(),
             failures: Vec::new(),
+            archive_metrics: None,
             resource_metrics: ResourceMetrics::default(),
         }
     }

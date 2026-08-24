@@ -151,7 +151,7 @@ measure_command \
     --output "$WORK/indexes/metagenomes.jam" --kmer-size 31 --fscale 200
 
 measure_command \
-    jma_index catalog_index jma-archive none none "$THREADS" "" "" \
+    jma_archive catalog_index jma-archive none none "$THREADS" "" "" \
     "$PYTHON" "$ROOT/evaluation/trace/build_archives.py" --jam "$JAM" \
     --assemblies-dir "$WORK/dataset/assemblies" --output-dir "$WORK/indexes/jma" \
     --primary-scale 100 --rescue-scale 100 --threads "$THREADS" --memory-target 4

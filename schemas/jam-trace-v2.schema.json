@@ -124,6 +124,12 @@
           "items": {"$ref": "#/$defs/failure"}
         },
         "warnings": {"type": "array", "items": {"type": "string"}},
+        "archive_metrics": {
+          "anyOf": [
+            {"$ref": "#/$defs/archive_metrics"},
+            {"type": "null"}
+          ]
+        },
         "resource_metrics": {"$ref": "#/$defs/resource_metrics"}
       },
       "required": [
@@ -150,6 +156,7 @@
         "coverage",
         "warnings",
         "failures",
+        "archive_metrics",
         "resource_metrics"
       ]
     },
@@ -725,6 +732,21 @@
         "message": {"type": "string"},
         "resource": {"type": ["string", "null"]},
         "retryable": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "archive_metrics": {
+      "type": "object",
+      "required": ["resource", "mapped_bytes", "resident_bytes", "metadata_bytes_read", "seed_bytes_read", "sequence_bytes_read", "decoded_sequence_bases", "coalesced_range_requests"],
+      "properties": {
+        "resource": {"$ref": "#/$defs/resource_metrics"},
+        "mapped_bytes": {"type": "integer", "minimum": 0},
+        "resident_bytes": {"type": "integer", "minimum": 0},
+        "metadata_bytes_read": {"type": "integer", "minimum": 0},
+        "seed_bytes_read": {"type": "integer", "minimum": 0},
+        "sequence_bytes_read": {"type": "integer", "minimum": 0},
+        "decoded_sequence_bases": {"type": "integer", "minimum": 0},
+        "coalesced_range_requests": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": false
     },

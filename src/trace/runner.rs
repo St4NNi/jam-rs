@@ -1288,6 +1288,7 @@ fn process_jma(
         coverage: Some(finalized.coverage),
         warnings,
         failures: Vec::new(),
+        archive_metrics: Some(archive.metrics()),
         resource_metrics: archive.metrics().resource,
     };
     Ok(ProcessedJma { result })
@@ -2304,6 +2305,7 @@ fn failed_result_with_metrics(
             resource: resource.map(redact_resource),
             retryable,
         }],
+        archive_metrics: None,
         resource_metrics,
     }
 }

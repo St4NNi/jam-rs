@@ -8,8 +8,8 @@ with each requested cache block size.  Every output directory must be new;
 the script never deletes or overwrites a previous study.
 
 The manifest format is shared with ``memory_matrix.py`` and additionally
-accepts an ``assemblies`` list.  Each assembly entry has ``id`` and ``path``
-fields.  If it is omitted, local ``raw`` paths in the catalog are used.
+requires an ``assemblies`` list. Each entry has ``id`` and ``path`` fields;
+raw assembly paths are not part of the production trace catalog.
 """
 
 from __future__ import annotations
@@ -90,7 +90,7 @@ SUMMARY_FIELDS = (
 )
 
 
-def _assembly_entries(manifest: dict[str, Any], base: Path, catalog: Path) -> list[dict[str, Any]]:
+def _assembly_entries(manifest: dict[str, Any], base: Path) -> list[dict[str, Any]]:
     entries = manifest.get("assemblies")
     if isinstance(entries, list) and entries:
         result: list[dict[str, Any]] = []
@@ -107,31 +107,7 @@ def _assembly_entries(manifest: dict[str, Any], base: Path, catalog: Path) -> li
             result.append({"id": assembly_id, "path": path})
         return result
 
-    result = []
-    try:
-        import csv
-
-        with catalog.open(encoding="utf-8", newline="") as handle:
-            for index, row in enumerate(csv.DictReader(handle, delimiter="\t")):
-                value = row.get("raw") or row.get("assembly")
-                if not value or "://" in value:
-                    continue
-                path = Path(value)
-                if not path.is_absolute():
-                    path = (catalog.parent / path).resolve()
-                if not path.is_file():
-                    raise SystemExit(f"catalog raw resource is not a file: {path}")
-                result.append(
-                    {
-                        "id": row.get("metagenome_id") or row.get("id") or f"assembly-{index + 1}",
-                        "path": path,
-                    }
-                )
-    except (OSError, csv.Error) as error:
-        raise SystemExit(f"cannot read local assembly paths from {catalog}: {error}") from error
-    if not result:
-        raise SystemExit("manifest requires assemblies or a catalog with local raw paths")
-    return result
+    raise SystemExit("block-size study manifest requires a non-empty assemblies list")
 
 
 def _run_measure(
@@ -178,11 +154,9 @@ def _run_measure(
 
 def _write_catalog(path: Path, archives: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
-        handle.write("metagenome_id\tjma\tjma_index\traw\n")
+        handle.write("metagenome_id\tresource_uri\tsha256\n")
         for entry in archives:
-            handle.write(
-                f"{entry['id']}\t{entry['jma']}\t{entry['jma_index']}\t{entry['raw']}\n"
-            )
+            handle.write(f"{entry['id']}\t{entry['jma']}\t{entry['sha256']}\n")
 
 
 def _write_tsv(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -213,7 +187,7 @@ def run_study(args: argparse.Namespace) -> int:
     manifest = load_manifest(manifest_path)
     base = manifest_path.parent
     database, source_catalog = _manifest_resources(manifest, base)
-    assemblies = _assembly_entries(manifest, base, source_catalog)
+    assemblies = _assembly_entries(manifest, base)
     queries = _query_entries(manifest, base)
     output = args.output_dir.resolve()
     if output.exists():
@@ -268,7 +242,6 @@ def run_study(args: argparse.Namespace) -> int:
         build_measurements: list[dict[str, Any]] = []
         for assembly in assemblies:
             archive_path = archive_dir / f"{assembly['id']}.jma"
-            index_path = Path(f"{archive_path}.idx.json")
             build_dir = raw_dir / f"archive_b{archive_block}" / f"build__{assembly['id']}"
             command = [
                 str(jam),
@@ -298,13 +271,12 @@ def run_study(args: argparse.Namespace) -> int:
             build_measurements.append(measurement)
             failed += int(measurement.get("exit_code") != 0)
             if measurement.get("exit_code") == 0:
-                if archive_path.is_file() and index_path.is_file():
+                if archive_path.is_file():
                     built.append(
                         {
                             "id": assembly["id"],
                             "jma": archive_path.resolve(),
-                            "jma_index": index_path.resolve(),
-                            "raw": assembly["path"].resolve(),
+                            "sha256": sha256(archive_path),
                         }
                     )
                 else:
@@ -342,15 +314,15 @@ def run_study(args: argparse.Namespace) -> int:
                     str(args.memory_target),
                     "--silent",
                     "trace",
-                    "--plasmid",
+                    "--query",
                     str(query["path"]),
                     "--database",
                     str(database),
-                    "--catalog",
+                    "--metagenomes",
                     str(catalog),
                     "--output",
                     str(trace_output),
-                    "--plasmid-id",
+                    "--query-id",
                     str(query["id"]),
                     "--sensitivity",
                     args.profile,

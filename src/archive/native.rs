@@ -82,8 +82,8 @@ impl<R: RangeReader> TraceArchive for NativeJmaArchive<R> {
             )));
         }
         let before = self.reader.archive_metrics();
-        let mut matches = Vec::new();
-        for (key_index, key) in keys.iter().enumerate() {
+        let mut queries = Vec::with_capacity(keys.len());
+        for key in keys {
             if key.verification.len() != expected_width {
                 return Err(ArchiveError::CorruptMetadata(format!(
                     "seed verification width {} does not match k={k}",
@@ -104,17 +104,19 @@ impl<R: RangeReader> TraceArchive for NativeJmaArchive<R> {
                     "seed verification contains non-zero padding bits".to_string(),
                 ));
             }
-            let occurrences = self
-                .reader
-                .seed_occurrences_for_scheme(
-                    scheme,
-                    SeedQuery {
-                        k,
-                        hash: key.digest,
-                        canonical_kmer,
-                    },
-                )
-                .map_err(backend_error)?
+            queries.push(SeedQuery {
+                k,
+                hash: key.digest,
+                canonical_kmer,
+            });
+        }
+        let occurrences = self
+            .reader
+            .seed_occurrences_for_scheme_batch(scheme, &queries)
+            .map_err(backend_error)?;
+        let mut matches = Vec::new();
+        for (key_index, occurrences) in occurrences.into_iter().enumerate() {
+            let occurrences = occurrences
                 .into_iter()
                 .map(|occurrence| SeedOccurrence {
                     contig_id: occurrence.contig_id,

@@ -46,6 +46,14 @@ class Metrics:
             return dict(self.values)
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "jam-trace-range-fixture/1.0"
 
@@ -86,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         size = path.stat().st_size
-        etag = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        etag = self.server.etags[path.resolve()]  # type: ignore[attr-defined]
         range_header = self.headers.get("Range")
         start, end = 0, size
         partial = False
@@ -154,6 +162,11 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.root = args.root.resolve()  # type: ignore[attr-defined]
     server.metrics = metrics  # type: ignore[attr-defined]
+    server.etags = {  # type: ignore[attr-defined]
+        path.resolve(): sha256_file(path)[:16]
+        for path in server.root.iterdir()  # type: ignore[attr-defined]
+        if path.is_file()
+    }
 
     def stop(_signum: int, _frame: object) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()
