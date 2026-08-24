@@ -46,6 +46,16 @@ def load_trace(path: Path) -> dict[str, dict]:
     return results
 
 
+def expected_contigs(truth_class: str) -> list[str]:
+    return {
+        "edited_fragment": ["trace"],
+        "origin_crossing": ["trace"],
+        "separate_fragments": ["trace_a", "trace_b", "trace_c"],
+        "overlap": ["trace_a", "trace_b"],
+        "rare_standalone": ["rare_trace"],
+    }.get(truth_class, [])
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--trace", type=Path, required=True)
@@ -70,6 +80,10 @@ def main() -> int:
         )
         truth_bases = sum(end - start for start, end in expected)
         recovered = overlap(expected, observed)
+        expected_ids = expected_contigs(row["truth_class"])
+        aligned_ids = {
+            alignment["contig_id"] for alignment in (result or {}).get("alignments", [])
+        }
         scored.append(
             {
                 **row,
@@ -78,6 +92,8 @@ def main() -> int:
                 "truth_bases": truth_bases,
                 "recovered_bases": recovered,
                 "truth_base_recall": recovered / truth_bases if truth_bases else None,
+                "expected_contigs": len(expected_ids),
+                "recovered_contigs": len(set(expected_ids) & aligned_ids),
                 "supporting_contigs": len(
                     ((result or {}).get("primary_fragment_mosaic") or {}).get(
                         "supporting_contigs", []
@@ -122,6 +138,8 @@ def main() -> int:
     }
     total_truth = sum(row["truth_bases"] for row in positive_scored)
     total_recovered = sum(row["recovered_bases"] for row in positive_scored)
+    total_contigs = sum(row["expected_contigs"] for row in positive_scored)
+    recovered_contigs = sum(row["recovered_contigs"] for row in positive_scored)
     output = {
         "schema_version": "1.0.0",
         "positive_cases": len(positive),
@@ -129,6 +147,7 @@ def main() -> int:
         "aligned_cases": sum(row["aligned"] for row in positive_scored),
         "candidate_recall": sum(row["candidate"] for row in positive_scored) / len(positive),
         "alignment_recall": sum(row["aligned"] for row in positive_scored) / len(positive),
+        "contig_recall": recovered_contigs / total_contigs,
         "truth_base_recall": total_recovered / total_truth,
         "exact_160_standalone": {
             "candidate": exact_160["candidate"],
