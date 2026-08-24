@@ -1,7 +1,10 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::Write;
-use std::{fs::remove_file, path::PathBuf};
+use std::{
+    fs::remove_file,
+    path::{Path, PathBuf},
+};
 
 use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
 use crate::format::VERSION;
@@ -1243,6 +1246,103 @@ pub fn handle_router_build_command(
         );
     }
     Ok(())
+}
+
+pub struct IndexBuildArgs {
+    pub metagenomes: PathBuf,
+    pub output: PathBuf,
+    pub policy: crate::jam_index::ScreenSelectionPolicy,
+    pub max_part_bases: u64,
+    pub max_part_signatures: u64,
+    pub parallel_parts: usize,
+    pub force: bool,
+    pub silent: bool,
+}
+
+pub fn handle_index_build(args: IndexBuildArgs) -> Result<()> {
+    if args.force {
+        return Err(anyhow::anyhow!(
+            "--force is not supported for append-only Jam Index construction"
+        ));
+    }
+    let sources = index_sources(&args.metagenomes)?;
+    let stats = crate::jam_index::build_jam_index(
+        &args.output,
+        &sources,
+        &crate::jam_index::JamIndexBuildConfig {
+            selection_policy: args.policy,
+            max_part_bases: args.max_part_bases,
+            max_part_signatures: args.max_part_signatures,
+            parallel_parts: args.parallel_parts,
+            source_manifest_sha256: provenance::sha256_file(&args.metagenomes)?,
+        },
+    )?;
+    print_index(&args.output, stats, args.silent);
+    Ok(())
+}
+
+pub fn handle_index_append(args: IndexBuildArgs) -> Result<()> {
+    if args.force {
+        return Err(anyhow::anyhow!(
+            "--force is not supported for append-only Jam Index construction"
+        ));
+    }
+    let sources = index_sources(&args.metagenomes)?;
+    let stats = crate::jam_index::append_jam_index(
+        &args.output,
+        &sources,
+        &crate::jam_index::JamIndexBuildConfig {
+            selection_policy: args.policy,
+            max_part_bases: args.max_part_bases,
+            max_part_signatures: args.max_part_signatures,
+            parallel_parts: args.parallel_parts,
+            source_manifest_sha256: provenance::sha256_file(&args.metagenomes)?,
+        },
+    )?;
+    print_index(&args.output, stats, args.silent);
+    Ok(())
+}
+
+fn index_sources(path: &Path) -> Result<Vec<crate::jam_index::MetagenomeSource>> {
+    let catalog = crate::trace::catalog::TraceCatalog::from_path(path)?;
+    catalog
+        .entries()
+        .iter()
+        .map(|entry| {
+            let locator = crate::resource::ResourceLocator::parse(entry.resource())?;
+            if locator.scheme() != crate::resource::ResourceScheme::Local {
+                return Err(anyhow::anyhow!(
+                    "Jam Index sources must be local files: {}",
+                    locator.redacted()
+                ));
+            }
+            let sequence_path = PathBuf::from(entry.resource());
+            let observed = provenance::sha256_file(&sequence_path)?;
+            if observed != entry.sha256 {
+                return Err(anyhow::anyhow!(
+                    "source checksum mismatch for {}",
+                    entry.metagenome_id
+                ));
+            }
+            Ok(crate::jam_index::MetagenomeSource {
+                metagenome_id: entry.metagenome_id.clone(),
+                sequence_path,
+            })
+        })
+        .collect()
+}
+
+fn print_index(output: &Path, stats: crate::jam_index::JamIndexBuildStats, silent: bool) {
+    if !silent {
+        eprintln!(
+            "Jam Index {}: {} new part(s), {} total metagenomes, {} total contigs, {} total bases",
+            output.display(),
+            stats.new_parts,
+            stats.total_metagenomes,
+            stats.total_contigs,
+            stats.total_bases
+        );
+    }
 }
 
 fn parse_sha256(value: &str) -> Result<[u8; 32]> {

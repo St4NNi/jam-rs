@@ -118,6 +118,59 @@ pub enum RouterCommands {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum IndexPolicyArg {
+    #[default]
+    Standard,
+    Small,
+}
+
+#[derive(Debug, Subcommand, Clone)]
+pub enum IndexCommands {
+    /// Build a new local Jam Index
+    Build {
+        /// TSV or JSON catalog mapping metagenome IDs to local sequence files
+        #[arg(long)]
+        metagenomes: PathBuf,
+        /// New Jam Index directory
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Contig-signature policy
+        #[arg(long, value_enum, default_value = "standard")]
+        policy: IndexPolicyArg,
+        /// Maximum total bases assigned to one part
+        #[arg(long, default_value = "1000000000")]
+        max_part_bases: u64,
+        /// Maximum estimated signatures assigned to one part
+        #[arg(long, default_value = "1000000")]
+        max_part_signatures: u64,
+        /// Parts built concurrently
+        #[arg(long)]
+        parallel_parts: Option<usize>,
+    },
+    /// Append new metagenomes as new immutable parts
+    Append {
+        /// TSV or JSON catalog mapping new metagenome IDs to local sequence files
+        #[arg(long)]
+        metagenomes: PathBuf,
+        /// Existing Jam Index directory
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Contig-signature policy; must match the existing manifest
+        #[arg(long, value_enum, default_value = "standard")]
+        policy: IndexPolicyArg,
+        /// Maximum total bases assigned to one new part
+        #[arg(long, default_value = "1000000000")]
+        max_part_bases: u64,
+        /// Maximum estimated signatures assigned to one new part
+        #[arg(long, default_value = "1000000")]
+        max_part_signatures: u64,
+        /// New parts built concurrently
+        #[arg(long)]
+        parallel_parts: Option<usize>,
+    },
+}
+
 #[derive(Debug, Subcommand, Clone)]
 pub enum Commands {
     /// Sketch one or more files and write the result to an output file
@@ -238,6 +291,12 @@ pub enum Commands {
     Router {
         #[command(subcommand)]
         command: RouterCommands,
+    },
+
+    /// Build or append a local Jam Index
+    Index {
+        #[command(subcommand)]
+        command: IndexCommands,
     },
 
     /// Trace one query sequence element across candidate metagenomic assemblies

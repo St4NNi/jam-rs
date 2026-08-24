@@ -17,9 +17,9 @@ pub mod sketch;
 pub mod trace;
 pub mod writer;
 pub use cli::handlers::{
-    handle_archive_command, handle_bias_create_command, handle_bias_stats_command,
-    handle_distance_command, handle_router_build_command, handle_screen_command,
-    handle_sketch_command, handle_stats_command, handle_trace_command,
+    IndexBuildArgs, handle_archive_command, handle_bias_create_command, handle_bias_stats_command,
+    handle_distance_command, handle_index_append, handle_index_build, handle_router_build_command,
+    handle_screen_command, handle_sketch_command, handle_stats_command, handle_trace_command,
 };
 pub use io::{expand_input_paths, is_sequence_file};
 pub use jamhash::jamhash_u64;
@@ -29,7 +29,8 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
-    QueryKindArg, RouterCommands, RouterHandoffArg, TopologyArg, TraceSensitivityArg,
+    IndexCommands, IndexPolicyArg, QueryKindArg, RouterCommands, RouterHandoffArg, TopologyArg,
+    TraceSensitivityArg,
 };
 
 pub fn run() -> Result<()> {
@@ -178,6 +179,53 @@ pub fn run() -> Result<()> {
                 cli.silent,
             ),
         },
+
+        Commands::Index { command } => {
+            let policy = |policy| match policy {
+                IndexPolicyArg::Standard => {
+                    crate::jam_index::ScreenSelectionPolicy::default_signatures()
+                }
+                IndexPolicyArg::Small => {
+                    crate::jam_index::ScreenSelectionPolicy::smaller_signatures()
+                }
+            };
+            match command {
+                IndexCommands::Build {
+                    metagenomes,
+                    output,
+                    policy: selected,
+                    max_part_bases,
+                    max_part_signatures,
+                    parallel_parts,
+                } => handle_index_build(IndexBuildArgs {
+                    metagenomes,
+                    output,
+                    policy: policy(selected),
+                    max_part_bases,
+                    max_part_signatures,
+                    parallel_parts: parallel_parts.unwrap_or(threads),
+                    force: cli.force,
+                    silent: cli.silent,
+                }),
+                IndexCommands::Append {
+                    metagenomes,
+                    output,
+                    policy: selected,
+                    max_part_bases,
+                    max_part_signatures,
+                    parallel_parts,
+                } => handle_index_append(IndexBuildArgs {
+                    metagenomes,
+                    output,
+                    policy: policy(selected),
+                    max_part_bases,
+                    max_part_signatures,
+                    parallel_parts: parallel_parts.unwrap_or(threads),
+                    force: cli.force,
+                    silent: cli.silent,
+                }),
+            }
+        }
 
         Commands::Trace {
             query,
