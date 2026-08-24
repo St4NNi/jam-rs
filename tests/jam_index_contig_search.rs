@@ -138,7 +138,7 @@ fn weaker_contigs_are_retained_only_as_a_bounded_expansion_suffix() {
 }
 
 #[test]
-fn aligned_postings_prevent_fallback() {
+fn aligned_postings_skip_fallback() {
     let (_source, output, query) = fixture();
     let root = output.path().join("index");
     let prepared =
