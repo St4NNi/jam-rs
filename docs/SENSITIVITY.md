@@ -15,43 +15,52 @@ uses 16 to 256 hashes per contig at one requested hash per 1,024 bases, a
 always use this policy.
 
 For a selected Jam Index candidate, positional hashes are generated from the
-complete selected contigs at scale 1. `fast` uses dense k=31 only; `balanced`
-and `sensitive` can use dense k=31 plus k=21 rescue. The profile still controls
-occurrence caps, chain requirements, window limits, scoring, and rescue work.
-No seed below k=21 is used.
+complete selected contigs at scale 1 after those contigs are read from the
+external assembly. `fast` uses dense k=31 only; `balanced` and `sensitive` can
+use dense k=31 plus k=21 rescue. The profile still controls occurrence caps,
+chain requirements, window limits, scoring, and rescue work. No seed below
+k=21 is used.
 
-The selected policy and a measured smaller-signature component removal were
-compared on the same 605,224,880-base, 43,080-contig collection:
+The selected 20-part Jam Index and the measured embedded-sequence baseline used
+the same 605,224,880-base, 43,080-contig collection and screening policy:
 
-| Measurement | Selected policy | Smaller signatures |
+| Measurement | Embedded baseline | Jam Index |
 | --- | ---: | ---: |
-| Total index bytes | 183,144,518 | 168,608,829 |
-| Index bytes/source base | 0.302606 | 0.278589 |
-| `screen.jam` bytes | 13,409,898 | 7,429,738 |
-| Contig-signature bytes | 11,528,960 | 2,973,440 |
-| Packed-sequence bytes | 151,321,656 | 151,321,656 |
+| Parts | 7 | 20 |
+| Total index bytes | 183,144,518 | 40,729,419 |
+| Index bytes/source base | 0.302606 | 0.067296 |
+| `screen.jam` bytes | 13,409,898 | 21,220,970 |
+| Contig signature/posting bytes | 11,528,960 | 12,760,826 |
+| Packed-sequence bytes | 151,321,656 | 0 |
 | 40-case candidate recovery | 40/40 | 40/40 |
+| 40-case contig recall | 1.0 | 1.0 |
 | 40-case base precision | 1.0 | 1.0 |
-| 40-case base recall | 0.981834375 | 0.9510875 |
+| 40-case base recall | 0.981834375 | 0.981834375 |
 | 40-case interval recall | 1.0 | 1.0 |
-| Anonymous short-case candidate recall | 0.96875 | 0.90625 |
+| Selected contigs | 280 | 280 |
+| Selected contig bases | 358,400 | 358,400 |
 
-The smaller signatures do not meet the selected base-recall gate and are not
-exposed as a build policy.
+The selected index is 77.8% smaller. Six alternating process-cold four-thread
+runs measured 4.516 s wall and 362,592 KiB peak-RSS medians for the embedded
+baseline, versus 4.650 s and 360,908 KiB for Jam Index. The wall distributions
+overlap; the selected median is 3.0% slower and its median RSS is 0.5% lower.
+Stage-isolated Jam Index peaks were 26,264 KiB for a no-candidate screen and
+162,188 KiB for one alignment worker.
 
-On three paired process-cold four-thread runs, the selected Jam Index had a
-4.364 s wall median and 313,300 KiB peak-RSS median. Stage-isolated process
-peaks were 25,892 KiB for a no-candidate screen and 162,688 KiB for the
-one-worker alignment condition. The selected run read 280 complete contigs
-totalling 358,400 bases for 40 candidates.
+The 20-, 24-, and 30-part layouts occupied 40,729,419, 44,968,711, and
+51,327,697 bytes. Their individual four-thread query measurements were 4.265,
+4.309, and 4.169 seconds; all produced the same biological output. Twenty
+parts are selected because they minimize persistent bytes. Indexed FASTA read
+362,712 source bytes. Candidate-only normal-gzip streaming read 210,645,647
+bytes and took 5.644 seconds, with identical output.
 
 The anonymous edited-fragment matrix covered 80, 100, 160, 250, 500, and
 1,000 bases at target identities 100%, 99%, 97%, 95%, and 90% on both strands.
-The selected policy recovered 62/64 positive candidates and 99.2703% of truth
-bases. Both missed cases were 80 bases at 90% identity: the edited fragments
-contained no retained exact k=21 witness. The exact standalone 160-base case,
-origin crossing, separate fragments, overlap, and rare-fragment controls were
-fully recovered.
+The selected policy recovered 62/64 positive candidates, 97.0149% of expected
+contigs, and 99.2703% of truth bases. Both missed cases were 80 bases at 90%
+identity: the edited fragments contained no retained exact k=21 witness. The
+exact standalone 160-base case, origin crossing, separate fragments, overlap,
+and rare-fragment controls were fully recovered.
 
 These measurements describe the versioned local fixtures, not a calibrated
 probability of recovery. A short edited trace can contain zero exact k=21
