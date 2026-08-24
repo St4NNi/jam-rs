@@ -61,7 +61,7 @@ fn default_and_smaller_policies_are_explicit_and_length_dependent() {
     let smaller = ScreenSelectionPolicy::smaller_signatures();
     default.validate().unwrap();
     smaller.validate().unwrap();
-    assert_eq!(default.contig_budget.budget_for_bases(160), 8);
+    assert_eq!(default.contig_budget.budget_for_bases(160), 16);
     assert_eq!(smaller.contig_budget.budget_for_bases(160), 4);
     assert!(
         default.estimated_signature_count(&[160, 1_000_000])

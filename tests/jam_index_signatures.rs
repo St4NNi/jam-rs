@@ -31,8 +31,8 @@ fn standalone_160_base_contig_receives_the_minimum_budget() {
     let policy = ScreenSelectionPolicy::default_signatures();
     let mut builder = MetagenomeSignatureBuilder::new(policy).unwrap();
     let signature = builder.add_contig(&sequence(160)).unwrap();
-    assert_eq!(signature.requested_budget, 8);
-    assert_eq!(signature.hashes.len(), 8);
+    assert_eq!(signature.requested_budget, 16);
+    assert_eq!(signature.hashes.len(), 16);
     assert!(signature.hashes.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(signature.hashes.iter().all(|hash| *hash != 0));
 }
@@ -47,7 +47,7 @@ fn contig_minhash_is_reverse_complement_invariant_and_bounded() {
     let forward = forward_builder.add_contig(&sequence).unwrap();
     let reverse = reverse_builder.add_contig(&reverse).unwrap();
     assert_eq!(forward.hashes, reverse.hashes);
-    assert!(forward.hashes.len() <= 128);
+    assert!(forward.hashes.len() <= 256);
 }
 
 #[test]

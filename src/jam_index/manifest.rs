@@ -53,9 +53,9 @@ impl ScreenSelectionPolicy {
             hash_id: "jamhash_u64_v1".to_string(),
             zero_excluded: true,
             contig_budget: ContigSignatureBudget {
-                minimum: 8,
-                maximum: 128,
-                bases_per_signature: 2_048,
+                minimum: 16,
+                maximum: 256,
+                bases_per_signature: 1_024,
             },
             whole_metagenome_budget: 512,
             query_window_bases: 256,
