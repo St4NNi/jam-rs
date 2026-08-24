@@ -2,6 +2,8 @@
 
 use super::manifest::ScreenSelectionPolicy;
 use super::signature::{MetagenomeSignatureBuilder, SignatureSelectionError};
+use crate::format::bucket_id;
+use crate::jam_index::external::{ExternalError, ExternalSource, SequenceAccess, read_fai};
 use crate::sequence::{
     EncodedContig, SequenceError, decode_ambiguity_payload, decode_range, encode_ambiguity_payload,
     encode_contig,
@@ -9,7 +11,7 @@ use crate::sequence::{
 use memmap2::Mmap;
 use needletail::{Sequence, parse_fastx_file};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -446,6 +448,293 @@ pub fn write_part(
     })
 }
 
+pub fn write_external_part(
+    output: impl AsRef<Path>,
+    sources: &[MetagenomeSource],
+    policy: &ScreenSelectionPolicy,
+) -> Result<PartWriteResult, JamIndexPartError> {
+    policy
+        .validate()
+        .map_err(|error| JamIndexPartError::InvalidInput(error.to_string()))?;
+    if sources.is_empty() {
+        return Err(JamIndexPartError::InvalidInput(
+            "a part requires at least one metagenome".to_string(),
+        ));
+    }
+    let mut seen_ids = BTreeSet::new();
+    if sources.iter().any(|source| {
+        source.metagenome_id.trim().is_empty()
+            || !source.sequence_path.is_file()
+            || !seen_ids.insert(source.metagenome_id.clone())
+    }) {
+        return Err(JamIndexPartError::InvalidInput(
+            "metagenome IDs must be unique and sequence paths must be local files".to_string(),
+        ));
+    }
+
+    let mut strings = Vec::new();
+    let mut source_records = Vec::with_capacity(sources.len());
+    let mut metagenomes = Vec::with_capacity(sources.len());
+    let mut contigs = Vec::new();
+    let mut postings = BTreeMap::<(u64, u32), BTreeSet<u32>>::new();
+    let mut screen_samples = Vec::with_capacity(sources.len());
+    let mut total_bases = 0u64;
+    let mut estimated_signature_count = 0u64;
+
+    for (metagenome_index, source) in sources.iter().enumerate() {
+        let metagenome_id =
+            u32::try_from(metagenome_index).map_err(|_| JamIndexPartError::Overflow)?;
+        let first_contig = u32::try_from(contigs.len()).map_err(|_| JamIndexPartError::Overflow)?;
+        let id_offset = append_string(&mut strings, &source.metagenome_id)?;
+        let id_length =
+            u32::try_from(source.metagenome_id.len()).map_err(|_| JamIndexPartError::Overflow)?;
+        let external = ExternalSource::detect(&source.sequence_path);
+        let fai = external.fai_path.as_ref().map(read_fai).transpose()?;
+        let (path_offset, path_length) = append_path(&mut strings, Some(&external.path))?;
+        let (fai_offset, fai_length) = append_path(&mut strings, external.fai_path.as_deref())?;
+        let (gzi_offset, gzi_length) = append_path(&mut strings, external.gzi_path.as_deref())?;
+        let source_sha256 = sha256_file(&source.sequence_path)?;
+        source_records.push(SourceBuildRecord {
+            path_offset,
+            path_length,
+            fai_offset,
+            fai_length,
+            gzi_offset,
+            gzi_length,
+            source_size: std::fs::metadata(&source.sequence_path)?.len(),
+            access: part_access(external.access),
+            source_sha256,
+            fai_sha256: external
+                .fai_path
+                .as_deref()
+                .map(sha256_file)
+                .transpose()?
+                .unwrap_or([0; 32]),
+            gzi_sha256: external
+                .gzi_path
+                .as_deref()
+                .map(sha256_file)
+                .transpose()?
+                .unwrap_or([0; 32]),
+        });
+        let mut selector = MetagenomeSignatureBuilder::new(policy.clone())?;
+        let mut reader =
+            parse_fastx_file(&source.sequence_path).map_err(|error| JamIndexPartError::Parse {
+                path: source.sequence_path.clone(),
+                message: error.to_string(),
+            })?;
+        let mut metagenome_bases = 0u64;
+        let mut metagenome_contigs = 0u32;
+        let mut metagenome_contig_ids = Vec::new();
+        while let Some(record) = reader.next() {
+            let record = record.map_err(|error| JamIndexPartError::Parse {
+                path: source.sequence_path.clone(),
+                message: error.to_string(),
+            })?;
+            let sequence = record.normalize(true);
+            let contig_id =
+                u32::try_from(contigs.len()).map_err(|_| JamIndexPartError::Overflow)?;
+            let source_ordinal = metagenome_contigs;
+            let name = std::str::from_utf8(record.id()).map_err(|_| {
+                JamIndexPartError::InvalidInput(format!(
+                    "contig name in {} is not UTF-8",
+                    source.sequence_path.display()
+                ))
+            })?;
+            let name_offset = append_string(&mut strings, name)?;
+            let name_length = u32::try_from(name.len()).map_err(|_| JamIndexPartError::Overflow)?;
+            let length = u64::try_from(sequence.len()).map_err(|_| JamIndexPartError::Overflow)?;
+            let indexed = fai.as_ref().and_then(|records| {
+                records.get(usize::try_from(source_ordinal).unwrap_or(usize::MAX))
+            });
+            if indexed.is_some_and(|indexed| indexed.name != name || indexed.length != length) {
+                return Err(JamIndexPartError::InvalidInput(format!(
+                    "FAI does not match {} contig {}",
+                    source.sequence_path.display(),
+                    name
+                )));
+            }
+            let selected = selector.add_contig(&sequence)?;
+            estimated_signature_count =
+                estimated_signature_count.saturating_add(u64::from(selected.requested_budget));
+            for hash in selected.hashes {
+                postings
+                    .entry((hash, metagenome_id))
+                    .or_default()
+                    .insert(contig_id);
+            }
+            let (fai_offset, line_bases, line_width) = indexed.map_or((0, 0, 0), |indexed| {
+                (indexed.offset, indexed.line_bases, indexed.line_width)
+            });
+            metagenome_bases = metagenome_bases.saturating_add(length);
+            total_bases = total_bases.saturating_add(length);
+            metagenome_contigs = metagenome_contigs
+                .checked_add(1)
+                .ok_or(JamIndexPartError::Overflow)?;
+            metagenome_contig_ids.push(contig_id);
+            contigs.push(ContigBuildRecord {
+                contig_id,
+                metagenome_id,
+                name_offset,
+                name_length,
+                base_count: length,
+                source_ordinal,
+                fai_offset,
+                line_bases,
+                line_width,
+                sequence_sha256: sha256(&sequence),
+                signature_count: 0,
+                packed_offset: 0,
+                packed_length: 0,
+                ambiguity_offset: 0,
+                ambiguity_length: 0,
+                sequence_checksum: [0; 32],
+            });
+        }
+        if metagenome_contigs == 0 {
+            return Err(JamIndexPartError::InvalidInput(format!(
+                "metagenome {} contains no contigs",
+                source.metagenome_id
+            )));
+        }
+        if fai.as_ref().is_some_and(|records| {
+            records.len() != usize::try_from(metagenome_contigs).unwrap_or(usize::MAX)
+        }) {
+            return Err(JamIndexPartError::InvalidInput(format!(
+                "FAI contig count does not match {}",
+                source.sequence_path.display()
+            )));
+        }
+        estimated_signature_count =
+            estimated_signature_count.saturating_add(u64::from(policy.whole_metagenome_budget));
+        let selected = selector.finish();
+        for (hash, source_ordinal) in &selected.whole_hash_contigs {
+            let contig_id = *metagenome_contig_ids
+                .get(usize::try_from(*source_ordinal).map_err(|_| JamIndexPartError::Overflow)?)
+                .ok_or(JamIndexPartError::Overflow)?;
+            postings
+                .entry((*hash, metagenome_id))
+                .or_default()
+                .insert(contig_id);
+        }
+        let screen_hash_count =
+            u32::try_from(selected.union_hashes.len()).map_err(|_| JamIndexPartError::Overflow)?;
+        screen_samples.push(PartScreenSample {
+            metagenome_id: source.metagenome_id.clone(),
+            hashes: selected.union_hashes,
+        });
+        metagenomes.push(MetagenomeBuildRecord {
+            metagenome_id,
+            first_contig,
+            contig_count: metagenome_contigs,
+            screen_hash_count,
+            id_offset,
+            id_length,
+            total_bases: metagenome_bases,
+            source_sha256,
+        });
+    }
+
+    let mut entries = screen_samples
+        .iter()
+        .enumerate()
+        .flat_map(|(sample_id, sample)| {
+            sample.hashes.iter().map(move |hash| {
+                (
+                    bucket_id(*hash),
+                    *hash,
+                    u32::try_from(sample_id).unwrap_or(u32::MAX),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    let mut headers = Vec::with_capacity(entries.len());
+    let mut payload = Vec::new();
+    for (_, hash, sample_id) in entries {
+        let contig_ids = postings
+            .get(&(hash, sample_id))
+            .ok_or(JamIndexPartError::Corrupt("screen posting binding"))?;
+        let offset = u64::try_from(payload.len()).map_err(|_| JamIndexPartError::Overflow)?;
+        encode_deltas(contig_ids, &mut payload)?;
+        let length = u32::try_from(
+            u64::try_from(payload.len())
+                .map_err(|_| JamIndexPartError::Overflow)?
+                .saturating_sub(offset),
+        )
+        .map_err(|_| JamIndexPartError::Overflow)?;
+        headers.push(PostingHeader {
+            offset,
+            count: u32::try_from(contig_ids.len()).map_err(|_| JamIndexPartError::Overflow)?,
+            length,
+        });
+    }
+    let source_bytes = encode_sources(&source_records);
+    let posting_bytes = encode_postings(&headers, &payload);
+    let metagenome_bytes = encode_metagenomes(&metagenomes);
+    let contig_bytes = encode_external_contigs(&contigs);
+    let output = output.as_ref();
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(output)?;
+    file.write_all(&vec![0u8; HEADER_SIZE])?;
+    let source_offset = file.stream_position()?;
+    file.write_all(&source_bytes)?;
+    let posting_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&posting_bytes)?;
+    let metagenome_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&metagenome_bytes)?;
+    let contig_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&contig_bytes)?;
+    let string_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&strings)?;
+    let object_size = file.stream_position()?;
+    let header = Header {
+        metagenome_count: u32::try_from(metagenomes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        contig_count: u64::try_from(contigs.len()).map_err(|_| JamIndexPartError::Overflow)?,
+        total_bases,
+        signature_count: u64::try_from(headers.len()).map_err(|_| JamIndexPartError::Overflow)?,
+        sequence_offset: source_offset,
+        sequence_length: u64::try_from(source_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        signature_offset: posting_offset,
+        signature_length: u64::try_from(posting_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        metagenome_offset,
+        metagenome_length: u64::try_from(metagenome_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        contig_offset,
+        contig_length: u64::try_from(contig_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        string_offset,
+        string_length: u64::try_from(strings.len()).map_err(|_| JamIndexPartError::Overflow)?,
+        sequence_checksum: sha256(&source_bytes),
+        signature_checksum: sha256(&posting_bytes),
+        metagenome_checksum: sha256(&metagenome_bytes),
+        contig_checksum: sha256(&contig_bytes),
+        string_checksum: sha256(&strings),
+    };
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&encode_header(header))?;
+    file.sync_all()?;
+    Ok(PartWriteResult {
+        screen_samples,
+        metagenome_count: header.metagenome_count,
+        contig_count: header.contig_count,
+        total_bases,
+        estimated_signature_count,
+        posting_count: header.signature_count,
+        signature_record_count: 0,
+        contig_signature_bytes: header.signature_length,
+        source_reference_bytes: header.sequence_length,
+        packed_sequence_bytes: 0,
+        data_file_bytes: object_size,
+    })
+}
+
 pub struct JamIndexPartReader {
     mmap: Mmap,
     header: Header,
@@ -598,6 +887,117 @@ fn append_string(strings: &mut Vec<u8>, value: &str) -> Result<u64, JamIndexPart
     let offset = u64::try_from(strings.len()).map_err(|_| JamIndexPartError::Overflow)?;
     strings.extend_from_slice(value.as_bytes());
     Ok(offset)
+}
+
+fn append_path(
+    strings: &mut Vec<u8>,
+    path: Option<&Path>,
+) -> Result<(u64, u32), JamIndexPartError> {
+    let Some(path) = path else {
+        return Ok((0, 0));
+    };
+    let value = path
+        .to_str()
+        .ok_or_else(|| JamIndexPartError::InvalidInput("source path is not UTF-8".to_string()))?;
+    Ok((
+        append_string(strings, value)?,
+        u32::try_from(value.len()).map_err(|_| JamIndexPartError::Overflow)?,
+    ))
+}
+
+fn part_access(access: SequenceAccess) -> PartAccess {
+    match access {
+        SequenceAccess::PlainFai => PartAccess::PlainFai,
+        SequenceAccess::Bgzf => PartAccess::Bgzf,
+        SequenceAccess::Sequential => PartAccess::Sequential,
+    }
+}
+
+fn encode_sources(records: &[SourceBuildRecord]) -> Vec<u8> {
+    let mut bytes = vec![0u8; records.len() * SOURCE_RECORD_SIZE];
+    for (index, record) in records.iter().enumerate() {
+        let offset = index * SOURCE_RECORD_SIZE;
+        put_u64(&mut bytes, offset, record.path_offset);
+        put_u32(&mut bytes, offset + 8, record.path_length);
+        put_u32(
+            &mut bytes,
+            offset + 12,
+            match record.access {
+                PartAccess::PlainFai => 1,
+                PartAccess::Bgzf => 2,
+                PartAccess::Sequential => 3,
+            },
+        );
+        put_u64(&mut bytes, offset + 16, record.fai_offset);
+        put_u32(&mut bytes, offset + 24, record.fai_length);
+        put_u64(&mut bytes, offset + 32, record.gzi_offset);
+        put_u32(&mut bytes, offset + 40, record.gzi_length);
+        put_u64(&mut bytes, offset + 48, record.source_size);
+        bytes[offset + 56..offset + 88].copy_from_slice(&record.source_sha256);
+        bytes[offset + 88..offset + 120].copy_from_slice(&record.fai_sha256);
+        bytes[offset + 120..offset + 152].copy_from_slice(&record.gzi_sha256);
+    }
+    bytes
+}
+
+fn encode_external_contigs(records: &[ContigBuildRecord]) -> Vec<u8> {
+    let mut bytes = vec![0u8; records.len() * CONTIG_RECORD_SIZE];
+    for (index, record) in records.iter().enumerate() {
+        let offset = index * CONTIG_RECORD_SIZE;
+        put_u32(&mut bytes, offset, record.contig_id);
+        put_u32(&mut bytes, offset + 4, record.metagenome_id);
+        put_u64(&mut bytes, offset + 8, record.name_offset);
+        put_u32(&mut bytes, offset + 16, record.name_length);
+        put_u32(&mut bytes, offset + 20, record.source_ordinal);
+        put_u64(&mut bytes, offset + 24, record.base_count);
+        put_u64(&mut bytes, offset + 32, record.fai_offset);
+        put_u32(&mut bytes, offset + 40, record.line_bases);
+        put_u32(&mut bytes, offset + 44, record.line_width);
+        bytes[offset + 48..offset + 80].copy_from_slice(&record.sequence_sha256);
+    }
+    bytes
+}
+
+fn encode_postings(headers: &[PostingHeader], payload: &[u8]) -> Vec<u8> {
+    let header_bytes = headers.len() * POSTING_HEADER_SIZE;
+    let mut bytes = vec![0u8; header_bytes + payload.len()];
+    for (index, header) in headers.iter().enumerate() {
+        let offset = index * POSTING_HEADER_SIZE;
+        put_u64(&mut bytes, offset, header.offset);
+        put_u32(&mut bytes, offset + 8, header.count);
+        put_u32(&mut bytes, offset + 12, header.length);
+    }
+    bytes[header_bytes..].copy_from_slice(payload);
+    bytes
+}
+
+fn encode_deltas(
+    contig_ids: &BTreeSet<u32>,
+    payload: &mut Vec<u8>,
+) -> Result<(), JamIndexPartError> {
+    let mut previous = 0u32;
+    for (index, contig_id) in contig_ids.iter().copied().enumerate() {
+        let mut delta = if index == 0 {
+            contig_id
+        } else {
+            contig_id
+                .checked_sub(previous)
+                .ok_or(JamIndexPartError::Overflow)?
+        };
+        loop {
+            let mut byte = u8::try_from(delta & 0x7f).expect("seven-bit varint chunk");
+            delta >>= 7;
+            if delta != 0 {
+                byte |= 0x80;
+            }
+            payload.push(byte);
+            if delta == 0 {
+                break;
+            }
+        }
+        previous = contig_id;
+    }
+    Ok(())
 }
 
 fn align_file(
@@ -1024,6 +1424,8 @@ pub enum JamIndexPartError {
     Io(#[from] std::io::Error),
     #[error("Jam Index part sequence failed: {0}")]
     Sequence(#[from] SequenceError),
+    #[error("Jam Index external sequence failed: {0}")]
+    External(String),
     #[error(transparent)]
     Signature(#[from] SignatureSelectionError),
     #[error("Jam Index part parse failed for {path}: {message}")]
@@ -1038,4 +1440,10 @@ pub enum JamIndexPartError {
     UnknownContig(u32),
     #[error("Jam Index part coordinate overflow")]
     Overflow,
+}
+
+impl From<ExternalError> for JamIndexPartError {
+    fn from(error: ExternalError) -> Self {
+        Self::External(error.to_string())
+    }
 }

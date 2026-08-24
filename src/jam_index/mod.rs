@@ -31,7 +31,7 @@ pub use manifest::{
 };
 pub use part::{
     JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome, PartScreenSample,
-    PartWriteResult, SignatureHit, write_part,
+    PartWriteResult, SignatureHit, write_external_part, write_part,
 };
 pub use screen::{
     JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError, JamIndexScreenMetrics,

@@ -1,4 +1,6 @@
-use jam_rs::jam_index::{JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy, write_part};
+use jam_rs::jam_index::{
+    JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy, write_external_part, write_part,
+};
 use std::fs;
 use tempfile::Builder;
 
@@ -89,4 +91,29 @@ fn signature_corruption_fails_open_and_sequence_corruption_fails_selected_read()
     fs::write(&sequence_path, sequence_corrupt).unwrap();
     let reader = JamIndexPartReader::open(sequence_path).unwrap();
     assert!(reader.read_contig(0).is_err());
+}
+
+#[test]
+fn external_writer_compact() {
+    let (directory, sources) = fixture();
+    let output = directory.path().join("external.bin");
+    let result = write_external_part(
+        &output,
+        &sources,
+        &ScreenSelectionPolicy::default_signatures(),
+    )
+    .unwrap();
+    assert_eq!(result.metagenome_count, 2);
+    assert_eq!(result.contig_count, 3);
+    assert_eq!(result.packed_sequence_bytes, 0);
+    assert_eq!(result.source_reference_bytes, 2 * 192);
+    assert!(result.posting_count > 0);
+    assert!(result.contig_signature_bytes > 0);
+    let bytes = fs::read(output).unwrap();
+    let sequence = b"ACGTTGCATGTCAGTACGATCGTACGTTAGCTAGCTGACTGATCGTAGCTAGTCGATCGTACGT";
+    assert!(
+        !bytes
+            .windows(sequence.len())
+            .any(|window| window == sequence)
+    );
 }
