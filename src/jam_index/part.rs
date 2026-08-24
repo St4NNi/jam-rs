@@ -954,7 +954,7 @@ fn check_sidecar(
     metagenome_id: u32,
 ) -> Result<(), JamIndexPartError> {
     match (path, expected) {
-        (Some(path), Some(expected)) if sha256_file(path)? == expected => Ok(()),
+        (Some(path), Some(expected)) if sha256_sidecar(path)? == expected => Ok(()),
         (None, None) => Ok(()),
         _ => Err(JamIndexPartError::SourceIdentity(metagenome_id)),
     }
@@ -1169,6 +1169,20 @@ fn sha256_file(path: &Path) -> Result<[u8; 32], JamIndexPartError> {
     let mut reader = BufReader::with_capacity(1024 * 1024, File::open(path)?);
     let mut digest = Sha256::new();
     let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn sha256_sidecar(path: &Path) -> Result<[u8; 32], JamIndexPartError> {
+    let mut reader = File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
     loop {
         let read = reader.read(&mut buffer)?;
         if read == 0 {
