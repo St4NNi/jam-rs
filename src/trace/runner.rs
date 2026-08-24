@@ -1530,6 +1530,92 @@ pub(crate) fn run_index_archive<A: TraceArchive>(
     Ok(result)
 }
 
+pub(crate) fn merge_index_results(
+    mut merged: TraceMetagenomeResult,
+    mut next: TraceMetagenomeResult,
+    query_length: usize,
+    config: &TraceRunnerConfig,
+) -> Result<TraceMetagenomeResult, RunnerError> {
+    if merged.plasmid_id != next.plasmid_id || merged.metagenome_id != next.metagenome_id {
+        return Err(RunnerError::InvalidConfig(
+            "cannot merge trace results from different queries or metagenomes".to_string(),
+        ));
+    }
+    merged.alignments.append(&mut next.alignments);
+    retain_best_alignments(&mut merged.alignments, config.max_alignments_per_candidate);
+    let finalized = finalize_evidence(query_length as u64, config, &mut merged.alignments)?;
+    merged.warnings = evidence_warnings(&finalized);
+    merged.coordinate_model = finalized.topology.coordinate_model;
+    merged.topology_evidence = finalized.topology.topology_evidence;
+    merged.primary_fragment_mosaic = Some(finalized.primary_mosaic);
+    merged.topology = Some(finalized.topology);
+    merged.coverage = Some(finalized.coverage);
+    merged.rescue_rounds.append(&mut next.rescue_rounds);
+    merged.stages.append(&mut next.stages);
+    merged.alignment_retries.append(&mut next.alignment_retries);
+    merged.failures.append(&mut next.failures);
+    merged.performance_counters =
+        merge_candidate_counters(merged.performance_counters, next.performance_counters);
+    merged.archive_metrics = merge_archive_metrics(merged.archive_metrics, next.archive_metrics);
+    merged.resource_metrics = merged
+        .resource_metrics
+        .saturating_add(next.resource_metrics);
+    Ok(merged)
+}
+
+fn merge_candidate_counters(
+    left: CandidatePerformanceCounters,
+    right: CandidatePerformanceCounters,
+) -> CandidatePerformanceCounters {
+    CandidatePerformanceCounters {
+        candidates_processed: left
+            .candidates_processed
+            .saturating_add(right.candidates_processed),
+        contigs_considered: left
+            .contigs_considered
+            .saturating_add(right.contigs_considered),
+        windows_retrieved: left
+            .windows_retrieved
+            .saturating_add(right.windows_retrieved),
+        alignments_attempted: left
+            .alignments_attempted
+            .saturating_add(right.alignments_attempted),
+        alignments_succeeded: left
+            .alignments_succeeded
+            .saturating_add(right.alignments_succeeded),
+        failures: left.failures.saturating_add(right.failures),
+        elapsed_millis: left.elapsed_millis.saturating_add(right.elapsed_millis),
+    }
+}
+
+fn merge_archive_metrics(
+    left: Option<ArchiveMetrics>,
+    right: Option<ArchiveMetrics>,
+) -> Option<ArchiveMetrics> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(ArchiveMetrics {
+            resource: left.resource.saturating_add(right.resource),
+            mapped_bytes: left.mapped_bytes.saturating_add(right.mapped_bytes),
+            resident_bytes: left.resident_bytes.saturating_add(right.resident_bytes),
+            metadata_bytes_read: left
+                .metadata_bytes_read
+                .saturating_add(right.metadata_bytes_read),
+            seed_bytes_read: left.seed_bytes_read.saturating_add(right.seed_bytes_read),
+            sequence_bytes_read: left
+                .sequence_bytes_read
+                .saturating_add(right.sequence_bytes_read),
+            decoded_sequence_bases: left
+                .decoded_sequence_bases
+                .saturating_add(right.decoded_sequence_bases),
+            coalesced_range_requests: left
+                .coalesced_range_requests
+                .saturating_add(right.coalesced_range_requests),
+        }),
+        (Some(metrics), None) | (None, Some(metrics)) => Some(metrics),
+        (None, None) => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn align_window(
     plasmid_id: &str,

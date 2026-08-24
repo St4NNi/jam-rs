@@ -13,7 +13,9 @@ use super::screen::{
 };
 use crate::trace::config::SensitivityProfile;
 use crate::trace::model::{CandidateResult, TraceMetagenomeResult};
-use crate::trace::runner::{RunnerError, TraceRunnerConfig, run_index_archive};
+use crate::trace::runner::{
+    RunnerError, TraceRunnerConfig, merge_index_results, run_index_archive,
+};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -172,14 +174,19 @@ fn run_plan(
         .iter()
         .map(|contig| contig.contig_id)
         .collect::<Vec<_>>();
-    let mut sequential = false;
-    if selected.is_empty()
-        && let Some(range) = &plan.sequential_fallback_range
-    {
-        selected.extend(range.clone());
-        sequential = true;
-    }
     if selected.is_empty() {
+        if let Some(range) = &plan.sequential_fallback_range {
+            return run_fallback(
+                reader,
+                query_id,
+                query,
+                query_hashes,
+                candidate,
+                range.clone(),
+                runner,
+                expansion_batch,
+            );
+        }
         return Err(JamIndexTraceError::NoContigs(plan.metagenome_id.clone()));
     }
     let candidate_result = candidate_result(reader, candidate, query_hashes)?;
@@ -192,7 +199,7 @@ fn run_plan(
         let result =
             run_index_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
         passes = passes.saturating_add(1);
-        if complete(&result, query.len()) || next >= plan.ranked_contigs.len() || sequential {
+        if complete(&result, query.len()) || next >= plan.ranked_contigs.len() {
             break result;
         }
         let end = next
@@ -221,7 +228,66 @@ fn run_plan(
             selected_contig_bases,
             alignment_passes: passes,
             expanded_candidates: u64::from(expanded),
-            sequential_scans: u64::from(sequential),
+            sequential_scans: 0,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_fallback(
+    reader: &JamIndexPartReader,
+    query_id: &str,
+    query: &[u8],
+    query_hashes: u64,
+    candidate: &JamIndexCandidate,
+    range: std::ops::Range<u32>,
+    runner: &TraceRunnerConfig,
+    batch_size: usize,
+) -> Result<(TraceMetagenomeResult, JamIndexTraceMetrics), JamIndexTraceError> {
+    let candidate_result = candidate_result(reader, candidate, query_hashes)?;
+    let batch_size = u32::try_from(batch_size).unwrap_or(u32::MAX);
+    let mut start = range.start;
+    let mut merged = None;
+    let mut passes = 0u64;
+    let mut selected_contigs = 0u64;
+    let mut selected_contig_bases = 0u64;
+    while start < range.end {
+        let end = start.saturating_add(batch_size).min(range.end);
+        let contig_ids = start..end;
+        for contig_id in contig_ids.clone() {
+            let contig = reader
+                .contigs()
+                .get(usize::try_from(contig_id).map_err(|_| JamIndexTraceError::Overflow)?)
+                .ok_or(JamIndexTraceError::CandidateBinding)?;
+            selected_contig_bases = selected_contig_bases.saturating_add(contig.base_count);
+        }
+        selected_contigs = selected_contigs.saturating_add(u64::from(end - start));
+        let archive = JamIndexArchive::load(reader, candidate.metagenome_local_id, contig_ids)?;
+        let result =
+            run_index_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
+        passes = passes.saturating_add(1);
+        let result = match merged.take() {
+            Some(previous) => merge_index_results(previous, result, query.len(), runner)?,
+            None => result,
+        };
+        let finished = complete(&result, query.len());
+        merged = Some(result);
+        if finished {
+            break;
+        }
+        start = end;
+    }
+    let result =
+        merged.ok_or_else(|| JamIndexTraceError::NoContigs(candidate.metagenome_id.clone()))?;
+    Ok((
+        result,
+        JamIndexTraceMetrics {
+            selected_candidates: 1,
+            selected_contigs,
+            selected_contig_bases,
+            alignment_passes: passes,
+            expanded_candidates: 0,
+            sequential_scans: 1,
         },
     ))
 }
@@ -299,4 +365,97 @@ pub enum JamIndexTraceError {
     Archive(#[from] crate::archive::ArchiveError),
     #[error(transparent)]
     Runner(#[from] RunnerError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jam_index::{JamIndexBuildConfig, MetagenomeSource, build_jam_index};
+    use crate::trace::config::SensitivityProfile;
+    use std::fs;
+    use tempfile::Builder;
+
+    fn sequence(length: usize) -> Vec<u8> {
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        (0..length)
+            .map(|_| {
+                state ^= state << 7;
+                state ^= state >> 9;
+                state ^= state << 8;
+                b"ACGT"[(state as usize) & 3]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fallback_scans_batches() {
+        let sources = Builder::new()
+            .prefix("index-fallback-source-")
+            .tempdir_in("target")
+            .unwrap();
+        let outputs = Builder::new()
+            .prefix("index-fallback-output-")
+            .tempdir_in("target")
+            .unwrap();
+        let query = sequence(160);
+        let source = sources.path().join("sample.fasta");
+        fs::write(
+            &source,
+            format!(
+                ">noise\n{}\n>target\n{}\n>unused\n{}\n",
+                "A".repeat(200),
+                String::from_utf8_lossy(&query),
+                "C".repeat(200)
+            ),
+        )
+        .unwrap();
+        let root = outputs.path().join("index");
+        build_jam_index(
+            &root,
+            &[MetagenomeSource {
+                metagenome_id: "sample".to_string(),
+                sequence_path: source,
+            }],
+            &JamIndexBuildConfig {
+                source_manifest_sha256: "a".repeat(64),
+                ..JamIndexBuildConfig::default()
+            },
+        )
+        .unwrap();
+        let manifest = load_manifest(&root).unwrap();
+        let part = &manifest.parts[0];
+        let reader =
+            JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file)).unwrap();
+        let candidate = JamIndexCandidate {
+            part_id: 0,
+            metagenome_local_id: 0,
+            metagenome_id: "sample".to_string(),
+            rank: 1,
+            shared_hash_count: 4,
+            supported_query_windows: 1,
+            longest_supported_window_run: 1,
+            weighted_hash_sum: 1.0,
+            shared_hashes: Vec::new(),
+        };
+        let plan = JamIndexContigPlan {
+            candidate_rank: 1,
+            part_id: 0,
+            metagenome_local_id: 0,
+            metagenome_id: "sample".to_string(),
+            ranked_contigs: Vec::new(),
+            initial_contig_count: 0,
+            sequential_fallback_range: Some(0..3),
+        };
+        let mut runner = TraceRunnerConfig::default();
+        runner.sensitivity = dense_profile(SensitivityProfile::Sensitive);
+        let (result, metrics) =
+            run_plan(&reader, "query", &query, 4, &candidate, &plan, &runner, 1).unwrap();
+        assert_eq!(metrics.sequential_scans, 1);
+        assert_eq!(metrics.alignment_passes, 2);
+        assert_eq!(metrics.selected_contigs, 2);
+        assert_eq!(
+            result.coverage.as_ref().unwrap().supported_bases,
+            query.len() as u64
+        );
+    }
 }
