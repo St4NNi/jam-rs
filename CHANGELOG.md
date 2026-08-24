@@ -28,11 +28,14 @@ All notable changes to this project are documented here.
   comparison support alongside BLASTn and minimap2.
 - Local Jam Index format 1 datasets with append-only independent parts. Each
   part combines a pure version-3 `.jam` screening shard, position-free
-  contig signatures, a compact contig directory, and complete two-bit contig
-  sequences.
+  hash-to-contig postings, compact metagenome/contig metadata, and checksummed
+  references to external assembly files.
 - `jam index build`, `jam index append`, and `jam trace --index` for parallel
   part screening, bounded contig selection, on-demand dense k=31/k=21 seed
   generation, and one JSONL/JSONL.zst result.
+- Candidate-only sequence access through plain FASTA/FAI, BGZF FASTA/FAI/GZI,
+  or sequential normal-gzip streaming. Noncandidate assembly files are not
+  opened.
 - Deterministic anonymous short-trace generation and scoring across 80 to
   1,000 bases, five identity levels, both strands, origin crossing, separate
   fragments, overlap, repeat-shared, integrated, rare, and unrelated cases.
@@ -52,7 +55,9 @@ All notable changes to this project are documented here.
 - Alignment refinement reuses one packed traceback matrix, and Jam Index
   candidate concurrency is admitted before work according to query length.
 - Jam Index query parsing preserves IUPAC symbols so verified complete-contig
-  matches can bypass dense chaining and emit direct `=` alignments.
+  matches can bypass dense chaining and emit direct `=` alignments. Selected
+  contigs are read from external assemblies; Jam Index parts contain no
+  nucleotide payload.
 
 ### Compatibility
 
@@ -69,8 +74,9 @@ All notable changes to this project are documented here.
 - Deterministic synthetic truth and local/mock-remote integration tests pass.
 - The selected anonymous 40-case Jam Index run recovered 40/40 candidates at
   1.0 base precision, 0.981834375 base recall, and 1.0 interval precision and
-  recall. Three paired process-cold four-thread runs had a 4.364 s wall median
-  and 313,300 KiB peak-RSS median.
+  recall. Six alternating process-cold four-thread runs had a 4.650 s wall
+  median and 360,908 KiB peak-RSS median. The 20-part index used 40,729,419
+  bytes for 605,224,880 source bases.
 - Sequence-backed queries are reported under anonymous aliases. Jam Index
   operation is local-only; read-derived assemblies, independently supported
   natural positives, and the 1,000-assembly/100-query release scale remain

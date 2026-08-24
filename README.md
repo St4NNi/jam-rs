@@ -103,11 +103,12 @@ jam stats --input plasmids.jam --json
 
 A Jam Index is one logical local dataset with a manifest and independently
 searchable, append-only parts. Each part contains a pure version-3 `.jam`
-screening shard, position-free contig signatures, a compact contig directory,
-and the complete two-bit contig sequences.
+screening shard, aligned hash-to-contig postings, compact metadata, and
+checksummed references to external assembly files. It contains no nucleotide
+sequence payload and no positional seed index.
 
-The source catalog binds each metagenome ID to one local FASTA/FASTQ and its
-checksum:
+The source catalog binds each metagenome ID to one local assembly FASTA and
+its checksum:
 
 ```text
 metagenome_id	resource_uri	sha256
@@ -116,12 +117,14 @@ sample_002	/data/assemblies/sample_002.fasta	<sha256>
 ```
 
 Build the standard index and split parts by both bases and estimated signature
-count:
+count. Twenty independently searchable parts are the default large-collection
+layout; `--parts` can select an exact 20 to 30 part target:
 
 ```bash
 jam index build \
   --metagenomes sources.tsv \
   --output metagenomes-index \
+  --parts 20 \
   --max-part-bases 100000000 \
   --max-part-signatures 250000 \
   --parallel-parts 4
@@ -157,10 +160,13 @@ The standard policy uses canonical k=21 `jamhash_u64_v1` signatures with a
 length-dependent budget of 16 to 256 hashes per contig, one hash per 1,024
 bases within those bounds, a 512-hash whole-metagenome sketch, and 256-base
 query windows. Exact shared hashes route selected candidates to bounded contig
-sets without storing nucleotide positions. Selected complete contigs generate
-dense k=31 and k=21 positions in memory, verify packed k-mers, and enter the
-existing mixed chaining, corridor alignment, and fragment-mosaic path. An
-exact complete-contig match emits a direct `=` alignment before seed chaining.
+sets through postings aligned to the corresponding `.jam` sample/hash entry;
+the posting records store only offsets, counts, and delta-coded contig IDs.
+Selected complete contigs are read from plain FASTA with FAI, BGZF FASTA with
+FAI/GZI, or a candidate-only sequential gzip fallback. They generate dense
+k=31 and k=21 positions in memory, verify packed k-mers, and enter the existing
+mixed chaining, corridor alignment, and fragment-mosaic path. Noncandidate
+assembly files are never opened.
 
 Jam Index operation is local-only. It does not open JMA objects, store
 collection-wide positional postings, or change ordinary `.jam` format or
@@ -270,11 +276,15 @@ The bounded release evidence and exact limitations are under
 [evaluation/trace-production/](evaluation/trace-production/). On the selected
 anonymous 40-case matrix, the standard Jam Index recovered 40/40 candidates
 with base precision 1.0, base recall 0.981834375, and interval precision and
-recall 1.0. Three paired process-cold four-thread runs had a 4.364 s median and
-313,300 KiB median peak RSS. The 605,224,880-base collection occupied
-183,144,518 bytes, or 0.302606 index bytes per source base. The exact standalone
+recall 1.0. Six alternating process-cold four-thread runs had a 4.650 s median
+and 360,908 KiB median peak RSS. The 20-part, 605,224,880-base collection
+occupied 40,729,419 bytes, or 0.067296 index bytes per source base, and read
+362,712 source-sequence bytes for the selected contigs. This Jam Index was
+77.8% smaller than the measured embedded-sequence baseline; median query time
+was 3.0% higher and median peak RSS was 0.5% lower. The exact standalone
 160-base trace, reverse-complement, origin-crossing, separate-contig, overlap,
-repeat-shared, integrated, and unrelated controls were rerun.
+repeat-shared, integrated, unrelated, and all anonymous sequence-backed
+controls were rerun.
 The machine-readable selected scorecard is
 [evaluation/trace-production/results/summary/jam-index-v1/summary.json](evaluation/trace-production/results/summary/jam-index-v1/summary.json).
 
