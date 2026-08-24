@@ -1530,6 +1530,61 @@ pub(crate) fn run_index_archive<A: TraceArchive>(
     Ok(result)
 }
 
+pub(crate) fn run_exact_index(
+    query_id: &str,
+    query_length: usize,
+    candidate: CandidateResult,
+    mut alignments: Vec<BaseAlignment>,
+    archive_metrics: ArchiveMetrics,
+    contigs_considered: u64,
+    config: &TraceRunnerConfig,
+) -> Result<TraceMetagenomeResult, RunnerError> {
+    let alignments_succeeded = u64::try_from(alignments.len()).unwrap_or(u64::MAX);
+    let finalized = finalize_evidence(query_length as u64, config, &mut alignments)?;
+    let warnings = evidence_warnings(&finalized);
+    let supported_bases = finalized.coverage.supported_bases;
+    Ok(TraceMetagenomeResult {
+        schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
+        run_id: String::new(),
+        plasmid_id: query_id.to_string(),
+        metagenome_id: candidate.metagenome_id.clone(),
+        query_kind: config.query_kind,
+        topology_requested: config.topology_requested,
+        coordinate_model: finalized.topology.coordinate_model,
+        topology_evidence: finalized.topology.topology_evidence,
+        algorithms: crate::trace::config::algorithm_identifiers(),
+        algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(
+            config.sensitivity.clone(),
+        ),
+        status: TraceStatus::Complete,
+        candidate: Some(candidate),
+        router_candidate: None,
+        alignments,
+        primary_fragment_mosaic: Some(finalized.primary_mosaic),
+        topology: Some(finalized.topology),
+        rescue_rounds: Vec::new(),
+        stages: vec![TraceStageMetrics {
+            stage: 0,
+            name: "exact_contig".to_string(),
+            new_query_bases_supported: supported_bases,
+            ..TraceStageMetrics::default()
+        }],
+        alignment_retries: Vec::new(),
+        performance_counters: CandidatePerformanceCounters {
+            candidates_processed: 1,
+            contigs_considered,
+            windows_retrieved: contigs_considered,
+            alignments_succeeded,
+            ..CandidatePerformanceCounters::default()
+        },
+        coverage: Some(finalized.coverage),
+        warnings,
+        failures: Vec::new(),
+        archive_metrics: Some(archive_metrics),
+        resource_metrics: archive_metrics.resource,
+    })
+}
+
 pub(crate) fn merge_index_results(
     mut merged: TraceMetagenomeResult,
     mut next: TraceMetagenomeResult,

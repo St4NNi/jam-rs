@@ -10,6 +10,15 @@ use needletail::Sequence;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExactContigMatch {
+    pub contig_id: String,
+    pub strand: crate::trace::model::Strand,
+    pub query_start: u64,
+    pub target_start: u64,
+    pub length: u64,
+}
+
 pub const K21_SCHEME: u32 = 0x4a49_0015;
 pub const K31_SCHEME: u32 = 0x4a49_001f;
 
@@ -112,6 +121,57 @@ impl JamIndexArchive {
                 ..ArchiveMetrics::default()
             }),
         })
+    }
+
+    pub(crate) fn exact_matches(&self, query: &[u8], allow_wrap: bool) -> Vec<ExactContigMatch> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let reverse_query = query.reverse_complement();
+        let mut doubled_query = Vec::new();
+        if allow_wrap {
+            doubled_query.reserve(query.len().saturating_mul(2).saturating_sub(1));
+            doubled_query.extend_from_slice(query);
+            doubled_query.extend_from_slice(&query[..query.len().saturating_sub(1)]);
+        }
+        let mut matches = Vec::new();
+        for contig in self.contigs.values() {
+            let found = find_exact(&contig.sequence, query)
+                .map(|target_start| (crate::trace::model::Strand::Forward, 0, target_start));
+            let found = found.or_else(|| {
+                find_exact(&contig.sequence, &reverse_query)
+                    .map(|target_start| (crate::trace::model::Strand::Reverse, 0, target_start))
+            });
+            let found = found.or_else(|| {
+                (allow_wrap && contig.sequence.len() == query.len())
+                    .then(|| {
+                        find_exact(&doubled_query, &contig.sequence).map(|query_start| {
+                            (crate::trace::model::Strand::Forward, query_start, 0)
+                        })
+                    })
+                    .flatten()
+            });
+            let found = found.or_else(|| {
+                (allow_wrap && contig.sequence.len() == query.len())
+                    .then(|| {
+                        let reverse_contig = contig.sequence.reverse_complement();
+                        find_exact(&doubled_query, &reverse_contig).map(|query_start| {
+                            (crate::trace::model::Strand::Reverse, query_start, 0)
+                        })
+                    })
+                    .flatten()
+            });
+            if let Some((strand, query_start, target_start)) = found {
+                matches.push(ExactContigMatch {
+                    contig_id: contig.name.clone(),
+                    strand,
+                    query_start: u64::try_from(query_start).unwrap_or(u64::MAX),
+                    target_start: u64::try_from(target_start).unwrap_or(u64::MAX),
+                    length: u64::try_from(query.len()).unwrap_or(u64::MAX),
+                });
+            }
+        }
+        matches
     }
 
     fn scheme(&self, scheme: SeedSchemeId) -> ArchiveResult<u8> {
@@ -294,6 +354,44 @@ impl TraceArchive for JamIndexArchive {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
     }
+}
+
+fn find_exact(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let mut prefix = vec![0usize; needle.len()];
+    let mut matched = 0usize;
+    for index in 1..needle.len() {
+        while matched > 0 && !base_equal(needle[index], needle[matched]) {
+            matched = prefix[matched - 1];
+        }
+        if base_equal(needle[index], needle[matched]) {
+            matched += 1;
+        }
+        prefix[index] = matched;
+    }
+    matched = 0;
+    for (index, base) in haystack.iter().copied().enumerate() {
+        while matched > 0 && !base_equal(base, needle[matched]) {
+            matched = prefix[matched - 1];
+        }
+        if base_equal(base, needle[matched]) {
+            matched += 1;
+        }
+        if matched == needle.len() {
+            return Some(index + 1 - needle.len());
+        }
+    }
+    None
+}
+
+fn base_equal(left: u8, right: u8) -> bool {
+    let normalize = |base: u8| match base.to_ascii_uppercase() {
+        b'U' => b'T',
+        other => other,
+    };
+    normalize(left) == normalize(right)
 }
 
 fn part_error(error: super::part::JamIndexPartError) -> ArchiveError {

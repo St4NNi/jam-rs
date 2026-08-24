@@ -1,6 +1,6 @@
 //! Three-stage local Jam Index trace orchestration.
 
-use super::archive::JamIndexArchive;
+use super::archive::{ExactContigMatch, JamIndexArchive};
 use super::builder::{JamIndexBuildError, load_manifest};
 use super::contig_search::{
     JamIndexContigPlan, JamIndexContigSearchConfig, JamIndexContigSearchError,
@@ -12,9 +12,12 @@ use super::screen::{
     prepare_screen_query, search_jam_index,
 };
 use crate::trace::config::SensitivityProfile;
-use crate::trace::model::{CandidateResult, TraceMetagenomeResult};
+use crate::trace::model::{
+    AlignmentRole, BaseAlignment, BaseInterval, CandidateResult, EditOperation, EditRun,
+    SeedEvidence, TopologyRequested, TraceMetagenomeResult,
+};
 use crate::trace::runner::{
-    RunnerError, TraceRunnerConfig, merge_index_results, run_index_archive,
+    RunnerError, TraceRunnerConfig, merge_index_results, run_exact_index, run_index_archive,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -196,8 +199,7 @@ fn run_plan(
     let mut expanded = false;
     let result = loop {
         let archive = JamIndexArchive::load(reader, plan.metagenome_local_id, selected.clone())?;
-        let result =
-            run_index_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
+        let result = run_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
         passes = passes.saturating_add(1);
         if complete(&result, query.len()) || next >= plan.ranked_contigs.len() {
             break result;
@@ -263,8 +265,7 @@ fn run_fallback(
         }
         selected_contigs = selected_contigs.saturating_add(u64::from(end - start));
         let archive = JamIndexArchive::load(reader, candidate.metagenome_local_id, contig_ids)?;
-        let result =
-            run_index_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
+        let result = run_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
         passes = passes.saturating_add(1);
         let result = match merged.take() {
             Some(previous) => merge_index_results(previous, result, query.len(), runner)?,
@@ -290,6 +291,119 @@ fn run_fallback(
             sequential_scans: 1,
         },
     ))
+}
+
+fn run_archive(
+    query_id: &str,
+    query: &[u8],
+    candidate: CandidateResult,
+    archive: &JamIndexArchive,
+    runner: &TraceRunnerConfig,
+) -> Result<TraceMetagenomeResult, JamIndexTraceError> {
+    let allow_wrap = !matches!(runner.topology_requested, TopologyRequested::Linear);
+    let exact = archive.exact_matches(query, allow_wrap);
+    if exact.is_empty() {
+        return Ok(run_index_archive(
+            query_id, query, candidate, archive, runner,
+        )?);
+    }
+    let alignments = exact
+        .into_iter()
+        .map(|item| {
+            exact_alignment(
+                query_id,
+                &candidate.metagenome_id,
+                item,
+                runner.sensitivity.alignment.match_score,
+            )
+        })
+        .collect::<Vec<_>>();
+    let metrics = crate::archive::TraceArchive::metrics(archive);
+    let contigs_considered = u64::try_from(
+        crate::archive::TraceArchive::metadata(archive)?
+            .contigs
+            .len(),
+    )
+    .unwrap_or(u64::MAX);
+    Ok(run_exact_index(
+        query_id,
+        query.len(),
+        candidate,
+        alignments,
+        metrics,
+        contigs_considered,
+        runner,
+    )?)
+}
+
+fn exact_alignment(
+    query_id: &str,
+    metagenome_id: &str,
+    exact: ExactContigMatch,
+    match_score: i32,
+) -> BaseAlignment {
+    let query_segments = if exact.query_start == 0 {
+        vec![BaseInterval {
+            start: 0,
+            end: exact.length,
+        }]
+    } else {
+        vec![
+            BaseInterval {
+                start: exact.query_start,
+                end: exact.length,
+            },
+            BaseInterval {
+                start: 0,
+                end: exact.query_start,
+            },
+        ]
+    };
+    let score =
+        i64::from(match_score).saturating_mul(i64::try_from(exact.length).unwrap_or(i64::MAX));
+    BaseAlignment {
+        alignment_id: String::new(),
+        plasmid_id: query_id.to_string(),
+        metagenome_id: metagenome_id.to_string(),
+        contig_id: exact.contig_id,
+        strand: exact.strand,
+        query_segments,
+        target_interval: BaseInterval {
+            start: exact.target_start,
+            end: exact.target_start.saturating_add(exact.length),
+        },
+        query_length: exact.length,
+        target_length: exact.length,
+        origin_crossing: exact.query_start != 0,
+        score,
+        matches: exact.length,
+        substitutions: 0,
+        insertions: 0,
+        deletions: 0,
+        cigar: format!("{}=", exact.length),
+        edit_script: equal_runs(exact.length),
+        chain_score: score,
+        identity: 1.0,
+        seed_evidence: SeedEvidence::default(),
+        primary_supported_bases: 0,
+        secondary_supported_bases: 0,
+        newly_supported_bases: 0,
+        role: AlignmentRole::AlternativeMapping,
+        primary: false,
+    }
+}
+
+fn equal_runs(mut length: u64) -> Vec<EditRun> {
+    let mut runs = Vec::new();
+    while length != 0 {
+        let chunk = length.min(u64::from(u32::MAX));
+        runs.push(EditRun {
+            operation: EditOperation::Equal,
+            length: u32::try_from(chunk).unwrap_or(u32::MAX),
+        });
+        length -= chunk;
+    }
+    runs
 }
 
 fn candidate_result(
@@ -446,8 +560,10 @@ mod tests {
             initial_contig_count: 0,
             sequential_fallback_range: Some(0..3),
         };
-        let mut runner = TraceRunnerConfig::default();
-        runner.sensitivity = dense_profile(SensitivityProfile::Sensitive);
+        let runner = TraceRunnerConfig {
+            sensitivity: dense_profile(SensitivityProfile::Sensitive),
+            ..TraceRunnerConfig::default()
+        };
         let (result, metrics) =
             run_plan(&reader, "query", &query, 4, &candidate, &plan, &runner, 1).unwrap();
         assert_eq!(metrics.sequential_scans, 1);
