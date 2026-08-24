@@ -21,6 +21,7 @@ pub struct JamIndexBuildConfig {
     pub selection_policy: ScreenSelectionPolicy,
     pub max_part_bases: u64,
     pub max_part_signatures: u64,
+    pub target_parts: usize,
     pub parallel_parts: usize,
     pub source_manifest_sha256: String,
 }
@@ -31,6 +32,7 @@ impl Default for JamIndexBuildConfig {
             selection_policy: ScreenSelectionPolicy::default_signatures(),
             max_part_bases: 1_000_000_000,
             max_part_signatures: 1_000_000,
+            target_parts: 24,
             parallel_parts: 1,
             source_manifest_sha256: "0".repeat(64),
         }
@@ -44,6 +46,7 @@ impl JamIndexBuildConfig {
             .map_err(|error| JamIndexBuildError::InvalidConfig(error.to_string()))?;
         if self.max_part_bases == 0
             || self.max_part_signatures == 0
+            || self.target_parts == 0
             || self.parallel_parts == 0
             || !valid_checksum(&self.source_manifest_sha256)
         {
@@ -202,6 +205,17 @@ fn split_parts(
     config: &JamIndexBuildConfig,
     first_part_id: u32,
 ) -> Result<Vec<PartPlan>, JamIndexBuildError> {
+    let target_parts = config.target_parts.min(sources.len());
+    let target_bases = sources
+        .iter()
+        .map(|source| source.total_bases)
+        .sum::<u64>()
+        .div_ceil(u64::try_from(target_parts).map_err(|_| JamIndexBuildError::Overflow)?);
+    let target_signatures = sources
+        .iter()
+        .map(|source| source.estimated_signatures)
+        .sum::<u64>()
+        .div_ceil(u64::try_from(target_parts).map_err(|_| JamIndexBuildError::Overflow)?);
     let mut plans = Vec::new();
     let mut current = PartPlan {
         part_id: first_part_id,
@@ -210,13 +224,20 @@ fn split_parts(
         total_bases: 0,
         estimated_signatures: 0,
     };
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
+        let future_parts = target_parts.saturating_sub(plans.len().saturating_add(1));
+        let remaining_sources = sources.len().saturating_sub(source_index);
+        let target_reached = current.total_bases >= target_bases
+            || current.estimated_signatures >= target_signatures;
+        let hard_exceeded = current.total_bases.saturating_add(source.total_bases)
+            > config.max_part_bases
+            || current
+                .estimated_signatures
+                .saturating_add(source.estimated_signatures)
+                > config.max_part_signatures;
         let exceeds = !current.sources.is_empty()
-            && (current.total_bases.saturating_add(source.total_bases) > config.max_part_bases
-                || current
-                    .estimated_signatures
-                    .saturating_add(source.estimated_signatures)
-                    > config.max_part_signatures);
+            && (hard_exceeded
+                || future_parts > 0 && (target_reached || remaining_sources == future_parts));
         if exceeds {
             plans.push(current);
             current = PartPlan {

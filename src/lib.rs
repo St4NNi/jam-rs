@@ -162,6 +162,7 @@ pub fn run() -> Result<()> {
                 output,
                 max_part_bases,
                 max_part_signatures,
+                parts,
                 parallel_parts,
             } => handle_index_build(IndexBuildArgs {
                 metagenomes,
@@ -169,6 +170,7 @@ pub fn run() -> Result<()> {
                 policy: crate::jam_index::ScreenSelectionPolicy::default_signatures(),
                 max_part_bases,
                 max_part_signatures,
+                target_parts: parts,
                 parallel_parts: parallel_parts.unwrap_or(threads),
                 force: cli.force,
                 silent: cli.silent,
@@ -178,6 +180,7 @@ pub fn run() -> Result<()> {
                 output,
                 max_part_bases,
                 max_part_signatures,
+                parts,
                 parallel_parts,
             } => handle_index_append(IndexBuildArgs {
                 metagenomes,
@@ -185,6 +188,7 @@ pub fn run() -> Result<()> {
                 policy: crate::jam_index::ScreenSelectionPolicy::default_signatures(),
                 max_part_bases,
                 max_part_signatures,
+                target_parts: parts,
                 parallel_parts: parallel_parts.unwrap_or(threads),
                 force: cli.force,
                 silent: cli.silent,

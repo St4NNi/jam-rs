@@ -115,3 +115,26 @@ fn append_rejects_policy_change_and_signature_bound_splits() {
     let third = source(source_dir.path(), "mg-c", 100);
     assert!(append_jam_index(&output, &[third], &changed).is_err());
 }
+
+#[test]
+fn target_parts_layout() {
+    let source_dir = directory("jam-index-target-source-");
+    let output_parent = directory("jam-index-target-output-");
+    let output = output_parent.path().join("index");
+    let sources = (0..12)
+        .map(|index| {
+            source(
+                source_dir.path(),
+                &format!("mg-{index:02}"),
+                200 + index * 10,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut selected = config(1_000_000, 1_000_000);
+    selected.target_parts = 5;
+    build_jam_index(&output, &sources, &selected).unwrap();
+    let manifest = load_manifest(output).unwrap();
+    assert_eq!(manifest.parts.len(), 5);
+    assert_eq!(manifest.total_metagenomes, 12);
+    assert!(manifest.parts.iter().all(|part| part.metagenome_count > 0));
+}
