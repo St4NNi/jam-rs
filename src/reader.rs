@@ -47,6 +47,12 @@ pub struct ReaderStats {
     pub has_bias_table: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EntryHit {
+    pub sample_id: u32,
+    pub ordinal: u64,
+}
+
 struct FilterMeta {
     descriptor_offset: usize,
     fingerprints_offset: usize,
@@ -559,6 +565,34 @@ impl JamReader {
             .iter()
             .take_while(move |e| e.hash == hash)
             .map(|e| e.sample_id)
+    }
+
+    #[inline]
+    pub fn search_entries(&self, hash: u64) -> impl Iterator<Item = EntryHit> + '_ {
+        let bucket_idx = bucket_id(hash);
+        let dominated = self
+            .bucket_filter(bucket_idx)
+            .is_some_and(|filter| filter.contains(&hash));
+        let entries = if dominated {
+            self.bucket_entries(bucket_idx)
+        } else {
+            &[]
+        };
+        let start = lower_bound_hash(entries, hash);
+        let bucket_start = self.bucket_table[..bucket_idx]
+            .iter()
+            .map(|meta| meta.entry_count)
+            .sum::<u64>();
+        entries[start..]
+            .iter()
+            .enumerate()
+            .take_while(move |(_, entry)| entry.hash == hash)
+            .map(move |(offset, entry)| EntryHit {
+                sample_id: entry.sample_id,
+                ordinal: bucket_start
+                    .saturating_add(u64::try_from(start).unwrap_or(u64::MAX))
+                    .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)),
+            })
     }
 }
 
@@ -1196,5 +1230,37 @@ mod tests {
                 assert_eq!(bucket_id(entry.hash), bucket_idx);
             }
         }
+    }
+
+    #[test]
+    fn entry_ordinals_stable() {
+        let input = make_fasta(&[
+            ("seq1", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+            ("seq2", "ATCGATCGATCGATCGATCGATCGATCGATCG"),
+        ]);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("test.jam");
+        let config = BuildConfig {
+            kmer_size: 11,
+            fscale: 1,
+            singleton: true,
+            num_threads: 1,
+            memory: 1,
+            ..Default::default()
+        };
+        build(&[input.path().to_path_buf()], &output_path, &config).unwrap();
+        let reader = JamReader::open(&output_path).unwrap();
+        let mut expected = 0u64;
+        for bucket_idx in 0..BUCKET_COUNT {
+            for entry in reader.bucket_entries(bucket_idx) {
+                let hit = reader
+                    .search_entries(entry.hash)
+                    .find(|hit| hit.sample_id == entry.sample_id)
+                    .unwrap();
+                assert_eq!(hit.ordinal, expected);
+                expected += 1;
+            }
+        }
+        assert_eq!(expected, reader.stats().entry_count);
     }
 }
