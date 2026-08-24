@@ -5,10 +5,7 @@ use super::signature::{MetagenomeSignatureBuilder, SignatureSelectionError};
 use crate::format::bucket_id;
 use crate::jam_index::external::{ContigRequest, read_selected as read_external};
 use crate::jam_index::external::{ExternalError, ExternalSource, SequenceAccess, read_fai};
-use crate::sequence::{
-    EncodedContig, SequenceError, decode_ambiguity_payload, decode_range, encode_ambiguity_payload,
-    encode_contig,
-};
+use crate::sequence::{SequenceError, encode_ambiguity_payload, encode_contig};
 use memmap2::Mmap;
 use needletail::{Sequence, parse_fastx_file};
 use sha2::{Digest, Sha256};
@@ -743,20 +740,13 @@ pub struct JamIndexPartReader {
     contigs: Vec<PartContig>,
 }
 
-pub struct ExternalPartReader {
-    mmap: Mmap,
-    header: Header,
-    metagenomes: Vec<PartMetagenome>,
-    contigs: Vec<PartContig>,
-}
-
 #[derive(Clone, Debug)]
 pub struct PartReadResult {
     pub contigs: BTreeMap<u32, Vec<u8>>,
     pub source_bytes: u64,
 }
 
-impl ExternalPartReader {
+impl JamIndexPartReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JamIndexPartError> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
@@ -907,147 +897,6 @@ impl ExternalPartReader {
             contigs,
             source_bytes: loaded.source_bytes,
         })
-    }
-}
-
-impl JamIndexPartReader {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, JamIndexPartError> {
-        let file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        if mmap.len() < HEADER_SIZE {
-            return Err(JamIndexPartError::Corrupt("truncated header"));
-        }
-        let header = decode_header(&mmap[..HEADER_SIZE])?;
-        validate_range(&mmap, header.sequence_offset, header.sequence_length)?;
-        let signature = section(&mmap, header.signature_offset, header.signature_length)?;
-        let metagenome = section(&mmap, header.metagenome_offset, header.metagenome_length)?;
-        let contig = section(&mmap, header.contig_offset, header.contig_length)?;
-        let strings = section(&mmap, header.string_offset, header.string_length)?;
-        if sha256(signature) != header.signature_checksum
-            || sha256(metagenome) != header.metagenome_checksum
-            || sha256(contig) != header.contig_checksum
-            || sha256(strings) != header.string_checksum
-        {
-            return Err(JamIndexPartError::Corrupt("section checksum mismatch"));
-        }
-        validate_section_lengths(header)?;
-        let metagenomes = decode_metagenomes(metagenome, strings, header.metagenome_count)?;
-        let contigs = decode_contigs(contig, strings, header.contig_count, mmap.len() as u64)?;
-        validate_directories(&metagenomes, &contigs, header.total_bases)?;
-        validate_signatures(signature, header.signature_count, header.contig_count)?;
-        Ok(Self {
-            mmap,
-            header,
-            metagenomes,
-            contigs,
-        })
-    }
-
-    #[must_use]
-    pub fn metagenomes(&self) -> &[PartMetagenome] {
-        &self.metagenomes
-    }
-
-    #[must_use]
-    pub fn contigs(&self) -> &[PartContig] {
-        &self.contigs
-    }
-
-    #[must_use]
-    pub const fn total_bases(&self) -> u64 {
-        self.header.total_bases
-    }
-
-    #[must_use]
-    pub const fn signature_record_count(&self) -> u64 {
-        self.header.signature_count
-    }
-
-    pub fn signature_hits(&self, hash: u64) -> Result<Vec<SignatureHit>, JamIndexPartError> {
-        let mut hits = Vec::new();
-        self.visit_signature_hits(hash, &mut |hit| hits.push(hit))?;
-        Ok(hits)
-    }
-
-    pub fn visit_signature_hits(
-        &self,
-        hash: u64,
-        visitor: &mut impl FnMut(SignatureHit),
-    ) -> Result<(), JamIndexPartError> {
-        let bytes = section(
-            &self.mmap,
-            self.header.signature_offset,
-            self.header.signature_length,
-        )?;
-        let count = usize::try_from(self.header.signature_count)
-            .map_err(|_| JamIndexPartError::Overflow)?;
-        let mut left = 0usize;
-        let mut right = count;
-        while left < right {
-            let middle = left + (right - left) / 2;
-            if signature_hash(bytes, middle) < hash {
-                left = middle + 1;
-            } else {
-                right = middle;
-            }
-        }
-        while left < count && signature_hash(bytes, left) == hash {
-            let record = decode_signature(bytes, left)?;
-            visitor(SignatureHit {
-                contig_id: record.contig_id,
-                contig_selected: record.flags & SIGNATURE_CONTIG != 0,
-                whole_metagenome_selected: record.flags & SIGNATURE_WHOLE_METAGENOME != 0,
-            });
-            left += 1;
-        }
-        Ok(())
-    }
-
-    pub fn metagenome_contigs(
-        &self,
-        metagenome_id: u32,
-    ) -> Result<std::ops::Range<u32>, JamIndexPartError> {
-        let metagenome = self
-            .metagenomes
-            .get(usize::try_from(metagenome_id).map_err(|_| JamIndexPartError::Overflow)?)
-            .ok_or(JamIndexPartError::UnknownMetagenome(metagenome_id))?;
-        Ok(metagenome.first_contig
-            ..metagenome
-                .first_contig
-                .checked_add(metagenome.contig_count)
-                .ok_or(JamIndexPartError::Overflow)?)
-    }
-
-    pub fn read_contig(&self, contig_id: u32) -> Result<Vec<u8>, JamIndexPartError> {
-        let contig = self
-            .contigs
-            .get(usize::try_from(contig_id).map_err(|_| JamIndexPartError::Overflow)?)
-            .ok_or(JamIndexPartError::UnknownContig(contig_id))?;
-        let packed = section(&self.mmap, contig.packed_offset, contig.packed_length)?;
-        let ambiguity = section(&self.mmap, contig.ambiguity_offset, contig.ambiguity_length)?;
-        if checksum_pair(packed, ambiguity) != contig.sequence_checksum {
-            return Err(JamIndexPartError::Corrupt("contig checksum mismatch"));
-        }
-        let encoded = EncodedContig {
-            base_count: contig.base_count,
-            two_bit: packed.to_vec(),
-            ambiguities: decode_ambiguity_payload(ambiguity)?,
-        };
-        decode_range(&encoded, 0..contig.base_count).map_err(Into::into)
-    }
-
-    pub fn verify_sequence_section(&self) -> Result<(), JamIndexPartError> {
-        let sequence = section(
-            &self.mmap,
-            self.header.sequence_offset,
-            self.header.sequence_length,
-        )?;
-        if sha256(sequence) != self.header.sequence_checksum {
-            return Err(JamIndexPartError::Corrupt(
-                "sequence section checksum mismatch",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -1604,62 +1453,6 @@ fn decode_metagenomes(
         .collect()
 }
 
-fn decode_contigs(
-    bytes: &[u8],
-    strings: &[u8],
-    count: u64,
-    object_size: u64,
-) -> Result<Vec<PartContig>, JamIndexPartError> {
-    let count = usize::try_from(count).map_err(|_| JamIndexPartError::Overflow)?;
-    if bytes.len() != count * CONTIG_RECORD_SIZE {
-        return Err(JamIndexPartError::Corrupt("contig directory length"));
-    }
-    (0..count)
-        .map(|id| {
-            let offset = id * CONTIG_RECORD_SIZE;
-            let contig_id = get_u32(bytes, offset);
-            let packed_offset = get_u64(bytes, offset + 32);
-            let packed_length = get_u64(bytes, offset + 40);
-            let ambiguity_offset = get_u64(bytes, offset + 48);
-            let ambiguity_length = get_u64(bytes, offset + 56);
-            if usize::try_from(contig_id).ok() != Some(id)
-                || bytes[offset + 96..offset + 128]
-                    .iter()
-                    .any(|byte| *byte != 0)
-                || packed_offset
-                    .checked_add(packed_length)
-                    .is_none_or(|end| end > object_size)
-                || ambiguity_offset
-                    .checked_add(ambiguity_length)
-                    .is_none_or(|end| end > object_size)
-            {
-                return Err(JamIndexPartError::Corrupt("contig directory record"));
-            }
-            Ok(PartContig {
-                contig_id,
-                metagenome_id: get_u32(bytes, offset + 4),
-                name: decode_string(
-                    strings,
-                    get_u64(bytes, offset + 8),
-                    get_u32(bytes, offset + 16),
-                )?,
-                base_count: get_u64(bytes, offset + 24),
-                source_ordinal: 0,
-                fai_offset: 0,
-                line_bases: 0,
-                line_width: 0,
-                sequence_sha256: array_32(bytes, offset + 64),
-                signature_count: get_u32(bytes, offset + 20),
-                packed_offset,
-                packed_length,
-                ambiguity_offset,
-                ambiguity_length,
-                sequence_checksum: array_32(bytes, offset + 64),
-            })
-        })
-        .collect()
-}
-
 fn validate_directories(
     metagenomes: &[PartMetagenome],
     contigs: &[PartContig],
@@ -1692,61 +1485,6 @@ fn validate_directories(
     Ok(())
 }
 
-fn validate_signatures(
-    bytes: &[u8],
-    count: u64,
-    contig_count: u64,
-) -> Result<(), JamIndexPartError> {
-    let count = usize::try_from(count).map_err(|_| JamIndexPartError::Overflow)?;
-    if bytes.len() != count * SIGNATURE_RECORD_SIZE {
-        return Err(JamIndexPartError::Corrupt("signature table length"));
-    }
-    let mut previous = None;
-    for index in 0..count {
-        let record = decode_signature(bytes, index)?;
-        if record.hash == 0
-            || u64::from(record.contig_id) >= contig_count
-            || record.flags == 0
-            || record.flags & !(SIGNATURE_CONTIG | SIGNATURE_WHOLE_METAGENOME) != 0
-            || previous.is_some_and(|old| old >= (record.hash, record.contig_id))
-        {
-            return Err(JamIndexPartError::Corrupt("signature table ordering"));
-        }
-        previous = Some((record.hash, record.contig_id));
-    }
-    Ok(())
-}
-
-fn validate_section_lengths(header: Header) -> Result<(), JamIndexPartError> {
-    if header.metagenome_length
-        != u64::from(header.metagenome_count) * METAGENOME_RECORD_SIZE as u64
-        || header.contig_length != header.contig_count * CONTIG_RECORD_SIZE as u64
-        || header.signature_length != header.signature_count * SIGNATURE_RECORD_SIZE as u64
-    {
-        return Err(JamIndexPartError::Corrupt("section length mismatch"));
-    }
-    Ok(())
-}
-
-fn decode_signature(bytes: &[u8], index: usize) -> Result<SignatureRecord, JamIndexPartError> {
-    let offset = index
-        .checked_mul(SIGNATURE_RECORD_SIZE)
-        .ok_or(JamIndexPartError::Overflow)?;
-    let record = bytes
-        .get(offset..offset + SIGNATURE_RECORD_SIZE)
-        .ok_or(JamIndexPartError::Corrupt("signature record"))?;
-    Ok(SignatureRecord {
-        hash: get_u64(record, 0),
-        contig_id: get_u32(record, 8),
-        flags: get_u32(record, 12),
-    })
-}
-
-fn signature_hash(bytes: &[u8], index: usize) -> u64 {
-    let offset = index * SIGNATURE_RECORD_SIZE;
-    get_u64(bytes, offset)
-}
-
 fn decode_string(strings: &[u8], offset: u64, length: u32) -> Result<String, JamIndexPartError> {
     let start = usize::try_from(offset).map_err(|_| JamIndexPartError::Overflow)?;
     let end = start
@@ -1769,10 +1507,6 @@ fn section(bytes: &[u8], offset: u64, length: u64) -> Result<&[u8], JamIndexPart
     bytes
         .get(start..end)
         .ok_or(JamIndexPartError::Corrupt("section range"))
-}
-
-fn validate_range(bytes: &[u8], offset: u64, length: u64) -> Result<(), JamIndexPartError> {
-    section(bytes, offset, length).map(|_| ())
 }
 
 fn sha256_file(path: &Path) -> Result<[u8; 32], JamIndexPartError> {

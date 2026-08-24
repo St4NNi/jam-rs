@@ -1,6 +1,6 @@
 //! Position-free archive adapter that generates dense seeds from selected contigs.
 
-use super::part::ExternalPartReader;
+use super::part::JamIndexPartReader;
 use crate::archive::{
     ArchiveContig, ArchiveError, ArchiveMetadata, ArchiveMetrics, ArchiveResult, SeedKey,
     SeedLookupMetrics, SeedLookupResult, SeedMatch, SeedOccurrence, SeedSchemeDescriptor,
@@ -37,7 +37,7 @@ pub struct JamIndexArchive {
 
 impl JamIndexArchive {
     pub fn load(
-        reader: &ExternalPartReader,
+        reader: &JamIndexPartReader,
         metagenome_id: u32,
         contig_ids: impl IntoIterator<Item = u32>,
     ) -> ArchiveResult<Self> {

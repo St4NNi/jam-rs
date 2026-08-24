@@ -2,7 +2,7 @@
 
 use super::builder::{JamIndexBuildError, load_manifest};
 use super::manifest::{JamIndexManifest, JamIndexPart, ScreenSelectionPolicy};
-use super::part::ExternalPartReader;
+use super::part::JamIndexPartReader;
 use crate::jamhash_u64_v1;
 use crate::reader::{JamReader, ReaderError};
 use needletail::Sequence;
@@ -482,7 +482,7 @@ fn materialize_part(
     selected: &[CandidateCore],
 ) -> Result<Vec<JamIndexCandidate>, JamIndexScreenError> {
     let screen = open_screen(root, part)?;
-    let data = ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+    let data = JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
     let mut by_sample = selected
         .iter()
         .enumerate()

@@ -1,7 +1,7 @@
 //! Parallel, append-only construction of local Jam Index parts.
 
 use super::manifest::{JamIndexManifest, JamIndexPart, ScreenSelectionPolicy};
-use super::part::{ExternalPartReader, MetagenomeSource, write_external_part};
+use super::part::{JamIndexPartReader, MetagenomeSource, write_external_part};
 use crate::provenance;
 use crate::reader::JamReader;
 use crate::writer::{HashSampleInput, build_hash_samples};
@@ -293,7 +293,7 @@ fn build_part(
         .collect::<Vec<_>>();
     let screen_stats = build_hash_samples(&screen_path, &screen_samples, 21, 1)?;
     let screen = JamReader::open(&screen_path)?;
-    let data = ExternalPartReader::open(&data_path)?;
+    let data = JamIndexPartReader::open(&data_path)?;
     if screen.sample_names()
         != data
             .metagenomes()
@@ -342,7 +342,7 @@ fn reject_existing_metagenomes(
         return Err(JamIndexBuildError::DuplicateMetagenome);
     }
     for part in &manifest.parts {
-        let reader = ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+        let reader = JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
         if reader
             .metagenomes()
             .iter()

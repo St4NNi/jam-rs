@@ -1,7 +1,7 @@
 //! Position-free Stage-2 mapping of selected screen hashes to bounded contigs.
 
 use super::builder::{JamIndexBuildError, load_manifest};
-use super::part::ExternalPartReader;
+use super::part::JamIndexPartReader;
 use super::screen::{JamIndexCandidate, PreparedJamIndexQuery};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -209,7 +209,7 @@ pub fn select_candidate_contigs(
                     )
                     .ok_or(JamIndexContigSearchError::UnknownPart(*part_id))?;
                 let reader =
-                    ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+                    JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
                 candidates
                     .iter()
                     .map(|candidate| {
@@ -237,7 +237,7 @@ pub fn select_candidate_contigs(
 }
 
 fn rank_candidate(
-    reader: &ExternalPartReader,
+    reader: &JamIndexPartReader,
     _query: &PreparedJamIndexQuery,
     candidate: &JamIndexCandidate,
     config: JamIndexContigSearchConfig,
