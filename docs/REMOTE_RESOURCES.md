@@ -10,6 +10,12 @@ accepts a local directory, memory maps its parts, and does not use remote
 ranges, persistent page caches, object uploads, JMA resources, or full-object
 fallback. See [JAM_INDEX.md](JAM_INDEX.md).
 
+Jam Index parts reference local external assemblies rather than embedding
+sequence. Plain FASTA uses FAI ranges, BGZF FASTA uses FAI/GZI ranges, and
+normal gzip uses one candidate-only sequential stream. No assembly is opened
+for a noncandidate metagenome. These reads do not use the remote resource
+contract described below.
+
 ## Locator syntax
 
 Each catalog resource is one of:

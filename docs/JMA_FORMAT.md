@@ -4,7 +4,8 @@ JMA format 1 is a deterministic, self-contained archive for one metagenome.
 One catalog row points at one `.jma` object and its checksum. Query-time trace
 does not use a companion index or a text file.
 
-Jam Index is a separate local format and does not contain or open JMA objects.
+Jam Index is a separate local format. It contains neither JMA objects nor
+nucleotide sequence and does not open JMA objects.
 Its complete selected contigs generate positions in memory. See
 [JAM_INDEX.md](JAM_INDEX.md). This document applies only to the existing
 `.jam` plus JMA trace path.

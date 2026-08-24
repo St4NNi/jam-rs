@@ -280,8 +280,11 @@ Ordinary dense chaining stages retain their existing names. A verified
 complete selected contig can instead emit stage 0 with
 `name="exact_contig"`, zero DP alignment attempts, and direct `=` alignment
 evidence. `archive_metrics.seed_bytes_read` is zero for Jam Index because no
-persistent positional seed section is read. `sequence_bytes_read` and
-`decoded_sequence_bases` account selected complete contigs.
+persistent positional seed section is read. `sequence_bytes_read` counts
+physical bytes read from selected external assembly files, while
+`decoded_sequence_bases` accounts selected complete contigs and their in-memory
+use. Normal gzip therefore reports the candidate assembly stream bytes, not
+only the retained contig bases.
 
 The output remains one JSONL or JSONL.zst stream. Separate contig IDs remain
 attached to their alignments and mosaic evidence; their appearance in one
