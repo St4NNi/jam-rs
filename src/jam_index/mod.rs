@@ -6,6 +6,7 @@
 //! positions.
 
 pub mod builder;
+pub mod contig_search;
 pub mod manifest;
 pub mod part;
 pub mod screen;
@@ -14,6 +15,11 @@ pub mod signature;
 pub use builder::{
     JamIndexBuildConfig, JamIndexBuildError, JamIndexBuildStats, append_jam_index, build_jam_index,
     load_manifest,
+};
+pub use contig_search::{
+    JamIndexContigPlan, JamIndexContigSearchConfig, JamIndexContigSearchError,
+    JamIndexContigSearchMetrics, JamIndexContigSearchResult, RankedJamIndexContig,
+    select_candidate_contigs,
 };
 pub use manifest::{
     ContigSignatureBudget, JamIndexManifest, JamIndexManifestError, JamIndexPart,

@@ -445,6 +445,16 @@ impl JamIndexPartReader {
     }
 
     pub fn signature_hits(&self, hash: u64) -> Result<Vec<SignatureHit>, JamIndexPartError> {
+        let mut hits = Vec::new();
+        self.visit_signature_hits(hash, &mut |hit| hits.push(hit))?;
+        Ok(hits)
+    }
+
+    pub fn visit_signature_hits(
+        &self,
+        hash: u64,
+        visitor: &mut impl FnMut(SignatureHit),
+    ) -> Result<(), JamIndexPartError> {
         let bytes = section(
             &self.mmap,
             self.header.signature_offset,
@@ -462,17 +472,16 @@ impl JamIndexPartReader {
                 right = middle;
             }
         }
-        let mut hits = Vec::new();
         while left < count && signature_hash(bytes, left) == hash {
             let record = decode_signature(bytes, left)?;
-            hits.push(SignatureHit {
+            visitor(SignatureHit {
                 contig_id: record.contig_id,
                 contig_selected: record.flags & SIGNATURE_CONTIG != 0,
                 whole_metagenome_selected: record.flags & SIGNATURE_WHOLE_METAGENOME != 0,
             });
             left += 1;
         }
-        Ok(hits)
+        Ok(())
     }
 
     pub fn contig_ids_for_metagenome(
