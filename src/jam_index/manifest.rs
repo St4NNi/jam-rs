@@ -113,8 +113,8 @@ pub struct JamIndexPart {
     pub total_bases: u64,
     pub estimated_signature_count: u64,
     pub screen_jam_bytes: u64,
-    pub contig_signature_bytes: u64,
-    pub packed_sequence_bytes: u64,
+    pub contig_posting_bytes: u64,
+    pub source_reference_bytes: u64,
     pub screen_sha256: String,
     pub data_sha256: String,
 }

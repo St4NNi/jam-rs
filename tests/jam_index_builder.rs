@@ -1,5 +1,5 @@
 use jam_rs::jam_index::{
-    JamIndexBuildConfig, JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy,
+    ExternalPartReader, JamIndexBuildConfig, MetagenomeSource, ScreenSelectionPolicy,
     append_jam_index, build_jam_index, load_manifest,
 };
 use jam_rs::reader::JamReader;
@@ -50,10 +50,10 @@ fn build_splits_by_bases_and_every_part_searches_independently() {
     for part in &manifest.parts {
         let root = output.join(&part.directory);
         let screen = JamReader::open(root.join(&part.screen_file)).unwrap();
-        let data = JamIndexPartReader::open(root.join(&part.data_file)).unwrap();
+        let data = ExternalPartReader::open(root.join(&part.data_file)).unwrap();
         assert_eq!(screen.sample_names().len(), 1);
         assert_eq!(data.metagenomes().len(), 1);
-        assert_eq!(data.read_contig(0).unwrap().len(), 300);
+        assert_eq!(data.read_contigs(0, &[0]).unwrap().contigs[&0].len(), 300);
     }
 }
 

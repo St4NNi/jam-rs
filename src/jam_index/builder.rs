@@ -1,7 +1,7 @@
 //! Parallel, append-only construction of local Jam Index parts.
 
 use super::manifest::{JamIndexManifest, JamIndexPart, ScreenSelectionPolicy};
-use super::part::{JamIndexPartReader, MetagenomeSource, write_part};
+use super::part::{ExternalPartReader, MetagenomeSource, write_external_part};
 use crate::provenance;
 use crate::reader::JamReader;
 use crate::writer::{HashSampleInput, build_hash_samples};
@@ -66,8 +66,8 @@ pub struct JamIndexBuildStats {
     pub new_bases: u64,
     pub total_bases: u64,
     pub screen_jam_bytes: u64,
-    pub contig_signature_bytes: u64,
-    pub packed_sequence_bytes: u64,
+    pub contig_posting_bytes: u64,
+    pub source_reference_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -279,7 +279,7 @@ fn build_part(
         .iter()
         .map(|source| source.source.clone())
         .collect::<Vec<_>>();
-    let result = write_part(&data_path, &sources, policy)?;
+    let result = write_external_part(&data_path, &sources, policy)?;
     if result.total_bases != plan.total_bases || result.contig_count != plan.contig_count {
         return Err(JamIndexBuildError::PlanMismatch(plan.part_id));
     }
@@ -293,7 +293,7 @@ fn build_part(
         .collect::<Vec<_>>();
     let screen_stats = build_hash_samples(&screen_path, &screen_samples, 21, 1)?;
     let screen = JamReader::open(&screen_path)?;
-    let data = JamIndexPartReader::open(&data_path)?;
+    let data = ExternalPartReader::open(&data_path)?;
     if screen.sample_names()
         != data
             .metagenomes()
@@ -301,6 +301,7 @@ fn build_part(
             .map(|metagenome| metagenome.metagenome_id.as_str())
             .collect::<Vec<_>>()
         || screen_stats.sample_count != result.metagenome_count
+        || screen_stats.total_entries != result.posting_count
     {
         return Err(JamIndexBuildError::PlanMismatch(plan.part_id));
     }
@@ -321,8 +322,8 @@ fn build_part(
         total_bases: result.total_bases,
         estimated_signature_count: result.estimated_signature_count,
         screen_jam_bytes: screen_stats.file_size,
-        contig_signature_bytes: result.contig_signature_bytes,
-        packed_sequence_bytes: result.packed_sequence_bytes,
+        contig_posting_bytes: result.contig_signature_bytes,
+        source_reference_bytes: result.source_reference_bytes,
         screen_sha256: provenance::sha256_file(&final_path.join("screen.jam"))?,
         data_sha256: provenance::sha256_file(&final_path.join("part.bin"))?,
     })
@@ -341,7 +342,7 @@ fn reject_existing_metagenomes(
         return Err(JamIndexBuildError::DuplicateMetagenome);
     }
     for part in &manifest.parts {
-        let reader = JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+        let reader = ExternalPartReader::open(root.join(&part.directory).join(&part.data_file))?;
         if reader
             .metagenomes()
             .iter()
@@ -382,8 +383,8 @@ fn stats(parts: &[JamIndexPart], manifest: &JamIndexManifest) -> JamIndexBuildSt
         new_bases: parts.iter().map(|part| part.total_bases).sum(),
         total_bases: manifest.total_bases,
         screen_jam_bytes: parts.iter().map(|part| part.screen_jam_bytes).sum(),
-        contig_signature_bytes: parts.iter().map(|part| part.contig_signature_bytes).sum(),
-        packed_sequence_bytes: parts.iter().map(|part| part.packed_sequence_bytes).sum(),
+        contig_posting_bytes: parts.iter().map(|part| part.contig_posting_bytes).sum(),
+        source_reference_bytes: parts.iter().map(|part| part.source_reference_bytes).sum(),
     }
 }
 

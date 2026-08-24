@@ -15,8 +15,8 @@ fn part(part_id: u32) -> JamIndexPart {
         total_bases: 1_000,
         estimated_signature_count: 50,
         screen_jam_bytes: 800,
-        contig_signature_bytes: 600,
-        packed_sequence_bytes: 250,
+        contig_posting_bytes: 600,
+        source_reference_bytes: 250,
         screen_sha256: checksum('a'),
         data_sha256: checksum('b'),
     }
