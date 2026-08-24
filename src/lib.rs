@@ -17,8 +17,8 @@ pub mod trace;
 pub mod writer;
 pub use cli::handlers::{
     handle_archive_command, handle_bias_create_command, handle_bias_stats_command,
-    handle_distance_command, handle_screen_command, handle_sketch_command, handle_stats_command,
-    handle_trace_command,
+    handle_distance_command, handle_router_build_command, handle_screen_command,
+    handle_sketch_command, handle_stats_command, handle_trace_command,
 };
 pub use io::{expand_input_paths, is_sequence_file};
 pub use jamhash::jamhash_u64;
@@ -28,7 +28,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
-    QueryKindArg, TopologyArg, TraceSensitivityArg,
+    QueryKindArg, RouterCommands, RouterHandoffArg, TopologyArg, TraceSensitivityArg,
 };
 
 pub fn run() -> Result<()> {
@@ -154,12 +154,37 @@ pub fn run() -> Result<()> {
             cli.silent,
         ),
 
+        Commands::Router { command } => match command {
+            RouterCommands::Build {
+                metagenomes,
+                witness_metagenomes,
+                output,
+                k21_base_scale,
+                tiers,
+                key_block_bytes,
+                positions_per_metagenome,
+                position_max_document_frequency,
+            } => handle_router_build_command(
+                metagenomes,
+                witness_metagenomes,
+                output,
+                k21_base_scale,
+                &tiers,
+                key_block_bytes,
+                positions_per_metagenome,
+                position_max_document_frequency,
+                cli.force,
+                cli.silent,
+            ),
+        },
+
         Commands::Trace {
             query,
             plasmid,
             query_kind,
             topology,
             database,
+            router,
             metagenomes,
             output,
             upload_to,
@@ -169,6 +194,12 @@ pub fn run() -> Result<()> {
             min_query_containment,
             min_metagenome_containment,
             top_candidates,
+            min_trace_length,
+            target_identity,
+            max_zero_witness_risk,
+            strict_witness_risk,
+            query_window_size,
+            router_handoff,
             max_alignments,
             io_concurrency,
             topology_margin_bases,
@@ -206,6 +237,7 @@ pub fn run() -> Result<()> {
                 query_kind,
                 topology,
                 database,
+                router,
                 metagenomes,
                 output,
                 upload_to,
@@ -219,6 +251,18 @@ pub fn run() -> Result<()> {
                 min_query_containment,
                 min_metagenome_containment,
                 top_candidates,
+                min_trace_length,
+                target_identity,
+                max_zero_witness_risk,
+                strict_witness_risk,
+                query_window_size,
+                match router_handoff {
+                    RouterHandoffArg::SampleOnly => crate::router::WitnessHandoffMode::SampleOnly,
+                    RouterHandoffArg::PositionBearing => {
+                        crate::router::WitnessHandoffMode::PositionBearing
+                    }
+                    RouterHandoffArg::Hybrid => crate::router::WitnessHandoffMode::Hybrid,
+                },
                 max_alignments,
                 threads,
                 io_concurrency.unwrap_or(threads),

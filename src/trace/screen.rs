@@ -72,6 +72,7 @@ impl CandidateSearchConfig {
 pub enum CandidateScoreMode {
     Uniform,
     Bias,
+    Witness,
 }
 
 impl CandidateScoreMode {
@@ -80,6 +81,7 @@ impl CandidateScoreMode {
         match self {
             Self::Uniform => "uniform",
             Self::Bias => "bias",
+            Self::Witness => "witness",
         }
     }
 }

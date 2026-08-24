@@ -1,13 +1,15 @@
+use jam_rs::trace::alignment::exact_blocks::ExactBlock;
 use jam_rs::trace::alignment::refine::{
-    BridgeConfig, ChainEndpoint, ScoreOnlyWorkspace, ScoreProbe, bridge_chains,
-    refine_with_score_only, score_only_corridor_with_scratch, select_retry_width,
+    BridgeConfig, ChainEndpoint, ExactBlockRefinementConfig, ScoreOnlyWorkspace, ScoreProbe,
+    bridge_chains, refine_with_exact_blocks, refine_with_score_only,
+    score_only_corridor_with_scratch, select_retry_width,
 };
 use jam_rs::trace::alignment::{
     AlignmentCorridor, AlignmentError, AlignmentOptions, AlignmentResult, AlignmentRetryMetadata,
     AlignmentWorkspace, CorridorAnchor,
 };
 use jam_rs::trace::config::AlignmentScoring;
-use jam_rs::trace::model::{BaseInterval, Strand};
+use jam_rs::trace::model::{BaseInterval, EditOperation, Strand};
 
 fn interval(start: u64, end: u64) -> BaseInterval {
     BaseInterval::new(start, end).unwrap()
@@ -61,6 +63,184 @@ fn scoring() -> AlignmentScoring {
 
 fn corridor(anchors: impl Into<Vec<CorridorAnchor>>, safety_margin: u32) -> AlignmentCorridor {
     AlignmentCorridor::new(anchors, safety_margin).unwrap()
+}
+
+fn exact_block(
+    query_start: u64,
+    query_end: u64,
+    oriented_target_start: u64,
+    oriented_target_end: u64,
+    target_length: u64,
+    contig_id: u32,
+    strand: Strand,
+) -> ExactBlock {
+    let oriented_target_interval = interval(oriented_target_start, oriented_target_end);
+    let target_interval = match strand {
+        Strand::Forward => oriented_target_interval,
+        Strand::Reverse => interval(
+            target_length - oriented_target_end,
+            target_length - oriented_target_start,
+        ),
+    };
+    ExactBlock {
+        query_interval: interval(query_start, query_end),
+        target_interval,
+        oriented_target_interval,
+        contig_id,
+        strand,
+        anchor_count: 1,
+        minimum_anchor_k: 21,
+    }
+}
+
+fn reverse_complement(sequence: &[u8]) -> Vec<u8> {
+    sequence
+        .iter()
+        .rev()
+        .map(|base| match base {
+            b'A' => b'T',
+            b'C' => b'G',
+            b'G' => b'C',
+            b'T' => b'A',
+            _ => b'N',
+        })
+        .collect()
+}
+
+#[test]
+fn exact_blocks_bypass_dp_and_emit_direct_equal_run() {
+    let query = b"ACGT".repeat(8);
+    let block = exact_block(
+        0,
+        query.len() as u64,
+        0,
+        query.len() as u64,
+        query.len() as u64,
+        4,
+        Strand::Forward,
+    );
+    // A zero matrix budget proves that no affine-gap allocation is attempted
+    // when the exact block covers the selected result.
+    let options = AlignmentOptions::new(scoring()).with_max_cells(0);
+    let result = refine_with_exact_blocks(
+        &query,
+        &query,
+        &[block],
+        options,
+        ExactBlockRefinementConfig {
+            max_gap_bases: 0,
+            max_terminal_flank_bases: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.cigar, "32=");
+    assert_eq!(result.edit_script[0].operation, EditOperation::Equal);
+    assert_eq!(result.matches, 32);
+}
+
+#[test]
+fn exact_block_stitch_aligns_only_bounded_indel_gap() {
+    let query = b"ACGT".repeat(16);
+    let mut target = query[..21].to_vec();
+    target.extend(std::iter::repeat_n(b'N', 4));
+    target.extend_from_slice(&query[21..]);
+    let blocks = [
+        exact_block(0, 21, 0, 21, target.len() as u64, 4, Strand::Forward),
+        exact_block(43, 64, 47, 68, target.len() as u64, 4, Strand::Forward),
+    ];
+    let result = refine_with_exact_blocks(
+        &query,
+        &target,
+        &blocks,
+        scoring(),
+        ExactBlockRefinementConfig {
+            max_gap_bases: 64,
+            max_terminal_flank_bases: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.query_interval, interval(0, 64));
+    assert_eq!(result.target_interval, interval(0, 68));
+    assert_eq!(result.cigar, "21=4I43=");
+    assert_eq!(result.insertions, 4);
+    let (aligned_query, aligned_target) = result.reconstruct(&query, &target).unwrap();
+    assert_eq!(
+        aligned_query
+            .into_iter()
+            .filter(|base| *base != b'-')
+            .collect::<Vec<_>>(),
+        query
+    );
+    assert_eq!(
+        aligned_target
+            .into_iter()
+            .filter(|base| *base != b'-')
+            .collect::<Vec<_>>(),
+        target
+    );
+}
+
+#[test]
+fn reverse_exact_block_stitch_maps_target_interval_without_dp() {
+    let query = b"ACGT".repeat(8);
+    let target_forward = reverse_complement(&query);
+    let block = exact_block(
+        0,
+        query.len() as u64,
+        0,
+        query.len() as u64,
+        target_forward.len() as u64,
+        4,
+        Strand::Reverse,
+    );
+    let result = refine_with_exact_blocks(
+        &query,
+        &target_forward,
+        &[block],
+        AlignmentOptions::new(scoring()).with_max_cells(0),
+        ExactBlockRefinementConfig {
+            max_gap_bases: 0,
+            max_terminal_flank_bases: 0,
+        },
+    )
+    .unwrap();
+    assert_eq!(result.strand, Strand::Reverse);
+    assert_eq!(result.target_interval, interval(0, 32));
+    assert_eq!(result.cigar, "32=");
+}
+
+#[test]
+fn exact_block_stitch_rejects_contig_or_strand_changes() {
+    let query = b"ACGT".repeat(8);
+    let target = query.clone();
+    let first = exact_block(0, 21, 0, 21, 32, 4, Strand::Forward);
+    let other_contig = exact_block(21, 32, 21, 32, 32, 5, Strand::Forward);
+    let contig_error = refine_with_exact_blocks(
+        &query,
+        &target,
+        &[first.clone(), other_contig],
+        scoring(),
+        ExactBlockRefinementConfig::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        contig_error,
+        jam_rs::trace::alignment::refine::ExactBlockRefinementError::ContigMismatch { .. }
+    ));
+
+    let other_strand = exact_block(21, 32, 0, 11, 32, 4, Strand::Reverse);
+    let strand_error = refine_with_exact_blocks(
+        &query,
+        &target,
+        &[first, other_strand],
+        scoring(),
+        ExactBlockRefinementConfig::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        strand_error,
+        jam_rs::trace::alignment::refine::ExactBlockRefinementError::StrandMismatch
+    ));
 }
 
 #[test]

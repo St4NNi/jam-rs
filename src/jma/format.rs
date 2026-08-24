@@ -118,11 +118,16 @@ pub fn checksum(bytes: &[u8]) -> [u8; 32] {
 /// as part of the object bytes.
 #[must_use]
 pub fn checksum_object(bytes: &[u8]) -> [u8; 32] {
-    let mut copy = bytes.to_vec();
-    if copy.len() >= SUPERBLOCK_SIZE {
-        copy[96..160].fill(0);
+    if bytes.len() < SUPERBLOCK_SIZE {
+        return checksum(bytes);
     }
-    checksum(&copy)
+    let mut digest = Sha256::new();
+    digest.update(&bytes[..96]);
+    digest.update([0; 64]);
+    digest.update(&bytes[160..]);
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&digest.finalize());
+    output
 }
 
 pub fn checked_usize(value: u64, what: &str) -> JmaResult<usize> {

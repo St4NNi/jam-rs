@@ -21,6 +21,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
 pub mod fixture;
+pub mod runtime;
 
 /// One query record supplied to [`prepare_batch_queries`].
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1156,11 +1156,229 @@ pub fn handle_archive_command(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn handle_router_build_command(
+    metagenomes_path: PathBuf,
+    witness_metagenomes_path: Option<PathBuf>,
+    output: PathBuf,
+    base_scale: u32,
+    tiers: &str,
+    key_block_bytes: u32,
+    positions_per_metagenome: usize,
+    position_max_document_frequency: u32,
+    force: bool,
+    silent: bool,
+) -> Result<()> {
+    if output.exists() && !force {
+        return Err(anyhow::anyhow!(
+            "Router output already exists: {}. Use --force to overwrite.",
+            output.display()
+        ));
+    }
+    let catalog = crate::trace::catalog::TraceCatalog::from_path(&metagenomes_path)?;
+    let metagenomes = catalog
+        .entries()
+        .iter()
+        .map(|entry| {
+            Ok(crate::router::format::MetagenomeEntry {
+                id: entry.metagenome_id.clone(),
+                object_uri: entry.resource_uri.clone(),
+                checksum: parse_sha256(&entry.sha256)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let witness_metagenomes = if let Some(path) = witness_metagenomes_path {
+        crate::trace::catalog::TraceCatalog::from_path(path)?
+            .entries()
+            .iter()
+            .map(|entry| {
+                Ok(crate::router::format::MetagenomeEntry {
+                    id: entry.metagenome_id.clone(),
+                    object_uri: entry.resource_uri.clone(),
+                    checksum: parse_sha256(&entry.sha256)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        metagenomes.clone()
+    };
+    let scales = tiers
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .map_err(|_| anyhow::anyhow!("invalid witness tier {value:?}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let stats = crate::router::build::build_router_from_local_jma_sources(
+        &witness_metagenomes,
+        &metagenomes,
+        &output,
+        &crate::router::build::RouterCollectionBuildConfig {
+            base_scale,
+            available_scales: scales,
+            rare_document_frequency: position_max_document_frequency,
+            positions_per_metagenome,
+            writer: crate::router::writer::RouterWriterOptions {
+                key_blocks: crate::router::format::KeyBlockConfig {
+                    target_block_bytes: key_block_bytes,
+                    packed_width: crate::router::format::PackedKeyWidth::Six,
+                    store_jamhash: false,
+                },
+                ..crate::router::writer::RouterWriterOptions::default()
+            },
+            ..crate::router::build::RouterCollectionBuildConfig::default()
+        },
+    )?;
+    if !silent {
+        eprintln!(
+            "Created JAM Witness Router {}: {} metagenomes, {} exact keys, {} posting IDs, {} positional occurrences, {} bytes",
+            output.display(),
+            stats.metagenomes,
+            stats.keys,
+            stats.posting_ids,
+            stats.positional_occurrences,
+            stats.bytes
+        );
+    }
+    Ok(())
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32]> {
+    if value.len() != 64 {
+        return Err(anyhow::anyhow!(
+            "SHA-256 must contain 64 hexadecimal digits"
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    let (chunks, remainder) = value.as_bytes().as_chunks::<2>();
+    debug_assert!(remainder.is_empty());
+    for (index, chunk) in chunks.iter().enumerate() {
+        let text = std::str::from_utf8(chunk)?;
+        bytes[index] = u8::from_str_radix(text, 16)
+            .map_err(|_| anyhow::anyhow!("SHA-256 contains a non-hexadecimal digit"))?;
+    }
+    Ok(bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_query_with_router(
+    router_path: &std::path::Path,
+    catalog: &crate::trace::catalog::TraceCatalog,
+    sequence: &[u8],
+    min_trace_length: u64,
+    target_identity: f64,
+    max_zero_witness_risk: f64,
+    strict_witness_risk: bool,
+    query_window_size: u32,
+    handoff_mode: crate::router::WitnessHandoffMode,
+    top_candidates: usize,
+) -> Result<(
+    Vec<crate::router::RoutedCandidate>,
+    crate::trace::model::InputResource,
+)> {
+    let reader = crate::router::reader::RouterReader::open_mmap(router_path)?;
+    let expected_metagenomes = catalog
+        .entries()
+        .iter()
+        .map(|entry| {
+            Ok(crate::router::format::MetagenomeEntry {
+                id: entry.metagenome_id.clone(),
+                object_uri: entry.resource_uri.clone(),
+                checksum: parse_sha256(&entry.sha256)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if reader.metagenomes().len() != expected_metagenomes.len()
+        || reader
+            .metagenomes()
+            .iter()
+            .zip(&expected_metagenomes)
+            .any(|(bound, expected)| bound.id != expected.id || bound.checksum != expected.checksum)
+    {
+        return Err(anyhow::anyhow!(
+            "router catalog binding does not match --metagenomes"
+        ));
+    }
+    let scheme = reader
+        .schemes()
+        .iter()
+        .find(|scheme| scheme.k == crate::router::WITNESS_K)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("router has no k=21 witness scheme"))?;
+    let plan = crate::trace::query_plan::plan_witness_tier(
+        crate::trace::WitnessPlanningRequest {
+            min_trace_length,
+            target_identity,
+            max_zero_witness_risk,
+            strict: strict_witness_risk,
+        },
+        &scheme,
+    )?;
+    if let Some(warning) = &plan.warning {
+        eprintln!("warning: {warning}");
+    }
+    let nested =
+        crate::router::witness::extract_nested_witnesses(sequence, &scheme, query_window_size)?;
+    let mut scales = plan
+        .selected_witness_tier
+        .into_iter()
+        .chain(plan.available_denser_tiers.iter().copied())
+        .collect::<Vec<_>>();
+    if scales.is_empty() {
+        scales = scheme.available_scales.clone();
+    }
+    scales.sort_unstable_by(|left, right| right.cmp(left));
+    scales.dedup();
+    let mut witnesses = Vec::new();
+    for witness in &nested.witnesses {
+        for &scale in &scales {
+            if witness.retained_at(scale) {
+                witnesses.push(crate::router::search::TieredQueryWitness::new(
+                    scale,
+                    witness.query_witness(),
+                ));
+            }
+        }
+    }
+    let max_shared_witnesses = nested.witnesses.len().clamp(1, 65_536);
+    let source = crate::router::source::RouterPostingSource::new(reader, scheme)?;
+    let router = crate::router::search::CandidateRouter::new(
+        &source,
+        crate::router::search::RouterSearchConfig {
+            top_k: top_candidates,
+            accumulator_capacity: catalog.len().max(top_candidates),
+            max_shared_witnesses_per_candidate: max_shared_witnesses,
+            max_positional_witnesses_per_candidate: max_shared_witnesses.min(4096),
+            handoff_mode,
+            max_positions_per_witness: 4,
+            total_query_windows: Some(nested.eligible_window_count()),
+            ..crate::router::search::RouterSearchConfig::default()
+        },
+    );
+    let candidates = router.search(&witnesses)?;
+    let sha256 = provenance::sha256_file(router_path)?;
+    Ok((
+        candidates,
+        crate::trace::model::InputResource {
+            role: "router".to_string(),
+            redacted_locator: crate::resource::ResourceLocator::parse(
+                router_path.to_string_lossy().as_ref(),
+            )?
+            .redacted(),
+            sha256: Some(sha256),
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn handle_trace_command(
     query_path: PathBuf,
     query_kind: crate::trace::model::QueryKind,
     topology_requested: crate::trace::model::TopologyRequested,
-    database: String,
+    database: Option<String>,
+    router: Option<PathBuf>,
     metagenomes_path: PathBuf,
     output: PathBuf,
     upload_to: Option<String>,
@@ -1170,6 +1388,12 @@ pub fn handle_trace_command(
     min_query_containment: f64,
     min_metagenome_containment: f64,
     top_candidates: Option<usize>,
+    min_trace_length: u64,
+    target_identity: f64,
+    max_zero_witness_risk: f64,
+    strict_witness_risk: bool,
+    query_window_size: u32,
+    router_handoff: crate::router::WitnessHandoffMode,
     max_alignments: usize,
     threads: usize,
     io_concurrency: usize,
@@ -1245,15 +1469,44 @@ pub fn handle_trace_command(
             .saturating_mul(7)
             / 10,
     })?;
+    let candidate_locator = database
+        .clone()
+        .or_else(|| {
+            router
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+        .ok_or_else(|| anyhow::anyhow!("either --database or --router is required"))?;
     let query = crate::trace::runner::TraceQuery {
         plasmid_id: query_id.clone(),
         plasmid_sequence: record.sequence.clone(),
-        database: database.clone(),
-        catalog,
+        database: candidate_locator,
+        catalog: catalog.clone(),
     };
     let started = provenance::unix_time_seconds();
     let run_id = format!("trace-{started}-{}", std::process::id());
-    let mut result = runner.run(&query)?;
+    let mut result = if let Some(router_path) = router.as_deref() {
+        let (candidates, router_input) = route_query_with_router(
+            router_path,
+            &catalog,
+            &record.sequence,
+            min_trace_length,
+            target_identity,
+            max_zero_witness_risk,
+            strict_witness_risk,
+            query_window_size,
+            router_handoff,
+            candidate_limit,
+        )?;
+        runner.run_routed(
+            &query,
+            candidates,
+            router_input,
+            crate::resource::ResourceMetrics::default(),
+        )?
+    } else {
+        runner.run(&query)?
+    };
     result.set_run_id(&run_id);
 
     let source_commit = provenance::source_commit();

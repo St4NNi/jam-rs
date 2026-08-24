@@ -48,8 +48,11 @@ fn assert_supported_trace(path: &Path) {
         .iter()
         .find(|record| record["record_type"] == "metagenome_result")
         .unwrap();
-    assert_eq!(result["candidate"]["score_mode"], "uniform");
-    assert!(result["candidate"]["uniform_hash_e_value"].is_number());
+    match result["candidate"]["score_mode"].as_str() {
+        Some("uniform") => assert!(result["candidate"]["uniform_hash_e_value"].is_number()),
+        Some("witness") => assert!(result["router_candidate"].is_object()),
+        mode => panic!("unexpected candidate score mode: {mode:?}"),
+    }
     assert!(
         !result["alignments"].as_array().unwrap().is_empty(),
         "trace result had no alignments: {result}"
@@ -153,6 +156,41 @@ fn local_self_contained_jma_trace_is_thread_deterministic() {
     assert_supported_trace(&indexed_output);
     assert!(!directory.path().join("assembly.jma.idx.json").exists());
 
+    let router = directory.path().join("metagenomes.jwr");
+    run_ok(
+        jam()
+            .arg("--silent")
+            .arg("router")
+            .arg("build")
+            .arg("--metagenomes")
+            .arg(&indexed_catalog)
+            .arg("--output")
+            .arg(&router)
+            .arg("--k21-base-scale")
+            .arg("1")
+            .arg("--tiers")
+            .arg("1"),
+    );
+    let router_output = directory.path().join("router.jsonl");
+    run_ok(
+        jam()
+            .arg("--silent")
+            .arg("trace")
+            .arg("--plasmid")
+            .arg(&plasmid)
+            .arg("--router")
+            .arg(&router)
+            .arg("--catalog")
+            .arg(&indexed_catalog)
+            .arg("--output")
+            .arg(&router_output)
+            .arg("--sensitivity")
+            .arg("sensitive")
+            .arg("--top-candidates")
+            .arg("1"),
+    );
+    assert_supported_trace(&router_output);
+
     let parallel_output = directory.path().join("parallel.jsonl");
     run_ok(
         jam()
@@ -184,6 +222,16 @@ fn local_self_contained_jma_trace_is_thread_deterministic() {
         .into_iter()
         .find(|record| record["record_type"] == "metagenome_result")
         .unwrap();
+    let router_result = records(&router_output)
+        .into_iter()
+        .find(|record| record["record_type"] == "metagenome_result")
+        .unwrap();
+    for field in ["alignments", "coverage", "failures"] {
+        assert_eq!(
+            indexed_result[field], router_result[field],
+            "router trace changed biological field {field}"
+        );
+    }
     for field in [
         "schema_version",
         "plasmid_id",

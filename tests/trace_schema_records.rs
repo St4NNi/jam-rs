@@ -52,6 +52,7 @@ fn result() -> TraceMetagenomeResult {
         ),
         status: TraceStatus::NoCandidate,
         candidate: None,
+        router_candidate: None,
         alignments: Vec::new(),
         primary_fragment_mosaic: None,
         topology: None,

@@ -10,8 +10,9 @@ use super::{AlignmentError, AlignmentOptions, AlignmentResult, AlignmentWorkspac
 use crate::trace::alignment::exact_blocks::{ExactBlock, ExactBlockError, extend_anchor};
 use crate::trace::anchors::Anchor;
 use crate::trace::config::AlignmentScoring;
-use crate::trace::model::{BaseInterval, Strand};
+use crate::trace::model::{BaseInterval, EditOperation, EditRun, Strand};
 use std::cmp::min;
+use std::fmt::Write as _;
 use thiserror::Error;
 
 /// Result of one score-only corridor pass.
@@ -350,6 +351,456 @@ fn rolling_best(cell: RollingCell) -> (i32, u8) {
             super::STATE_DELETION,
         ),
     ])
+}
+
+/// Limits for stitching exact blocks and bounded affine-gap segments.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExactBlockRefinementConfig {
+    /// Maximum query or oriented-target span between two exact blocks.
+    pub max_gap_bases: u64,
+    /// Maximum terminal query or oriented-target flank to align. Larger
+    /// flanks are left outside the local result rather than expanding DP.
+    pub max_terminal_flank_bases: u64,
+}
+
+impl Default for ExactBlockRefinementConfig {
+    fn default() -> Self {
+        Self {
+            max_gap_bases: 250_000,
+            max_terminal_flank_bases: 2_048,
+        }
+    }
+}
+
+/// Refine one ordered exact-block path while bypassing DP for every verified
+/// exact block. DP is invoked only for bounded intervening/terminal segments.
+///
+/// Blocks must describe one contig and one relative strand. Reverse blocks
+/// retain forward target coordinates, while their oriented intervals define
+/// the sequence order used by the stitcher. If a gap cannot be represented by
+/// the bounded local workspace, callers should fall back to the existing
+/// corridor path.
+pub fn refine_with_exact_blocks(
+    query: &[u8],
+    target_forward: &[u8],
+    blocks: &[ExactBlock],
+    options: impl Into<AlignmentOptions>,
+    config: ExactBlockRefinementConfig,
+) -> Result<AlignmentResult, ExactBlockRefinementError> {
+    let options = options.into();
+    if query.is_empty() {
+        return Err(ExactBlockRefinementError::Alignment(
+            AlignmentError::EmptyQuery,
+        ));
+    }
+    if target_forward.is_empty() {
+        return Err(ExactBlockRefinementError::Alignment(
+            AlignmentError::EmptyTarget,
+        ));
+    }
+    if blocks.is_empty() {
+        return Err(ExactBlockRefinementError::NoBlocks);
+    }
+
+    let mut ordered = blocks.to_vec();
+    validate_exact_block_path(query.len(), target_forward.len(), &ordered)?;
+    // Adjacent/overlapping anchors are common. Normalizing here makes the
+    // direct run unambiguous while retaining the input path's contig/strand
+    // validation above.
+    let normalized = crate::trace::alignment::exact_blocks::merge_exact_blocks(&mut ordered);
+    validate_exact_block_path(query.len(), target_forward.len(), &normalized)?;
+
+    let strand = normalized[0].strand;
+    let oriented_target = if strand == Strand::Forward {
+        target_forward.to_vec()
+    } else {
+        target_forward
+            .iter()
+            .rev()
+            .copied()
+            .map(super::complement)
+            .collect::<Vec<_>>()
+    };
+
+    let first = normalized[0].clone();
+    let last = normalized.last().expect("validated non-empty path").clone();
+    let terminal_limit = usize::try_from(config.max_terminal_flank_bases)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let first_query_start = usize::try_from(first.query_interval.start)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let first_target_start = usize::try_from(first.oriented_target_interval.start)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let last_query_end = usize::try_from(last.query_interval.end)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let last_target_end = usize::try_from(last.oriented_target_interval.end)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+
+    let query_start = if first_query_start <= terminal_limit {
+        0
+    } else {
+        first_query_start
+    };
+    let target_start = if first_target_start <= terminal_limit {
+        0
+    } else {
+        first_target_start
+    };
+    let query_end = if query.len().saturating_sub(last_query_end) <= terminal_limit {
+        query.len()
+    } else {
+        last_query_end
+    };
+    let target_end = if oriented_target.len().saturating_sub(last_target_end) <= terminal_limit {
+        oriented_target.len()
+    } else {
+        last_target_end
+    };
+
+    let mut operations = Vec::<EditRun>::new();
+    let mut workspace = AlignmentWorkspace::new();
+    let mut metadata = super::AlignmentRetryMetadata {
+        corridor_used: true,
+        ..super::AlignmentRetryMetadata::default()
+    };
+    append_bounded_segment(
+        query,
+        &oriented_target,
+        query_start,
+        first_query_start,
+        target_start,
+        first_target_start,
+        &mut workspace,
+        options,
+        config.max_terminal_flank_bases,
+        &mut operations,
+        &mut metadata,
+    )?;
+    for pair in normalized.windows(2) {
+        let left = &pair[0];
+        let right = &pair[1];
+        let left_query_end = usize::try_from(left.query_interval.end)
+            .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+        let right_query_start = usize::try_from(right.query_interval.start)
+            .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+        let left_target_end = usize::try_from(left.oriented_target_interval.end)
+            .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+        let right_target_start = usize::try_from(right.oriented_target_interval.start)
+            .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+        append_exact_run(&mut operations, left.len())?;
+        append_bounded_segment(
+            query,
+            &oriented_target,
+            left_query_end,
+            right_query_start,
+            left_target_end,
+            right_target_start,
+            &mut workspace,
+            options,
+            config.max_gap_bases,
+            &mut operations,
+            &mut metadata,
+        )?;
+    }
+
+    append_exact_run(&mut operations, last.len())?;
+    append_bounded_segment(
+        query,
+        &oriented_target,
+        last_query_end,
+        query_end,
+        last_target_end,
+        target_end,
+        &mut workspace,
+        options,
+        config.max_terminal_flank_bases,
+        &mut operations,
+        &mut metadata,
+    )?;
+    let (query_consumed, target_consumed) = run_consumption(&operations);
+    let query_expected = query_end.saturating_sub(query_start);
+    let target_expected = target_end.saturating_sub(target_start);
+    if query_consumed != query_expected || target_consumed != target_expected {
+        return Err(ExactBlockRefinementError::StitchConsumption {
+            query_consumed,
+            query_expected,
+            target_consumed,
+            target_expected,
+        });
+    }
+
+    let (matches, substitutions, insertions, deletions) = run_counts(&operations);
+    let score = score_runs(&operations, options.scoring);
+    let cigar = cigar_runs(&operations)?;
+    let query_interval = BaseInterval::new(query_start as u64, query_end as u64)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let target_interval = match strand {
+        Strand::Forward => BaseInterval::new(target_start as u64, target_end as u64),
+        Strand::Reverse => BaseInterval::new(
+            (target_forward.len() - target_end) as u64,
+            (target_forward.len() - target_start) as u64,
+        ),
+    }
+    .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    metadata.selected_width = metadata.selected_width.max(options.scoring.band_width);
+    Ok(AlignmentResult {
+        score,
+        strand,
+        query_interval,
+        query_segments: vec![query_interval],
+        target_interval,
+        origin_crossing: false,
+        query_length: query_end.saturating_sub(query_start) as u64,
+        target_length: target_end.saturating_sub(target_start) as u64,
+        matches,
+        substitutions,
+        insertions,
+        deletions,
+        cigar,
+        edit_script: operations,
+        chain_score: 0,
+        retry_metadata: metadata,
+    })
+}
+
+fn validate_exact_block_path(
+    query_length: usize,
+    target_length: usize,
+    blocks: &[ExactBlock],
+) -> Result<(), ExactBlockRefinementError> {
+    let first = blocks.first().ok_or(ExactBlockRefinementError::NoBlocks)?;
+    for block in blocks {
+        if block.contig_id != first.contig_id {
+            return Err(ExactBlockRefinementError::ContigMismatch {
+                expected: first.contig_id,
+                observed: block.contig_id,
+            });
+        }
+        if block.strand != first.strand {
+            return Err(ExactBlockRefinementError::StrandMismatch);
+        }
+        let query_end = usize::try_from(block.query_interval.end)
+            .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+        let target_end = usize::try_from(block.oriented_target_interval.end)
+            .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+        if query_end > query_length
+            || target_end > target_length
+            || block.query_interval.start > block.query_interval.end
+            || block.oriented_target_interval.start > block.oriented_target_interval.end
+            || block.query_interval.len() != block.oriented_target_interval.len()
+        {
+            return Err(ExactBlockRefinementError::BlockOutOfBounds);
+        }
+        let mapped_target = match block.strand {
+            Strand::Forward => block.oriented_target_interval,
+            Strand::Reverse => BaseInterval::new(
+                target_length as u64 - block.oriented_target_interval.end,
+                target_length as u64 - block.oriented_target_interval.start,
+            )
+            .map_err(|_| ExactBlockRefinementError::BlockOutOfBounds)?,
+        };
+        if mapped_target != block.target_interval {
+            return Err(ExactBlockRefinementError::BlockTargetMismatch);
+        }
+    }
+    for pair in blocks.windows(2) {
+        if pair[0].query_interval.start > pair[1].query_interval.start
+            || pair[0].oriented_target_interval.start > pair[1].oriented_target_interval.start
+        {
+            return Err(ExactBlockRefinementError::BlocksNotOrdered);
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_bounded_segment(
+    query: &[u8],
+    oriented_target: &[u8],
+    query_start: usize,
+    query_end: usize,
+    target_start: usize,
+    target_end: usize,
+    workspace: &mut AlignmentWorkspace,
+    options: AlignmentOptions,
+    max_segment_bases: u64,
+    operations: &mut Vec<EditRun>,
+    metadata: &mut super::AlignmentRetryMetadata,
+) -> Result<(), ExactBlockRefinementError> {
+    if query_start > query_end || target_start > target_end {
+        return Err(ExactBlockRefinementError::GapOutOfBounds);
+    }
+    let query_len = query_end - query_start;
+    let target_len = target_end - target_start;
+    if u64::try_from(query_len)
+        .ok()
+        .is_some_and(|length| length > max_segment_bases)
+        || u64::try_from(target_len)
+            .ok()
+            .is_some_and(|length| length > max_segment_bases)
+    {
+        return Err(ExactBlockRefinementError::GapTooLarge {
+            query_bases: query_len as u64,
+            target_bases: target_len as u64,
+        });
+    }
+    if query_len == 0 {
+        append_run(operations, EditOperation::Insertion, target_len)?;
+        return Ok(());
+    }
+    if target_len == 0 {
+        append_run(operations, EditOperation::Deletion, query_len)?;
+        return Ok(());
+    }
+
+    let result = workspace.align(
+        &query[query_start..query_end],
+        &oriented_target[target_start..target_end],
+        options,
+    )?;
+    metadata.band_edge_touched |= result.retry_metadata.band_edge_touched;
+    metadata.memory_bound_reached |= result.retry_metadata.memory_bound_reached;
+    metadata.semiglobal_attempted |= result.retry_metadata.semiglobal_attempted;
+    metadata.semiglobal_accepted |= result.retry_metadata.semiglobal_accepted;
+    metadata
+        .attempted_widths
+        .extend(result.retry_metadata.attempted_widths);
+    metadata.retries = metadata
+        .retries
+        .saturating_add(result.retry_metadata.retries);
+    metadata.selected_width = metadata
+        .selected_width
+        .max(result.retry_metadata.selected_width);
+
+    let query_core_start = usize::try_from(result.query_interval.start)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let query_core_end = usize::try_from(result.query_interval.end)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let target_core_start = usize::try_from(result.target_interval.start)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    let target_core_end = usize::try_from(result.target_interval.end)
+        .map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?;
+    append_run(operations, EditOperation::Deletion, query_core_start)?;
+    append_run(operations, EditOperation::Insertion, target_core_start)?;
+    for run in result.edit_script {
+        append_run(
+            operations,
+            run.operation,
+            usize::try_from(run.length).unwrap_or(usize::MAX),
+        )?;
+    }
+    append_run(
+        operations,
+        EditOperation::Deletion,
+        query_len.saturating_sub(query_core_end),
+    )?;
+    append_run(
+        operations,
+        EditOperation::Insertion,
+        target_len.saturating_sub(target_core_end),
+    )?;
+    Ok(())
+}
+
+fn append_exact_run(
+    operations: &mut Vec<EditRun>,
+    length: u64,
+) -> Result<(), ExactBlockRefinementError> {
+    append_run(
+        operations,
+        EditOperation::Equal,
+        usize::try_from(length).map_err(|_| ExactBlockRefinementError::CoordinateOverflow)?,
+    )
+}
+
+fn append_run(
+    operations: &mut Vec<EditRun>,
+    operation: EditOperation,
+    length: usize,
+) -> Result<(), ExactBlockRefinementError> {
+    if length == 0 {
+        return Ok(());
+    }
+    let length = u32::try_from(length).map_err(|_| ExactBlockRefinementError::RunTooLong)?;
+    if let Some(last) = operations.last_mut()
+        && last.operation == operation
+    {
+        last.length = last
+            .length
+            .checked_add(length)
+            .ok_or(ExactBlockRefinementError::RunTooLong)?;
+    } else {
+        operations.push(EditRun { operation, length });
+    }
+    Ok(())
+}
+
+fn run_consumption(operations: &[EditRun]) -> (usize, usize) {
+    operations
+        .iter()
+        .fold((0usize, 0usize), |(query, target), run| {
+            let length = usize::try_from(run.length).unwrap_or(usize::MAX);
+            match run.operation {
+                EditOperation::Equal | EditOperation::Substitution => {
+                    (query.saturating_add(length), target.saturating_add(length))
+                }
+                EditOperation::Insertion | EditOperation::SoftClip => {
+                    (query, target.saturating_add(length))
+                }
+                EditOperation::Deletion => (query.saturating_add(length), target),
+            }
+        })
+}
+
+fn run_counts(operations: &[EditRun]) -> (u64, u64, u64, u64) {
+    let mut matches = 0u64;
+    let mut substitutions = 0u64;
+    let mut insertions = 0u64;
+    let mut deletions = 0u64;
+    for run in operations {
+        match run.operation {
+            EditOperation::Equal => matches = matches.saturating_add(u64::from(run.length)),
+            EditOperation::Substitution => {
+                substitutions = substitutions.saturating_add(u64::from(run.length))
+            }
+            EditOperation::Insertion => {
+                insertions = insertions.saturating_add(u64::from(run.length))
+            }
+            EditOperation::Deletion => deletions = deletions.saturating_add(u64::from(run.length)),
+            EditOperation::SoftClip => {}
+        }
+    }
+    (matches, substitutions, insertions, deletions)
+}
+
+fn score_runs(operations: &[EditRun], scoring: AlignmentScoring) -> i32 {
+    operations.iter().fold(0i32, |score, run| {
+        let length = i32::try_from(run.length).unwrap_or(i32::MAX);
+        let delta = match run.operation {
+            EditOperation::Equal => scoring.match_score.saturating_mul(length),
+            EditOperation::Substitution => scoring.mismatch_score.saturating_mul(length),
+            EditOperation::Insertion | EditOperation::Deletion => scoring
+                .gap_open_score
+                .saturating_add(scoring.gap_extend_score.saturating_mul(length)),
+            EditOperation::SoftClip => 0,
+        };
+        score.saturating_add(delta)
+    })
+}
+
+fn cigar_runs(operations: &[EditRun]) -> Result<String, ExactBlockRefinementError> {
+    let mut cigar = String::new();
+    for run in operations {
+        let code = match run.operation {
+            EditOperation::Equal => '=',
+            EditOperation::Substitution => 'X',
+            EditOperation::Insertion => 'I',
+            EditOperation::Deletion => 'D',
+            EditOperation::SoftClip => 'S',
+        };
+        write!(&mut cigar, "{}{}", run.length, code)
+            .map_err(|_| ExactBlockRefinementError::CigarWrite)?;
+    }
+    Ok(cigar)
 }
 
 /// Deterministic choice made after score-only corridor probes.
@@ -837,6 +1288,48 @@ const fn strand_rank(strand: Strand) -> u8 {
         Strand::Forward => 0,
         Strand::Reverse => 1,
     }
+}
+
+/// Errors that tell the runner to use the existing corridor fallback.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum ExactBlockRefinementError {
+    #[error(transparent)]
+    Alignment(#[from] AlignmentError),
+    #[error(transparent)]
+    Exact(#[from] ExactBlockError),
+    #[error("exact-block refinement requires at least one block")]
+    NoBlocks,
+    #[error("exact blocks use multiple contigs: expected {expected}, observed {observed}")]
+    ContigMismatch { expected: u32, observed: u32 },
+    #[error("exact blocks use multiple strands")]
+    StrandMismatch,
+    #[error("exact block is outside the supplied query or target")]
+    BlockOutOfBounds,
+    #[error("exact block target interval does not match its oriented interval")]
+    BlockTargetMismatch,
+    #[error("exact blocks are not ordered in query and oriented-target coordinates")]
+    BlocksNotOrdered,
+    #[error("exact-block gap coordinates are invalid")]
+    GapOutOfBounds,
+    #[error(
+        "exact-block gap exceeds the configured bound: query={query_bases}, target={target_bases}"
+    )]
+    GapTooLarge { query_bases: u64, target_bases: u64 },
+    #[error(
+        "exact-block stitch consumed query={query_consumed}/{query_expected}, target={target_consumed}/{target_expected}"
+    )]
+    StitchConsumption {
+        query_consumed: usize,
+        query_expected: usize,
+        target_consumed: usize,
+        target_expected: usize,
+    },
+    #[error("exact-block coordinate overflow")]
+    CoordinateOverflow,
+    #[error("exact-block edit run exceeds the serialized u32 limit")]
+    RunTooLong,
+    #[error("failed to write stitched CIGAR")]
+    CigarWrite,
 }
 
 /// Errors from conservative single-anchor refinement.

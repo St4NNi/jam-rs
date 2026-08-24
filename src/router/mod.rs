@@ -4,10 +4,12 @@ use crate::jamhash_u64_v1;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod build;
 pub mod format;
 pub mod postings;
 pub mod reader;
 pub mod search;
+pub mod source;
 pub mod witness;
 pub mod writer;
 

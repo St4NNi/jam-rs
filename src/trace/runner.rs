@@ -15,6 +15,7 @@ use crate::archive::{
 };
 use crate::jma::{ArchiveReader, JmaError, SequenceRange};
 use crate::resource::{RangeReader, ResourceError, ResourceMetrics, ResourceOpenOptions};
+use crate::router::RoutedCandidate;
 use crate::trace::TraceMemoryEstimate;
 use crate::trace::alignment::exact_blocks::extend_and_merge_anchors;
 use crate::trace::alignment::{
@@ -33,16 +34,16 @@ use crate::trace::chain::{
 use crate::trace::config::{SeedSensitivity, SensitivityConfig};
 use crate::trace::memory::TraceMemorySemaphore;
 use crate::trace::model::{
-    AlignmentRole, BaseAlignment, BaseInterval, CandidatePerformanceCounters, CoordinateModel,
-    CoverageSummary, FragmentMosaicSummary, InputResource, QueryKind, RescueRoundMetrics,
-    SeedEvidence, Strand, TopologyAssessment, TopologyEvidence, TopologyRequested, TraceFailure,
-    TraceMetagenomeResult, TraceStageMetrics, TraceStatus,
+    AlignmentRole, BaseAlignment, BaseInterval, CandidatePerformanceCounters, CandidateResult,
+    CoordinateModel, CoverageSummary, FragmentMosaicSummary, InputResource, QueryKind,
+    RescueRoundMetrics, SeedEvidence, Strand, TopologyAssessment, TopologyEvidence,
+    TopologyRequested, TraceFailure, TraceMetagenomeResult, TraceStageMetrics, TraceStatus,
 };
 use crate::trace::mosaic::{MosaicError, assess_topology, assign_alignment_ids};
 use crate::trace::raw::{AssemblyResource, RawAssembly, RawError, open_resource};
 use crate::trace::screen::{
-    CandidateError, CandidateSearchConfig, CandidateSearchResult, CandidateSearcher,
-    RankedCandidate,
+    CandidateError, CandidateScoreMode, CandidateSearchConfig, CandidateSearchResult,
+    CandidateSearcher, RankedCandidate,
 };
 use crate::trace::seeds::gear::{
     ExactFragment, FragmentOrientation, FragmentationMode, GearConfig, GearTableKind,
@@ -55,7 +56,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -250,7 +251,8 @@ fn candidate_memory_estimate(
 ) -> TraceMemoryEstimate {
     let anchors = u64::from(config.sensitivity.max_anchors_per_candidate);
     let chains = u64::from(config.sensitivity.max_chains_per_candidate);
-    let band = u64::from(config.sensitivity.alignment.band_width.clamp(64, 512));
+    let query_length_u64 = u64::try_from(query_length).unwrap_or(u64::MAX);
+    let band = u64::from(alignment_half_width_cap(config, query_length_u64));
     let row_width = band.saturating_mul(2).saturating_add(1);
     let query_rows = u64::try_from(query_length)
         .unwrap_or(u64::MAX)
@@ -271,11 +273,24 @@ fn candidate_memory_estimate(
             .saturating_add(chains.saturating_mul(256)),
         sequence_block_bytes: config.sensitivity.max_alignment_window_bases,
         alignment_score_bytes: row_width.saturating_mul(2).saturating_mul(32),
-        traceback_bytes: query_rows.saturating_mul(row_width).saturating_mul(24),
+        traceback_bytes: query_rows.saturating_mul(row_width).saturating_mul(32),
         output_bytes: u64::try_from(config.max_alignments_per_candidate)
             .unwrap_or(u64::MAX)
             .saturating_mul(8 * 1024),
     }
+}
+
+fn alignment_half_width_cap(config: &TraceRunnerConfig, query_length: u64) -> u32 {
+    const BUDGET_BYTES_PER_BANDED_POSITION: u64 = 40;
+
+    let row_budget = config.memory_budget_bytes
+        / query_length
+            .saturating_add(1)
+            .saturating_mul(BUDGET_BYTES_PER_BANDED_POSITION)
+            .max(1);
+    u32::try_from(row_budget.saturating_sub(1) / 2)
+        .unwrap_or(u32::MAX)
+        .clamp(64, 2048)
 }
 
 /// Complete in-memory orchestration result.  The JSON writer consumes
@@ -921,6 +936,95 @@ impl TraceRunner {
         // before constructing the worker input so a pathological search
         // result cannot create an unbounded queue or result vector.
         search.candidates.truncate(positional_candidate_limit);
+        self.run_selected(
+            query,
+            search,
+            database.input,
+            database.metrics,
+            None,
+            started,
+        )
+    }
+
+    pub fn run_routed(
+        &self,
+        query: &TraceQuery,
+        routed: Vec<RoutedCandidate>,
+        router_input: InputResource,
+        router_metrics: ResourceMetrics,
+    ) -> Result<TraceRunOutput, RunnerError> {
+        query.validate()?;
+        let started = Instant::now();
+        let positional_candidate_limit =
+            usize::try_from(self.config.sensitivity.max_candidates).unwrap_or(usize::MAX);
+        let mut routed = routed;
+        routed.truncate(positional_candidate_limit);
+        let candidates = routed
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| RankedCandidate {
+                candidate: CandidateResult {
+                    metagenome_id: candidate.metagenome_id.clone(),
+                    shared_hashes: u64::from(
+                        candidate
+                            .rare_shared_witnesses
+                            .saturating_add(candidate.common_shared_witnesses),
+                    ),
+                    plasmid_hashes: candidate
+                        .window_evidence
+                        .total_shared_witness_count
+                        .max(1)
+                        .into(),
+                    metagenome_hashes: 0,
+                    plasmid_containment: candidate.estimated_query_containment,
+                    metagenome_containment: 0.0,
+                    rank: u32::try_from(index + 1).unwrap_or(u32::MAX),
+                    score_mode: CandidateScoreMode::Witness.as_str().to_string(),
+                    bias_weighted_plasmid_containment: None,
+                    uniform_hash_e_value: None,
+                },
+                score_mode: CandidateScoreMode::Witness,
+                bias_weighted_plasmid_containment: None,
+                uniform_hash_e_value: None,
+            })
+            .collect::<Vec<_>>();
+        let search = CandidateSearchResult {
+            query_hashes: candidates
+                .iter()
+                .map(|candidate| candidate.candidate.plasmid_hashes)
+                .max()
+                .unwrap_or(0),
+            hashes_found: candidates
+                .iter()
+                .map(|candidate| candidate.candidate.shared_hashes)
+                .max()
+                .unwrap_or(0),
+            candidates,
+            score_mode: CandidateScoreMode::Witness,
+        };
+        let routed = routed
+            .into_iter()
+            .map(|candidate| (candidate.metagenome_id.clone(), candidate))
+            .collect::<BTreeMap<_, _>>();
+        self.run_selected(
+            query,
+            search,
+            router_input,
+            router_metrics,
+            Some(&routed),
+            started,
+        )
+    }
+
+    fn run_selected(
+        &self,
+        query: &TraceQuery,
+        search: CandidateSearchResult,
+        database_input: InputResource,
+        database_metrics: ResourceMetrics,
+        routed: Option<&BTreeMap<String, RoutedCandidate>>,
+        started: Instant,
+    ) -> Result<TraceRunOutput, RunnerError> {
         let mut counters = TracePerformanceCounters {
             candidate_queries: 1,
             candidates_considered: search.candidates.len() as u64,
@@ -954,11 +1058,14 @@ impl TraceRunner {
                     })?;
                     let candidate_started = Instant::now();
                     let entry = query.catalog.get(candidate.metagenome_id());
+                    let router_candidate =
+                        routed.and_then(|candidates| candidates.get(candidate.metagenome_id()));
                     let mut work = process_candidate(
                         plasmid_id,
                         plasmid_sequence,
                         candidate,
                         entry,
+                        router_candidate,
                         run_config,
                     );
                     work.counters.failures = work.result.failures.len() as u64;
@@ -1014,8 +1121,8 @@ impl TraceRunner {
             search,
             metagenomes,
             counters,
-            database_input: database.input,
-            database_metrics: database.metrics,
+            database_input,
+            database_metrics,
         })
     }
 }
@@ -1045,6 +1152,7 @@ fn process_candidate(
     plasmid: &[u8],
     candidate: &RankedCandidate,
     entry: Option<&CatalogEntry>,
+    router_candidate: Option<&RoutedCandidate>,
     config: &TraceRunnerConfig,
 ) -> CandidateWork {
     let mut counters = TracePerformanceCounters {
@@ -1052,28 +1160,28 @@ fn process_candidate(
         ..TracePerformanceCounters::default()
     };
     let Some(entry) = entry else {
-        return CandidateWork {
-            result: failed_result(
-                plasmid_id,
-                candidate,
-                config,
-                "catalog",
-                "missing_catalog_entry",
-                "candidate is absent from the resource catalog",
-                false,
-                None,
-            ),
-            counters,
-        };
+        let mut result = failed_result(
+            plasmid_id,
+            candidate,
+            config,
+            "catalog",
+            "missing_catalog_entry",
+            "candidate is absent from the resource catalog",
+            false,
+            None,
+        );
+        result.router_candidate = router_candidate.cloned();
+        return CandidateWork { result, counters };
     };
 
     let resource = entry.resource();
-    let result = match process_jma(
+    let mut result = match process_jma(
         plasmid_id,
         plasmid,
         candidate,
         resource,
         &entry.sha256,
+        router_candidate,
         config,
         &mut counters,
     ) {
@@ -1090,6 +1198,7 @@ fn process_candidate(
             *error.metrics,
         ),
     };
+    result.router_candidate = router_candidate.cloned();
     CandidateWork { result, counters }
 }
 
@@ -1114,12 +1223,14 @@ fn positional_round_configs(sensitivity: &SensitivityConfig) -> Vec<Vec<SeedSens
     rounds
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_jma(
     plasmid_id: &str,
     plasmid: &[u8],
     candidate: &RankedCandidate,
     locator: &str,
     expected_sha256: &str,
+    router_candidate: Option<&RoutedCandidate>,
     config: &TraceRunnerConfig,
     counters: &mut TracePerformanceCounters,
 ) -> Result<ProcessedJma, TraceProcessingFailure> {
@@ -1215,6 +1326,7 @@ fn process_jma(
             &config.sensitivity,
             chain_model,
             (round_index > 0).then_some(target_gaps.as_slice()),
+            router_candidate,
             &mut seen_seed_keys,
         )
         .map_err(|error| TraceProcessingFailure::new(error, archive.metrics().resource))?;
@@ -1344,6 +1456,7 @@ fn process_jma(
         ),
         status: TraceStatus::Complete,
         candidate: Some(candidate.candidate.clone()),
+        router_candidate: None,
         alignments,
         primary_fragment_mosaic: Some(finalized.primary_mosaic),
         topology: Some(finalized.topology),
@@ -1394,7 +1507,7 @@ fn align_window(
         .map(|corridor| corridor.required_half_width())
         .unwrap_or(config.sensitivity.alignment.band_width)
         .max(config.sensitivity.alignment.band_width)
-        .min(2048);
+        .min(alignment_half_width_cap(config, query_span));
     let max_cells = query_span_usize.saturating_add(1).saturating_mul(
         usize::try_from(retry_band)
             .unwrap_or(band)
@@ -1493,6 +1606,7 @@ struct LevelChainResult {
     chains_accepted: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn chains_for_configs<A: TraceArchive>(
     archive: &A,
     plasmid: &[u8],
@@ -1500,6 +1614,7 @@ fn chains_for_configs<A: TraceArchive>(
     sensitivity: &SensitivityConfig,
     coordinate_model: CoordinateModel,
     intervals: Option<&[BaseInterval]>,
+    router_candidate: Option<&RoutedCandidate>,
     seen_seed_keys: &mut HashSet<(u8, u64, u64, u64)>,
 ) -> Result<LevelChainResult, RunnerError> {
     let descriptors = archive.available_seed_schemes().map_err(archive_error)?;
@@ -1511,16 +1626,43 @@ fn chains_for_configs<A: TraceArchive>(
     });
 
     for seed_config in seed_configs {
-        let scheme = select_seed_scheme(&descriptors, *seed_config)?;
+        let effective_seed_config = if seed_config.k == crate::trace::seeds::RESCUE_K {
+            router_candidate.map_or(*seed_config, |candidate| SeedSensitivity {
+                scale: u64::from(candidate.candidate_tier),
+                ..*seed_config
+            })
+        } else {
+            *seed_config
+        };
+        let scheme = select_seed_scheme(&descriptors, effective_seed_config)?;
         let mut level = match intervals {
             Some(intervals) => extract_seed_level_in_intervals(
                 plasmid,
-                *seed_config,
+                effective_seed_config,
                 intervals,
                 sensitivity.gap_rescue.flank_bases,
             )?,
-            None => extract_seed_level(plasmid, *seed_config)?,
+            None => extract_seed_level(plasmid, effective_seed_config)?,
         };
+        if seed_config.k == crate::trace::seeds::RESCUE_K
+            && let Some(router_candidate) = router_candidate
+        {
+            let handed = router_candidate
+                .shared_witnesses
+                .iter()
+                .map(|witness| {
+                    (
+                        witness.key.jamhash,
+                        witness.key.packed,
+                        witness.query_position,
+                        witness.query_reverse,
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            level.seeds.retain(|seed| {
+                handed.contains(&(seed.hash, seed.canonical_kmer, seed.position, seed.reverse))
+            });
+        }
         let reuse_primary_for_mixed =
             seed_configs.len() > 1 && seed_config.k == crate::trace::seeds::PRIMARY_K;
         level.seeds.retain(|seed| {
@@ -1532,8 +1674,44 @@ fn chains_for_configs<A: TraceArchive>(
             remaining_bucket_budget = remaining_bucket_budget.saturating_sub(level.seeds.len());
         }
         seed_keys_tested = seed_keys_tested.saturating_add(level.seeds.len() as u64);
+        let mut handed_positions =
+            BTreeMap::<(u64, u64, u64, bool), Vec<crate::jma::SeedOccurrence>>::new();
+        if seed_config.k == crate::trace::seeds::RESCUE_K
+            && let Some(router_candidate) = router_candidate
+        {
+            for position in &router_candidate.positional_witnesses {
+                if position.scheme_id != scheme.scheme_id {
+                    return Err(RunnerError::InvalidConfig(
+                        "router/JMA witness scheme mismatch".to_string(),
+                    ));
+                }
+                handed_positions
+                    .entry((
+                        position.witness.key.jamhash,
+                        position.witness.key.packed,
+                        position.witness.query_position,
+                        position.witness.query_reverse,
+                    ))
+                    .or_default()
+                    .push(crate::jma::SeedOccurrence {
+                        contig_id: position.contig_id,
+                        position: position.position,
+                        reverse: position.reverse,
+                    });
+            }
+        }
         let mut by_key = BTreeMap::<SeedKey, Vec<QuerySeed>>::new();
         for seed in level.seeds {
+            if let Some(occurrences) =
+                handed_positions.get(&(seed.hash, seed.canonical_kmer, seed.position, seed.reverse))
+            {
+                groups.push(SeedOccurrenceGroup {
+                    seed,
+                    k: level.k,
+                    occurrences: occurrences.clone(),
+                });
+                continue;
+            }
             by_key
                 .entry(seed_key(seed, level.k))
                 .or_default()
@@ -1930,6 +2108,7 @@ fn align_indexed_chains<A: TraceArchive>(
                 .alignment
                 .band_width
                 .min(crate::trace::alignment::DEFAULT_RETRY_WIDTHS[0]),
+            alignment_half_width_cap(config, coordinates.query_span),
         )?;
         attempted = attempted.saturating_add(1);
         align_window(
@@ -2072,6 +2251,7 @@ fn build_chain_corridor(
     coordinates: &ChainAlignmentCoordinates,
     query_length: u64,
     safety_margin: u32,
+    max_half_width: u32,
 ) -> Result<AlignmentCorridor, RunnerError> {
     let mut anchors = chain
         .anchors
@@ -2098,7 +2278,7 @@ fn build_chain_corridor(
     anchors.sort_by_key(|anchor| (anchor.query_position, anchor.target_position));
     anchors.dedup_by_key(|anchor| (anchor.query_position, anchor.target_position));
     AlignmentCorridor::new(anchors, safety_margin)
-        .map(|corridor| corridor.with_max_half_width(2048))
+        .map(|corridor| corridor.with_max_half_width(max_half_width))
         .map_err(RunnerError::Alignment)
 }
 
@@ -2464,6 +2644,7 @@ fn failed_result_with_metrics(
         ),
         status: TraceStatus::Failed,
         candidate: Some(candidate.candidate.clone()),
+        router_candidate: None,
         alignments: Vec::new(),
         primary_fragment_mosaic: None,
         topology: None,
@@ -2844,6 +3025,25 @@ mod failure_tests {
         assert_eq!(alignments.len(), 2);
         assert_eq!(alignments[0].alignment_id, "earlier-exact");
         assert_eq!(alignments[1].alignment_id, "later-high");
+    }
+}
+
+#[cfg(test)]
+mod memory_cap_tests {
+    use super::*;
+
+    #[test]
+    fn long_query_retry_width_is_capped_before_matrix_allocation() {
+        let config = TraceRunnerConfig {
+            threads: 4,
+            io_concurrency: 2,
+            memory_budget_bytes: 4 * 1024 * 1024 * 1024,
+            ..TraceRunnerConfig::default()
+        };
+        assert!(alignment_half_width_cap(&config, 94_281) >= 512);
+        assert!(alignment_half_width_cap(&config, 94_281) < 1024);
+        assert!(alignment_half_width_cap(&config, 10_000) >= 512);
+        assert!(candidate_memory_estimate(&config, 94_281).total_bytes() <= 4 * 1024 * 1024 * 1024);
     }
 }
 

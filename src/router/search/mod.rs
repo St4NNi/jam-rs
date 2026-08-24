@@ -161,7 +161,7 @@ impl<'a, S: PostingSource> CandidateRouter<'a, S> {
         // are allocated here.
         for tiered in &witnesses {
             let Some(descriptor) =
-                posting_descriptor(self.source, tiered, &self.config, collection_size)
+                posting_descriptor(self.source, tiered, &self.config, collection_size)?
             else {
                 continue;
             };
@@ -211,7 +211,7 @@ impl<'a, S: PostingSource> CandidateRouter<'a, S> {
             .max(1);
         for tiered in &witnesses {
             let Some(descriptor) =
-                posting_descriptor(self.source, tiered, &self.config, collection_size)
+                posting_descriptor(self.source, tiered, &self.config, collection_size)?
             else {
                 continue;
             };
@@ -572,11 +572,13 @@ fn posting_descriptor<S: PostingSource>(
     tiered: &TieredQueryWitness,
     config: &RouterSearchConfig,
     collection_size: u32,
-) -> Option<PostingDescriptor> {
+) -> Result<Option<PostingDescriptor>, SearchError> {
     if tiered.witness.query_window_ids.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let header = source.header(tiered.tier, &tiered.witness.key)?;
+    let Some(header) = source.try_header(tiered.tier, &tiered.witness.key)? else {
+        return Ok(None);
+    };
     // Header checks happen before either pass asks the source for payload
     // bytes.  A repetitive/suppressed key is never evidence by itself.
     if header.suppressed
@@ -588,9 +590,9 @@ fn posting_descriptor<S: PostingSource>(
             .is_some_and(|maximum| header.posting_count > maximum)
         || header.is_empty()
     {
-        return None;
+        return Ok(None);
     }
-    Some(PostingDescriptor {
+    Ok(Some(PostingDescriptor {
         class: classify(
             header,
             config.rare_max_document_frequency,
@@ -598,7 +600,7 @@ fn posting_descriptor<S: PostingSource>(
         ),
         weight: witness_weight(collection_size, header.document_frequency),
         header,
-    })
+    }))
 }
 
 fn classify(header: PostingHeader, rare_max: u32, moderate_max: u32) -> WitnessClass {

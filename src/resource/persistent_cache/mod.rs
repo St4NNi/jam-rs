@@ -16,6 +16,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
+pub mod cached_reader;
+
 const MAGIC: &[u8; 8] = b"JAMPCG01";
 const VERSION: u16 = 1;
 const HEADER_BYTES: usize = 120;

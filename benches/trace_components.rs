@@ -221,6 +221,7 @@ fn example_result() -> TraceMetagenomeResult {
             bias_weighted_plasmid_containment: None,
             uniform_hash_e_value: Some(0.01),
         }),
+        router_candidate: None,
         alignments: vec![BaseAlignment {
             alignment_id: "alignment-1".to_string(),
             plasmid_id: "query".to_string(),

@@ -449,6 +449,8 @@ pub struct TraceMetagenomeResult {
     pub algorithm: TraceAlgorithmMetadata,
     pub status: TraceStatus,
     pub candidate: Option<CandidateResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_candidate: Option<crate::router::RoutedCandidate>,
     pub alignments: Vec<BaseAlignment>,
     pub primary_fragment_mosaic: Option<FragmentMosaicSummary>,
     pub topology: Option<TopologyAssessment>,

@@ -302,12 +302,16 @@ pub fn checksum(bytes: &[u8]) -> [u8; 32] {
 /// (object and superblock) but includes all sections and the directory.
 #[must_use]
 pub fn checksum_object(bytes: &[u8]) -> [u8; 32] {
-    let mut copy = bytes.to_vec();
-    if copy.len() >= SUPERBLOCK_SIZE {
-        copy[OBJECT_CHECKSUM_OFFSET..OBJECT_CHECKSUM_OFFSET + 32].fill(0);
-        copy[SUPERBLOCK_CHECKSUM_OFFSET..SUPERBLOCK_CHECKSUM_OFFSET + 32].fill(0);
+    if bytes.len() < SUPERBLOCK_SIZE {
+        return checksum(bytes);
     }
-    checksum(&copy)
+    let mut digest = Sha256::new();
+    digest.update(&bytes[..OBJECT_CHECKSUM_OFFSET]);
+    digest.update([0; 64]);
+    digest.update(&bytes[SUPERBLOCK_CHECKSUM_OFFSET + 32..]);
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&digest.finalize());
+    output
 }
 
 pub const OBJECT_CHECKSUM_OFFSET: usize = 128;

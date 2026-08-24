@@ -12,8 +12,10 @@ use crate::router::format::{
     verify_object_checksum, verify_section_checksum,
 };
 use memmap2::Mmap;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use thiserror::Error;
@@ -107,7 +109,8 @@ impl RouterSource for MmapSource {
         let end = start
             .checked_add(length)
             .ok_or(RouterFormatError::OffsetOverflow)?;
-        self.mmap
+        let bytes = self
+            .mmap
             .get(start..end)
             .map(ToOwned::to_owned)
             .ok_or_else(|| {
@@ -117,7 +120,15 @@ impl RouterSource for MmapSource {
                     length: range.length,
                     object_size: self.mmap.len() as u64,
                 })
-            })
+            })?;
+        #[cfg(unix)]
+        // The mmap slice is no longer borrowed after `to_owned`, so dropping
+        // its resident pages cannot invalidate a live reference.
+        let _ = unsafe {
+            self.mmap
+                .unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, length)
+        };
+        Ok(bytes)
     }
 
     fn full_bytes(&self) -> Option<&[u8]> {
@@ -138,8 +149,9 @@ pub struct RouterReader {
     key_blocks: Vec<KeyBlockDescriptor>,
     prefix_bits: u8,
     prefixes: Vec<PrefixEntry>,
-    posting_headers: Vec<PostingHeader>,
+    posting_count: u64,
     key_section: SectionDescriptor,
+    posting_headers_section: SectionDescriptor,
     posting_section: SectionDescriptor,
     position_section: Option<SectionDescriptor>,
 }
@@ -169,13 +181,15 @@ impl RouterReader {
     /// identity checksum is checked before returning, because the mmap makes
     /// that validation local and does not add a remote request.
     pub fn open_mmap(path: impl AsRef<Path>) -> Result<Self, RouterReaderError> {
-        let file =
+        let mut file =
             File::open(path.as_ref()).map_err(|error| RouterReaderError::Io(error.to_string()))?;
         let mmap = unsafe { Mmap::map(&file) }
             .map_err(|error| RouterReaderError::Io(error.to_string()))?;
+        #[cfg(unix)]
+        let _ = mmap.advise(memmap2::Advice::Random);
         let source: Arc<dyn RouterSource> = Arc::new(MmapSource { mmap });
         let reader = Self::open_source(source)?;
-        reader.verify_identity()?;
+        verify_file_identity(&mut file, &reader.header)?;
         Ok(reader)
     }
 
@@ -220,8 +234,6 @@ impl RouterReader {
         let scheme_bytes = read_checked_section(&*source, scheme_section, header.object_size)?;
         let filter_bytes = read_checked_section(&*source, filter_section, header.object_size)?;
         let prefix_bytes = read_checked_section(&*source, prefix_section, header.object_size)?;
-        let posting_header_bytes =
-            read_checked_section(&*source, posting_headers_section, header.object_size)?;
         if checksum(&metagenome_bytes) != header.catalog_checksum {
             return Err(RouterReaderError::Format(
                 RouterFormatError::ChecksumMismatch("metagenome identity".to_string()),
@@ -260,28 +272,20 @@ impl RouterReader {
             key_config.store_jamhash,
             prefix_bits,
         )?;
-        let posting_headers = decode_posting_headers(
-            &posting_header_bytes,
-            posting_section.length,
-            directory
-                .get(SECTION_POSITION_PAYLOAD)
-                .map_or(0, |entry| entry.length),
-        )?;
-        if u64::try_from(posting_headers.len()).ok() != Some(key_config.key_count) {
+        let posting_header_prefix = source.read(range_in_object(
+            posting_headers_section.offset,
+            POSTING_HEADER_SIZE as u64,
+            header.object_size,
+            "posting header prefix",
+        )?)?;
+        let posting_count =
+            decode_posting_header_prefix(&posting_header_prefix, posting_headers_section.length)?;
+        if posting_count != key_config.key_count {
             return Err(RouterReaderError::Format(
                 RouterFormatError::InvalidPostingHeaders,
             ));
         }
         let position_section = directory.get(SECTION_POSITION_PAYLOAD);
-        if posting_headers
-            .iter()
-            .any(|header| header.position_length != 0)
-            && position_section.is_none()
-        {
-            return Err(RouterReaderError::SectionUnavailable(
-                SECTION_POSITION_PAYLOAD,
-            ));
-        }
         Ok(Self {
             source,
             header,
@@ -293,8 +297,9 @@ impl RouterReader {
             key_blocks,
             prefix_bits,
             prefixes,
-            posting_headers,
+            posting_count,
             key_section,
+            posting_headers_section,
             posting_section,
             position_section,
         })
@@ -421,10 +426,29 @@ impl RouterReader {
     }
 
     pub fn posting_header(&self, key_index: u64) -> Result<PostingHeader, RouterReaderError> {
-        self.posting_headers
-            .get(checked_usize(key_index, "key index")?)
-            .copied()
-            .ok_or(RouterReaderError::KeyIndexOutOfBounds(key_index))
+        if key_index >= self.posting_count {
+            return Err(RouterReaderError::KeyIndexOutOfBounds(key_index));
+        }
+        let relative = key_index
+            .checked_mul(POSTING_RECORD_SIZE as u64)
+            .and_then(|offset| offset.checked_add(POSTING_HEADER_SIZE as u64))
+            .ok_or(RouterFormatError::OffsetOverflow)?;
+        let offset = self
+            .posting_headers_section
+            .offset
+            .checked_add(relative)
+            .ok_or(RouterFormatError::OffsetOverflow)?;
+        let bytes = self.source.read(range_in_object(
+            offset,
+            POSTING_RECORD_SIZE as u64,
+            self.header.object_size,
+            "posting header record",
+        )?)?;
+        decode_posting_header_record(
+            &bytes,
+            self.posting_section.length,
+            self.position_section.map_or(0, |entry| entry.length),
+        )
     }
 
     /// Return bounded raw posting and optional position slices, validating the
@@ -476,6 +500,48 @@ impl RouterReader {
             positions,
         })
     }
+}
+
+fn verify_file_identity(file: &mut File, header: &RouterHeader) -> Result<(), RouterReaderError> {
+    const BUFFER_BYTES: usize = 1024 * 1024;
+    const ZERO_START: u64 = 128;
+    const ZERO_END: u64 = 192;
+
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| RouterReaderError::Io(error.to_string()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; BUFFER_BYTES];
+    let mut offset = 0u64;
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| RouterReaderError::Io(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        let end = offset
+            .checked_add(u64::try_from(read).map_err(|_| RouterFormatError::OffsetOverflow)?)
+            .ok_or(RouterFormatError::OffsetOverflow)?;
+        let zero_start = ZERO_START.saturating_sub(offset).min(read as u64) as usize;
+        let zero_end = ZERO_END.saturating_sub(offset).min(read as u64) as usize;
+        if offset < ZERO_END && end > ZERO_START {
+            buffer[zero_start..zero_end].fill(0);
+        }
+        digest.update(&buffer[..read]);
+        offset = end;
+    }
+    if offset != header.object_size {
+        return Err(RouterReaderError::ObjectSize {
+            actual: offset,
+            declared: header.object_size,
+        });
+    }
+    if digest.finalize().as_slice() != header.object_checksum {
+        return Err(RouterReaderError::Format(
+            RouterFormatError::ObjectChecksumMismatch,
+        ));
+    }
+    Ok(())
 }
 
 fn read_checked_section(
@@ -749,12 +815,11 @@ fn validate_prefixes(
     Ok(())
 }
 
-fn decode_posting_headers(
+fn decode_posting_header_prefix(
     bytes: &[u8],
-    posting_section_length: u64,
-    position_section_length: u64,
-) -> Result<Vec<PostingHeader>, RouterReaderError> {
-    if bytes.len() < POSTING_HEADER_SIZE
+    section_length: u64,
+) -> Result<u64, RouterReaderError> {
+    if bytes.len() != POSTING_HEADER_SIZE
         || get_u32(bytes, 0)? != 1
         || get_u32(bytes, 4)? as usize != POSTING_RECORD_SIZE
     {
@@ -762,49 +827,50 @@ fn decode_posting_headers(
             RouterFormatError::InvalidPostingHeaders,
         ));
     }
-    let count = usize::try_from(get_u64(bytes, 8)?).map_err(|_| {
-        RouterReaderError::Format(RouterFormatError::CountTooLarge("posting headers"))
-    })?;
-    let records_offset = checked_usize(get_u64(bytes, 16)?, "posting records")?;
-    let expected_length = records_offset
-        .checked_add(
-            count
-                .checked_mul(POSTING_RECORD_SIZE)
-                .ok_or(RouterFormatError::OffsetOverflow)?,
-        )
+    let count = get_u64(bytes, 8)?;
+    let records_offset = get_u64(bytes, 16)?;
+    let expected_length = count
+        .checked_mul(POSTING_RECORD_SIZE as u64)
+        .and_then(|length| records_offset.checked_add(length))
         .ok_or(RouterFormatError::OffsetOverflow)?;
-    if records_offset != POSTING_HEADER_SIZE || expected_length != bytes.len() {
+    if records_offset != POSTING_HEADER_SIZE as u64 || expected_length != section_length {
         return Err(RouterReaderError::Format(
             RouterFormatError::InvalidPostingHeaders,
         ));
     }
-    let mut headers = Vec::with_capacity(count);
-    for index in 0..count {
-        let offset = records_offset + index * POSTING_RECORD_SIZE;
-        let header = PostingHeader {
-            document_frequency: get_u32(bytes, offset)?,
-            posting_count: get_u32(bytes, offset + 4)?,
-            flags: get_u32(bytes, offset + 8)?,
-            posting_offset: get_u64(bytes, offset + 16)?,
-            posting_length: get_u64(bytes, offset + 24)?,
-            position_offset: get_u64(bytes, offset + 32)?,
-            position_length: get_u64(bytes, offset + 40)?,
-            checksum: array_32(bytes, offset + 48)?,
-        };
-        if get_u32(bytes, offset + 12)? != 0
-            || checked_end(header.posting_offset, header.posting_length)? > posting_section_length
-            || checked_end(header.position_offset, header.position_length)?
-                > position_section_length
-            || (header.position_length != 0
-                && header.flags & PostingHeader::FLAG_POSITION_BEARING == 0)
-        {
-            return Err(RouterReaderError::Format(
-                RouterFormatError::InvalidPostingHeaders,
-            ));
-        }
-        headers.push(header);
+    Ok(count)
+}
+
+fn decode_posting_header_record(
+    bytes: &[u8],
+    posting_section_length: u64,
+    position_section_length: u64,
+) -> Result<PostingHeader, RouterReaderError> {
+    if bytes.len() != POSTING_RECORD_SIZE {
+        return Err(RouterReaderError::Format(
+            RouterFormatError::InvalidPostingHeaders,
+        ));
     }
-    Ok(headers)
+    let header = PostingHeader {
+        document_frequency: get_u32(bytes, 0)?,
+        posting_count: get_u32(bytes, 4)?,
+        flags: get_u32(bytes, 8)?,
+        posting_offset: get_u64(bytes, 16)?,
+        posting_length: get_u64(bytes, 24)?,
+        position_offset: get_u64(bytes, 32)?,
+        position_length: get_u64(bytes, 40)?,
+        checksum: array_32(bytes, 48)?,
+    };
+    if get_u32(bytes, 12)? != 0
+        || checked_end(header.posting_offset, header.posting_length)? > posting_section_length
+        || checked_end(header.position_offset, header.position_length)? > position_section_length
+        || (header.position_length != 0 && header.flags & PostingHeader::FLAG_POSITION_BEARING == 0)
+    {
+        return Err(RouterReaderError::Format(
+            RouterFormatError::InvalidPostingHeaders,
+        ));
+    }
+    Ok(header)
 }
 
 fn decode_packed(bytes: &[u8]) -> u64 {

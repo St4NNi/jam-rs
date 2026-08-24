@@ -59,6 +59,131 @@ pub struct PositionPosting {
     pub reverse: bool,
 }
 
+const DOCUMENT_WIRE_VERSION: u8 = 1;
+const POSITION_WIRE_VERSION: u8 = 1;
+
+pub fn encode_document_ids_wire(document_ids: &[u32]) -> Result<Vec<u8>, PostingError> {
+    let mut ids = document_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let mut bytes = Vec::new();
+    bytes.push(DOCUMENT_WIRE_VERSION);
+    bytes.extend_from_slice(
+        &u32::try_from(ids.len())
+            .map_err(|_| PostingError::SizeOverflow)?
+            .to_le_bytes(),
+    );
+    let mut previous = 0u32;
+    for (index, id) in ids.into_iter().enumerate() {
+        let value = if index == 0 { id } else { id - previous };
+        encode_var_u32(value, &mut bytes);
+        previous = id;
+    }
+    Ok(bytes)
+}
+
+pub fn decode_document_ids_wire(bytes: &[u8]) -> Result<Vec<u32>, PostingError> {
+    if bytes.len() < 5 || bytes[0] != DOCUMENT_WIRE_VERSION {
+        return Err(PostingError::CorruptPayload(
+            "invalid document posting header".to_string(),
+        ));
+    }
+    let count = u32::from_le_bytes(
+        bytes[1..5]
+            .try_into()
+            .map_err(|_| PostingError::CorruptPayload("truncated document count".to_string()))?,
+    );
+    let mut offset = 5usize;
+    let mut previous = 0u32;
+    let mut ids = Vec::with_capacity(usize::try_from(count).unwrap_or(usize::MAX));
+    for index in 0..count {
+        let value = decode_var_u32(bytes, &mut offset)?;
+        let id = if index == 0 {
+            value
+        } else {
+            previous
+                .checked_add(value)
+                .ok_or(PostingError::DeltaOverflow)?
+        };
+        if index != 0 && id <= previous {
+            return Err(PostingError::CorruptPayload(
+                "document posting is not strictly increasing".to_string(),
+            ));
+        }
+        ids.push(id);
+        previous = id;
+    }
+    if offset != bytes.len() {
+        return Err(PostingError::CorruptPayload(
+            "document posting has trailing bytes".to_string(),
+        ));
+    }
+    Ok(ids)
+}
+
+pub fn encode_positions_wire(positions: &[PositionPosting]) -> Result<Vec<u8>, PostingError> {
+    let mut positions = positions.to_vec();
+    positions.sort_unstable();
+    positions.dedup();
+    let mut bytes = Vec::with_capacity(5 + positions.len().saturating_mul(17));
+    bytes.push(POSITION_WIRE_VERSION);
+    bytes.extend_from_slice(
+        &u32::try_from(positions.len())
+            .map_err(|_| PostingError::SizeOverflow)?
+            .to_le_bytes(),
+    );
+    for position in positions {
+        bytes.extend_from_slice(&position.metagenome_id.to_le_bytes());
+        bytes.extend_from_slice(&position.contig_id.to_le_bytes());
+        bytes.extend_from_slice(&position.position.to_le_bytes());
+        bytes.push(u8::from(position.reverse));
+    }
+    Ok(bytes)
+}
+
+pub fn decode_positions_wire(bytes: &[u8]) -> Result<Vec<PositionPosting>, PostingError> {
+    if bytes.len() < 5 || bytes[0] != POSITION_WIRE_VERSION {
+        return Err(PostingError::CorruptPayload(
+            "invalid position posting header".to_string(),
+        ));
+    }
+    let count = u32::from_le_bytes(
+        bytes[1..5]
+            .try_into()
+            .map_err(|_| PostingError::CorruptPayload("truncated position count".to_string()))?,
+    ) as usize;
+    if bytes.len() != 5usize.saturating_add(count.saturating_mul(17)) {
+        return Err(PostingError::CorruptPayload(
+            "position posting length is invalid".to_string(),
+        ));
+    }
+    let mut positions = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = 5 + index * 17;
+        let reverse = match bytes[offset + 16] {
+            0 => false,
+            1 => true,
+            _ => {
+                return Err(PostingError::CorruptPayload(
+                    "position posting orientation is invalid".to_string(),
+                ));
+            }
+        };
+        positions.push(PositionPosting {
+            metagenome_id: u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+            contig_id: u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()),
+            position: u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().unwrap()),
+            reverse,
+        });
+    }
+    if positions.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(PostingError::CorruptPayload(
+            "position posting is not strictly increasing".to_string(),
+        ));
+    }
+    Ok(positions)
+}
+
 /// Input used by [`InMemoryPostingSource::insert`].
 #[derive(Clone, Debug, Default)]
 pub struct PostingInput {
@@ -126,6 +251,14 @@ pub trait PostingSource {
     /// Read only the header.  A miss or a header-level suppression must not
     /// require decoding either payload.
     fn header(&self, tier: u32, key: &WitnessKey) -> Option<PostingHeader>;
+
+    fn try_header(
+        &self,
+        tier: u32,
+        key: &WitnessKey,
+    ) -> Result<Option<PostingHeader>, PostingError> {
+        Ok(self.header(tier, key))
+    }
 
     /// Decode sorted document IDs after the caller has accepted the header.
     fn decode_document_ids(&self, tier: u32, key: &WitnessKey) -> Result<Vec<u32>, PostingError>;
@@ -567,6 +700,8 @@ pub enum PostingError {
     DeltaOverflow,
     #[error("posting is too large to represent")]
     SizeOverflow,
+    #[error("posting backend failed: {0}")]
+    Backend(String),
     #[error(transparent)]
     Contract(#[from] RouterContractError),
 }

@@ -395,6 +395,13 @@ impl<R: RangeReader> JmaReader<R> {
         Ok(result)
     }
 
+    pub fn export_seed_records(
+        &self,
+        scheme_id: crate::archive::SeedSchemeId,
+    ) -> JmaResult<Vec<seed_compact::ExportedSeedRecord>> {
+        self.compact_seed_index(scheme_id.0)?.export_records()
+    }
+
     /// Looks up a seed at a density level. Page and occurrence ranges are
     /// read only after selecting by hash prefix; canonical k-mer equality is
     /// checked after the digest match.
