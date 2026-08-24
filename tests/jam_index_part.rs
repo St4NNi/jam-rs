@@ -1,6 +1,4 @@
-use jam_rs::jam_index::{
-    JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy, write_external_part,
-};
+use jam_rs::jam_index::{JamIndexPartReader, MetagenomeSource, ScreenSelectionPolicy, write_part};
 use std::fs;
 use tempfile::Builder;
 
@@ -39,7 +37,7 @@ fn fixture() -> (tempfile::TempDir, Vec<MetagenomeSource>) {
 fn external_part_roundtrip() {
     let (directory, sources) = fixture();
     let output = directory.path().join("part.bin");
-    let result = write_external_part(
+    let result = write_part(
         &output,
         &sources,
         &ScreenSelectionPolicy::default_signatures(),
@@ -47,7 +45,6 @@ fn external_part_roundtrip() {
     .unwrap();
     assert_eq!(result.metagenome_count, 2);
     assert_eq!(result.contig_count, 3);
-    assert_eq!(result.packed_sequence_bytes, 0);
     assert_eq!(result.source_reference_bytes, 2 * 192);
     assert_eq!(result.screen_samples.len(), 2);
     let reader = JamIndexPartReader::open(&output).unwrap();
@@ -72,7 +69,7 @@ fn external_part_roundtrip() {
 fn external_corruption_fails() {
     let (directory, sources) = fixture();
     let output = directory.path().join("part.bin");
-    write_external_part(
+    write_part(
         &output,
         &sources,
         &ScreenSelectionPolicy::default_signatures(),

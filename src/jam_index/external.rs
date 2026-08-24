@@ -1,7 +1,5 @@
 //! Candidate-only reads from external FASTA resources.
 
-#![allow(dead_code)]
-
 use flate2::read::MultiGzDecoder;
 use needletail::{Sequence, parse_fastx_file};
 use std::collections::BTreeMap;

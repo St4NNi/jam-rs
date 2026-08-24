@@ -1,9 +1,9 @@
 //! Local append-only Jam Index datasets.
 //!
 //! A Jam Index is a manifest plus independently buildable/searchable parts.
-//! Every part owns a pure `.jam` screening shard, compact contig signatures,
-//! and complete two-bit contig sequence. It never stores nucleotide seed
-//! positions.
+//! Every part owns a pure `.jam` screening shard, compact contig postings,
+//! metadata, and checked references to external assembly files. It stores no
+//! nucleotide sequence or nucleotide seed positions.
 
 pub mod archive;
 pub mod builder;
@@ -31,7 +31,7 @@ pub use manifest::{
 };
 pub use part::{
     JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome, PartScreenSample,
-    PartWriteResult, SignatureHit, write_external_part, write_part,
+    PartWriteResult, write_part,
 };
 pub use screen::{
     JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError, JamIndexScreenMetrics,

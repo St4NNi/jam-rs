@@ -1,7 +1,7 @@
 //! Parallel, append-only construction of local Jam Index parts.
 
 use super::manifest::{JamIndexManifest, JamIndexPart, ScreenSelectionPolicy};
-use super::part::{JamIndexPartReader, MetagenomeSource, write_external_part};
+use super::part::{JamIndexPartReader, MetagenomeSource, write_part};
 use crate::provenance;
 use crate::reader::JamReader;
 use crate::writer::{HashSampleInput, build_hash_samples};
@@ -279,7 +279,7 @@ fn build_part(
         .iter()
         .map(|source| source.source.clone())
         .collect::<Vec<_>>();
-    let result = write_external_part(&data_path, &sources, policy)?;
+    let result = write_part(&data_path, &sources, policy)?;
     if result.total_bases != plan.total_bases || result.contig_count != plan.contig_count {
         return Err(JamIndexBuildError::PlanMismatch(plan.part_id));
     }
