@@ -45,7 +45,7 @@ pub struct PartWriteResult {
     pub total_bases: u64,
     pub estimated_signature_count: u64,
     pub posting_count: u64,
-    pub contig_signature_bytes: u64,
+    pub contig_posting_bytes: u64,
     pub source_reference_bytes: u64,
     pub data_file_bytes: u64,
 }
@@ -432,7 +432,7 @@ pub fn write_part(
         total_bases,
         estimated_signature_count,
         posting_count: header.signature_count,
-        contig_signature_bytes: header.signature_length,
+        contig_posting_bytes: header.signature_length,
         source_reference_bytes: header.sequence_length,
         data_file_bytes: object_size,
     })

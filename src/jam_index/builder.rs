@@ -322,7 +322,7 @@ fn build_part(
         total_bases: result.total_bases,
         estimated_signature_count: result.estimated_signature_count,
         screen_jam_bytes: screen_stats.file_size,
-        contig_posting_bytes: result.contig_signature_bytes,
+        contig_posting_bytes: result.contig_posting_bytes,
         source_reference_bytes: result.source_reference_bytes,
         screen_sha256: provenance::sha256_file(&final_path.join("screen.jam"))?,
         data_sha256: provenance::sha256_file(&final_path.join("part.bin"))?,
