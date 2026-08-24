@@ -7,7 +7,7 @@ use crate::sequence::{
     encode_contig,
 };
 use memmap2::Mmap;
-use needletail::parse_fastx_file;
+use needletail::{Sequence, parse_fastx_file};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
@@ -18,8 +18,12 @@ use thiserror::Error;
 const MAGIC: [u8; 8] = *b"JAMIDX1P";
 const VERSION: u16 = 1;
 const HEADER_SIZE: usize = 512;
+#[allow(dead_code)]
+const SOURCE_RECORD_SIZE: usize = 192;
 const METAGENOME_RECORD_SIZE: usize = 96;
 const CONTIG_RECORD_SIZE: usize = 128;
+#[allow(dead_code)]
+const POSTING_HEADER_SIZE: usize = 16;
 const SIGNATURE_RECORD_SIZE: usize = 16;
 const HEADER_CHECKSUM_OFFSET: usize = 280;
 
@@ -45,10 +49,19 @@ pub struct PartWriteResult {
     pub contig_count: u64,
     pub total_bases: u64,
     pub estimated_signature_count: u64,
+    pub posting_count: u64,
     pub signature_record_count: u64,
     pub contig_signature_bytes: u64,
+    pub source_reference_bytes: u64,
     pub packed_sequence_bytes: u64,
     pub data_file_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PartAccess {
+    PlainFai,
+    Bgzf,
+    Sequential,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,7 +71,14 @@ pub struct PartMetagenome {
     pub contig_count: u32,
     pub total_bases: u64,
     pub screen_hash_count: u32,
+    pub source_path: PathBuf,
+    pub source_size: u64,
     pub source_sha256: [u8; 32],
+    pub access: PartAccess,
+    pub fai_path: Option<PathBuf>,
+    pub fai_sha256: Option<[u8; 32]>,
+    pub gzi_path: Option<PathBuf>,
+    pub gzi_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -67,6 +87,11 @@ pub struct PartContig {
     pub metagenome_id: u32,
     pub name: String,
     pub base_count: u64,
+    pub source_ordinal: u32,
+    pub fai_offset: u64,
+    pub line_bases: u32,
+    pub line_width: u32,
+    pub sequence_sha256: [u8; 32],
     pub signature_count: u32,
     packed_offset: u64,
     packed_length: u64,
@@ -117,14 +142,36 @@ struct MetagenomeBuildRecord {
     source_sha256: [u8; 32],
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct SourceBuildRecord {
+    path_offset: u64,
+    path_length: u32,
+    fai_offset: u64,
+    fai_length: u32,
+    gzi_offset: u64,
+    gzi_length: u32,
+    source_size: u64,
+    access: PartAccess,
+    source_sha256: [u8; 32],
+    fai_sha256: [u8; 32],
+    gzi_sha256: [u8; 32],
+}
+
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct ContigBuildRecord {
     contig_id: u32,
     metagenome_id: u32,
     name_offset: u64,
     name_length: u32,
-    signature_count: u32,
     base_count: u64,
+    source_ordinal: u32,
+    fai_offset: u64,
+    line_bases: u32,
+    line_width: u32,
+    sequence_sha256: [u8; 32],
+    signature_count: u32,
     packed_offset: u64,
     packed_length: u64,
     ambiguity_offset: u64,
@@ -137,6 +184,14 @@ struct SignatureRecord {
     hash: u64,
     contig_id: u32,
     flags: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+struct PostingHeader {
+    offset: u64,
+    count: u32,
+    length: u32,
 }
 
 pub fn write_part(
@@ -252,8 +307,13 @@ pub fn write_part(
                 metagenome_id,
                 name_offset,
                 name_length,
-                signature_count: 0,
                 base_count: encoded.base_count,
+                source_ordinal: local_contig_id,
+                fai_offset: 0,
+                line_bases: 0,
+                line_width: 0,
+                sequence_sha256: sha256(&record.normalize(true)),
+                signature_count: 0,
                 packed_offset,
                 packed_length,
                 ambiguity_offset,
@@ -377,8 +437,10 @@ pub fn write_part(
         contig_count: header.contig_count,
         total_bases,
         estimated_signature_count,
+        posting_count: header.signature_count,
         signature_record_count: header.signature_count,
         contig_signature_bytes: header.signature_length,
+        source_reference_bytes: 0,
         packed_sequence_bytes,
         data_file_bytes: object_size,
     })
@@ -717,7 +779,14 @@ fn decode_metagenomes(
                 contig_count: get_u32(bytes, offset + 8),
                 screen_hash_count: get_u32(bytes, offset + 12),
                 total_bases: get_u64(bytes, offset + 32),
+                source_path: PathBuf::new(),
+                source_size: 0,
                 source_sha256,
+                access: PartAccess::Sequential,
+                fai_path: None,
+                fai_sha256: None,
+                gzi_path: None,
+                gzi_sha256: None,
             })
         })
         .collect()
@@ -762,8 +831,13 @@ fn decode_contigs(
                     get_u64(bytes, offset + 8),
                     get_u32(bytes, offset + 16),
                 )?,
-                signature_count: get_u32(bytes, offset + 20),
                 base_count: get_u64(bytes, offset + 24),
+                source_ordinal: 0,
+                fai_offset: 0,
+                line_bases: 0,
+                line_width: 0,
+                sequence_sha256: array_32(bytes, offset + 64),
+                signature_count: get_u32(bytes, offset + 20),
                 packed_offset,
                 packed_length,
                 ambiguity_offset,
