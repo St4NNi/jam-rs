@@ -14,6 +14,7 @@ use super::screen::{
 use crate::trace::config::SensitivityProfile;
 use crate::trace::model::{CandidateResult, TraceMetagenomeResult};
 use crate::trace::runner::{RunnerError, TraceRunnerConfig, run_index_archive};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,6 +26,7 @@ pub struct JamIndexTraceConfig {
     pub contigs: JamIndexContigSearchConfig,
     pub runner: TraceRunnerConfig,
     pub expansion_batch: usize,
+    pub parallel_candidates: usize,
 }
 
 impl Default for JamIndexTraceConfig {
@@ -34,13 +36,14 @@ impl Default for JamIndexTraceConfig {
             contigs: JamIndexContigSearchConfig::default(),
             runner: TraceRunnerConfig::default(),
             expansion_batch: 8,
+            parallel_candidates: 1,
         }
     }
 }
 
 impl JamIndexTraceConfig {
     fn validate(&self) -> Result<(), JamIndexTraceError> {
-        if self.expansion_batch == 0 {
+        if self.expansion_batch == 0 || self.parallel_candidates == 0 {
             return Err(JamIndexTraceError::InvalidConfig);
         }
         self.runner.validate()?;
@@ -93,27 +96,40 @@ pub fn trace_index(
         selected_candidates: u64::try_from(screen.candidates.len()).unwrap_or(u64::MAX),
         ..JamIndexTraceMetrics::default()
     };
-    let mut metagenomes = Vec::with_capacity(contigs.plans.len());
-    for plan in &contigs.plans {
-        let candidate = candidates
-            .get(&plan.candidate_rank)
-            .copied()
-            .ok_or(JamIndexTraceError::CandidateBinding)?;
-        let part = manifest
-            .parts
-            .get(usize::try_from(plan.part_id).map_err(|_| JamIndexTraceError::Overflow)?)
-            .ok_or(JamIndexTraceError::CandidateBinding)?;
-        let reader = JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
-        let (result, delta) = run_plan(
-            &reader,
-            query_id,
-            query,
-            query_hashes,
-            candidate,
-            plan,
-            &runner,
-            config.expansion_batch,
-        )?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.parallel_candidates)
+        .build()
+        .map_err(|_| JamIndexTraceError::InvalidConfig)?;
+    let completed = pool.install(|| {
+        contigs
+            .plans
+            .par_iter()
+            .map(|plan| {
+                let candidate = candidates
+                    .get(&plan.candidate_rank)
+                    .copied()
+                    .ok_or(JamIndexTraceError::CandidateBinding)?;
+                let part = manifest
+                    .parts
+                    .get(usize::try_from(plan.part_id).map_err(|_| JamIndexTraceError::Overflow)?)
+                    .ok_or(JamIndexTraceError::CandidateBinding)?;
+                let reader =
+                    JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
+                run_plan(
+                    &reader,
+                    query_id,
+                    query,
+                    query_hashes,
+                    candidate,
+                    plan,
+                    &runner,
+                    config.expansion_batch,
+                )
+            })
+            .collect::<Result<Vec<_>, JamIndexTraceError>>()
+    })?;
+    let mut metagenomes = Vec::with_capacity(completed.len());
+    for (result, delta) in completed {
         metrics.selected_contigs = metrics
             .selected_contigs
             .saturating_add(delta.selected_contigs);

@@ -1436,6 +1436,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
             },
             runner,
             expansion_batch: args.expansion_batch,
+            parallel_candidates: args.threads,
         },
     )?;
     let started = provenance::unix_time_seconds();
