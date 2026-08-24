@@ -376,9 +376,7 @@ impl Sink {
             .ok_or(ReportError::UnknownEntry(index))?;
         let record = ShardRecord {
             shard: open.name.clone(),
-            record: Record::from_event(query, &entry.name, event, || {
-                Ok::<_, CliError>(shard.packed(index)?.contigs()?)
-            })?,
+            record: Record::from_event(query, &entry.name, event)?,
         };
         self.write_lines(&record_lines(format, &record)?)
     }

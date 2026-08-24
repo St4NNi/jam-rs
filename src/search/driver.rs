@@ -4,8 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::align_stage::{
-    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, PreparedQuery,
-    align_packed_entry,
+    AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, align_packed_entry,
 };
 use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
@@ -302,38 +301,27 @@ impl<'a> Searcher<'a> {
             SearchStage::Locate,
         )?;
         let started = Instant::now();
-        let aligned = self.align(prepared, &located, request, worker);
+        let last = self.align(prepared, &located, request, worker);
         worker.align.entries += 1;
         worker.align.time += started.elapsed();
-        let aligned = aligned.map_err(|error| Halt {
+        let last = last.map_err(|error| Halt {
             stage: SearchStage::Align,
-            error: error.into(),
+            error,
         })?;
-        worker.align.counts.add(&aligned.work);
-        if aligned.decision.qualifies {
-            worker.align.confirmed_entries += 1;
-            emit(events, EntryEvent::Confirmed(aligned), SearchStage::Align)
-        } else {
-            let dropped = EntryEvent::Dropped {
-                entry,
-                stage: SearchStage::Align,
-                reason: DropReason::Decision,
-            };
-            emit(events, dropped, SearchStage::Align)
-        }
+        emit(events, last, SearchStage::Align)
     }
 
-    /// Stage 3 for one located entry. The packed sequence is opened here, so it can later come
-    /// from another source, such as a block cache.
+    /// Stage 3 for one located entry: opens its packed sequence once, aligns and decides, and
+    /// returns the last event of the entry, confirmed (with the contig table) or dropped.
     fn align(
         &self,
         prepared: &PreparedQuery,
         located: &LocatedEntry,
         request: &Request<'_>,
         worker: &mut Worker,
-    ) -> Result<AlignedEntry, AlignStageError> {
+    ) -> Result<EntryEvent, SearchError> {
         let packed = self.shard.packed(located.entry)?;
-        align_packed_entry(
+        let aligned = align_packed_entry(
             &packed,
             prepared,
             located,
@@ -341,7 +329,18 @@ impl<'a> Searcher<'a> {
             &request.config.rule,
             &mut worker.align_workspace,
             request.control,
-        )
+        )?;
+        worker.align.counts.add(&aligned.work);
+        if !aligned.decision.qualifies {
+            return Ok(EntryEvent::Dropped {
+                entry: located.entry,
+                stage: SearchStage::Align,
+                reason: DropReason::Decision,
+            });
+        }
+        worker.align.confirmed_entries += 1;
+        let contigs = packed.contigs()?;
+        Ok(EntryEvent::Confirmed { aligned, contigs })
     }
 }
 

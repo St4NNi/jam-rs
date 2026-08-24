@@ -313,7 +313,7 @@ fn last_event(events: &BTreeMap<u32, Vec<EntryEvent>>, entry: u32) -> &EntryEven
 
 /// The fragments of a confirmed entry's mosaic.
 fn fragments(event: &EntryEvent) -> Vec<&Fragment> {
-    let EntryEvent::Confirmed(aligned) = event else {
+    let EntryEvent::Confirmed { aligned, .. } = event else {
         panic!("not confirmed: {event:?}");
     };
     assert!(aligned.decision.qualifies);
@@ -381,7 +381,7 @@ fn planted_query_confirmed() {
         format_cigar(&fragment.alignment.runs),
         "1000=1X999=1X999=1X1999="
     );
-    let EntryEvent::Confirmed(aligned) = last_event(&events, 0) else {
+    let EntryEvent::Confirmed { aligned, .. } = last_event(&events, 0) else {
         unreachable!()
     };
     assert!((aligned.decision.identity() - 4_997.0 / 5_000.0).abs() < 1e-12);
@@ -437,7 +437,7 @@ fn circular_query_confirmed() {
     let shard = test_shard(directory.path(), &entries);
     let (summary, events) = search(&shard, &query, true, &config(SearchStage::Align), false);
     assert_eq!(summary.align.confirmed_entries, 1);
-    let EntryEvent::Confirmed(aligned) = last_event(&events, 0) else {
+    let EntryEvent::Confirmed { aligned, .. } = last_event(&events, 0) else {
         panic!("{:?}", events[&0]);
     };
     assert_eq!(aligned.decision.mosaic.covered_bases, QUERY_LENGTH as u64);

@@ -87,8 +87,6 @@ impl ServedShard {
         let index = event.entry();
         let entry = (self.shard.manifest().entries.get(index as usize))
             .ok_or(ReportError::UnknownEntry(index))?;
-        Record::from_event(query, &entry.name, event, || {
-            Ok::<_, ServiceError>(self.shard.packed(index)?.contigs()?)
-        })
+        Ok(Record::from_event(query, &entry.name, event)?)
     }
 }

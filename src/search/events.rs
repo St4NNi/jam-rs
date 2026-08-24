@@ -6,6 +6,7 @@ use super::LocatedEntry;
 use super::align_stage::{AlignStageError, AlignedEntry};
 use super::control::Stopped;
 use super::error::SearchError;
+use crate::index::Contig;
 use serde::{Deserialize, Serialize};
 
 /// A stage of the search; as the last stage of a search it is its level.
@@ -57,8 +58,12 @@ pub enum EntryEvent {
     },
     /// Stage 2 found where to align the entry.
     Located(LocatedEntry),
-    /// Stage 3 aligned the entry and it qualifies; the decision holds its mosaic.
-    Confirmed(AlignedEntry),
+    /// Stage 3 aligned the entry and it qualifies; the decision holds its mosaic, and `contigs`
+    /// the contig table that its fragments refer to.
+    Confirmed {
+        aligned: AlignedEntry,
+        contigs: Vec<Contig>,
+    },
     /// The entry left the search at `stage`.
     Dropped {
         entry: u32,
@@ -77,7 +82,7 @@ impl EntryEvent {
             | Self::Dropped { entry, .. }
             | Self::Unfinished { entry, .. } => *entry,
             Self::Located(located) => located.entry,
-            Self::Confirmed(aligned) => aligned.entry,
+            Self::Confirmed { aligned, .. } => aligned.entry,
         }
     }
 }

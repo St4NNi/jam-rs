@@ -3,8 +3,6 @@
 // SPDX-License-Identifier: MIT
 
 use super::{DecisionRecord, ReportError};
-use crate::index::Contig;
-use crate::search::align_stage::AlignedEntry;
 use crate::search::{Completion, DropReason, EntryEvent, SearchStage, SearchSummary, Stopped};
 use serde::{Deserialize, Serialize};
 
@@ -148,14 +146,8 @@ pub struct ShardRecord {
 }
 
 impl Record {
-    /// The record of an entry event. `contigs` gives the contig table of the entry and is only
-    /// called for a confirmed entry.
-    pub fn from_event<E: From<ReportError>>(
-        query: &str,
-        entry: &str,
-        event: &EntryEvent,
-        contigs: impl FnOnce() -> Result<Vec<Contig>, E>,
-    ) -> Result<Self, E> {
+    /// The record of an entry event of query `query` in entry `entry`.
+    pub fn from_event(query: &str, entry: &str, event: &EntryEvent) -> Result<Self, ReportError> {
         let (query, entry) = (query.to_string(), entry.to_string());
         Ok(match event {
             EntryEvent::Possible {
@@ -181,10 +173,14 @@ impl Record {
                     .map(|range| range.end - range.start)
                     .sum(),
             }),
-            EntryEvent::Confirmed(AlignedEntry { decision, .. }) => Self::Confirmed(Confirmed {
+            EntryEvent::Confirmed { aligned, contigs } => Self::Confirmed(Confirmed {
                 query,
                 entry,
-                decision: DecisionRecord::new(decision.mosaic.query_length, decision, &contigs()?)?,
+                decision: DecisionRecord::new(
+                    aligned.decision.mosaic.query_length,
+                    &aligned.decision,
+                    contigs,
+                )?,
             }),
             EntryEvent::Dropped { stage, reason, .. } => Self::Dropped(Dropped {
                 query,
@@ -302,11 +298,10 @@ mod tests {
             },
         ];
         for event in &events {
-            let record =
-                Record::from_event::<ReportError>("q1", "plasmid_a", event, || Ok(vec![])).unwrap();
+            let record = Record::from_event("q1", "plasmid_a", event).unwrap();
             round_trip(&record);
         }
-        let located = Record::from_event::<ReportError>("q1", "e", &events[1], || Ok(vec![]));
+        let located = Record::from_event("q1", "e", &events[1]);
         assert!(matches!(
             located,
             Ok(Record::Located(Located {
