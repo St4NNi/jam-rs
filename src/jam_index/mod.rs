@@ -8,6 +8,7 @@
 pub mod builder;
 pub mod manifest;
 pub mod part;
+pub mod screen;
 pub mod signature;
 
 pub use builder::{
@@ -21,5 +22,10 @@ pub use manifest::{
 pub use part::{
     JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome, PartScreenSample,
     PartWriteResult, SignatureHit, write_part,
+};
+pub use screen::{
+    JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError, JamIndexScreenMetrics,
+    JamIndexScreenResult, PreparedJamIndexQuery, QueryHashOccurrence, SharedScreenHash,
+    prepare_screen_query, search_jam_index,
 };
 pub use signature::{ContigSignature, MetagenomeSignatureBuilder, SignatureSelectionError};
