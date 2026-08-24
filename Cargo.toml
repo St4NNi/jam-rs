@@ -29,6 +29,7 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = "1.0.102"
 dashmap = "6.1.0"
+flate2 = "1.1.9"
 jamhash = "=0.1.2"
 needletail = { version = "0.6.3", features = [
     "flate2",

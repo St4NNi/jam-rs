@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod builder;
 pub mod contig_search;
+pub(crate) mod external;
 pub mod manifest;
 pub mod part;
 pub mod screen;

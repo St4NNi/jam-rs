@@ -667,6 +667,7 @@ dependencies = [
  "crossfire",
  "dashmap",
  "fastmurmur3",
+ "flate2",
  "foldhash 0.2.0",
  "indicatif",
  "jamhash",
