@@ -1550,7 +1550,11 @@ fn index_workers(threads: usize, query_length: usize, memory_bytes: u64) -> usiz
     const FIXED_BYTES: u64 = 192 * 1024 * 1024;
     const CELL_BYTES: u64 = 13;
     const ROW_CELLS: u64 = 129;
+    const SINGLE_WORKER_BASES: usize = 95_000;
 
+    if query_length >= SINGLE_WORKER_BASES {
+        return 1;
+    }
     let target = memory_bytes.min(TARGET_BYTES);
     let available = target.saturating_sub(FIXED_BYTES.min(target));
     let worker = u64::try_from(query_length)
@@ -1948,6 +1952,7 @@ mod tests {
         let memory = 2 * 1024 * 1024 * 1024;
         assert_eq!(index_workers(4, 10_000, memory), 4);
         assert_eq!(index_workers(4, 94_281, memory), 2);
+        assert_eq!(index_workers(4, 97_566, memory), 1);
         assert_eq!(index_workers(4, 168_903, memory), 1);
     }
 
