@@ -13,10 +13,12 @@ fn trace_help_exposes_generic_query_contract() {
         "--query-kind",
         "--topology",
         "--metagenomes",
+        "--index",
         "--io-concurrency",
     ] {
         assert!(stdout.contains(flag), "trace help is missing {flag}");
     }
+    assert!(!stdout.contains("--router"));
     assert!(stdout.contains("--plasmid"));
 }
 

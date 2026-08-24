@@ -9,11 +9,11 @@ fn catalog(
     base: u8,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let source = directory.join(format!("{id}.fasta"));
-    fs::write(
-        &source,
-        format!(">contig\n{}\n", char::from(base).to_string().repeat(200)),
-    )
-    .unwrap();
+    let offset = usize::from(base & 3);
+    let sequence = (0..200)
+        .map(|index| b"ACGT"[(index * 13 + index / 7 + offset) & 3] as char)
+        .collect::<String>();
+    fs::write(&source, format!(">contig\n{sequence}\n")).unwrap();
     let catalog = directory.join(format!("{id}.tsv"));
     fs::write(
         &catalog,
@@ -33,7 +33,7 @@ fn index_builds_parts() {
         .prefix("jam-index-cli-")
         .tempdir_in("target")
         .unwrap();
-    let (_first, first_catalog) = catalog(directory.path(), "mg-a", b'A');
+    let (first, first_catalog) = catalog(directory.path(), "mg-a", b'A');
     let index = directory.path().join("index");
     let build = Command::new(env!("CARGO_BIN_EXE_jam"))
         .args(["--silent", "index", "build", "--metagenomes"])
@@ -66,4 +66,31 @@ fn index_builds_parts() {
     let manifest = load_manifest(&index).unwrap();
     assert_eq!(manifest.parts.len(), 2);
     assert_eq!(manifest.total_metagenomes, 2);
+
+    let trace = directory.path().join("trace.jsonl");
+    let run = Command::new(env!("CARGO_BIN_EXE_jam"))
+        .args(["--silent", "trace", "--query"])
+        .arg(&first)
+        .args(["--index"])
+        .arg(&index)
+        .args(["--output"])
+        .arg(&trace)
+        .args([
+            "--sensitivity",
+            "sensitive",
+            "--min-shared",
+            "1",
+            "--initial-contigs",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let records = fs::read_to_string(trace).unwrap();
+    assert!(records.contains("\"record_type\":\"metagenome_result\""));
+    assert!(records.contains("\"metagenome_id\":\"mg-a\""));
 }

@@ -40,13 +40,6 @@ pub enum TraceSensitivityArg {
     Sensitive,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
-pub enum RouterHandoffArg {
-    SampleOnly,
-    PositionBearing,
-    Hybrid,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum QueryKindArg {
     Plasmid,
@@ -85,37 +78,6 @@ pub enum ArchiveGearTableArg {
     SingleBase,
     Dinucleotide,
     PackedFourBase,
-}
-
-#[derive(Debug, Subcommand, Clone)]
-pub enum RouterCommands {
-    /// Build an immutable JAM Witness Router from local JMA resources
-    Build {
-        /// TSV or JSON catalog mapping metagenome IDs to JMA resources
-        #[arg(long)]
-        metagenomes: PathBuf,
-        /// Optional dense-witness JMA catalog when final JMA objects are coarser
-        #[arg(long)]
-        witness_metagenomes: Option<PathBuf>,
-        /// Output JAM Witness Router
-        #[arg(short, long)]
-        output: PathBuf,
-        /// Dense k=21 base scale present in every JMA
-        #[arg(long, default_value = "20")]
-        k21_base_scale: u32,
-        /// Comma-separated nested query scales
-        #[arg(long, default_value = "20,50,100,200,500")]
-        tiers: String,
-        /// Target exact-key block size (4096, 8192, 16384, or 32768)
-        #[arg(long, default_value = "4096")]
-        key_block_bytes: u32,
-        /// Maximum retained positions per metagenome for a rare witness
-        #[arg(long, default_value = "4")]
-        positions_per_metagenome: usize,
-        /// Maximum document frequency eligible for positional postings
-        #[arg(long, default_value = "4")]
-        position_max_document_frequency: u32,
-    },
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -287,12 +249,6 @@ pub enum Commands {
         complexity: Option<f64>,
     },
 
-    /// Build or inspect a collection-level witness router
-    Router {
-        #[command(subcommand)]
-        command: RouterCommands,
-    },
-
     /// Build or append a local Jam Index
     Index {
         #[command(subcommand)]
@@ -323,16 +279,21 @@ pub enum Commands {
         #[arg(
             short,
             long,
-            required_unless_present = "router",
-            conflicts_with = "router"
+            required_unless_present = "index",
+            conflicts_with = "index"
         )]
         database: Option<String>,
-        /// JAM Witness Router for short-trace-aware candidate routing
+        /// Local Jam Index directory
         #[arg(long, conflicts_with = "database")]
-        router: Option<PathBuf>,
+        index: Option<PathBuf>,
         /// TSV or JSON catalog mapping database sample IDs to self-contained JMA resources
-        #[arg(short = 'c', long = "metagenomes", visible_alias = "catalog")]
-        metagenomes: PathBuf,
+        #[arg(
+            short = 'c',
+            long = "metagenomes",
+            visible_alias = "catalog",
+            required_unless_present = "index"
+        )]
+        metagenomes: Option<PathBuf>,
         /// JSONL output; .zst or .zstd enables Zstandard compression
         #[arg(short, long)]
         output: PathBuf,
@@ -361,24 +322,18 @@ pub enum Commands {
         /// Override the profile's deterministic candidate limit
         #[arg(long)]
         top_candidates: Option<usize>,
-        /// Minimum trace length used by the witness-risk planner
-        #[arg(long, default_value = "160")]
-        min_trace_length: u64,
-        /// Target per-base identity used by the witness-risk planner
-        #[arg(long, default_value = "0.99")]
-        target_identity: f64,
-        /// Maximum modeled risk of retaining zero witnesses
-        #[arg(long, default_value = "0.01")]
-        max_zero_witness_risk: f64,
-        /// Fail instead of warning when the router cannot meet the risk bound
-        #[arg(long)]
-        strict_witness_risk: bool,
-        /// Logical query-window size for witness support
-        #[arg(long, default_value = "256")]
-        query_window_size: u32,
-        /// Positional witness handoff policy
-        #[arg(long, value_enum, default_value = "hybrid")]
-        router_handoff: RouterHandoffArg,
+        /// Initial candidate contigs aligned before weaker expansion
+        #[arg(long, default_value = "8")]
+        initial_contigs: usize,
+        /// Maximum signature-matched contigs retained per candidate
+        #[arg(long, default_value = "64")]
+        max_contigs: usize,
+        /// Maximum total bases retained in signature-matched contigs
+        #[arg(long, default_value = "67108864")]
+        max_contig_bases: u64,
+        /// Weaker contigs added per incomplete-coverage pass
+        #[arg(long, default_value = "8")]
+        expansion_batch: usize,
         /// Maximum retained alignments per candidate metagenome
         #[arg(long, default_value = "256")]
         max_alignments: usize,

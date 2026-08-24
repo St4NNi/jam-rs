@@ -1345,6 +1345,188 @@ fn print_index(output: &Path, stats: crate::jam_index::JamIndexBuildStats, silen
     }
 }
 
+pub struct IndexTraceArgs {
+    pub query: PathBuf,
+    pub query_id: Option<String>,
+    pub query_kind: crate::trace::model::QueryKind,
+    pub topology: crate::trace::model::TopologyRequested,
+    pub index: PathBuf,
+    pub output: PathBuf,
+    pub profile: crate::trace::config::SensitivityProfile,
+    pub min_shared: u32,
+    pub top_candidates: Option<usize>,
+    pub initial_contigs: usize,
+    pub max_contigs: usize,
+    pub max_contig_bases: u64,
+    pub expansion_batch: usize,
+    pub max_alignments: usize,
+    pub threads: usize,
+    pub topology_margin: Option<u64>,
+    pub memory_gb: usize,
+    pub force: bool,
+    pub silent: bool,
+}
+
+pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
+    if args.output.exists() && !args.force {
+        return Err(anyhow::anyhow!(
+            "Trace output already exists: {}. Use --force to overwrite.",
+            args.output.display()
+        ));
+    }
+    if !args.index.is_dir() {
+        return Err(anyhow::anyhow!(
+            "Jam Index is not a local directory: {}",
+            args.index.display()
+        ));
+    }
+    let resources = crate::resource::ResourceOpenOptions::default();
+    let parsed =
+        crate::trace::raw::RawAssembly::open(args.query.to_string_lossy(), resources.clone())?;
+    if parsed.contigs.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "Query input must contain exactly one FASTA/FASTQ record, got {}",
+            parsed.contigs.len()
+        ));
+    }
+    let record = &parsed.contigs[0];
+    let query_id = args.query_id.unwrap_or_else(|| record.id.clone());
+    let sensitivity = index_sensitivity(args.profile);
+    let candidate_limit = args
+        .top_candidates
+        .unwrap_or_else(|| usize::try_from(sensitivity.max_candidates).unwrap_or(usize::MAX));
+    let runner = crate::trace::runner::TraceRunnerConfig {
+        sensitivity: sensitivity.clone(),
+        candidates: crate::trace::screen::CandidateSearchConfig {
+            min_shared_hashes: args.min_shared,
+            min_plasmid_containment: 0.0,
+            min_metagenome_containment: 0.0,
+            top_candidates: candidate_limit,
+        },
+        resources,
+        threads: args.threads,
+        io_concurrency: args.threads,
+        max_alignments_per_candidate: args.max_alignments,
+        query_kind: args.query_kind,
+        topology_requested: args.topology,
+        topology_margin_bases: args
+            .topology_margin
+            .unwrap_or(sensitivity.auto_topology_margin_bases),
+        memory_budget_bytes: (args.memory_gb as u64).saturating_mul(1024 * 1024 * 1024),
+    };
+    let mut result = crate::jam_index::trace_index(
+        &args.index,
+        &query_id,
+        &record.sequence,
+        &crate::jam_index::JamIndexTraceConfig {
+            screen: crate::jam_index::JamIndexScreenConfig {
+                top_candidates: candidate_limit,
+                accumulator_capacity: candidate_limit.saturating_mul(16).max(4_096),
+                min_shared_hashes: args.min_shared,
+                min_query_windows: 1,
+                parallel_parts: args.threads,
+            },
+            contigs: crate::jam_index::JamIndexContigSearchConfig {
+                initial_contigs_per_candidate: args.initial_contigs,
+                max_contigs_per_candidate: args.max_contigs,
+                accumulator_capacity: args.max_contigs.saturating_mul(8).max(args.max_contigs),
+                max_ranked_contig_bases: args.max_contig_bases,
+                strong_candidate_shared_hashes: args.min_shared.max(4),
+                parallel_parts: args.threads,
+            },
+            runner,
+            expansion_batch: args.expansion_batch,
+        },
+    )?;
+    let started = provenance::unix_time_seconds();
+    let run_id = format!("trace-{started}-{}", std::process::id());
+    for metagenome in &mut result.metagenomes {
+        metagenome.run_id = run_id.clone();
+    }
+    let header = crate::trace::model::TraceRunHeader {
+        schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
+        run_id: run_id.clone(),
+        jam_rs_version: env!("CARGO_PKG_VERSION").to_string(),
+        source_commit: Some(provenance::source_commit()),
+        started_at_utc: format!("unix:{started}"),
+        command: provenance::redacted_command_line(),
+        plasmid_id: query_id,
+        plasmid_length: record.sequence.len() as u64,
+        query_kind: args.query_kind,
+        topology_requested: args.topology,
+        threads: args.threads,
+        io_concurrency: args.threads,
+        sensitivity: sensitivity.clone(),
+        algorithms: crate::trace::config::algorithm_identifiers(),
+        algorithm: crate::trace::config::TraceAlgorithmMetadata::for_sensitivity(sensitivity),
+        inputs: vec![
+            trace_input("query", &args.query)?,
+            trace_input(
+                "jam_index",
+                &args
+                    .index
+                    .join(crate::jam_index::builder::JAM_INDEX_MANIFEST_FILE),
+            )?,
+        ],
+    };
+    let resources = result.metagenomes.iter().fold(
+        crate::resource::ResourceMetrics::default(),
+        |total, item| add_resource_metrics(total, item.resource_metrics),
+    );
+    let footer = crate::trace::model::TraceRunFooter {
+        schema_version: crate::trace::TRACE_JSON_SCHEMA_VERSION.to_string(),
+        run_id,
+        completed_at_utc: format!("unix:{}", provenance::unix_time_seconds()),
+        metagenomes_total: result.metagenomes.len() as u64,
+        metagenomes_with_candidates: result.metagenomes.len() as u64,
+        metagenomes_aligned: result
+            .metagenomes
+            .iter()
+            .filter(|item| !item.alignments.is_empty())
+            .count() as u64,
+        metagenomes_failed: result
+            .metagenomes
+            .iter()
+            .filter(|item| item.status == crate::trace::model::TraceStatus::Failed)
+            .count() as u64,
+        alignments_total: result
+            .metagenomes
+            .iter()
+            .map(|item| item.alignments.len() as u64)
+            .sum(),
+        resource_metrics: resources,
+    };
+    let mut writer = crate::trace::output::create(&args.output)?;
+    writer.write_header(&header)?;
+    for item in &result.metagenomes {
+        writer.write_metagenome_result(item)?;
+    }
+    writer.write_footer(&footer)?;
+    writer.finish()?;
+    if !args.silent {
+        eprintln!(
+            "Jam Index trace {}: {} candidates, {} contigs, {} selected bases",
+            args.output.display(),
+            result.trace_metrics.selected_candidates,
+            result.trace_metrics.selected_contigs,
+            result.trace_metrics.selected_contig_bases
+        );
+    }
+    Ok(())
+}
+
+fn index_sensitivity(
+    profile: crate::trace::config::SensitivityProfile,
+) -> crate::trace::config::SensitivityConfig {
+    let mut sensitivity = crate::trace::config::SensitivityConfig::for_profile(profile);
+    sensitivity.primary.scale = 1;
+    if let Some(rescue) = sensitivity.rescue.as_mut() {
+        rescue.scale = 1;
+    }
+    sensitivity.gap_rescue.dense_primary = None;
+    sensitivity
+}
+
 fn parse_sha256(value: &str) -> Result<[u8; 32]> {
     if value.len() != 64 {
         return Err(anyhow::anyhow!(

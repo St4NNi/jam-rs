@@ -17,9 +17,10 @@ pub mod sketch;
 pub mod trace;
 pub mod writer;
 pub use cli::handlers::{
-    IndexBuildArgs, handle_archive_command, handle_bias_create_command, handle_bias_stats_command,
-    handle_distance_command, handle_index_append, handle_index_build, handle_router_build_command,
-    handle_screen_command, handle_sketch_command, handle_stats_command, handle_trace_command,
+    IndexBuildArgs, IndexTraceArgs, handle_archive_command, handle_bias_create_command,
+    handle_bias_stats_command, handle_distance_command, handle_index_append, handle_index_build,
+    handle_index_trace, handle_screen_command, handle_sketch_command, handle_stats_command,
+    handle_trace_command,
 };
 pub use io::{expand_input_paths, is_sequence_file};
 pub use jamhash::jamhash_u64;
@@ -29,8 +30,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
-    IndexCommands, IndexPolicyArg, QueryKindArg, RouterCommands, RouterHandoffArg, TopologyArg,
-    TraceSensitivityArg,
+    IndexCommands, IndexPolicyArg, QueryKindArg, TopologyArg, TraceSensitivityArg,
 };
 
 pub fn run() -> Result<()> {
@@ -156,30 +156,6 @@ pub fn run() -> Result<()> {
             cli.silent,
         ),
 
-        Commands::Router { command } => match command {
-            RouterCommands::Build {
-                metagenomes,
-                witness_metagenomes,
-                output,
-                k21_base_scale,
-                tiers,
-                key_block_bytes,
-                positions_per_metagenome,
-                position_max_document_frequency,
-            } => handle_router_build_command(
-                metagenomes,
-                witness_metagenomes,
-                output,
-                k21_base_scale,
-                &tiers,
-                key_block_bytes,
-                positions_per_metagenome,
-                position_max_document_frequency,
-                cli.force,
-                cli.silent,
-            ),
-        },
-
         Commands::Index { command } => {
             let policy = |policy| match policy {
                 IndexPolicyArg::Standard => {
@@ -233,7 +209,7 @@ pub fn run() -> Result<()> {
             query_kind,
             topology,
             database,
-            router,
+            index,
             metagenomes,
             output,
             upload_to,
@@ -243,12 +219,10 @@ pub fn run() -> Result<()> {
             min_query_containment,
             min_metagenome_containment,
             top_candidates,
-            min_trace_length,
-            target_identity,
-            max_zero_witness_risk,
-            strict_witness_risk,
-            query_window_size,
-            router_handoff,
+            initial_contigs,
+            max_contigs,
+            max_contig_bases,
+            expansion_batch,
             max_alignments,
             io_concurrency,
             topology_margin_bases,
@@ -281,49 +255,71 @@ pub fn run() -> Result<()> {
                 TopologyArg::Auto => trace::model::TopologyRequested::Auto,
                 TopologyArg::Unknown => trace::model::TopologyRequested::Unknown,
             };
-            handle_trace_command(
-                query,
-                query_kind,
-                topology,
-                database,
-                router,
-                metagenomes,
-                output,
-                upload_to,
-                query_id,
-                match sensitivity {
-                    TraceSensitivityArg::Fast => trace::config::SensitivityProfile::Fast,
-                    TraceSensitivityArg::Balanced => trace::config::SensitivityProfile::Balanced,
-                    TraceSensitivityArg::Sensitive => trace::config::SensitivityProfile::Sensitive,
-                },
-                min_shared,
-                min_query_containment,
-                min_metagenome_containment,
-                top_candidates,
-                min_trace_length,
-                target_identity,
-                max_zero_witness_risk,
-                strict_witness_risk,
-                query_window_size,
-                match router_handoff {
-                    RouterHandoffArg::SampleOnly => crate::router::WitnessHandoffMode::SampleOnly,
-                    RouterHandoffArg::PositionBearing => {
-                        crate::router::WitnessHandoffMode::PositionBearing
-                    }
-                    RouterHandoffArg::Hybrid => crate::router::WitnessHandoffMode::Hybrid,
-                },
-                max_alignments,
-                threads,
-                io_concurrency.unwrap_or(threads),
-                topology_margin_bases,
-                memory_target,
-                cache_dir,
-                cache_block_bytes,
-                request_timeout_seconds,
-                max_retries,
-                cli.force,
-                cli.silent,
-            )
+            let profile = match sensitivity {
+                TraceSensitivityArg::Fast => trace::config::SensitivityProfile::Fast,
+                TraceSensitivityArg::Balanced => trace::config::SensitivityProfile::Balanced,
+                TraceSensitivityArg::Sensitive => trace::config::SensitivityProfile::Sensitive,
+            };
+            if let Some(index) = index {
+                if upload_to.is_some() {
+                    anyhow::bail!("Jam Index trace is local-only and cannot use --upload-to");
+                }
+                handle_index_trace(IndexTraceArgs {
+                    query,
+                    query_id,
+                    query_kind,
+                    topology,
+                    index,
+                    output,
+                    profile,
+                    min_shared,
+                    top_candidates,
+                    initial_contigs,
+                    max_contigs,
+                    max_contig_bases,
+                    expansion_batch,
+                    max_alignments,
+                    threads,
+                    topology_margin: topology_margin_bases,
+                    memory_gb: memory_target,
+                    force: cli.force,
+                    silent: cli.silent,
+                })
+            } else {
+                handle_trace_command(
+                    query,
+                    query_kind,
+                    topology,
+                    database,
+                    None,
+                    metagenomes.ok_or_else(|| anyhow::anyhow!("--metagenomes is required"))?,
+                    output,
+                    upload_to,
+                    query_id,
+                    profile,
+                    min_shared,
+                    min_query_containment,
+                    min_metagenome_containment,
+                    top_candidates,
+                    160,
+                    0.99,
+                    0.01,
+                    false,
+                    256,
+                    crate::router::WitnessHandoffMode::SampleOnly,
+                    max_alignments,
+                    threads,
+                    io_concurrency.unwrap_or(threads),
+                    topology_margin_bases,
+                    memory_target,
+                    cache_dir,
+                    cache_block_bytes,
+                    request_timeout_seconds,
+                    max_retries,
+                    cli.force,
+                    cli.silent,
+                )
+            }
         }
 
         Commands::Bias { command } => match command {
