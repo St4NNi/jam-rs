@@ -4,6 +4,7 @@ pub mod cli;
 pub mod core_utils;
 pub mod format;
 pub mod io;
+pub mod jam_index;
 pub mod jma;
 pub mod provenance;
 pub mod query;
