@@ -67,6 +67,7 @@ fn build_fixture() -> (tempfile::TempDir, tempfile::TempDir, Vec<u8>) {
         &JamIndexBuildConfig {
             max_part_bases: 2_200,
             max_part_signatures: 10_000,
+            target_parts: 2,
             parallel_parts: 2,
             source_manifest_sha256: "a".repeat(64),
             ..JamIndexBuildConfig::default()
