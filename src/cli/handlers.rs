@@ -1396,6 +1396,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
         .top_candidates
         .unwrap_or_else(|| usize::try_from(sensitivity.max_candidates).unwrap_or(usize::MAX));
     let total_memory = (args.memory_gb as u64).saturating_mul(1024 * 1024 * 1024);
+    let alignment_workers = index_workers(args.threads, record.sequence.len(), total_memory);
     let worker_memory = total_memory
         / u64::try_from(args.threads)
             .unwrap_or(u64::MAX)
@@ -1442,7 +1443,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
             },
             runner,
             expansion_batch: args.expansion_batch,
-            parallel_candidates: args.threads,
+            parallel_candidates: alignment_workers,
         },
     )?;
     let started = provenance::unix_time_seconds();
@@ -1532,6 +1533,23 @@ fn index_sensitivity(
     }
     sensitivity.gap_rescue.dense_primary = None;
     sensitivity
+}
+
+fn index_workers(threads: usize, query_length: usize, memory_bytes: u64) -> usize {
+    const TARGET_BYTES: u64 = 512 * 1024 * 1024;
+    const FIXED_BYTES: u64 = 192 * 1024 * 1024;
+    const CELL_BYTES: u64 = 13;
+    const ROW_CELLS: u64 = 129;
+
+    let target = memory_bytes.min(TARGET_BYTES);
+    let available = target.saturating_sub(FIXED_BYTES.min(target));
+    let worker = u64::try_from(query_length)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(CELL_BYTES)
+        .saturating_mul(ROW_CELLS)
+        .max(1);
+    let admitted = usize::try_from(available / worker).unwrap_or(usize::MAX);
+    threads.min(admitted.max(1)).max(1)
 }
 
 fn parse_sha256(value: &str) -> Result<[u8; 32]> {
@@ -1913,7 +1931,15 @@ fn add_resource_metrics(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_distance_chunk_size, normalize_distance_cutoff};
+    use super::{compute_distance_chunk_size, index_workers, normalize_distance_cutoff};
+
+    #[test]
+    fn index_workers_bound() {
+        let memory = 2 * 1024 * 1024 * 1024;
+        assert_eq!(index_workers(4, 10_000, memory), 4);
+        assert_eq!(index_workers(4, 94_281, memory), 2);
+        assert_eq!(index_workers(4, 168_903, memory), 1);
+    }
 
     #[test]
     fn distance_chunk_size_handles_small_query_counts() {
