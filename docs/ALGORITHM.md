@@ -70,9 +70,9 @@ recount the global shortlist exactly
 retain exact shared-hash occurrences only for selected metagenomes
 
 for each selected metagenome:
-    map shared hashes to contig IDs through the sorted signature table
+    map shared .jam entry ordinals to delta-coded contig-ID postings
     rank and bound contigs by rarity, windows, shared hashes, count, and bases
-    read complete selected contigs
+    read complete selected contigs from the external assembly
     if a complete contig is an exact forward, reverse, or circular rotation:
         emit one direct '=' alignment
     otherwise:
@@ -113,11 +113,13 @@ ln((metagenome_count + 1) / (document_frequency + 1))
 
 It is a ranking weight, not a biological probability.
 
-Stage 2 repeats only the selected exact hash lookups against 16-byte sorted
-`(jamhash, contig_id, flags)` records. A bounded approximate contig pass is
-followed by an exact recount. Contig order is deterministic by rarity weight,
-window spread, longest window run, shared hash count, shorter contig, then
-contig ID. No signature record stores a nucleotide position.
+Stage 2 carries each selected hit's stable `.jam` entry ordinal into a parallel
+posting table. The corresponding 16-byte header stores a payload offset,
+contig count, and payload length; the payload stores sorted delta-coded contig
+IDs. Hash values are not repeated in `part.bin`. A bounded approximate contig
+pass is followed by an exact recount. Contig order is deterministic by rarity
+weight, window spread, longest window run, shared hash count, shorter contig,
+then contig ID. No posting stores a nucleotide position.
 
 The initial contig set is bounded by count and total bases. Weaker ranked
 contigs are added in fixed batches only when the current mosaic does not cover
@@ -125,11 +127,13 @@ the query. A strong candidate with no mapped contig may scan its contig range
 in fixed batches; evidence is merged between batches and the complete
 metagenome is never loaded as one fallback allocation.
 
-Stage 3 scans every selected contig position for requested dense k=31 and k=21
-keys. Occurrence caps are applied before anchors are allocated. The resulting
-verified anchors enter the same mixed chaining, chain-window, corridor,
-alignment, and mosaic rules documented below. No persistent positional seed
-section participates in Jam Index trace.
+Stage 3 reads every selected contig from plain FASTA/FAI, BGZF FASTA/FAI/GZI,
+or a candidate-only normal-gzip stream, then scans it for requested dense k=31
+and k=21 keys. Occurrence caps are applied before anchors are allocated. The
+resulting verified anchors enter the same mixed chaining, chain-window,
+corridor, alignment, and mosaic rules documented below. No persistent
+positional seed or sequence section participates in Jam Index trace, and no
+assembly is opened for a noncandidate metagenome.
 
 Before seed generation, an O(query + contig) exact matcher checks complete
 selected contigs. Equality is case-insensitive, preserves IUPAC identity, and

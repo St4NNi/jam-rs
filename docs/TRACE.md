@@ -12,8 +12,8 @@ The selected local collection workflow is:
 one query FASTA record
     -> every Jam Index screening part in parallel
     -> globally ranked candidate metagenomes and exact shared hashes
-    -> bounded position-free contig-signature lookup
-    -> complete selected contig sequences only
+    -> bounded position-free hash-to-contig postings
+    -> complete selected contigs from external assembly files only
     -> dense k=31/k=21 positions generated in memory
     -> packed-kmer verification, mixed chains, and corridor alignments
     -> nonredundant query-coordinate fragment mosaic
@@ -44,16 +44,17 @@ Build independently searchable parts:
 jam index build \
   --metagenomes sources.tsv \
   --output metagenomes-index \
+  --parts 20 \
   --max-part-bases 100000000 \
   --max-part-signatures 250000 \
   --parallel-parts 4
 ```
 
 Every metagenome stays within one part. A part contains `screen.jam` and
-`part.bin`; the latter holds the compact contig/signature tables and complete
-two-bit sequences. The root `manifest.json` binds part order, checksums,
-source totals, and the screening policy. Add data without rebuilding existing
-parts:
+`part.bin`; the latter holds aligned hash-to-contig postings, compact metadata,
+and checksummed external assembly references. It contains no sequence. The
+root `manifest.json` binds part order, checksums, source totals, and the
+screening policy. Add data without rebuilding existing parts:
 
 ```bash
 jam index append \
@@ -204,19 +205,21 @@ spread, and collection document frequency. Accumulators and final top-k
 selection are bounded; full shared-hash detail is materialized only for the
 globally selected candidates.
 
-Stage 2 maps those same selected hashes to contig IDs in `part.bin`. It stores
-no nucleotide positions. Contigs rank by independent query-window support,
-shared hashes, and rarity weight. The initial set is bounded by count and
-bases; weaker contigs are added only while query coverage remains incomplete.
-A strong candidate with no signature-mapped contig may enter a sequential,
-fixed-batch scan. The scan never loads the complete metagenome at once.
+Stage 2 maps the selected `.jam` entry ordinals to delta-coded contig IDs in
+`part.bin`. The posting table repeats neither hashes nor nucleotide positions.
+Contigs rank by independent query-window support, shared hashes, and rarity
+weight. The initial set is bounded by count and bases; weaker contigs are added
+only while query coverage remains incomplete. A strong candidate with no
+signature-mapped contig may enter a sequential, fixed-batch contig scan.
 
-Stage 3 reads complete selected contigs, generates dense canonical k=31 and
-k=21 positions in memory, and verifies packed k-mers before creating anchors.
-The existing mixed chainer, corridor alignment, and fragment mosaic consume
-that evidence. A verified complete forward, reverse-complement, or circularly
-rotated contig emits a direct `=` alignment before dense chaining. No
-position-bearing collection index or positional JMA is used.
+Stage 3 reads complete selected contigs from plain FASTA/FAI, BGZF
+FASTA/FAI/GZI, or one candidate-only normal-gzip stream. It generates dense
+canonical k=31 and k=21 positions in memory and verifies packed k-mers before
+creating anchors. The existing mixed chainer, corridor alignment, and fragment
+mosaic consume that evidence. A verified complete forward, reverse-complement,
+or circularly rotated contig emits a direct `=` alignment before dense
+chaining. No position-bearing collection index, sequence payload, or
+positional JMA is used.
 
 The selected standard screening policy is:
 
@@ -334,11 +337,13 @@ autonomous element or a host association.
 ## Resource forms and limits
 
 Jam Index build and query operation is local-only. Part screening shards and
-part data are memory mapped; noncandidate sequence data is not decoded.
-Candidate alignment concurrency is selected before allocation from query
-length and the memory envelope. At 95,000 query bases and above, one alignment
-candidate runs at a time under the selected default; part screening can still
-use all requested threads.
+part data are memory mapped. External assembly files are opened only for
+selected candidate metagenomes; indexed FASTA/BGZF reads only selected contig
+ranges, while normal gzip uses a candidate-only sequential pass. Candidate
+alignment concurrency is selected before allocation from query length and the
+memory envelope. At 95,000 query bases and above, one alignment candidate runs
+at a time under the selected default; part screening can still use all
+requested threads.
 
 Catalog resources accept local paths, `file://`, `http://`, `https://`, and
 `s3://bucket/key` locators. Local paths in a catalog are resolved relative to
@@ -382,9 +387,10 @@ The trace JSON schema is version `2.0.0`. A legacy `.jam` without a sidecar may
 still be readable, but its original catalog provenance cannot be reconstructed.
 
 For Jam Index runs, record the root `manifest.json`, every part directory, the
-source catalog, query checksum, command line, and JSONL output together. Jam
-Index format 1 is an append-only local dataset contract; ordinary `.jam`
-version 3 and JMA format 1 remain independent formats.
+source catalog, referenced assemblies and FAI/GZI sidecars, query checksum,
+command line, and JSONL output together. Jam Index format 1 is an append-only
+local dataset contract; ordinary `.jam` version 3 and JMA format 1 remain
+independent formats.
 
 Bias-assisted `.jam` retrieval is optional and catalog-specific. In bias mode,
 retained and weighted evidence is labelled separately, and the uniform-hash
