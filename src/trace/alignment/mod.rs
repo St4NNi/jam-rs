@@ -370,7 +370,6 @@ impl From<AlignmentScoring> for AlignmentOptions {
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
     cells: Vec<Cell>,
-    semiglobal_cells: Vec<SemiCell>,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
     row_widths: Vec<usize>,
@@ -1254,12 +1253,12 @@ impl AlignmentWorkspace {
                 max_cells: options.max_cells,
             });
         }
-        let default_cell = SemiCell::default();
-        if self.semiglobal_cells.len() < total_cells {
-            self.semiglobal_cells.resize(total_cells, default_cell);
+        let default_cell = Cell::semiglobal();
+        if self.cells.len() < total_cells {
+            self.cells.resize(total_cells, default_cell);
         } else {
-            self.semiglobal_cells[..total_cells].fill(default_cell);
-            self.semiglobal_cells.truncate(total_cells);
+            self.cells[..total_cells].fill(default_cell);
+            self.cells.truncate(total_cells);
         }
 
         for query_index in 0..=query_len {
@@ -1270,18 +1269,17 @@ impl AlignmentWorkspace {
                 if query_index == 0 {
                     // Any target prefix may be skipped at no cost. The match
                     // state is used as the zero-cost start marker.
-                    self.semiglobal_cells[cell_index].scores[usize::from(STATE_MATCH)] = 0;
-                    self.semiglobal_cells[cell_index].previous[usize::from(STATE_MATCH)] =
-                        STATE_START;
+                    self.cells[cell_index].scores[usize::from(STATE_MATCH)] = 0;
+                    self.cells[cell_index].previous[usize::from(STATE_MATCH)] = STATE_START;
                     continue;
                 }
-                let mut cell = SemiCell::default();
+                let mut cell = Cell::semiglobal();
                 if target_index > 0
                     && let Some(previous_index) =
                         self.cell_index_checked(query_index - 1, target_index - 1)
                 {
-                    let previous = self.semiglobal_cells[previous_index];
-                    let (previous_score, previous_state) = previous.best_score();
+                    let previous = self.cells[previous_index];
+                    let (previous_score, previous_state) = previous.best_semi();
                     if previous_score > SEMI_NEG_INF {
                         let substitution =
                             if equal_base(query[query_index - 1], target[target_index - 1]) {
@@ -1298,7 +1296,7 @@ impl AlignmentWorkspace {
                     && let Some(previous_index) =
                         self.cell_index_checked(query_index, target_index - 1)
                 {
-                    let previous = self.semiglobal_cells[previous_index];
+                    let previous = self.cells[previous_index];
                     let extension = semi_add(
                         previous.scores[usize::from(STATE_INSERTION)],
                         options.scoring.gap_extend_score,
@@ -1321,7 +1319,7 @@ impl AlignmentWorkspace {
                 }
                 if let Some(previous_index) = self.cell_index_checked(query_index - 1, target_index)
                 {
-                    let previous = self.semiglobal_cells[previous_index];
+                    let previous = self.cells[previous_index];
                     let extension = semi_add(
                         previous.scores[usize::from(STATE_DELETION)],
                         options.scoring.gap_extend_score,
@@ -1342,7 +1340,7 @@ impl AlignmentWorkspace {
                     cell.scores[usize::from(STATE_DELETION)] = score;
                     cell.previous[usize::from(STATE_DELETION)] = previous_state;
                 }
-                self.semiglobal_cells[cell_index] = cell;
+                self.cells[cell_index] = cell;
             }
         }
 
@@ -1350,8 +1348,8 @@ impl AlignmentWorkspace {
         let final_width = self.row_widths[query_len];
         let mut best = (SEMI_NEG_INF, final_start, STATE_UNREACHABLE);
         for target_index in final_start..final_start + final_width {
-            let cell = self.semiglobal_cells[self.cell_index(query_len, target_index)];
-            let (score, state) = cell.best_score();
+            let cell = self.cells[self.cell_index(query_len, target_index)];
+            let (score, state) = cell.best_semi();
             if score > best.0
                 || (score == best.0
                     && (target_index < best.1 || (target_index == best.1 && state < best.2)))
@@ -1405,7 +1403,7 @@ impl AlignmentWorkspace {
             let index = self
                 .cell_index_checked(query_index, target_index)
                 .ok_or(AlignmentError::TracebackOutsideBand)?;
-            let cell = self.semiglobal_cells[index];
+            let cell = self.cells[index];
             if state >= STATE_START || cell.scores[usize::from(state)] <= SEMI_NEG_INF {
                 return Err(AlignmentError::InvalidTraceback);
             }
@@ -1748,32 +1746,22 @@ struct Cell {
 
 const SEMI_NEG_INF: i32 = i32::MIN / 4;
 
-#[derive(Clone, Copy, Debug)]
-struct SemiCell {
-    scores: [i32; 3],
-    previous: [u8; 3],
-}
-
-impl Default for SemiCell {
-    fn default() -> Self {
+impl Cell {
+    fn semiglobal() -> Self {
         Self {
             scores: [SEMI_NEG_INF; 3],
             previous: [STATE_UNREACHABLE; 3],
         }
     }
-}
 
-impl SemiCell {
-    fn best_score(self) -> (i32, u8) {
+    fn best_semi(self) -> (i32, u8) {
         choose_semi_transition([
             (self.scores[usize::from(STATE_MATCH)], STATE_MATCH),
             (self.scores[usize::from(STATE_INSERTION)], STATE_INSERTION),
             (self.scores[usize::from(STATE_DELETION)], STATE_DELETION),
         ])
     }
-}
 
-impl Cell {
     fn best_score(self) -> (i32, u8) {
         choose_transition([
             (self.scores[usize::from(STATE_MATCH)], STATE_MATCH),
