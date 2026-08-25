@@ -7,7 +7,8 @@ use super::control::{SearchControl, Stopped};
 use super::query::QueryKmers;
 use crate::index::{ColorSetId, Sketch};
 use rayon::prelude::*;
-use std::time::{Duration, Instant};
+use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// Distinct query k-mers that one parallel step looks up or expands.
 const CHUNK_SEEDS: usize = 4096;
@@ -36,7 +37,7 @@ pub struct PossibleEntry {
 }
 
 /// The work of stage 1.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SketchWork {
     /// Query k-mers, counting repeats.
     pub query_kmers: u64,
@@ -56,8 +57,8 @@ pub struct SketchWork {
     pub unseeded_entries: u64,
     /// Candidate entries kept by the coverage bound.
     pub possible_entries: u64,
-    /// Wall time of the stage.
-    pub time: Duration,
+    /// Wall seconds of the stage.
+    pub seconds: f64,
 }
 
 /// What stage 1 hands on: the candidate entries, highest coverage bound first, and the seeds that
@@ -133,7 +134,7 @@ pub fn sketch_stage(
     );
     candidates.sort_by(|a, b| (b.coverage_bound, a.entry).cmp(&(a.coverage_bound, b.entry)));
     work.possible_entries = candidates.len() as u64;
-    work.time = started.elapsed();
+    work.seconds = started.elapsed().as_secs_f64();
     Ok(SketchOutcome {
         candidates,
         frequent_seeds,

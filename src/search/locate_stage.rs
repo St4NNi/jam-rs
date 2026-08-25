@@ -11,14 +11,15 @@ use super::located::{ContigWindows, LocatedEntry};
 use super::query::QueryKmers;
 use super::sketch_stage::PossibleEntry;
 use crate::index::{SeedLocation, Shard};
+use serde::{Deserialize, Serialize};
 use std::ops::Range;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// Seeds looked up between two checks of the search control.
 const LOOKUPS_PER_CHECK: usize = 1024;
 
 /// The work of stage 2.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct LocateWork {
     /// Candidate entries that stage 2 looked at.
     pub entries: u64,
@@ -34,8 +35,8 @@ pub struct LocateWork {
     pub candidate_bins: u64,
     /// Alignment windows, over all located entries.
     pub windows: u64,
-    /// Time spent in the stage, summed over threads.
-    pub time: Duration,
+    /// Seconds spent in the stage, summed over threads.
+    pub seconds: f64,
 }
 
 impl LocateWork {
@@ -48,7 +49,7 @@ impl LocateWork {
         self.dropped_entries += other.dropped_entries;
         self.candidate_bins += other.candidate_bins;
         self.windows += other.windows;
-        self.time += other.time;
+        self.seconds += other.seconds;
     }
 }
 
@@ -91,7 +92,7 @@ pub fn locate_entry(
     let started = Instant::now();
     let outcome = locate(shard, request, possible, workspace, work, control);
     work.entries += 1;
-    work.time += started.elapsed();
+    work.seconds += started.elapsed().as_secs_f64();
     match &outcome {
         Ok(LocateOutcome::Located(located)) => {
             work.candidate_bins += workspace.bins.len() as u64;

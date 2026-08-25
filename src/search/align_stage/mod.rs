@@ -32,6 +32,7 @@ use crate::align::{AlignmentError, AlignmentWorkspace, JoinScratch};
 use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
 use crate::index::{IndexError, PackedSequence};
 use place::Collected;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Why stage 3 could not decide an entry.
@@ -70,7 +71,7 @@ pub struct AlignStageWorkspace {
 }
 
 /// The work stage 3 did for one entry, for the search summary.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AlignWork {
     /// Alignment windows read, counting every widening round.
     pub windows: u64,

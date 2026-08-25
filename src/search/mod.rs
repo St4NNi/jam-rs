@@ -17,7 +17,9 @@ pub use control::{SearchControl, Stopped};
 pub use driver::{AlignStageWork, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;
 pub use events::{Completion, DropReason, EntryEvent, SearchStage};
+pub use locate_stage::LocateWork;
 pub use located::{ContigWindows, LocatedEntry};
+pub use sketch_stage::SketchWork;
 
 #[cfg(test)]
 mod locate_stage_tests;

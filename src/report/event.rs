@@ -3,7 +3,10 @@
 // SPDX-License-Identifier: MIT
 
 use super::{DecisionRecord, ReportError};
-use crate::search::{Completion, DropReason, EntryEvent, SearchStage, SearchSummary, Stopped};
+use crate::search::{
+    AlignStageWork, Completion, DropReason, EntryEvent, LocateWork, SearchStage, SearchSummary,
+    SketchWork, Stopped,
+};
 use serde::{Deserialize, Serialize};
 
 /// How a search ended.
@@ -18,49 +21,6 @@ pub enum Ending {
     Asked,
     /// A stage, or the server, failed; the summary names the error.
     Failed,
-}
-
-/// The work of stage 1.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct SketchWorkRecord {
-    pub query_kmers: u64,
-    pub lookups: u64,
-    pub seeds_found: u64,
-    pub frequent_seeds: u64,
-    pub expanded_seeds: u64,
-    pub seed_hits: u64,
-    pub seeded_entries: u64,
-    pub unseeded_entries: u64,
-    pub possible_entries: u64,
-    pub seconds: f64,
-}
-
-/// The work of stage 2.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct LocateWorkRecord {
-    pub entries: u64,
-    pub lookups: u64,
-    pub seed_locations: u64,
-    pub false_seed_hits: u64,
-    pub dropped_entries: u64,
-    pub candidate_bins: u64,
-    pub windows: u64,
-    /// Summed over threads.
-    pub seconds: f64,
-}
-
-/// The work of stage 3.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct AlignWorkRecord {
-    pub entries: u64,
-    pub confirmed_entries: u64,
-    pub windows: u64,
-    pub bases_read: u64,
-    pub anchors: u64,
-    pub chains: u64,
-    pub alignments: u64,
-    /// Summed over threads.
-    pub seconds: f64,
 }
 
 /// Stage 1 kept the entry.
@@ -121,9 +81,9 @@ pub struct Summary {
     pub ending: Ending,
     /// The cause when the ending is `failed`.
     pub error: Option<String>,
-    pub sketch: SketchWorkRecord,
-    pub locate: LocateWorkRecord,
-    pub align: AlignWorkRecord,
+    pub sketch: SketchWork,
+    pub locate: LocateWork,
+    pub align: AlignStageWork,
 }
 
 /// One line of output. `kind` names the record, `query` the query record and `entry` the entry.
@@ -207,9 +167,9 @@ impl Record {
             query_length,
             ending: Ending::Failed,
             error: Some(error.to_string()),
-            sketch: SketchWorkRecord::default(),
-            locate: LocateWorkRecord::default(),
-            align: AlignWorkRecord::default(),
+            sketch: SketchWork::default(),
+            locate: LocateWork::default(),
+            align: AlignStageWork::default(),
         })
     }
 
@@ -221,44 +181,14 @@ impl Record {
             Completion::Stopped(Stopped::Asked) => (Ending::Asked, None),
             Completion::Failed(error) => (Ending::Failed, Some(error.to_string())),
         };
-        let (sketch, locate, align) = (&summary.sketch, &summary.locate, &summary.align);
         Self::Summary(Summary {
             query: query.to_string(),
             query_length: summary.query_length,
             ending,
             error,
-            sketch: SketchWorkRecord {
-                query_kmers: sketch.query_kmers,
-                lookups: sketch.lookups,
-                seeds_found: sketch.seeds_found,
-                frequent_seeds: sketch.frequent_seeds,
-                expanded_seeds: sketch.expanded_seeds,
-                seed_hits: sketch.seed_hits,
-                seeded_entries: sketch.seeded_entries,
-                unseeded_entries: sketch.unseeded_entries,
-                possible_entries: sketch.possible_entries,
-                seconds: sketch.time.as_secs_f64(),
-            },
-            locate: LocateWorkRecord {
-                entries: locate.entries,
-                lookups: locate.lookups,
-                seed_locations: locate.seed_locations,
-                false_seed_hits: locate.false_seed_hits,
-                dropped_entries: locate.dropped_entries,
-                candidate_bins: locate.candidate_bins,
-                windows: locate.windows,
-                seconds: locate.time.as_secs_f64(),
-            },
-            align: AlignWorkRecord {
-                entries: align.entries,
-                confirmed_entries: align.confirmed_entries,
-                windows: align.counts.windows,
-                bases_read: align.counts.bases_read,
-                anchors: align.counts.anchors,
-                chains: align.counts.chains,
-                alignments: align.counts.alignments,
-                seconds: align.time.as_secs_f64(),
-            },
+            sketch: summary.sketch,
+            locate: summary.locate,
+            align: summary.align,
         })
     }
 }

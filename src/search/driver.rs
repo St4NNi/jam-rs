@@ -21,9 +21,10 @@ use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
 use crate::seeds::Seeder;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 /// The settings of one search.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -89,7 +90,7 @@ pub struct SearchSummary {
 }
 
 /// The work of stage 3, summed over entries.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct AlignStageWork {
     /// Located entries that stage 3 aligned.
     pub entries: u64,
@@ -97,8 +98,8 @@ pub struct AlignStageWork {
     pub confirmed_entries: u64,
     /// Windows, bases read, anchors, chains and alignments.
     pub counts: AlignWork,
-    /// Time spent in the stage, summed over threads.
-    pub time: Duration,
+    /// Seconds spent in the stage, summed over threads.
+    pub seconds: f64,
 }
 
 impl AlignStageWork {
@@ -107,7 +108,7 @@ impl AlignStageWork {
         self.entries += other.entries;
         self.confirmed_entries += other.confirmed_entries;
         self.counts.add(&other.counts);
-        self.time += other.time;
+        self.seconds += other.seconds;
     }
 }
 
@@ -303,7 +304,7 @@ impl<'a> Searcher<'a> {
         let started = Instant::now();
         let last = self.align(prepared, &located, request, worker);
         worker.align.entries += 1;
-        worker.align.time += started.elapsed();
+        worker.align.seconds += started.elapsed().as_secs_f64();
         let last = last.map_err(|error| Halt {
             stage: SearchStage::Align,
             error,
