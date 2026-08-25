@@ -1,5 +1,5 @@
 //! jam (just another minimizer) finds small sequences in very large sets of assemblies and aligns
-//! them with CIGAR strings; `ARCHITECTURE.md` describes the stages, terms and module order.
+//! them with CIGAR strings.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
