@@ -8,6 +8,7 @@ use super::tests::{
 };
 use super::*;
 use crate::align::{Interval, Strand, format_cigar};
+use crate::index::Shard;
 use crate::search::ContigWindows;
 
 /// Every contig of an entry as one window.

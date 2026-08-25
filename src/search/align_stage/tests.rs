@@ -4,7 +4,7 @@
 use super::*;
 use crate::align::{Interval, Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
-use crate::index::{BuildOptions, EntryInput, Parameters, build_shard};
+use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use crate::search::ContigWindows;
 use crate::seeds::complement;
 use crate::storage::MappedFile;

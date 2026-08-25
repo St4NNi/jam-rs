@@ -20,7 +20,6 @@ pub struct QuerySeed {
 #[derive(Clone, Debug)]
 pub struct QueryKmers {
     length: u64,
-    circular: bool,
     /// The minimizer window of the seed scheme, in k-mers.
     window: u64,
     kmers: u64,
@@ -56,7 +55,6 @@ impl QueryKmers {
         }
         Self {
             length: query.len() as u64,
-            circular,
             window: u64::from(seeder.scheme().w),
             kmers: kmers.len() as u64,
             seeds,
@@ -67,11 +65,6 @@ impl QueryKmers {
     /// Bases of the query.
     pub fn length(&self) -> u64 {
         self.length
-    }
-
-    /// Whether the query is circular.
-    pub fn circular(&self) -> bool {
-        self.circular
     }
 
     /// The number of query k-mers, counting repeats.

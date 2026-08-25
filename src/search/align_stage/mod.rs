@@ -30,7 +30,7 @@ pub use query::PreparedQuery;
 use super::{LocatedEntry, SearchControl, Stopped};
 use crate::align::{AlignmentError, AlignmentWorkspace, JoinScratch};
 use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
-use crate::index::{IndexError, PackedSequence, Shard};
+use crate::index::{IndexError, PackedSequence};
 use place::Collected;
 use thiserror::Error;
 
@@ -113,8 +113,9 @@ pub struct AlignedEntry {
 }
 
 /// Aligns the query in the windows of a located entry of `shard` and decides the entry.
+#[cfg(test)]
 pub fn align_entry(
-    shard: &Shard,
+    shard: &crate::index::Shard,
     query: &PreparedQuery,
     located: &LocatedEntry,
     config: &AlignStageConfig,

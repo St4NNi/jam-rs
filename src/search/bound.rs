@@ -38,11 +38,6 @@ impl<'a> CoverageBound<'a> {
         }
     }
 
-    /// The query coverage, in bases, that an entry must reach.
-    pub fn required_bases(&self) -> u64 {
-        self.required_bases
-    }
-
     /// The highest query coverage, in bases, of an entry with seed hits (or possible seed hits)
     /// at the ascending query starts `positions`: the bases their k-mers cover, plus at most the
     /// allowance `a` of each stretch without a seed hit.
