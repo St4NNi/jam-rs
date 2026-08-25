@@ -231,6 +231,7 @@ pub enum IndexCommands {
 }
 
 #[derive(Debug, Subcommand, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Sketch one or more files and write the result to an output file
     #[command(arg_required_else_help = true)]
@@ -416,6 +417,9 @@ pub enum Commands {
         /// Enable the bounded candidate-only Hamming-distance-one rescue
         #[arg(long, requires = "index")]
         hamming1_rescue: bool,
+        /// Restrict Hamming-one rescue to one stable query ID
+        #[arg(long, requires = "hamming1_rescue")]
+        hamming1_query_id: Option<String>,
         /// Minimum whole-metagenome fallback hashes for Jam Index admission
         #[arg(long, default_value = "2")]
         whole_sample_min_shared: u32,

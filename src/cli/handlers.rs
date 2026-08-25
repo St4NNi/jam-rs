@@ -1801,6 +1801,7 @@ pub struct IndexTraceArgs {
     pub min_query_windows: u32,
     pub rare_rescue_df: Option<u32>,
     pub hamming1_rescue: bool,
+    pub hamming1_query_id: Option<String>,
     pub whole_sample_min_shared: u32,
     pub top_candidates: Option<usize>,
     pub initial_contigs: usize,
@@ -1831,6 +1832,7 @@ pub struct IndexBatchTraceArgs {
     pub min_query_windows: u32,
     pub rare_rescue_df: Option<u32>,
     pub hamming1_rescue: bool,
+    pub hamming1_query_id: Option<String>,
     pub whole_sample_min_shared: u32,
     pub screen_only: bool,
     pub top_candidates: Option<usize>,
@@ -1863,7 +1865,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
     }
     let (record_id, sequence) = index_query(&args.query)?;
     let query_id = args.query_id.unwrap_or(record_id);
-    let (sensitivity, trace_config) = index_trace_configuration(
+    let (sensitivity, mut trace_config) = index_trace_configuration(
         args.profile,
         args.min_shared,
         args.min_query_windows,
@@ -1883,6 +1885,19 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
         args.topology,
         sequence.len(),
     );
+    if let Some(target) = &args.hamming1_query_id {
+        if target != &query_id {
+            return Err(anyhow::anyhow!(
+                "--hamming1-query-id does not match the input query"
+            ));
+        }
+        trace_config
+            .screen
+            .hamming1_rescue
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("--hamming1-query-id requires rescue"))?
+            .query_index = Some(0);
+    }
     let mut result =
         crate::jam_index::trace_index(&args.index, &query_id, &sequence, &trace_config)?;
     let started = provenance::unix_time_seconds();
@@ -1988,6 +2003,7 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
             min_query_windows: args.min_query_windows,
             rare_rescue_df: args.rare_rescue_df,
             hamming1_rescue: args.hamming1_rescue,
+            hamming1_query_id: args.hamming1_query_id,
             whole_sample_min_shared: args.whole_sample_min_shared,
             top_candidates: args.top_candidates,
             initial_contigs: args.initial_contigs,
@@ -2044,7 +2060,7 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
         .map(|query| query.sequence.len())
         .max()
         .unwrap_or(0);
-    let (sensitivity, trace_config) = index_trace_configuration(
+    let (sensitivity, mut trace_config) = index_trace_configuration(
         args.profile,
         args.min_shared,
         args.min_query_windows,
@@ -2064,6 +2080,18 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
         args.topology,
         maximum_query,
     );
+    if let Some(target) = &args.hamming1_query_id {
+        let query_index = queries
+            .iter()
+            .position(|query| &query.query_id == target)
+            .ok_or_else(|| anyhow::anyhow!("--hamming1-query-id is absent from the input"))?;
+        trace_config
+            .screen
+            .hamming1_rescue
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("--hamming1-query-id requires rescue"))?
+            .query_index = Some(query_index);
+    }
     let config = crate::jam_index::JamIndexBatchConfig {
         trace: trace_config,
         max_group_contig_bases: args.max_group_contig_bases,
@@ -2295,6 +2323,7 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
         "source_catalog": args.source_catalog,
         "screen_only": args.screen_only,
         "hamming1_rescue": args.hamming1_rescue,
+        "hamming1_query_id": args.hamming1_query_id,
         "hamming1_limits": args.hamming1_rescue.then(|| {
             let limits = crate::jam_index::Hamming1RescueConfig::pilot();
             serde_json::json!({

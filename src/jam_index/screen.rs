@@ -100,18 +100,20 @@ pub struct Hamming1RescueConfig {
     pub max_document_frequency: u32,
     pub max_memory_bytes: u64,
     pub max_wall_millis: u64,
+    pub query_index: Option<usize>,
 }
 
 impl Hamming1RescueConfig {
     #[must_use]
     pub const fn pilot() -> Self {
         Self {
-            max_source_keys: 512,
-            max_generated_keys: 32_256,
+            max_source_keys: 100_000,
+            max_generated_keys: 6_300_000,
             max_candidates: 4,
             max_document_frequency: 4,
-            max_memory_bytes: 256 * 1024 * 1024,
+            max_memory_bytes: 2 * 1024 * 1024 * 1024,
             max_wall_millis: 30_000,
+            query_index: None,
         }
     }
 
@@ -832,7 +834,10 @@ fn apply_hamming1_rescue(
         .iter()
         .enumerate()
         .filter_map(|(query_index, result)| {
-            (!result.candidate_limit_reached
+            (rescue_config
+                .query_index
+                .is_none_or(|selected| selected == query_index)
+                && !result.candidate_limit_reached
                 && result.candidates.len() < screen_config.top_candidates)
                 .then_some(query_index)
         })
@@ -1049,47 +1054,32 @@ fn prepare_hamming1_query(
         .iter()
         .map(|occurrence| occurrence.query_window_id)
         .collect::<BTreeSet<_>>();
-    let mut generated = BTreeMap::<u64, QueryHashEvidence>::new();
+    let mut generated =
+        HashMap::<u64, QueryHashOccurrence>::with_capacity(selected_count.saturating_mul(32));
     let mut generated_keys = 0usize;
-    'sources: for occurrence in &selected {
-        for slot in 0..21u32 {
-            let shift = slot * 2;
-            let observed = (occurrence.packed_kmer >> shift) & 3;
-            for replacement in 0..4u64 {
-                if replacement == observed {
-                    continue;
+    'sources: for coordinate_chunk in selected.chunks(512) {
+        for occurrence in coordinate_chunk {
+            for slot in 0..21u32 {
+                let shift = slot * 2;
+                let observed = (occurrence.packed_kmer >> shift) & 3;
+                for replacement in 0..4u64 {
+                    if replacement == observed {
+                        continue;
+                    }
+                    if generated_keys == config.max_generated_keys {
+                        break 'sources;
+                    }
+                    generated_keys += 1;
+                    let mask = !(3u64 << shift);
+                    let changed = (occurrence.packed_kmer & mask) | (replacement << shift);
+                    let canonical = canonical_k21(changed);
+                    let hash = jamhash_u64_v1(canonical);
+                    if hash != 0 {
+                        generated.entry(hash).or_insert(*occurrence);
+                    }
                 }
-                if generated_keys == config.max_generated_keys {
-                    break 'sources;
-                }
-                generated_keys += 1;
-                let mask = !(3u64 << shift);
-                let changed = (occurrence.packed_kmer & mask) | (replacement << shift);
-                let canonical = canonical_k21(changed);
-                let hash = jamhash_u64_v1(canonical);
-                if hash == 0 {
-                    continue;
-                }
-                let evidence = generated.entry(hash).or_insert_with(|| QueryHashEvidence {
-                    occurrences: Vec::new(),
-                    windows: Vec::new(),
-                });
-                evidence.occurrences.push(*occurrence);
-                evidence.windows.push(occurrence.query_window_id);
             }
         }
-    }
-    for evidence in generated.values_mut() {
-        evidence.occurrences.sort_unstable_by_key(|occurrence| {
-            (
-                occurrence.query_position,
-                occurrence.packed_kmer,
-                occurrence.query_reverse,
-            )
-        });
-        evidence.occurrences.dedup();
-        evidence.windows.sort_unstable();
-        evidence.windows.dedup();
     }
     let deduplicated_keys = generated.len();
     let mut common_keys_suppressed = 0u64;
@@ -1107,6 +1097,18 @@ fn prepare_hamming1_query(
         document_frequency != 0 && document_frequency <= config.max_document_frequency
     });
     record_signature_comparisons(comparisons);
+    let generated = generated
+        .into_iter()
+        .map(|(hash, occurrence)| {
+            (
+                hash,
+                QueryHashEvidence {
+                    occurrences: vec![occurrence],
+                    windows: vec![occurrence.query_window_id],
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let memory_bytes = u64::try_from(deduplicated_keys)
         .unwrap_or(u64::MAX)
         .saturating_mul(64);
