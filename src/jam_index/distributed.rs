@@ -163,6 +163,8 @@ pub struct IndexFragmentManifest {
     pub overflow_mappings: u64,
     pub overflow_contigs: u64,
     pub maximum_overflow_count: u32,
+    pub signature_run_count: u32,
+    pub signature_run_record_limit: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -188,6 +190,8 @@ pub struct MergedPartManifest {
     pub overflow_mappings: u64,
     pub overflow_contigs: u64,
     pub maximum_overflow_count: u32,
+    pub signature_run_count: u32,
+    pub signature_run_record_limit: u64,
 }
 
 pub fn plan_index(
@@ -435,6 +439,8 @@ pub fn build_fragment(
         overflow_mappings: result.overflow_mappings,
         overflow_contigs: result.overflow_contigs,
         maximum_overflow_count: result.maximum_overflow_count,
+        signature_run_count: result.signature_run_count,
+        signature_run_record_limit: result.signature_run_record_limit,
     };
     write_json_atomic(&staging.path().join("fragment.json"), &manifest)?;
     let staging_path = staging.keep();
@@ -572,6 +578,8 @@ pub fn merge_part(
         overflow_mappings: result.overflow_mappings,
         overflow_contigs: result.overflow_contigs,
         maximum_overflow_count: result.maximum_overflow_count,
+        signature_run_count: result.signature_run_count,
+        signature_run_record_limit: result.signature_run_record_limit,
     };
     write_json_atomic(&staging.path().join("part.json"), &manifest)?;
     let staging_path = staging.keep();

@@ -19,6 +19,7 @@ pub struct MetagenomeSignatureBuilder {
     whole: BottomK,
     whole_sources: BTreeMap<u64, u32>,
     union: BTreeSet<u64>,
+    retain_union: bool,
     contig_count: u64,
     total_bases: u64,
 }
@@ -33,9 +34,18 @@ impl MetagenomeSignatureBuilder {
             whole_sources: BTreeMap::new(),
             policy,
             union: BTreeSet::new(),
+            retain_union: true,
             contig_count: 0,
             total_bases: 0,
         })
+    }
+
+    pub(crate) fn new_streaming(
+        policy: ScreenSelectionPolicy,
+    ) -> Result<Self, SignatureSelectionError> {
+        let mut builder = Self::new(policy)?;
+        builder.retain_union = false;
+        Ok(builder)
     }
 
     pub fn add_contig(
@@ -103,7 +113,9 @@ impl MetagenomeSignatureBuilder {
             Some(contig) => contig.into_sorted(),
             None => spatial_hashes(spatial_minima, self.policy.contig_budget.maximum),
         };
-        self.union.extend(hashes.iter().copied());
+        if self.retain_union {
+            self.union.extend(hashes.iter().copied());
+        }
         self.contig_count = self.contig_count.saturating_add(1);
         self.total_bases = self.total_bases.saturating_add(length);
         Ok(ContigSignature {
@@ -116,7 +128,9 @@ impl MetagenomeSignatureBuilder {
     #[must_use]
     pub fn finish(mut self) -> MetagenomeSignatures {
         let whole_metagenome_hashes = self.whole.into_sorted();
-        self.union.extend(whole_metagenome_hashes.iter().copied());
+        if self.retain_union {
+            self.union.extend(whole_metagenome_hashes.iter().copied());
+        }
         MetagenomeSignatures {
             contig_count: self.contig_count,
             total_bases: self.total_bases,

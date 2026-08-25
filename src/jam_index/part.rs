@@ -8,9 +8,10 @@ use crate::jam_index::external::{ExternalError, ExternalSource, SequenceAccess, 
 use memmap2::Mmap;
 use needletail::{Sequence, parse_fastx_file, parse_fastx_reader};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -18,12 +19,14 @@ use thiserror::Error;
 
 const MAGIC: [u8; 8] = *b"JAMIDX1P";
 const LEGACY_VERSION: u16 = 1;
-const VERSION: u16 = 2;
+const MAPPING_VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const HEADER_SIZE: usize = 512;
 #[allow(dead_code)]
 const SOURCE_RECORD_SIZE: usize = 192;
 const METAGENOME_RECORD_SIZE: usize = 96;
-const CONTIG_RECORD_SIZE: usize = 128;
+const LEGACY_CONTIG_RECORD_SIZE: usize = 128;
+const CONTIG_RECORD_SIZE: usize = 80;
 #[allow(dead_code)]
 const POSTING_HEADER_SIZE: usize = 16;
 const MAPPING_RECORD_SIZE: usize = 8;
@@ -31,6 +34,8 @@ const MAPPING_OVERFLOW: u32 = 1 << 31;
 const MAPPING_WHOLE_SAMPLE: u32 = 1 << 30;
 const MAPPING_SPATIAL: u32 = 1 << 29;
 const MAPPING_COUNT_MASK: u32 = (1 << 29) - 1;
+const SIGNATURE_RUN_RECORD_SIZE: usize = 24;
+const SIGNATURE_RUN_RECORD_LIMIT: usize = 1_000_000;
 const HEADER_CHECKSUM_OFFSET: usize = 280;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +83,8 @@ pub struct PartWriteResult {
     pub overflow_mappings: u64,
     pub overflow_contigs: u64,
     pub maximum_overflow_count: u32,
+    pub signature_run_count: u32,
+    pub signature_run_record_limit: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -210,6 +217,278 @@ struct DecodedMapping {
     overflow_range: Option<std::ops::Range<usize>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SignatureRunRecord {
+    hash: u64,
+    sample_id: u32,
+    contig_id: u32,
+    spatial: bool,
+    whole_sample: bool,
+}
+
+impl SignatureRunRecord {
+    fn key(self) -> (usize, u64, u32, u32) {
+        (
+            bucket_id(self.hash),
+            self.hash,
+            self.sample_id,
+            self.contig_id,
+        )
+    }
+}
+
+struct SignatureRunBuilder {
+    directory: tempfile::TempDir,
+    records: Vec<SignatureRunRecord>,
+    runs: Vec<PathBuf>,
+}
+
+struct StreamingMappings {
+    _directory: tempfile::TempDir,
+    records_path: PathBuf,
+    payload_path: PathBuf,
+    signature_count: u64,
+    stats: MappingStats,
+    run_count: u32,
+}
+
+impl SignatureRunBuilder {
+    fn new(parent: &Path) -> Result<Self, JamIndexPartError> {
+        Ok(Self {
+            directory: tempfile::Builder::new()
+                .prefix(".jam-index-signature-runs-")
+                .tempdir_in(parent)?,
+            records: Vec::with_capacity(SIGNATURE_RUN_RECORD_LIMIT),
+            runs: Vec::new(),
+        })
+    }
+
+    fn push(&mut self, record: SignatureRunRecord) -> Result<(), JamIndexPartError> {
+        self.records.push(record);
+        if self.records.len() >= SIGNATURE_RUN_RECORD_LIMIT {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), JamIndexPartError> {
+        if self.records.is_empty() {
+            return Ok(());
+        }
+        self.records.sort_unstable_by_key(|record| record.key());
+        let path = self
+            .directory
+            .path()
+            .join(format!("run-{:06}.bin", self.runs.len()));
+        let mut writer = BufWriter::new(
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&path)?,
+        );
+        for record in self.records.drain(..) {
+            write_signature_run_record(&mut writer, record)?;
+        }
+        writer.flush()?;
+        self.runs.push(path);
+        Ok(())
+    }
+
+    fn finish(
+        mut self,
+        screen_samples: &mut [PartScreenSample],
+    ) -> Result<StreamingMappings, JamIndexPartError> {
+        self.flush()?;
+        let run_count = u32::try_from(self.runs.len()).map_err(|_| JamIndexPartError::Overflow)?;
+        let records_path = self.directory.path().join("mapping-records.bin");
+        let payload_path = self.directory.path().join("mapping-payload.bin");
+        let mut mapping_records = BufWriter::new(
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&records_path)?,
+        );
+        let mut mapping_payload = BufWriter::new(
+            OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&payload_path)?,
+        );
+        let mut readers = self
+            .runs
+            .iter()
+            .map(|path| File::open(path).map(BufReader::new))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut heap = BinaryHeap::new();
+        for (run_index, reader) in readers.iter_mut().enumerate() {
+            if let Some(record) = read_signature_run_record(reader)? {
+                heap.push(Reverse((
+                    record.key(),
+                    record.spatial,
+                    record.whole_sample,
+                    run_index,
+                )));
+            }
+        }
+        let mut current_key = None;
+        let mut current = PostingBuildRecord::default();
+        let mut signature_count = 0u64;
+        let mut payload_bytes = 0u64;
+        let mut stats = MappingStats::default();
+        while let Some(Reverse((key, spatial, whole_sample, run_index))) = heap.pop() {
+            let (_, hash, sample_id, contig_id) = key;
+            if current_key != Some((hash, sample_id)) {
+                if let Some((previous_hash, previous_sample)) = current_key {
+                    write_stream_mapping(
+                        &mut mapping_records,
+                        &mut mapping_payload,
+                        &mut payload_bytes,
+                        &mut stats,
+                        screen_samples,
+                        previous_hash,
+                        previous_sample,
+                        &current,
+                    )?;
+                    signature_count = signature_count.saturating_add(1);
+                    current = PostingBuildRecord::default();
+                }
+                current_key = Some((hash, sample_id));
+            }
+            current.spatial |= spatial;
+            current.whole_sample |= whole_sample;
+            current.contig_ids.insert(contig_id);
+            if let Some(next) = read_signature_run_record(&mut readers[run_index])? {
+                heap.push(Reverse((
+                    next.key(),
+                    next.spatial,
+                    next.whole_sample,
+                    run_index,
+                )));
+            }
+        }
+        if let Some((hash, sample_id)) = current_key {
+            write_stream_mapping(
+                &mut mapping_records,
+                &mut mapping_payload,
+                &mut payload_bytes,
+                &mut stats,
+                screen_samples,
+                hash,
+                sample_id,
+                &current,
+            )?;
+            signature_count = signature_count.saturating_add(1);
+        }
+        mapping_records.flush()?;
+        mapping_payload.flush()?;
+        Ok(StreamingMappings {
+            _directory: self.directory,
+            records_path,
+            payload_path,
+            signature_count,
+            stats,
+            run_count,
+        })
+    }
+}
+
+fn write_signature_run_record(
+    writer: &mut impl Write,
+    record: SignatureRunRecord,
+) -> Result<(), JamIndexPartError> {
+    let mut bytes = [0u8; SIGNATURE_RUN_RECORD_SIZE];
+    put_u64(&mut bytes, 0, record.hash);
+    put_u32(&mut bytes, 8, record.sample_id);
+    put_u32(&mut bytes, 12, record.contig_id);
+    put_u32(
+        &mut bytes,
+        16,
+        u32::from(record.spatial) | (u32::from(record.whole_sample) << 1),
+    );
+    writer.write_all(&bytes)?;
+    Ok(())
+}
+
+fn read_signature_run_record(
+    reader: &mut impl Read,
+) -> Result<Option<SignatureRunRecord>, JamIndexPartError> {
+    let mut bytes = [0u8; SIGNATURE_RUN_RECORD_SIZE];
+    let mut read = 0usize;
+    while read < bytes.len() {
+        let count = reader.read(&mut bytes[read..])?;
+        if count == 0 {
+            if read == 0 {
+                return Ok(None);
+            }
+            return Err(JamIndexPartError::Corrupt("truncated signature run"));
+        }
+        read += count;
+    }
+    if bytes[20..].iter().any(|byte| *byte != 0) || get_u32(&bytes, 16) & !3 != 0 {
+        return Err(JamIndexPartError::Corrupt("signature run record"));
+    }
+    let flags = get_u32(&bytes, 16);
+    Ok(Some(SignatureRunRecord {
+        hash: get_u64(&bytes, 0),
+        sample_id: get_u32(&bytes, 8),
+        contig_id: get_u32(&bytes, 12),
+        spatial: flags & 1 != 0,
+        whole_sample: flags & 2 != 0,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_stream_mapping(
+    records: &mut impl Write,
+    payload: &mut impl Write,
+    payload_bytes: &mut u64,
+    stats: &mut MappingStats,
+    screen_samples: &mut [PartScreenSample],
+    hash: u64,
+    sample_id: u32,
+    posting: &PostingBuildRecord,
+) -> Result<(), JamIndexPartError> {
+    let sample = screen_samples
+        .get_mut(usize::try_from(sample_id).map_err(|_| JamIndexPartError::Overflow)?)
+        .ok_or(JamIndexPartError::Overflow)?;
+    sample.hashes.push(hash);
+    let count = u32::try_from(posting.contig_ids.len()).map_err(|_| JamIndexPartError::Overflow)?;
+    if count == 0 || count > MAPPING_COUNT_MASK || (!posting.spatial && !posting.whole_sample) {
+        return Err(JamIndexPartError::Overflow);
+    }
+    let mut metadata = count;
+    if posting.spatial {
+        metadata |= MAPPING_SPATIAL;
+    }
+    if posting.whole_sample {
+        metadata |= MAPPING_WHOLE_SAMPLE;
+    }
+    let value = if count == 1 {
+        stats.single = stats.single.saturating_add(1);
+        *posting
+            .contig_ids
+            .first()
+            .ok_or(JamIndexPartError::Corrupt("empty inline mapping"))?
+    } else {
+        stats.overflow = stats.overflow.saturating_add(1);
+        stats.overflow_contigs = stats.overflow_contigs.saturating_add(u64::from(count));
+        stats.maximum_overflow_count = stats.maximum_overflow_count.max(count);
+        metadata |= MAPPING_OVERFLOW;
+        let offset = u32::try_from(*payload_bytes).map_err(|_| JamIndexPartError::Overflow)?;
+        let mut encoded = Vec::new();
+        encode_deltas(&posting.contig_ids, &mut encoded)?;
+        payload.write_all(&encoded)?;
+        *payload_bytes =
+            (*payload_bytes).saturating_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX));
+        offset
+    };
+    let mut bytes = [0u8; MAPPING_RECORD_SIZE];
+    put_u32(&mut bytes, 0, value);
+    put_u32(&mut bytes, 4, metadata);
+    records.write_all(&bytes)?;
+    Ok(())
+}
+
 pub fn write_part(
     output: impl AsRef<Path>,
     sources: &[MetagenomeSource],
@@ -235,6 +514,7 @@ pub fn write_part_staged(
     sources: &[StagedMetagenomeSource],
     policy: &ScreenSelectionPolicy,
 ) -> Result<PartWriteResult, JamIndexPartError> {
+    let output = output.as_ref();
     policy
         .validate()
         .map_err(|error| JamIndexPartError::InvalidInput(error.to_string()))?;
@@ -259,7 +539,8 @@ pub fn write_part_staged(
     let mut source_records = Vec::with_capacity(sources.len());
     let mut metagenomes = Vec::with_capacity(sources.len());
     let mut contigs = Vec::new();
-    let mut postings = BTreeMap::<(u64, u32), PostingBuildRecord>::new();
+    let mut signature_runs =
+        SignatureRunBuilder::new(output.parent().unwrap_or_else(|| Path::new(".")))?;
     let mut screen_samples = Vec::with_capacity(sources.len());
     let mut total_bases = 0u64;
     let mut estimated_signature_count = 0u64;
@@ -271,6 +552,10 @@ pub fn write_part_staged(
         let id_offset = append_string(&mut strings, &source.metagenome_id)?;
         let id_length =
             u32::try_from(source.metagenome_id.len()).map_err(|_| JamIndexPartError::Overflow)?;
+        screen_samples.push(PartScreenSample {
+            metagenome_id: source.metagenome_id.clone(),
+            hashes: Vec::new(),
+        });
         let staged = ExternalSource::detect(&source.staged_sequence_path);
         let published = ExternalSource::detect(&source.published_sequence_path);
         if part_access(staged.access) != part_access(published.access)
@@ -307,7 +592,7 @@ pub fn write_part_staged(
                 .transpose()?
                 .unwrap_or([0; 32]),
         });
-        let mut selector = MetagenomeSignatureBuilder::new(policy.clone())?;
+        let mut selector = MetagenomeSignatureBuilder::new_streaming(policy.clone())?;
         let raw_digest = Arc::new(Mutex::new(Sha256::new()));
         let raw_bytes = Arc::new(AtomicU64::new(0));
         let raw = HashingReader {
@@ -356,9 +641,13 @@ pub fn write_part_staged(
             estimated_signature_count =
                 estimated_signature_count.saturating_add(u64::from(screen_signature_count));
             for hash in selected.hashes {
-                let posting = postings.entry((hash, metagenome_id)).or_default();
-                posting.spatial = true;
-                posting.contig_ids.insert(contig_id);
+                signature_runs.push(SignatureRunRecord {
+                    hash,
+                    sample_id: metagenome_id,
+                    contig_id,
+                    spatial: true,
+                    whole_sample: false,
+                })?;
             }
             let (fai_offset, line_bases, line_width) = indexed.map_or((0, 0, 0), |indexed| {
                 (indexed.offset, indexed.line_bases, indexed.line_width)
@@ -424,34 +713,36 @@ pub fn write_part_staged(
             let contig_id = *metagenome_contig_ids
                 .get(usize::try_from(*source_ordinal).map_err(|_| JamIndexPartError::Overflow)?)
                 .ok_or(JamIndexPartError::Overflow)?;
-            let posting = postings.entry((*hash, metagenome_id)).or_default();
-            posting.whole_sample = true;
-            posting.contig_ids.insert(contig_id);
+            signature_runs.push(SignatureRunRecord {
+                hash: *hash,
+                sample_id: metagenome_id,
+                contig_id,
+                spatial: false,
+                whole_sample: true,
+            })?;
         }
-        let screen_hash_count =
-            u32::try_from(selected.union_hashes.len()).map_err(|_| JamIndexPartError::Overflow)?;
-        screen_samples.push(PartScreenSample {
-            metagenome_id: source.metagenome_id.clone(),
-            hashes: selected.union_hashes,
-        });
         metagenomes.push(MetagenomeBuildRecord {
             metagenome_id,
             first_contig,
             contig_count: metagenome_contigs,
-            screen_hash_count,
+            screen_hash_count: 0,
             id_offset,
             id_length,
             total_bases: metagenome_bases,
             source_sha256,
         });
     }
-
-    write_encoded_part(
-        output.as_ref(),
+    let mappings = signature_runs.finish(&mut screen_samples)?;
+    for (metagenome, sample) in metagenomes.iter_mut().zip(&screen_samples) {
+        metagenome.screen_hash_count =
+            u32::try_from(sample.hashes.len()).map_err(|_| JamIndexPartError::Overflow)?;
+    }
+    write_encoded_part_streaming(
+        output,
         source_records,
         metagenomes,
         contigs,
-        postings,
+        mappings,
         strings,
         screen_samples,
         total_bases,
@@ -660,6 +951,110 @@ pub fn merge_part_fragments(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn write_encoded_part_streaming(
+    output: &Path,
+    source_records: Vec<SourceBuildRecord>,
+    metagenomes: Vec<MetagenomeBuildRecord>,
+    contigs: Vec<ContigBuildRecord>,
+    mappings: StreamingMappings,
+    strings: Vec<u8>,
+    screen_samples: Vec<PartScreenSample>,
+    total_bases: u64,
+    estimated_signature_count: u64,
+) -> Result<PartWriteResult, JamIndexPartError> {
+    if mappings.signature_count > estimated_signature_count {
+        return Err(JamIndexPartError::Corrupt("signature estimate underflow"));
+    }
+    let source_bytes = encode_sources(&source_records);
+    let contig_signature_histogram =
+        contigs
+            .iter()
+            .fold(BTreeMap::<u32, u64>::new(), |mut histogram, contig| {
+                let count = histogram.entry(contig.screen_signature_count).or_default();
+                *count = count.saturating_add(1);
+                histogram
+            });
+    let metagenome_bytes = encode_metagenomes(&metagenomes);
+    let contig_bytes = encode_external_contigs(&contigs);
+    let mapping_records_bytes = std::fs::metadata(&mappings.records_path)?.len();
+    let mapping_payload_bytes = std::fs::metadata(&mappings.payload_path)?.len();
+    let signature_length = mapping_records_bytes.saturating_add(mapping_payload_bytes);
+    if mapping_records_bytes
+        != mappings
+            .signature_count
+            .saturating_mul(MAPPING_RECORD_SIZE as u64)
+    {
+        return Err(JamIndexPartError::Corrupt("mapping record count"));
+    }
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .read(true)
+        .write(true)
+        .open(output)?;
+    file.write_all(&vec![0u8; HEADER_SIZE])?;
+    let source_offset = file.stream_position()?;
+    file.write_all(&source_bytes)?;
+    let posting_offset = align_file_plain(&mut file, 8)?;
+    std::io::copy(&mut File::open(&mappings.records_path)?, &mut file)?;
+    std::io::copy(&mut File::open(&mappings.payload_path)?, &mut file)?;
+    let metagenome_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&metagenome_bytes)?;
+    let contig_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&contig_bytes)?;
+    let string_offset = align_file_plain(&mut file, 8)?;
+    file.write_all(&strings)?;
+    let object_size = file.stream_position()?;
+    file.flush()?;
+    let header = Header {
+        format_version: VERSION,
+        metagenome_count: u32::try_from(metagenomes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        contig_count: u64::try_from(contigs.len()).map_err(|_| JamIndexPartError::Overflow)?,
+        total_bases,
+        signature_count: mappings.signature_count,
+        sequence_offset: source_offset,
+        sequence_length: u64::try_from(source_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        signature_offset: posting_offset,
+        signature_length,
+        metagenome_offset,
+        metagenome_length: u64::try_from(metagenome_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        contig_offset,
+        contig_length: u64::try_from(contig_bytes.len())
+            .map_err(|_| JamIndexPartError::Overflow)?,
+        string_offset,
+        string_length: u64::try_from(strings.len()).map_err(|_| JamIndexPartError::Overflow)?,
+        sequence_checksum: sha256(&source_bytes),
+        signature_checksum: sha256_file_range(output, posting_offset, signature_length)?,
+        metagenome_checksum: sha256(&metagenome_bytes),
+        contig_checksum: sha256(&contig_bytes),
+        string_checksum: sha256(&strings),
+    };
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&encode_header(header))?;
+    file.sync_all()?;
+    Ok(PartWriteResult {
+        screen_samples,
+        metagenome_count: header.metagenome_count,
+        contig_count: header.contig_count,
+        total_bases,
+        estimated_signature_count: header.signature_count,
+        posting_count: header.signature_count,
+        contig_posting_bytes: header.signature_length,
+        source_reference_bytes: header.sequence_length,
+        data_file_bytes: object_size,
+        contig_signature_histogram,
+        single_contig_mappings: mappings.stats.single,
+        overflow_mappings: mappings.stats.overflow,
+        overflow_contigs: mappings.stats.overflow_contigs,
+        maximum_overflow_count: mappings.stats.maximum_overflow_count,
+        signature_run_count: mappings.run_count,
+        signature_run_record_limit: SIGNATURE_RUN_RECORD_LIMIT as u64,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn write_encoded_part(
     output: &Path,
     source_records: Vec<SourceBuildRecord>,
@@ -763,6 +1158,8 @@ fn write_encoded_part(
         overflow_mappings: mapping_stats.overflow,
         overflow_contigs: mapping_stats.overflow_contigs,
         maximum_overflow_count: mapping_stats.maximum_overflow_count,
+        signature_run_count: 0,
+        signature_run_record_limit: 0,
     })
 }
 
@@ -813,7 +1210,8 @@ impl JamIndexPartReader {
             metagenome.gzi_path = source.gzi_path;
             metagenome.gzi_sha256 = source.gzi_sha256;
         }
-        let contigs = decode_external_contigs(contig, strings, header.contig_count)?;
+        let contigs =
+            decode_external_contigs(contig, strings, header.contig_count, header.format_version)?;
         validate_directories(&metagenomes, &contigs, header.total_bases)?;
         validate_postings(
             posting,
@@ -1162,17 +1560,17 @@ fn encode_external_contigs(records: &[ContigBuildRecord]) -> Vec<u8> {
     let mut bytes = vec![0u8; records.len() * CONTIG_RECORD_SIZE];
     for (index, record) in records.iter().enumerate() {
         let offset = index * CONTIG_RECORD_SIZE;
-        put_u32(&mut bytes, offset, record.contig_id);
-        put_u32(&mut bytes, offset + 4, record.metagenome_id);
+        debug_assert_eq!(usize::try_from(record.contig_id).ok(), Some(index));
+        put_u32(&mut bytes, offset, record.metagenome_id);
+        put_u32(&mut bytes, offset + 4, record.source_ordinal);
         put_u64(&mut bytes, offset + 8, record.name_offset);
         put_u32(&mut bytes, offset + 16, record.name_length);
-        put_u32(&mut bytes, offset + 20, record.source_ordinal);
+        put_u32(&mut bytes, offset + 20, record.screen_signature_count);
         put_u64(&mut bytes, offset + 24, record.base_count);
         put_u64(&mut bytes, offset + 32, record.fai_offset);
         put_u32(&mut bytes, offset + 40, record.line_bases);
         put_u32(&mut bytes, offset + 44, record.line_width);
         bytes[offset + 48..offset + 80].copy_from_slice(&record.sequence_sha256);
-        put_u32(&mut bytes, offset + 80, record.screen_signature_count);
     }
     bytes
 }
@@ -1340,37 +1738,58 @@ fn decode_external_contigs(
     bytes: &[u8],
     strings: &[u8],
     count: u64,
+    format_version: u16,
 ) -> Result<Vec<PartContig>, JamIndexPartError> {
     let count = usize::try_from(count).map_err(|_| JamIndexPartError::Overflow)?;
-    if bytes.len() != count * CONTIG_RECORD_SIZE {
+    let record_size = if format_version < VERSION {
+        LEGACY_CONTIG_RECORD_SIZE
+    } else {
+        CONTIG_RECORD_SIZE
+    };
+    if bytes.len() != count * record_size {
         return Err(JamIndexPartError::Corrupt("contig directory length"));
     }
     (0..count)
         .map(|id| {
-            let offset = id * CONTIG_RECORD_SIZE;
-            let contig_id = get_u32(bytes, offset);
-            if usize::try_from(contig_id).ok() != Some(id)
-                || bytes[offset + 84..offset + CONTIG_RECORD_SIZE]
-                    .iter()
-                    .any(|byte| *byte != 0)
+            let offset = id * record_size;
+            let contig_id = u32::try_from(id).map_err(|_| JamIndexPartError::Overflow)?;
+            if format_version < VERSION
+                && (get_u32(bytes, offset) != contig_id
+                    || bytes[offset + 84..offset + record_size]
+                        .iter()
+                        .any(|byte| *byte != 0))
             {
                 return Err(JamIndexPartError::Corrupt("contig directory record"));
             }
+            let (metagenome_id, source_ordinal, screen_signature_count) =
+                if format_version < VERSION {
+                    (
+                        get_u32(bytes, offset + 4),
+                        get_u32(bytes, offset + 20),
+                        get_u32(bytes, offset + 80),
+                    )
+                } else {
+                    (
+                        get_u32(bytes, offset),
+                        get_u32(bytes, offset + 4),
+                        get_u32(bytes, offset + 20),
+                    )
+                };
             Ok(PartContig {
                 contig_id,
-                metagenome_id: get_u32(bytes, offset + 4),
+                metagenome_id,
                 name: decode_string(
                     strings,
                     get_u64(bytes, offset + 8),
                     get_u32(bytes, offset + 16),
                 )?,
                 base_count: get_u64(bytes, offset + 24),
-                source_ordinal: get_u32(bytes, offset + 20),
+                source_ordinal,
                 fai_offset: get_u64(bytes, offset + 32),
                 line_bases: get_u32(bytes, offset + 40),
                 line_width: get_u32(bytes, offset + 44),
                 sequence_sha256: array_32(bytes, offset + 48),
-                screen_signature_count: get_u32(bytes, offset + 80),
+                screen_signature_count,
             })
         })
         .collect()
@@ -1580,10 +1999,15 @@ fn validate_external_lengths(header: Header) -> Result<(), JamIndexPartError> {
             MAPPING_RECORD_SIZE as u64
         })
         .ok_or(JamIndexPartError::Overflow)?;
+    let contig_record_size = if header.format_version < VERSION {
+        LEGACY_CONTIG_RECORD_SIZE as u64
+    } else {
+        CONTIG_RECORD_SIZE as u64
+    };
     if header.sequence_length != u64::from(header.metagenome_count) * SOURCE_RECORD_SIZE as u64
         || header.metagenome_length
             != u64::from(header.metagenome_count) * METAGENOME_RECORD_SIZE as u64
-        || header.contig_length != header.contig_count * CONTIG_RECORD_SIZE as u64
+        || header.contig_length != header.contig_count * contig_record_size
         || header.signature_length < header_bytes
     {
         return Err(JamIndexPartError::Corrupt("section length mismatch"));
@@ -1663,7 +2087,7 @@ fn decode_header(bytes: &[u8]) -> Result<Header, JamIndexPartError> {
     }
     let format_version = get_u16(bytes, 8);
     if bytes[..8] != MAGIC
-        || !matches!(format_version, LEGACY_VERSION | VERSION)
+        || !matches!(format_version, LEGACY_VERSION | MAPPING_VERSION | VERSION)
         || usize::from(get_u16(bytes, 10)) != HEADER_SIZE
         || bytes[12..16].iter().any(|byte| *byte != 0)
         || bytes[320..].iter().any(|byte| *byte != 0)
@@ -1835,6 +2259,27 @@ fn sha256_file(path: &Path) -> Result<[u8; 32], JamIndexPartError> {
             break;
         }
         digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
+}
+
+fn sha256_file_range(path: &Path, offset: u64, length: u64) -> Result<[u8; 32], JamIndexPartError> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut reader = BufReader::with_capacity(1024 * 1024, file.take(length));
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    let mut observed = 0u64;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        observed = observed.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
+        digest.update(&buffer[..read]);
+    }
+    if observed != length {
+        return Err(JamIndexPartError::Corrupt("truncated checksum range"));
     }
     Ok(digest.finalize().into())
 }
