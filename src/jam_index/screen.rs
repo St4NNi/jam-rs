@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::path::Path;
+use std::time::Instant;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -88,6 +89,43 @@ pub struct JamIndexScreenConfig {
     pub min_query_windows: u32,
     pub rare_rescue_max_document_frequency: Option<u32>,
     pub parallel_parts: usize,
+    pub hamming1_rescue: Option<Hamming1RescueConfig>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Hamming1RescueConfig {
+    pub max_source_keys: usize,
+    pub max_generated_keys: usize,
+    pub max_candidates: usize,
+    pub max_document_frequency: u32,
+    pub max_memory_bytes: u64,
+    pub max_wall_millis: u64,
+}
+
+impl Hamming1RescueConfig {
+    #[must_use]
+    pub const fn pilot() -> Self {
+        Self {
+            max_source_keys: 512,
+            max_generated_keys: 32_256,
+            max_candidates: 4,
+            max_document_frequency: 4,
+            max_memory_bytes: 256 * 1024 * 1024,
+            max_wall_millis: 30_000,
+        }
+    }
+
+    fn validate(self) -> bool {
+        self.max_source_keys != 0
+            && self.max_generated_keys >= self.max_source_keys.saturating_mul(63)
+            && self.max_candidates != 0
+            && self.max_document_frequency != 0
+            && self.max_memory_bytes
+                >= u64::try_from(self.max_generated_keys)
+                    .unwrap_or(u64::MAX)
+                    .saturating_mul(64)
+            && self.max_wall_millis != 0
+    }
 }
 
 impl Default for JamIndexScreenConfig {
@@ -99,6 +137,7 @@ impl Default for JamIndexScreenConfig {
             min_query_windows: 1,
             rare_rescue_max_document_frequency: None,
             parallel_parts: 1,
+            hamming1_rescue: None,
         }
     }
 }
@@ -111,6 +150,9 @@ impl JamIndexScreenConfig {
             || self.min_query_windows == 0
             || self.rare_rescue_max_document_frequency == Some(0)
             || self.parallel_parts == 0
+            || self
+                .hamming1_rescue
+                .is_some_and(|rescue| !rescue.validate())
         {
             return Err(JamIndexScreenError::InvalidConfig);
         }
@@ -128,6 +170,15 @@ pub struct JamIndexScreenMetrics {
     pub exact_candidates_recounted: u64,
     pub candidate_limit_hits: u64,
     pub selected_candidates: u64,
+    pub hamming1_queries: u64,
+    pub hamming1_query_windows: u64,
+    pub hamming1_source_keys: u64,
+    pub hamming1_generated_keys: u64,
+    pub hamming1_deduplicated_keys: u64,
+    pub hamming1_common_keys_suppressed: u64,
+    pub hamming1_candidates_added: u64,
+    pub hamming1_wall_micros: u64,
+    pub hamming1_limit_hits: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -404,6 +455,10 @@ pub fn search_jam_index(
 ) -> Result<JamIndexScreenResult, JamIndexScreenError> {
     let config = config.validate()?;
     let root = root.as_ref();
+    if config.hamming1_rescue.is_some() {
+        let mut batch = search_jam_index_batch(root, std::slice::from_ref(query), config)?;
+        return batch.queries.pop().ok_or(JamIndexScreenError::EmptyBatch);
+    }
     let manifest = load_manifest(root)?;
     if query.query_window_bases != manifest.selection_policy.query_window_bases {
         return Err(JamIndexScreenError::PolicyMismatch);
@@ -434,10 +489,21 @@ pub fn search_jam_index_batch(
         .num_threads(config.parallel_parts)
         .build()
         .map_err(|_| JamIndexScreenError::InvalidConfig)?;
-    let results = {
+    let mut results = {
         let _profile = crate::profiling::process_scope("screen_part_candidate_search");
         search_open_batch(&manifest, &screens, queries, config, &pool)?
     };
+    if let Some(rescue) = config.hamming1_rescue {
+        apply_hamming1_rescue(
+            &manifest,
+            &screens,
+            queries,
+            &mut results,
+            config,
+            rescue,
+            &pool,
+        )?;
+    }
     Ok(JamIndexBatchScreenResult {
         queries: results,
         parts_opened: u64::try_from(screens.len()).unwrap_or(u64::MAX),
@@ -742,6 +808,345 @@ fn search_open_batch(
         });
     }
     Ok(results)
+}
+
+struct HammingQueryPreparation {
+    query_index: usize,
+    query: PreparedJamIndexQuery,
+    metrics: JamIndexScreenMetrics,
+    limit_hit: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_hamming1_rescue(
+    manifest: &JamIndexManifest,
+    screens: &[(&JamIndexPart, JamReader)],
+    queries: &[PreparedJamIndexQuery],
+    results: &mut [JamIndexScreenResult],
+    screen_config: JamIndexScreenConfig,
+    rescue_config: Hamming1RescueConfig,
+    pool: &rayon::ThreadPool,
+) -> Result<(), JamIndexScreenError> {
+    let _profile = crate::profiling::process_scope("hamming1_rescue");
+    let mut eligible = results
+        .iter()
+        .enumerate()
+        .filter_map(|(query_index, result)| {
+            (!result.candidate_limit_reached
+                && result.candidates.len() < screen_config.top_candidates)
+                .then_some(query_index)
+        })
+        .collect::<Vec<_>>();
+    let maximum_query_bytes = u64::try_from(rescue_config.max_generated_keys)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(64)
+        .max(1);
+    let maximum_active_queries =
+        usize::try_from(rescue_config.max_memory_bytes / maximum_query_bytes)
+            .unwrap_or(usize::MAX)
+            .max(1);
+    if eligible.len() > maximum_active_queries {
+        for query_index in eligible.drain(maximum_active_queries..) {
+            let result = results
+                .get_mut(query_index)
+                .ok_or(JamIndexScreenError::Overflow)?;
+            result.candidate_limit_reached = true;
+            result.metrics.hamming1_limit_hits =
+                result.metrics.hamming1_limit_hits.saturating_add(1);
+        }
+    }
+    if eligible.is_empty() {
+        return Ok(());
+    }
+    let started = Instant::now();
+    let prepared = pool.install(|| {
+        eligible
+            .par_iter()
+            .map(|query_index| {
+                prepare_hamming1_query(*query_index, &queries[*query_index], screens, rescue_config)
+            })
+            .collect::<Result<Vec<_>, JamIndexScreenError>>()
+    })?;
+    let rescue_queries = prepared
+        .iter()
+        .map(|prepared| prepared.query.clone())
+        .collect::<Vec<_>>();
+    let candidate_started = Instant::now();
+    let rescue_results = search_open_batch(
+        manifest,
+        screens,
+        &rescue_queries,
+        JamIndexScreenConfig {
+            top_candidates: rescue_config.max_candidates,
+            accumulator_capacity: rescue_config.max_candidates.saturating_mul(16).max(64),
+            min_shared_hashes: 1,
+            min_query_windows: 1,
+            rare_rescue_max_document_frequency: None,
+            parallel_parts: screen_config.parallel_parts,
+            hamming1_rescue: None,
+        },
+        pool,
+    )?;
+    let search_micros = u64::try_from(candidate_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let shared_search_micros =
+        search_micros / u64::try_from(prepared.len()).unwrap_or(u64::MAX).max(1);
+    let total_limit = rescue_config
+        .max_wall_millis
+        .saturating_mul(u64::try_from(prepared.len()).unwrap_or(u64::MAX));
+    let global_time_limit_hit =
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX) > total_limit;
+
+    for (prepared, rescue_result) in prepared.into_iter().zip(rescue_results) {
+        let result = results
+            .get_mut(prepared.query_index)
+            .ok_or(JamIndexScreenError::Overflow)?;
+        let existing = result
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.part_id, candidate.metagenome_local_id))
+            .collect::<BTreeSet<_>>();
+        let available = screen_config
+            .top_candidates
+            .saturating_sub(result.candidates.len());
+        let mut additions = rescue_result
+            .candidates
+            .into_iter()
+            .filter(|candidate| {
+                !existing.contains(&(candidate.part_id, candidate.metagenome_local_id))
+            })
+            .collect::<Vec<_>>();
+        let merge_limit_hit = additions.len() > available;
+        additions.truncate(available);
+        for mut candidate in additions {
+            candidate.admission_source = CandidateAdmissionSource::Hamming1Rescue;
+            candidate.screen_policy = format!("{}+hamming1", candidate.screen_policy);
+            candidate.rank = u32::try_from(result.candidates.len() + 1)
+                .map_err(|_| JamIndexScreenError::Overflow)?;
+            result.candidates.push(candidate);
+        }
+        let candidates_added =
+            u64::try_from(result.candidates.len().saturating_sub(existing.len()))
+                .unwrap_or(u64::MAX);
+        let mut metrics = add_metrics(result.metrics, rescue_result.metrics);
+        metrics.hamming1_queries = metrics
+            .hamming1_queries
+            .saturating_add(prepared.metrics.hamming1_queries);
+        metrics.hamming1_query_windows = metrics
+            .hamming1_query_windows
+            .saturating_add(prepared.metrics.hamming1_query_windows);
+        metrics.hamming1_source_keys = metrics
+            .hamming1_source_keys
+            .saturating_add(prepared.metrics.hamming1_source_keys);
+        metrics.hamming1_generated_keys = metrics
+            .hamming1_generated_keys
+            .saturating_add(prepared.metrics.hamming1_generated_keys);
+        metrics.hamming1_deduplicated_keys = metrics
+            .hamming1_deduplicated_keys
+            .saturating_add(prepared.metrics.hamming1_deduplicated_keys);
+        metrics.hamming1_common_keys_suppressed = metrics
+            .hamming1_common_keys_suppressed
+            .saturating_add(prepared.metrics.hamming1_common_keys_suppressed);
+        metrics.hamming1_candidates_added = metrics
+            .hamming1_candidates_added
+            .saturating_add(candidates_added);
+        metrics.hamming1_wall_micros = metrics
+            .hamming1_wall_micros
+            .saturating_add(prepared.metrics.hamming1_wall_micros)
+            .saturating_add(shared_search_micros);
+        let limit_hit = prepared.limit_hit
+            || rescue_result.candidate_limit_reached
+            || merge_limit_hit
+            || global_time_limit_hit;
+        metrics.hamming1_limit_hits = metrics
+            .hamming1_limit_hits
+            .saturating_add(u64::from(limit_hit));
+        metrics.selected_candidates = u64::try_from(result.candidates.len()).unwrap_or(u64::MAX);
+        crate::profiling::add_counter(
+            "hamming1_query_windows_examined",
+            prepared.metrics.hamming1_query_windows,
+        );
+        crate::profiling::add_counter(
+            "hamming1_source_keys",
+            prepared.metrics.hamming1_source_keys,
+        );
+        crate::profiling::add_counter(
+            "hamming1_generated_keys",
+            prepared.metrics.hamming1_generated_keys,
+        );
+        crate::profiling::add_counter(
+            "hamming1_deduplicated_keys",
+            prepared.metrics.hamming1_deduplicated_keys,
+        );
+        crate::profiling::add_counter(
+            "hamming1_common_keys_suppressed",
+            prepared.metrics.hamming1_common_keys_suppressed,
+        );
+        crate::profiling::add_counter("hamming1_candidates_added", candidates_added);
+        crate::profiling::add_counter("hamming1_limit_hits", u64::from(limit_hit));
+        result.metrics = metrics;
+        result.candidate_limit_reached |= limit_hit;
+    }
+    crate::profiling::add_counter(
+        "hamming1_queries_entered",
+        u64::try_from(eligible.len()).unwrap_or(u64::MAX),
+    );
+    crate::profiling::add_counter(
+        "hamming1_max_source_keys",
+        u64::try_from(rescue_config.max_source_keys).unwrap_or(u64::MAX),
+    );
+    crate::profiling::add_counter(
+        "hamming1_max_generated_keys",
+        u64::try_from(rescue_config.max_generated_keys).unwrap_or(u64::MAX),
+    );
+    crate::profiling::add_counter(
+        "hamming1_max_candidates",
+        u64::try_from(rescue_config.max_candidates).unwrap_or(u64::MAX),
+    );
+    crate::profiling::add_counter(
+        "hamming1_max_document_frequency",
+        u64::from(rescue_config.max_document_frequency),
+    );
+    crate::profiling::add_counter("hamming1_max_memory_bytes", rescue_config.max_memory_bytes);
+    crate::profiling::add_counter("hamming1_max_wall_millis", rescue_config.max_wall_millis);
+    Ok(())
+}
+
+fn prepare_hamming1_query(
+    query_index: usize,
+    query: &PreparedJamIndexQuery,
+    screens: &[(&JamIndexPart, JamReader)],
+    config: Hamming1RescueConfig,
+) -> Result<HammingQueryPreparation, JamIndexScreenError> {
+    let started = Instant::now();
+    let mut occurrences = query
+        .hashes
+        .values()
+        .flat_map(|evidence| evidence.occurrences.iter().copied())
+        .collect::<Vec<_>>();
+    occurrences.sort_unstable_by_key(|occurrence| {
+        (
+            occurrence.query_position,
+            occurrence.packed_kmer,
+            occurrence.query_reverse,
+        )
+    });
+    occurrences.dedup_by_key(|occurrence| {
+        (
+            occurrence.query_position,
+            occurrence.packed_kmer,
+            occurrence.query_reverse,
+        )
+    });
+    let selected_count = occurrences.len().min(config.max_source_keys);
+    let selected = if selected_count == occurrences.len() {
+        occurrences
+    } else {
+        (0..selected_count)
+            .map(|index| occurrences[index.saturating_mul(occurrences.len()) / selected_count])
+            .collect()
+    };
+    let windows = selected
+        .iter()
+        .map(|occurrence| occurrence.query_window_id)
+        .collect::<BTreeSet<_>>();
+    let mut generated = BTreeMap::<u64, QueryHashEvidence>::new();
+    let mut generated_keys = 0usize;
+    'sources: for occurrence in &selected {
+        for slot in 0..21u32 {
+            let shift = slot * 2;
+            let observed = (occurrence.packed_kmer >> shift) & 3;
+            for replacement in 0..4u64 {
+                if replacement == observed {
+                    continue;
+                }
+                if generated_keys == config.max_generated_keys {
+                    break 'sources;
+                }
+                generated_keys += 1;
+                let mask = !(3u64 << shift);
+                let changed = (occurrence.packed_kmer & mask) | (replacement << shift);
+                let canonical = canonical_k21(changed);
+                let hash = jamhash_u64_v1(canonical);
+                if hash == 0 {
+                    continue;
+                }
+                let evidence = generated.entry(hash).or_insert_with(|| QueryHashEvidence {
+                    occurrences: Vec::new(),
+                    windows: Vec::new(),
+                });
+                evidence.occurrences.push(*occurrence);
+                evidence.windows.push(occurrence.query_window_id);
+            }
+        }
+    }
+    for evidence in generated.values_mut() {
+        evidence.occurrences.sort_unstable_by_key(|occurrence| {
+            (
+                occurrence.query_position,
+                occurrence.packed_kmer,
+                occurrence.query_reverse,
+            )
+        });
+        evidence.occurrences.dedup();
+        evidence.windows.sort_unstable();
+        evidence.windows.dedup();
+    }
+    let deduplicated_keys = generated.len();
+    let mut common_keys_suppressed = 0u64;
+    let mut comparisons = 0u64;
+    generated.retain(|hash, _| {
+        let document_frequency = screens.iter().fold(0u32, |total, (_, screen)| {
+            let mut hits = screen.search_entries_profiled(*hash);
+            let count = u32::try_from(hits.by_ref().count()).unwrap_or(u32::MAX);
+            comparisons = comparisons.saturating_add(hits.comparisons());
+            total.saturating_add(count)
+        });
+        if document_frequency > config.max_document_frequency {
+            common_keys_suppressed = common_keys_suppressed.saturating_add(1);
+        }
+        document_frequency != 0 && document_frequency <= config.max_document_frequency
+    });
+    record_signature_comparisons(comparisons);
+    let memory_bytes = u64::try_from(deduplicated_keys)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(64);
+    let limit_hit = generated_keys == config.max_generated_keys
+        && selected_count.saturating_mul(63) > config.max_generated_keys
+        || memory_bytes > config.max_memory_bytes
+        || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+            > config.max_wall_millis;
+    let metrics = JamIndexScreenMetrics {
+        hamming1_queries: 1,
+        hamming1_query_windows: u64::try_from(windows.len()).unwrap_or(u64::MAX),
+        hamming1_source_keys: u64::try_from(selected_count).unwrap_or(u64::MAX),
+        hamming1_generated_keys: u64::try_from(generated_keys).unwrap_or(u64::MAX),
+        hamming1_deduplicated_keys: u64::try_from(deduplicated_keys).unwrap_or(u64::MAX),
+        hamming1_common_keys_suppressed: common_keys_suppressed,
+        hamming1_wall_micros: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        hamming1_limit_hits: 0,
+        ..JamIndexScreenMetrics::default()
+    };
+    Ok(HammingQueryPreparation {
+        query_index,
+        query: PreparedJamIndexQuery {
+            query_length: query.query_length,
+            query_window_bases: query.query_window_bases,
+            total_query_windows: query.total_query_windows,
+            hashes: generated,
+        },
+        metrics,
+        limit_hit,
+    })
+}
+
+fn canonical_k21(value: u64) -> u64 {
+    let mut remaining = value;
+    let mut reverse_complement = 0u64;
+    for _ in 0..21 {
+        reverse_complement = (reverse_complement << 2) | ((!remaining) & 3);
+        remaining >>= 2;
+    }
+    value.min(reverse_complement)
 }
 
 fn batch_query_buckets(queries: &[PreparedJamIndexQuery]) -> Vec<Vec<BatchBucketHash>> {
@@ -1373,6 +1778,31 @@ fn add_metrics(left: JamIndexScreenMetrics, right: JamIndexScreenMetrics) -> Jam
         selected_candidates: left
             .selected_candidates
             .saturating_add(right.selected_candidates),
+        hamming1_queries: left.hamming1_queries.saturating_add(right.hamming1_queries),
+        hamming1_query_windows: left
+            .hamming1_query_windows
+            .saturating_add(right.hamming1_query_windows),
+        hamming1_source_keys: left
+            .hamming1_source_keys
+            .saturating_add(right.hamming1_source_keys),
+        hamming1_generated_keys: left
+            .hamming1_generated_keys
+            .saturating_add(right.hamming1_generated_keys),
+        hamming1_deduplicated_keys: left
+            .hamming1_deduplicated_keys
+            .saturating_add(right.hamming1_deduplicated_keys),
+        hamming1_common_keys_suppressed: left
+            .hamming1_common_keys_suppressed
+            .saturating_add(right.hamming1_common_keys_suppressed),
+        hamming1_candidates_added: left
+            .hamming1_candidates_added
+            .saturating_add(right.hamming1_candidates_added),
+        hamming1_wall_micros: left
+            .hamming1_wall_micros
+            .saturating_add(right.hamming1_wall_micros),
+        hamming1_limit_hits: left
+            .hamming1_limit_hits
+            .saturating_add(right.hamming1_limit_hits),
     }
 }
 

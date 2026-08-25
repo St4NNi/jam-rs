@@ -394,7 +394,11 @@ fn rank_candidate(
     let shared_spatial_signatures = u32::try_from(spatial_hashes.len()).unwrap_or(u32::MAX);
     let shared_whole_sample_signatures = u32::try_from(whole_hashes.len()).unwrap_or(u32::MAX);
     let rare_shared_signatures = u32::try_from(rare_spatial_hashes.len()).unwrap_or(u32::MAX);
-    let candidate_entry_reason = if shared_spatial_signatures >= config.min_spatial_signatures {
+    let candidate_entry_reason = if candidate.admission_source
+        == CandidateAdmissionSource::Hamming1Rescue
+    {
+        Some(CandidateAdmissionSource::Hamming1Rescue)
+    } else if shared_spatial_signatures >= config.min_spatial_signatures {
         Some(CandidateAdmissionSource::Standard)
     } else if u32::try_from(spatial_windows.len()).unwrap_or(u32::MAX) >= config.min_query_windows {
         Some(CandidateAdmissionSource::WindowSpread)

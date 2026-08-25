@@ -387,6 +387,7 @@ pub enum CandidateAdmissionSource {
     WindowSpread,
     RareRescue,
     WholeSampleFallback,
+    Hamming1Rescue,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

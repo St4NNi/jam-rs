@@ -413,6 +413,9 @@ pub enum Commands {
         /// Admit a one-signature Jam Index candidate at or below this document frequency
         #[arg(long)]
         rare_rescue_df: Option<u32>,
+        /// Enable the bounded candidate-only Hamming-distance-one rescue
+        #[arg(long, requires = "index")]
+        hamming1_rescue: bool,
         /// Minimum whole-metagenome fallback hashes for Jam Index admission
         #[arg(long, default_value = "2")]
         whole_sample_min_shared: u32,

@@ -1,6 +1,7 @@
 use jam_rs::jam_index::{
-    JamIndexBuildConfig, JamIndexScreenConfig, MetagenomeSource, ScreenSelectionPolicy,
-    append_jam_index, build_jam_index, prepare_screen_query, search_jam_index,
+    Hamming1RescueConfig, JamIndexBuildConfig, JamIndexScreenConfig, MetagenomeSource,
+    ScreenSelectionPolicy, append_jam_index, build_jam_index, prepare_screen_query,
+    search_jam_index,
 };
 use std::fs;
 use tempfile::Builder;
@@ -171,4 +172,63 @@ fn globally_unselected_candidates_do_not_retain_shared_hash_vectors() {
     assert_eq!(result.candidates.len(), 1);
     assert_eq!(result.metrics.selected_candidates, 1);
     assert!(result.metrics.maximum_accumulator_entries <= 4);
+}
+
+#[test]
+fn bounded_hamming1_rescue_adds_candidate_without_exact_k21() {
+    let source_root = directory("jam-index-hamming-source-");
+    let output_root = directory("jam-index-hamming-output-");
+    let query = sequence(1_000, 0x8181_4242_dead_beef);
+    let mut target = query.clone();
+    for position in (10..1_000).step_by(20) {
+        target[position] = match target[position] {
+            b'A' => b'C',
+            b'C' => b'G',
+            b'G' => b'T',
+            _ => b'A',
+        };
+    }
+    let output = output_root.path().join("index");
+    let policy = ScreenSelectionPolicy::spatial_256_adaptive(1_024, 512).unwrap();
+    build_jam_index(
+        &output,
+        &[write_source(source_root.path(), "target", &[target])],
+        &JamIndexBuildConfig {
+            selection_policy: policy.clone(),
+            source_manifest_sha256: "d".repeat(64),
+            ..JamIndexBuildConfig::default()
+        },
+    )
+    .unwrap();
+    let prepared = prepare_screen_query(&query, &policy).unwrap();
+    let config = JamIndexScreenConfig {
+        top_candidates: 16,
+        accumulator_capacity: 256,
+        min_shared_hashes: 2,
+        min_query_windows: 2,
+        rare_rescue_max_document_frequency: Some(8),
+        parallel_parts: 2,
+        ..JamIndexScreenConfig::default()
+    };
+    let exact = search_jam_index(&output, &prepared, config).unwrap();
+    assert!(exact.candidates.is_empty());
+
+    let rescued = search_jam_index(
+        &output,
+        &prepared,
+        JamIndexScreenConfig {
+            hamming1_rescue: Some(Hamming1RescueConfig::pilot()),
+            ..config
+        },
+    )
+    .unwrap();
+    assert_eq!(rescued.candidates.len(), 1);
+    assert_eq!(rescued.candidates[0].metagenome_id, "target");
+    assert_eq!(
+        rescued.candidates[0].admission_source,
+        jam_rs::trace::model::CandidateAdmissionSource::Hamming1Rescue
+    );
+    assert!(rescued.metrics.hamming1_generated_keys > 0);
+    assert_eq!(rescued.metrics.hamming1_candidates_added, 1);
+    assert_eq!(rescued.metrics.hamming1_limit_hits, 0);
 }

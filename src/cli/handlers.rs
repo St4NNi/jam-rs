@@ -1800,6 +1800,7 @@ pub struct IndexTraceArgs {
     pub min_shared: u32,
     pub min_query_windows: u32,
     pub rare_rescue_df: Option<u32>,
+    pub hamming1_rescue: bool,
     pub whole_sample_min_shared: u32,
     pub top_candidates: Option<usize>,
     pub initial_contigs: usize,
@@ -1829,6 +1830,7 @@ pub struct IndexBatchTraceArgs {
     pub min_shared: u32,
     pub min_query_windows: u32,
     pub rare_rescue_df: Option<u32>,
+    pub hamming1_rescue: bool,
     pub whole_sample_min_shared: u32,
     pub screen_only: bool,
     pub top_candidates: Option<usize>,
@@ -1866,6 +1868,7 @@ pub fn handle_index_trace(args: IndexTraceArgs) -> Result<()> {
         args.min_shared,
         args.min_query_windows,
         args.rare_rescue_df,
+        args.hamming1_rescue,
         args.whole_sample_min_shared,
         args.top_candidates,
         args.initial_contigs,
@@ -1984,6 +1987,7 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
             min_shared: args.min_shared,
             min_query_windows: args.min_query_windows,
             rare_rescue_df: args.rare_rescue_df,
+            hamming1_rescue: args.hamming1_rescue,
             whole_sample_min_shared: args.whole_sample_min_shared,
             top_candidates: args.top_candidates,
             initial_contigs: args.initial_contigs,
@@ -2045,6 +2049,7 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
         args.min_shared,
         args.min_query_windows,
         args.rare_rescue_df,
+        args.hamming1_rescue,
         args.whole_sample_min_shared,
         args.top_candidates,
         args.initial_contigs,
@@ -2289,6 +2294,18 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
         "index": args.index,
         "source_catalog": args.source_catalog,
         "screen_only": args.screen_only,
+        "hamming1_rescue": args.hamming1_rescue,
+        "hamming1_limits": args.hamming1_rescue.then(|| {
+            let limits = crate::jam_index::Hamming1RescueConfig::pilot();
+            serde_json::json!({
+                "max_source_keys": limits.max_source_keys,
+                "max_generated_keys": limits.max_generated_keys,
+                "max_candidates": limits.max_candidates,
+                "max_document_frequency": limits.max_document_frequency,
+                "max_memory_bytes": limits.max_memory_bytes,
+                "max_wall_millis": limits.max_wall_millis,
+            })
+        }),
         "profiling": profiling,
         "execution": execution,
         "queries": plan.queries.iter().map(|query| serde_json::json!({
@@ -2445,6 +2462,7 @@ fn index_trace_configuration(
     min_shared: u32,
     min_query_windows: u32,
     rare_rescue_df: Option<u32>,
+    hamming1_rescue: bool,
     whole_sample_min_shared: u32,
     top_candidates: Option<usize>,
     initial_contigs: usize,
@@ -2499,6 +2517,8 @@ fn index_trace_configuration(
                 min_query_windows,
                 rare_rescue_max_document_frequency: rare_rescue_df,
                 parallel_parts: threads,
+                hamming1_rescue: hamming1_rescue
+                    .then_some(crate::jam_index::Hamming1RescueConfig::pilot()),
             },
             contigs: crate::jam_index::JamIndexContigSearchConfig {
                 initial_contigs_per_candidate: initial_contigs,

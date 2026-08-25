@@ -49,9 +49,10 @@ pub use part::{
     StagedMetagenomeSource, merge_part_fragments, write_part, write_part_staged,
 };
 pub use screen::{
-    JamIndexBatchScreenResult, JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError,
-    JamIndexScreenMetrics, JamIndexScreenResult, PreparedJamIndexQuery, QueryHashOccurrence,
-    SharedScreenHash, prepare_screen_query, search_jam_index, search_jam_index_batch,
+    Hamming1RescueConfig, JamIndexBatchScreenResult, JamIndexCandidate, JamIndexScreenConfig,
+    JamIndexScreenError, JamIndexScreenMetrics, JamIndexScreenResult, PreparedJamIndexQuery,
+    QueryHashOccurrence, SharedScreenHash, prepare_screen_query, search_jam_index,
+    search_jam_index_batch,
 };
 pub use signature::{
     ContigSignature, MetagenomeSignatureBuilder, SignatureSelectionError, SpatialSignature,
