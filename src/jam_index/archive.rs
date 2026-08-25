@@ -1,6 +1,6 @@
 //! Position-free archive adapter that generates dense seeds from selected contigs.
 
-use super::part::JamIndexPartReader;
+use super::part::{JamIndexPartReader, LoadedPartContig};
 use crate::archive::{
     ArchiveContig, ArchiveError, ArchiveMetadata, ArchiveMetrics, ArchiveResult, SeedKey,
     SeedLookupMetrics, SeedLookupResult, SeedMatch, SeedOccurrence, SeedSchemeDescriptor,
@@ -60,15 +60,10 @@ impl JamIndexArchive {
         let loaded = reader
             .read_contigs(metagenome_id, &selected_ids)
             .map_err(part_error)?;
-        let loaded_sequences = loaded
-            .contigs
-            .into_iter()
-            .map(|(contig_id, sequence)| (contig_id, Arc::<[u8]>::from(sequence)))
-            .collect::<BTreeMap<_, _>>();
         Self::from_loaded(
             reader,
             metagenome_id,
-            &loaded_sequences,
+            &loaded.contigs,
             selected,
             loaded.source_bytes,
         )
@@ -77,7 +72,7 @@ impl JamIndexArchive {
     pub(crate) fn from_loaded(
         reader: &JamIndexPartReader,
         metagenome_id: u32,
-        loaded: &BTreeMap<u32, Arc<[u8]>>,
+        loaded: &BTreeMap<u32, LoadedPartContig>,
         contig_ids: impl IntoIterator<Item = u32>,
         source_bytes: u64,
     ) -> ArchiveResult<Self> {
@@ -109,14 +104,7 @@ impl JamIndexArchive {
         }
         let mut contigs = BTreeMap::new();
         for contig_id in selected {
-            let descriptor =
-                reader
-                    .contigs()
-                    .get(usize::try_from(contig_id).map_err(|_| {
-                        ArchiveError::CorruptMetadata("contig ID overflow".to_string())
-                    })?)
-                    .ok_or(ArchiveError::UnknownContig(contig_id))?;
-            let sequence = loaded
+            let loaded = loaded
                 .get(&contig_id)
                 .cloned()
                 .ok_or(ArchiveError::UnknownContig(contig_id))?;
@@ -124,8 +112,8 @@ impl JamIndexArchive {
                 contig_id,
                 LoadedContig {
                     id: contig_id,
-                    name: descriptor.name.clone(),
-                    sequence,
+                    name: loaded.name,
+                    sequence: loaded.bases,
                 },
             );
         }

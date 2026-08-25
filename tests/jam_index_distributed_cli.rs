@@ -35,7 +35,18 @@ fn distributed_index_commands_publish_only_after_all_parts_exist() {
         .arg(&catalog_path)
         .args(["--output"])
         .arg(&plan_path)
-        .args(["--parts", "2", "--fragments-per-part", "2"])
+        .args([
+            "--parts",
+            "2",
+            "--fragments-per-part",
+            "2",
+            "--screen-policy",
+            "spatial256-one",
+            "--adaptive-second-minimum-threshold",
+            "768",
+            "--whole-metagenome-hashes",
+            "512",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -47,6 +58,10 @@ fn distributed_index_commands_publish_only_after_all_parts_exist() {
         std::fs::File::open(&plan_path).unwrap(),
     ))
     .unwrap();
+    assert_eq!(
+        plan.selection_policy.adaptive_second_minimum_bases,
+        Some(768)
+    );
     for fragment in plan.parts.iter().flat_map(|part| &part.fragments) {
         let run = Command::new(env!("CARGO_BIN_EXE_jam"))
             .args(["--silent", "index", "build-fragment", "--plan"])

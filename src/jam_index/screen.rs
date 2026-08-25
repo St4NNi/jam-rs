@@ -45,6 +45,13 @@ impl PreparedJamIndexQuery {
     pub fn hashes(&self) -> impl Iterator<Item = u64> + '_ {
         self.hashes.keys().copied()
     }
+
+    #[must_use]
+    pub fn occurrences(&self, hash: u64) -> Option<&[QueryHashOccurrence]> {
+        self.hashes
+            .get(&hash)
+            .map(|evidence| evidence.occurrences.as_slice())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

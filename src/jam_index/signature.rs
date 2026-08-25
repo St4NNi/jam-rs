@@ -11,6 +11,14 @@ pub struct ContigSignature {
     pub requested_budget: u32,
     pub eligible_kmers: u64,
     pub hashes: Vec<u64>,
+    pub spatial_signatures: Vec<SpatialSignature>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpatialSignature {
+    pub segment: u64,
+    pub position: u64,
+    pub hash: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -63,7 +71,7 @@ impl MetagenomeSignatureBuilder {
             .is_none()
             .then(|| BottomK::new(requested_budget as usize))
             .transpose()?;
-        let mut spatial_minima = Vec::<(u64, u64)>::new();
+        let mut spatial_minima = Vec::<SpatialSignature>::new();
         let mut active_segment = None;
         let mut active_candidates = Vec::<(u64, u64)>::new();
         let mut eligible_kmers = 0u64;
@@ -84,7 +92,9 @@ impl MetagenomeSignatureBuilder {
                             &mut spatial_minima,
                             previous,
                             &active_candidates,
-                            self.policy.spatial_signatures_per_segment().unwrap_or(1),
+                            self.policy
+                                .spatial_signatures_per_segment(length)
+                                .unwrap_or(1),
                         );
                     }
                     active_segment = Some(segment);
@@ -106,12 +116,14 @@ impl MetagenomeSignatureBuilder {
                 &mut spatial_minima,
                 segment,
                 &active_candidates,
-                self.policy.spatial_signatures_per_segment().unwrap_or(1),
+                self.policy
+                    .spatial_signatures_per_segment(length)
+                    .unwrap_or(1),
             );
         }
         let hashes = match contig {
             Some(contig) => contig.into_sorted(),
-            None => spatial_hashes(spatial_minima, self.policy.contig_budget.maximum),
+            None => spatial_hashes(&mut spatial_minima, self.policy.contig_budget.maximum),
         };
         if self.retain_union {
             self.union.extend(hashes.iter().copied());
@@ -122,6 +134,7 @@ impl MetagenomeSignatureBuilder {
             requested_budget,
             eligible_kmers,
             hashes,
+            spatial_signatures: spatial_minima,
         })
     }
 
@@ -142,7 +155,7 @@ impl MetagenomeSignatureBuilder {
 }
 
 fn append_segment_signatures(
-    output: &mut Vec<(u64, u64)>,
+    output: &mut Vec<SpatialSignature>,
     segment: u64,
     candidates: &[(u64, u64)],
     requested: u32,
@@ -154,30 +167,44 @@ fn append_segment_signatures(
     let Some((&first_hash, first_positions)) = by_hash.first_key_value() else {
         return;
     };
-    output.push((segment, first_hash));
+    let first_position = first_positions.first().copied().unwrap_or(0);
+    output.push(SpatialSignature {
+        segment,
+        position: first_position,
+        hash: first_hash,
+    });
     if requested < 2 {
         return;
     }
     let separated = by_hash.iter().skip(1).find_map(|(hash, positions)| {
-        positions
-            .iter()
-            .any(|position| {
-                first_positions
-                    .iter()
-                    .any(|first| position.abs_diff(*first) >= 32)
-            })
-            .then_some(*hash)
+        positions.iter().find_map(|position| {
+            first_positions
+                .iter()
+                .any(|first| position.abs_diff(*first) >= 32)
+                .then_some((*hash, *position))
+        })
     });
-    if let Some(second_hash) = separated.or_else(|| by_hash.keys().nth(1).copied()) {
-        output.push((segment, second_hash));
+    let second = separated.or_else(|| {
+        by_hash
+            .iter()
+            .nth(1)
+            .and_then(|(hash, positions)| positions.first().map(|position| (*hash, *position)))
+    });
+    if let Some((hash, position)) = second {
+        output.push(SpatialSignature {
+            segment,
+            position,
+            hash,
+        });
     }
 }
 
-fn spatial_hashes(minima: Vec<(u64, u64)>, maximum: u32) -> Vec<u64> {
+fn spatial_hashes(minima: &mut Vec<SpatialSignature>, maximum: u32) -> Vec<u64> {
     let mut seen = BTreeSet::new();
     let mut unique = minima
-        .into_iter()
-        .filter_map(|(segment, hash)| seen.insert(hash).then_some((segment, hash)))
+        .iter()
+        .copied()
+        .filter(|selected| seen.insert(selected.hash))
         .collect::<Vec<_>>();
     let maximum = usize::try_from(maximum).unwrap_or(usize::MAX);
     if unique.len() > maximum {
@@ -186,7 +213,11 @@ fn spatial_hashes(minima: Vec<(u64, u64)>, maximum: u32) -> Vec<u64> {
             .map(|index| unique[index.saturating_mul(count) / maximum])
             .collect();
     }
-    let mut hashes = unique.into_iter().map(|(_, hash)| hash).collect::<Vec<_>>();
+    *minima = unique;
+    let mut hashes = minima
+        .iter()
+        .map(|selected| selected.hash)
+        .collect::<Vec<_>>();
     hashes.sort_unstable();
     hashes
 }
@@ -267,10 +298,38 @@ mod tests {
     fn two_signature_segment_prefers_a_separated_second_position() {
         let mut selected = Vec::new();
         append_segment_signatures(&mut selected, 0, &[(10, 1), (20, 2), (100, 3)], 2);
-        assert_eq!(selected, vec![(0, 1), (0, 3)]);
+        assert_eq!(
+            selected,
+            vec![
+                SpatialSignature {
+                    segment: 0,
+                    position: 10,
+                    hash: 1,
+                },
+                SpatialSignature {
+                    segment: 0,
+                    position: 100,
+                    hash: 3,
+                },
+            ]
+        );
 
         selected.clear();
         append_segment_signatures(&mut selected, 0, &[(10, 1), (20, 2)], 2);
-        assert_eq!(selected, vec![(0, 1), (0, 2)]);
+        assert_eq!(
+            selected,
+            vec![
+                SpatialSignature {
+                    segment: 0,
+                    position: 10,
+                    hash: 1,
+                },
+                SpatialSignature {
+                    segment: 0,
+                    position: 20,
+                    hash: 2,
+                },
+            ]
+        );
     }
 }

@@ -5,11 +5,14 @@ use std::collections::BTreeSet;
 use std::path::{Component, Path};
 use thiserror::Error;
 
-pub const JAM_INDEX_MANIFEST_SCHEMA: &str = "jam-index-manifest-v1";
-pub const JAM_INDEX_FORMAT_VERSION: u16 = 1;
+pub const JAM_INDEX_MANIFEST_SCHEMA: &str = "jam-index-manifest-v2";
+pub const JAM_INDEX_FORMAT_VERSION: u16 = 2;
 pub const BASELINE_SIGNATURE_POLICY_ID: &str = "contig-minhash-v1";
 pub const SPATIAL_256_SIGNATURE_POLICY_ID: &str = "contig-spatial-min-256-v1";
 pub const SPATIAL_256_TWO_SIGNATURE_POLICY_ID: &str = "contig-spatial-min-256x2-v1";
+pub const SPATIAL_256_ADAPTIVE_512_POLICY_ID: &str = "contig-spatial-min-256-adaptive-512-v1";
+pub const SPATIAL_256_ADAPTIVE_768_POLICY_ID: &str = "contig-spatial-min-256-adaptive-768-v1";
+pub const SPATIAL_256_ADAPTIVE_1024_POLICY_ID: &str = "contig-spatial-min-256-adaptive-1024-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContigSignatureBudget {
@@ -45,6 +48,7 @@ pub struct ScreenSelectionPolicy {
     pub contig_budget: ContigSignatureBudget,
     pub whole_metagenome_budget: u32,
     pub query_window_bases: u32,
+    pub adaptive_second_minimum_bases: Option<u64>,
 }
 
 impl ScreenSelectionPolicy {
@@ -62,6 +66,7 @@ impl ScreenSelectionPolicy {
             },
             whole_metagenome_budget: 512,
             query_window_bases: 256,
+            adaptive_second_minimum_bases: None,
         }
     }
 
@@ -83,6 +88,21 @@ impl ScreenSelectionPolicy {
         )
     }
 
+    pub fn spatial_256_adaptive(
+        threshold: u64,
+        whole_metagenome_budget: u32,
+    ) -> Result<Self, JamIndexManifestError> {
+        let policy_id = match threshold {
+            512 => SPATIAL_256_ADAPTIVE_512_POLICY_ID,
+            768 => SPATIAL_256_ADAPTIVE_768_POLICY_ID,
+            1_024 => SPATIAL_256_ADAPTIVE_1024_POLICY_ID,
+            _ => return Err(JamIndexManifestError::InvalidSelectionPolicy),
+        };
+        let mut policy = Self::spatial(policy_id, 256, whole_metagenome_budget);
+        policy.adaptive_second_minimum_bases = Some(threshold);
+        Ok(policy)
+    }
+
     fn spatial(policy_id: &str, segment_bases: u64, whole_metagenome_budget: u32) -> Self {
         Self {
             policy_id: policy_id.to_string(),
@@ -96,29 +116,43 @@ impl ScreenSelectionPolicy {
             },
             whole_metagenome_budget,
             query_window_bases: 256,
+            adaptive_second_minimum_bases: None,
         }
     }
 
     #[must_use]
     pub fn spatial_segment_bases(&self) -> Option<u32> {
         match self.policy_id.as_str() {
-            SPATIAL_256_SIGNATURE_POLICY_ID | SPATIAL_256_TWO_SIGNATURE_POLICY_ID => Some(256),
+            SPATIAL_256_SIGNATURE_POLICY_ID
+            | SPATIAL_256_TWO_SIGNATURE_POLICY_ID
+            | SPATIAL_256_ADAPTIVE_512_POLICY_ID
+            | SPATIAL_256_ADAPTIVE_768_POLICY_ID
+            | SPATIAL_256_ADAPTIVE_1024_POLICY_ID => Some(256),
             _ => None,
         }
     }
 
     #[must_use]
-    pub fn spatial_signatures_per_segment(&self) -> Option<u32> {
+    pub fn spatial_signatures_per_segment(&self, contig_bases: u64) -> Option<u32> {
+        if self
+            .adaptive_second_minimum_bases
+            .is_some_and(|threshold| contig_bases >= threshold)
+        {
+            return Some(2);
+        }
         match self.policy_id.as_str() {
             SPATIAL_256_SIGNATURE_POLICY_ID => Some(1),
             SPATIAL_256_TWO_SIGNATURE_POLICY_ID => Some(2),
+            SPATIAL_256_ADAPTIVE_512_POLICY_ID
+            | SPATIAL_256_ADAPTIVE_768_POLICY_ID
+            | SPATIAL_256_ADAPTIVE_1024_POLICY_ID => Some(1),
             _ => None,
         }
     }
 
     #[must_use]
     pub fn contig_signature_budget(&self, bases: u64) -> u32 {
-        if let Some(per_segment) = self.spatial_signatures_per_segment() {
+        if let Some(per_segment) = self.spatial_signatures_per_segment(bases) {
             let segments = bases.saturating_add(255) / 256;
             u32::try_from(segments.saturating_mul(u64::from(per_segment)))
                 .unwrap_or(u32::MAX)
@@ -142,6 +176,7 @@ impl ScreenSelectionPolicy {
             },
             whole_metagenome_budget: 256,
             query_window_bases: 256,
+            adaptive_second_minimum_bases: None,
         }
     }
 
@@ -160,8 +195,27 @@ impl ScreenSelectionPolicy {
             && (self.contig_budget.minimum != 1
                 || self.contig_budget.bases_per_signature
                     != u64::from(segment_bases)
-                        / u64::from(self.spatial_signatures_per_segment().unwrap_or(1))
+                        / u64::from(self.spatial_signatures_per_segment(0).unwrap_or(1))
                 || !matches!(self.whole_metagenome_budget, 512 | 1_024))
+        {
+            return Err(JamIndexManifestError::InvalidSelectionPolicy);
+        }
+        let adaptive_id = matches!(
+            self.policy_id.as_str(),
+            SPATIAL_256_ADAPTIVE_512_POLICY_ID
+                | SPATIAL_256_ADAPTIVE_768_POLICY_ID
+                | SPATIAL_256_ADAPTIVE_1024_POLICY_ID
+        );
+        if adaptive_id != self.adaptive_second_minimum_bases.is_some()
+            || self.adaptive_second_minimum_bases.is_some_and(|threshold| {
+                !matches!(threshold, 512 | 768 | 1_024)
+                    || self.policy_id
+                        != match threshold {
+                            512 => SPATIAL_256_ADAPTIVE_512_POLICY_ID,
+                            768 => SPATIAL_256_ADAPTIVE_768_POLICY_ID,
+                            _ => SPATIAL_256_ADAPTIVE_1024_POLICY_ID,
+                        }
+            })
         {
             return Err(JamIndexManifestError::InvalidSelectionPolicy);
         }
@@ -190,6 +244,10 @@ pub struct JamIndexPart {
     pub screen_jam_bytes: u64,
     pub contig_posting_bytes: u64,
     pub source_reference_bytes: u64,
+    pub metagenome_directory_bytes: u64,
+    pub contig_length_bytes: u64,
+    pub exceptional_length_bytes: u64,
+    pub string_table_bytes: u64,
     pub screen_sha256: String,
     pub data_sha256: String,
 }

@@ -95,3 +95,27 @@ fn spatial_signatures_remain_sorted_deduplicated_and_nonzero() {
     assert!(selected.hashes.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(selected.hashes.iter().all(|hash| *hash != 0));
 }
+
+#[test]
+fn adaptive_spatial_policy_adds_second_minima_only_at_threshold() {
+    for threshold in [512, 768, 1_024] {
+        let policy = ScreenSelectionPolicy::spatial_256_adaptive(threshold, 512).unwrap();
+        let mut below = MetagenomeSignatureBuilder::new(policy.clone()).unwrap();
+        let below = below
+            .add_contig(&sequence(usize::try_from(threshold - 1).unwrap()))
+            .unwrap();
+        assert_eq!(
+            below.requested_budget,
+            u32::try_from((threshold - 1).div_ceil(256)).unwrap()
+        );
+
+        let mut at = MetagenomeSignatureBuilder::new(policy).unwrap();
+        let at = at
+            .add_contig(&sequence(usize::try_from(threshold).unwrap()))
+            .unwrap();
+        assert_eq!(
+            at.requested_budget,
+            u32::try_from(threshold.div_ceil(256) * 2).unwrap()
+        );
+    }
+}

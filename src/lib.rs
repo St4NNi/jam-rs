@@ -21,8 +21,9 @@ pub use cli::handlers::{
     IndexBatchTraceArgs, IndexBuildArgs, IndexTraceArgs, handle_archive_command,
     handle_bias_create_command, handle_bias_stats_command, handle_distance_command,
     handle_index_append, handle_index_batch_trace, handle_index_build, handle_index_build_fragment,
-    handle_index_finalize, handle_index_merge_part, handle_index_plan, handle_index_trace,
-    handle_screen_command, handle_sketch_command, handle_stats_command, handle_trace_command,
+    handle_index_diagnose_spatial, handle_index_finalize, handle_index_merge_part,
+    handle_index_plan, handle_index_trace, handle_screen_command, handle_sketch_command,
+    handle_stats_command, handle_trace_command,
 };
 pub use io::{expand_input_paths, is_sequence_file};
 pub use jamhash::jamhash_u64;
@@ -166,6 +167,7 @@ pub fn run() -> Result<()> {
                 fragments_per_part,
                 estimated_expansion,
                 screen_policy,
+                adaptive_second_minimum_threshold,
                 whole_metagenome_hashes,
             } => handle_index_plan(
                 metagenomes,
@@ -173,19 +175,30 @@ pub fn run() -> Result<()> {
                 parts,
                 fragments_per_part,
                 estimated_expansion,
-                match screen_policy {
-                    IndexScreenPolicyArg::Baseline => {
+                match (screen_policy, adaptive_second_minimum_threshold) {
+                    (IndexScreenPolicyArg::Baseline, None) => {
                         crate::jam_index::ScreenSelectionPolicy::default_signatures()
                     }
-                    IndexScreenPolicyArg::Spatial256One => {
+                    (IndexScreenPolicyArg::Spatial256One, None) => {
                         crate::jam_index::ScreenSelectionPolicy::spatial_256(
                             whole_metagenome_hashes,
                         )
                     }
-                    IndexScreenPolicyArg::Spatial256Two => {
+                    (IndexScreenPolicyArg::Spatial256One, Some(threshold)) => {
+                        crate::jam_index::ScreenSelectionPolicy::spatial_256_adaptive(
+                            threshold,
+                            whole_metagenome_hashes,
+                        )?
+                    }
+                    (IndexScreenPolicyArg::Spatial256Two, None) => {
                         crate::jam_index::ScreenSelectionPolicy::spatial_256_two(
                             whole_metagenome_hashes,
                         )
+                    }
+                    (_, Some(_)) => {
+                        return Err(anyhow::anyhow!(
+                            "--adaptive-second-minimum-threshold requires --screen-policy spatial256-one"
+                        ));
                     }
                 },
                 cli.force,
@@ -220,6 +233,26 @@ pub fn run() -> Result<()> {
             IndexCommands::Finalize { plan, output } => {
                 handle_index_finalize(plan, output, cli.force, cli.silent)
             }
+            IndexCommands::DiagnoseSpatial {
+                index,
+                queries,
+                query_id,
+                metagenome_id,
+                contig_header,
+                query_start,
+                rare_rescue_df,
+                output,
+            } => handle_index_diagnose_spatial(
+                index,
+                queries,
+                query_id,
+                metagenome_id,
+                contig_header,
+                query_start,
+                rare_rescue_df,
+                output,
+                cli.force,
+            ),
             IndexCommands::Build {
                 metagenomes,
                 output,

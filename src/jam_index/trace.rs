@@ -4,9 +4,9 @@ use super::archive::{ExactContigMatch, JamIndexArchive};
 use super::builder::{JamIndexBuildError, load_manifest};
 use super::contig_search::{
     JamIndexContigPlan, JamIndexContigSearchConfig, JamIndexContigSearchError,
-    JamIndexContigSearchMetrics, select_candidate_contigs,
+    JamIndexContigSearchMetrics, select_candidate_contigs_batch_with_readers,
 };
-use super::part::JamIndexPartReader;
+use super::part::{JamIndexPartReader, LoadedPartContig};
 use super::screen::{
     JamIndexCandidate, JamIndexScreenConfig, JamIndexScreenError, JamIndexScreenMetrics,
     prepare_screen_query, search_jam_index,
@@ -23,7 +23,6 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -86,7 +85,20 @@ pub fn trace_index(
     let manifest = load_manifest(root)?;
     let prepared = prepare_screen_query(query, &manifest.selection_policy)?;
     let screen = search_jam_index(root, &prepared, config.screen)?;
-    let contigs = select_candidate_contigs(root, &prepared, &screen.candidates, config.contigs)?;
+    let (mut contig_batch, readers) = select_candidate_contigs_batch_with_readers(
+        root,
+        std::slice::from_ref(&prepared),
+        std::slice::from_ref(&screen.candidates),
+        config.contigs,
+    )?;
+    let contigs = contig_batch
+        .queries
+        .pop()
+        .ok_or(JamIndexTraceError::CandidateBinding)?;
+    crate::profiling::add_counter(
+        "part_reuse_count",
+        u64::try_from(readers.len()).unwrap_or(u64::MAX),
+    );
     let candidates = contigs
         .plans
         .iter()
@@ -126,14 +138,11 @@ pub fn trace_index(
                 let candidate = candidates
                     .get(&plan.candidate_rank)
                     .ok_or(JamIndexTraceError::CandidateBinding)?;
-                let part = manifest
-                    .parts
-                    .get(usize::try_from(plan.part_id).map_err(|_| JamIndexTraceError::Overflow)?)
+                let reader = readers
+                    .get(&plan.part_id)
                     .ok_or(JamIndexTraceError::CandidateBinding)?;
-                let reader =
-                    JamIndexPartReader::open(root.join(&part.directory).join(&part.data_file))?;
                 run_plan(
-                    &reader,
+                    reader,
                     query_id,
                     query,
                     query_hashes,
@@ -228,11 +237,9 @@ fn run_plan(
         expanded = true;
     };
     let selected_contig_bases = selected.iter().try_fold(0u64, |total, contig_id| {
-        let contig = reader
-            .contigs()
-            .get(usize::try_from(*contig_id).map_err(|_| JamIndexTraceError::Overflow)?)
-            .ok_or(JamIndexTraceError::CandidateBinding)?;
-        Ok::<_, JamIndexTraceError>(total.saturating_add(contig.base_count))
+        Ok::<_, JamIndexTraceError>(
+            total.saturating_add(reader.contig_length(plan.metagenome_local_id, *contig_id)?),
+        )
     })?;
     Ok((
         result,
@@ -257,7 +264,7 @@ pub(crate) fn run_plan_loaded(
     plan: &JamIndexContigPlan,
     runner: &TraceRunnerConfig,
     expansion_batch: usize,
-    loaded: &BTreeMap<u32, Arc<[u8]>>,
+    loaded: &BTreeMap<u32, LoadedPartContig>,
 ) -> Result<(TraceMetagenomeResult, JamIndexTraceMetrics), JamIndexTraceError> {
     let mut selected = plan
         .initial_contigs()
@@ -297,11 +304,9 @@ pub(crate) fn run_plan_loaded(
         expanded = true;
     };
     let selected_contig_bases = selected.iter().try_fold(0u64, |total, contig_id| {
-        let contig = reader
-            .contigs()
-            .get(usize::try_from(*contig_id).map_err(|_| JamIndexTraceError::Overflow)?)
-            .ok_or(JamIndexTraceError::CandidateBinding)?;
-        Ok::<_, JamIndexTraceError>(total.saturating_add(contig.base_count))
+        Ok::<_, JamIndexTraceError>(
+            total.saturating_add(reader.contig_length(plan.metagenome_local_id, *contig_id)?),
+        )
     })?;
     Ok((
         result,
@@ -338,11 +343,8 @@ fn run_fallback(
         let end = start.saturating_add(batch_size).min(range.end);
         let contig_ids = start..end;
         for contig_id in contig_ids.clone() {
-            let contig = reader
-                .contigs()
-                .get(usize::try_from(contig_id).map_err(|_| JamIndexTraceError::Overflow)?)
-                .ok_or(JamIndexTraceError::CandidateBinding)?;
-            selected_contig_bases = selected_contig_bases.saturating_add(contig.base_count);
+            selected_contig_bases = selected_contig_bases
+                .saturating_add(reader.contig_length(candidate.metagenome_local_id, contig_id)?);
         }
         selected_contigs = selected_contigs.saturating_add(u64::from(end - start));
         let archive = JamIndexArchive::load(reader, candidate.metagenome_local_id, contig_ids)?;

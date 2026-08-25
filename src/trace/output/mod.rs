@@ -79,16 +79,24 @@ impl<W: Write> TraceJsonlWriter<W> {
 
         // Serialize before touching the stream. This makes a serialization
         // error unable to leave a truncated JSON line behind.
-        let mut encoded = {
+        let encoded = {
             let _profile = crate::profiling::scope("json_serialization");
             serde_json::to_vec(record)?
         };
+        self.write_encoded_record(record, &encoded)
+    }
+
+    fn write_encoded_record(
+        &mut self,
+        record: &TraceRecord,
+        encoded: &[u8],
+    ) -> TraceOutputResult<()> {
         crate::profiling::add_counter(
             "result_bytes",
             u64::try_from(encoded.len()).unwrap_or(u64::MAX),
         );
-        encoded.push(b'\n');
-        self.writer.write_all(&encoded)?;
+        self.writer.write_all(encoded)?;
+        self.writer.write_all(b"\n")?;
         self.writer.flush()?;
 
         match record {
@@ -114,6 +122,16 @@ impl<W: Write> TraceJsonlWriter<W> {
         result: &TraceMetagenomeResult,
     ) -> TraceOutputResult<()> {
         self.write_record(&TraceRecord::MetagenomeResult(result.clone()))
+    }
+
+    fn write_serialized_metagenome_result(
+        &mut self,
+        result: &TraceMetagenomeResult,
+        encoded: &[u8],
+    ) -> TraceOutputResult<()> {
+        let record = TraceRecord::MetagenomeResult(result.clone());
+        self.validate_record(&record)?;
+        self.write_encoded_record(&record, encoded)
     }
 
     /// Write the required final record.
@@ -329,6 +347,21 @@ impl TraceFileWriter {
         }
     }
 
+    pub(crate) fn write_serialized_metagenome_result(
+        &mut self,
+        result: &TraceMetagenomeResult,
+        encoded: &[u8],
+    ) -> TraceOutputResult<()> {
+        match &mut self.inner {
+            TraceFileWriterInner::Plain { writer, .. } => {
+                writer.write_serialized_metagenome_result(result, encoded)
+            }
+            TraceFileWriterInner::Zstd { writer, .. } => {
+                writer.write_serialized_metagenome_result(result, encoded)
+            }
+        }
+    }
+
     pub fn write_footer(&mut self, footer: &TraceRunFooter) -> TraceOutputResult<()> {
         match &mut self.inner {
             TraceFileWriterInner::Plain { writer, .. } => writer.write_footer(footer),
@@ -509,5 +542,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["record_type"], "run_header");
         assert_eq!(value["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn accepts_worker_serialized_metagenome_record() {
+        let mut writer = TraceJsonlWriter::new(Cursor::new(Vec::new()));
+        writer.write_header(&header()).unwrap();
+        let result = result();
+        let encoded = serde_json::to_vec(&TraceRecord::MetagenomeResult(result.clone())).unwrap();
+        writer
+            .write_serialized_metagenome_result(&result, &encoded)
+            .unwrap();
+        writer.write_footer(&footer()).unwrap();
+        let output = writer.finish().unwrap().into_inner();
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\"record_type\":\"metagenome_result\"")
+        );
     }
 }

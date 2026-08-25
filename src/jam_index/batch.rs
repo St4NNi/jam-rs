@@ -5,7 +5,7 @@ use super::contig_search::{
     JamIndexBatchContigSearchResult, JamIndexContigPlan, JamIndexContigSearchError,
     JamIndexContigSearchMetrics, select_candidate_contigs_batch_with_readers,
 };
-use super::part::{JamIndexPartError, JamIndexPartReader};
+use super::part::{JamIndexPartError, JamIndexPartReader, LoadedPartContig};
 use super::screen::{
     JamIndexCandidate, JamIndexScreenError, JamIndexScreenMetrics, PreparedJamIndexQuery,
     prepare_screen_query, search_jam_index_batch,
@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 use thiserror::Error;
 
@@ -169,6 +168,10 @@ pub struct JamIndexBatchMetrics {
     pub query_bases: u64,
     pub screen_parts_opened: u64,
     pub contig_parts_opened: u64,
+    pub part_open_count: u64,
+    pub part_validation_count: u64,
+    pub part_reuse_count: u64,
+    pub part_bytes_remapped: u64,
     pub candidate_pairs: u64,
     pub work_groups: u64,
     pub source_open_count: u64,
@@ -187,8 +190,13 @@ pub struct JamIndexBatchExecution {
 }
 
 struct JamIndexBatchGroupExecution {
-    outcomes: Vec<(usize, Result<TraceMetagenomeResult, String>)>,
+    outcomes: Vec<(usize, Result<SerializedMetagenomeResult, String>)>,
     metrics: JamIndexBatchMetrics,
+}
+
+struct SerializedMetagenomeResult {
+    result: TraceMetagenomeResult,
+    json: Vec<u8>,
 }
 
 pub fn plan_batch(
@@ -347,6 +355,10 @@ pub fn plan_batch(
         }
         groups
     };
+    crate::profiling::add_counter(
+        "part_reuse_count",
+        u64::try_from(readers.len()).unwrap_or(u64::MAX),
+    );
     Ok(JamIndexBatchPlan {
         queries: planned,
         groups,
@@ -364,6 +376,18 @@ pub fn execute_batch<F>(
 ) -> Result<JamIndexBatchExecution, JamIndexBatchError>
 where
     F: FnMut(TraceMetagenomeResult) -> Result<(), JamIndexBatchError>,
+{
+    execute_batch_serialized(plan, config, run_id, |result, _| emit(result))
+}
+
+pub fn execute_batch_serialized<F>(
+    plan: &JamIndexBatchPlan,
+    config: &JamIndexBatchConfig,
+    run_id: &str,
+    mut emit: F,
+) -> Result<JamIndexBatchExecution, JamIndexBatchError>
+where
+    F: FnMut(TraceMetagenomeResult, Vec<u8>) -> Result<(), JamIndexBatchError>,
 {
     config.validate()?;
     let mut statuses = plan
@@ -398,6 +422,10 @@ where
             .fold(0u64, u64::saturating_add),
         screen_parts_opened: plan.screen_parts_opened,
         contig_parts_opened: plan.contig_parts_opened,
+        part_open_count: plan.contig_parts_opened,
+        part_validation_count: plan.contig_parts_opened,
+        part_reuse_count: u64::try_from(plan.readers.len()).unwrap_or(u64::MAX),
+        part_bytes_remapped: 0,
         candidate_pairs: plan
             .queries
             .iter()
@@ -449,10 +477,10 @@ where
                             .get_mut(query_index)
                             .ok_or(JamIndexBatchError::Overflow)?;
                         match outcome {
-                            Ok(result) => {
-                                let aligned = !result.alignments.is_empty();
+                            Ok(serialized) => {
+                                let aligned = !serialized.result.alignments.is_empty();
                                 if output_error.is_none()
-                                    && let Err(error) = emit(result)
+                                    && let Err(error) = emit(serialized.result, serialized.json)
                                 {
                                     output_error = Some(error);
                                 }
@@ -541,11 +569,9 @@ fn group_memory_bytes(
             })
             .collect::<BTreeSet<_>>();
         selected.iter().try_fold(0u64, |total, contig_id| {
-            let contig = reader
-                .contigs()
-                .get(usize::try_from(*contig_id).map_err(|_| JamIndexBatchError::Overflow)?)
-                .ok_or(JamIndexBatchError::CandidateBinding)?;
-            Ok::<_, JamIndexBatchError>(total.saturating_add(contig.base_count))
+            Ok::<_, JamIndexBatchError>(
+                total.saturating_add(reader.contig_length(group.metagenome_local_id, *contig_id)?),
+            )
         })?
     };
     let query_work = group
@@ -602,7 +628,7 @@ fn execute_group(
     run_id: &str,
 ) -> Result<JamIndexBatchGroupExecution, JamIndexBatchError> {
     let mut metrics = JamIndexBatchMetrics::default();
-    let mut results = BTreeMap::<usize, TraceMetagenomeResult>::new();
+    let mut results = BTreeMap::<usize, SerializedMetagenomeResult>::new();
     let reader = plan
         .readers
         .get(&group.part_id)
@@ -625,11 +651,9 @@ fn execute_group(
         })
         .collect::<BTreeSet<_>>();
     let selected_bases = selected_ids.iter().try_fold(0u64, |total, contig_id| {
-        let contig = reader
-            .contigs()
-            .get(usize::try_from(*contig_id).map_err(|_| JamIndexBatchError::Overflow)?)
-            .ok_or(JamIndexBatchError::CandidateBinding)?;
-        Ok::<_, JamIndexBatchError>(total.saturating_add(contig.base_count))
+        Ok::<_, JamIndexBatchError>(
+            total.saturating_add(reader.contig_length(group.metagenome_local_id, *contig_id)?),
+        )
     })?;
     if selected_bases > config.max_group_contig_bases {
         return Err(JamIndexBatchError::GroupTooLarge {
@@ -639,7 +663,7 @@ fn execute_group(
         });
     }
     crate::profiling::add_counter("selected_contig_bases", selected_bases);
-    let mut loaded = BTreeMap::<u32, Arc<[u8]>>::new();
+    let mut loaded = BTreeMap::<u32, LoadedPartContig>::new();
     let mut fallback_results = BTreeMap::<usize, TraceMetagenomeResult>::new();
     let mut query_failures = BTreeMap::<usize, String>::new();
     let _source_profile = crate::profiling::scope("source_staging");
@@ -651,14 +675,10 @@ fn execute_group(
         let loaded_bases = read
             .contigs
             .values()
-            .map(|sequence| u64::try_from(sequence.len()).unwrap_or(u64::MAX))
+            .map(|contig| u64::try_from(contig.bases.len()).unwrap_or(u64::MAX))
             .fold(0u64, u64::saturating_add);
         metrics.maximum_loaded_contig_bases = metrics.maximum_loaded_contig_bases.max(loaded_bases);
-        loaded.extend(
-            read.contigs
-                .into_iter()
-                .map(|(contig_id, sequence)| (contig_id, Arc::<[u8]>::from(sequence))),
-        );
+        loaded.extend(read.contigs);
         read.source_bytes
     } else {
         metrics.sequential_source_open_count =
@@ -667,24 +687,15 @@ fn execute_group(
             group.metagenome_local_id,
             config.fallback_contigs_per_chunk,
             |chunk| {
-                let chunk = chunk
-                    .into_iter()
-                    .map(|(contig_id, sequence)| (contig_id, Arc::<[u8]>::from(sequence)))
-                    .collect::<BTreeMap<_, _>>();
                 let active_ids = loaded
                     .keys()
                     .chain(chunk.keys())
                     .copied()
                     .collect::<BTreeSet<_>>();
                 let active_bases = active_ids.iter().try_fold(0u64, |total, contig_id| {
-                    let contig = reader
-                        .contigs()
-                        .get(
-                            usize::try_from(*contig_id)
-                                .map_err(|_| JamIndexBatchError::Overflow)?,
-                        )
-                        .ok_or(JamIndexBatchError::CandidateBinding)?;
-                    Ok::<_, JamIndexBatchError>(total.saturating_add(contig.base_count))
+                    Ok::<_, JamIndexBatchError>(total.saturating_add(
+                        reader.contig_length(group.metagenome_local_id, *contig_id)?,
+                    ))
                 })?;
                 if active_bases > config.max_group_contig_bases {
                     return Err(JamIndexBatchError::GroupTooLarge {
@@ -695,9 +706,9 @@ fn execute_group(
                 }
                 metrics.maximum_loaded_contig_bases =
                     metrics.maximum_loaded_contig_bases.max(active_bases);
-                for (contig_id, sequence) in &chunk {
+                for (contig_id, contig) in &chunk {
                     if selected_ids.contains(contig_id) {
-                        loaded.insert(*contig_id, Arc::clone(sequence));
+                        loaded.insert(*contig_id, contig.clone());
                     }
                 }
                 for work in group
@@ -815,7 +826,17 @@ fn execute_group(
         };
         result.run_id = run_id.to_string();
         let alignment_count = u64::try_from(result.alignments.len()).unwrap_or(u64::MAX);
-        results.insert(work.query_index, result);
+        let json = {
+            let _profile = crate::profiling::scope("json_serialization");
+            serde_json::to_vec(&crate::trace::model::TraceRecord::MetagenomeResult(
+                result.clone(),
+            ))?
+        };
+        results.insert(
+            work.query_index,
+            SerializedMetagenomeResult { result, json },
+        );
+        crate::profiling::add_counter("completed_query_metagenome_pairs", 1);
         metrics.results_emitted = metrics.results_emitted.saturating_add(1);
         metrics.alignments_emitted = metrics.alignments_emitted.saturating_add(alignment_count);
         let _ = trace_metrics;
@@ -869,6 +890,8 @@ pub enum JamIndexBatchError {
     NoResult(String),
     #[error("Jam Index batch output failed: {0}")]
     Output(String),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     #[error(transparent)]
     Build(#[from] JamIndexBuildError),
     #[error(transparent)]

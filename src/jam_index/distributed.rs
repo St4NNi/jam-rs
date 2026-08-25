@@ -16,9 +16,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub const DISTRIBUTED_PLAN_SCHEMA: &str = "jam-index-build-plan-v1";
-pub const FRAGMENT_MANIFEST_SCHEMA: &str = "jam-index-fragment-v1";
-pub const MERGED_PART_MANIFEST_SCHEMA: &str = "jam-index-merged-part-v1";
+pub const DISTRIBUTED_PLAN_SCHEMA: &str = "jam-index-build-plan-v2";
+pub const FRAGMENT_MANIFEST_SCHEMA: &str = "jam-index-fragment-v2";
+pub const MERGED_PART_MANIFEST_SCHEMA: &str = "jam-index-merged-part-v2";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct IndexPlanSource {
@@ -158,6 +158,11 @@ pub struct IndexFragmentManifest {
     pub data_sha256: String,
     pub screen_bytes: u64,
     pub data_bytes: u64,
+    pub source_table_bytes: u64,
+    pub metagenome_directory_bytes: u64,
+    pub contig_length_bytes: u64,
+    pub exceptional_length_bytes: u64,
+    pub string_table_bytes: u64,
     pub contig_signature_histogram: BTreeMap<u32, u64>,
     pub single_contig_mappings: u64,
     pub overflow_mappings: u64,
@@ -434,6 +439,11 @@ pub fn build_fragment(
             .map_err(|error| DistributedIndexError::Provenance(error.to_string()))?,
         screen_bytes: screen_stats.file_size,
         data_bytes: result.data_file_bytes,
+        source_table_bytes: result.source_reference_bytes,
+        metagenome_directory_bytes: result.metagenome_directory_bytes,
+        contig_length_bytes: result.contig_length_bytes,
+        exceptional_length_bytes: result.exceptional_length_bytes,
+        string_table_bytes: result.string_table_bytes,
         contig_signature_histogram: result.contig_signature_histogram,
         single_contig_mappings: result.single_contig_mappings,
         overflow_mappings: result.overflow_mappings,
@@ -471,6 +481,7 @@ pub fn merge_part(
     let mut fragment_ids = Vec::new();
     let mut fragment_manifest_sha256 = Vec::new();
     let mut estimated_signature_count = 0u64;
+    let mut contig_signature_histogram = BTreeMap::<u32, u64>::new();
     let mut published = BTreeMap::new();
     for fragment in &part_plan.fragments {
         let root = fragments_root
@@ -508,6 +519,10 @@ pub fn merge_part(
         fragment_paths.push((root.join("screen.jam"), root.join("part.bin")));
         estimated_signature_count =
             estimated_signature_count.saturating_add(manifest.estimated_signature_count);
+        for (signatures, contigs) in &manifest.contig_signature_histogram {
+            let total = contig_signature_histogram.entry(*signatures).or_default();
+            *total = total.saturating_add(*contigs);
+        }
         fragment_ids.push(fragment.fragment_id);
         fragment_manifest_sha256.push(
             provenance::sha256_file(&manifest_path)
@@ -527,7 +542,12 @@ pub fn merge_part(
     }
     let data_path = staging.path().join("part.bin");
     let screen_path = staging.path().join("screen.jam");
-    let result = merge_part_fragments(&data_path, &fragment_paths, &published)?;
+    let result = merge_part_fragments(
+        &data_path,
+        &fragment_paths,
+        &published,
+        contig_signature_histogram,
+    )?;
     if result.estimated_signature_count != estimated_signature_count {
         return Err(DistributedIndexError::PartIdentity(part_id));
     }
@@ -563,6 +583,10 @@ pub fn merge_part(
         screen_jam_bytes: screen_stats.file_size,
         contig_posting_bytes: result.contig_posting_bytes,
         source_reference_bytes: result.source_reference_bytes,
+        metagenome_directory_bytes: result.metagenome_directory_bytes,
+        contig_length_bytes: result.contig_length_bytes,
+        exceptional_length_bytes: result.exceptional_length_bytes,
+        string_table_bytes: result.string_table_bytes,
         screen_sha256: provenance::sha256_file(&screen_path)
             .map_err(|error| DistributedIndexError::Provenance(error.to_string()))?,
         data_sha256: provenance::sha256_file(&data_path)

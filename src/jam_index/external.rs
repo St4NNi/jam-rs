@@ -39,7 +39,7 @@ pub(crate) struct ExternalSource {
 pub(crate) struct ContigRequest {
     pub contig_id: u32,
     pub source_ordinal: u32,
-    pub name: String,
+    pub name: Option<String>,
     pub length: u64,
     pub offset: u64,
     pub line_bases: u32,
@@ -49,6 +49,7 @@ pub(crate) struct ContigRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LoadedSequence {
     pub contig_id: u32,
+    pub name: String,
     pub bases: Vec<u8>,
 }
 
@@ -152,6 +153,10 @@ fn read_plain(
         source_bytes = source_bytes.saturating_add(span);
         contigs.push(LoadedSequence {
             contig_id: request.contig_id,
+            name: request
+                .name
+                .clone()
+                .ok_or(ExternalError::InvalidCoordinates)?,
             bases: strip_lines(raw, request.length)?,
         });
     }
@@ -209,6 +214,10 @@ fn read_bgzf(
         };
         contigs.push(LoadedSequence {
             contig_id: request.contig_id,
+            name: request
+                .name
+                .clone()
+                .ok_or(ExternalError::InvalidCoordinates)?,
             bases,
         });
     }
@@ -245,7 +254,10 @@ fn read_stream(
             let _profile = crate::profiling::scope("selected_contig_extraction");
             let name = std::str::from_utf8(record.id()).map_err(|_| ExternalError::InvalidName)?;
             let bases = record.normalize(true).into_owned();
-            if name != request.name
+            if request
+                .name
+                .as_deref()
+                .is_some_and(|expected| name != expected)
                 || u64::try_from(bases.len()).unwrap_or(u64::MAX) != request.length
             {
                 return Err(ExternalError::ContigMismatch(request.contig_id));
@@ -254,6 +266,7 @@ fn read_stream(
                 ordinal,
                 LoadedSequence {
                     contig_id: request.contig_id,
+                    name: name.to_string(),
                     bases,
                 },
             );
@@ -398,7 +411,7 @@ mod tests {
             ContigRequest {
                 contig_id: 7,
                 source_ordinal: 0,
-                name: "one".to_string(),
+                name: Some("one".to_string()),
                 length: 8,
                 offset: 5,
                 line_bases: 6,
@@ -407,7 +420,7 @@ mod tests {
             ContigRequest {
                 contig_id: 9,
                 source_ordinal: 1,
-                name: "two".to_string(),
+                name: Some("two".to_string()),
                 length: 8,
                 offset: 20,
                 line_bases: 4,

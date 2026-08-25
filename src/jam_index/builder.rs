@@ -345,6 +345,10 @@ fn build_part(
         screen_jam_bytes: screen_stats.file_size,
         contig_posting_bytes: result.contig_posting_bytes,
         source_reference_bytes: result.source_reference_bytes,
+        metagenome_directory_bytes: result.metagenome_directory_bytes,
+        contig_length_bytes: result.contig_length_bytes,
+        exceptional_length_bytes: result.exceptional_length_bytes,
+        string_table_bytes: result.string_table_bytes,
         screen_sha256: provenance::sha256_file(&final_path.join("screen.jam"))?,
         data_sha256: provenance::sha256_file(&final_path.join("part.bin"))?,
     })

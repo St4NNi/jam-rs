@@ -21,7 +21,8 @@ pub use archive::JamIndexArchive;
 pub use batch::{
     JamIndexBatchConfig, JamIndexBatchError, JamIndexBatchExecution, JamIndexBatchMetrics,
     JamIndexBatchPlan, JamIndexBatchQuery, JamIndexBatchQueryStatus, JamIndexBatchStatusKind,
-    JamIndexBatchWork, JamIndexBatchWorkGroup, JamIndexPlannedQuery, execute_batch, plan_batch,
+    JamIndexBatchWork, JamIndexBatchWorkGroup, JamIndexPlannedQuery, execute_batch,
+    execute_batch_serialized, plan_batch,
 };
 pub use builder::{
     JamIndexBuildConfig, JamIndexBuildError, JamIndexBuildStats, append_jam_index, build_jam_index,
@@ -43,7 +44,7 @@ pub use manifest::{
     ScreenSelectionPolicy,
 };
 pub use part::{
-    JamIndexPartError, JamIndexPartReader, MetagenomeSource, PartContig, PartMetagenome,
+    JamIndexPartError, JamIndexPartReader, LoadedPartContig, MetagenomeSource, PartMetagenome,
     PartReadResult, PartScreenSample, PartWriteResult, PublishedMetagenomeSource,
     StagedMetagenomeSource, merge_part_fragments, write_part, write_part_staged,
 };
@@ -52,7 +53,9 @@ pub use screen::{
     JamIndexScreenMetrics, JamIndexScreenResult, PreparedJamIndexQuery, QueryHashOccurrence,
     SharedScreenHash, prepare_screen_query, search_jam_index, search_jam_index_batch,
 };
-pub use signature::{ContigSignature, MetagenomeSignatureBuilder, SignatureSelectionError};
+pub use signature::{
+    ContigSignature, MetagenomeSignatureBuilder, SignatureSelectionError, SpatialSignature,
+};
 pub use trace::{
     JamIndexTraceConfig, JamIndexTraceError, JamIndexTraceMetrics, JamIndexTraceOutput, trace_index,
 };

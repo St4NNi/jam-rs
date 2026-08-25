@@ -110,6 +110,9 @@ pub enum IndexCommands {
         /// Database-side Jam Index spatial signature policy
         #[arg(long, value_enum, default_value = "baseline")]
         screen_policy: IndexScreenPolicyArg,
+        /// Add a second spatial minimum only at or above this contig length
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        adaptive_second_minimum_threshold: Option<u64>,
         /// Whole-metagenome fallback hashes stored in each ordinary .jam sample
         #[arg(long, default_value = "512")]
         whole_metagenome_hashes: u32,
@@ -150,6 +153,33 @@ pub enum IndexCommands {
         #[arg(long)]
         plan: PathBuf,
         /// Jam Index root containing completed parts
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Explain spatial-signature evidence for one controlled query/contig pair
+    DiagnoseSpatial {
+        /// Jam Index root
+        #[arg(long)]
+        index: PathBuf,
+        /// FASTA containing the requested query record
+        #[arg(long)]
+        queries: PathBuf,
+        /// Stable query ID to diagnose
+        #[arg(long)]
+        query_id: String,
+        /// Indexed metagenome ID containing the controlled contig
+        #[arg(long)]
+        metagenome_id: String,
+        /// Exact FASTA header ID of the controlled contig
+        #[arg(long)]
+        contig_header: String,
+        /// Forward query coordinate homologous to contig coordinate zero
+        #[arg(long)]
+        query_start: u64,
+        /// Maximum collection document frequency for single-signature rescue
+        #[arg(long, default_value = "8")]
+        rare_rescue_df: u32,
+        /// New diagnostic JSON
         #[arg(short, long)]
         output: PathBuf,
     },

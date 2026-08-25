@@ -17,6 +17,10 @@ fn part(part_id: u32) -> JamIndexPart {
         screen_jam_bytes: 800,
         contig_posting_bytes: 600,
         source_reference_bytes: 250,
+        metagenome_directory_bytes: 96,
+        contig_length_bytes: 28,
+        exceptional_length_bytes: 0,
+        string_table_bytes: 80,
         screen_sha256: checksum('a'),
         data_sha256: checksum('b'),
     }
@@ -82,4 +86,15 @@ fn spatial_policies_are_explicit_and_restrict_whole_sample_budgets() {
 
     let invalid = ScreenSelectionPolicy::spatial_256(256);
     assert!(invalid.validate().is_err());
+
+    for threshold in [512, 768, 1_024] {
+        let adaptive = ScreenSelectionPolicy::spatial_256_adaptive(threshold, 512).unwrap();
+        adaptive.validate().unwrap();
+        assert_eq!(
+            adaptive.spatial_signatures_per_segment(threshold - 1),
+            Some(1)
+        );
+        assert_eq!(adaptive.spatial_signatures_per_segment(threshold), Some(2));
+    }
+    assert!(ScreenSelectionPolicy::spatial_256_adaptive(513, 512).is_err());
 }

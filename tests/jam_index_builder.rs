@@ -53,7 +53,10 @@ fn build_splits_by_bases_and_every_part_searches_independently() {
         let data = JamIndexPartReader::open(root.join(&part.data_file)).unwrap();
         assert_eq!(screen.sample_names().len(), 1);
         assert_eq!(data.metagenomes().len(), 1);
-        assert_eq!(data.read_contigs(0, &[0]).unwrap().contigs[&0].len(), 300);
+        assert_eq!(
+            data.read_contigs(0, &[0]).unwrap().contigs[&0].bases.len(),
+            300
+        );
     }
 }
 

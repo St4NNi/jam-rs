@@ -97,7 +97,6 @@ fn selected_hashes_map_to_the_exact_contig_without_positions() {
         .iter()
         .find(|plan| plan.metagenome_id == "target")
         .unwrap();
-    assert_eq!(target.initial_contigs()[0].contig_name, "exact-target");
     assert!(target.sequential_fallback_range.is_none());
     assert!(target.shared_spatial_signatures >= 2);
     assert_eq!(

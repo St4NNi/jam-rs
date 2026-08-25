@@ -143,6 +143,10 @@ fn batch_reuses_gzip_group_and_matches_single_query_results() {
     })
     .unwrap();
     assert_eq!(execution.metrics.source_open_count, 1);
+    assert_eq!(execution.metrics.part_open_count, 1);
+    assert_eq!(execution.metrics.part_validation_count, 1);
+    assert_eq!(execution.metrics.part_reuse_count, 1);
+    assert_eq!(execution.metrics.part_bytes_remapped, 0);
     assert_eq!(
         execution
             .statuses

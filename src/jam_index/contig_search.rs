@@ -65,7 +65,6 @@ impl JamIndexContigSearchConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RankedJamIndexContig {
     pub contig_id: u32,
-    pub contig_name: String,
     pub base_count: u64,
     pub shared_hash_count: u32,
     pub supported_query_windows: u32,
@@ -449,14 +448,9 @@ fn rank_candidate(
     let mut ranked = exact
         .into_iter()
         .map(|(contig_id, counter)| {
-            let contig = reader
-                .contigs()
-                .get(usize::try_from(contig_id).map_err(|_| JamIndexContigSearchError::Overflow)?)
-                .ok_or(JamIndexContigSearchError::UnknownContig(contig_id))?;
             Ok(RankedJamIndexContig {
                 contig_id,
-                contig_name: contig.name.clone(),
-                base_count: contig.base_count,
+                base_count: reader.contig_length(candidate.metagenome_local_id, contig_id)?,
                 shared_hash_count: u32::try_from(counter.hashes.len()).unwrap_or(u32::MAX),
                 supported_query_windows: u32::try_from(counter.windows.len()).unwrap_or(u32::MAX),
                 longest_supported_window_run: longest_run(&counter.windows),

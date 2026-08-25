@@ -45,7 +45,10 @@ fn external_part_roundtrip() {
     .unwrap();
     assert_eq!(result.metagenome_count, 2);
     assert_eq!(result.contig_count, 3);
-    assert_eq!(result.source_reference_bytes, 2 * 192);
+    assert_eq!(result.source_reference_bytes, 2 * 160);
+    assert_eq!(result.metagenome_directory_bytes, 2 * 48);
+    assert_eq!(result.contig_length_bytes, 3 * 4);
+    assert_eq!(result.exceptional_length_bytes, 0);
     assert_eq!(result.screen_samples.len(), 2);
     let reader = JamIndexPartReader::open(&output).unwrap();
     assert_eq!(reader.metagenomes()[0].metagenome_id, "mg-a");
@@ -53,13 +56,23 @@ fn external_part_roundtrip() {
         reader.metagenomes()[0].source_path,
         sources[0].sequence_path
     );
-    assert_eq!(reader.contigs()[0].name, "short");
-    assert_eq!(
-        reader.read_contigs(0, &[1]).unwrap().contigs[&1],
-        b"ACGTNNRYACGT"
-    );
+    let loaded = reader.read_contigs(0, &[1]).unwrap();
+    assert_eq!(loaded.contigs[&1].name, "ambiguous");
+    assert_eq!(loaded.contigs[&1].bases.as_ref(), b"ACGTNNRYACGT");
+    assert_eq!(reader.contig_length(0, 1).unwrap(), 12);
     assert_eq!(reader.metagenome_contigs(0).unwrap(), 0..2);
     assert_eq!(reader.posting_count(), result.posting_count);
+    let bytes = fs::read(&output).unwrap();
+    assert!(
+        !bytes
+            .windows(b"short".len())
+            .any(|window| window == b"short")
+    );
+    assert!(
+        !bytes
+            .windows(b"ambiguous".len())
+            .any(|window| window == b"ambiguous")
+    );
     assert_eq!(
         result.single_contig_mappings + result.overflow_mappings,
         result.posting_count
@@ -126,7 +139,7 @@ fn external_corruption_fails() {
     let reader = JamIndexPartReader::open(output).unwrap();
     let changed = fs::read_to_string(&sources[0].sequence_path)
         .unwrap()
-        .replace("ACGTNNRYACGT", "ACGTNNRAACGT");
+        .replace("ACGTNNRYACGT", "ACGTNNRAAACGT");
     fs::write(&sources[0].sequence_path, changed).unwrap();
     assert!(reader.read_contigs(0, &[1]).is_err());
 }

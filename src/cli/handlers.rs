@@ -1386,6 +1386,200 @@ pub fn handle_index_finalize(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn handle_index_diagnose_spatial(
+    index: PathBuf,
+    queries: PathBuf,
+    query_id: String,
+    metagenome_id: String,
+    contig_header: String,
+    query_start: u64,
+    rare_rescue_df: u32,
+    output: PathBuf,
+    force: bool,
+) -> Result<()> {
+    if force {
+        return Err(anyhow::anyhow!(
+            "--force is not supported for spatial diagnostics"
+        ));
+    }
+    if output.exists() || rare_rescue_df == 0 {
+        return Err(anyhow::anyhow!(
+            "diagnostic output must be new and --rare-rescue-df must be positive"
+        ));
+    }
+    let manifest = crate::jam_index::load_manifest(&index)?;
+    let query = index_batch_queries(
+        &[queries],
+        crate::trace::model::QueryKind::Plasmid,
+        crate::trace::model::TopologyRequested::Linear,
+    )?
+    .into_iter()
+    .find(|query| query.query_id == query_id)
+    .ok_or_else(|| anyhow::anyhow!("diagnostic query ID is absent"))?;
+    let prepared =
+        crate::jam_index::prepare_screen_query(&query.sequence, &manifest.selection_policy)?;
+
+    let mut selected_part = None;
+    for part in &manifest.parts {
+        let data = crate::jam_index::JamIndexPartReader::open(
+            index.join(&part.directory).join(&part.data_file),
+        )?;
+        if let Some(local_id) = data
+            .metagenomes()
+            .iter()
+            .position(|metagenome| metagenome.metagenome_id == metagenome_id)
+        {
+            selected_part = Some((part.clone(), data, u32::try_from(local_id)?));
+            break;
+        }
+    }
+    let (part, data, metagenome_local_id) = selected_part
+        .ok_or_else(|| anyhow::anyhow!("diagnostic metagenome is absent from the index"))?;
+    let metagenome = data
+        .metagenomes()
+        .get(usize::try_from(metagenome_local_id)?)
+        .ok_or_else(|| anyhow::anyhow!("diagnostic metagenome binding is invalid"))?;
+    if std::fs::metadata(&metagenome.source_path)?.len() != metagenome.source_size {
+        return Err(anyhow::anyhow!("diagnostic source identity changed"));
+    }
+    let mut source = needletail::parse_fastx_file(&metagenome.source_path)?;
+    let mut contig_ordinal = 0u32;
+    let mut contig = None;
+    while let Some(record) = source.next() {
+        let record = record?;
+        let name = std::str::from_utf8(record.id())?;
+        if name == contig_header {
+            let bases = record.normalize(true).into_owned();
+            if data.contig_length(metagenome_local_id, contig_ordinal)?
+                != u64::try_from(bases.len())?
+            {
+                return Err(anyhow::anyhow!("diagnostic contig length changed"));
+            }
+            contig = Some(crate::jam_index::LoadedPartContig {
+                name: name.to_string(),
+                bases: std::sync::Arc::from(bases),
+            });
+            break;
+        }
+        contig_ordinal = contig_ordinal
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("diagnostic contig ordinal overflow"))?;
+    }
+    let contig = contig.ok_or_else(|| anyhow::anyhow!("diagnostic contig header is absent"))?;
+    let mut selector =
+        crate::jam_index::MetagenomeSignatureBuilder::new(manifest.selection_policy.clone())?;
+    let selected = selector.add_contig(contig.bases.as_ref())?;
+    let target_screen =
+        crate::reader::JamReader::open(index.join(&part.directory).join(&part.screen_file))?;
+    let screens = manifest
+        .parts
+        .iter()
+        .map(|part| {
+            Ok(crate::reader::JamReader::open(
+                index.join(&part.directory).join(&part.screen_file),
+            )?)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut evidence = Vec::new();
+    let mut shared_hashes = std::collections::BTreeSet::new();
+    let mut supported_windows = std::collections::BTreeSet::new();
+    let mut minimum_document_frequency = u32::MAX;
+    for signature in &selected.spatial_signatures {
+        let occurrences = prepared.occurrences(signature.hash).unwrap_or(&[]);
+        let document_frequency = screens.iter().fold(0u32, |total, screen| {
+            total.saturating_add(
+                u32::try_from(screen.search_entries(signature.hash).count()).unwrap_or(u32::MAX),
+            )
+        });
+        let target_has_signature = target_screen
+            .search_entries(signature.hash)
+            .any(|entry| entry.sample_id == metagenome_local_id);
+        if target_has_signature && !occurrences.is_empty() {
+            shared_hashes.insert(signature.hash);
+            supported_windows.extend(
+                occurrences
+                    .iter()
+                    .map(|occurrence| occurrence.query_window_id),
+            );
+            minimum_document_frequency = minimum_document_frequency.min(document_frequency);
+        }
+        let homologous_query_position = query_start.saturating_add(signature.position);
+        let contig_start = usize::try_from(signature.position)?;
+        let query_start = usize::try_from(homologous_query_position)?;
+        let contig_end = contig_start.saturating_add(21);
+        let query_end = query_start.saturating_add(21);
+        let homologous_exact = contig
+            .bases
+            .get(contig_start..contig_end)
+            .zip(query.sequence.get(query_start..query_end))
+            .is_some_and(|(target, query)| target == query);
+        let packed_exact = occurrences.iter().any(|occurrence| {
+            occurrence.query_position == homologous_query_position
+                && contig
+                    .bases
+                    .get(contig_start..contig_end)
+                    .and_then(|sequence| sequence.normalize(false).bit_kmers(21, true).next())
+                    .is_some_and(|(_, kmer, _)| kmer.0 == occurrence.packed_kmer)
+        });
+        evidence.push(serde_json::json!({
+            "segment": signature.segment,
+            "contig_position": signature.position,
+            "hash": format!("{:016x}", signature.hash),
+            "target_screen_entry": target_has_signature,
+            "document_frequency": document_frequency,
+            "homologous_query_position": homologous_query_position,
+            "homologous_query_window": homologous_query_position / 256,
+            "homologous_k21_exact": homologous_exact,
+            "homologous_packed_canonical_exact": packed_exact,
+            "matching_query_positions": occurrences.iter().map(|item| item.query_position).collect::<Vec<_>>(),
+            "matching_query_windows": occurrences.iter().map(|item| item.query_window_id).collect::<std::collections::BTreeSet<_>>(),
+        }));
+    }
+    let shared_spatial_signatures = u32::try_from(shared_hashes.len()).unwrap_or(u32::MAX);
+    let supported_query_windows = u32::try_from(supported_windows.len()).unwrap_or(u32::MAX);
+    let admission = if shared_spatial_signatures >= 2 {
+        Some("standard")
+    } else if supported_query_windows >= 2 {
+        Some("window_spread")
+    } else if shared_spatial_signatures == 1 && minimum_document_frequency <= rare_rescue_df {
+        Some("rare_rescue")
+    } else {
+        None
+    };
+    let rejection_reason = admission.is_none().then_some({
+        if shared_spatial_signatures == 0 {
+            "no_exact_shared_spatial_signature"
+        } else {
+            "single_signature_document_frequency_above_limit"
+        }
+    });
+    write_json_atomic_file(
+        &output,
+        &serde_json::json!({
+            "schema": "jam-index-spatial-diagnostic-v1",
+            "query_id": query.query_id,
+            "metagenome_id": metagenome_id,
+            "part_id": part.part_id,
+            "metagenome_local_id": metagenome_local_id,
+            "contig_ordinal": contig_ordinal,
+            "contig_header": contig.name,
+            "contig_length": contig.bases.len(),
+            "query_start": query_start,
+            "policy": manifest.selection_policy,
+            "rare_rescue_document_frequency_limit": rare_rescue_df,
+            "selected_spatial_signatures": evidence,
+            "shared_spatial_signatures": shared_spatial_signatures,
+            "supported_query_windows": supported_query_windows,
+            "minimum_shared_document_frequency": (minimum_document_frequency != u32::MAX).then_some(minimum_document_frequency),
+            "candidate_entry_reason": admission,
+            "rejection_reason": rejection_reason,
+        }),
+    )?;
+    Ok(())
+}
+
 pub fn handle_index_build(args: IndexBuildArgs) -> Result<()> {
     if args.force {
         return Err(anyhow::anyhow!(
@@ -2012,9 +2206,9 @@ pub fn handle_index_batch_trace(args: IndexBatchTraceArgs) -> Result<()> {
     let execution = if args.screen_only {
         index_screen_only_execution(&plan)
     } else {
-        crate::jam_index::execute_batch(&plan, &config, &run_id, |result| {
+        crate::jam_index::execute_batch_serialized(&plan, &config, &run_id, |result, encoded| {
             trace_writer
-                .write_metagenome_result(&result)
+                .write_serialized_metagenome_result(&result, &encoded)
                 .map_err(|error| crate::jam_index::JamIndexBatchError::Output(error.to_string()))
         })?
     };
