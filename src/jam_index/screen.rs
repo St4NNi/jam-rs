@@ -107,11 +107,11 @@ impl Hamming1RescueConfig {
     #[must_use]
     pub const fn pilot() -> Self {
         Self {
-            max_source_keys: 100_000,
-            max_generated_keys: 6_300_000,
-            max_candidates: 4,
+            max_source_keys: 8_192,
+            max_generated_keys: 516_096,
+            max_candidates: 8,
             max_document_frequency: 4,
-            max_memory_bytes: 2 * 1024 * 1024 * 1024,
+            max_memory_bytes: 256 * 1024 * 1024,
             max_wall_millis: 30_000,
             query_index: None,
         }
