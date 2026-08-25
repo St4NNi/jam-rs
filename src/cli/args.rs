@@ -161,6 +161,9 @@ pub enum IndexCommands {
         /// Jam Index root
         #[arg(long)]
         index: PathBuf,
+        /// Catalog remapping the diagnosed source to a staged local copy
+        #[arg(long)]
+        source_catalog: Option<PathBuf>,
         /// FASTA containing the requested query record
         #[arg(long)]
         queries: PathBuf,

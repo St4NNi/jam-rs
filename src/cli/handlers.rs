@@ -1389,6 +1389,7 @@ pub fn handle_index_finalize(
 #[allow(clippy::too_many_arguments)]
 pub fn handle_index_diagnose_spatial(
     index: PathBuf,
+    source_catalog: Option<PathBuf>,
     queries: PathBuf,
     query_id: String,
     metagenome_id: String,
@@ -1434,8 +1435,15 @@ pub fn handle_index_diagnose_spatial(
             break;
         }
     }
-    let (part, data, metagenome_local_id) = selected_part
+    let (part, mut data, metagenome_local_id) = selected_part
         .ok_or_else(|| anyhow::anyhow!("diagnostic metagenome is absent from the index"))?;
+    if let Some(source_catalog) = source_catalog {
+        let overrides = index_source_overrides(&source_catalog)?;
+        let (source_path, source_sha256) = overrides.get(&metagenome_id).ok_or_else(|| {
+            anyhow::anyhow!("diagnostic source catalog is missing the metagenome")
+        })?;
+        data.remap_source(&metagenome_id, source_path, *source_sha256)?;
+    }
     let metagenome = data
         .metagenomes()
         .get(usize::try_from(metagenome_local_id)?)

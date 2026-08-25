@@ -112,4 +112,36 @@ fn distributed_index_commands_publish_only_after_all_parts_exist() {
     let manifest = load_manifest(&index).unwrap();
     assert_eq!(manifest.parts.len(), 2);
     assert_eq!(manifest.total_metagenomes, 4);
+
+    let diagnostic = root.path().join("diagnostic.json");
+    let diagnose = Command::new(env!("CARGO_BIN_EXE_jam"))
+        .args(["--silent", "index", "diagnose-spatial", "--index"])
+        .arg(&index)
+        .args(["--source-catalog"])
+        .arg(&catalog_path)
+        .args(["--queries"])
+        .arg(root.path().join("mg-0.fasta"))
+        .args([
+            "--query-id",
+            "contig-0",
+            "--metagenome-id",
+            "mg-0",
+            "--contig-header",
+            "contig-0",
+            "--query-start",
+            "0",
+            "--output",
+        ])
+        .arg(&diagnostic)
+        .output()
+        .unwrap();
+    assert!(
+        diagnose.status.success(),
+        "{}",
+        String::from_utf8_lossy(&diagnose.stderr)
+    );
+    let diagnostic: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(diagnostic).unwrap()).unwrap();
+    assert_eq!(diagnostic["contig_ordinal"], 0);
+    assert_eq!(diagnostic["contig_header"], "contig-0");
 }

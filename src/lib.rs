@@ -235,6 +235,7 @@ pub fn run() -> Result<()> {
             }
             IndexCommands::DiagnoseSpatial {
                 index,
+                source_catalog,
                 queries,
                 query_id,
                 metagenome_id,
@@ -244,6 +245,7 @@ pub fn run() -> Result<()> {
                 output,
             } => handle_index_diagnose_spatial(
                 index,
+                source_catalog,
                 queries,
                 query_id,
                 metagenome_id,
