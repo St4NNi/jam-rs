@@ -375,7 +375,7 @@ fn reject_existing_metagenomes(
     Ok(())
 }
 
-fn write_manifest_atomic(
+pub(crate) fn write_manifest_atomic(
     root: &Path,
     manifest: &JamIndexManifest,
 ) -> Result<(), JamIndexBuildError> {

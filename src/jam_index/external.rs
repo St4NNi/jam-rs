@@ -175,7 +175,10 @@ fn read_bgzf(
             .rev()
             .find(|(_, uncompressed)| *uncompressed <= request.offset)
             .ok_or(ExternalError::InvalidGzi)?;
-        let mut file = File::open(&source.path)?;
+        let mut file = {
+            let _profile = crate::profiling::scope("gzip_open");
+            File::open(&source.path)?
+        };
         file.seek(SeekFrom::Start(compressed))?;
         let counter = Arc::new(AtomicU64::new(0));
         let counted = CountReader {
@@ -183,22 +186,30 @@ fn read_bgzf(
             count: Arc::clone(&counter),
         };
         let mut decoder = MultiGzDecoder::new(counted);
-        io::copy(
-            &mut decoder
-                .by_ref()
-                .take(request.offset.saturating_sub(uncompressed)),
-            &mut io::sink(),
-        )?;
-        let span = raw_span(request)?;
-        let mut raw = Vec::with_capacity(usize::try_from(span).unwrap_or(0));
-        decoder.by_ref().take(span).read_to_end(&mut raw)?;
+        let (span, raw) = {
+            let _profile = crate::profiling::scope("gzip_decompression");
+            io::copy(
+                &mut decoder
+                    .by_ref()
+                    .take(request.offset.saturating_sub(uncompressed)),
+                &mut io::sink(),
+            )?;
+            let span = raw_span(request)?;
+            let mut raw = Vec::with_capacity(usize::try_from(span).unwrap_or(0));
+            decoder.by_ref().take(span).read_to_end(&mut raw)?;
+            (span, raw)
+        };
         if u64::try_from(raw.len()).unwrap_or(u64::MAX) != span {
             return Err(ExternalError::TruncatedSequence);
         }
         source_bytes = source_bytes.saturating_add(counter.load(Ordering::Relaxed));
+        let bases = {
+            let _profile = crate::profiling::scope("selected_contig_extraction");
+            strip_lines(raw, request.length)?
+        };
         contigs.push(LoadedSequence {
             contig_id: request.contig_id,
-            bases: strip_lines(raw, request.length)?,
+            bases,
         });
     }
     Ok(ReadResult {
@@ -216,17 +227,22 @@ fn read_stream(
         .map(|request| (request.source_ordinal, request))
         .collect::<BTreeMap<_, _>>();
     let mut found = BTreeMap::new();
-    let mut reader = parse_fastx_file(&source.path).map_err(|error| ExternalError::Parse {
-        path: source.path.clone(),
-        message: error.to_string(),
-    })?;
+    let mut reader = {
+        let _profile = crate::profiling::scope("gzip_open");
+        parse_fastx_file(&source.path).map_err(|error| ExternalError::Parse {
+            path: source.path.clone(),
+            message: error.to_string(),
+        })?
+    };
     let mut ordinal = 0u32;
+    let _decompression_profile = crate::profiling::scope("gzip_decompression");
     while let Some(record) = reader.next() {
         let record = record.map_err(|error| ExternalError::Parse {
             path: source.path.clone(),
             message: error.to_string(),
         })?;
         if let Some(request) = requested.get(&ordinal) {
+            let _profile = crate::profiling::scope("selected_contig_extraction");
             let name = std::str::from_utf8(record.id()).map_err(|_| ExternalError::InvalidName)?;
             let bases = record.normalize(true).into_owned();
             if name != request.name
@@ -244,6 +260,7 @@ fn read_stream(
         }
         ordinal = ordinal.checked_add(1).ok_or(ExternalError::Overflow)?;
     }
+    drop(_decompression_profile);
     if found.len() != requested.len() {
         return Err(ExternalError::MissingContig);
     }

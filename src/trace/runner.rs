@@ -245,7 +245,7 @@ impl TracePerformanceCounters {
     }
 }
 
-fn candidate_memory_estimate(
+pub(crate) fn candidate_memory_estimate(
     config: &TraceRunnerConfig,
     query_length: usize,
 ) -> TraceMemoryEstimate {
@@ -976,6 +976,11 @@ impl TraceRunner {
                         .max(1)
                         .into(),
                     metagenome_hashes: 0,
+                    shared_spatial_signatures: 0,
+                    rare_shared_signatures: 0,
+                    shared_whole_sample_signatures: 0,
+                    screen_policy: None,
+                    admission_source: None,
                     plasmid_containment: candidate.estimated_query_containment,
                     metagenome_containment: 0.0,
                     rank: u32::try_from(index + 1).unwrap_or(u32::MAX),
@@ -1359,49 +1364,57 @@ fn process_indexed_archive<A: TraceArchive>(
             occurrences_decoded,
         } = round;
         let protected_alignments = alignments.len();
-        let alignment_windows_attempted = align_indexed_chains(
-            archive,
-            plasmid_id,
-            plasmid,
-            candidate,
-            config,
-            chains,
-            if round_index == 0 {
-                u64::MAX
-            } else {
-                u64::from(
-                    config
-                        .sensitivity
-                        .gap_rescue
-                        .max_alignment_windows_per_round,
-                )
-            },
-            if round_index == 0 {
-                u64::MAX
-            } else {
-                u64::from(config.sensitivity.gap_rescue.max_sequence_blocks_per_round)
-            },
-            &mut workspace,
-            &mut seen_contigs,
-            &mut seen_windows,
-            &mut alignments,
-            &mut retry_metadata,
-            counters,
-        )
-        .map_err(|error| TraceProcessingFailure::new(error, archive.metrics().resource))?;
+        let alignment_windows_attempted = {
+            let _profile = crate::profiling::scope("alignment");
+            align_indexed_chains(
+                archive,
+                plasmid_id,
+                plasmid,
+                candidate,
+                config,
+                chains,
+                if round_index == 0 {
+                    u64::MAX
+                } else {
+                    u64::from(
+                        config
+                            .sensitivity
+                            .gap_rescue
+                            .max_alignment_windows_per_round,
+                    )
+                },
+                if round_index == 0 {
+                    u64::MAX
+                } else {
+                    u64::from(config.sensitivity.gap_rescue.max_sequence_blocks_per_round)
+                },
+                &mut workspace,
+                &mut seen_contigs,
+                &mut seen_windows,
+                &mut alignments,
+                &mut retry_metadata,
+                counters,
+            )
+            .map_err(|error| TraceProcessingFailure::new(error, archive.metrics().resource))?
+        };
         retain_new_alignments(
             &mut alignments,
             protected_alignments,
             config.max_alignments_per_candidate,
         );
 
-        let topology = assess_topology(
-            query_length,
-            config.topology_requested,
-            config.topology_margin_bases,
-            &alignments,
-        )
-        .map_err(|error| TraceProcessingFailure::new(error.into(), archive.metrics().resource))?;
+        let topology = {
+            let _profile = crate::profiling::scope("mosaic_construction");
+            assess_topology(
+                query_length,
+                config.topology_requested,
+                config.topology_margin_bases,
+                &alignments,
+            )
+            .map_err(|error| {
+                TraceProcessingFailure::new(error.into(), archive.metrics().resource)
+            })?
+        };
         let selected = selected_mosaic(&topology);
         let supported_after = selected.base_covered_bases;
         target_gaps = selected
@@ -1972,10 +1985,17 @@ fn chains_for_configs<A: TraceArchive>(
         .iter()
         .map(|config| (config.k, config.max_occurrences))
         .collect::<BTreeMap<_, _>>();
-    let anchors = bounded_generate_anchors(
-        &groups,
-        &occurrence_limits,
-        sensitivity.max_anchors_per_candidate,
+    let anchors = {
+        let _profile = crate::profiling::scope("anchor_generation");
+        bounded_generate_anchors(
+            &groups,
+            &occurrence_limits,
+            sensitivity.max_anchors_per_candidate,
+        )
+    };
+    crate::profiling::add_counter(
+        "anchors",
+        u64::try_from(anchors.anchors.len()).unwrap_or(u64::MAX),
     );
     let anchor_evidence = summarize_anchor_evidence(
         &anchors.anchors,
@@ -2002,12 +2022,15 @@ fn chains_for_configs<A: TraceArchive>(
             WeightedAnchor::new(anchor, class)
         })
         .collect::<Vec<_>>();
-    let chains = chain_weighted_anchors(
-        &weighted_anchors,
-        plasmid.len() as u64,
-        ChainConfig::from_sensitivity(sensitivity).with_coordinate_model(coordinate_model),
-    )
-    .map_err(RunnerError::from)?;
+    let chains = {
+        let _profile = crate::profiling::scope("chaining");
+        chain_weighted_anchors(
+            &weighted_anchors,
+            plasmid.len() as u64,
+            ChainConfig::from_sensitivity(sensitivity).with_coordinate_model(coordinate_model),
+        )
+        .map_err(RunnerError::from)?
+    };
     let chains_accepted = chains.len() as u64;
     let chains = chains
         .into_iter()
@@ -2085,6 +2108,7 @@ fn bounded_generate_anchors(
     occurrence_limits: &BTreeMap<u8, u32>,
     max_anchors: u32,
 ) -> AnchorSet {
+    let allocation_profile = crate::profiling::scope("anchor_allocation");
     let max_anchors = usize::try_from(max_anchors).unwrap_or(usize::MAX);
     let mut anchors = Vec::with_capacity(max_anchors.min(groups.len()));
     let mut seen = HashSet::new();
@@ -2136,6 +2160,8 @@ fn bounded_generate_anchors(
             }
         }
     }
+    drop(allocation_profile);
+    let sorting_profile = crate::profiling::scope("anchor_sorting");
     anchors.sort_by_key(|anchor| {
         (
             anchor.contig_id,
@@ -2149,6 +2175,7 @@ fn bounded_generate_anchors(
             anchor.target_reverse,
         )
     });
+    drop(sorting_profile);
     AnchorSet {
         anchors,
         repetitive_seeds,
@@ -2475,9 +2502,41 @@ fn build_chain_corridor(
         .collect::<Vec<_>>();
     anchors.sort_by_key(|anchor| (anchor.query_position, anchor.target_position));
     anchors.dedup_by_key(|anchor| (anchor.query_position, anchor.target_position));
+    let anchors = longest_monotone_corridor_anchors(anchors);
     AlignmentCorridor::new(anchors, safety_margin)
         .map(|corridor| corridor.with_max_half_width(max_half_width))
         .map_err(RunnerError::Alignment)
+}
+
+fn longest_monotone_corridor_anchors(anchors: Vec<CorridorAnchor>) -> Vec<CorridorAnchor> {
+    if anchors.len() < 2 {
+        return anchors;
+    }
+    let mut lengths = vec![1usize; anchors.len()];
+    let mut predecessors = vec![None; anchors.len()];
+    let mut endpoint = 0usize;
+    for current in 0..anchors.len() {
+        for previous in 0..current {
+            if anchors[previous].query_position <= anchors[current].query_position
+                && anchors[previous].target_position <= anchors[current].target_position
+                && lengths[previous].saturating_add(1) > lengths[current]
+            {
+                lengths[current] = lengths[previous].saturating_add(1);
+                predecessors[current] = Some(previous);
+            }
+        }
+        if lengths[current] > lengths[endpoint] {
+            endpoint = current;
+        }
+    }
+    let mut selected = Vec::with_capacity(lengths[endpoint]);
+    let mut cursor = Some(endpoint);
+    while let Some(index) = cursor {
+        selected.push(anchors[index]);
+        cursor = predecessors[index];
+    }
+    selected.reverse();
+    selected
 }
 
 const fn chaining_coordinate_model(topology: TopologyRequested) -> CoordinateModel {
@@ -2631,6 +2690,7 @@ fn finalize_evidence(
     config: &TraceRunnerConfig,
     alignments: &mut [BaseAlignment],
 ) -> Result<FinalEvidence, RunnerError> {
+    let _profile = crate::profiling::scope("mosaic_construction");
     assign_alignment_ids(alignments);
     let topology = assess_topology(
         query_length,
@@ -3101,6 +3161,24 @@ mod coordinate_tests {
             vec![BaseInterval::new(120, 320).unwrap()]
         );
         assert_eq!(result.matches, 200);
+    }
+
+    #[test]
+    fn corridor_prunes_a_target_decreasing_mixed_span_anchor() {
+        let anchors = vec![
+            CorridorAnchor::new(0, 100, 31),
+            CorridorAnchor::new(10, 10, 21),
+            CorridorAnchor::new(20, 20, 21),
+            CorridorAnchor::new(30, 30, 21),
+        ];
+        assert_eq!(
+            longest_monotone_corridor_anchors(anchors),
+            vec![
+                CorridorAnchor::new(10, 10, 21),
+                CorridorAnchor::new(20, 20, 21),
+                CorridorAnchor::new(30, 30, 21),
+            ]
+        );
     }
 }
 

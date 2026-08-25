@@ -1023,6 +1023,10 @@ impl AlignmentWorkspace {
                 max_cells: options.max_cells,
             });
         }
+        crate::profiling::add_counter(
+            "alignment_matrix_cells",
+            u64::try_from(total_cells).unwrap_or(u64::MAX),
+        );
 
         let default_cell = Cell::default();
         if self.cells.len() < total_cells {
@@ -1263,6 +1267,10 @@ impl AlignmentWorkspace {
                 max_cells: options.max_cells,
             });
         }
+        crate::profiling::add_counter(
+            "alignment_matrix_cells",
+            u64::try_from(total_cells).unwrap_or(u64::MAX),
+        );
         let default_cell = Cell::semiglobal();
         if self.cells.len() < total_cells {
             self.cells.resize(total_cells, default_cell);

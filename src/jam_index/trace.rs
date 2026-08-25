@@ -23,6 +23,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -47,7 +48,7 @@ impl Default for JamIndexTraceConfig {
 }
 
 impl JamIndexTraceConfig {
-    fn validate(&self) -> Result<(), JamIndexTraceError> {
+    pub(crate) fn validate(&self) -> Result<(), JamIndexTraceError> {
         if self.expansion_batch == 0 || self.parallel_candidates == 0 {
             return Err(JamIndexTraceError::InvalidConfig);
         }
@@ -86,11 +87,23 @@ pub fn trace_index(
     let prepared = prepare_screen_query(query, &manifest.selection_policy)?;
     let screen = search_jam_index(root, &prepared, config.screen)?;
     let contigs = select_candidate_contigs(root, &prepared, &screen.candidates, config.contigs)?;
-    let candidates = screen
-        .candidates
+    let candidates = contigs
+        .plans
         .iter()
-        .map(|candidate| (candidate.rank, candidate))
-        .collect::<BTreeMap<_, _>>();
+        .map(|plan| {
+            let mut candidate = screen
+                .candidates
+                .iter()
+                .find(|candidate| candidate.rank == plan.candidate_rank)
+                .cloned()
+                .ok_or(JamIndexTraceError::CandidateBinding)?;
+            candidate.shared_spatial_signatures = plan.shared_spatial_signatures;
+            candidate.rare_shared_signatures = plan.rare_shared_signatures;
+            candidate.shared_whole_sample_signatures = plan.shared_whole_sample_signatures;
+            candidate.admission_source = plan.candidate_entry_reason;
+            Ok((candidate.rank, candidate))
+        })
+        .collect::<Result<BTreeMap<_, _>, JamIndexTraceError>>()?;
     let mut runner = config.runner.clone();
     runner.sensitivity = dense_profile(runner.sensitivity.profile);
     runner.topology_margin_bases = runner.sensitivity.auto_topology_margin_bases;
@@ -98,7 +111,7 @@ pub fn trace_index(
     let query_hashes =
         u64::try_from(prepared.unique_hash_count()).map_err(|_| JamIndexTraceError::Overflow)?;
     let mut metrics = JamIndexTraceMetrics {
-        selected_candidates: u64::try_from(screen.candidates.len()).unwrap_or(u64::MAX),
+        selected_candidates: u64::try_from(candidates.len()).unwrap_or(u64::MAX),
         ..JamIndexTraceMetrics::default()
     };
     let pool = rayon::ThreadPoolBuilder::new()
@@ -112,7 +125,6 @@ pub fn trace_index(
             .map(|plan| {
                 let candidate = candidates
                     .get(&plan.candidate_rank)
-                    .copied()
                     .ok_or(JamIndexTraceError::CandidateBinding)?;
                 let part = manifest
                     .parts
@@ -236,6 +248,75 @@ fn run_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn run_plan_loaded(
+    reader: &JamIndexPartReader,
+    query_id: &str,
+    query: &[u8],
+    query_hashes: u64,
+    candidate: &JamIndexCandidate,
+    plan: &JamIndexContigPlan,
+    runner: &TraceRunnerConfig,
+    expansion_batch: usize,
+    loaded: &BTreeMap<u32, Arc<[u8]>>,
+) -> Result<(TraceMetagenomeResult, JamIndexTraceMetrics), JamIndexTraceError> {
+    let mut selected = plan
+        .initial_contigs()
+        .iter()
+        .map(|contig| contig.contig_id)
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(JamIndexTraceError::NoContigs(plan.metagenome_id.clone()));
+    }
+    let candidate_result = candidate_result(reader, candidate, query_hashes)?;
+    let mut next =
+        usize::try_from(plan.initial_contig_count).map_err(|_| JamIndexTraceError::Overflow)?;
+    let mut passes = 0u64;
+    let mut expanded = false;
+    let result = loop {
+        let archive = JamIndexArchive::from_loaded(
+            reader,
+            plan.metagenome_local_id,
+            loaded,
+            selected.clone(),
+            0,
+        )?;
+        let result = run_archive(query_id, query, candidate_result.clone(), &archive, runner)?;
+        passes = passes.saturating_add(1);
+        if complete(&result, query.len()) || next >= plan.ranked_contigs.len() {
+            break result;
+        }
+        let end = next
+            .saturating_add(expansion_batch)
+            .min(plan.ranked_contigs.len());
+        selected.extend(
+            plan.ranked_contigs[next..end]
+                .iter()
+                .map(|contig| contig.contig_id),
+        );
+        next = end;
+        expanded = true;
+    };
+    let selected_contig_bases = selected.iter().try_fold(0u64, |total, contig_id| {
+        let contig = reader
+            .contigs()
+            .get(usize::try_from(*contig_id).map_err(|_| JamIndexTraceError::Overflow)?)
+            .ok_or(JamIndexTraceError::CandidateBinding)?;
+        Ok::<_, JamIndexTraceError>(total.saturating_add(contig.base_count))
+    })?;
+    Ok((
+        result,
+        JamIndexTraceMetrics {
+            selected_candidates: 1,
+            selected_contigs: u64::try_from(selected.len()).unwrap_or(u64::MAX),
+            selected_contig_bases,
+            alignment_passes: passes,
+            expanded_candidates: u64::from(expanded),
+            sequential_scans: 0,
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_fallback(
     reader: &JamIndexPartReader,
     query_id: &str,
@@ -293,7 +374,7 @@ fn run_fallback(
     ))
 }
 
-fn run_archive(
+pub(crate) fn run_archive(
     query_id: &str,
     query: &[u8],
     candidate: CandidateResult,
@@ -406,7 +487,7 @@ fn equal_runs(mut length: u64) -> Vec<EditRun> {
     runs
 }
 
-fn candidate_result(
+pub(crate) fn candidate_result(
     reader: &JamIndexPartReader,
     candidate: &JamIndexCandidate,
     query_hashes: u64,
@@ -423,6 +504,11 @@ fn candidate_result(
         shared_hashes: u64::from(candidate.shared_hash_count),
         plasmid_hashes: query_hashes,
         metagenome_hashes: u64::from(metagenome.screen_hash_count),
+        shared_spatial_signatures: u64::from(candidate.shared_spatial_signatures),
+        rare_shared_signatures: u64::from(candidate.rare_shared_signatures),
+        shared_whole_sample_signatures: u64::from(candidate.shared_whole_sample_signatures),
+        screen_policy: Some(candidate.screen_policy.clone()),
+        admission_source: Some(candidate.admission_source),
         plasmid_containment: if query_hashes == 0 {
             0.0
         } else {
@@ -440,7 +526,9 @@ fn candidate_result(
     })
 }
 
-fn dense_profile(profile: SensitivityProfile) -> crate::trace::config::SensitivityConfig {
+pub(crate) fn dense_profile(
+    profile: SensitivityProfile,
+) -> crate::trace::config::SensitivityConfig {
     let mut sensitivity = crate::trace::config::SensitivityConfig::for_profile(profile);
     sensitivity.primary.scale = 1;
     if let Some(rescue) = sensitivity.rescue.as_mut() {
@@ -450,7 +538,7 @@ fn dense_profile(profile: SensitivityProfile) -> crate::trace::config::Sensitivi
     sensitivity
 }
 
-fn complete(result: &TraceMetagenomeResult, query_length: usize) -> bool {
+pub(crate) fn complete(result: &TraceMetagenomeResult, query_length: usize) -> bool {
     result
         .coverage
         .as_ref()
@@ -549,6 +637,11 @@ mod tests {
             supported_query_windows: 1,
             longest_supported_window_run: 1,
             weighted_hash_sum: 1.0,
+            shared_spatial_signatures: 4,
+            rare_shared_signatures: 0,
+            shared_whole_sample_signatures: 0,
+            screen_policy: "test".to_string(),
+            admission_source: crate::trace::model::CandidateAdmissionSource::Standard,
             shared_hashes: Vec::new(),
         };
         let plan = JamIndexContigPlan {
@@ -559,6 +652,11 @@ mod tests {
             ranked_contigs: Vec::new(),
             initial_contig_count: 0,
             sequential_fallback_range: Some(0..3),
+            contig_truncated: false,
+            shared_spatial_signatures: 4,
+            rare_shared_signatures: 0,
+            shared_whole_sample_signatures: 0,
+            candidate_entry_reason: crate::trace::model::CandidateAdmissionSource::Standard,
         };
         let runner = TraceRunnerConfig {
             sensitivity: dense_profile(SensitivityProfile::Sensitive),

@@ -8,7 +8,7 @@ use crate::archive::{
 };
 use needletail::Sequence;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExactContigMatch {
@@ -26,7 +26,7 @@ pub const K31_SCHEME: u32 = 0x4a49_001f;
 struct LoadedContig {
     id: u32,
     name: String,
-    sequence: Vec<u8>,
+    sequence: Arc<[u8]>,
 }
 
 pub struct JamIndexArchive {
@@ -41,17 +41,6 @@ impl JamIndexArchive {
         metagenome_id: u32,
         contig_ids: impl IntoIterator<Item = u32>,
     ) -> ArchiveResult<Self> {
-        let metagenome =
-            reader
-                .metagenomes()
-                .get(usize::try_from(metagenome_id).map_err(|_| {
-                    ArchiveError::CorruptMetadata("metagenome ID overflow".to_string())
-                })?)
-                .ok_or_else(|| {
-                    ArchiveError::CorruptMetadata(format!(
-                        "unknown Jam Index metagenome {metagenome_id}"
-                    ))
-                })?;
         let allowed = reader
             .metagenome_contigs(metagenome_id)
             .map_err(part_error)?;
@@ -71,6 +60,53 @@ impl JamIndexArchive {
         let loaded = reader
             .read_contigs(metagenome_id, &selected_ids)
             .map_err(part_error)?;
+        let loaded_sequences = loaded
+            .contigs
+            .into_iter()
+            .map(|(contig_id, sequence)| (contig_id, Arc::<[u8]>::from(sequence)))
+            .collect::<BTreeMap<_, _>>();
+        Self::from_loaded(
+            reader,
+            metagenome_id,
+            &loaded_sequences,
+            selected,
+            loaded.source_bytes,
+        )
+    }
+
+    pub(crate) fn from_loaded(
+        reader: &JamIndexPartReader,
+        metagenome_id: u32,
+        loaded: &BTreeMap<u32, Arc<[u8]>>,
+        contig_ids: impl IntoIterator<Item = u32>,
+        source_bytes: u64,
+    ) -> ArchiveResult<Self> {
+        let metagenome =
+            reader
+                .metagenomes()
+                .get(usize::try_from(metagenome_id).map_err(|_| {
+                    ArchiveError::CorruptMetadata("metagenome ID overflow".to_string())
+                })?)
+                .ok_or_else(|| {
+                    ArchiveError::CorruptMetadata(format!(
+                        "unknown Jam Index metagenome {metagenome_id}"
+                    ))
+                })?;
+        let allowed = reader
+            .metagenome_contigs(metagenome_id)
+            .map_err(part_error)?;
+        let mut selected = BTreeSet::new();
+        for contig_id in contig_ids {
+            if !allowed.contains(&contig_id) {
+                return Err(ArchiveError::UnknownContig(contig_id));
+            }
+            selected.insert(contig_id);
+        }
+        if selected.is_empty() {
+            return Err(ArchiveError::CorruptMetadata(
+                "Jam Index candidate has no selected contigs".to_string(),
+            ));
+        }
         let mut contigs = BTreeMap::new();
         for contig_id in selected {
             let descriptor =
@@ -81,7 +117,6 @@ impl JamIndexArchive {
                     })?)
                     .ok_or(ArchiveError::UnknownContig(contig_id))?;
             let sequence = loaded
-                .contigs
                 .get(&contig_id)
                 .cloned()
                 .ok_or(ArchiveError::UnknownContig(contig_id))?;
@@ -123,7 +158,7 @@ impl JamIndexArchive {
             },
             contigs,
             metrics: Mutex::new(ArchiveMetrics {
-                sequence_bytes_read: loaded.source_bytes,
+                sequence_bytes_read: source_bytes,
                 decoded_sequence_bases: total_bases,
                 ..ArchiveMetrics::default()
             }),
@@ -131,6 +166,7 @@ impl JamIndexArchive {
     }
 
     pub(crate) fn exact_matches(&self, query: &[u8], allow_wrap: bool) -> Vec<ExactContigMatch> {
+        let _profile = crate::profiling::scope("exact_sequence_scan");
         if query.is_empty() {
             return Vec::new();
         }
@@ -143,16 +179,16 @@ impl JamIndexArchive {
         }
         let mut matches = Vec::new();
         for contig in self.contigs.values() {
-            let found = find_exact(&contig.sequence, query)
+            let found = find_exact(contig.sequence.as_ref(), query)
                 .map(|target_start| (crate::trace::model::Strand::Forward, 0, target_start));
             let found = found.or_else(|| {
-                find_exact(&contig.sequence, &reverse_query)
+                find_exact(contig.sequence.as_ref(), &reverse_query)
                     .map(|target_start| (crate::trace::model::Strand::Reverse, 0, target_start))
             });
             let found = found.or_else(|| {
                 (allow_wrap && contig.sequence.len() == query.len())
                     .then(|| {
-                        find_exact(&doubled_query, &contig.sequence).map(|query_start| {
+                        find_exact(&doubled_query, contig.sequence.as_ref()).map(|query_start| {
                             (crate::trace::model::Strand::Forward, query_start, 0)
                         })
                     })
@@ -196,6 +232,11 @@ impl JamIndexArchive {
         max_occurrences: Option<u32>,
     ) -> ArchiveResult<SeedLookupResult> {
         let k = self.scheme(scheme)?;
+        let _profile = crate::profiling::scope(if k == 21 {
+            "dense_k21_generation"
+        } else {
+            "dense_k31_generation"
+        });
         let width = usize::from(k).div_ceil(4);
         let mut requested = BTreeMap::<u64, Vec<(usize, u64)>>::new();
         for (index, key) in keys.iter().enumerate() {
@@ -216,7 +257,7 @@ impl JamIndexArchive {
         let mut counts = vec![0u64; keys.len()];
         let mut tested = 0u64;
         for contig in self.contigs.values() {
-            let normalized = contig.sequence.normalize(false);
+            let normalized = contig.sequence.as_ref().normalize(false);
             for (position, kmer, reverse) in normalized.bit_kmers(k, true) {
                 tested = tested.saturating_add(1);
                 let hash = crate::jamhash_u64_v1(kmer.0);
@@ -243,6 +284,7 @@ impl JamIndexArchive {
                 }
             }
         }
+        crate::profiling::add_counter("dense_signature_comparisons", tested);
         let before = counts.iter().copied().sum();
         let after = occurrences
             .iter()

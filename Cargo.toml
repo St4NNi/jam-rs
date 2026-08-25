@@ -46,9 +46,10 @@ tempfile = "3.25.0"
 crossfire = "3.1.3"
 bytemuck = { version = "1.25.0", features = ["derive"] }
 memmap2 = "0.9.10"
-xorf = { version = "0.12", features = ["serde"] }
+xorf = { version = "0.12", default-features = false, features = ["binary-fuse", "serde"] }
 thiserror = "2"
 indicatif = "0.18.4"
+libc = "0.2.182"
 statrs = "0.18"
 zstd = "0.13.3"
 

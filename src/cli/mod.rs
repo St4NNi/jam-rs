@@ -3,5 +3,5 @@ pub mod handlers;
 
 pub use args::{
     ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
-    IndexCommands, QueryKindArg, TopologyArg, TraceSensitivityArg,
+    IndexCommands, IndexScreenPolicyArg, QueryKindArg, TopologyArg, TraceSensitivityArg,
 };

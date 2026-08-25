@@ -68,3 +68,18 @@ fn default_and_smaller_policies_are_explicit_and_length_dependent() {
             > smaller.estimated_signature_count(&[160, 1_000_000])
     );
 }
+
+#[test]
+fn spatial_policies_are_explicit_and_restrict_whole_sample_budgets() {
+    let spatial_256 = ScreenSelectionPolicy::spatial_256(512);
+    let spatial_256_two = ScreenSelectionPolicy::spatial_256_two(1_024);
+    spatial_256.validate().unwrap();
+    spatial_256_two.validate().unwrap();
+    assert_eq!(spatial_256.spatial_segment_bases(), Some(256));
+    assert_eq!(spatial_256_two.spatial_segment_bases(), Some(256));
+    assert_eq!(spatial_256.contig_budget.budget_for_bases(160), 1);
+    assert_eq!(spatial_256_two.contig_signature_budget(1_000), 8);
+
+    let invalid = ScreenSelectionPolicy::spatial_256(256);
+    assert!(invalid.validate().is_err());
+}

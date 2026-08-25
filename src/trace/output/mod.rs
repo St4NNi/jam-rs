@@ -79,7 +79,14 @@ impl<W: Write> TraceJsonlWriter<W> {
 
         // Serialize before touching the stream. This makes a serialization
         // error unable to leave a truncated JSON line behind.
-        let mut encoded = serde_json::to_vec(record)?;
+        let mut encoded = {
+            let _profile = crate::profiling::scope("json_serialization");
+            serde_json::to_vec(record)?
+        };
+        crate::profiling::add_counter(
+            "result_bytes",
+            u64::try_from(encoded.len()).unwrap_or(u64::MAX),
+        );
         encoded.push(b'\n');
         self.writer.write_all(&encoded)?;
         self.writer.flush()?;

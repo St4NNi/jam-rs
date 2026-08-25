@@ -6,6 +6,7 @@ pub mod format;
 pub mod io;
 pub mod jam_index;
 pub mod jma;
+pub mod profiling;
 pub mod provenance;
 pub mod query;
 pub mod reader;
@@ -17,10 +18,11 @@ pub mod sketch;
 pub mod trace;
 pub mod writer;
 pub use cli::handlers::{
-    IndexBuildArgs, IndexTraceArgs, handle_archive_command, handle_bias_create_command,
-    handle_bias_stats_command, handle_distance_command, handle_index_append, handle_index_build,
-    handle_index_trace, handle_screen_command, handle_sketch_command, handle_stats_command,
-    handle_trace_command,
+    IndexBatchTraceArgs, IndexBuildArgs, IndexTraceArgs, handle_archive_command,
+    handle_bias_create_command, handle_bias_stats_command, handle_distance_command,
+    handle_index_append, handle_index_batch_trace, handle_index_build, handle_index_build_fragment,
+    handle_index_finalize, handle_index_merge_part, handle_index_plan, handle_index_trace,
+    handle_screen_command, handle_sketch_command, handle_stats_command, handle_trace_command,
 };
 pub use io::{expand_input_paths, is_sequence_file};
 pub use jamhash::jamhash_u64;
@@ -30,7 +32,7 @@ use anyhow::Result;
 use clap::Parser;
 use cli::{
     ArchiveBlockCodecArg, ArchiveBlockPolicyArg, ArchiveGearTableArg, BiasCommands, Cli, Commands,
-    IndexCommands, QueryKindArg, TopologyArg, TraceSensitivityArg,
+    IndexCommands, IndexScreenPolicyArg, QueryKindArg, TopologyArg, TraceSensitivityArg,
 };
 
 pub fn run() -> Result<()> {
@@ -157,6 +159,67 @@ pub fn run() -> Result<()> {
         ),
 
         Commands::Index { command } => match command {
+            IndexCommands::Plan {
+                metagenomes,
+                output,
+                parts,
+                fragments_per_part,
+                estimated_expansion,
+                screen_policy,
+                whole_metagenome_hashes,
+            } => handle_index_plan(
+                metagenomes,
+                output,
+                parts,
+                fragments_per_part,
+                estimated_expansion,
+                match screen_policy {
+                    IndexScreenPolicyArg::Baseline => {
+                        crate::jam_index::ScreenSelectionPolicy::default_signatures()
+                    }
+                    IndexScreenPolicyArg::Spatial256One => {
+                        crate::jam_index::ScreenSelectionPolicy::spatial_256(
+                            whole_metagenome_hashes,
+                        )
+                    }
+                    IndexScreenPolicyArg::Spatial256Two => {
+                        crate::jam_index::ScreenSelectionPolicy::spatial_256_two(
+                            whole_metagenome_hashes,
+                        )
+                    }
+                },
+                cli.force,
+                cli.silent,
+            ),
+            IndexCommands::BuildFragment {
+                plan,
+                fragment_id,
+                staged_metagenomes,
+                output,
+            } => handle_index_build_fragment(
+                plan,
+                fragment_id,
+                staged_metagenomes,
+                output,
+                cli.force,
+                cli.silent,
+            ),
+            IndexCommands::MergePart {
+                plan,
+                part_id,
+                fragments_root,
+                output,
+            } => handle_index_merge_part(
+                plan,
+                part_id,
+                fragments_root,
+                output,
+                cli.force,
+                cli.silent,
+            ),
+            IndexCommands::Finalize { plan, output } => {
+                handle_index_finalize(plan, output, cli.force, cli.silent)
+            }
             IndexCommands::Build {
                 metagenomes,
                 output,
@@ -208,6 +271,10 @@ pub fn run() -> Result<()> {
             query_id,
             sensitivity,
             min_shared,
+            min_query_windows,
+            rare_rescue_df,
+            whole_sample_min_shared,
+            screen_only,
             min_query_containment,
             min_metagenome_containment,
             top_candidates,
@@ -216,6 +283,8 @@ pub fn run() -> Result<()> {
             max_contig_bases,
             expansion_batch,
             max_alignments,
+            max_group_contig_bases,
+            fallback_contigs_per_chunk,
             io_concurrency,
             topology_margin_bases,
             cache_dir,
@@ -224,9 +293,14 @@ pub fn run() -> Result<()> {
             max_retries,
         } => {
             let used_plasmid_alias = plasmid.is_some();
-            let query = query
-                .or(plasmid)
-                .ok_or_else(|| anyhow::anyhow!("--query is required"))?;
+            let query = if let Some(plasmid) = plasmid {
+                vec![plasmid]
+            } else {
+                query
+            };
+            if query.is_empty() {
+                anyhow::bail!("--query is required");
+            }
             let query_kind = if used_plasmid_alias {
                 if !matches!(query_kind, QueryKindArg::Unknown | QueryKindArg::Plasmid) {
                     anyhow::bail!("--plasmid implies --query-kind plasmid");
@@ -256,21 +330,31 @@ pub fn run() -> Result<()> {
                 if upload_to.is_some() {
                     anyhow::bail!("Jam Index trace is local-only and cannot use --upload-to");
                 }
-                handle_index_trace(IndexTraceArgs {
-                    query,
+                handle_index_batch_trace(IndexBatchTraceArgs {
+                    queries: query,
                     query_id,
                     query_kind,
                     topology,
                     index,
+                    source_catalog: metagenomes,
                     output,
+                    candidates: None,
+                    work: None,
+                    status: None,
                     profile,
                     min_shared,
+                    min_query_windows,
+                    rare_rescue_df,
+                    whole_sample_min_shared,
+                    screen_only,
                     top_candidates,
                     initial_contigs,
                     max_contigs,
                     max_contig_bases,
                     expansion_batch,
                     max_alignments,
+                    max_group_contig_bases,
+                    fallback_contigs_per_chunk,
                     threads,
                     topology_margin: topology_margin_bases,
                     memory_gb: memory_target,
@@ -278,8 +362,14 @@ pub fn run() -> Result<()> {
                     silent: cli.silent,
                 })
             } else {
+                if query.len() != 1 {
+                    anyhow::bail!("multi-file trace requires --index");
+                }
                 handle_trace_command(
-                    query,
+                    query
+                        .into_iter()
+                        .next()
+                        .expect("one query path was checked"),
                     query_kind,
                     topology,
                     database,

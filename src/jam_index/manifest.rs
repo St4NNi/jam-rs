@@ -7,6 +7,9 @@ use thiserror::Error;
 
 pub const JAM_INDEX_MANIFEST_SCHEMA: &str = "jam-index-manifest-v1";
 pub const JAM_INDEX_FORMAT_VERSION: u16 = 1;
+pub const BASELINE_SIGNATURE_POLICY_ID: &str = "contig-minhash-v1";
+pub const SPATIAL_256_SIGNATURE_POLICY_ID: &str = "contig-spatial-min-256-v1";
+pub const SPATIAL_256_TWO_SIGNATURE_POLICY_ID: &str = "contig-spatial-min-256x2-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ContigSignatureBudget {
@@ -48,7 +51,7 @@ impl ScreenSelectionPolicy {
     #[must_use]
     pub fn default_signatures() -> Self {
         Self {
-            policy_id: "contig-minhash-v1".to_string(),
+            policy_id: BASELINE_SIGNATURE_POLICY_ID.to_string(),
             k: 21,
             hash_id: "jamhash_u64_v1".to_string(),
             zero_excluded: true,
@@ -59,6 +62,69 @@ impl ScreenSelectionPolicy {
             },
             whole_metagenome_budget: 512,
             query_window_bases: 256,
+        }
+    }
+
+    #[must_use]
+    pub fn spatial_256(whole_metagenome_budget: u32) -> Self {
+        Self::spatial(
+            SPATIAL_256_SIGNATURE_POLICY_ID,
+            256,
+            whole_metagenome_budget,
+        )
+    }
+
+    #[must_use]
+    pub fn spatial_256_two(whole_metagenome_budget: u32) -> Self {
+        Self::spatial(
+            SPATIAL_256_TWO_SIGNATURE_POLICY_ID,
+            128,
+            whole_metagenome_budget,
+        )
+    }
+
+    fn spatial(policy_id: &str, segment_bases: u64, whole_metagenome_budget: u32) -> Self {
+        Self {
+            policy_id: policy_id.to_string(),
+            k: 21,
+            hash_id: "jamhash_u64_v1".to_string(),
+            zero_excluded: true,
+            contig_budget: ContigSignatureBudget {
+                minimum: 1,
+                maximum: 262_144,
+                bases_per_signature: segment_bases,
+            },
+            whole_metagenome_budget,
+            query_window_bases: 256,
+        }
+    }
+
+    #[must_use]
+    pub fn spatial_segment_bases(&self) -> Option<u32> {
+        match self.policy_id.as_str() {
+            SPATIAL_256_SIGNATURE_POLICY_ID | SPATIAL_256_TWO_SIGNATURE_POLICY_ID => Some(256),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn spatial_signatures_per_segment(&self) -> Option<u32> {
+        match self.policy_id.as_str() {
+            SPATIAL_256_SIGNATURE_POLICY_ID => Some(1),
+            SPATIAL_256_TWO_SIGNATURE_POLICY_ID => Some(2),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn contig_signature_budget(&self, bases: u64) -> u32 {
+        if let Some(per_segment) = self.spatial_signatures_per_segment() {
+            let segments = bases.saturating_add(255) / 256;
+            u32::try_from(segments.saturating_mul(u64::from(per_segment)))
+                .unwrap_or(u32::MAX)
+                .clamp(self.contig_budget.minimum, self.contig_budget.maximum)
+        } else {
+            self.contig_budget.budget_for_bases(bases)
         }
     }
 
@@ -90,6 +156,15 @@ impl ScreenSelectionPolicy {
         {
             return Err(JamIndexManifestError::InvalidSelectionPolicy);
         }
+        if let Some(segment_bases) = self.spatial_segment_bases()
+            && (self.contig_budget.minimum != 1
+                || self.contig_budget.bases_per_signature
+                    != u64::from(segment_bases)
+                        / u64::from(self.spatial_signatures_per_segment().unwrap_or(1))
+                || !matches!(self.whole_metagenome_budget, 512 | 1_024))
+        {
+            return Err(JamIndexManifestError::InvalidSelectionPolicy);
+        }
         Ok(())
     }
 
@@ -97,7 +172,7 @@ impl ScreenSelectionPolicy {
     pub fn estimated_signature_count(&self, contig_lengths: &[u64]) -> u64 {
         contig_lengths
             .iter()
-            .map(|length| u64::from(self.contig_budget.budget_for_bases(*length)))
+            .map(|length| u64::from(self.contig_signature_budget(*length)))
             .fold(u64::from(self.whole_metagenome_budget), u64::saturating_add)
     }
 }

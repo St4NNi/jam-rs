@@ -63,3 +63,35 @@ fn whole_metagenome_sketch_is_fixed_and_union_is_deduplicated() {
     assert!(result.union_hashes.len() <= first.hashes.len() + second.hashes.len() + 256);
     assert!(result.union_hashes.windows(2).all(|pair| pair[0] < pair[1]));
 }
+
+#[test]
+fn spatial_policies_have_no_fixed_sixteen_signature_floor() {
+    let sequence = sequence(1_000);
+    let mut spatial_256 =
+        MetagenomeSignatureBuilder::new(ScreenSelectionPolicy::spatial_256(512)).unwrap();
+    let mut spatial_256_two =
+        MetagenomeSignatureBuilder::new(ScreenSelectionPolicy::spatial_256_two(512)).unwrap();
+    let selected_256 = spatial_256.add_contig(&sequence).unwrap();
+    let selected_256_two = spatial_256_two.add_contig(&sequence).unwrap();
+    assert_eq!(selected_256.requested_budget, 4);
+    assert_eq!(selected_256.hashes.len(), 4);
+    assert_eq!(selected_256_two.requested_budget, 8);
+    assert_eq!(selected_256_two.hashes.len(), 8);
+
+    let mut short =
+        MetagenomeSignatureBuilder::new(ScreenSelectionPolicy::spatial_256(512)).unwrap();
+    let selected_short = short.add_contig(&sequence[..160]).unwrap();
+    assert_eq!(selected_short.requested_budget, 1);
+    assert_eq!(selected_short.hashes.len(), 1);
+}
+
+#[test]
+fn spatial_signatures_remain_sorted_deduplicated_and_nonzero() {
+    let repeated = b"ACGT".repeat(1_000);
+    let mut builder =
+        MetagenomeSignatureBuilder::new(ScreenSelectionPolicy::spatial_256_two(1_024)).unwrap();
+    let selected = builder.add_contig(&repeated).unwrap();
+    assert!(selected.hashes.len() < selected.requested_budget as usize);
+    assert!(selected.hashes.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(selected.hashes.iter().all(|hash| *hash != 0));
+}

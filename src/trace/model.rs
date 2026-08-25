@@ -357,6 +357,20 @@ pub struct CandidateResult {
     #[serde(rename = "query_hashes", alias = "plasmid_hashes")]
     pub plasmid_hashes: u64,
     pub metagenome_hashes: u64,
+    #[serde(default)]
+    pub shared_spatial_signatures: u64,
+    #[serde(default)]
+    pub rare_shared_signatures: u64,
+    #[serde(default)]
+    pub shared_whole_sample_signatures: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screen_policy: Option<String>,
+    #[serde(
+        default,
+        rename = "candidate_entry_reason",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub admission_source: Option<CandidateAdmissionSource>,
     #[serde(rename = "query_containment", alias = "plasmid_containment")]
     pub plasmid_containment: f64,
     pub metagenome_containment: f64,
@@ -364,6 +378,15 @@ pub struct CandidateResult {
     pub score_mode: String,
     pub bias_weighted_plasmid_containment: Option<f64>,
     pub uniform_hash_e_value: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateAdmissionSource {
+    Standard,
+    WindowSpread,
+    RareRescue,
+    WholeSampleFallback,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

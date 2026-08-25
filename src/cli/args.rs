@@ -80,8 +80,79 @@ pub enum ArchiveGearTableArg {
     PackedFourBase,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum IndexScreenPolicyArg {
+    #[default]
+    Baseline,
+    Spatial256One,
+    Spatial256Two,
+}
+
 #[derive(Debug, Subcommand, Clone)]
 pub enum IndexCommands {
+    /// Write a deterministic top-level part and build-fragment plan
+    Plan {
+        /// TSV or JSON catalog mapping metagenome IDs to persistent source files
+        #[arg(long)]
+        metagenomes: PathBuf,
+        /// New plan JSON
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Final searchable part count
+        #[arg(long, default_value = "20")]
+        parts: usize,
+        /// Independently buildable fragments assigned to each part
+        #[arg(long, default_value = "16")]
+        fragments_per_part: usize,
+        /// Estimated biological bases per compressed source byte
+        #[arg(long, default_value = "4")]
+        estimated_expansion: u64,
+        /// Database-side Jam Index spatial signature policy
+        #[arg(long, value_enum, default_value = "baseline")]
+        screen_policy: IndexScreenPolicyArg,
+        /// Whole-metagenome fallback hashes stored in each ordinary .jam sample
+        #[arg(long, default_value = "512")]
+        whole_metagenome_hashes: u32,
+    },
+    /// Build one independently restartable planned fragment
+    BuildFragment {
+        /// Deterministic plan JSON
+        #[arg(long)]
+        plan: PathBuf,
+        /// Global fragment ID from the plan
+        #[arg(long)]
+        fragment_id: u32,
+        /// Catalog mapping planned IDs to task-local staged source copies
+        #[arg(long)]
+        staged_metagenomes: PathBuf,
+        /// New fragment directory
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Merge all completed fragments for one final searchable part
+    MergePart {
+        /// Deterministic plan JSON
+        #[arg(long)]
+        plan: PathBuf,
+        /// Planned top-level part ID
+        #[arg(long)]
+        part_id: u32,
+        /// Directory containing fragment-NNNNNN directories
+        #[arg(long)]
+        fragments_root: PathBuf,
+        /// New final part directory
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Publish the root manifest after every planned final part validates
+    Finalize {
+        /// Deterministic plan JSON
+        #[arg(long)]
+        plan: PathBuf,
+        /// Jam Index root containing completed parts
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Build a new local Jam Index
     Build {
         /// TSV or JSON catalog mapping metagenome IDs to local sequence files
@@ -251,14 +322,15 @@ pub enum Commands {
     /// Trace one query sequence element across candidate metagenomic assemblies
     #[command(arg_required_else_help = true)]
     Trace {
-        /// FASTA/FASTQ containing exactly one query sequence
+        /// One or more FASTA/FASTQ files; each may contain one or more queries
         #[arg(
             short = 'q',
             long,
+            num_args = 1..,
             required_unless_present = "plasmid",
             conflicts_with = "plasmid"
         )]
-        query: Option<PathBuf>,
+        query: Vec<PathBuf>,
         /// Compatibility alias for --query; implies --query-kind plasmid
         #[arg(short = 'p', long, conflicts_with = "query")]
         plasmid: Option<PathBuf>,
@@ -279,7 +351,7 @@ pub enum Commands {
         /// Local Jam Index directory
         #[arg(long, conflicts_with = "database")]
         index: Option<PathBuf>,
-        /// TSV or JSON catalog mapping database sample IDs to self-contained JMA resources
+        /// TSV or JSON catalog mapping sample IDs to sequence resources; with --index, overrides staged assembly paths
         #[arg(
             short = 'c',
             long = "metagenomes",
@@ -302,6 +374,18 @@ pub enum Commands {
         /// Minimum shared hashes for metagenome candidate retrieval
         #[arg(long, default_value = "3")]
         min_shared: u32,
+        /// Minimum distinct query windows for Jam Index candidate admission
+        #[arg(long, default_value = "2")]
+        min_query_windows: u32,
+        /// Admit a one-signature Jam Index candidate at or below this document frequency
+        #[arg(long)]
+        rare_rescue_df: Option<u32>,
+        /// Minimum whole-metagenome fallback hashes for Jam Index admission
+        #[arg(long, default_value = "2")]
+        whole_sample_min_shared: u32,
+        /// Stop a Jam Index run after screening, exact recount, and contig work planning
+        #[arg(long, requires = "index")]
+        screen_only: bool,
         /// Minimum retained query containment
         #[arg(
             long = "min-query-containment",
@@ -330,6 +414,12 @@ pub enum Commands {
         /// Maximum retained alignments per candidate metagenome
         #[arg(long, default_value = "256")]
         max_alignments: usize,
+        /// Maximum unique selected-contig bases retained for one metagenome group
+        #[arg(long, default_value = "4294967296")]
+        max_group_contig_bases: u64,
+        /// Contigs per bounded shared sequential-fallback chunk
+        #[arg(long, default_value = "8")]
+        fallback_contigs_per_chunk: usize,
         /// Maximum candidate resource tasks in flight
         #[arg(long)]
         io_concurrency: Option<usize>,

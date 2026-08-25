@@ -53,6 +53,49 @@ pub struct EntryHit {
     pub ordinal: u64,
 }
 
+pub struct ProfiledEntrySearch<'a> {
+    entries: &'a [Entry],
+    index: usize,
+    hash: u64,
+    bucket_start: u64,
+    comparisons: u64,
+    finished: bool,
+}
+
+impl ProfiledEntrySearch<'_> {
+    #[must_use]
+    pub fn comparisons(&self) -> u64 {
+        self.comparisons
+    }
+}
+
+impl Iterator for ProfiledEntrySearch<'_> {
+    type Item = EntryHit;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let Some(entry) = self.entries.get(self.index) else {
+            self.finished = true;
+            return None;
+        };
+        self.comparisons = self.comparisons.saturating_add(1);
+        if entry.hash != self.hash {
+            self.finished = true;
+            return None;
+        }
+        let offset = self.index;
+        self.index = self.index.saturating_add(1);
+        Some(EntryHit {
+            sample_id: entry.sample_id,
+            ordinal: self
+                .bucket_start
+                .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)),
+        })
+    }
+}
+
 struct FilterMeta {
     descriptor_offset: usize,
     fingerprints_offset: usize,
@@ -479,6 +522,14 @@ impl JamReader {
     }
 
     #[inline]
+    pub fn bucket_entry_ordinal_start(&self, bucket_idx: usize) -> u64 {
+        self.bucket_table[..bucket_idx]
+            .iter()
+            .map(|meta| meta.entry_count)
+            .sum()
+    }
+
+    #[inline]
     pub fn bucket_filter_byte_range(&self, bucket_idx: usize) -> (usize, usize) {
         let meta = &self.bucket_table[bucket_idx];
         let start = meta.filter_offset as usize;
@@ -594,24 +645,57 @@ impl JamReader {
                     .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)),
             })
     }
+
+    pub fn search_entries_profiled(&self, hash: u64) -> ProfiledEntrySearch<'_> {
+        let bucket_idx = bucket_id(hash);
+        let dominated = self
+            .bucket_filter(bucket_idx)
+            .is_some_and(|filter| filter.contains(&hash));
+        let entries = if dominated {
+            self.bucket_entries(bucket_idx)
+        } else {
+            &[]
+        };
+        let (index, comparisons) = lower_bound_hash_counted(entries, hash);
+        let bucket_start = self.bucket_table[..bucket_idx]
+            .iter()
+            .map(|meta| meta.entry_count)
+            .sum::<u64>();
+        ProfiledEntrySearch {
+            entries,
+            index,
+            hash,
+            bucket_start,
+            comparisons,
+            finished: false,
+        }
+    }
 }
 
 #[inline]
 pub(crate) fn lower_bound_hash(entries: &[Entry], key: u64) -> usize {
+    lower_bound_hash_counted(entries, key).0
+}
+
+#[inline]
+pub(crate) fn lower_bound_hash_counted(entries: &[Entry], key: u64) -> (usize, u64) {
     const MAX_INTERPOLATION_PROBES: usize = 8;
     const BINARY_SEARCH_CUTOFF: usize = 64;
 
     let mut lo = 0usize;
     let mut hi = entries.len();
+    let mut comparisons = 0u64;
     if hi == 0 {
-        return 0;
+        return (0, comparisons);
     }
 
+    comparisons = comparisons.saturating_add(1);
     if entries[lo].hash >= key {
-        return lo;
+        return (lo, comparisons);
     }
+    comparisons = comparisons.saturating_add(1);
     if entries[hi - 1].hash < key {
-        return hi;
+        return (hi, comparisons);
     }
 
     for _ in 0..MAX_INTERPOLATION_PROBES {
@@ -621,12 +705,15 @@ pub(crate) fn lower_bound_hash(entries: &[Entry], key: u64) -> usize {
 
         let lo_hash = entries[lo].hash;
         let hi_hash = entries[hi - 1].hash;
+        comparisons = comparisons.saturating_add(1);
         if lo_hash >= key {
-            return lo;
+            return (lo, comparisons);
         }
+        comparisons = comparisons.saturating_add(1);
         if hi_hash < key {
-            return hi;
+            return (hi, comparisons);
         }
+        comparisons = comparisons.saturating_add(1);
         if lo_hash == hi_hash {
             break;
         }
@@ -637,6 +724,7 @@ pub(crate) fn lower_bound_hash(entries: &[Entry], key: u64) -> usize {
         let probe = lo + ((rel as u128 * width as u128) / span as u128) as usize;
         let probe_hash = entries[probe].hash;
 
+        comparisons = comparisons.saturating_add(1);
         if probe_hash < key {
             lo = probe + 1;
         } else {
@@ -644,20 +732,28 @@ pub(crate) fn lower_bound_hash(entries: &[Entry], key: u64) -> usize {
         }
     }
 
-    lower_bound_hash_binary(entries, key, lo, hi)
+    let (index, binary_comparisons) = lower_bound_hash_binary_counted(entries, key, lo, hi);
+    (index, comparisons.saturating_add(binary_comparisons))
 }
 
 #[inline]
-fn lower_bound_hash_binary(entries: &[Entry], key: u64, mut lo: usize, mut hi: usize) -> usize {
+fn lower_bound_hash_binary_counted(
+    entries: &[Entry],
+    key: u64,
+    mut lo: usize,
+    mut hi: usize,
+) -> (usize, u64) {
+    let mut comparisons = 0u64;
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
+        comparisons = comparisons.saturating_add(1);
         if entries[mid].hash < key {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    lo
+    (lo, comparisons)
 }
 
 fn checked_file_range(

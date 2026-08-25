@@ -189,7 +189,7 @@ impl TraceMemorySemaphore {
         Ok(result)
     }
 
-    fn acquire_bytes(&self, bytes: u64) -> Result<TraceMemoryReservation, MemoryBudgetError> {
+    pub fn acquire_bytes(&self, bytes: u64) -> Result<TraceMemoryReservation, MemoryBudgetError> {
         let mut state = lock_state(&self.inner);
         validate_request(&state, bytes)?;
 
