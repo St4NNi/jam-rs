@@ -106,14 +106,10 @@ fn contig_order_cigar(alignment: &Alignment) -> String {
 }
 
 impl DecisionRecord {
-    /// The record of `decision` for a query of `query_length` bases; `contigs` is the contig
-    /// table of the entry.
-    pub fn new(
-        query_length: u64,
-        decision: &Decision,
-        contigs: &[Contig],
-    ) -> Result<Self, ReportError> {
+    /// The record of `decision`; `contigs` is the contig table of the entry.
+    pub fn new(decision: &Decision, contigs: &[Contig]) -> Result<Self, ReportError> {
         let mosaic = &decision.mosaic;
+        let query_length = mosaic.query_length;
         let counts = decision.counts;
         let fragments = mosaic
             .primary
@@ -196,7 +192,7 @@ mod tests {
     #[test]
     fn decision_round_trip() {
         let decision = decision(fragment(Strand::Forward, "3=1X3=1D1="));
-        let record = DecisionRecord::new(8, &decision, &contigs()).unwrap();
+        let record = DecisionRecord::new(&decision, &contigs()).unwrap();
         assert_eq!(record.fragments.len(), 1);
         assert_eq!(record.query_coverage, 1.0);
         let text = serde_json::to_string(&record).unwrap();

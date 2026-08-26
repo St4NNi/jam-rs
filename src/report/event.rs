@@ -140,11 +140,7 @@ impl Record {
             EntryEvent::Confirmed { aligned, contigs } => Self::Confirmed(Confirmed {
                 query,
                 entry,
-                decision: DecisionRecord::new(
-                    aligned.decision.mosaic.query_length,
-                    &aligned.decision,
-                    contigs,
-                )?,
+                decision: DecisionRecord::new(&aligned.decision, contigs)?,
             }),
             EntryEvent::Dropped { stage, reason, .. } => Self::Dropped(Dropped {
                 query,
