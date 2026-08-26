@@ -7,7 +7,7 @@ mod decision;
 mod event;
 mod paf;
 
-pub use decision::{DecisionRecord, FragmentRecord, Span, Strand};
+pub use decision::{DecisionRecord, FragmentRecord};
 pub use event::{
     Confirmed, Dropped, Ending, Located, Possible, Record, ShardRecord, Summary, Unfinished,
 };

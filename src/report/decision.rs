@@ -4,34 +4,10 @@
 // SPDX-License-Identifier: MIT
 
 use super::ReportError;
-use crate::align::{Alignment, EditRun, Strand as AlignStrand, format_cigar};
+use crate::align::{Alignment, EditRun, Interval, Strand, format_cigar};
 use crate::decide::{Decision, Fragment};
 use crate::index::Contig;
 use serde::{Deserialize, Serialize};
-
-/// A half-open range of positions, `start..end`.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Span {
-    pub start: u64,
-    pub end: u64,
-}
-
-/// The contig strand that the query aligns to.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Strand {
-    Forward,
-    Reverse,
-}
-
-impl From<AlignStrand> for Strand {
-    fn from(strand: AlignStrand) -> Self {
-        match strand {
-            AlignStrand::Forward => Self::Forward,
-            AlignStrand::Reverse => Self::Reverse,
-        }
-    }
-}
 
 /// One fragment of a mosaic, placed on the query and on a named contig.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -40,8 +16,8 @@ pub struct FragmentRecord {
     pub contig_length: u64,
     /// The query bases the fragment spans; two segments when it runs over the end of a circular
     /// query.
-    pub query_segments: Vec<Span>,
-    pub contig_interval: Span,
+    pub query_segments: Vec<Interval>,
+    pub contig_interval: Interval,
     pub strand: Strand,
     pub score: i32,
     /// The query bases that only this fragment adds to the mosaic; 0 for an alternative.
@@ -92,19 +68,9 @@ impl FragmentRecord {
         Ok(Self {
             contig: contig.name.clone(),
             contig_length: contig.length,
-            query_segments: fragment
-                .query_segments
-                .iter()
-                .map(|interval| Span {
-                    start: interval.start,
-                    end: interval.end,
-                })
-                .collect(),
-            contig_interval: Span {
-                start: alignment.contig_interval.start,
-                end: alignment.contig_interval.end,
-            },
-            strand: alignment.strand.into(),
+            query_segments: fragment.query_segments.clone(),
+            contig_interval: alignment.contig_interval,
+            strand: alignment.strand,
             score: alignment.score,
             new_bases,
             matches: counts.matches,
@@ -131,8 +97,8 @@ impl FragmentRecord {
 /// which runs backwards on the contig, so they are turned around.
 fn contig_order_cigar(alignment: &Alignment) -> String {
     match alignment.strand {
-        AlignStrand::Forward => format_cigar(&alignment.runs),
-        AlignStrand::Reverse => {
+        Strand::Forward => format_cigar(&alignment.runs),
+        Strand::Reverse => {
             let runs: Vec<EditRun> = alignment.runs.iter().rev().copied().collect();
             format_cigar(&runs)
         }
@@ -188,7 +154,7 @@ mod tests {
         }]
     }
 
-    fn fragment(strand: AlignStrand, cigar: &str) -> Fragment {
+    fn fragment(strand: Strand, cigar: &str) -> Fragment {
         let runs = parse_cigar(cigar).unwrap();
         let query_end = 8;
         Fragment {
@@ -214,13 +180,13 @@ mod tests {
 
     #[test]
     fn fragment_record_fields() {
-        let forward = fragment(AlignStrand::Forward, "3=1X3=1D1=");
+        let forward = fragment(Strand::Forward, "3=1X3=1D1=");
         let record = FragmentRecord::new(&forward, 8, &contigs()).unwrap();
         assert_eq!(record.contig, "plasmid_1");
         assert_eq!(record.contig_length, 5_000);
         assert_eq!(record.cigar, "3=1X3=1D1=");
         assert_eq!((record.matches, record.columns()), (7, 9));
-        let reverse = fragment(AlignStrand::Reverse, "3=1X3=1D1=");
+        let reverse = fragment(Strand::Reverse, "3=1X3=1D1=");
         let record = FragmentRecord::new(&reverse, 8, &contigs()).unwrap();
         assert_eq!(record.cigar, "1=1D3=1X3=");
         assert_eq!(record.strand, Strand::Reverse);
@@ -229,7 +195,7 @@ mod tests {
 
     #[test]
     fn decision_round_trip() {
-        let decision = decision(fragment(AlignStrand::Forward, "3=1X3=1D1="));
+        let decision = decision(fragment(Strand::Forward, "3=1X3=1D1="));
         let record = DecisionRecord::new(8, &decision, &contigs()).unwrap();
         assert_eq!(record.fragments.len(), 1);
         assert_eq!(record.query_coverage, 1.0);

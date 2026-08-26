@@ -2,7 +2,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::decision::{DecisionRecord, FragmentRecord, Strand};
+use super::decision::{DecisionRecord, FragmentRecord};
+use crate::align::Strand;
 use std::fmt::Write;
 
 /// The PAF lines of a decision: first the primary fragments, then the alternatives. Mapping
@@ -45,14 +46,14 @@ fn paf_line(query: &str, query_length: u64, fragment: &FragmentRecord, kind: cha
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::decision::Span;
+    use crate::align::Interval;
 
-    fn fragment(strand: Strand, segments: Vec<Span>) -> FragmentRecord {
+    fn fragment(strand: Strand, segments: Vec<Interval>) -> FragmentRecord {
         FragmentRecord {
             contig: "plasmid_1".into(),
             contig_length: 5_000,
             query_segments: segments,
-            contig_interval: Span {
+            contig_interval: Interval {
                 start: 100,
                 end: 109,
             },
@@ -89,7 +90,7 @@ mod tests {
 
     #[test]
     fn fragment_standard_columns() {
-        let span = Span { start: 2, end: 10 };
+        let span = Interval { start: 2, end: 10 };
         let lines = paf_lines(
             "q1",
             &decision(vec![fragment(Strand::Reverse, vec![span])], vec![]),
@@ -104,8 +105,11 @@ mod tests {
 
     #[test]
     fn secondary_and_wrapped() {
-        let wrapped = vec![Span { start: 7, end: 10 }, Span { start: 0, end: 5 }];
-        let single = vec![Span { start: 0, end: 8 }];
+        let wrapped = vec![
+            Interval { start: 7, end: 10 },
+            Interval { start: 0, end: 5 },
+        ];
+        let single = vec![Interval { start: 0, end: 8 }];
         let lines = paf_lines(
             "q1",
             &decision(
