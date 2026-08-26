@@ -3,16 +3,41 @@
 // SPDX-License-Identifier: MIT
 
 use super::DecideError;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
 
 /// The least query coverage that reports an entry: a share such as `0.5` or a base count such
 /// as `800bp`. A share is kept as an exact decimal, so `0.7` never turns into 0.69999.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QueryCoverage {
     /// `numerator / 10^decimal_places` of the query.
     Share { numerator: u64, decimal_places: u32 },
     /// A fixed number of query bases.
     Bases(u64),
+}
+
+impl fmt::Display for QueryCoverage {
+    /// Writes the coverage as `FromStr` reads it, such as `0.5` or `800bp`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Bases(bases) => write!(formatter, "{bases}bp"),
+            Self::Share {
+                numerator,
+                decimal_places: 0,
+            } => write!(formatter, "{numerator}"),
+            Self::Share {
+                numerator,
+                decimal_places,
+            } => {
+                let places = decimal_places as usize;
+                let digits = format!("{numerator:0>width$}", width = places + 1);
+                let (whole, fraction) = digits.split_at(digits.len() - places);
+                write!(formatter, "{whole}.{fraction}")
+            }
+        }
+    }
 }
 
 impl QueryCoverage {
@@ -117,6 +142,14 @@ mod tests {
                     assert!(!coverage.accepts(required - 1, length));
                 }
             }
+        }
+    }
+
+    #[test]
+    fn text_reads_back() {
+        for text in ["0", "1", "0.5", "0.05", "0.125", "800bp"] {
+            let coverage: QueryCoverage = text.parse().unwrap();
+            assert_eq!(coverage.to_string(), text);
         }
     }
 
