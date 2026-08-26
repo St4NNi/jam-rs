@@ -24,7 +24,7 @@ pub use coordinator::{PEER_CONNECT, PEER_GRACE};
 pub use endpoint::{bind, parse_address};
 pub use protocol::{ALPN, MAX_MESSAGE_BYTES, Reply, SearchRequest};
 pub use server::{Server, ServerLimits};
-pub use settings::{CoverageSetting, SearchSettings};
+pub use settings::SearchSettings;
 pub use shard::ServedShard;
 
 /// Errors of serving and of remote searches.

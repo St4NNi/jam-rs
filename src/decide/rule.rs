@@ -6,9 +6,10 @@ use super::contigs::counted_contig_fragments;
 use super::mosaic::build_mosaic;
 use super::{DecideError, Fragment, Mosaic, QueryCoverage};
 use crate::align::{Alignment, EditCounts};
+use serde::{Deserialize, Serialize};
 
 /// The limits that decide whether an entry is reported.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DecisionRule {
     /// The least query coverage of the mosaic. A share must be at least 0.05, as a large plasmid
     /// can show as a few small pieces.
