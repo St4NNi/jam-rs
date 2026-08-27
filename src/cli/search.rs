@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use crate::decide::QueryCoverage;
+use super::rule::RuleArgs;
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
 use crate::report::{Ending, Record, ReportError, ShardRecord, paf_lines};
@@ -46,27 +46,11 @@ pub struct SearchArgs {
     /// Treat the queries as circular instead of linear
     #[arg(long)]
     circular: bool,
-    /// Least query coverage: a share such as 0.5, or a base count such as 800bp [default: 0.5]
-    #[arg(short, long)]
-    coverage: Option<QueryCoverage>,
-    /// Least identity over all counted fragments together [default: 0.8]
-    #[arg(short, long)]
-    identity: Option<f64>,
-    /// Least identity of one fragment to count [default: 0]
-    #[arg(long)]
-    fragment_identity: Option<f64>,
-    /// Least alignment columns of one fragment to count [default: 100]
-    #[arg(long)]
-    fragment_columns: Option<u64>,
-    /// Contig rule: least share of a contig's bases that must align [default: 0, rule off]
-    #[arg(long)]
-    contig_coverage: Option<f64>,
-    /// Contig rule: least identity of the fragments of a contig [default: 0, rule off]
-    #[arg(long)]
-    contig_identity: Option<f64>,
-    /// Largest chance of missing a qualifying entry [default: 0.0001]
-    #[arg(long)]
-    loss_budget: Option<f64>,
+    #[command(flatten)]
+    rule: RuleArgs,
+    /// Largest chance of missing a qualifying entry
+    #[arg(long, default_value_t = LossBudget::default().chance())]
+    loss_budget: f64,
     /// The last stage that runs
     #[arg(long, value_enum, default_value = "align")]
     level: SearchStage,
@@ -144,7 +128,11 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     if let Some(server) = &args.server {
         return run_remote(args, server);
     }
-    let config = config_of(args)?;
+    let base = SearchConfig {
+        threads: args.threads.unwrap_or(0),
+        ..SearchConfig::default()
+    };
+    let config = settings_of(args)?.apply(&base)?;
     let inputs = args.inputs()?;
     let shards = open_shards(&inputs.shards)?;
     let parameters = shards[0].shard.manifest().parameters;
@@ -186,8 +174,7 @@ fn run_remote(args: &SearchArgs, server: &EndpointAddr) -> Result<(), CliError> 
             "with --server give only the query file".into(),
         ));
     };
-    let config = config_of(args)?;
-    let settings = SearchSettings::of(&config);
+    let settings = settings_of(args)?;
     let deadline_ms = args
         .deadline
         .map(|seconds| (seconds * 1_000.0).ceil() as u64);
@@ -238,7 +225,7 @@ async fn search_remote(
     Ok(incomplete)
 }
 
-/// Calls `search` with the name (first word of the id) and the upper-case bases of every record
+/// Calls `search` with the name (first word of the id) and the bases of every record
 /// of the query file, and sums the incomplete searches it returns. Fails on a file without
 /// records.
 fn each_query(
@@ -255,7 +242,7 @@ fn each_query(
     while let Some(record) = reader.next() {
         let record = record.map_err(|error| query_error(error.to_string()))?;
         records += 1;
-        incomplete += search(&first_word(record.id()), &record.seq().to_ascii_uppercase())?;
+        incomplete += search(&first_word(record.id()), &record.seq())?;
     }
     match records {
         0 => Err(query_error("it holds no records".into())),
@@ -305,25 +292,11 @@ fn search_one(
     })
 }
 
-fn config_of(args: &SearchArgs) -> Result<SearchConfig, CliError> {
-    let mut config = SearchConfig {
-        last_stage: args.level,
-        ..SearchConfig::default()
-    };
-    let rule = &mut config.rule;
-    rule.min_query_coverage = args.coverage.unwrap_or(rule.min_query_coverage);
-    rule.min_identity = args.identity.unwrap_or(rule.min_identity);
-    rule.min_fragment_identity = args.fragment_identity.unwrap_or(rule.min_fragment_identity);
-    rule.min_fragment_columns = args.fragment_columns.unwrap_or(rule.min_fragment_columns);
-    rule.min_contig_coverage = args.contig_coverage.unwrap_or(rule.min_contig_coverage);
-    rule.min_contig_identity = args.contig_identity.unwrap_or(rule.min_contig_identity);
-    if let Some(chance) = args.loss_budget {
-        config.loss_budget = LossBudget::new(chance)?;
-    }
+/// The search settings of the command line, checked; the threads and the deadline stay local.
+fn settings_of(args: &SearchArgs) -> Result<SearchSettings, CliError> {
     if args.threads == Some(0) {
         return Err(CliError::Usage("--threads must be at least 1".into()));
     }
-    config.threads = args.threads.unwrap_or(0);
     if args
         .deadline
         .is_some_and(|seconds| !(seconds > 0.0 && seconds.is_finite()))
@@ -332,8 +305,12 @@ fn config_of(args: &SearchArgs) -> Result<SearchConfig, CliError> {
             "--deadline must be a number of seconds above 0".into(),
         ));
     }
-    config.validate()?;
-    Ok(config)
+    let mut settings = SearchSettings::of(&SearchConfig::default());
+    settings.last_stage = args.level;
+    settings.rule = args.rule.rule();
+    settings.loss_budget = args.loss_budget;
+    settings.apply(&SearchConfig::default())?;
+    Ok(settings)
 }
 
 fn first_word(id: &[u8]) -> String {

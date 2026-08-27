@@ -4,6 +4,7 @@
 
 mod error;
 mod index;
+mod rule;
 mod search;
 mod serve;
 mod stats;
