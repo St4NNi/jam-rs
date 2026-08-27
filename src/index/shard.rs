@@ -10,11 +10,12 @@ use super::sketch::{SKETCH_FILE, Sketch};
 use super::sources::{PackedLocation, PackedOptions, PackedSources};
 use super::{AtPath, IndexError};
 use crate::storage::MappedFile;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Sizes and counts of a shard, for `jam stats`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct ShardStats {
     /// Entries of the shard.
     pub entries: u64,
