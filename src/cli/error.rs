@@ -23,8 +23,14 @@ pub enum CliError {
         source: std::io::Error,
     },
     /// The query file is not valid FASTA or FASTQ.
-    #[error("cannot read the query file {path}: {message}")]
-    Query { path: PathBuf, message: String },
+    #[error("cannot read the query file {path}: {source}")]
+    Query {
+        path: PathBuf,
+        source: needletail::errors::ParseError,
+    },
+    /// The query file holds no records.
+    #[error("the query file {0} holds no records")]
+    NoQueries(PathBuf),
     /// A shard cannot be opened.
     #[error("cannot open the shard {path}: {source}")]
     Shard { path: PathBuf, source: IndexError },

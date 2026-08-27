@@ -232,20 +232,19 @@ fn each_query(
     path: &Path,
     mut search: impl FnMut(&str, &[u8]) -> Result<usize, CliError>,
 ) -> Result<usize, CliError> {
-    let query_error = |message: String| CliError::Query {
+    let query_error = |source| CliError::Query {
         path: path.to_path_buf(),
-        message,
+        source,
     };
-    let mut reader =
-        needletail::parse_fastx_file(path).map_err(|error| query_error(error.to_string()))?;
+    let mut reader = needletail::parse_fastx_file(path).map_err(query_error)?;
     let (mut records, mut incomplete) = (0, 0);
     while let Some(record) = reader.next() {
-        let record = record.map_err(|error| query_error(error.to_string()))?;
+        let record = record.map_err(query_error)?;
         records += 1;
         incomplete += search(&first_word(record.id()), &record.seq())?;
     }
     match records {
-        0 => Err(query_error("it holds no records".into())),
+        0 => Err(CliError::NoQueries(path.to_path_buf())),
         _ => Ok(incomplete),
     }
 }
