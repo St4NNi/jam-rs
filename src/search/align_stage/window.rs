@@ -1,4 +1,6 @@
 //! Reading one alignment window and finding its chains and dense walks.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{AlignStageConfig, AlignStageError, AlignWork, PreparedQuery};
 use crate::align::{

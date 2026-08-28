@@ -1,10 +1,12 @@
 //! The settings of stage 3 and the memory limits of one entry.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::AlignStageError;
 use crate::align::{AlignmentConfig, AnchorConfig, BandConfig, ChainConfig};
 
 /// How stage 3 finds anchors, chains them, aligns them and widens alignment windows, and how
-/// much memory one entry may use.
+/// much memory one entry may use (window bases of a contig, prepared windows, fragments).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AlignStageConfig {
     /// Anchor length a (15), lookup stride and entropy limit.

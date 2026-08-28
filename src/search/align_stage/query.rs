@@ -1,5 +1,7 @@
 //! The query as stage 3 uses it: its bases and its anchor tables, built once and shared by all
 //! workers.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{AlignStageConfig, AlignStageError};
 use crate::align::QueryTable;

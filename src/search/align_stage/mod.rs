@@ -1,15 +1,7 @@
 //! Stage 3: reads the alignment windows of a located entry, aligns the query there and decides
 //! the entry.
-//!
-//! For every contig the windows are read, anchors are chained and the chains aligned (`chains`),
-//! and copies in dense repeats are walked and aligned (`walks`). When an alignment or a chain
-//! reaches a cut window edge with query bases left beyond it, the window is widened and the
-//! contig is aligned again (`contig`), so an alignment is never cut by a window edge. The
-//! alignments become fragments, and `DecisionRule` decides the entry from them.
-//!
-//! Memory of one entry is bounded by the limits of `AlignStageConfig`: the window bases of one
-//! contig, the bytes of its prepared windows, and the bytes of the entry's fragments. The kernel
-//! keeps at most `max_cells` traceback cells resident per pass.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 mod chains;
 mod config;
@@ -129,8 +121,9 @@ pub fn align_entry(
     align_packed_entry(&packed, query, located, config, rule, workspace, control)
 }
 
-/// `align_entry` on an open packed sequence, which may read from any source, such as S3 or a
-/// block cache.
+/// Aligns the query in the windows of a located entry, read from an open packed sequence (any
+/// source, such as S3 or a block cache), and decides the entry from the fragments. Chains and
+/// dense walks are aligned per window; a window grows while an alignment reaches its edge.
 pub fn align_packed_entry(
     packed: &PackedSequence,
     query: &PreparedQuery,

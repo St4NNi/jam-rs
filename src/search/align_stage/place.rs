@@ -1,4 +1,6 @@
 //! Alignments placed as fragments, and the fragments one entry collects within its limit.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::{AlignStageError, PreparedQuery};
 use crate::align::{EditRun, Interval};

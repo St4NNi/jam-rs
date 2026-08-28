@@ -1,5 +1,7 @@
 //! End-to-end tests of stage 3 on small generated shards. Alignment windows come from exact
 //! k-mer matches between the query and each contig, as stage 2 would find them from seeds.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::*;
 use crate::align::{Interval, Strand, format_cigar};

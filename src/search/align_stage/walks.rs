@@ -1,9 +1,6 @@
 //! Aligning the dense walks of one window: copies in dense repeats and low-complexity runs.
-//!
-//! Every long walk is an ungapped fragment. A walk with real substitutions, or whose end can
-//! reach a conserved block on another diagonal, is also aligned with gaps; those gapped
-//! alignments are kept once per copy. Walks shorter than a fragment that no fragment holds are
-//! joined across their divergent pieces when the join reaches the fragment limits.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::contig::{ContigJob, WindowOutput};
 use super::paths::{AlignedPath, PathIndex};
@@ -18,8 +15,9 @@ use crate::decide::Fragment;
 use crate::seeds::base_code;
 use std::cmp::Reverse;
 
-/// Aligns the walks of `window`, keeps their gapped alignments once per copy, and joins short
-/// walks.
+/// Aligns the walks of `window`: every long walk is an ungapped fragment, walks with changes are
+/// also aligned with gaps (kept once per copy), and short walks are joined across their
+/// divergent pieces when the join reaches the fragment limits.
 pub(super) fn align_walks(
     job: &ContigJob<'_>,
     window: &PreparedWindow,

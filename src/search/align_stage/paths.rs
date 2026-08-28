@@ -1,15 +1,14 @@
 //! The paired bases of the alignments already made from one alignment window, so that a chain or
 //! a dense walk that only finds one of them again is not aligned a second time.
-//!
-//! Positions are oriented: window positions are read on the alignment's strand (the reverse
-//! complement of the window for the reverse strand), and query positions run on past the origin
-//! of a circular query without wrapping. The diagonal of a pair is its window position minus its
-//! query position.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use crate::align::{Alignment, Chain, EditOperation, Strand, Walk};
 use std::collections::HashMap;
 
 /// The paired stretches of one alignment: (query position, oriented window position, length).
+/// Window positions run on the alignment's strand; query positions run on past the origin of a
+/// circular query. A pair's diagonal is its window position minus its query position.
 pub(super) struct AlignedPath {
     reverse: bool,
     paired: Vec<(u64, u64, u64)>,
@@ -219,9 +218,8 @@ impl PathIndex {
     }
 
     /// Whether kernel alignments within `band` diagonals of a dense walk already pair nine tenths
-    /// of its query bases and nine tenths of its window bases. A gapped alignment of such a walk
-    /// would only find that region again. Dense walks do not count: the gapped join between them
-    /// is what an alignment of a walk looks for.
+    /// of its query and window bases, so a gapped alignment would only find them again. Dense
+    /// walks do not count: the gapped join between them is what a walk alignment looks for.
     pub(super) fn aligned_around(
         &self,
         walk: &Walk,

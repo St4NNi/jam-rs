@@ -1,6 +1,7 @@
-//! Aligning the chains of one window. A chain whose anchors are already on an alignment of the
-//! window is skipped. Anchors that an alignment leaves out, such as a second conserved block
-//! beyond a costly insertion, are aligned again on their own.
+//! Aligning the chains of one window; a chain whose anchors already lie on an alignment of the
+//! window is skipped.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::contig::{ContigJob, WindowOutput};
 use super::paths::AlignedPath;
@@ -8,13 +9,13 @@ use super::window::PreparedWindow;
 use super::{AlignStageConfig, AlignStageError};
 use crate::align::{AlignmentWorkspace, Chain, align_chain, split_by_drift};
 
-/// Query bases that the alignment of leftover anchors may reach beyond them on each side. Two
-/// blocks that one alignment would have joined are less than this far apart (bridging them costs
-/// less than the smaller block earns), so the window of the second block holds no part of the
-/// first.
+/// Query bases that the alignment of leftover anchors may reach beyond them on each side. Blocks
+/// that one alignment would have joined lie closer than this, so the window of the second block
+/// holds no part of the first.
 const LEFTOVER_REACH: u64 = 64;
 
-/// Aligns every chain of `window`, with the leftover anchors of each alignment.
+/// Aligns every chain of `window`. Anchors that an alignment leaves out, such as a second
+/// conserved block beyond a costly insertion, are aligned again on their own.
 pub(super) fn align_chains(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
@@ -45,10 +46,9 @@ pub(super) fn align_chains(
     Ok(())
 }
 
-/// Whether the anchors of a chain are too few for its stretch to have the chain identity of
-/// `config`. Anchors are the k-mers at every `stride`-th window position that the query has too,
-/// and at identity `p` a k-mer is unchanged with chance `p^k`. Short chains are never judged:
-/// too few anchors tell nothing.
+/// Whether the anchors of a chain are too few for the chain identity of `config`: at identity `p`
+/// an anchor survives with chance `p^a`. Short chains are never judged, as too few anchors tell
+/// nothing.
 fn chain_too_sparse(config: &AlignStageConfig, chain: &Chain) -> bool {
     const MIN_ANCHORS: usize = 24;
     if config.min_chain_identity <= 0.0 || chain.anchors.len() < MIN_ANCHORS {

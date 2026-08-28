@@ -1,6 +1,6 @@
-//! End-to-end tests of stage 3 on repeats, low-complexity runs and short conserved blocks,
-//! ported from the search tests of jam 0.10. jam 0.10 wrote `I` for contig-only bases; here
-//! CIGAR strings follow SAM, so those are `D`.
+//! End-to-end tests of stage 3 on repeats, low-complexity runs and short conserved blocks.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::tests::{
     align, align_located, build, fragments, random_sequence, reverse_complement, rule,

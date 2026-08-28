@@ -1,6 +1,7 @@
-//! The windows of one contig, aligned in rounds: a round reads every window, and when a chain or
-//! an alignment reaches a cut window edge with query bases left beyond it, the window grows and
-//! the contig is aligned again. The growth step doubles every round.
+//! The windows of one contig, aligned in rounds: when a chain or an alignment reaches a cut window
+//! edge with query bases left beyond it, the window grows and the contig is aligned again.
+// Copyright (c) 2023-2026 Sebastian Beyvers
+// SPDX-License-Identifier: MIT
 
 use super::paths::PathIndex;
 use super::place::{Collected, query_room};
