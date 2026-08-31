@@ -2,14 +2,13 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::tests::{
-    align, align_located, build, fragments, random_sequence, reverse_complement, rule,
-    single_contig_entries,
-};
+use super::tests::{align, align_located, build, fragments, rule, single_contig_entries};
 use super::*;
 use crate::align::{Interval, Strand, format_cigar};
 use crate::index::Shard;
 use crate::search::ContigWindows;
+use crate::seeds::reverse_complement;
+use crate::test_support::{random_bases, rng};
 
 /// Every contig of an entry as one window.
 fn whole_contigs(shard: &Shard, entry: u32, query_length: u64) -> LocatedEntry {
@@ -45,8 +44,13 @@ fn costly_gap_split() {
     // costs more than the second block earns, so the first alignment is the first block alone;
     // the second block is aligned from the anchors it leaves out.
     let directory = tempfile::tempdir().unwrap();
-    let query = random_sequence(1200, 71);
-    let contig = [&query[..700], &random_sequence(1000, 72)[..], &query[700..]].concat();
+    let query = random_bases(&mut rng(71), 1200);
+    let contig = [
+        &query[..700],
+        &random_bases(&mut rng(72), 1000)[..],
+        &query[700..],
+    ]
+    .concat();
     let shard = build(
         directory.path(),
         &single_contig_entries(&[("split", &contig)]),
@@ -71,9 +75,9 @@ fn costly_gap_split() {
 fn ambiguity_codes_align() {
     let directory = tempfile::tempdir().unwrap();
     let query = [
-        random_sequence(1000, 51),
+        random_bases(&mut rng(51), 1000),
         vec![b'R'; 1000],
-        random_sequence(1000, 52),
+        random_bases(&mut rng(52), 1000),
     ]
     .concat();
     let reverse = reverse_complement(&query);
@@ -246,12 +250,17 @@ fn low_complexity_aligned() {
     // substitutions in one block, inside unrelated sequence. The repeat stays short, as every
     // walk of it is aligned.
     let repeat: Vec<u8> = b"AAAT".repeat(60);
-    let query = [repeat.clone(), random_sequence(50, 71)].concat();
+    let query = [repeat.clone(), random_bases(&mut rng(71), 50)].concat();
     let mut copy = repeat.clone();
     for at in [81, 121, 161] {
         copy[at] = if copy[at] == b'A' { b'C' } else { b'G' };
     }
-    let source = [random_sequence(3000, 72), copy, random_sequence(3000, 73)].concat();
+    let source = [
+        random_bases(&mut rng(72), 3000),
+        copy,
+        random_bases(&mut rng(73), 3000),
+    ]
+    .concat();
     let entries = single_contig_entries(&[("poly", &poly), ("repeat", &source)]);
     let shard = build(directory.path(), &entries);
     for circular in [false, true] {
@@ -270,8 +279,8 @@ fn low_complexity_aligned() {
 #[test]
 fn clustered_change_kept() {
     let directory = tempfile::tempdir().unwrap();
-    let left = [random_sequence(998, 42), b"GC".to_vec()].concat();
-    let right = [b"GC".to_vec(), random_sequence(998, 43)].concat();
+    let left = [random_bases(&mut rng(42), 998), b"GC".to_vec()].concat();
+    let right = [b"GC".to_vec(), random_bases(&mut rng(43), 998)].concat();
     let original = b"AAAT".repeat(45);
     let mut changed = original.clone();
     changed[90] = b'C';
@@ -308,7 +317,10 @@ fn gapped_middle_found(
     middle: impl Fn(&crate::align::Alignment) -> bool,
 ) {
     let directory = tempfile::tempdir().unwrap();
-    let (left, right) = (random_sequence(1000, 61), random_sequence(1000, 62));
+    let (left, right) = (
+        random_bases(&mut rng(61), 1000),
+        random_bases(&mut rng(62), 1000),
+    );
     let query = [left.as_slice(), middle_query, &right].concat();
     let contigs = |sequences: [Vec<u8>; 3]| {
         let names = ["c0", "c1", "c2"].map(String::from);

@@ -176,17 +176,7 @@ mod tests {
     use super::*;
     use crate::align::Strand;
     use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
-
-    fn random_bases(length: usize, mut state: u64) -> Vec<u8> {
-        (0..length)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                b"ACGT"[(state % 4) as usize]
-            })
-            .collect()
-    }
+    use crate::test_support::{random_bases, rng};
 
     /// A shard of one entry with one contig.
     fn shard_of(directory: &std::path::Path, contig: &[u8]) -> Shard {
@@ -207,7 +197,7 @@ mod tests {
     #[test]
     fn window_read_parts() {
         let directory = tempfile::tempdir().unwrap();
-        let contig = [random_bases(3000, 7), vec![b'T'; 200]].concat();
+        let contig = [random_bases(&mut rng(7), 3000), vec![b'T'; 200]].concat();
         let shard = shard_of(directory.path(), &contig);
         let packed = shard.packed(0).unwrap();
         let config = AlignStageConfig::default();
