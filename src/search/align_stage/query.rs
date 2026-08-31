@@ -67,7 +67,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn queries_are_upper_case_and_keep_other_bytes() {
+    fn queries_upper_case() {
         let config = AlignStageConfig::default();
         let query = PreparedQuery::new(b"acgtRYacgt", true, &config).unwrap();
         assert_eq!(query.bases(), b"ACGTRYACGT");

@@ -85,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_defaults_are_those_of_jam_0_10() {
+    fn documented_defaults() {
         let config = AlignStageConfig::default();
         config.validate().unwrap();
         assert_eq!(config.anchors.a, 15);
@@ -101,7 +101,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_settings_are_rejected() {
+    fn invalid_settings_rejected() {
         let bad = [
             AlignStageConfig {
                 min_chain_identity: 1.5,

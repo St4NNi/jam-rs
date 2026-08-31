@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn query_room_on_both_sides() {
+    fn query_room_sides() {
         let bases = b"ACGTTGCAAC".repeat(10);
         let config = AlignStageConfig::default();
         let circular = PreparedQuery::new(&bases, true, &config).unwrap();
@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn fragments_stay_within_their_limit_and_rounds_go_back() {
+    fn fragment_limit_rounds() {
         let bases = b"ACGTTGCAAC".repeat(10);
         let query = PreparedQuery::new(&bases, false, &AlignStageConfig::default()).unwrap();
         let fragment = Fragment::place(0, alignment((0, 50)), query.length(), false).unwrap();

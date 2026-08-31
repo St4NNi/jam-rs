@@ -202,7 +202,7 @@ pub(super) fn fragments(aligned: &AlignedEntry) -> Vec<&Fragment> {
     primary.chain(mosaic.alternatives.iter()).collect()
 }
 
-/// The entries of jam 0.10's search tests, in this order: s1 to s9.
+/// The nine entries of the stage 3 tests, named s1 to s9.
 fn fixture_entries(query: &[u8]) -> Vec<EntryContigs> {
     let flank = random_sequence;
     let named = |name: &str, contigs: Vec<(&str, Vec<u8>)>| {
@@ -297,7 +297,7 @@ fn entry(name: &str) -> u32 {
 }
 
 #[test]
-fn a_planted_query_is_confirmed_with_its_location_and_cigar() {
+fn planted_query_placed() {
     let fixture = fixture();
     let s1 = align(
         &fixture.shard,
@@ -324,7 +324,7 @@ fn a_planted_query_is_confirmed_with_its_location_and_cigar() {
 }
 
 #[test]
-fn a_diverged_reverse_copy_is_confirmed_on_the_reverse_strand() {
+fn reverse_copy_confirmed() {
     let fixture = fixture();
     let s2 = align(
         &fixture.shard,
@@ -345,7 +345,7 @@ fn a_diverged_reverse_copy_is_confirmed_on_the_reverse_strand() {
 }
 
 #[test]
-fn split_entries_and_contigs_count_together() {
+fn split_parts_count() {
     let fixture = fixture();
     let s3 = align(
         &fixture.shard,
@@ -390,7 +390,7 @@ fn split_entries_and_contigs_count_together() {
 }
 
 #[test]
-fn an_entry_below_the_limits_is_not_reported() {
+fn low_entry_unreported() {
     let fixture = fixture();
     // s4 holds 400 query bases.
     let s4 = align(
@@ -405,7 +405,7 @@ fn an_entry_below_the_limits_is_not_reported() {
 }
 
 #[test]
-fn mixed_identities_qualify_combined() {
+fn mixed_identities_combine() {
     let fixture = fixture();
     let s6 = align(
         &fixture.shard,
@@ -440,7 +440,7 @@ fn mixed_identities_qualify_combined() {
 }
 
 #[test]
-fn a_circular_query_aligns_over_its_origin_in_one_fragment() {
+fn circular_origin_fragment() {
     let fixture = fixture();
     let ring = align(
         &fixture.shard,
@@ -472,7 +472,7 @@ fn a_circular_query_aligns_over_its_origin_in_one_fragment() {
 }
 
 #[test]
-fn contigs_that_are_mostly_not_the_query_do_not_count() {
+fn foreign_contigs_ignored() {
     let fixture = fixture();
     let with_contig_rule = |coverage: f64| DecisionRule {
         min_contig_coverage: coverage,
@@ -493,7 +493,7 @@ fn contigs_that_are_mostly_not_the_query_do_not_count() {
 }
 
 #[test]
-fn a_contig_that_only_shares_a_repeat_is_left_out_by_the_contig_rule() {
+fn repeat_contig_excluded() {
     let directory = tempfile::tempdir().unwrap();
     let query = random_sequence(3000, 21);
     // Contig 0 holds the query with a few differences; contig 1 holds 600 query bases in
@@ -526,7 +526,7 @@ fn a_contig_that_only_shares_a_repeat_is_left_out_by_the_contig_rule() {
 }
 
 #[test]
-fn a_window_widens_while_the_alignment_reaches_its_edge() {
+fn window_widens_edge() {
     let directory = tempfile::tempdir().unwrap();
     let query = random_sequence(20_000, 42);
     let contig = [
@@ -563,7 +563,7 @@ fn a_window_widens_while_the_alignment_reaches_its_edge() {
 }
 
 #[test]
-fn insertions_are_query_bases_and_deletions_are_contig_bases() {
+fn insertion_deletion_sides() {
     let directory = tempfile::tempdir().unwrap();
     let query = random_sequence(2000, 31);
     let extra = b"GGGGGGGGGG";
@@ -612,7 +612,7 @@ impl crate::storage::ReadAt for StopOnRead {
 }
 
 #[test]
-fn a_stop_flag_stops_between_windows() {
+fn stop_between_windows() {
     use crate::storage::ReadAt;
     let fixture = fixture();
     let s3 = entry("s3");
@@ -652,7 +652,7 @@ fn a_stop_flag_stops_between_windows() {
 }
 
 #[test]
-fn windows_outside_their_contig_and_other_anchor_settings_are_rejected() {
+fn bad_windows_rejected() {
     let fixture = fixture();
     let mut located = located(&fixture.shard, entry("s1"), &fixture.query, 300);
     let beyond = 0..1_000_000;

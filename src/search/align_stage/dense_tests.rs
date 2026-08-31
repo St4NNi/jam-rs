@@ -40,7 +40,7 @@ fn cigars(aligned: &AlignedEntry) -> Vec<String> {
 }
 
 #[test]
-fn a_second_block_beyond_a_costly_gap_is_aligned_on_its_own() {
+fn costly_gap_split() {
     // The entry holds query[..700], 1,000 unrelated bases and query[700..]. Bridging the gap
     // costs more than the second block earns, so the first alignment is the first block alone;
     // the second block is aligned from the anchors it leaves out.
@@ -68,7 +68,7 @@ fn a_second_block_beyond_a_costly_gap_is_aligned_on_its_own() {
 }
 
 #[test]
-fn ambiguity_codes_align_to_their_stored_bytes() {
+fn ambiguity_codes_align() {
     let directory = tempfile::tempdir().unwrap();
     let query = [
         random_sequence(1000, 51),
@@ -91,7 +91,7 @@ fn ambiguity_codes_align_to_their_stored_bytes() {
 }
 
 #[test]
-fn dense_exact_blocks_join_across_a_long_gap() {
+fn blocks_join_gap() {
     let directory = tempfile::tempdir().unwrap();
     let query = [vec![b'A'; 600], vec![b'C'; 600]].concat();
     let contig = [vec![b'A'; 600], vec![b'G'; 300], vec![b'C'; 600]].concat();
@@ -113,7 +113,7 @@ fn dense_exact_blocks_join_across_a_long_gap() {
 }
 
 #[test]
-fn dense_conserved_blocks_give_the_full_gapped_cigar() {
+fn conserved_blocks_cigar() {
     let directory = tempfile::tempdir().unwrap();
     let query = [vec![b'A'; 600], vec![b'C'; 600]].concat();
     let contig = [vec![b'A'; 600], vec![b'G'; 20], vec![b'C'; 600]].concat();
@@ -138,7 +138,7 @@ fn dense_conserved_blocks_give_the_full_gapped_cigar() {
 }
 
 #[test]
-fn every_periodic_mapping_is_kept() {
+fn periodic_mappings_kept() {
     // 20 kb of ACGT against itself: every diagonal a multiple of four apart is an exact
     // mapping, on both strands.
     let directory = tempfile::tempdir().unwrap();
@@ -172,7 +172,7 @@ fn every_periodic_mapping_is_kept() {
 }
 
 #[test]
-fn circular_dense_repeats_keep_every_whole_location() {
+fn circular_repeat_locations() {
     for query in [vec![b'A'; 1200], b"ACGT".repeat(300)] {
         let directory = tempfile::tempdir().unwrap();
         let contig = [query.clone(), query.clone()].concat();
@@ -200,7 +200,7 @@ fn circular_dense_repeats_keep_every_whole_location() {
 }
 
 #[test]
-fn an_imperfect_dense_repeat_gives_every_copy() {
+fn imperfect_repeat_copies() {
     // 20 kb of ACGT with one N against the same contig: the anchors would exceed the chaining
     // budget, so the copies are walked along their diagonals instead.
     let directory = tempfile::tempdir().unwrap();
@@ -238,13 +238,13 @@ fn an_imperfect_dense_repeat_gives_every_copy() {
 }
 
 #[test]
-fn low_complexity_runs_are_aligned() {
+fn low_complexity_aligned() {
     let directory = tempfile::tempdir().unwrap();
     // A homopolymer query and entry: no ordinary anchor exists.
     let poly = vec![b'A'; 1200];
     // A mostly low-complexity query whose entry holds only that part, with clustered
-    // substitutions in one block, inside unrelated sequence. (jam 0.10 used 1,000 repeat bases;
-    // every walk of the repeat is aligned, which takes minutes in a debug build.)
+    // substitutions in one block, inside unrelated sequence. The repeat stays short, as every
+    // walk of it is aligned.
     let repeat: Vec<u8> = b"AAAT".repeat(60);
     let query = [repeat.clone(), random_sequence(50, 71)].concat();
     let mut copy = repeat.clone();
@@ -268,7 +268,7 @@ fn low_complexity_runs_are_aligned() {
 }
 
 #[test]
-fn a_clustered_change_keeps_a_short_low_complexity_fragment() {
+fn clustered_change_kept() {
     let directory = tempfile::tempdir().unwrap();
     let left = [random_sequence(998, 42), b"GC".to_vec()].concat();
     let right = [b"GC".to_vec(), random_sequence(998, 43)].concat();
@@ -302,7 +302,7 @@ fn a_clustered_change_keeps_a_short_low_complexity_fragment() {
 /// Searches random flanks around `middle_query` in entries "forward" and "reverse" whose three
 /// contigs are the flanks and `middle_contig`, on the given and the opposite strand, and checks
 /// that both give the whole query with the full gapped middle fragment.
-fn gapped_middle_is_recovered(
+fn gapped_middle_found(
     middle_query: &[u8],
     middle_contig: &[u8],
     middle: impl Fn(&crate::align::Alignment) -> bool,
@@ -351,10 +351,10 @@ fn gapped_middle_is_recovered(
 }
 
 #[test]
-fn short_seeded_blocks_join_into_a_gapped_fragment() {
+fn short_blocks_join() {
     // Conserved blocks of 30 bases, each shorter than an anchor chain, with 20 contig-only bases
     // between them.
-    gapped_middle_is_recovered(
+    gapped_middle_found(
         &[[b'A'; 30], [b'C'; 30], [b'G'; 30]].concat(),
         &[
             &[b'A'; 30][..],
@@ -369,10 +369,10 @@ fn short_seeded_blocks_join_into_a_gapped_fragment() {
 }
 
 #[test]
-fn a_substitution_beside_a_gap_joins_the_conserved_blocks() {
+fn substitution_beside_gap() {
     // The base after the first block differs, so no exact seed sits next to its end: 200
     // matches, one substitution and 99 contig-only bases.
-    gapped_middle_is_recovered(
+    gapped_middle_found(
         &[&[b'A'; 100][..], b"T", &[b'C'; 100]].concat(),
         &[[b'A'; 100], [b'G'; 100], [b'C'; 100]].concat(),
         |alignment| {
@@ -389,10 +389,10 @@ fn a_substitution_beside_a_gap_joins_the_conserved_blocks() {
 }
 
 #[test]
-fn a_weak_join_of_short_blocks_reaches_the_column_minimum() {
+fn weak_join_columns() {
     // Blocks of 25 bases around 50 contig-only bases: one block has fewer than 100 columns,
     // the join has 100.
-    gapped_middle_is_recovered(
+    gapped_middle_found(
         &[[b'A'; 25], [b'C'; 25]].concat(),
         &[&[b'A'; 25][..], &[b'G'; 50], &[b'C'; 25]].concat(),
         |alignment| format_cigar(&alignment.runs) == "25=50D25=",
@@ -400,10 +400,10 @@ fn a_weak_join_of_short_blocks_reaches_the_column_minimum() {
 }
 
 #[test]
-fn a_weak_join_aligns_both_divergent_pieces_globally() {
+fn weak_join_global() {
     // Three query bases against 50 contig bases between the blocks: three substitutions and 47
     // contig-only bases score above three query-only and 50 contig-only bases.
-    gapped_middle_is_recovered(
+    gapped_middle_found(
         &[&[b'A'; 25][..], &[b'T'; 3], &[b'C'; 25]].concat(),
         &[&[b'A'; 25][..], &[b'G'; 50], &[b'C'; 25]].concat(),
         |alignment| {
@@ -421,15 +421,15 @@ fn a_weak_join_aligns_both_divergent_pieces_globally() {
 }
 
 #[test]
-fn joins_of_short_blocks_count_whatever_their_score() {
+fn short_joins_count() {
     // Blocks of 17 and 18 bases: 35 matches score 70; 65 contig-only bases score -70 and 100
     // score -105.
-    gapped_middle_is_recovered(
+    gapped_middle_found(
         &[&[b'A'; 17][..], &[b'C'; 18]].concat(),
         &[&[b'A'; 17][..], &[b'G'; 65], &[b'C'; 18]].concat(),
         |alignment| format_cigar(&alignment.runs) == "17=65D18=" && alignment.score == 0,
     );
-    gapped_middle_is_recovered(
+    gapped_middle_found(
         &[&[b'A'; 17][..], &[b'C'; 18]].concat(),
         &[&[b'A'; 17][..], &[b'G'; 100], &[b'C'; 18]].concat(),
         |alignment| format_cigar(&alignment.runs) == "17=100D18=" && alignment.score == -35,

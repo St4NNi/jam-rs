@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn insertions_move_the_query_and_deletions_move_the_window() {
+    fn gaps_move_positions() {
         // Window bases 100..130 of a window starting at contig position 1,000.
         let found = alignment(Strand::Forward, (10, 35), (1100, 1130), "10=5I5=10D5=");
         let path = AlignedPath::of(&found, 500, 1000);
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chain_on_an_aligned_diagonal_is_redundant_and_its_rest_is_kept() {
+    fn aligned_diagonal_redundant() {
         let mut paths = PathIndex::default();
         let found = alignment(Strand::Forward, (0, 100), (0, 100), "100=");
         paths.add(&AlignedPath::of(&found, 1000, 0));
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn circular_positions_meet_stretches_one_query_length_on() {
+    fn circular_positions_shift() {
         let mut paths = PathIndex::default();
         // An alignment over the origin of a query of 100 bases: query 90..130.
         let found = alignment(Strand::Forward, (90, 130), (190, 230), "40=");
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn walks_count_for_coverage_but_not_for_alignments_around() {
+    fn walks_count_coverage() {
         let walk = Walk {
             strand: Strand::Reverse,
             contig: 100,

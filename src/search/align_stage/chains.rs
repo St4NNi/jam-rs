@@ -118,7 +118,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_chains_are_skipped_only_when_long_and_asked_for() {
+    fn sparse_chains_skipped() {
         let asked = AlignStageConfig {
             min_chain_identity: 0.9,
             ..AlignStageConfig::default()

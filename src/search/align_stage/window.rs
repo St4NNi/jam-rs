@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn a_window_read_gives_its_chains_walks_and_edges() {
+    fn window_read_parts() {
         let directory = tempfile::tempdir().unwrap();
         let contig = [random_bases(3000, 7), vec![b'T'; 200]].concat();
         let shard = shard_of(directory.path(), &contig);
@@ -238,14 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn spans_merge_when_they_overlap_or_touch() {
+    fn touching_spans_merge() {
         let mut spans = vec![30..40, 0..10, 5..20, 20..25, 50..60];
         merge_spans(&mut spans);
         assert_eq!(spans, [0..25, 30..40, 50..60]);
     }
 
     #[test]
-    fn spans_widen_once_per_round_within_the_contig() {
+    fn spans_widen_once() {
         let read = 100..200;
         let mut span = read.clone();
         assert!(widen(&mut span, &read, (true, false), 64, 1000));
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn walks_on_the_reverse_strand_are_read_from_the_window_end() {
+    fn reverse_walks_read() {
         let walk = Walk {
             strand: Strand::Reverse,
             contig: 10,
