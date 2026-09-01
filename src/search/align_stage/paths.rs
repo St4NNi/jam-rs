@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use crate::align::{Alignment, Chain, EditOperation, Strand, Walk};
+use crate::align::{Alignment, Chain, EditOperation, Interval, Strand, Walk};
 use std::collections::HashMap;
 
 /// The paired stretches of one alignment: (query position, oriented window position, length).
@@ -86,18 +86,13 @@ fn add_segments(segments: &mut Segments, path: &AlignedPath) {
     }
 }
 
-/// The bases covered by the union of the half-open spans.
-fn covered_bases(mut spans: Vec<(i64, i64)>) -> u64 {
-    spans.sort_unstable();
-    let (mut covered, mut reached) = (0u64, i64::MIN);
-    for (from, to) in spans {
-        let from = from.max(reached);
-        if to > from {
-            covered += (to - from) as u64;
-            reached = to;
-        }
-    }
-    covered
+/// The bases covered by the union of `spans`, which are clipped to the walk and so never negative.
+fn covered_bases(spans: &[(i64, i64)]) -> u64 {
+    let intervals = spans.iter().map(|&(from, to)| Interval {
+        start: from as u64,
+        end: to as u64,
+    });
+    Interval::total_length(&Interval::union(intervals.collect()))
 }
 
 /// The query lengths a circular position may be shifted by to meet a stored stretch.
@@ -214,7 +209,7 @@ impl PathIndex {
             );
         }
         let required = if circular { 10 } else { 9 };
-        covered_bases(overlaps).min(length as u64) * 10 >= length as u64 * required
+        covered_bases(&overlaps).min(length as u64) * 10 >= length as u64 * required
     }
 
     /// Whether kernel alignments within `band` diagonals of a dense walk already pair nine tenths
@@ -250,7 +245,9 @@ impl PathIndex {
                 }
             }
         }
-        let nine_tenths = |spans| covered_bases(spans).min(length as u64) * 10 >= length as u64 * 9;
+        let nine_tenths = |spans: Vec<(i64, i64)>| {
+            covered_bases(&spans).min(length as u64) * 10 >= length as u64 * 9
+        };
         nine_tenths(queries) && nine_tenths(windows)
     }
 }
