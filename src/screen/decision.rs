@@ -7,6 +7,7 @@ use super::ScreenError;
 use super::batch::AssemblyContig;
 use super::fragments::EntryContig;
 use super::records::{ScreenContig, ScreenEntry};
+use crate::align::Interval;
 use crate::decide::{DecisionRule, Fragment};
 use std::collections::{HashMap, HashSet};
 
@@ -29,33 +30,19 @@ struct ContigScores {
     entries: HashMap<u32, u32>,
 }
 
-/// The bases in the union of half-open spans.
-fn union_length(mut spans: Vec<(u64, u64)>) -> u64 {
-    spans.sort_unstable();
-    let (mut total, mut reached) = (0, 0);
-    for (start, end) in spans {
-        let start = start.max(reached);
-        if end > start {
-            total += end - start;
-            reached = end;
-        }
-    }
-    total
-}
-
 /// The bases of each assembly contig that the fragments align, counted once.
 fn aligned_bases<'a>(fragments: impl Iterator<Item = &'a Fragment>) -> HashMap<u32, u64> {
-    let mut spans: HashMap<u32, Vec<(u64, u64)>> = HashMap::new();
+    let mut intervals: HashMap<u32, Vec<Interval>> = HashMap::new();
     for fragment in fragments {
         let interval = fragment.alignment.contig_interval;
-        spans
+        intervals
             .entry(fragment.contig_index)
             .or_default()
-            .push((interval.start, interval.end));
+            .push(interval);
     }
-    spans
+    intervals
         .into_iter()
-        .map(|(contig, spans)| (contig, union_length(spans)))
+        .map(|(contig, intervals)| (contig, Interval::total_length(&Interval::union(intervals))))
         .collect()
 }
 
