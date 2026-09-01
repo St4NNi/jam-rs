@@ -10,16 +10,14 @@ use crate::align::{Alignment, AlignmentConfig, Interval};
 use crate::decide::{DecisionRule, Fragment};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
+use crate::search::CoverageBound;
+use crate::search::PossibleEntry;
+use crate::search::QueryKmers;
 use crate::search::SearchControl;
-use crate::search::align_stage::{
+use crate::search::{
     AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, entry_fragments,
 };
-use crate::search::bound::CoverageBound;
-use crate::search::locate_stage::{
-    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
-};
-use crate::search::query::QueryKmers;
-use crate::search::sketch_stage::PossibleEntry;
+use crate::search::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
 use rayon::prelude::*;
 
 /// An entry contig, the query of the screen: the entry and the contig within it.

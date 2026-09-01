@@ -21,7 +21,7 @@ pub use records::{AssemblySummary, ScreenContig, ScreenEntry};
 use crate::align::AlignmentError;
 use crate::decide::{DecideError, DecisionRule};
 use crate::index::IndexError;
-use crate::search::align_stage::{AlignStageConfig, AlignStageError};
+use crate::search::{AlignStageConfig, AlignStageError};
 use crate::search::{SearchError, Stopped};
 use contig_output::write_contigs;
 use std::path::PathBuf;

@@ -5,9 +5,9 @@
 use super::ScreenError;
 use super::batch::Batch;
 use crate::index::{ColorSetId, SeedLocation, Shard, Sketch};
+use crate::search::QueryKmers;
 use crate::search::SearchControl;
 use crate::search::Stopped;
-use crate::search::query::QueryKmers;
 use crate::seeds::Seeder;
 use rayon::prelude::*;
 use std::collections::HashMap;

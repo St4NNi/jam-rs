@@ -7,11 +7,11 @@ use super::tests::{index_of, plasmids, screen};
 use super::*;
 use crate::index::Shard;
 use crate::loss::LossBudget;
-use crate::search::align_stage::{AlignStageWorkspace, PreparedQuery, align_entry};
-use crate::search::bound::CoverageBound;
-use crate::search::locate_stage::{LocateOutcome, LocateRequest, LocateWorkspace, locate_entry};
-use crate::search::query::QueryKmers;
-use crate::search::sketch_stage::{SketchLimits, sketch_stage};
+use crate::search::CoverageBound;
+use crate::search::QueryKmers;
+use crate::search::{AlignStageWorkspace, PreparedQuery, align_entry};
+use crate::search::{LocateOutcome, LocateRequest, LocateWorkspace, locate_entry};
+use crate::search::{SketchLimits, sketch_stage};
 use crate::seeds::{Seeder, reverse_complement};
 use crate::test_support::{miss_model, no_stop, random_bases, rng, with_substitutions};
 

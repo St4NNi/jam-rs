@@ -2,24 +2,32 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-pub mod align_stage;
-pub mod bound;
-pub mod control;
-pub mod driver;
-pub mod error;
-pub mod events;
-pub mod locate_stage;
-pub mod located;
-pub mod query;
-pub mod sketch_stage;
+mod align_stage;
+mod bound;
+mod control;
+mod driver;
+mod error;
+mod events;
+mod locate_stage;
+mod located;
+mod query;
+mod sketch_stage;
 
+#[cfg(test)]
+pub use align_stage::align_entry;
+pub use align_stage::{
+    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, PreparedQuery,
+    entry_fragments,
+};
+pub use bound::CoverageBound;
 pub use control::{SearchControl, Stopped};
 pub use driver::{AlignStageWork, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;
 pub use events::{Completion, DropReason, EntryEvent, SearchStage};
-pub use locate_stage::LocateWork;
+pub use locate_stage::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
 pub use located::{ContigWindows, LocatedEntry};
-pub use sketch_stage::SketchWork;
+pub use query::QueryKmers;
+pub use sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 
 #[cfg(test)]
 mod locate_stage_tests;
