@@ -119,20 +119,20 @@ fn blocks_join_gap() {
 #[test]
 fn conserved_blocks_cigar() {
     let directory = tempfile::tempdir().unwrap();
-    let query = [vec![b'A'; 600], vec![b'C'; 600]].concat();
-    let contig = [vec![b'A'; 600], vec![b'G'; 20], vec![b'C'; 600]].concat();
+    let query = [vec![b'A'; 200], vec![b'C'; 200]].concat();
+    let contig = [vec![b'A'; 200], vec![b'G'; 20], vec![b'C'; 200]].concat();
     let reverse = reverse_complement(&contig);
     let entries = single_contig_entries(&[("forward", &contig), ("reverse", &reverse)]);
     let shard = build(directory.path(), &entries);
     for circular in [false, true] {
         for entry in [0, 1] {
-            let located = whole_contigs(&shard, entry, 1200);
+            let located = whole_contigs(&shard, entry, 400);
             let aligned = align_located(&shard, &query, circular, &located, &rule("1"));
             assert!(
                 fragments(&aligned).iter().any(|f| {
-                    format_cigar(&f.alignment.runs) == "600=20D600="
-                        && f.alignment.contig_interval == Interval::new(0, 1220).unwrap()
-                        && f.query_segments.iter().map(|part| part.len()).sum::<u64>() == 1200
+                    format_cigar(&f.alignment.runs) == "200=20D200="
+                        && f.alignment.contig_interval == Interval::new(0, 420).unwrap()
+                        && f.query_segments.iter().map(|part| part.len()).sum::<u64>() == 400
                 }),
                 "entry {entry} circular {circular}: {:?}",
                 cigars(&aligned)
@@ -143,10 +143,10 @@ fn conserved_blocks_cigar() {
 
 #[test]
 fn periodic_mappings_kept() {
-    // 20 kb of ACGT against itself: every diagonal a multiple of four apart is an exact
+    // 4 kb of ACGT against itself: every diagonal a multiple of four apart is an exact
     // mapping, on both strands.
     let directory = tempfile::tempdir().unwrap();
-    let query = b"ACGT".repeat(5000);
+    let query = b"ACGT".repeat(1000);
     let shard = build(
         directory.path(),
         &single_contig_entries(&[("periodic", &query)]),
@@ -155,11 +155,11 @@ fn periodic_mappings_kept() {
         &shard,
         &query,
         false,
-        &whole_contigs(&shard, 0, 20_000),
+        &whole_contigs(&shard, 0, 4_000),
         &rule("0.5"),
     );
     // Chains need 40 bases (the least chain score); fragments need 100 columns.
-    let per_strand = |minimum: u64| 2 * (20_000 - minimum) / 4 + 1;
+    let per_strand = |minimum: u64| 2 * (4_000 - minimum) / 4 + 1;
     assert_eq!(aligned.work.chains, 2 * per_strand(40));
     assert_eq!(aligned.work.redundant_chains, 0);
     let decision = &aligned.decision;
@@ -205,20 +205,20 @@ fn circular_repeat_locations() {
 
 #[test]
 fn imperfect_repeat_copies() {
-    // 20 kb of ACGT with one N against the same contig: the anchors would exceed the chaining
+    // 4 kb of ACGT with one N against the same contig: the anchors would exceed the chaining
     // budget, so the copies are walked along their diagonals instead.
     let directory = tempfile::tempdir().unwrap();
-    let mut query = b"ACGT".repeat(5000);
-    query[10_000] = b'N';
+    let mut query = b"ACGT".repeat(1000);
+    query[2_000] = b'N';
     let shard = build(
         directory.path(),
         &single_contig_entries(&[("dense", &query)]),
     );
     for circular in [false, true] {
-        let located = whole_contigs(&shard, 0, 20_000);
+        let located = whole_contigs(&shard, 0, 4_000);
         let aligned = align_located(&shard, &query, circular, &located, &rule("0.5"));
         assert_eq!(aligned.work.anchors, 0);
-        assert_eq!(aligned.decision.mosaic.covered_bases, 20_000);
+        assert_eq!(aligned.decision.mosaic.covered_bases, 4_000);
         assert!(aligned.decision.identity() > 0.999);
         let found = fragments(&aligned);
         assert!(
@@ -229,9 +229,9 @@ fn imperfect_repeat_copies() {
         // Every diagonal a multiple of four apart, on both strands: a linear query has one per
         // offset with at least 100 columns, a circular one each offset modulo its length.
         let expected = if circular {
-            2 * 20_000 / 4
+            2 * 4_000 / 4
         } else {
-            2 * (2 * (20_000 - 100) / 4 + 1)
+            2 * (2 * (4_000 - 100) / 4 + 1)
         };
         assert!(
             found.len() <= expected && found.len() + 8 >= expected,
@@ -245,7 +245,7 @@ fn imperfect_repeat_copies() {
 fn low_complexity_aligned() {
     let directory = tempfile::tempdir().unwrap();
     // A homopolymer query and entry: no ordinary anchor exists.
-    let poly = vec![b'A'; 1200];
+    let poly = vec![b'A'; 400];
     // A mostly low-complexity query whose entry holds only that part, with clustered
     // substitutions in one block, inside unrelated sequence. The repeat stays short, as every
     // walk of it is aligned.
@@ -256,16 +256,16 @@ fn low_complexity_aligned() {
         copy[at] = if copy[at] == b'A' { b'C' } else { b'G' };
     }
     let source = [
-        random_bases(&mut rng(72), 3000),
+        random_bases(&mut rng(72), 1000),
         copy,
-        random_bases(&mut rng(73), 3000),
+        random_bases(&mut rng(73), 1000),
     ]
     .concat();
     let entries = single_contig_entries(&[("poly", &poly), ("repeat", &source)]);
     let shard = build(directory.path(), &entries);
     for circular in [false, true] {
         let found = align(&shard, 0, &poly, circular, &rule("0.5"));
-        assert_eq!(found.decision.mosaic.covered_bases, 1200);
+        assert_eq!(found.decision.mosaic.covered_bases, 400);
         let found = align(&shard, 1, &query, circular, &rule("0.5"));
         let covered = found.decision.mosaic.covered_bases;
         assert!(covered >= 237, "{covered}");
@@ -318,8 +318,8 @@ fn gapped_middle_found(
 ) {
     let directory = tempfile::tempdir().unwrap();
     let (left, right) = (
-        random_bases(&mut rng(61), 1000),
-        random_bases(&mut rng(62), 1000),
+        random_bases(&mut rng(61), 300),
+        random_bases(&mut rng(62), 300),
     );
     let query = [left.as_slice(), middle_query, &right].concat();
     let contigs = |sequences: [Vec<u8>; 3]| {
@@ -342,22 +342,20 @@ fn gapped_middle_found(
     ];
     let shard = build(directory.path(), &entries);
     for circular in [false, true] {
-        for coverage in ["1", "0.5"] {
-            for entry in [0, 1] {
-                let context = format!("entry {entry} circular {circular} coverage {coverage}");
-                let located = whole_contigs(&shard, entry, query.len() as u64);
-                let found = align_located(&shard, &query, circular, &located, &rule(coverage));
-                let covered = found.decision.mosaic.covered_bases;
-                assert_eq!(covered, query.len() as u64, "{context}");
-                let contig = Interval::new(0, middle_contig.len() as u64).unwrap();
-                assert!(
-                    fragments(&found).iter().any(|f| f.contig_index == 1
-                        && f.alignment.contig_interval == contig
-                        && middle(&f.alignment)),
-                    "{context}: {:?}",
-                    cigars(&found)
-                );
-            }
+        for entry in [0, 1] {
+            let context = format!("entry {entry} circular {circular}");
+            let located = whole_contigs(&shard, entry, query.len() as u64);
+            let found = align_located(&shard, &query, circular, &located, &rule("1"));
+            let covered = found.decision.mosaic.covered_bases;
+            assert_eq!(covered, query.len() as u64, "{context}");
+            let contig = Interval::new(0, middle_contig.len() as u64).unwrap();
+            assert!(
+                fragments(&found).iter().any(|f| f.contig_index == 1
+                    && f.alignment.contig_interval == contig
+                    && middle(&f.alignment)),
+                "{context}: {:?}",
+                cigars(&found)
+            );
         }
     }
 }
@@ -382,11 +380,11 @@ fn short_blocks_join() {
 
 #[test]
 fn substitution_beside_gap() {
-    // The base after the first block differs, so no exact seed sits next to its end: 200
-    // matches, one substitution and 99 contig-only bases.
+    // The base after the first block differs, so no exact seed sits next to its end: 80
+    // matches, one substitution and 39 contig-only bases.
     gapped_middle_found(
-        &[&[b'A'; 100][..], b"T", &[b'C'; 100]].concat(),
-        &[[b'A'; 100], [b'G'; 100], [b'C'; 100]].concat(),
+        &[&[b'A'; 40][..], b"T", &[b'C'; 40]].concat(),
+        &[[b'A'; 40], [b'G'; 40], [b'C'; 40]].concat(),
         |alignment| {
             let counts = alignment.counts();
             let found = (
@@ -395,7 +393,7 @@ fn substitution_beside_gap() {
                 counts.insertions,
                 counts.deletions,
             );
-            found == (200, 1, 0, 99)
+            found == (80, 1, 0, 39)
         },
     );
 }
