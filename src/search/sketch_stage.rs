@@ -31,7 +31,7 @@ pub struct PossibleEntry {
     /// The containment estimate from the seed hits of the sketch; for an entry in a frequent
     /// seed's color set, that seed counts as hit. False seed hits are still included.
     pub containment_estimate: f64,
-    /// The distinct query k-mers (indices into `QueryKmers::seeds`) that the sketch places in the
+    /// The distinct query k-mers (indices into `QueryKmers::distinct`) that the sketch places in the
     /// entry, ascending. Frequent seeds are not listed.
     pub seed_hits: Vec<u32>,
 }
@@ -66,7 +66,7 @@ pub struct SketchWork {
 #[derive(Clone, Debug)]
 pub struct SketchOutcome {
     pub candidates: Vec<PossibleEntry>,
-    /// The frequent seeds (indices into `QueryKmers::seeds`), ascending.
+    /// The frequent seeds (indices into `QueryKmers::distinct`), ascending.
     pub frequent_seeds: Vec<u32>,
     pub work: SketchWork,
 }
@@ -91,7 +91,7 @@ pub fn sketch_stage(
     let found = look_up(sketch, query, control)?;
     let mut work = SketchWork {
         query_kmers: query.kmers(),
-        lookups: query.seeds().len() as u64,
+        lookups: query.distinct().len() as u64,
         seeds_found: found.len() as u64,
         ..SketchWork::default()
     };
@@ -150,7 +150,7 @@ fn look_up(
 ) -> Result<Vec<FoundSeed>, Stopped> {
     let color_sets = sketch.color_sets();
     let chunks = query
-        .seeds()
+        .distinct()
         .par_chunks(CHUNK_SEEDS)
         .enumerate()
         .map(|(chunk, seeds)| {

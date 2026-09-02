@@ -159,7 +159,7 @@ fn read_seed_hits(
         if index % LOOKUPS_PER_CHECK == 0 {
             control.check()?;
         }
-        let hash = request.query.seeds()[seed as usize].hash;
+        let hash = request.query.distinct()[seed as usize].hash;
         workspace.locations.clear();
         shard
             .positions()

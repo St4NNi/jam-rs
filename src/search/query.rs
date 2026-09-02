@@ -8,7 +8,7 @@ use std::ops::Range;
 
 /// One distinct query k-mer and where it occurs on the query.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuerySeed {
+pub struct DistinctKmer {
     /// jamhash of the canonical k-mer, salted below the entropy limit, as the index stores it.
     pub hash: u64,
     /// Its starts on the query, as a range into `QueryKmers::positions`.
@@ -23,7 +23,7 @@ pub struct QueryKmers {
     /// The minimizer window of the seed scheme, in k-mers.
     window: u64,
     kmers: u64,
-    seeds: Vec<QuerySeed>,
+    distinct: Vec<DistinctKmer>,
     positions: Vec<u32>,
 }
 
@@ -43,11 +43,11 @@ impl QueryKmers {
             }
         });
         kmers.par_sort_unstable();
-        let mut seeds: Vec<QuerySeed> = Vec::new();
+        let mut distinct: Vec<DistinctKmer> = Vec::new();
         for (index, &(hash, _)) in kmers.iter().enumerate() {
-            match seeds.last_mut() {
+            match distinct.last_mut() {
                 Some(last) if last.hash == hash => last.positions.end += 1,
-                _ => seeds.push(QuerySeed {
+                _ => distinct.push(DistinctKmer {
                     hash,
                     positions: index as u32..index as u32 + 1,
                 }),
@@ -57,7 +57,7 @@ impl QueryKmers {
             length: query.len() as u64,
             window: u64::from(seeder.scheme().w),
             kmers: kmers.len() as u64,
-            seeds,
+            distinct,
             positions: kmers.into_iter().map(|(_, position)| position).collect(),
         }
     }
@@ -73,13 +73,13 @@ impl QueryKmers {
     }
 
     /// The distinct query k-mers, by ascending hash.
-    pub fn seeds(&self) -> &[QuerySeed] {
-        &self.seeds
+    pub fn distinct(&self) -> &[DistinctKmer] {
+        &self.distinct
     }
 
     /// The query starts of the distinct k-mer `seed`, ascending.
     pub fn positions(&self, seed: u32) -> &[u32] {
-        let range = &self.seeds[seed as usize].positions;
+        let range = &self.distinct[seed as usize].positions;
         &self.positions[range.start as usize..range.end as usize]
     }
 
@@ -125,9 +125,9 @@ mod tests {
         let query = b"ACGTTGCAACGTTGCA";
         let kmers = QueryKmers::new(&seeder(), query, false);
         assert_eq!(kmers.kmers(), 12);
-        let all: Vec<u32> = (0..kmers.seeds().len() as u32).collect();
+        let all: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
         assert_eq!(kmers.sorted_positions(&all), (0..12).collect::<Vec<_>>());
-        let first = (0..kmers.seeds().len() as u32)
+        let first = (0..kmers.distinct().len() as u32)
             .find(|&seed| kmers.positions(seed).contains(&0))
             .unwrap();
         assert_eq!(kmers.positions(first), &[0, 7, 8]);
@@ -140,7 +140,7 @@ mod tests {
         let circular = QueryKmers::new(&seeder(), query, true);
         assert_eq!(linear.kmers(), 8);
         assert_eq!(circular.kmers(), 12);
-        let all: Vec<u32> = (0..circular.seeds().len() as u32).collect();
+        let all: Vec<u32> = (0..circular.distinct().len() as u32).collect();
         assert_eq!(circular.sorted_positions(&all), (0..12).collect::<Vec<_>>());
     }
 
@@ -148,7 +148,7 @@ mod tests {
     fn unknown_bases_skipped() {
         let query = b"ACGTTNGCAAGGT";
         let kmers = QueryKmers::new(&seeder(), query, false);
-        let all: Vec<u32> = (0..kmers.seeds().len() as u32).collect();
+        let all: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
         assert_eq!(kmers.sorted_positions(&all), vec![0, 6, 7, 8]);
     }
 }

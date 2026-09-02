@@ -182,7 +182,7 @@ fn counted_entries(
     counted
 }
 
-/// The seed hits (indices into `QueryKmers::seeds` of the batch) of each kept entry, from the
+/// The seed hits (indices into `QueryKmers::distinct` of the batch) of each kept entry, from the
 /// pieces it is kept for. `kept` maps an entry to its kept pieces, ascending.
 pub(super) fn kept_seed_hits(
     sketch: &Sketch,
@@ -193,7 +193,7 @@ pub(super) fn kept_seed_hits(
     let color_sets = sketch.color_sets();
     let seed_of = |hash: u64| {
         kmers
-            .seeds()
+            .distinct()
             .binary_search_by_key(&hash, |seed| seed.hash)
             .ok()
             .map(|seed| seed as u32)

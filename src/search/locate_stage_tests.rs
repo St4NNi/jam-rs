@@ -147,7 +147,7 @@ fn second_pruning_drops() {
         entry: 0,
         coverage_bound: 5_000,
         containment_estimate: 1.0,
-        seed_hits: (0..query_kmers.seeds().len() as u32).collect(),
+        seed_hits: (0..query_kmers.distinct().len() as u32).collect(),
     };
     let (outcome, work) = locate(&shard, &query_kmers, &bound(5_000, 2_500), &possible);
     assert_eq!(outcome, LocateOutcome::Dropped(DropReason::CoverageBound));
