@@ -253,3 +253,66 @@ fn incomplete_search_fails() {
     let message = String::from_utf8(output.stderr).unwrap();
     assert_eq!(message.trim(), "jam: 1 searches did not complete");
 }
+
+/// Writes a FASTA file with one record per named sequence.
+fn write_records(path: &Path, records: &[(&str, Vec<u8>)]) {
+    let mut text = Vec::new();
+    for (name, sequence) in records {
+        text.extend_from_slice(format!(">{name} contig\n").as_bytes());
+        text.extend_from_slice(sequence);
+        text.push(b'\n');
+    }
+    std::fs::write(path, text).unwrap();
+}
+
+/// Two assemblies, one holding a copy of the second entry with one substitution, and a list
+/// path that does not exist: the copy is found, and the missing assembly fails on its own.
+#[test]
+fn screen_finds_copy() {
+    let fixture = fixture();
+    let directory = fixture.directory.path();
+    let mut copy = random_bases(22, 20_000);
+    copy[10_000] = if copy[10_000] == b'A' { b'C' } else { b'A' };
+    let first = directory.join("first.fa");
+    write_records(
+        &first,
+        &[("chromosome", random_bases(55, 30_000)), ("planted", copy)],
+    );
+    let second = directory.join("second.fa");
+    write_records(&second, &[("other", random_bases(66, 30_000))]);
+    let list = directory.join("assemblies.txt");
+    let missing = directory.join("missing.fa");
+    let paths = [&first, &second, &missing].map(|path| path.display().to_string());
+    std::fs::write(&list, paths.join("\n")).unwrap();
+    let output = jam(&[
+        "screen".as_ref(),
+        fixture.shard.as_os_str(),
+        "--assemblies".as_ref(),
+        list.as_os_str(),
+        "-t".as_ref(),
+        "2".as_ref(),
+    ]);
+    assert!(!output.status.success(), "the missing assembly must fail");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let records: Vec<_> = stdout.lines().map(json).collect();
+    let of = |kind: &str| -> Vec<&serde_json::Value> {
+        records
+            .iter()
+            .filter(|record| record["type"] == kind)
+            .collect()
+    };
+    let entries = of("entry");
+    assert_eq!(entries.len(), 1, "{stdout}");
+    let entry = entries[0];
+    assert_eq!(
+        (entry["entry"].as_str(), entry["assembly"].as_str()),
+        (Some("plasmid_1"), Some("first.fa"))
+    );
+    assert_eq!(entry["contigs"][0]["name"], "planted");
+    let alignment = &entry["primary"][0]["fragment"]["alignment"];
+    assert_eq!(alignment["cigar"], "10000=1X9999=");
+    assert_eq!(of("assembly").len(), 2, "{stdout}");
+    let failed = of("failed");
+    assert_eq!(failed.len(), 1, "{stdout}");
+    assert_eq!(failed[0]["assembly"], "missing.fa");
+}
