@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::CliError;
+use super::{CliError, read_list};
 use crate::index::{
     BuildOptions, EntryInput, Manifest, PackedOutput, Parameters, ReshardOptions, Split,
     build_shard, reshard,
@@ -174,19 +174,6 @@ fn parent_of(output: &Path) -> PathBuf {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     }
-}
-
-fn read_list(list: &Path) -> Result<Vec<PathBuf>, CliError> {
-    let text = std::fs::read_to_string(list).map_err(|source| CliError::File {
-        path: list.to_path_buf(),
-        source,
-    })?;
-    Ok(text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .collect())
 }
 
 fn summary_line(output: &Path, manifest: &Manifest) -> String {

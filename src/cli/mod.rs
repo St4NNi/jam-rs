@@ -11,6 +11,9 @@ mod stats;
 
 use clap::{Parser, Subcommand};
 pub use error::CliError;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 /// jam (just another minimizer) finds small sequences in very large sets of assemblies and aligns
 /// them with CIGAR strings.
@@ -44,4 +47,30 @@ pub fn run() -> Result<(), CliError> {
         Command::Screen => Err(CliError::Usage("jam screen is not built yet".into())),
         Command::Serve(args) => serve::run(&args),
     }
+}
+
+/// The output of a command: the file at `path`, buffered, or the standard output.
+fn output_writer(path: Option<&Path>) -> Result<Box<dyn Write>, CliError> {
+    let Some(path) = path else {
+        return Ok(Box::new(std::io::stdout()));
+    };
+    let file = File::create(path).map_err(|source| CliError::File {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(Box::new(BufWriter::new(file)))
+}
+
+/// The paths of a list file: one per line, blank lines left out.
+fn read_list(list: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let text = std::fs::read_to_string(list).map_err(|source| CliError::File {
+        path: list.to_path_buf(),
+        source,
+    })?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }

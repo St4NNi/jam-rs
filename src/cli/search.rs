@@ -3,8 +3,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::CliError;
 use super::rule::RuleArgs;
+use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
 use crate::report::{Ending, Record, ReportError, ShardRecord, paf_lines};
@@ -14,8 +14,7 @@ use crate::search::{
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::sync_channel;
@@ -324,16 +323,9 @@ struct Sink {
 
 impl Sink {
     fn new(args: &SearchArgs) -> Result<Self, CliError> {
-        let writer: Box<dyn Write> = match &args.output {
-            Some(path) => Box::new(BufWriter::new(File::create(path).map_err(|source| {
-                CliError::File {
-                    path: path.clone(),
-                    source,
-                }
-            })?)),
-            None => Box::new(std::io::stdout()),
-        };
-        Ok(Self { writer })
+        Ok(Self {
+            writer: output_writer(args.output.as_deref())?,
+        })
     }
 
     fn event(
