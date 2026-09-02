@@ -40,8 +40,14 @@ Show what a shard holds (`--json` for JSON):
 
     jam stats plasmids.shard
 
-`jam screen` streams large assemblies past an index of small sequences, and `jam serve` serves a
-shard to other machines; both are being finished.
+Screen large assemblies for the small sequences of a shard: each assembly of the list (one path
+per line, plain or gzip FASTA) is read once, and every shard entry it holds is reported as a JSON
+line, followed by one `assembly` summary line per assembly (`failed` for one that could not be
+read):
+
+    jam screen plasmids.shard --assemblies assemblies.txt --coverage 0.8 -o screen.jsonl
+
+`jam serve` serves a shard to other machines.
 
 ## Output
 
