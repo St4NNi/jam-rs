@@ -5,6 +5,7 @@
 use crate::index::IndexError;
 use crate::loss::LossError;
 use crate::report::ReportError;
+use crate::screen::ScreenError;
 use crate::search::SearchError;
 use crate::service::ServiceError;
 use std::path::PathBuf;
@@ -58,6 +59,12 @@ pub enum CliError {
     /// Searches ended before every possible entry was decided (a deadline passed).
     #[error("{0} searches did not complete")]
     Incomplete(usize),
+    /// The screen settings are invalid or the shard cannot be screened.
+    #[error(transparent)]
+    Screen(#[from] ScreenError),
+    /// Assemblies could not be screened; each has a failed record.
+    #[error("{0} assemblies could not be screened")]
+    FailedAssemblies(usize),
     /// Serving or a remote search failed.
     #[error(transparent)]
     Service(#[from] ServiceError),

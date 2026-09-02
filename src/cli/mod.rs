@@ -5,6 +5,7 @@
 mod error;
 mod index;
 mod rule;
+mod screen;
 mod search;
 mod serve;
 mod stats;
@@ -32,8 +33,8 @@ enum Command {
     Search(search::SearchArgs),
     /// Show what a shard holds
     Stats(stats::StatsArgs),
-    /// Stream large assemblies past small query sequences (not built yet)
-    Screen,
+    /// Stream large assemblies past a shard of small sequences and report what each holds
+    Screen(screen::ScreenArgs),
     /// Serve a shard over iroh, as the coordinator of its peers when it has some
     Serve(serve::ServeArgs),
 }
@@ -44,7 +45,7 @@ pub fn run() -> Result<(), CliError> {
         Command::Index(args) => index::run(&args),
         Command::Search(args) => search::run(&args),
         Command::Stats(args) => stats::run(&args),
-        Command::Screen => Err(CliError::Usage("jam screen is not built yet".into())),
+        Command::Screen(args) => screen::run(&args),
         Command::Serve(args) => serve::run(&args),
     }
 }

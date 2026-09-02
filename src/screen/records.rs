@@ -91,3 +91,25 @@ pub struct AssemblySummary {
     pub survey_seconds: f64,
     pub align_seconds: f64,
 }
+
+/// An assembly that could not be screened; the other assemblies go on.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AssemblyFailure {
+    /// Always `failed`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub assembly: String,
+    /// What went wrong.
+    pub error: String,
+}
+
+impl AssemblyFailure {
+    /// The failure record of `assembly`.
+    pub fn new(assembly: &str, error: &dyn std::error::Error) -> Self {
+        Self {
+            kind: "failed",
+            assembly: assembly.to_string(),
+            error: error.to_string(),
+        }
+    }
+}

@@ -16,7 +16,7 @@ mod tests;
 mod turn;
 
 pub use assembly::{EntrySink, Screener};
-pub use records::{AssemblySummary, ScreenContig, ScreenEntry};
+pub use records::{AssemblyFailure, AssemblySummary, ScreenContig, ScreenEntry};
 
 use crate::align::AlignmentError;
 use crate::decide::{DecideError, DecisionRule};
