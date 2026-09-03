@@ -177,6 +177,13 @@ impl Header {
     }
 
     pub fn decode(file: &[u8]) -> Result<Self, JidxError> {
+        let file_len = u64::try_from(file.len()).map_err(|_| JidxError::Invalid("file length"))?;
+        let header = Self::decode_header(file, file_len)?;
+        header.verify_body(file)?;
+        Ok(header)
+    }
+
+    pub fn decode_header(file: &[u8], file_len: u64) -> Result<Self, JidxError> {
         if file.len() < HEADER_SIZE {
             return Err(JidxError::FileTooSmall {
                 expected: HEADER_SIZE,
@@ -229,13 +236,20 @@ impl Header {
             body_sha256: bytes[112..144].try_into().expect("JIDX body digest"),
             sections: sections.try_into().expect("fixed JIDX section count"),
         };
-        header.validate_layout(
-            u64::try_from(file.len()).map_err(|_| JidxError::Invalid("file length"))?,
-        )?;
-        if sha256(&file[HEADER_SIZE..]) != header.body_sha256 {
+        header.validate_layout(file_len)?;
+        Ok(header)
+    }
+
+    pub fn verify_body(&self, file: &[u8]) -> Result<(), JidxError> {
+        if u64::try_from(file.len()).ok() != Some(self.file_len()?)
+            || sha256(file.get(HEADER_SIZE..).ok_or(JidxError::FileTooSmall {
+                expected: HEADER_SIZE,
+                actual: file.len(),
+            })?) != self.body_sha256
+        {
             return Err(JidxError::ChecksumMismatch);
         }
-        Ok(header)
+        Ok(())
     }
 
     pub fn section(&self, kind: SectionKind) -> SectionDescriptor {
@@ -304,6 +318,102 @@ impl Header {
             return Err(JidxError::Invalid("section length"));
         }
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StringRef {
+    pub offset: u32,
+    pub length: u32,
+}
+
+impl StringRef {
+    pub fn resolve(self, strings: &[u8]) -> Result<&str, JidxError> {
+        let start =
+            usize::try_from(self.offset).map_err(|_| JidxError::Invalid("string offset"))?;
+        let length =
+            usize::try_from(self.length).map_err(|_| JidxError::Invalid("string length"))?;
+        let end = start
+            .checked_add(length)
+            .ok_or(JidxError::Invalid("string range"))?;
+        let bytes = strings
+            .get(start..end)
+            .ok_or(JidxError::Invalid("string range"))?;
+        if bytes.is_empty() || bytes.iter().any(|byte| matches!(byte, 0 | b'\n' | b'\r')) {
+            return Err(JidxError::Invalid("string value"));
+        }
+        std::str::from_utf8(bytes).map_err(|_| JidxError::Invalid("string encoding"))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct DocumentRecord {
+    pub name: StringRef,
+    pub bgzf_uri: StringRef,
+    pub fai_uri: StringRef,
+    pub gzi_uri: StringRef,
+    pub bgzf_bytes: u64,
+    pub fai_bytes: u64,
+    pub gzi_bytes: u64,
+    pub contig_start: u32,
+    pub contig_count: u32,
+    pub bgzf_sha256: [u8; 32],
+    pub fai_sha256: [u8; 32],
+    pub gzi_sha256: [u8; 32],
+}
+
+impl DocumentRecord {
+    pub fn decode(bytes: &[u8]) -> Result<Self, JidxError> {
+        if bytes.len() != DOCUMENT_RECORD_SIZE as usize {
+            return Err(JidxError::Invalid("document record size"));
+        }
+        Ok(Self {
+            name: string_ref(bytes, 0),
+            bgzf_uri: string_ref(bytes, 8),
+            fai_uri: string_ref(bytes, 16),
+            gzi_uri: string_ref(bytes, 24),
+            bgzf_bytes: read_u64(bytes, 32),
+            fai_bytes: read_u64(bytes, 40),
+            gzi_bytes: read_u64(bytes, 48),
+            contig_start: read_u32(bytes, 56),
+            contig_count: read_u32(bytes, 60),
+            bgzf_sha256: bytes[64..96].try_into().expect("JIDX BGZF digest"),
+            fai_sha256: bytes[96..128].try_into().expect("JIDX FAI digest"),
+            gzi_sha256: bytes[128..160].try_into().expect("JIDX GZI digest"),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ContigRecord {
+    pub document_id: u32,
+    pub name: StringRef,
+    pub length: u64,
+    pub fasta_offset: u64,
+    pub line_bases: u32,
+    pub line_width: u32,
+}
+
+impl ContigRecord {
+    pub fn decode(bytes: &[u8]) -> Result<Self, JidxError> {
+        if bytes.len() != CONTIG_RECORD_SIZE as usize || read_u32(bytes, 12) != 0 {
+            return Err(JidxError::Invalid("contig record"));
+        }
+        Ok(Self {
+            document_id: read_u32(bytes, 0),
+            name: string_ref(bytes, 4),
+            length: read_u64(bytes, 16),
+            fasta_offset: read_u64(bytes, 24),
+            line_bases: read_u32(bytes, 32),
+            line_width: read_u32(bytes, 36),
+        })
+    }
+}
+
+fn string_ref(bytes: &[u8], offset: usize) -> StringRef {
+    StringRef {
+        offset: read_u32(bytes, offset),
+        length: read_u32(bytes, offset + 4),
     }
 }
 
