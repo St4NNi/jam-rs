@@ -1,14 +1,17 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use needletail::parse_fastx_file;
 use std::fs::remove_file;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
 use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
 use crate::jidx_writer::sync_directory;
 use crate::query::QueryEngine;
+use crate::range_source::S3Config;
 use crate::reader::JamReader;
+use crate::trace::{TraceConfig, TraceEngine};
 use crate::writer::{BuildConfig, build};
 use std::sync::Arc;
 
@@ -45,6 +48,85 @@ pub(crate) fn handle_jidx_build_command(
     } else {
         staged
             .persist_noclobber(&output)
+            .map_err(|error| error.error)?;
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
+
+pub(crate) struct TraceArgs {
+    pub query: PathBuf,
+    pub database: PathBuf,
+    pub index: PathBuf,
+    pub output: PathBuf,
+    pub query_id: Option<String>,
+    pub config: TraceConfig,
+    pub s3: Option<S3Config>,
+    pub force: bool,
+}
+
+pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
+    if args.output.try_exists()? {
+        if !args.output.is_file() {
+            return Err(anyhow::anyhow!(
+                "Output path is not a file: {:?}",
+                args.output
+            ));
+        }
+        if !args.force {
+            return Err(anyhow::anyhow!(
+                "Output file {:?} already exists. Use --force to overwrite.",
+                args.output
+            ));
+        }
+    }
+    let parent = args
+        .output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    if args.output.file_name().is_none() {
+        return Err(anyhow::anyhow!("Invalid output path: {:?}", args.output));
+    }
+
+    let engine = TraceEngine::open(args.database, args.index, args.s3)?;
+    engine.verify_index()?;
+    let mut input = parse_fastx_file(&args.query)?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".jam-trace-")
+        .tempfile_in(parent)?;
+    let mut count = 0usize;
+    {
+        let mut output = BufWriter::new(temporary.as_file_mut());
+        while let Some(record) = input.next() {
+            let record = record?;
+            if count != 0 && args.query_id.is_some() {
+                return Err(anyhow::anyhow!(
+                    "--query-id requires a query file with one record"
+                ));
+            }
+            let id = match &args.query_id {
+                Some(id) => id.clone(),
+                None => std::str::from_utf8(record.id())?.to_string(),
+            };
+            let result = engine.search(id, record.seq().as_ref(), args.config)?;
+            serde_json::to_writer(&mut output, &result)?;
+            output.write_all(b"\n")?;
+            count += 1;
+        }
+        output.flush()?;
+    }
+    if count == 0 {
+        return Err(anyhow::anyhow!("Query file contains no sequence records"));
+    }
+    temporary.as_file().sync_all()?;
+    if args.force {
+        temporary
+            .persist(&args.output)
+            .map_err(|error| error.error)?;
+    } else {
+        temporary
+            .persist_noclobber(&args.output)
             .map_err(|error| error.error)?;
     }
     sync_directory(parent)?;
@@ -946,9 +1028,11 @@ pub fn handle_stats_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_distance_chunk_size, handle_jidx_build_command, normalize_distance_cutoff,
+        TraceArgs, compute_distance_chunk_size, handle_jidx_build_command, handle_trace_command,
+        normalize_distance_cutoff,
     };
     use crate::jidx_builder::JidxBuildConfig;
+    use crate::trace::TraceConfig;
 
     #[test]
     fn distance_chunk_size_handles_small_query_counts() {
@@ -989,5 +1073,26 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(output).unwrap(), b"old index");
+    }
+
+    #[test]
+    fn failed_forced_trace_preserves_existing_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("existing.jsonl");
+        std::fs::write(&output, b"old result").unwrap();
+        assert!(
+            handle_trace_command(TraceArgs {
+                query: directory.path().join("missing.fa"),
+                database: directory.path().join("missing.jam"),
+                index: directory.path().join("missing.jidx"),
+                output: output.clone(),
+                query_id: None,
+                config: TraceConfig::default(),
+                s3: None,
+                force: true,
+            })
+            .is_err()
+        );
+        assert_eq!(std::fs::read(output).unwrap(), b"old result");
     }
 }

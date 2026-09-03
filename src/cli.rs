@@ -109,6 +109,50 @@ pub enum Commands {
         seeds_per_segment: u16,
     },
 
+    /// Trace every sequence in a query file through a JAM and JIDX pair
+    #[command(arg_required_else_help = true)]
+    Trace {
+        /// Query FASTA or FASTQ file
+        #[arg(short, long)]
+        query: PathBuf,
+        /// JAM database used for metagenome screening
+        #[arg(short, long)]
+        database: PathBuf,
+        /// Query-independent JIDX file
+        #[arg(short, long)]
+        index: PathBuf,
+        /// Atomic JSONL output
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Override the identifier of a single query record
+        #[arg(long)]
+        query_id: Option<String>,
+        /// Treat query coordinates as linear
+        #[arg(long)]
+        linear: bool,
+        /// Minimum JAM query containment
+        #[arg(long, default_value = "0.01")]
+        min_containment: f64,
+        /// Maximum metagenomes aligned per query
+        #[arg(long, default_value = "100")]
+        max_metagenomes: usize,
+        /// Minimum exact seed hits in one diagonal region
+        #[arg(long, default_value = "2")]
+        min_seed_hits: u32,
+        /// Verify complete BGZF, FAI, and GZI checksums before reading
+        #[arg(long)]
+        verify_resources: bool,
+        /// Region for S3 resources referenced by the JIDX
+        #[arg(long)]
+        s3_region: Option<String>,
+        /// Custom S3 endpoint
+        #[arg(long, requires = "s3_region")]
+        s3_endpoint: Option<String>,
+        /// Use path-style S3 requests
+        #[arg(long, requires = "s3_region")]
+        s3_path_style: bool,
+    },
+
     /// Build and analyze hash bias tables for filtering
     #[command(arg_required_else_help = true)]
     Bias {

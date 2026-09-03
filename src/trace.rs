@@ -693,6 +693,7 @@ pub enum TraceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::handlers::{TraceArgs, handle_trace_command};
     use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
     use crate::writer::{BuildConfig, build};
     use noodles_bgzf::{self as bgzf, gzi};
@@ -790,6 +791,25 @@ mod tests {
         assert_eq!(first.metagenomes[0].mosaic.covered_bases, 128);
         assert_eq!(first.metagenomes[0].contigs[0].name, "contig");
         serde_json::to_vec(&first).unwrap();
+
+        let output = directory.path().join("trace.jsonl");
+        handle_trace_command(TraceArgs {
+            query: directory.path().join("sample.fa"),
+            database: jam,
+            index: jidx,
+            output: output.clone(),
+            query_id: Some("plasmid".into()),
+            config,
+            s3: None,
+            force: false,
+        })
+        .unwrap();
+        let published = std::fs::read_to_string(output).unwrap();
+        assert!(published.ends_with('\n'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&published).unwrap()["query_id"],
+            "plasmid"
+        );
     }
 
     #[test]

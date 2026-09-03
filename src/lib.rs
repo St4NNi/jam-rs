@@ -26,7 +26,7 @@ pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::handlers::handle_jidx_build_command;
+use cli::handlers::{TraceArgs, handle_jidx_build_command, handle_trace_command};
 use cli::{BiasCommands, Cli, Commands};
 
 pub fn run() -> Result<()> {
@@ -137,6 +137,50 @@ pub fn run() -> Result<()> {
             },
             cli.force,
         ),
+
+        Commands::Trace {
+            query,
+            database,
+            index,
+            output,
+            query_id,
+            linear,
+            min_containment,
+            max_metagenomes,
+            min_seed_hits,
+            verify_resources,
+            s3_region,
+            s3_endpoint,
+            s3_path_style,
+        } => {
+            let s3 = if let Some(region) = s3_region {
+                Some(range_source::S3Config::new(
+                    &region,
+                    s3_endpoint.as_deref(),
+                    s3_path_style,
+                    s3::creds::Credentials::default()?,
+                )?)
+            } else {
+                None
+            };
+            handle_trace_command(TraceArgs {
+                query,
+                database,
+                index,
+                output,
+                query_id,
+                config: trace::TraceConfig {
+                    min_containment,
+                    max_metagenomes,
+                    min_seed_hits,
+                    circular: !linear,
+                    verify_resources,
+                    ..trace::TraceConfig::default()
+                },
+                s3,
+                force: cli.force,
+            })
+        }
 
         Commands::Stats { input, short, full } => {
             handle_stats_command(input, short, full, cli.silent)
