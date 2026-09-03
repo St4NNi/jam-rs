@@ -254,6 +254,7 @@ impl JidxReader {
                 || contig.length == 0
                 || contig.line_bases == 0
                 || contig.line_width < contig.line_bases
+                || contig.line_width > contig.line_bases.saturating_add(2)
                 || !contig_names.insert((contig.metagenome_id, contig.name))
             {
                 return Err(JidxError::Invalid("contig metadata").into());

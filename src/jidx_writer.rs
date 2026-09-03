@@ -333,7 +333,11 @@ fn validate_metagenome(input: &MetagenomeInput) -> Result<(), JidxWriteError> {
 }
 
 fn validate_contig(input: &ContigInput, index: &JidxInput) -> Result<(), JidxWriteError> {
-    if input.length == 0 || input.line_bases == 0 || input.line_width < input.line_bases {
+    if input.length == 0
+        || input.line_bases == 0
+        || input.line_width < input.line_bases
+        || input.line_width > input.line_bases.saturating_add(2)
+    {
         return Err(JidxWriteError::Invalid("contig metadata"));
     }
     let mut seeds = input.seeds.iter().collect::<Vec<_>>();
