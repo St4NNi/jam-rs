@@ -1,3 +1,4 @@
+pub mod alignment;
 pub mod bias;
 pub mod cli;
 pub mod core_utils;

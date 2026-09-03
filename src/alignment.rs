@@ -1,0 +1,770 @@
+use serde::{Deserialize, Serialize};
+use std::fmt::Write as _;
+use thiserror::Error;
+
+const MATCH: u8 = 0;
+const INSERTION: u8 = 1;
+const DELETION: u8 = 2;
+const START: u8 = 3;
+const UNREACHABLE: u8 = 4;
+
+pub const DEFAULT_MAX_CELLS: usize = 4_000_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Interval {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl Interval {
+    pub fn new(start: u64, end: u64) -> Result<Self, AlignmentError> {
+        if start > end {
+            return Err(AlignmentError::ReversedInterval { start, end });
+        }
+        Ok(Self { start, end })
+    }
+
+    pub fn len(self) -> u64 {
+        self.end - self.start
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Strand {
+    Forward,
+    Reverse,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum EditOperation {
+    #[serde(rename = "=")]
+    Equal,
+    #[serde(rename = "X")]
+    Substitution,
+    #[serde(rename = "I")]
+    Insertion,
+    #[serde(rename = "D")]
+    Deletion,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EditRun {
+    pub operation: EditOperation,
+    pub length: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AlignmentConfig {
+    pub match_score: i32,
+    pub mismatch_score: i32,
+    pub gap_open_score: i32,
+    pub gap_extend_score: i32,
+    pub band_width: u32,
+    pub diagonal_offset: i64,
+    pub max_cells: usize,
+}
+
+impl Default for AlignmentConfig {
+    fn default() -> Self {
+        Self {
+            match_score: 2,
+            mismatch_score: -3,
+            gap_open_score: -5,
+            gap_extend_score: -1,
+            band_width: 128,
+            diagonal_offset: 0,
+            max_cells: DEFAULT_MAX_CELLS,
+        }
+    }
+}
+
+impl AlignmentConfig {
+    fn validate(self) -> Result<(), AlignmentError> {
+        if self.match_score <= 0
+            || self.mismatch_score > 0
+            || self.gap_open_score > 0
+            || self.gap_extend_score > 0
+            || self.max_cells == 0
+        {
+            return Err(AlignmentError::InvalidConfig);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Alignment {
+    pub score: i32,
+    pub strand: Strand,
+    pub query_interval: Interval,
+    pub target_interval: Interval,
+    pub matches: u64,
+    pub substitutions: u64,
+    pub insertions: u64,
+    pub deletions: u64,
+    pub cigar: String,
+    pub edit_script: Vec<EditRun>,
+}
+
+impl Alignment {
+    pub fn identity(&self) -> f64 {
+        let total = self
+            .matches
+            .saturating_add(self.substitutions)
+            .saturating_add(self.insertions)
+            .saturating_add(self.deletions);
+        if total == 0 {
+            0.0
+        } else {
+            self.matches as f64 / total as f64
+        }
+    }
+
+    pub fn validate_cigar(&self) -> Result<(), AlignmentError> {
+        let runs = parse_cigar(&self.cigar)?;
+        if runs != self.edit_script {
+            return Err(AlignmentError::CigarMismatch);
+        }
+        let summary = summarize_runs(&runs)?;
+        if summary.query_bases != self.query_interval.len()
+            || summary.target_bases != self.target_interval.len()
+        {
+            return Err(AlignmentError::CigarSpanMismatch);
+        }
+        if (
+            summary.matches,
+            summary.substitutions,
+            summary.insertions,
+            summary.deletions,
+        ) != (
+            self.matches,
+            self.substitutions,
+            self.insertions,
+            self.deletions,
+        ) {
+            return Err(AlignmentError::CigarCountMismatch);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AlignmentWorkspace {
+    cells: Vec<Cell>,
+    row_offsets: Vec<usize>,
+    row_starts: Vec<usize>,
+    row_widths: Vec<usize>,
+    operations: Vec<EditOperation>,
+    reverse: Vec<u8>,
+}
+
+impl AlignmentWorkspace {
+    pub fn capacity_cells(&self) -> usize {
+        self.cells.capacity()
+    }
+
+    pub fn align(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> Result<Alignment, AlignmentError> {
+        let raw = self.align_raw(query, target, config)?;
+        finish(raw, Strand::Forward, 0, target.len())
+    }
+
+    pub fn align_oriented(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        target_offset: u64,
+        strand: Strand,
+        config: AlignmentConfig,
+    ) -> Result<Alignment, AlignmentError> {
+        let raw = match strand {
+            Strand::Forward => self.align_raw(query, target, config)?,
+            Strand::Reverse => {
+                let mut reverse = std::mem::take(&mut self.reverse);
+                reverse.clear();
+                reverse.reserve(target.len());
+                reverse.extend(target.iter().rev().map(|base| complement(*base)));
+                let result = self.align_raw(query, &reverse, config);
+                self.reverse = reverse;
+                result?
+            }
+        };
+        finish(raw, strand, target_offset, target.len())
+    }
+
+    fn align_raw(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> Result<RawAlignment, AlignmentError> {
+        config.validate()?;
+        if query.is_empty() {
+            return Err(AlignmentError::EmptyQuery);
+        }
+        if target.is_empty() {
+            return Err(AlignmentError::EmptyTarget);
+        }
+
+        self.prepare_rows(query.len(), target.len(), config)?;
+        let total_cells = self
+            .row_offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(self.row_widths.last().copied().unwrap_or(0))
+            .ok_or(AlignmentError::LengthOverflow)?;
+        if total_cells == 0 {
+            return Err(AlignmentError::BandExcludesInput);
+        }
+        if total_cells > config.max_cells {
+            return Err(AlignmentError::MatrixTooLarge {
+                cells: total_cells,
+                max_cells: config.max_cells,
+            });
+        }
+        if self.cells.len() < total_cells {
+            self.cells.resize(total_cells, Cell::default());
+        } else {
+            self.cells[..total_cells].fill(Cell::default());
+            self.cells.truncate(total_cells);
+        }
+
+        let mut best = BestCell::default();
+        for query_index in 0..=query.len() {
+            let start = self.row_starts[query_index];
+            let width = self.row_widths[query_index];
+            for target_index in start..start + width {
+                if query_index == 0 && target_index == 0 {
+                    continue;
+                }
+                let mut cell = Cell::default();
+                if query_index > 0
+                    && target_index > 0
+                    && let Some(previous) =
+                        self.cell_index_checked(query_index - 1, target_index - 1)
+                {
+                    let previous = self.cells[previous];
+                    let (score, state) = previous.best_score();
+                    let substitution =
+                        if query[query_index - 1].eq_ignore_ascii_case(&target[target_index - 1]) {
+                            config.match_score
+                        } else {
+                            config.mismatch_score
+                        };
+                    let score = score.saturating_add(substitution);
+                    if score > 0 {
+                        cell.scores[MATCH as usize] = score;
+                        cell.previous[MATCH as usize] =
+                            if score == substitution { START } else { state };
+                    }
+                }
+                if target_index > 0
+                    && let Some(previous) = self.cell_index_checked(query_index, target_index - 1)
+                {
+                    let previous = self.cells[previous];
+                    let (score, state) = choose([
+                        (
+                            previous.scores[INSERTION as usize]
+                                .saturating_add(config.gap_extend_score),
+                            INSERTION,
+                        ),
+                        (
+                            previous.scores[MATCH as usize].saturating_add(gap_open(config)),
+                            MATCH,
+                        ),
+                        (
+                            previous.scores[DELETION as usize].saturating_add(gap_open(config)),
+                            DELETION,
+                        ),
+                    ]);
+                    if score > 0 {
+                        cell.scores[INSERTION as usize] = score;
+                        cell.previous[INSERTION as usize] = state;
+                    }
+                }
+                if query_index > 0
+                    && let Some(previous) = self.cell_index_checked(query_index - 1, target_index)
+                {
+                    let previous = self.cells[previous];
+                    let (score, state) = choose([
+                        (
+                            previous.scores[DELETION as usize]
+                                .saturating_add(config.gap_extend_score),
+                            DELETION,
+                        ),
+                        (
+                            previous.scores[MATCH as usize].saturating_add(gap_open(config)),
+                            MATCH,
+                        ),
+                        (
+                            previous.scores[INSERTION as usize].saturating_add(gap_open(config)),
+                            INSERTION,
+                        ),
+                    ]);
+                    if score > 0 {
+                        cell.scores[DELETION as usize] = score;
+                        cell.previous[DELETION as usize] = state;
+                    }
+                }
+                let index = self.cell_index(query_index, target_index);
+                self.cells[index] = cell;
+                best.consider(query_index, target_index, cell);
+            }
+        }
+        if best.score <= 0 {
+            return Err(AlignmentError::NoAlignment);
+        }
+
+        let (query_start, target_start) = self.traceback(query, target, best)?;
+        let edit_script = runs_from_operations(&self.operations)?;
+        let summary = summarize_runs(&edit_script)?;
+        Ok(RawAlignment {
+            score: best.score,
+            query_interval: Interval::new(query_start as u64, best.query_index as u64)?,
+            target_interval: Interval::new(target_start as u64, best.target_index as u64)?,
+            cigar: cigar_from_runs(&edit_script)?,
+            edit_script,
+            summary,
+        })
+    }
+
+    fn prepare_rows(
+        &mut self,
+        query_len: usize,
+        target_len: usize,
+        config: AlignmentConfig,
+    ) -> Result<(), AlignmentError> {
+        self.row_offsets.clear();
+        self.row_starts.clear();
+        self.row_widths.clear();
+        let target_len = i128::try_from(target_len).map_err(|_| AlignmentError::LengthOverflow)?;
+        let band = i128::from(config.band_width);
+        let diagonal = i128::from(config.diagonal_offset);
+        let mut total = 0usize;
+        for query_index in 0..=query_len {
+            let center =
+                i128::try_from(query_index).map_err(|_| AlignmentError::LengthOverflow)? + diagonal;
+            let low = center - band;
+            let high = center + band;
+            let (start, width) = if high < 0 || low > target_len {
+                (0, 0)
+            } else {
+                let start =
+                    usize::try_from(low.max(0)).map_err(|_| AlignmentError::LengthOverflow)?;
+                let end = usize::try_from(high.min(target_len))
+                    .map_err(|_| AlignmentError::LengthOverflow)?;
+                (start, end - start + 1)
+            };
+            self.row_offsets.push(total);
+            self.row_starts.push(start);
+            self.row_widths.push(width);
+            total = total
+                .checked_add(width)
+                .ok_or(AlignmentError::LengthOverflow)?;
+        }
+        Ok(())
+    }
+
+    fn cell_index(&self, query_index: usize, target_index: usize) -> usize {
+        self.row_offsets[query_index] + target_index - self.row_starts[query_index]
+    }
+
+    fn cell_index_checked(&self, query_index: usize, target_index: usize) -> Option<usize> {
+        let start = *self.row_starts.get(query_index)?;
+        let width = *self.row_widths.get(query_index)?;
+        (target_index >= start && target_index < start + width)
+            .then(|| self.row_offsets[query_index] + target_index - start)
+    }
+
+    fn traceback(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        best: BestCell,
+    ) -> Result<(usize, usize), AlignmentError> {
+        let mut query_index = best.query_index;
+        let mut target_index = best.target_index;
+        let mut state = best.state;
+        self.operations.clear();
+        while query_index > 0 || target_index > 0 {
+            let index = self
+                .cell_index_checked(query_index, target_index)
+                .ok_or(AlignmentError::TracebackOutsideBand)?;
+            let cell = self.cells[index];
+            if state > DELETION || cell.scores[state as usize] <= 0 {
+                break;
+            }
+            let previous = cell.previous[state as usize];
+            match state {
+                MATCH if query_index > 0 && target_index > 0 => {
+                    self.operations.push(
+                        if query[query_index - 1].eq_ignore_ascii_case(&target[target_index - 1]) {
+                            EditOperation::Equal
+                        } else {
+                            EditOperation::Substitution
+                        },
+                    );
+                    query_index -= 1;
+                    target_index -= 1;
+                }
+                INSERTION if target_index > 0 => {
+                    self.operations.push(EditOperation::Insertion);
+                    target_index -= 1;
+                }
+                DELETION if query_index > 0 => {
+                    self.operations.push(EditOperation::Deletion);
+                    query_index -= 1;
+                }
+                _ => return Err(AlignmentError::InvalidTraceback),
+            }
+            if previous == START {
+                break;
+            }
+            state = previous;
+        }
+        self.operations.reverse();
+        Ok((query_index, target_index))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Cell {
+    scores: [i32; 3],
+    previous: [u8; 3],
+}
+
+impl Cell {
+    fn best_score(self) -> (i32, u8) {
+        choose([
+            (self.scores[MATCH as usize], MATCH),
+            (self.scores[INSERTION as usize], INSERTION),
+            (self.scores[DELETION as usize], DELETION),
+        ])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct BestCell {
+    score: i32,
+    query_index: usize,
+    target_index: usize,
+    state: u8,
+}
+
+impl BestCell {
+    fn consider(&mut self, query_index: usize, target_index: usize, cell: Cell) {
+        let (score, state) = cell.best_score();
+        if score > self.score
+            || (score == self.score
+                && score > 0
+                && (query_index, target_index, state)
+                    < (self.query_index, self.target_index, self.state))
+        {
+            *self = Self {
+                score,
+                query_index,
+                target_index,
+                state,
+            };
+        }
+    }
+}
+
+struct RawAlignment {
+    score: i32,
+    query_interval: Interval,
+    target_interval: Interval,
+    cigar: String,
+    edit_script: Vec<EditRun>,
+    summary: RunSummary,
+}
+
+fn finish(
+    raw: RawAlignment,
+    strand: Strand,
+    target_offset: u64,
+    target_len: usize,
+) -> Result<Alignment, AlignmentError> {
+    let target_len = u64::try_from(target_len).map_err(|_| AlignmentError::LengthOverflow)?;
+    let (start, end) = if strand == Strand::Reverse {
+        (
+            target_len
+                .checked_sub(raw.target_interval.end)
+                .ok_or(AlignmentError::LengthOverflow)?,
+            target_len
+                .checked_sub(raw.target_interval.start)
+                .ok_or(AlignmentError::LengthOverflow)?,
+        )
+    } else {
+        (raw.target_interval.start, raw.target_interval.end)
+    };
+    let alignment = Alignment {
+        score: raw.score,
+        strand,
+        query_interval: raw.query_interval,
+        target_interval: Interval::new(
+            target_offset
+                .checked_add(start)
+                .ok_or(AlignmentError::LengthOverflow)?,
+            target_offset
+                .checked_add(end)
+                .ok_or(AlignmentError::LengthOverflow)?,
+        )?,
+        matches: raw.summary.matches,
+        substitutions: raw.summary.substitutions,
+        insertions: raw.summary.insertions,
+        deletions: raw.summary.deletions,
+        cigar: raw.cigar,
+        edit_script: raw.edit_script,
+    };
+    alignment.validate_cigar()?;
+    Ok(alignment)
+}
+
+fn choose<const N: usize>(values: [(i32, u8); N]) -> (i32, u8) {
+    values.into_iter().fold((0, UNREACHABLE), |best, value| {
+        if value.0 > best.0 || (value.0 == best.0 && value.1 < best.1) {
+            value
+        } else {
+            best
+        }
+    })
+}
+
+fn gap_open(config: AlignmentConfig) -> i32 {
+    config
+        .gap_open_score
+        .saturating_add(config.gap_extend_score)
+}
+
+fn complement(base: u8) -> u8 {
+    match base.to_ascii_uppercase() {
+        b'A' => b'T',
+        b'C' => b'G',
+        b'G' => b'C',
+        b'T' => b'A',
+        b'R' => b'Y',
+        b'Y' => b'R',
+        b'S' => b'S',
+        b'W' => b'W',
+        b'K' => b'M',
+        b'M' => b'K',
+        b'B' => b'V',
+        b'V' => b'B',
+        b'D' => b'H',
+        b'H' => b'D',
+        _ => b'N',
+    }
+}
+
+fn runs_from_operations(operations: &[EditOperation]) -> Result<Vec<EditRun>, AlignmentError> {
+    let mut runs: Vec<EditRun> = Vec::new();
+    for &operation in operations {
+        if let Some(run) = runs.last_mut()
+            && run.operation == operation
+        {
+            run.length = run
+                .length
+                .checked_add(1)
+                .ok_or(AlignmentError::RunTooLong)?;
+        } else {
+            runs.push(EditRun {
+                operation,
+                length: 1,
+            });
+        }
+    }
+    Ok(runs)
+}
+
+pub fn parse_cigar(cigar: &str) -> Result<Vec<EditRun>, AlignmentError> {
+    let mut runs = Vec::new();
+    let mut length = 0u32;
+    for byte in cigar.bytes() {
+        if byte.is_ascii_digit() {
+            length = length
+                .checked_mul(10)
+                .and_then(|value| value.checked_add(u32::from(byte - b'0')))
+                .ok_or(AlignmentError::RunTooLong)?;
+            continue;
+        }
+        if length == 0 {
+            return Err(AlignmentError::InvalidCigar);
+        }
+        let operation = match byte {
+            b'=' => EditOperation::Equal,
+            b'X' => EditOperation::Substitution,
+            b'I' => EditOperation::Insertion,
+            b'D' => EditOperation::Deletion,
+            _ => return Err(AlignmentError::InvalidCigar),
+        };
+        if runs
+            .last()
+            .is_some_and(|run: &EditRun| run.operation == operation)
+        {
+            return Err(AlignmentError::InvalidCigar);
+        }
+        runs.push(EditRun { operation, length });
+        length = 0;
+    }
+    if length != 0 || runs.is_empty() {
+        return Err(AlignmentError::InvalidCigar);
+    }
+    Ok(runs)
+}
+
+fn cigar_from_runs(runs: &[EditRun]) -> Result<String, AlignmentError> {
+    let mut cigar = String::new();
+    for run in runs {
+        let operation = match run.operation {
+            EditOperation::Equal => '=',
+            EditOperation::Substitution => 'X',
+            EditOperation::Insertion => 'I',
+            EditOperation::Deletion => 'D',
+        };
+        write!(&mut cigar, "{}{operation}", run.length).map_err(|_| AlignmentError::CigarWrite)?;
+    }
+    Ok(cigar)
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RunSummary {
+    query_bases: u64,
+    target_bases: u64,
+    matches: u64,
+    substitutions: u64,
+    insertions: u64,
+    deletions: u64,
+}
+
+fn summarize_runs(runs: &[EditRun]) -> Result<RunSummary, AlignmentError> {
+    let mut summary = RunSummary::default();
+    for run in runs {
+        if run.length == 0 {
+            return Err(AlignmentError::InvalidCigar);
+        }
+        let length = u64::from(run.length);
+        match run.operation {
+            EditOperation::Equal => {
+                summary.query_bases += length;
+                summary.target_bases += length;
+                summary.matches += length;
+            }
+            EditOperation::Substitution => {
+                summary.query_bases += length;
+                summary.target_bases += length;
+                summary.substitutions += length;
+            }
+            EditOperation::Insertion => {
+                summary.target_bases += length;
+                summary.insertions += length;
+            }
+            EditOperation::Deletion => {
+                summary.query_bases += length;
+                summary.deletions += length;
+            }
+        }
+    }
+    Ok(summary)
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum AlignmentError {
+    #[error("alignment query is empty")]
+    EmptyQuery,
+    #[error("alignment target is empty")]
+    EmptyTarget,
+    #[error("alignment configuration is invalid")]
+    InvalidConfig,
+    #[error("alignment length overflows")]
+    LengthOverflow,
+    #[error("alignment band excludes the input")]
+    BandExcludesInput,
+    #[error("alignment matrix requires {cells} cells, exceeding {max_cells}")]
+    MatrixTooLarge { cells: usize, max_cells: usize },
+    #[error("no positive-scoring local alignment was found")]
+    NoAlignment,
+    #[error("alignment traceback left the band")]
+    TracebackOutsideBand,
+    #[error("alignment traceback is inconsistent")]
+    InvalidTraceback,
+    #[error("alignment interval is reversed: {start}..{end}")]
+    ReversedInterval { start: u64, end: u64 },
+    #[error("alignment edit run exceeds u32")]
+    RunTooLong,
+    #[error("CIGAR text is invalid")]
+    InvalidCigar,
+    #[error("CIGAR text differs from the edit script")]
+    CigarMismatch,
+    #[error("CIGAR span differs from alignment coordinates")]
+    CigarSpanMismatch,
+    #[error("CIGAR counts differ from alignment counts")]
+    CigarCountMismatch,
+    #[error("failed to write CIGAR text")]
+    CigarWrite,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> AlignmentConfig {
+        AlignmentConfig {
+            band_width: 8,
+            ..AlignmentConfig::default()
+        }
+    }
+
+    #[test]
+    fn affine_alignment_validates_its_cigar() {
+        let mut workspace = AlignmentWorkspace::default();
+        let alignment = workspace
+            .align(b"ACGTACGT", b"ACGTGACGT", config())
+            .unwrap();
+        assert_eq!(alignment.cigar, "4=1I4=");
+        assert_eq!(alignment.insertions, 1);
+        assert_eq!(alignment.identity(), 8.0 / 9.0);
+        alignment.validate_cigar().unwrap();
+    }
+
+    #[test]
+    fn reverse_interval_uses_forward_coordinates() {
+        let mut workspace = AlignmentWorkspace::default();
+        let alignment = workspace
+            .align_oriented(b"AGGACTT", b"AAGTCCT", 100, Strand::Reverse, config())
+            .unwrap();
+        assert_eq!(alignment.target_interval, Interval::new(100, 107).unwrap());
+        assert_eq!(alignment.strand, Strand::Reverse);
+    }
+
+    #[test]
+    fn workspace_reuses_matrix_capacity() {
+        let mut workspace = AlignmentWorkspace::default();
+        workspace.align(b"ACGT", b"ACGT", config()).unwrap();
+        let capacity = workspace.capacity_cells();
+        workspace.align(b"ACG", b"ACG", config()).unwrap();
+        assert_eq!(workspace.capacity_cells(), capacity);
+    }
+
+    #[test]
+    fn malformed_cigar_is_rejected() {
+        assert_eq!(
+            parse_cigar("4=1I4").unwrap_err(),
+            AlignmentError::InvalidCigar
+        );
+        assert_eq!(
+            parse_cigar("4=1I1I").unwrap_err(),
+            AlignmentError::InvalidCigar
+        );
+    }
+}
