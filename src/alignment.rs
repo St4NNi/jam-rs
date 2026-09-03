@@ -10,7 +10,7 @@ const UNREACHABLE: u8 = 4;
 
 pub const DEFAULT_MAX_CELLS: usize = 4_000_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct Interval {
     pub start: u64,
     pub end: u64,
@@ -33,7 +33,7 @@ impl Interval {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strand {
     Forward,
@@ -97,7 +97,7 @@ impl AlignmentConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Alignment {
     pub score: i32,
     pub strand: Strand,
@@ -1015,7 +1015,7 @@ pub fn parse_cigar(cigar: &str) -> Result<Vec<EditRun>, AlignmentError> {
     Ok(runs)
 }
 
-fn cigar_from_runs(runs: &[EditRun]) -> Result<String, AlignmentError> {
+pub(crate) fn cigar_from_runs(runs: &[EditRun]) -> Result<String, AlignmentError> {
     let mut cigar = String::new();
     for run in runs {
         let operation = match run.operation {
