@@ -40,12 +40,28 @@ pub(crate) fn validate_table(file: &[u8], header: &Header) -> Result<(), JidxErr
     for index in 0..header.seed_count {
         let record = seed_record(file, header, index)?;
         validate_record(header, record)?;
+        validate_document_bytes(document_bytes(file, header, record.into())?, header)?;
         if previous.is_some_and(|key| key >= record.packed_key) {
             return Err(JidxError::Invalid("seed order"));
         }
         previous = Some(record.packed_key);
     }
     Ok(())
+}
+
+pub(crate) fn documents(
+    file: &[u8],
+    header: &Header,
+    seed: SeedEntry,
+) -> Result<Vec<u32>, JidxError> {
+    let bytes = document_bytes(file, header, seed)?;
+    validate_document_bytes(bytes, header)?;
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|bytes| u32::from_le_bytes(*bytes))
+        .collect())
 }
 
 #[derive(Clone, Copy)]
@@ -135,6 +151,41 @@ fn validate_record(header: &Header, record: SeedRecord) -> Result<(), JidxError>
         || occurrence_end > header.section(SectionKind::ContigPostings).length
     {
         return Err(JidxError::Invalid("seed posting range"));
+    }
+    Ok(())
+}
+
+fn document_bytes<'a>(
+    file: &'a [u8],
+    header: &Header,
+    seed: SeedEntry,
+) -> Result<&'a [u8], JidxError> {
+    let section = header.section(SectionKind::DocumentPostings);
+    let start = section
+        .offset
+        .checked_add(seed.document_offset)
+        .ok_or(JidxError::Invalid("document posting offset"))?;
+    let length = u64::from(seed.document_frequency)
+        .checked_mul(u64::from(DOCUMENT_POSTING_SIZE))
+        .ok_or(JidxError::Invalid("document posting length"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or(JidxError::Invalid("document posting range"))?;
+    let start =
+        usize::try_from(start).map_err(|_| JidxError::Invalid("document posting offset"))?;
+    let end = usize::try_from(end).map_err(|_| JidxError::Invalid("document posting range"))?;
+    file.get(start..end)
+        .ok_or(JidxError::Invalid("document posting range"))
+}
+
+fn validate_document_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxError> {
+    let mut previous = None;
+    for bytes in bytes.as_chunks::<4>().0 {
+        let id = u32::from_le_bytes(*bytes);
+        if id >= header.document_count || previous.is_some_and(|previous| previous >= id) {
+            return Err(JidxError::Invalid("document postings"));
+        }
+        previous = Some(id);
     }
     Ok(())
 }
