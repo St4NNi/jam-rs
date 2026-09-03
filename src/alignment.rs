@@ -156,6 +156,7 @@ impl Alignment {
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
     cells: Vec<Cell>,
+    endpoint_cells: Vec<EndpointCell>,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
     row_widths: Vec<usize>,
@@ -199,6 +200,46 @@ impl AlignmentWorkspace {
             }
         };
         finish(raw, strand, target_offset, target.len())
+    }
+
+    pub fn complete_endpoints(
+        &mut self,
+        core: Alignment,
+        query: &[u8],
+        target: &[u8],
+        target_offset: u64,
+        max_extension: usize,
+        config: AlignmentConfig,
+    ) -> Result<EndpointCompletion, AlignmentError> {
+        config.validate()?;
+        match core.strand {
+            Strand::Forward => complete_endpoints(
+                &mut self.endpoint_cells,
+                core,
+                query,
+                target,
+                target_offset,
+                max_extension,
+                config,
+            ),
+            Strand::Reverse => {
+                let mut reverse = std::mem::take(&mut self.reverse);
+                reverse.clear();
+                reverse.reserve(target.len());
+                reverse.extend(target.iter().rev().map(|base| complement(*base)));
+                let result = complete_endpoints(
+                    &mut self.endpoint_cells,
+                    core,
+                    query,
+                    &reverse,
+                    target_offset,
+                    max_extension,
+                    config,
+                );
+                self.reverse = reverse;
+                result
+            }
+        }
     }
 
     fn align_raw(
@@ -489,6 +530,357 @@ struct RawAlignment {
     summary: RunSummary,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EndpointMetrics {
+    pub left_query_bases: usize,
+    pub left_target_bases: usize,
+    pub right_query_bases: usize,
+    pub right_target_bases: usize,
+    pub matrix_cells: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct EndpointCompletion {
+    pub alignment: Alignment,
+    pub metrics: EndpointMetrics,
+}
+
+const NEGATIVE: i32 = i32::MIN / 4;
+
+#[derive(Clone, Copy, Debug)]
+struct EndpointCell {
+    scores: [i32; 3],
+    previous: [u8; 3],
+}
+
+impl Default for EndpointCell {
+    fn default() -> Self {
+        Self {
+            scores: [NEGATIVE; 3],
+            previous: [START; 3],
+        }
+    }
+}
+
+struct EndpointResult {
+    runs: Vec<EditRun>,
+    query_bases: usize,
+    target_bases: usize,
+    matrix_cells: usize,
+}
+
+fn complete_endpoints(
+    cells: &mut Vec<EndpointCell>,
+    mut core: Alignment,
+    query: &[u8],
+    target: &[u8],
+    target_offset: u64,
+    max_extension: usize,
+    config: AlignmentConfig,
+) -> Result<EndpointCompletion, AlignmentError> {
+    let forward_target_len = target.len();
+    core.validate_cigar()?;
+    let query_start =
+        usize::try_from(core.query_interval.start).map_err(|_| AlignmentError::LengthOverflow)?;
+    let query_end =
+        usize::try_from(core.query_interval.end).map_err(|_| AlignmentError::LengthOverflow)?;
+    let local_start = core
+        .target_interval
+        .start
+        .checked_sub(target_offset)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(AlignmentError::EndpointOutsideWindow)?;
+    let local_end = core
+        .target_interval
+        .end
+        .checked_sub(target_offset)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(AlignmentError::EndpointOutsideWindow)?;
+    if query_start > query_end
+        || query_end > query.len()
+        || local_start > local_end
+        || local_end > forward_target_len
+    {
+        return Err(AlignmentError::EndpointOutsideWindow);
+    }
+    let (target_start, target_end) = match core.strand {
+        Strand::Forward => (local_start, local_end),
+        Strand::Reverse => (
+            forward_target_len - local_end,
+            forward_target_len - local_start,
+        ),
+    };
+
+    let left_query_len = query_start.min(max_extension);
+    let left_target_len = target_start.min(max_extension);
+    let left_query: Vec<_> = query[query_start - left_query_len..query_start]
+        .iter()
+        .rev()
+        .copied()
+        .collect();
+    let left_target: Vec<_> = target[target_start - left_target_len..target_start]
+        .iter()
+        .rev()
+        .copied()
+        .collect();
+    let mut left = anchored_semiglobal(cells, &left_query, &left_target, config)?;
+    left.runs.reverse();
+
+    let query_limit = query_end.saturating_add(max_extension).min(query.len());
+    let target_limit = target_end.saturating_add(max_extension).min(target.len());
+    let right = anchored_semiglobal(
+        cells,
+        &query[query_end..query_limit],
+        &target[target_end..target_limit],
+        config,
+    )?;
+
+    let mut runs = Vec::with_capacity(left.runs.len() + core.edit_script.len() + right.runs.len());
+    append_runs(&mut runs, left.runs)?;
+    append_runs(&mut runs, core.edit_script)?;
+    append_runs(&mut runs, right.runs)?;
+    let summary = summarize_runs(&runs)?;
+    core.score = score_runs(&runs, config);
+    core.query_interval = Interval::new(
+        u64::try_from(query_start - left.query_bases)
+            .map_err(|_| AlignmentError::LengthOverflow)?,
+        u64::try_from(query_end + right.query_bases).map_err(|_| AlignmentError::LengthOverflow)?,
+    )?;
+    let oriented_start = target_start - left.target_bases;
+    let oriented_end = target_end + right.target_bases;
+    let (forward_start, forward_end) = match core.strand {
+        Strand::Forward => (oriented_start, oriented_end),
+        Strand::Reverse => (
+            forward_target_len - oriented_end,
+            forward_target_len - oriented_start,
+        ),
+    };
+    core.target_interval = Interval::new(
+        target_offset
+            .checked_add(u64::try_from(forward_start).map_err(|_| AlignmentError::LengthOverflow)?)
+            .ok_or(AlignmentError::LengthOverflow)?,
+        target_offset
+            .checked_add(u64::try_from(forward_end).map_err(|_| AlignmentError::LengthOverflow)?)
+            .ok_or(AlignmentError::LengthOverflow)?,
+    )?;
+    core.matches = summary.matches;
+    core.substitutions = summary.substitutions;
+    core.insertions = summary.insertions;
+    core.deletions = summary.deletions;
+    core.cigar = cigar_from_runs(&runs)?;
+    core.edit_script = runs;
+    core.validate_cigar()?;
+
+    Ok(EndpointCompletion {
+        alignment: core,
+        metrics: EndpointMetrics {
+            left_query_bases: left.query_bases,
+            left_target_bases: left.target_bases,
+            right_query_bases: right.query_bases,
+            right_target_bases: right.target_bases,
+            matrix_cells: left.matrix_cells.saturating_add(right.matrix_cells),
+        },
+    })
+}
+
+fn anchored_semiglobal(
+    cells: &mut Vec<EndpointCell>,
+    query: &[u8],
+    target: &[u8],
+    config: AlignmentConfig,
+) -> Result<EndpointResult, AlignmentError> {
+    if query.is_empty() || target.is_empty() {
+        return Ok(EndpointResult {
+            runs: Vec::new(),
+            query_bases: 0,
+            target_bases: 0,
+            matrix_cells: 0,
+        });
+    }
+    let rows = query
+        .len()
+        .checked_add(1)
+        .ok_or(AlignmentError::LengthOverflow)?;
+    let columns = target
+        .len()
+        .checked_add(1)
+        .ok_or(AlignmentError::LengthOverflow)?;
+    let matrix_cells = rows
+        .checked_mul(columns)
+        .ok_or(AlignmentError::LengthOverflow)?;
+    if matrix_cells > config.max_cells {
+        return Err(AlignmentError::MatrixTooLarge {
+            cells: matrix_cells,
+            max_cells: config.max_cells,
+        });
+    }
+    if cells.len() < matrix_cells {
+        cells.resize(matrix_cells, EndpointCell::default());
+    } else {
+        cells[..matrix_cells].fill(EndpointCell::default());
+        cells.truncate(matrix_cells);
+    }
+    cells[0].scores[MATCH as usize] = 0;
+    for (column, cell) in cells.iter_mut().enumerate().take(columns).skip(1) {
+        cell.scores[INSERTION as usize] = config.gap_open_score.saturating_add(
+            config
+                .gap_extend_score
+                .saturating_mul(i32::try_from(column).unwrap_or(i32::MAX)),
+        );
+        cell.previous[INSERTION as usize] = if column == 1 { MATCH } else { INSERTION };
+    }
+    for row in 1..rows {
+        let first = row * columns;
+        cells[first].scores[DELETION as usize] = config.gap_open_score.saturating_add(
+            config
+                .gap_extend_score
+                .saturating_mul(i32::try_from(row).unwrap_or(i32::MAX)),
+        );
+        cells[first].previous[DELETION as usize] = if row == 1 { MATCH } else { DELETION };
+        for column in 1..columns {
+            let index = first + column;
+            let (score, state) = maximum(cells[index - columns - 1].scores);
+            cells[index].scores[MATCH as usize] = score.saturating_add(
+                if query[row - 1].eq_ignore_ascii_case(&target[column - 1]) {
+                    config.match_score
+                } else {
+                    config.mismatch_score
+                },
+            );
+            cells[index].previous[MATCH as usize] = state;
+
+            let above = cells[index - columns].scores;
+            let (score, state) = maximum([
+                above[MATCH as usize].saturating_add(gap_open(config)),
+                above[INSERTION as usize].saturating_add(gap_open(config)),
+                above[DELETION as usize].saturating_add(config.gap_extend_score),
+            ]);
+            cells[index].scores[DELETION as usize] = score;
+            cells[index].previous[DELETION as usize] = state;
+
+            let left = cells[index - 1].scores;
+            let (score, state) = maximum([
+                left[MATCH as usize].saturating_add(gap_open(config)),
+                left[INSERTION as usize].saturating_add(config.gap_extend_score),
+                left[DELETION as usize].saturating_add(gap_open(config)),
+            ]);
+            cells[index].scores[INSERTION as usize] = score;
+            cells[index].previous[INSERTION as usize] = state;
+        }
+    }
+
+    let mut best = (NEGATIVE, 0usize, 0usize, START);
+    for row in 0..rows {
+        for column in 0..columns {
+            if (row + 1 != rows && column + 1 != columns) || (row == 0 && column == 0) {
+                continue;
+            }
+            let (score, state) = maximum(cells[row * columns + column].scores);
+            let candidate = (
+                row.saturating_add(column),
+                row,
+                column,
+                std::cmp::Reverse(state),
+            );
+            let current = (
+                best.1.saturating_add(best.2),
+                best.1,
+                best.2,
+                std::cmp::Reverse(best.3),
+            );
+            if score > best.0 || (score == best.0 && candidate > current) {
+                best = (score, row, column, state);
+            }
+        }
+    }
+    if best.3 > DELETION {
+        return Err(AlignmentError::NoAlignment);
+    }
+
+    let mut row = best.1;
+    let mut column = best.2;
+    let mut state = best.3;
+    let mut operations = Vec::with_capacity(row.saturating_add(column));
+    while row > 0 || column > 0 {
+        let index = row * columns + column;
+        let previous = cells[index].previous[state as usize];
+        match state {
+            MATCH if row > 0 && column > 0 => {
+                operations.push(
+                    if query[row - 1].eq_ignore_ascii_case(&target[column - 1]) {
+                        EditOperation::Equal
+                    } else {
+                        EditOperation::Substitution
+                    },
+                );
+                row -= 1;
+                column -= 1;
+            }
+            INSERTION if column > 0 => {
+                operations.push(EditOperation::Insertion);
+                column -= 1;
+            }
+            DELETION if row > 0 => {
+                operations.push(EditOperation::Deletion);
+                row -= 1;
+            }
+            _ => return Err(AlignmentError::InvalidTraceback),
+        }
+        state = previous;
+    }
+    operations.reverse();
+    Ok(EndpointResult {
+        runs: runs_from_operations(&operations)?,
+        query_bases: best.1,
+        target_bases: best.2,
+        matrix_cells,
+    })
+}
+
+fn maximum(values: [i32; 3]) -> (i32, u8) {
+    values
+        .into_iter()
+        .enumerate()
+        .skip(1)
+        .fold((values[0], MATCH), |best, (state, score)| {
+            if score > best.0 {
+                (score, state as u8)
+            } else {
+                best
+            }
+        })
+}
+
+fn append_runs(output: &mut Vec<EditRun>, runs: Vec<EditRun>) -> Result<(), AlignmentError> {
+    for run in runs {
+        if let Some(last) = output.last_mut()
+            && last.operation == run.operation
+        {
+            last.length = last
+                .length
+                .checked_add(run.length)
+                .ok_or(AlignmentError::RunTooLong)?;
+        } else {
+            output.push(run);
+        }
+    }
+    Ok(())
+}
+
+fn score_runs(runs: &[EditRun], config: AlignmentConfig) -> i32 {
+    runs.iter().fold(0, |score, run| {
+        let length = i32::try_from(run.length).unwrap_or(i32::MAX);
+        let delta = match run.operation {
+            EditOperation::Equal => config.match_score.saturating_mul(length),
+            EditOperation::Substitution => config.mismatch_score.saturating_mul(length),
+            EditOperation::Insertion | EditOperation::Deletion => config
+                .gap_open_score
+                .saturating_add(config.gap_extend_score.saturating_mul(length)),
+        };
+        score.saturating_add(delta)
+    })
+}
+
 fn finish(
     raw: RawAlignment,
     strand: Strand,
@@ -712,6 +1104,8 @@ pub enum AlignmentError {
     CigarCountMismatch,
     #[error("failed to write CIGAR text")]
     CigarWrite,
+    #[error("alignment core is outside the supplied endpoint window")]
+    EndpointOutsideWindow,
 }
 
 #[cfg(test)]
@@ -766,5 +1160,78 @@ mod tests {
             parse_cigar("4=1I1I").unwrap_err(),
             AlignmentError::InvalidCigar
         );
+    }
+
+    fn core(strand: Strand, target_interval: Interval) -> Alignment {
+        Alignment {
+            score: 8,
+            strand,
+            query_interval: Interval::new(2, 6).unwrap(),
+            target_interval,
+            matches: 4,
+            substitutions: 0,
+            insertions: 0,
+            deletions: 0,
+            cigar: "4=".into(),
+            edit_script: vec![EditRun {
+                operation: EditOperation::Equal,
+                length: 4,
+            }],
+        }
+    }
+
+    #[test]
+    fn completes_both_endpoints_within_bound() {
+        let mut workspace = AlignmentWorkspace::default();
+        let completed = workspace
+            .complete_endpoints(
+                core(Strand::Forward, Interval::new(102, 106).unwrap()),
+                b"TTACGTAA",
+                b"TTACGTAA",
+                100,
+                2,
+                config(),
+            )
+            .unwrap();
+        assert_eq!(
+            completed.alignment.query_interval,
+            Interval::new(0, 8).unwrap()
+        );
+        assert_eq!(
+            completed.alignment.target_interval,
+            Interval::new(100, 108).unwrap()
+        );
+        assert_eq!(completed.alignment.cigar, "8=");
+        assert_eq!(completed.metrics.left_query_bases, 2);
+        assert_eq!(completed.metrics.right_query_bases, 2);
+    }
+
+    #[test]
+    fn completion_preserves_reverse_coordinates() {
+        let mut workspace = AlignmentWorkspace::default();
+        let completed = workspace
+            .complete_endpoints(
+                core(Strand::Reverse, Interval::new(102, 106).unwrap()),
+                b"TTACGCAA",
+                b"TTGCGTAA",
+                100,
+                2,
+                config(),
+            )
+            .unwrap();
+        assert_eq!(
+            completed.alignment.target_interval,
+            Interval::new(100, 108).unwrap()
+        );
+        assert_eq!(completed.alignment.cigar, "8=");
+    }
+
+    #[test]
+    fn semiglobal_completion_leaves_outer_overhang_free() {
+        let mut cells = Vec::new();
+        let result =
+            anchored_semiglobal(&mut cells, b"ACGTACGT", b"ACGTACGTCCCC", config()).unwrap();
+        assert_eq!((result.query_bases, result.target_bases), (8, 8));
+        assert_eq!(cigar_from_runs(&result.runs).unwrap(), "8=");
     }
 }
