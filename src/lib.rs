@@ -4,6 +4,7 @@ pub mod cli;
 pub mod core_utils;
 pub mod format;
 pub mod io;
+pub mod jidx;
 pub mod mosaic;
 pub mod query;
 pub mod reader;
