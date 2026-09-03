@@ -16,19 +16,19 @@ const SECTION_DESCRIPTOR_SIZE: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeedScheme {
-    CanonicalKmer,
+    WindowMinHash,
 }
 
 impl SeedScheme {
     const fn code(self) -> u8 {
         match self {
-            Self::CanonicalKmer => 1,
+            Self::WindowMinHash => 1,
         }
     }
 
     fn from_code(code: u8) -> Result<Self, JidxError> {
         match code {
-            1 => Ok(Self::CanonicalKmer),
+            1 => Ok(Self::WindowMinHash),
             _ => Err(JidxError::Invalid("seed scheme")),
         }
     }
@@ -141,6 +141,8 @@ pub struct Header {
     pub contig_count: u32,
     pub seed_count: u64,
     pub occurrence_count: u64,
+    pub segment_bases: u32,
+    pub seeds_per_segment: u16,
     pub jam_sha256: [u8; 32],
     pub manifest_sha256: [u8; 32],
     pub body_sha256: [u8; 32],
@@ -173,6 +175,8 @@ impl Header {
             put_u64(&mut bytes, start + 8, section.offset);
             put_u64(&mut bytes, start + 16, section.length);
         }
+        put_u32(&mut bytes, 288, self.segment_bases);
+        put_u16(&mut bytes, 292, self.seeds_per_segment);
         Ok(bytes)
     }
 
@@ -204,7 +208,7 @@ impl Header {
         if read_u32(bytes, 12) != 0 || read_u16(bytes, 22) != 0 {
             return Err(JidxError::Invalid("header flags"));
         }
-        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[288..].iter().any(|byte| *byte != 0)
+        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[294..].iter().any(|byte| *byte != 0)
         {
             return Err(JidxError::Invalid("header reservation"));
         }
@@ -231,6 +235,8 @@ impl Header {
             contig_count: read_u32(bytes, 28),
             seed_count: read_u64(bytes, 32),
             occurrence_count: read_u64(bytes, 40),
+            segment_bases: read_u32(bytes, 288),
+            seeds_per_segment: read_u16(bytes, 292),
             jam_sha256: bytes[48..80].try_into().expect("JIDX jam digest"),
             manifest_sha256: bytes[80..112].try_into().expect("JIDX manifest digest"),
             body_sha256: bytes[112..144].try_into().expect("JIDX body digest"),
@@ -267,6 +273,12 @@ impl Header {
     fn validate_layout(&self, file_len: u64) -> Result<(), JidxError> {
         if !(1..=32).contains(&self.k) {
             return Err(JidxError::Invalid("k-mer size"));
+        }
+        if self.segment_bases < u32::from(self.k)
+            || self.seeds_per_segment == 0
+            || u32::from(self.seeds_per_segment) > self.segment_bases - u32::from(self.k) + 1
+        {
+            return Err(JidxError::Invalid("seed selection"));
         }
         if self.document_count == 0
             || self.jam_sha256 == [0; 32]
@@ -481,13 +493,15 @@ mod tests {
         }
         let header = Header {
             k: 21,
-            seed_scheme: SeedScheme::CanonicalKmer,
+            seed_scheme: SeedScheme::WindowMinHash,
             posting_codec: PostingCodec::Raw,
             filter: FilterKind::None,
             document_count: 1,
             contig_count: 1,
             seed_count: 1,
             occurrence_count: 1,
+            segment_bases: 256,
+            seeds_per_segment: 2,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],
             body_sha256: sha256(&file[HEADER_SIZE..]),
