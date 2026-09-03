@@ -1,58 +1,61 @@
-use crate::jidx::sha256_reader;
 use crate::jidx_reader::{Contig, Metagenome, MetagenomeId};
+use crate::range_source::{RangeSource, RangeSourceError, RangeStats};
 use noodles_bgzf::{self as bgzf, gzi};
-use std::fs::File;
-use std::io::{self, BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::io::{self, Read};
+use std::path::PathBuf;
 use thiserror::Error;
 
 pub struct BgzfReader {
     metagenome_id: MetagenomeId,
-    reader: bgzf::io::Reader<File>,
+    reader: bgzf::io::Reader<RangeSource>,
     index: gzi::Index,
-    bgzf_path: PathBuf,
-    fai_path: PathBuf,
-    gzi_path: PathBuf,
-    bgzf_sha256: [u8; 32],
-    fai_sha256: [u8; 32],
-    gzi_sha256: [u8; 32],
 }
 
 impl BgzfReader {
-    pub fn open_local(source: Metagenome<'_>) -> Result<Self, BgzfError> {
+    pub fn open_local(source: Metagenome<'_>, verify: bool) -> Result<Self, BgzfError> {
         let bgzf_path = local_path(source.bgzf_uri)?;
         let fai_path = local_path(source.fai_uri)?;
         let gzi_path = local_path(source.gzi_uri)?;
-        check_size(&bgzf_path, source.bgzf_bytes)?;
-        check_size(&fai_path, source.fai_bytes)?;
-        check_size(&gzi_path, source.gzi_bytes)?;
-        let index = gzi::fs::read(&gzi_path)?;
-        let reader = bgzf::io::Reader::new(File::open(&bgzf_path)?);
+        Self::open(
+            source,
+            RangeSource::local(bgzf_path, source.bgzf_bytes)?,
+            RangeSource::local(fai_path, source.fai_bytes)?,
+            RangeSource::local(gzi_path, source.gzi_bytes)?,
+            verify,
+        )
+    }
+
+    pub fn open(
+        source: Metagenome<'_>,
+        mut bgzf_source: RangeSource,
+        mut fai_source: RangeSource,
+        mut gzi_source: RangeSource,
+        verify: bool,
+    ) -> Result<Self, BgzfError> {
+        if bgzf_source.len() != source.bgzf_bytes
+            || fai_source.len() != source.fai_bytes
+            || gzi_source.len() != source.gzi_bytes
+        {
+            return Err(BgzfError::SizeMismatch);
+        }
+        if verify
+            && (!bgzf_source.verify_sha256(source.bgzf_sha256)?
+                || !fai_source.verify_sha256(source.fai_sha256)?
+                || !gzi_source.verify_sha256(source.gzi_sha256)?)
+        {
+            return Err(BgzfError::ChecksumMismatch);
+        }
+        let mut index_reader = gzi::io::Reader::new(gzi_source);
+        let index = index_reader.read_index()?;
         Ok(Self {
             metagenome_id: source.id,
-            reader,
+            reader: bgzf::io::Reader::new(bgzf_source),
             index,
-            bgzf_path,
-            fai_path,
-            gzi_path,
-            bgzf_sha256: source.bgzf_sha256,
-            fai_sha256: source.fai_sha256,
-            gzi_sha256: source.gzi_sha256,
         })
     }
 
-    pub fn verify_resources(&self) -> Result<(), BgzfError> {
-        for (path, expected) in [
-            (&self.bgzf_path, self.bgzf_sha256),
-            (&self.fai_path, self.fai_sha256),
-            (&self.gzi_path, self.gzi_sha256),
-        ] {
-            let actual = sha256_reader(BufReader::new(File::open(path)?))?;
-            if actual != expected {
-                return Err(BgzfError::ChecksumMismatch);
-            }
-        }
-        Ok(())
+    pub fn range_stats(&self) -> RangeStats {
+        self.reader.get_ref().stats()
     }
 
     pub fn read_contig_range(
@@ -150,17 +153,12 @@ fn local_path(uri: &str) -> Result<PathBuf, BgzfError> {
     Ok(uri.into())
 }
 
-fn check_size(path: &Path, expected: u64) -> Result<(), BgzfError> {
-    if path.metadata()?.len() != expected {
-        return Err(BgzfError::SizeMismatch);
-    }
-    Ok(())
-}
-
 #[derive(Debug, Error)]
 pub enum BgzfError {
     #[error("BGZF I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error(transparent)]
+    Range(#[from] RangeSourceError),
     #[error("BGZF resource is not a local path")]
     InvalidLocalUri,
     #[error("BGZF resource size differs from JIDX metadata")]
@@ -176,8 +174,11 @@ pub enum BgzfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jidx::sha256_reader;
     use crate::jidx_reader::{ContigId, MetagenomeId};
-    use std::io::Write;
+    use std::fs::File;
+    use std::io::{BufReader, Write};
+    use std::path::Path;
 
     fn digest(path: &Path) -> [u8; 32] {
         sha256_reader(BufReader::new(File::open(path).unwrap())).unwrap()
@@ -212,16 +213,10 @@ mod tests {
             contig_start: ContigId::default(),
             contig_count: 1,
         };
-        let mut reader = BgzfReader::open_local(source).unwrap();
-        reader.verify_resources().unwrap();
+        let mut reader = BgzfReader::open_local(source, true).unwrap();
         let mut mismatched = source;
         mismatched.bgzf_sha256 = [9; 32];
-        assert!(
-            BgzfReader::open_local(mismatched)
-                .unwrap()
-                .verify_resources()
-                .is_err()
-        );
+        assert!(BgzfReader::open_local(mismatched, true).is_err());
         let contig = Contig {
             id: 0,
             metagenome_id: 0,
@@ -235,6 +230,7 @@ mod tests {
             reader.read_contig_range(contig, 2, 10).unwrap(),
             b"GTTGCAAA"
         );
+        assert!(reader.range_stats().bytes_read > 0);
         assert!(reader.read_contig_range(contig, 10, 13).is_err());
     }
 }

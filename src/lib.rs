@@ -11,6 +11,7 @@ pub mod jidx_reader;
 pub mod jidx_writer;
 pub mod mosaic;
 pub mod query;
+pub mod range_source;
 pub mod reader;
 pub mod sketch;
 pub mod writer;
