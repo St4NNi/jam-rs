@@ -144,13 +144,6 @@ impl QuerySketch {
         singleton: bool,
     ) -> Result<Self, QueryError> {
         let input_path = input.as_ref();
-        let kmer_size = db.kmer_size();
-        let threshold = match db.bias_table() {
-            Some(ref bt) if bt.is_soft_filter() => u64::MAX / bt.min_fscale(),
-            _ => db.threshold(),
-        };
-        let min_entropy = db.min_entropy();
-        let bias_table = db.bias_table();
 
         let mut reader = match parse_fastx_file(input_path) {
             Ok(reader) => reader,
@@ -206,33 +199,14 @@ impl QuerySketch {
             }
 
             let sequence = record.normalize(false);
-            if sequence.len() < kmer_size as usize {
-                continue;
-            }
-
-            for (_, kmer, _) in sequence.bit_kmers(kmer_size, true) {
-                let hash = jamhash_u64(kmer.0);
-
-                if hash >= threshold {
-                    continue;
-                }
-
-                if min_entropy > 0.0 && !passes_entropy_filter(kmer.0, kmer_size, min_entropy) {
-                    continue;
-                }
-
-                if bias_table.as_ref().is_some_and(|b| !b.passes_filter(hash)) {
-                    continue;
-                }
-
-                if sample_hash_sets[current_sample_id as usize].insert(hash) {
-                    buckets[bucket_id(hash)].push((hash, current_sample_id));
-                    if let Some(ref bt) = bias_table {
-                        weight_sums[current_sample_id as usize] +=
-                            bt.effective_fscale_at(bt.weight(hash));
-                    }
-                }
-            }
+            add_sequence_hashes(
+                &sequence,
+                current_sample_id,
+                db,
+                &mut buckets,
+                &mut sample_hash_sets[current_sample_id as usize],
+                &mut weight_sums[current_sample_id as usize],
+            );
         }
 
         for bucket in &mut buckets {
@@ -247,6 +221,31 @@ impl QuerySketch {
             sample_names,
             query_sizes,
             query_weight_sums: weight_sums,
+        })
+    }
+
+    pub fn from_sequence(
+        name: impl Into<String>,
+        sequence: &[u8],
+        db: &JamReader,
+    ) -> Result<Self, QueryError> {
+        let name = name.into();
+        if name.is_empty() {
+            return Err(QueryError::Config("query name is empty".to_string()));
+        }
+        let mut buckets = std::array::from_fn(|_| Vec::new());
+        let mut hashes = HashSet::new();
+        let mut weight = 0.0;
+        let sequence = sequence.normalize(false);
+        add_sequence_hashes(&sequence, 0, db, &mut buckets, &mut hashes, &mut weight);
+        for bucket in &mut buckets {
+            bucket.sort_unstable();
+        }
+        Ok(Self {
+            buckets,
+            sample_names: vec![name],
+            query_sizes: vec![hashes.len()],
+            query_weight_sums: vec![weight],
         })
     }
 
@@ -320,6 +319,41 @@ impl QuerySketch {
 impl Default for QuerySketch {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn add_sequence_hashes(
+    sequence: &[u8],
+    sample_id: u32,
+    db: &JamReader,
+    buckets: &mut [Vec<(u64, u32)>; BUCKET_COUNT],
+    hashes: &mut HashSet<u64>,
+    weight: &mut f64,
+) {
+    let k = db.kmer_size();
+    if sequence.len() < usize::from(k) {
+        return;
+    }
+    let bias = db.bias_table();
+    let threshold = match &bias {
+        Some(table) if table.is_soft_filter() => u64::MAX / table.min_fscale(),
+        _ => db.threshold(),
+    };
+    for (_, kmer, _) in sequence.bit_kmers(k, true) {
+        let hash = jamhash_u64(kmer.0);
+        if hash >= threshold
+            || db.min_entropy() > 0.0 && !passes_entropy_filter(kmer.0, k, db.min_entropy())
+            || bias
+                .as_ref()
+                .is_some_and(|table| !table.passes_filter(hash))
+            || !hashes.insert(hash)
+        {
+            continue;
+        }
+        buckets[bucket_id(hash)].push((hash, sample_id));
+        if let Some(table) = &bias {
+            *weight += table.effective_fscale_at(table.weight(hash));
+        }
     }
 }
 
@@ -1381,6 +1415,20 @@ mod tests {
             "Expected high containment, got {}",
             top[0].containment
         );
+    }
+
+    #[test]
+    fn in_memory_sequence_matches_fasta_sketch() {
+        let sequence = b"ATCGATCGATCGATCGATCGATCGATCGATCG";
+        let text = std::str::from_utf8(sequence).unwrap();
+        let (_dir, db_path) = build_test_db(&[("db_seq", text)], false);
+        let db = JamReader::open(&db_path).unwrap();
+        let query_fasta = make_fasta(&[("query", text)]);
+        let from_file = QuerySketch::from_fasta(query_fasta.path(), &db, true).unwrap();
+        let from_memory = QuerySketch::from_sequence("query", sequence, &db).unwrap();
+        assert_eq!(from_memory.buckets, from_file.buckets);
+        assert_eq!(from_memory.query_sizes, from_file.query_sizes);
+        assert_eq!(from_memory.query_weight_sums, from_file.query_weight_sums);
     }
 
     fn build_test_db_with_params(
