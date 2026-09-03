@@ -1057,8 +1057,8 @@ mod tests {
         assert!(is_compressed([0x42, 0x5A]));
         assert!(is_compressed([0xFD, 0x37]));
         assert!(is_compressed([0x28, 0xB5]));
-        assert!(!is_compressed([b'>', b's']));
-        assert!(!is_compressed([b'@', b'r']));
+        assert!(!is_compressed(*b">s"));
+        assert!(!is_compressed(*b"@r"));
     }
 
     #[test]
