@@ -425,11 +425,11 @@ fn read_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("JIDX u16"))
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("JIDX u32"))
 }
 
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("JIDX u64"))
 }
 

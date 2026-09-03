@@ -5,6 +5,7 @@ pub mod core_utils;
 pub mod format;
 pub mod io;
 pub mod jidx;
+mod jidx_postings;
 pub mod jidx_reader;
 pub mod mosaic;
 pub mod query;

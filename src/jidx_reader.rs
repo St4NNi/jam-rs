@@ -9,6 +9,8 @@ use std::io;
 use std::path::Path;
 use thiserror::Error;
 
+pub use crate::jidx_postings::SeedEntry;
+
 pub type MetagenomeId = u32;
 pub type ContigId = u32;
 
@@ -70,7 +72,16 @@ impl JidxReader {
 
     pub fn verify_checksum(&self) -> Result<(), JidxReaderError> {
         self.header.verify_body(&self.mmap)?;
+        crate::jidx_postings::validate_table(&self.mmap, &self.header)?;
         Ok(())
+    }
+
+    pub fn find_seed(&self, packed_key: u64) -> Result<Option<SeedEntry>, JidxReaderError> {
+        Ok(crate::jidx_postings::lookup(
+            &self.mmap,
+            &self.header,
+            packed_key,
+        )?)
     }
 
     pub fn metagenome(&self, id: MetagenomeId) -> Result<Option<Metagenome<'_>>, JidxReaderError> {
@@ -277,13 +288,22 @@ mod tests {
         put_u32(&mut contig, 32, 8);
         put_u32(&mut contig, 36, 9);
 
+        let mut seed = vec![0; SEED_RECORD_SIZE as usize];
+        put_u64(&mut seed, 0, 0x1234);
+        put_u64(&mut seed, 8, 0);
+        put_u32(&mut seed, 16, 1);
+        put_u64(&mut seed, 24, 0);
+        put_u64(&mut seed, 32, 1);
+        let document_posting = 0u32.to_le_bytes().to_vec();
+        let mut contig_posting = vec![0; CONTIG_POSTING_SIZE as usize];
+        put_u64(&mut contig_posting, 8, 2);
         let payloads = [
             strings,
             document,
             contig,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
+            seed,
+            document_posting,
+            contig_posting,
         ];
         let sizes = [
             0,
@@ -317,8 +337,8 @@ mod tests {
             filter: FilterKind::None,
             document_count: 1,
             contig_count: 1,
-            seed_count: 0,
-            occurrence_count: 0,
+            seed_count: 1,
+            occurrence_count: 1,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],
             body_sha256: sha256(&file[HEADER_SIZE..]),
@@ -363,5 +383,15 @@ mod tests {
         let (_directory, path) = fixture(false, true);
         let reader = JidxReader::open(path).unwrap();
         assert!(reader.verify_checksum().is_err());
+    }
+
+    #[test]
+    fn exact_packed_seed_lookup_rejects_partial_matches() {
+        let (_directory, path) = fixture(false, false);
+        let reader = JidxReader::open(path).unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        assert_eq!((seed.packed_key, seed.document_frequency), (0x1234, 1));
+        assert!(reader.find_seed(0x1233).unwrap().is_none());
+        assert!(reader.find_seed(0x1235).unwrap().is_none());
     }
 }
