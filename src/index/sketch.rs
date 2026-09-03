@@ -3,11 +3,10 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::bits::{
-    BIT_PADDING, BitWriter, bits_needed, put_varint, read_bits, read_varint, u16_at, u32_at, u64_at,
-};
+use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u16_at, u32_at, u64_at};
 use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
 use crate::storage::MappedFile;
+use integer_encoding::VarInt;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -142,8 +141,7 @@ impl<'a> ColorSets<'a> {
         let start = usize::try_from(u64_at(self.offsets, at)?).ok()?;
         let end = usize::try_from(u64_at(self.offsets, at + 8)?).ok()?;
         let bytes = self.sets.get(start..end)?;
-        let mut at = 0;
-        let count = read_varint(bytes, &mut at)?;
+        let (count, at) = u64::decode_var(bytes)?;
         Some(ColorSetEntries {
             bytes,
             at,
@@ -182,9 +180,9 @@ impl Iterator for ColorSetEntries<'_> {
         if self.left == 0 {
             return None;
         }
-        let value = self
-            .next
-            .checked_add(read_varint(self.bytes, &mut self.at)?)?;
+        let (gap, used) = u64::decode_var(self.bytes.get(self.at..)?)?;
+        self.at += used;
+        let value = self.next.checked_add(gap)?;
         self.left -= 1;
         self.next = value + 1;
         u32::try_from(value).ok()
@@ -193,10 +191,15 @@ impl Iterator for ColorSetEntries<'_> {
 
 /// Appends a color set (entries ascending and distinct) in its file encoding.
 pub(crate) fn encode_color_set(entries: &[u32], out: &mut Vec<u8>) {
-    put_varint(out, entries.len() as u64);
+    let mut buffer = [0u8; 10];
+    let mut put = |value: u64| {
+        let used = value.encode_var(&mut buffer);
+        out.extend_from_slice(&buffer[..used]);
+    };
+    put(entries.len() as u64);
     let mut next = 0u64;
     for &entry in entries {
-        put_varint(out, u64::from(entry) - next);
+        put(u64::from(entry) - next);
         next = u64::from(entry) + 1;
     }
 }

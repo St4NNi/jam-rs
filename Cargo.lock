@@ -1611,6 +1611,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "integer-encoding"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14c00403deb17c3221a1fe4fb571b9ed0370b3dcd116553c77fa294a3d918699"
+
+[[package]]
 name = "io-uring"
 version = "0.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1835,6 +1841,7 @@ dependencies = [
  "foyer",
  "futures-util",
  "hex",
+ "integer-encoding",
  "iroh",
  "jamhash",
  "libc",

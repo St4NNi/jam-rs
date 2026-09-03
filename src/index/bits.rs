@@ -96,29 +96,6 @@ impl<'a> BitWriter<'a> {
     }
 }
 
-/// Appends `value` as a varint: seven bits per byte, the high bit set on all but the last.
-pub(crate) fn put_varint(out: &mut Vec<u8>, mut value: u64) {
-    while value >= 0x80 {
-        out.push(value as u8 | 0x80);
-        value >>= 7;
-    }
-    out.push(value as u8);
-}
-
-/// Reads the varint at `*at` and moves past it, or `None` when it is cut off or too long.
-pub(crate) fn read_varint(bytes: &[u8], at: &mut usize) -> Option<u64> {
-    let mut value = 0u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *bytes.get(*at)?;
-        *at += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte < 0x80 {
-            return Some(value);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,18 +128,7 @@ mod tests {
     }
 
     #[test]
-    fn varints_round_trip() {
-        let values = [0u64, 1, 127, 128, 300, u32::MAX as u64, u64::MAX];
-        let mut out = Vec::new();
-        for value in values {
-            put_varint(&mut out, value);
-        }
-        let mut at = 0;
-        for value in values {
-            assert_eq!(read_varint(&out, &mut at), Some(value));
-        }
-        assert_eq!(read_varint(&out, &mut at), None);
-        assert_eq!(read_varint(&[0x80; 11], &mut 0), None);
+    fn fields_read_checked() {
         assert_eq!(u64_at(&[0; 7], 0), None);
         assert_eq!(u32_at(&[1, 0, 0, 0], 0), Some(1));
         assert_eq!(u16_at(&[1, 2], 1), None);

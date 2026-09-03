@@ -46,6 +46,7 @@ hex = "0.4.3"
 libc = "0.2.191"
 crc32fast = "1.5.3"
 flate2 = "1.1.10"
+integer-encoding = "4.1.0"
 iroh = { version = "1.4.1", default-features = false, features = ["tls-ring"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.20", features = ["codec"] }
