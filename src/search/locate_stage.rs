@@ -34,7 +34,7 @@ pub struct LocateWork {
     /// Bins with seed hits, over all located entries.
     pub candidate_bins: u64,
     /// Alignment windows, over all located entries.
-    pub windows: u64,
+    pub alignment_windows: u64,
     /// Seconds spent in the stage, summed over threads.
     pub seconds: f64,
 }
@@ -48,7 +48,7 @@ impl LocateWork {
         self.false_seed_hits += other.false_seed_hits;
         self.dropped_entries += other.dropped_entries;
         self.candidate_bins += other.candidate_bins;
-        self.windows += other.windows;
+        self.alignment_windows += other.alignment_windows;
         self.seconds += other.seconds;
     }
 }
@@ -96,8 +96,8 @@ pub fn locate_entry(
     match &outcome {
         Ok(LocateOutcome::Located(located)) => {
             work.candidate_bins += workspace.bins.len() as u64;
-            work.windows += located
-                .windows
+            work.alignment_windows += located
+                .alignment_windows
                 .iter()
                 .map(|contig| contig.ranges.len() as u64)
                 .sum::<u64>();
@@ -136,7 +136,7 @@ fn locate(
         entry: possible.entry,
         coverage_bound,
         containment_estimate: request.query.containment_estimate(positions.len() as u64),
-        windows: alignment_windows(&contig_starts, bins, bin_bits, request.flank),
+        alignment_windows: alignment_windows(&contig_starts, bins, bin_bits, request.flank),
     }))
 }
 

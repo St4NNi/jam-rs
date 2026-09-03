@@ -15,7 +15,7 @@ pub struct LocatedEntry {
     /// seeds included, false seed hits removed).
     pub containment_estimate: f64,
     /// The alignment windows, by contig in ascending order.
-    pub windows: Vec<ContigWindows>,
+    pub alignment_windows: Vec<ContigWindows>,
 }
 
 /// The alignment windows of one contig: sorted, non-overlapping ranges in contig coordinates.

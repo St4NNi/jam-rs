@@ -88,7 +88,7 @@ fn search(
 fn windows(outcome: &LocateOutcome) -> Vec<(u32, Vec<Range<u64>>)> {
     match outcome {
         LocateOutcome::Located(located) => located
-            .windows
+            .alignment_windows
             .iter()
             .map(|contig| (contig.contig, contig.ranges.clone()))
             .collect(),

@@ -27,7 +27,7 @@ fn whole_contigs(shard: &Shard, entry: u32, query_length: u64) -> LocatedEntry {
         entry,
         coverage_bound: query_length,
         containment_estimate: 1.0,
-        windows,
+        alignment_windows: windows,
     }
 }
 

@@ -23,7 +23,7 @@ fn events_round_trip() {
             entry: 3,
             coverage_bound: 900,
             containment_estimate: 0.75,
-            windows: vec![crate::search::ContigWindows {
+            alignment_windows: vec![crate::search::ContigWindows {
                 contig: 0,
                 ranges: vec![10..20, 40..45],
             }],
@@ -46,7 +46,7 @@ fn events_round_trip() {
     assert!(matches!(
         located,
         Ok(Record::Located(Located {
-            windows: 2,
+            alignment_windows: 2,
             window_bases: 15,
             ..
         }))

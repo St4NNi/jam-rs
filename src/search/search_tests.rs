@@ -113,7 +113,7 @@ fn level_ends_search() {
         let EntryEvent::Located(located) = &list[1] else {
             panic!("entry {entry}: {list:?}");
         };
-        assert_eq!(located.windows.len(), 1);
+        assert_eq!(located.alignment_windows.len(), 1);
         assert!(located.coverage_bound >= 4_500);
     }
 }

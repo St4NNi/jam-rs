@@ -112,7 +112,7 @@ pub(super) fn located(shard: &Shard, entry: u32, query: &[u8], flank: u64) -> Lo
         entry,
         coverage_bound: query.len() as u64,
         containment_estimate: 1.0,
-        windows,
+        alignment_windows: windows,
     }
 }
 
@@ -519,7 +519,7 @@ fn window_widens_edge() {
         entry: 0,
         coverage_bound: 20_000,
         containment_estimate: 1.0,
-        windows: vec![ContigWindows {
+        alignment_windows: vec![ContigWindows {
             contig: 0,
             ranges: vec![first_bin],
         }],
@@ -591,7 +591,7 @@ fn stop_between_windows() {
     let fixture = fixture();
     let s3 = entry("s3");
     let located = located(&fixture.shard, s3, &fixture.query, 300);
-    assert_eq!(located.windows.len(), 2);
+    assert_eq!(located.alignment_windows.len(), 2);
     let stop = Arc::new(AtomicBool::new(false));
     let source = Arc::new(StopOnRead {
         file: MappedFile::open(&fixture.shard.packed_path(s3).unwrap(), false).unwrap(),
@@ -630,7 +630,7 @@ fn bad_windows_rejected() {
     let fixture = fixture();
     let mut located = located(&fixture.shard, entry("s1"), &fixture.query, 300);
     let beyond = 0..1_000_000;
-    located.windows[0].ranges = vec![beyond];
+    located.alignment_windows[0].ranges = vec![beyond];
     let config = AlignStageConfig::default();
     let query = PreparedQuery::new(&fixture.query, false, &config).unwrap();
     let stop = AtomicBool::new(false);

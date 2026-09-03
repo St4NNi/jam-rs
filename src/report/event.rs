@@ -44,7 +44,7 @@ pub struct Located {
     /// so false seed hits no longer count; mutations lower it.
     pub containment_estimate: f64,
     /// Alignment windows and their bases together.
-    pub windows: u64,
+    pub alignment_windows: u64,
     pub window_bases: u64,
 }
 
@@ -129,9 +129,13 @@ impl Record {
                 entry,
                 coverage_bound: located.coverage_bound,
                 containment_estimate: located.containment_estimate,
-                windows: located.windows.iter().map(|c| c.ranges.len() as u64).sum(),
+                alignment_windows: located
+                    .alignment_windows
+                    .iter()
+                    .map(|c| c.ranges.len() as u64)
+                    .sum(),
                 window_bases: located
-                    .windows
+                    .alignment_windows
                     .iter()
                     .flat_map(|c| &c.ranges)
                     .map(|range| range.end - range.start)

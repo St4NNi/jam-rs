@@ -166,7 +166,7 @@ pub fn entry_fragments(
     query.check(config)?;
     let mut fragments = Collected::new(config.max_fragment_bytes);
     let mut work = AlignWork::default();
-    for windows in &located.windows {
+    for windows in &located.alignment_windows {
         control.check()?;
         let job = contig::ContigJob::new(packed, windows.contig, query, config, rule, control)?;
         job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
