@@ -7,6 +7,7 @@ pub mod io;
 pub mod jidx;
 mod jidx_postings;
 pub mod jidx_reader;
+pub mod jidx_writer;
 pub mod mosaic;
 pub mod query;
 pub mod reader;

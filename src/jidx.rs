@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::io::{self, Read};
 use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"JIDX\0\0\0\0";
@@ -95,7 +96,7 @@ impl SectionKind {
         Self::ContigPostings,
     ];
 
-    const fn record_size(self) -> u32 {
+    pub(crate) const fn record_size(self) -> u32 {
         match self {
             Self::Strings => 0,
             Self::Documents => DOCUMENT_RECORD_SIZE,
@@ -375,6 +376,23 @@ pub(crate) struct DocumentRecord {
 }
 
 impl DocumentRecord {
+    pub fn encode(self) -> [u8; DOCUMENT_RECORD_SIZE as usize] {
+        let mut bytes = [0; DOCUMENT_RECORD_SIZE as usize];
+        put_string_ref(&mut bytes, 0, self.name);
+        put_string_ref(&mut bytes, 8, self.bgzf_uri);
+        put_string_ref(&mut bytes, 16, self.fai_uri);
+        put_string_ref(&mut bytes, 24, self.gzi_uri);
+        put_u64(&mut bytes, 32, self.bgzf_bytes);
+        put_u64(&mut bytes, 40, self.fai_bytes);
+        put_u64(&mut bytes, 48, self.gzi_bytes);
+        put_u32(&mut bytes, 56, self.contig_start);
+        put_u32(&mut bytes, 60, self.contig_count);
+        bytes[64..96].copy_from_slice(&self.bgzf_sha256);
+        bytes[96..128].copy_from_slice(&self.fai_sha256);
+        bytes[128..160].copy_from_slice(&self.gzi_sha256);
+        bytes
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, JidxError> {
         if bytes.len() != DOCUMENT_RECORD_SIZE as usize {
             return Err(JidxError::Invalid("document record size"));
@@ -407,6 +425,17 @@ pub(crate) struct ContigRecord {
 }
 
 impl ContigRecord {
+    pub fn encode(self) -> [u8; CONTIG_RECORD_SIZE as usize] {
+        let mut bytes = [0; CONTIG_RECORD_SIZE as usize];
+        put_u32(&mut bytes, 0, self.document_id);
+        put_string_ref(&mut bytes, 4, self.name);
+        put_u64(&mut bytes, 16, self.length);
+        put_u64(&mut bytes, 24, self.fasta_offset);
+        put_u32(&mut bytes, 32, self.line_bases);
+        put_u32(&mut bytes, 36, self.line_width);
+        bytes
+    }
+
     pub fn decode(bytes: &[u8]) -> Result<Self, JidxError> {
         if bytes.len() != CONTIG_RECORD_SIZE as usize || read_u32(bytes, 12) != 0 {
             return Err(JidxError::Invalid("contig record"));
@@ -429,8 +458,26 @@ fn string_ref(bytes: &[u8], offset: usize) -> StringRef {
     }
 }
 
+fn put_string_ref(bytes: &mut [u8], offset: usize, value: StringRef) {
+    put_u32(bytes, offset, value.offset);
+    put_u32(bytes, offset + 4, value.length);
+}
+
 pub fn sha256(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+pub fn sha256_reader(mut reader: impl Read) -> io::Result<[u8; 32]> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -445,15 +492,15 @@ pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("JIDX u64"))
 }
 
-fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+pub(crate) fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
     bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
 }
 
-fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+pub(crate) fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
     bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
 }
 
-fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+pub(crate) fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 

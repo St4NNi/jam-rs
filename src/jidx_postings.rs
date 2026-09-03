@@ -24,7 +24,7 @@ pub(crate) fn lookup(
     header: &Header,
     packed_key: u64,
 ) -> Result<Option<SeedEntry>, JidxError> {
-    validate_key(packed_key, header.k)?;
+    validate_packed_key(packed_key, header.k)?;
     let mut low = 0;
     let mut high = header.seed_count;
     while low < high {
@@ -167,7 +167,7 @@ fn seed_record(file: &[u8], header: &Header, index: u64) -> Result<SeedRecord, J
 }
 
 fn validate_record(header: &Header, record: SeedRecord) -> Result<(), JidxError> {
-    validate_key(record.packed_key, header.k)?;
+    validate_packed_key(record.packed_key, header.k)?;
     if record.document_count == 0
         || record.document_count > header.document_count
         || record.occurrence_count == 0
@@ -281,9 +281,27 @@ fn validate_occurrence_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxEr
     Ok(())
 }
 
-fn validate_key(key: u64, k: u8) -> Result<(), JidxError> {
+pub(crate) fn validate_packed_key(key: u64, k: u8) -> Result<(), JidxError> {
     if k < 32 && key >= 1u64 << (2 * k) {
         return Err(JidxError::Invalid("packed seed"));
     }
     Ok(())
+}
+
+pub(crate) fn encode_seed(seed: SeedEntry) -> [u8; SEED_RECORD_SIZE as usize] {
+    let mut bytes = [0; SEED_RECORD_SIZE as usize];
+    crate::jidx::put_u64(&mut bytes, 0, seed.packed_key);
+    crate::jidx::put_u64(&mut bytes, 8, seed.document_offset);
+    crate::jidx::put_u32(&mut bytes, 16, seed.document_frequency);
+    crate::jidx::put_u64(&mut bytes, 24, seed.occurrence_offset);
+    crate::jidx::put_u64(&mut bytes, 32, seed.occurrence_count);
+    bytes
+}
+
+pub(crate) fn encode_occurrence(occurrence: SeedOccurrence) -> [u8; CONTIG_POSTING_SIZE as usize] {
+    let mut bytes = [0; CONTIG_POSTING_SIZE as usize];
+    crate::jidx::put_u32(&mut bytes, 0, occurrence.contig_id);
+    bytes[4] = u8::from(occurrence.canonical_orientation);
+    crate::jidx::put_u64(&mut bytes, 8, occurrence.position);
+    bytes
 }
