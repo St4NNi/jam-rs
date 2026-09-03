@@ -175,6 +175,65 @@ fn optimum_reuse_matches() {
 }
 
 #[test]
+fn shared_kernels_match() {
+    // Tandem repeats with changes give many walks on near diagonals; aligning them in one box
+    // must give every walk the alignment of its own box, on both query kinds.
+    let mut generator = rng(11);
+    let repeat = |unit: &[u8], count: usize| unit.repeat(count);
+    let mut query = random_bases(&mut generator, 3_000);
+    query.extend(repeat(b"AT", 60));
+    query.extend(repeat(b"GGC", 30));
+    query.extend(random_bases(&mut generator, 3_000));
+    let mut contig = random_bases(&mut generator, 1_000);
+    contig.extend_from_slice(&query[2_500..3_000]);
+    contig.extend(repeat(b"AT", 40));
+    contig.push(b'C');
+    contig.extend(repeat(b"AT", 30));
+    contig.extend(repeat(b"GGC", 12));
+    contig.extend_from_slice(b"TT");
+    contig.extend(repeat(b"GGC", 15));
+    contig.extend_from_slice(&query[3_210..3_700]);
+    contig.extend(random_bases(&mut generator, 1_000));
+    for circular in [false, true] {
+        let table = QueryTable::low_complexity(
+            &query,
+            circular,
+            AnchorConfig::default(),
+            ChainConfig::default(),
+        )
+        .unwrap();
+        let walks = dense_walks(&table, &contig, 0, BandConfig::default(), 64 << 20)
+            .unwrap()
+            .walks;
+        assert!(walks.len() > 100, "{}", walks.len());
+        let mut workspace = AlignmentWorkspace::default();
+        let config = BandConfig {
+            max_drift: 64,
+            ..BandConfig::default()
+        };
+        let mut align_all = |shared: bool| {
+            let mut results = DenseResults::default();
+            let walks = &walks;
+            (0..walks.len())
+                .map(|index| {
+                    let input = DenseWalk {
+                        walk: &walks[index],
+                        later: if shared { &walks[index + 1..] } else { &[] },
+                        window: &contig,
+                        offset: 7,
+                        table: &table,
+                    };
+                    align_dense_walk(input, config, &mut workspace, &mut results).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let alone = align_all(false);
+        assert!(alone.iter().filter(|found| found.is_some()).count() > 100);
+        assert_eq!(align_all(true), alone);
+    }
+}
+
+#[test]
 fn gapped_walk_widens() {
     let query = random_bases(&mut rng(7), 10_000);
     let mut contig = random_bases(&mut rng(8), 300);
