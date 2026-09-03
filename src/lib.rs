@@ -15,6 +15,7 @@ pub mod query;
 pub mod range_source;
 pub mod reader;
 pub mod sketch;
+pub mod trace;
 pub mod writer;
 pub use cli::handlers::{
     handle_bias_create_command, handle_bias_stats_command, handle_distance_command,

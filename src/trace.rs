@@ -1,0 +1,802 @@
+use crate::alignment::{AlignmentConfig, AlignmentError, AlignmentWorkspace, Interval, Strand};
+use crate::bgzf::{BgzfError, BgzfReader};
+use crate::jidx::{JidxError, sha256_reader};
+use crate::jidx_reader::{ContigId, JidxReader, JidxReaderError, MetagenomeId};
+use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
+use crate::query::{QueryEngine, QueryError, QuerySketch};
+use crate::range_source::S3Config;
+use crate::reader::ReaderError;
+use needletail::Sequence;
+use rayon::prelude::*;
+use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::File;
+use std::io::{self, BufReader};
+use std::path::Path;
+use thiserror::Error;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TraceConfig {
+    pub min_containment: f64,
+    pub max_metagenomes: usize,
+    pub min_seed_hits: u32,
+    pub diagonal_bin_bases: u64,
+    pub flank_bases: u64,
+    pub min_identity: f64,
+    pub min_aligned_bases: u64,
+    pub endpoint_bases: usize,
+    pub circular: bool,
+    pub verify_resources: bool,
+    pub alignment: AlignmentConfig,
+}
+
+impl Default for TraceConfig {
+    fn default() -> Self {
+        Self {
+            min_containment: 0.01,
+            max_metagenomes: 100,
+            min_seed_hits: 2,
+            diagonal_bin_bases: 64,
+            flank_bases: 256,
+            min_identity: 0.8,
+            min_aligned_bases: 40,
+            endpoint_bases: 256,
+            circular: true,
+            verify_resources: false,
+            alignment: AlignmentConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TraceResult {
+    pub query_id: String,
+    pub query_length: u64,
+    pub candidates_screened: u32,
+    pub metagenomes: Vec<MetagenomeTrace>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MetagenomeTrace {
+    pub metagenome_id: MetagenomeId,
+    pub name: String,
+    pub shared_hashes: u32,
+    pub containment: f64,
+    pub exact_seed_hits: u64,
+    pub compressed_bytes_read: u64,
+    pub range_requests: u64,
+    pub contigs: Vec<TraceContig>,
+    pub mosaic: Mosaic,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TraceContig {
+    pub id: ContigId,
+    pub name: String,
+}
+
+pub struct TraceEngine {
+    screen: QueryEngine,
+    index: JidxReader,
+    sample_to_metagenome: Vec<MetagenomeId>,
+    s3: Option<S3Config>,
+}
+
+impl TraceEngine {
+    pub fn open(
+        jam: impl AsRef<Path>,
+        jidx: impl AsRef<Path>,
+        s3: Option<S3Config>,
+    ) -> Result<Self, TraceError> {
+        let jam = jam.as_ref();
+        let index = JidxReader::open(jidx)?;
+        let jam_sha256 = sha256_reader(BufReader::new(File::open(jam)?))?;
+        if jam_sha256 != index.header().jam_sha256 {
+            return Err(TraceError::Invalid(
+                "JIDX belongs to a different JAM database",
+            ));
+        }
+        let screen = QueryEngine::open(jam)?;
+        let mut by_name = HashMap::new();
+        for id in 0..index.header().document_count {
+            let metagenome = index
+                .metagenome(id)?
+                .ok_or(TraceError::Invalid("missing JIDX metagenome"))?;
+            if by_name.insert(metagenome.name.to_string(), id).is_some() {
+                return Err(TraceError::Invalid("duplicate JIDX metagenome"));
+            }
+        }
+        let mut sample_to_metagenome = Vec::with_capacity(screen.reader().sample_names().len());
+        for name in screen.reader().sample_names() {
+            sample_to_metagenome.push(
+                *by_name
+                    .get(name)
+                    .ok_or(TraceError::Invalid("JAM and JIDX names differ"))?,
+            );
+        }
+        if sample_to_metagenome.len() != by_name.len() {
+            return Err(TraceError::Invalid("JAM and JIDX names differ"));
+        }
+        Ok(Self {
+            screen,
+            index,
+            sample_to_metagenome,
+            s3,
+        })
+    }
+
+    pub fn verify_index(&self) -> Result<(), TraceError> {
+        self.index.verify_checksum()?;
+        Ok(())
+    }
+
+    pub fn search(
+        &self,
+        query_id: impl Into<String>,
+        sequence: &[u8],
+        config: TraceConfig,
+    ) -> Result<TraceResult, TraceError> {
+        validate_config(config)?;
+        let query_id = query_id.into();
+        if query_id.is_empty()
+            || query_id
+                .bytes()
+                .any(|byte| matches!(byte, 0 | b'\n' | b'\r'))
+        {
+            return Err(TraceError::Invalid("query ID"));
+        }
+        let query = sequence.normalize(false).into_owned();
+        if query.is_empty() {
+            return Err(TraceError::Invalid("empty query"));
+        }
+        let query_length =
+            u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
+        let candidates = self.screen_candidates(&query_id, &query, config)?;
+        let candidate_ids: HashSet<_> = candidates.iter().map(|candidate| candidate.id).collect();
+        let query_seeds = unique_query_seeds(&query, self.index.header().k, config.circular)?;
+        let mut regions = BTreeMap::<RegionKey, RegionAccumulator>::new();
+        let mut seed_hits = HashMap::<MetagenomeId, u64>::new();
+        for seed in query_seeds {
+            let Some(index_seed) = self.index.find_seed(seed.packed_key)? else {
+                continue;
+            };
+            if !self
+                .index
+                .seed_metagenomes(index_seed)?
+                .iter()
+                .any(|id| candidate_ids.contains(id))
+            {
+                continue;
+            }
+            for occurrence in self.index.seed_occurrences(index_seed)? {
+                let contig = self
+                    .index
+                    .contig(occurrence.contig_id)?
+                    .ok_or(TraceError::Invalid("missing occurrence contig"))?;
+                if !candidate_ids.contains(&contig.metagenome_id) {
+                    continue;
+                }
+                let strand = if seed.canonical_orientation == occurrence.canonical_orientation {
+                    Strand::Forward
+                } else {
+                    Strand::Reverse
+                };
+                let oriented_position = match strand {
+                    Strand::Forward => occurrence.position,
+                    Strand::Reverse => contig
+                        .length
+                        .checked_sub(
+                            occurrence
+                                .position
+                                .checked_add(u64::from(self.index.header().k))
+                                .ok_or(TraceError::Invalid("occurrence position"))?,
+                        )
+                        .ok_or(TraceError::Invalid("occurrence position"))?,
+                };
+                let diagonal = i128::from(oriented_position) - i128::from(seed.position);
+                let bin = i64::try_from(diagonal.div_euclid(i128::from(config.diagonal_bin_bases)))
+                    .map_err(|_| TraceError::Invalid("alignment diagonal"))?;
+                regions
+                    .entry(RegionKey {
+                        metagenome_id: contig.metagenome_id,
+                        contig_id: contig.id,
+                        strand,
+                        bin,
+                    })
+                    .and_modify(|region| region.add(seed.position, oriented_position))
+                    .or_insert_with(|| RegionAccumulator::new(seed.position, oriented_position));
+                let hits = seed_hits.entry(contig.metagenome_id).or_default();
+                *hits = hits.saturating_add(1);
+            }
+        }
+
+        let tasks = self.tasks(regions, query_length, config)?;
+        let (loaded, reads) = self.load_ranges(&tasks, config.verify_resources)?;
+        let fragments = self.align_tasks(&query, &tasks, &loaded, config)?;
+        let mut by_metagenome = BTreeMap::<MetagenomeId, Vec<Fragment>>::new();
+        for (metagenome_id, fragment) in fragments {
+            by_metagenome
+                .entry(metagenome_id)
+                .or_default()
+                .push(fragment);
+        }
+
+        let candidates_screened =
+            u32::try_from(candidates.len()).map_err(|_| TraceError::Invalid("candidate count"))?;
+        let mut metagenomes = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let fragments = by_metagenome.remove(&candidate.id).unwrap_or_default();
+            let mosaic = build_mosaic(query_length, &fragments)?;
+            let mut contig_ids = BTreeSet::new();
+            for fragment in mosaic
+                .primary
+                .iter()
+                .map(|selected| &selected.fragment)
+                .chain(mosaic.alternatives.iter())
+            {
+                contig_ids.insert(fragment.contig_id);
+            }
+            let mut contigs = Vec::with_capacity(contig_ids.len());
+            for id in contig_ids {
+                let contig = self
+                    .index
+                    .contig(id)?
+                    .ok_or(TraceError::Invalid("missing result contig"))?;
+                contigs.push(TraceContig {
+                    id,
+                    name: contig.name.to_string(),
+                });
+            }
+            let stats = reads.get(&candidate.id).copied().unwrap_or_default();
+            metagenomes.push(MetagenomeTrace {
+                metagenome_id: candidate.id,
+                name: candidate.name,
+                shared_hashes: candidate.shared_hashes,
+                containment: candidate.containment,
+                exact_seed_hits: seed_hits.get(&candidate.id).copied().unwrap_or(0),
+                compressed_bytes_read: stats.bytes_read,
+                range_requests: stats.read_requests,
+                contigs,
+                mosaic,
+            });
+        }
+        Ok(TraceResult {
+            query_id,
+            query_length,
+            candidates_screened,
+            metagenomes,
+        })
+    }
+
+    fn screen_candidates(
+        &self,
+        query_id: &str,
+        query: &[u8],
+        config: TraceConfig,
+    ) -> Result<Vec<Candidate>, TraceError> {
+        let sketch = QuerySketch::from_sequence(query_id, query, self.screen.reader())?;
+        let result = self
+            .screen
+            .query_sketch(&sketch)
+            .into_iter()
+            .next()
+            .ok_or(TraceError::Invalid("missing JAM query result"))?;
+        let mut candidates = result
+            .matches
+            .into_iter()
+            .filter(|candidate| candidate.containment >= config.min_containment)
+            .map(|candidate| {
+                let id = *self
+                    .sample_to_metagenome
+                    .get(candidate.sample_id as usize)
+                    .ok_or(TraceError::Invalid("JAM sample ID"))?;
+                let name = self
+                    .index
+                    .metagenome(id)?
+                    .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
+                    .name
+                    .to_string();
+                Ok(Candidate {
+                    id,
+                    name,
+                    shared_hashes: candidate.hit_count,
+                    containment: candidate.containment,
+                })
+            })
+            .collect::<Result<Vec<_>, TraceError>>()?;
+        candidates.sort_by(|left, right| {
+            right
+                .containment
+                .total_cmp(&left.containment)
+                .then_with(|| right.shared_hashes.cmp(&left.shared_hashes))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        candidates.truncate(config.max_metagenomes);
+        Ok(candidates)
+    }
+
+    fn tasks(
+        &self,
+        regions: BTreeMap<RegionKey, RegionAccumulator>,
+        query_length: u64,
+        config: TraceConfig,
+    ) -> Result<Vec<AlignmentTask>, TraceError> {
+        let k = u64::from(self.index.header().k);
+        let mut tasks = Vec::new();
+        for (key, region) in regions {
+            if region.hits < config.min_seed_hits {
+                continue;
+            }
+            let contig = self
+                .index
+                .contig(key.contig_id)?
+                .ok_or(TraceError::Invalid("missing region contig"))?;
+            let query_start = region.query_start.saturating_sub(config.flank_bases);
+            let query_end = region
+                .query_end
+                .saturating_add(k)
+                .saturating_add(config.flank_bases);
+            let query_span = if config.circular {
+                query_end.saturating_sub(query_start).min(query_length)
+            } else {
+                query_end.min(query_length).saturating_sub(query_start)
+            };
+            if query_span == 0 {
+                continue;
+            }
+            let oriented_start = region.target_start.saturating_sub(config.flank_bases);
+            let oriented_end = region
+                .target_end
+                .saturating_add(k)
+                .saturating_add(config.flank_bases)
+                .min(contig.length);
+            let (target_start, target_end) = match key.strand {
+                Strand::Forward => (oriented_start, oriented_end),
+                Strand::Reverse => (contig.length - oriented_end, contig.length - oriented_start),
+            };
+            let target_relative = region.target_start - oriented_start;
+            let query_relative = region.query_start - query_start;
+            let diagonal_offset =
+                i64::try_from(i128::from(target_relative) - i128::from(query_relative))
+                    .map_err(|_| TraceError::Invalid("task diagonal"))?;
+            tasks.push(AlignmentTask {
+                metagenome_id: key.metagenome_id,
+                contig_id: key.contig_id,
+                strand: key.strand,
+                query_start,
+                query_span,
+                target_start,
+                target_end,
+                diagonal_offset,
+            });
+        }
+        tasks.sort_unstable_by_key(|task| {
+            (
+                task.metagenome_id,
+                task.contig_id,
+                task.strand,
+                task.target_start,
+                task.query_start,
+            )
+        });
+        Ok(tasks)
+    }
+
+    fn load_ranges(
+        &self,
+        tasks: &[AlignmentTask],
+        verify: bool,
+    ) -> Result<LoadedRanges, TraceError> {
+        let mut spans = BTreeMap::<(MetagenomeId, ContigId), (u64, u64)>::new();
+        for task in tasks {
+            spans
+                .entry((task.metagenome_id, task.contig_id))
+                .and_modify(|span| {
+                    span.0 = span.0.min(task.target_start);
+                    span.1 = span.1.max(task.target_end);
+                })
+                .or_insert((task.target_start, task.target_end));
+        }
+        let mut loaded = BTreeMap::new();
+        let mut reads = HashMap::new();
+        for metagenome_id in tasks
+            .iter()
+            .map(|task| task.metagenome_id)
+            .collect::<BTreeSet<_>>()
+        {
+            let source = self
+                .index
+                .metagenome(metagenome_id)?
+                .ok_or(TraceError::Invalid("missing source metagenome"))?;
+            let mut reader = BgzfReader::open(source, self.s3.as_ref(), verify)?;
+            for (&(_, contig_id), &(start, end)) in
+                spans.range((metagenome_id, 0)..=(metagenome_id, u32::MAX))
+            {
+                let contig = self
+                    .index
+                    .contig(contig_id)?
+                    .ok_or(TraceError::Invalid("missing source contig"))?;
+                // ponytail: read one covering span per selected contig; split only if sparse spans dominate I/O.
+                let sequence = reader.read_contig_range(contig, start, end)?;
+                loaded.insert(
+                    (metagenome_id, contig_id),
+                    LoadedRange {
+                        offset: start,
+                        sequence,
+                    },
+                );
+            }
+            reads.insert(metagenome_id, reader.range_stats());
+        }
+        Ok((loaded, reads))
+    }
+
+    fn align_tasks(
+        &self,
+        query: &[u8],
+        tasks: &[AlignmentTask],
+        loaded: &BTreeMap<(MetagenomeId, ContigId), LoadedRange>,
+        config: TraceConfig,
+    ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
+        tasks
+            .par_iter()
+            .map_init(AlignmentWorkspace::default, |workspace, task| {
+                let query_window =
+                    linearize_query(query, task.query_start, task.query_span, config.circular)?;
+                let loaded = loaded
+                    .get(&(task.metagenome_id, task.contig_id))
+                    .ok_or(TraceError::Invalid("missing loaded contig"))?;
+                let start = usize::try_from(task.target_start - loaded.offset)
+                    .map_err(|_| TraceError::Invalid("loaded range"))?;
+                let end = usize::try_from(task.target_end - loaded.offset)
+                    .map_err(|_| TraceError::Invalid("loaded range"))?;
+                let target = loaded
+                    .sequence
+                    .get(start..end)
+                    .ok_or(TraceError::Invalid("loaded range"))?;
+                let mut alignment_config = config.alignment;
+                alignment_config.diagonal_offset = task.diagonal_offset;
+                let core = match workspace.align_oriented(
+                    &query_window,
+                    target,
+                    task.target_start,
+                    task.strand,
+                    alignment_config,
+                ) {
+                    Ok(alignment) => alignment,
+                    Err(AlignmentError::NoAlignment) => return Ok(None),
+                    Err(error) => return Err(error.into()),
+                };
+                let alignment = workspace
+                    .complete_endpoints(
+                        core,
+                        &query_window,
+                        target,
+                        task.target_start,
+                        config.endpoint_bases,
+                        alignment_config,
+                    )?
+                    .alignment;
+                if alignment.identity() < config.min_identity
+                    || alignment.query_interval.len() < config.min_aligned_bases
+                {
+                    return Ok(None);
+                }
+                let query_segments = query_segments(
+                    task.query_start,
+                    alignment.query_interval,
+                    u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?,
+                    config.circular,
+                )?;
+                Ok(Some((
+                    task.metagenome_id,
+                    Fragment {
+                        contig_id: task.contig_id,
+                        query_segments,
+                        alignment,
+                    },
+                )))
+            })
+            .filter_map(|result| match result {
+                Ok(Some(value)) => Some(Ok(value)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+}
+
+type LoadedRanges = (
+    BTreeMap<(MetagenomeId, ContigId), LoadedRange>,
+    HashMap<MetagenomeId, crate::range_source::RangeStats>,
+);
+
+struct LoadedRange {
+    offset: u64,
+    sequence: Vec<u8>,
+}
+
+struct Candidate {
+    id: MetagenomeId,
+    name: String,
+    shared_hashes: u32,
+    containment: f64,
+}
+
+#[derive(Clone, Copy)]
+struct QuerySeed {
+    packed_key: u64,
+    position: u64,
+    canonical_orientation: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RegionKey {
+    metagenome_id: MetagenomeId,
+    contig_id: ContigId,
+    strand: Strand,
+    bin: i64,
+}
+
+struct RegionAccumulator {
+    query_start: u64,
+    query_end: u64,
+    target_start: u64,
+    target_end: u64,
+    hits: u32,
+}
+
+impl RegionAccumulator {
+    fn new(query: u64, target: u64) -> Self {
+        Self {
+            query_start: query,
+            query_end: query,
+            target_start: target,
+            target_end: target,
+            hits: 1,
+        }
+    }
+
+    fn add(&mut self, query: u64, target: u64) {
+        self.query_start = self.query_start.min(query);
+        self.query_end = self.query_end.max(query);
+        self.target_start = self.target_start.min(target);
+        self.target_end = self.target_end.max(target);
+        self.hits = self.hits.saturating_add(1);
+    }
+}
+
+struct AlignmentTask {
+    metagenome_id: MetagenomeId,
+    contig_id: ContigId,
+    strand: Strand,
+    query_start: u64,
+    query_span: u64,
+    target_start: u64,
+    target_end: u64,
+    diagonal_offset: i64,
+}
+
+fn unique_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySeed>, TraceError> {
+    if query.len() < usize::from(k) {
+        return Ok(Vec::new());
+    }
+    let mut sequence = query.to_vec();
+    if circular {
+        sequence.extend_from_slice(&query[..usize::from(k) - 1]);
+    }
+    let mut seeds = BTreeMap::<u64, Option<QuerySeed>>::new();
+    for (position, kmer, orientation) in sequence.bit_kmers(k, true) {
+        if position >= query.len() {
+            break;
+        }
+        let seed = QuerySeed {
+            packed_key: kmer.0,
+            position: u64::try_from(position)
+                .map_err(|_| TraceError::Invalid("query seed position"))?,
+            canonical_orientation: orientation,
+        };
+        seeds
+            .entry(seed.packed_key)
+            .and_modify(|existing| *existing = None)
+            .or_insert(Some(seed));
+    }
+    // ponytail: ignore repeated query keys; add bounded repeat pairing only if repeat-only recall matters.
+    Ok(seeds.into_values().flatten().collect())
+}
+
+fn linearize_query(
+    query: &[u8],
+    start: u64,
+    span: u64,
+    circular: bool,
+) -> Result<Vec<u8>, TraceError> {
+    let start = usize::try_from(start).map_err(|_| TraceError::Invalid("query window"))?;
+    let span = usize::try_from(span).map_err(|_| TraceError::Invalid("query window"))?;
+    if !circular {
+        return query
+            .get(start..start + span)
+            .map(<[u8]>::to_vec)
+            .ok_or(TraceError::Invalid("query window"));
+    }
+    Ok((0..span)
+        .map(|offset| query[(start + offset) % query.len()])
+        .collect())
+}
+
+fn query_segments(
+    window_start: u64,
+    local: Interval,
+    query_length: u64,
+    circular: bool,
+) -> Result<Vec<Interval>, TraceError> {
+    let start = window_start
+        .checked_add(local.start)
+        .ok_or(TraceError::Invalid("query coordinates"))?;
+    let end = window_start
+        .checked_add(local.end)
+        .ok_or(TraceError::Invalid("query coordinates"))?;
+    if !circular || end <= query_length {
+        return Ok(vec![Interval::new(start, end)?]);
+    }
+    if start >= query_length {
+        return Ok(vec![Interval::new(
+            start - query_length,
+            end - query_length,
+        )?]);
+    }
+    let wrapped = end % query_length;
+    let mut segments = vec![Interval::new(start, query_length)?];
+    if wrapped != 0 {
+        segments.push(Interval::new(0, wrapped)?);
+    }
+    Ok(segments)
+}
+
+fn validate_config(config: TraceConfig) -> Result<(), TraceError> {
+    if !config.min_containment.is_finite()
+        || !(0.0..=1.0).contains(&config.min_containment)
+        || config.max_metagenomes == 0
+        || config.min_seed_hits == 0
+        || config.diagonal_bin_bases == 0
+        || !config.min_identity.is_finite()
+        || !(0.0..=1.0).contains(&config.min_identity)
+        || config.min_aligned_bases == 0
+    {
+        return Err(TraceError::Invalid("trace configuration"));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Error)]
+pub enum TraceError {
+    #[error("trace I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Database(#[from] ReaderError),
+    #[error(transparent)]
+    Query(#[from] QueryError),
+    #[error(transparent)]
+    Jidx(#[from] JidxReaderError),
+    #[error(transparent)]
+    JidxFormat(#[from] JidxError),
+    #[error(transparent)]
+    Bgzf(#[from] BgzfError),
+    #[error(transparent)]
+    Alignment(#[from] AlignmentError),
+    #[error(transparent)]
+    Mosaic(#[from] MosaicError),
+    #[error("invalid trace input: {0}")]
+    Invalid(&'static str),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
+    use crate::writer::{BuildConfig, build};
+    use noodles_bgzf::{self as bgzf, gzi};
+    use std::io::Write;
+
+    fn sequence() -> String {
+        let mut state = 7u64;
+        (0..128)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                b"ACGT"[(state >> 62) as usize] as char
+            })
+            .collect()
+    }
+
+    #[test]
+    fn traces_an_arbitrary_query_deterministically() {
+        let directory = tempfile::tempdir().unwrap();
+        let sequence = sequence();
+        let fasta = directory.path().join("sample.fa");
+        std::fs::write(&fasta, format!(">sample\n{sequence}\n")).unwrap();
+        let jam = directory.path().join("database.jam");
+        build(
+            &[fasta],
+            &jam,
+            &BuildConfig {
+                kmer_size: 5,
+                fscale: 1,
+                singleton: true,
+                memory: 1,
+                ..BuildConfig::default()
+            },
+        )
+        .unwrap();
+
+        let bgzf_path = directory.path().join("sample.bgz");
+        let fai_path = directory.path().join("sample.bgz.fai");
+        let gzi_path = directory.path().join("sample.bgz.gzi");
+        let mut raw = b">contig\n".to_vec();
+        for line in sequence.as_bytes().chunks(16) {
+            raw.extend_from_slice(line);
+            raw.push(b'\n');
+        }
+        let mut writer = bgzf::io::Writer::new(File::create(&bgzf_path).unwrap());
+        writer.write_all(&raw).unwrap();
+        writer.finish().unwrap();
+        std::fs::write(&fai_path, b"contig\t128\t8\t16\t17\n").unwrap();
+        gzi::fs::write(&gzi_path, &gzi::Index::default()).unwrap();
+        let manifest = directory.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                "{{\"metagenomes\":[{{\"name\":\"sample\",\"bgzf\":\"{}\",\"fai\":\"{}\",\"gzi\":\"{}\"}}]}}",
+                bgzf_path.display(),
+                fai_path.display(),
+                gzi_path.display()
+            ),
+        )
+        .unwrap();
+        let jidx = directory.path().join("database.jidx");
+        build_local_jidx(
+            &jam,
+            &manifest,
+            &jidx,
+            JidxBuildConfig {
+                k: 5,
+                segment_bases: 16,
+                seeds_per_segment: 2,
+            },
+        )
+        .unwrap();
+
+        let engine = TraceEngine::open(&jam, &jidx, None).unwrap();
+        engine.verify_index().unwrap();
+        let config = TraceConfig {
+            min_seed_hits: 2,
+            diagonal_bin_bases: 32,
+            flank_bases: 32,
+            min_aligned_bases: 32,
+            endpoint_bases: 32,
+            alignment: AlignmentConfig {
+                band_width: 32,
+                ..AlignmentConfig::default()
+            },
+            ..TraceConfig::default()
+        };
+        let first = engine
+            .search("plasmid", sequence.as_bytes(), config)
+            .unwrap();
+        let second = engine
+            .search("plasmid", sequence.as_bytes(), config)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.metagenomes.len(), 1);
+        assert_eq!(first.metagenomes[0].mosaic.covered_bases, 128);
+        assert_eq!(first.metagenomes[0].contigs[0].name, "contig");
+        serde_json::to_vec(&first).unwrap();
+    }
+
+    #[test]
+    fn maps_fully_wrapped_query_intervals() {
+        assert_eq!(
+            query_segments(120, Interval::new(10, 20).unwrap(), 128, true).unwrap(),
+            vec![Interval::new(2, 12).unwrap()]
+        );
+    }
+}
