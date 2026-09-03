@@ -839,7 +839,9 @@ fn parse_sample_names(data: &[u8], count: u32) -> Result<Vec<String>, ReaderErro
 }
 
 fn parse_sample_sizes(data: &[u8]) -> Vec<u64> {
-    data.as_chunks::<8>().0.iter()
+    data.as_chunks::<8>()
+        .0
+        .iter()
         .map(|chunk| u64::from_le_bytes(*chunk))
         .collect()
 }
