@@ -6,6 +6,7 @@ pub mod core_utils;
 pub mod format;
 pub mod io;
 pub mod jidx;
+pub mod jidx_builder;
 mod jidx_postings;
 pub mod jidx_reader;
 pub mod jidx_writer;
