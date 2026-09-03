@@ -1,3 +1,6 @@
+#[path = "cli_handlers.rs"]
+pub mod handlers;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
