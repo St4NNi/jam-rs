@@ -99,7 +99,7 @@ pub fn build_local_jidx(
             contig_count: u32::try_from(fai.len())
                 .map_err(|_| JidxBuildError::Invalid("contig count"))?,
         };
-        let mut reader = BgzfReader::open_local(source, false)?;
+        let mut reader = BgzfReader::open(source, None, false)?;
         let mut contigs = Vec::with_capacity(fai.len());
         for (id, record) in fai.into_iter().enumerate() {
             let contig = Contig {

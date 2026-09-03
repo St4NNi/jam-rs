@@ -1,8 +1,7 @@
 use crate::jidx_reader::{Contig, Metagenome, MetagenomeId};
-use crate::range_source::{RangeSource, RangeSourceError, RangeStats};
+use crate::range_source::{RangeSource, RangeSourceError, RangeStats, S3Config};
 use noodles_bgzf::{self as bgzf, gzi};
 use std::io::{self, Read};
-use std::path::PathBuf;
 use thiserror::Error;
 
 pub struct BgzfReader {
@@ -12,20 +11,21 @@ pub struct BgzfReader {
 }
 
 impl BgzfReader {
-    pub fn open_local(source: Metagenome<'_>, verify: bool) -> Result<Self, BgzfError> {
-        let bgzf_path = local_path(source.bgzf_uri)?;
-        let fai_path = local_path(source.fai_uri)?;
-        let gzi_path = local_path(source.gzi_uri)?;
-        Self::open(
+    pub fn open(
+        source: Metagenome<'_>,
+        s3: Option<&S3Config>,
+        verify: bool,
+    ) -> Result<Self, BgzfError> {
+        Self::from_sources(
             source,
-            RangeSource::local(bgzf_path, source.bgzf_bytes)?,
-            RangeSource::local(fai_path, source.fai_bytes)?,
-            RangeSource::local(gzi_path, source.gzi_bytes)?,
+            RangeSource::open(source.bgzf_uri, source.bgzf_bytes, s3)?,
+            RangeSource::open(source.fai_uri, source.fai_bytes, s3)?,
+            RangeSource::open(source.gzi_uri, source.gzi_bytes, s3)?,
             verify,
         )
     }
 
-    pub fn open(
+    fn from_sources(
         source: Metagenome<'_>,
         mut bgzf_source: RangeSource,
         mut fai_source: RangeSource,
@@ -140,27 +140,12 @@ fn is_iupac(base: u8) -> bool {
     )
 }
 
-fn local_path(uri: &str) -> Result<PathBuf, BgzfError> {
-    if let Some(path) = uri.strip_prefix("file://") {
-        if path.starts_with('/') {
-            return Ok(path.into());
-        }
-        return Err(BgzfError::InvalidLocalUri);
-    }
-    if uri.contains("://") {
-        return Err(BgzfError::InvalidLocalUri);
-    }
-    Ok(uri.into())
-}
-
 #[derive(Debug, Error)]
 pub enum BgzfError {
     #[error("BGZF I/O failed: {0}")]
     Io(#[from] io::Error),
     #[error(transparent)]
     Range(#[from] RangeSourceError),
-    #[error("BGZF resource is not a local path")]
-    InvalidLocalUri,
     #[error("BGZF resource size differs from JIDX metadata")]
     SizeMismatch,
     #[error("BGZF resource checksum differs from JIDX metadata")]
@@ -213,10 +198,10 @@ mod tests {
             contig_start: ContigId::default(),
             contig_count: 1,
         };
-        let mut reader = BgzfReader::open_local(source, true).unwrap();
+        let mut reader = BgzfReader::open(source, None, true).unwrap();
         let mut mismatched = source;
         mismatched.bgzf_sha256 = [9; 32];
-        assert!(BgzfReader::open_local(mismatched, true).is_err());
+        assert!(BgzfReader::open(mismatched, None, true).is_err());
         let contig = Contig {
             id: 0,
             metagenome_id: 0,

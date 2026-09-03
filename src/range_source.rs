@@ -1,5 +1,5 @@
 use crate::jidx::sha256_reader;
-use s3::Bucket;
+use s3::{Bucket, Region, creds::Credentials};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -11,6 +11,45 @@ const S3_BLOCK_BYTES: u64 = 1024 * 1024;
 pub enum RangeSource {
     Local(LocalSource),
     S3(S3Source),
+}
+
+pub struct S3Config {
+    region: Region,
+    credentials: Credentials,
+    path_style: bool,
+}
+
+impl S3Config {
+    pub fn new(
+        region: &str,
+        endpoint: Option<&str>,
+        path_style: bool,
+        credentials: Credentials,
+    ) -> Result<Self, RangeSourceError> {
+        let region = match endpoint {
+            Some(endpoint) if !endpoint.is_empty() => Region::Custom {
+                region: region.to_string(),
+                endpoint: endpoint.to_string(),
+            },
+            Some(_) => return Err(RangeSourceError::S3),
+            None => region.parse().map_err(|_| RangeSourceError::S3)?,
+        };
+        Ok(Self {
+            region,
+            credentials,
+            path_style,
+        })
+    }
+
+    fn bucket(&self, name: &str) -> Result<Box<Bucket>, RangeSourceError> {
+        let bucket = Bucket::new(name, self.region.clone(), self.credentials.clone())
+            .map_err(|_| RangeSourceError::S3)?;
+        Ok(if self.path_style {
+            bucket.with_path_style()
+        } else {
+            bucket
+        })
+    }
 }
 
 pub struct LocalSource {
@@ -38,6 +77,37 @@ pub struct RangeStats {
 }
 
 impl RangeSource {
+    pub fn open(
+        uri: &str,
+        expected_size: u64,
+        s3: Option<&S3Config>,
+    ) -> Result<Self, RangeSourceError> {
+        if let Some(value) = uri.strip_prefix("s3://") {
+            let (bucket, key) = value.split_once('/').ok_or(RangeSourceError::InvalidKey)?;
+            if bucket.is_empty() || key.is_empty() {
+                return Err(RangeSourceError::InvalidKey);
+            }
+            return Self::s3(
+                s3.ok_or(RangeSourceError::MissingS3Config)?
+                    .bucket(bucket)?,
+                key,
+                expected_size,
+            );
+        }
+        let path = if let Some(path) = uri.strip_prefix("file://") {
+            if !path.starts_with('/') {
+                return Err(RangeSourceError::InvalidLocalUri);
+            }
+            Path::new(path)
+        } else {
+            if uri.contains("://") {
+                return Err(RangeSourceError::InvalidLocalUri);
+            }
+            Path::new(uri)
+        };
+        Self::local(path, expected_size)
+    }
+
     pub fn local(path: impl AsRef<Path>, expected_size: u64) -> Result<Self, RangeSourceError> {
         let file = File::open(path)?;
         let length = file.metadata()?.len();
@@ -249,13 +319,17 @@ pub enum RangeSourceError {
     SizeMismatch,
     #[error("S3 object key is empty")]
     InvalidKey,
+    #[error("S3 configuration is required")]
+    MissingS3Config,
+    #[error("range source is not a supported local URI")]
+    InvalidLocalUri,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::jidx::sha256;
-    use s3::{Region, creds::Credentials};
+    use s3::creds::Credentials;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
     use std::thread;
@@ -312,17 +386,9 @@ mod tests {
         let server = thread::spawn(move || serve(listener, server_data));
         let credentials =
             Credentials::new(Some("access"), Some("secret"), None, None, None).unwrap();
-        let bucket = Bucket::new(
-            "bucket",
-            Region::Custom {
-                region: "test".into(),
-                endpoint,
-            },
-            credentials,
-        )
-        .unwrap()
-        .with_path_style();
-        let mut source = RangeSource::s3(bucket, "object", data.len() as u64).unwrap();
+        let config = S3Config::new("test", Some(&endpoint), true, credentials).unwrap();
+        let mut source =
+            RangeSource::open("s3://bucket/object", data.len() as u64, Some(&config)).unwrap();
         let mut first = [0; 5];
         source.read_exact(&mut first).unwrap();
         assert_eq!(first, data[..5]);
