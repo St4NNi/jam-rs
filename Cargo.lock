@@ -1843,6 +1843,8 @@ dependencies = [
  "opendal",
  "postcard",
  "rand",
+ "rand_core",
+ "rand_pcg",
  "rayon",
  "serde",
  "serde_json",

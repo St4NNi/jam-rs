@@ -7,6 +7,8 @@
 //! the model averages it over the layouts of random sequences in a table over length and identity.
 
 use crate::seeds::{SeedError, SeedScheme};
+use rand_core::{Rng, SeedableRng};
+use rand_pcg::Pcg64Mcg;
 use rayon::prelude::*;
 use thiserror::Error;
 
@@ -155,7 +157,8 @@ const MAX_K: usize = 32;
 
 /// The average miss chance over random layouts of one stretch length, for every identity.
 fn average_row(length: usize, k: usize, w: usize, layouts: usize, identities: &[f64]) -> Vec<f64> {
-    let mut random = Random(0x6A09_E667_F3BC_C908 ^ length as u64);
+    // PCG gives the same numbers in every version, so the table never changes between builds.
+    let mut random = Pcg64Mcg::seed_from_u64(0x6A09_E667_F3BC_C908 ^ length as u64);
     let mut sums = vec![0.0f64; identities.len()];
     for _ in 0..layouts {
         let seeds = random_layout(length, k, w, &mut random);
@@ -168,9 +171,9 @@ fn average_row(length: usize, k: usize, w: usize, layouts: usize, identities: &[
 
 /// The base positions where the seeds of a random stretch end (the last base of the seed k-mer),
 /// in increasing order. The hashes of the k-mers of a random sequence are independent and uniform.
-fn random_layout(length: usize, k: usize, w: usize, random: &mut Random) -> Vec<usize> {
+fn random_layout(length: usize, k: usize, w: usize, random: &mut Pcg64Mcg) -> Vec<usize> {
     let kmers = length + 1 - k;
-    let hashes: Vec<u64> = (0..kmers).map(|_| random.next()).collect();
+    let hashes: Vec<u64> = (0..kmers).map(|_| random.next_u64()).collect();
     let mut seeds = Vec::new();
     if kmers < w {
         let smallest = (0..kmers).min_by_key(|&i| hashes[i]).unwrap_or(0);
@@ -239,20 +242,6 @@ fn locate(grid: &[f64], value: f64) -> (usize, f64) {
         .saturating_sub(1);
     let weight = (value - grid[below]) / (grid[below + 1] - grid[below]);
     (below, weight)
-}
-
-/// A small, fast random number generator (splitmix64) for the layouts. Its own code keeps the
-/// table the same on every run and with every version of the rand crate.
-struct Random(u64);
-
-impl Random {
-    fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
 }
 
 #[cfg(test)]

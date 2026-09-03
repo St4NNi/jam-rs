@@ -46,7 +46,7 @@ fn layout_chance_exact() {
 
 #[test]
 fn layouts_follow_windows() {
-    let mut random = Random(7);
+    let mut random = Pcg64Mcg::seed_from_u64(7);
     let short = random_layout(60, 25, 100, &mut random);
     assert_eq!(short.len(), 1);
     assert!((24..60).contains(&short[0]));
@@ -71,20 +71,39 @@ const SIMULATION: [(usize, f64, f64, f64); 7] = [
 
 #[test]
 fn simulation_agrees() {
+    const LAYOUTS: usize = 5000;
     [1000, 2000].into_par_iter().for_each(|length| {
         let points: Vec<_> = SIMULATION
             .iter()
             .filter(|point| point.0 == length)
             .collect();
         let identities: Vec<f64> = points.iter().map(|point| point.1).collect();
-        let row = average_row(length, 25, 100, 5000, &identities);
+        let row = average_row(length, 25, 100, LAYOUTS, &identities);
         for (&&(_, identity, chance, error), mine) in points.iter().zip(row) {
+            // Both sides are sample means: allow three times their combined standard error.
+            let model_error = layout_spread(length, identity) / (LAYOUTS as f64).sqrt();
+            let tolerance = 3.0 * (error.powi(2) + model_error.powi(2)).sqrt();
             assert!(
-                (mine - chance).abs() < 2.0 * error,
-                "{length} {identity}: {mine:e} against {chance:e}"
+                (mine - chance).abs() < tolerance,
+                "{length} {identity}: {mine:e} against {chance:e}, tolerance {tolerance:e}"
             );
         }
     });
+}
+
+/// The standard deviation of the miss chance between layouts, from an independent sample.
+fn layout_spread(length: usize, identity: f64) -> f64 {
+    let mut random = Pcg64Mcg::seed_from_u64(99);
+    let values: Vec<f64> = (0..1000)
+        .map(|_| layout_miss_chance(&random_layout(length, 25, 100, &mut random), 25, identity))
+        .collect();
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let variance = values
+        .iter()
+        .map(|value| (value - mean).powi(2))
+        .sum::<f64>()
+        / (values.len() - 1) as f64;
+    variance.sqrt()
 }
 
 #[test]
