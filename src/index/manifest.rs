@@ -175,7 +175,7 @@ pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
     for part in parts {
         digest.update(part);
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 /// The size and SHA-256 digest of a file.
@@ -200,7 +200,7 @@ pub(crate) fn sha256_file(path: &Path) -> Result<FileDigest, IndexError> {
         digest.update(&buffer[..read]);
         bytes += read as u64;
     }
-    let sha256 = format!("{:x}", digest.finalize());
+    let sha256 = hex::encode(digest.finalize());
     Ok(FileDigest { bytes, sha256 })
 }
 
@@ -228,7 +228,7 @@ pub(crate) fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<
         digest.update(&buffer[..length]);
         offset += length as u64;
     }
-    if size != record.bytes || format!("{:x}", digest.finalize()) != record.sha256 {
+    if size != record.bytes || hex::encode(digest.finalize()) != record.sha256 {
         return Err(IndexError::Checksum(format!(
             "{} differs from its manifest record",
             record.path
