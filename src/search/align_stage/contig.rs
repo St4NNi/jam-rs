@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::paths::PathIndex;
-use super::place::{Collected, query_room};
+use super::place::Collected;
 use super::window::{PreparedWindow, merge_spans, prepare_window, widen};
 use super::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
@@ -239,16 +239,5 @@ impl WindowOutput<'_> {
             job.query.circular(),
         )?)?;
         Ok(true)
-    }
-
-    /// Keeps or widens for an alignment, with the query room of its own query interval.
-    pub fn keep_alignment(
-        &mut self,
-        job: &ContigJob<'_>,
-        window: &PreparedWindow,
-        alignment: Alignment,
-    ) -> Result<bool, AlignStageError> {
-        let room = query_room(alignment.query_interval, job.query);
-        self.keep_or_widen(job, window, alignment, room)
     }
 }

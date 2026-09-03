@@ -5,6 +5,7 @@
 
 use super::contig::{ContigJob, WindowOutput};
 use super::paths::AlignedPath;
+use super::place::query_room;
 use super::window::PreparedWindow;
 use super::{AlignStageConfig, AlignStageError};
 use crate::align::{AlignmentWorkspace, Chain, align_chain, split_by_drift};
@@ -88,7 +89,8 @@ fn align_part(
     };
     output.work.alignments += 1;
     let path = AlignedPath::of(&alignment, window.bases.len() as u64, window.start);
-    if !output.keep_alignment(job, window, alignment)? {
+    let room = query_room(alignment.query_interval, job.query);
+    if !output.keep_or_widen(job, window, alignment, room)? {
         return Ok(None);
     }
     output.paths.add(&path);
