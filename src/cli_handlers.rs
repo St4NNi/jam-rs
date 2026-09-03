@@ -107,7 +107,14 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             }
             let id = match &args.query_id {
                 Some(id) => id.clone(),
-                None => std::str::from_utf8(record.id())?.to_string(),
+                None => std::str::from_utf8(
+                    record
+                        .id()
+                        .split(|byte| byte.is_ascii_whitespace())
+                        .next()
+                        .unwrap_or_default(),
+                )?
+                .to_string(),
             };
             let result = engine.search(id, record.seq().as_ref(), args.config)?;
             serde_json::to_writer(&mut output, &result)?;

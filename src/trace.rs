@@ -792,13 +792,15 @@ mod tests {
         assert_eq!(first.metagenomes[0].contigs[0].name, "contig");
         serde_json::to_vec(&first).unwrap();
 
+        let query = directory.path().join("query.fa");
+        std::fs::write(&query, format!(">sample description\n{sequence}\n")).unwrap();
         let output = directory.path().join("trace.jsonl");
         handle_trace_command(TraceArgs {
-            query: directory.path().join("sample.fa"),
+            query,
             database: jam,
             index: jidx,
             output: output.clone(),
-            query_id: Some("plasmid".into()),
+            query_id: None,
             config,
             s3: None,
             force: false,
@@ -808,7 +810,7 @@ mod tests {
         assert!(published.ends_with('\n'));
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&published).unwrap()["query_id"],
-            "plasmid"
+            "sample"
         );
     }
 
