@@ -9,7 +9,7 @@ use std::io;
 use std::path::Path;
 use thiserror::Error;
 
-pub use crate::jidx_postings::SeedEntry;
+pub use crate::jidx_postings::{SeedEntry, SeedOccurrence};
 
 pub type MetagenomeId = u32;
 pub type ContigId = u32;
@@ -73,6 +73,10 @@ impl JidxReader {
     pub fn verify_checksum(&self) -> Result<(), JidxReaderError> {
         self.header.verify_body(&self.mmap)?;
         crate::jidx_postings::validate_table(&self.mmap, &self.header)?;
+        for index in 0..self.header.seed_count {
+            let seed = crate::jidx_postings::entry(&self.mmap, &self.header, index)?;
+            self.seed_occurrences(seed)?;
+        }
         Ok(())
     }
 
@@ -90,6 +94,31 @@ impl JidxReader {
             &self.header,
             seed,
         )?)
+    }
+
+    pub fn seed_occurrences(
+        &self,
+        seed: SeedEntry,
+    ) -> Result<Vec<SeedOccurrence>, JidxReaderError> {
+        let occurrences = crate::jidx_postings::occurrences(&self.mmap, &self.header, seed)?;
+        let mut metagenomes = Vec::new();
+        for occurrence in &occurrences {
+            let record = self.contig_record(occurrence.contig_id)?;
+            if occurrence
+                .position
+                .checked_add(u64::from(self.header.k))
+                .is_none_or(|end| end > record.length)
+            {
+                return Err(JidxError::Invalid("contig posting position").into());
+            }
+            if metagenomes.last().copied() != Some(record.document_id) {
+                metagenomes.push(record.document_id);
+            }
+        }
+        if metagenomes != self.seed_metagenomes(seed)? {
+            return Err(JidxError::Invalid("seed document postings").into());
+        }
+        Ok(occurrences)
     }
 
     pub fn metagenome(&self, id: MetagenomeId) -> Result<Option<Metagenome<'_>>, JidxReaderError> {
@@ -124,11 +153,7 @@ impl JidxReader {
             return Ok(None);
         }
         let strings = self.section_bytes(SectionKind::Strings)?;
-        let record = ContigRecord::decode(self.record_bytes(
-            SectionKind::Contigs,
-            u64::from(id),
-            CONTIG_RECORD_SIZE,
-        )?)?;
+        let record = self.contig_record(id)?;
         Ok(Some(Contig {
             id,
             metagenome_id: record.document_id,
@@ -138,6 +163,14 @@ impl JidxReader {
             line_bases: record.line_bases,
             line_width: record.line_width,
         }))
+    }
+
+    fn contig_record(&self, id: ContigId) -> Result<ContigRecord, JidxReaderError> {
+        Ok(ContigRecord::decode(self.record_bytes(
+            SectionKind::Contigs,
+            u64::from(id),
+            CONTIG_RECORD_SIZE,
+        )?)?)
     }
 
     fn section_bytes(&self, kind: SectionKind) -> Result<&[u8], JidxReaderError> {
@@ -270,6 +303,7 @@ mod tests {
         bad_metagenome_id: bool,
         corrupt_padding: bool,
         bad_document_posting: bool,
+        bad_occurrence: bool,
     ) -> (tempfile::TempDir, PathBuf) {
         let mut strings = Vec::new();
         let name = push_string(&mut strings, "doc");
@@ -295,10 +329,10 @@ mod tests {
         let mut contig = vec![0; CONTIG_RECORD_SIZE as usize];
         put_u32(&mut contig, 0, u32::from(bad_metagenome_id));
         put_string(&mut contig, 4, contig_name);
-        put_u64(&mut contig, 16, 8);
+        put_u64(&mut contig, 16, 100);
         put_u64(&mut contig, 24, 5);
-        put_u32(&mut contig, 32, 8);
-        put_u32(&mut contig, 36, 9);
+        put_u32(&mut contig, 32, 100);
+        put_u32(&mut contig, 36, 101);
 
         let mut seed = vec![0; SEED_RECORD_SIZE as usize];
         put_u64(&mut seed, 0, 0x1234);
@@ -308,7 +342,8 @@ mod tests {
         put_u64(&mut seed, 32, 1);
         let document_posting = u32::from(bad_document_posting).to_le_bytes().to_vec();
         let mut contig_posting = vec![0; CONTIG_POSTING_SIZE as usize];
-        put_u64(&mut contig_posting, 8, 2);
+        contig_posting[4] = 1;
+        put_u64(&mut contig_posting, 8, if bad_occurrence { 90 } else { 2 });
         let payloads = [
             strings,
             document,
@@ -368,7 +403,7 @@ mod tests {
 
     #[test]
     fn reads_compact_metagenome_and_contig_ids() {
-        let (_directory, path) = fixture(false, false, false);
+        let (_directory, path) = fixture(false, false, false, false);
         let reader = JidxReader::open(path).unwrap();
         reader.verify_checksum().unwrap();
         assert_eq!(reader.header().document_count, 1);
@@ -386,20 +421,20 @@ mod tests {
 
     #[test]
     fn rejects_invalid_contig_ownership() {
-        let (_directory, path) = fixture(true, false, false);
+        let (_directory, path) = fixture(true, false, false, false);
         assert!(JidxReader::open(path).is_err());
     }
 
     #[test]
     fn checksum_verification_is_explicit() {
-        let (_directory, path) = fixture(false, true, false);
+        let (_directory, path) = fixture(false, true, false, false);
         let reader = JidxReader::open(path).unwrap();
         assert!(reader.verify_checksum().is_err());
     }
 
     #[test]
     fn exact_packed_seed_lookup_rejects_partial_matches() {
-        let (_directory, path) = fixture(false, false, false);
+        let (_directory, path) = fixture(false, false, false, false);
         let reader = JidxReader::open(path).unwrap();
         let seed = reader.find_seed(0x1234).unwrap().unwrap();
         assert_eq!((seed.packed_key, seed.document_frequency), (0x1234, 1));
@@ -409,14 +444,34 @@ mod tests {
 
     #[test]
     fn document_postings_are_checked_and_decoded() {
-        let (_directory, path) = fixture(false, false, false);
+        let (_directory, path) = fixture(false, false, false, false);
         let reader = JidxReader::open(path).unwrap();
         let seed = reader.find_seed(0x1234).unwrap().unwrap();
         assert_eq!(reader.seed_metagenomes(seed).unwrap(), [0]);
 
-        let (_directory, path) = fixture(false, false, true);
+        let (_directory, path) = fixture(false, false, true, false);
         let reader = JidxReader::open(path).unwrap();
         let seed = reader.find_seed(0x1234).unwrap().unwrap();
         assert!(reader.seed_metagenomes(seed).is_err());
+    }
+
+    #[test]
+    fn contig_postings_include_checked_position_and_orientation() {
+        let (_directory, path) = fixture(false, false, false, false);
+        let reader = JidxReader::open(path).unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        assert_eq!(
+            reader.seed_occurrences(seed).unwrap(),
+            [SeedOccurrence {
+                contig_id: 0,
+                position: 2,
+                canonical_orientation: true,
+            }]
+        );
+
+        let (_directory, path) = fixture(false, false, false, true);
+        let reader = JidxReader::open(path).unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        assert!(reader.seed_occurrences(seed).is_err());
     }
 }

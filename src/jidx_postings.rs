@@ -12,6 +12,13 @@ pub struct SeedEntry {
     pub(crate) occurrence_offset: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SeedOccurrence {
+    pub contig_id: u32,
+    pub position: u64,
+    pub canonical_orientation: bool,
+}
+
 pub(crate) fn lookup(
     file: &[u8],
     header: &Header,
@@ -37,16 +44,41 @@ pub(crate) fn lookup(
 
 pub(crate) fn validate_table(file: &[u8], header: &Header) -> Result<(), JidxError> {
     let mut previous = None;
+    let mut document_offset = 0;
+    let mut occurrence_offset = 0;
     for index in 0..header.seed_count {
         let record = seed_record(file, header, index)?;
         validate_record(header, record)?;
+        if record.document_offset != document_offset
+            || record.occurrence_offset != occurrence_offset
+        {
+            return Err(JidxError::Invalid("posting order"));
+        }
         validate_document_bytes(document_bytes(file, header, record.into())?, header)?;
+        validate_occurrence_bytes(occurrence_bytes(file, header, record.into())?, header)?;
         if previous.is_some_and(|key| key >= record.packed_key) {
             return Err(JidxError::Invalid("seed order"));
         }
+        document_offset = document_offset
+            .checked_add(u64::from(record.document_count) * u64::from(DOCUMENT_POSTING_SIZE))
+            .ok_or(JidxError::Invalid("document posting length"))?;
+        occurrence_offset = occurrence_offset
+            .checked_add(record.occurrence_count * u64::from(CONTIG_POSTING_SIZE))
+            .ok_or(JidxError::Invalid("contig posting length"))?;
         previous = Some(record.packed_key);
     }
+    if document_offset != header.section(SectionKind::DocumentPostings).length
+        || occurrence_offset != header.section(SectionKind::ContigPostings).length
+    {
+        return Err(JidxError::Invalid("posting coverage"));
+    }
     Ok(())
+}
+
+pub(crate) fn entry(file: &[u8], header: &Header, index: u64) -> Result<SeedEntry, JidxError> {
+    let record = seed_record(file, header, index)?;
+    validate_record(header, record)?;
+    Ok(record.into())
 }
 
 pub(crate) fn documents(
@@ -61,6 +93,25 @@ pub(crate) fn documents(
         .0
         .iter()
         .map(|bytes| u32::from_le_bytes(*bytes))
+        .collect())
+}
+
+pub(crate) fn occurrences(
+    file: &[u8],
+    header: &Header,
+    seed: SeedEntry,
+) -> Result<Vec<SeedOccurrence>, JidxError> {
+    let bytes = occurrence_bytes(file, header, seed)?;
+    validate_occurrence_bytes(bytes, header)?;
+    Ok(bytes
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|bytes| SeedOccurrence {
+            contig_id: read_u32(bytes, 0),
+            canonical_orientation: bytes[4] == 1,
+            position: read_u64(bytes, 8),
+        })
         .collect())
 }
 
@@ -178,6 +229,29 @@ fn document_bytes<'a>(
         .ok_or(JidxError::Invalid("document posting range"))
 }
 
+fn occurrence_bytes<'a>(
+    file: &'a [u8],
+    header: &Header,
+    seed: SeedEntry,
+) -> Result<&'a [u8], JidxError> {
+    let section = header.section(SectionKind::ContigPostings);
+    let start = section
+        .offset
+        .checked_add(seed.occurrence_offset)
+        .ok_or(JidxError::Invalid("contig posting offset"))?;
+    let length = seed
+        .occurrence_count
+        .checked_mul(u64::from(CONTIG_POSTING_SIZE))
+        .ok_or(JidxError::Invalid("contig posting length"))?;
+    let end = start
+        .checked_add(length)
+        .ok_or(JidxError::Invalid("contig posting range"))?;
+    let start = usize::try_from(start).map_err(|_| JidxError::Invalid("contig posting offset"))?;
+    let end = usize::try_from(end).map_err(|_| JidxError::Invalid("contig posting range"))?;
+    file.get(start..end)
+        .ok_or(JidxError::Invalid("contig posting range"))
+}
+
 fn validate_document_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxError> {
     let mut previous = None;
     for bytes in bytes.as_chunks::<4>().0 {
@@ -186,6 +260,23 @@ fn validate_document_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxErro
             return Err(JidxError::Invalid("document postings"));
         }
         previous = Some(id);
+    }
+    Ok(())
+}
+
+fn validate_occurrence_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxError> {
+    let mut previous = None;
+    for bytes in bytes.as_chunks::<16>().0 {
+        let contig_id = read_u32(bytes, 0);
+        let position = read_u64(bytes, 8);
+        if contig_id >= header.contig_count
+            || bytes[4] > 1
+            || bytes[5..8].iter().any(|byte| *byte != 0)
+            || previous.is_some_and(|previous| previous >= (contig_id, position))
+        {
+            return Err(JidxError::Invalid("contig postings"));
+        }
+        previous = Some((contig_id, position));
     }
     Ok(())
 }
