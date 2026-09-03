@@ -20,8 +20,8 @@ pub use chains::{
 pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
 pub use walk::{
-    DenseOptimum, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk, align_dense_walk,
-    dense_walks, gap_continuation, holds_walk, long_enough, walk_alignment,
+    DenseResults, DenseWalk, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk,
+    align_dense_walk, dense_walks, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 
 use serde::ser::SerializeStruct;

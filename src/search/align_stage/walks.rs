@@ -8,7 +8,7 @@ use super::place::query_room;
 use super::window::PreparedWindow;
 use super::{AlignStageError, AlignStageWorkspace};
 use crate::align::{
-    Alignment, DenseOptimum, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
+    Alignment, DenseResults, DenseWalk, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
     align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
 use crate::decide::Fragment;
@@ -41,7 +41,7 @@ fn walk_fragments(
     workspace: &mut AlignStageWorkspace,
 ) -> Result<Vec<(Alignment, usize)>, AlignStageError> {
     let (query, config) = (job.query, job.config);
-    let mut optimum = None;
+    let mut results = DenseResults::default();
     let mut gapped = Vec::new();
     for (index, walk) in window.walks.iter().enumerate() {
         job.control.check()?;
@@ -62,10 +62,11 @@ fn walk_fragments(
         let alignment = walk_alignment(walk, oriented, window.start, &query.table, config.band)?;
         let walked = WalkAlignment {
             walk,
+            later: &window.walks[index + 1..],
             alignment: &alignment,
         };
         if let Some(joined) =
-            gapped_alignment(job, window, output, workspace, walked, &mut optimum)?
+            gapped_alignment(job, window, output, workspace, walked, &mut results)?
         {
             gapped.push((joined, index));
         }
@@ -80,10 +81,11 @@ fn walk_fragments(
     Ok(gapped)
 }
 
-/// A walk and its ungapped alignment.
+/// A walk, the walks of its window after it, and its ungapped alignment.
 #[derive(Clone, Copy)]
 struct WalkAlignment<'a> {
     walk: &'a Walk,
+    later: &'a [Walk],
     alignment: &'a Alignment,
 }
 
@@ -125,7 +127,7 @@ fn gapped_alignment(
     output: &mut WindowOutput<'_>,
     workspace: &mut AlignStageWorkspace,
     walked: WalkAlignment<'_>,
-    optimum: &mut Option<DenseOptimum>,
+    results: &mut DenseResults,
 ) -> Result<Option<Alignment>, AlignStageError> {
     let (query, config) = (job.query, job.config);
     let walk = walked.walk;
@@ -147,15 +149,14 @@ fn gapped_alignment(
     {
         return Ok(None);
     }
-    let aligned = align_dense_walk(
+    let input = DenseWalk {
         walk,
-        &window.bases,
-        window.start,
-        &query.table,
-        config.band,
-        &mut workspace.alignment,
-        optimum,
-    )?;
+        later: walked.later,
+        window: &window.bases,
+        offset: window.start,
+        table: &query.table,
+    };
+    let aligned = align_dense_walk(input, config.band, &mut workspace.alignment, results)?;
     let Some(joined) = aligned else {
         return Ok(None);
     };

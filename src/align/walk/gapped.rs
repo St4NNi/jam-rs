@@ -9,11 +9,12 @@ use crate::align::kernel::AlignmentInput;
 use crate::align::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentWorkspace, EditOperation, Strand,
 };
+use std::ops::Range;
 
 /// A walk alignment proven to be the best for its query window and contig range, so the next
 /// walk with the same inputs and its diagonals inside its band need not be aligned again.
 #[derive(Clone, Copy, Debug)]
-pub struct DenseOptimum {
+struct DenseOptimum {
     strand: Strand,
     query_start: u64,
     /// The oriented window range `low..high` that was aligned.
@@ -22,49 +23,53 @@ pub struct DenseOptimum {
     diagonals: (i64, i64),
 }
 
-/// One walk of an alignment window: the forward window, the contig position where it starts,
-/// and the query.
-#[derive(Clone, Copy)]
-struct WalkInput<'a> {
-    walk: &'a Walk,
-    window: &'a [u8],
-    offset: u64,
-    table: &'a QueryTable,
+/// The kernel results of the dense walks of one window, kept so later walks can use them.
+#[derive(Debug, Default)]
+pub struct DenseResults {
+    optimum: Option<DenseOptimum>,
+    /// Aligned cell boxes and their best alignment; `None` when no cell scores positive.
+    kernels: Vec<(KernelBox, Option<Alignment>)>,
 }
 
-/// The gapped alignment around `walk` of `window` (the forward contig bases from `offset`),
-/// widened on a linear query while it runs into an edge. `None` when no positive alignment
-/// exists, or when `optimum` already holds the best alignment of the same inputs.
+/// One walk of an alignment window: the walks after it, the forward window, the contig position
+/// where the window starts, and the query.
+#[derive(Clone, Copy)]
+pub struct DenseWalk<'a> {
+    /// The walk to align.
+    pub walk: &'a Walk,
+    /// The walks of the window after `walk`; the near ones share its kernel call.
+    pub later: &'a [Walk],
+    /// The forward window bases.
+    pub window: &'a [u8],
+    /// The contig position of the first window base.
+    pub offset: u64,
+    /// The query.
+    pub table: &'a QueryTable,
+}
+
+/// The gapped alignment around a walk, widened on a linear query while it runs into an edge.
+/// `None` when no positive alignment exists, or when `results` already holds the best alignment
+/// of the same inputs.
 pub fn align_dense_walk(
-    walk: &Walk,
-    window: &[u8],
-    offset: u64,
-    table: &QueryTable,
+    input: DenseWalk<'_>,
     config: BandConfig,
     workspace: &mut AlignmentWorkspace,
-    optimum: &mut Option<DenseOptimum>,
+    results: &mut DenseResults,
 ) -> Result<Option<Alignment>, AlignmentError> {
-    let input = WalkInput {
-        walk,
-        window,
-        offset,
-        table,
-    };
+    let table = input.table;
     let length = u64::from(table.query_length());
-    if table.circular() {
-        let start = u64::from(walk.query);
-        return align_query_range(input, start..start + length, config, workspace, optimum);
-    }
     let margin = config.drift_margin();
-    let walk_end = u64::from(walk.query) + u64::from(walk.length);
     let mut extension = 2 * margin;
     loop {
-        let start = u64::from(walk.query).saturating_sub(extension);
-        let end = (walk_end + extension).min(length);
-        let Some(alignment) = align_query_range(input, start..end, config, workspace, optimum)?
+        let range = query_range(input.walk, table, extension);
+        let Some(alignment) = align_query_range(input, extension, config, workspace, results)?
         else {
             return Ok(None);
         };
+        if table.circular() {
+            return Ok(Some(alignment));
+        }
+        let (start, end) = (range.start, range.end);
         let (aligned_start, aligned_end) = (
             alignment.query_interval.start - start,
             alignment.query_interval.end - start,
@@ -78,32 +83,40 @@ pub fn align_dense_walk(
     }
 }
 
-/// Aligns a dense walk over the query positions `range`, which run on over the origin of a
-/// circular query.
+/// The query positions aligned around `walk`: `extension` bases on each side on a linear query,
+/// the whole query from the walk on (running on over the origin) on a circular one.
+fn query_range(walk: &Walk, table: &QueryTable, extension: u64) -> Range<u64> {
+    let (start, length) = (u64::from(walk.query), u64::from(table.query_length()));
+    if table.circular() {
+        return start..start + length;
+    }
+    start.saturating_sub(extension)..(start + u64::from(walk.length) + extension).min(length)
+}
+
+/// Aligns a dense walk over the query positions of `extension`.
 fn align_query_range(
-    input: WalkInput<'_>,
-    range: std::ops::Range<u64>,
+    input: DenseWalk<'_>,
+    extension: u64,
     config: BandConfig,
     workspace: &mut AlignmentWorkspace,
-    optimum: &mut Option<DenseOptimum>,
+    results: &mut DenseResults,
 ) -> Result<Option<Alignment>, AlignmentError> {
-    let (query_start, span) = (range.start, range.end - range.start);
-    let WalkInput {
+    let DenseWalk {
         walk,
         window,
         offset,
         table,
+        ..
     } = input;
-    let margin = config.drift_margin();
-    let diagonal = i64::from(walk.contig) - (u64::from(walk.query) - query_start) as i64;
-    let low = (diagonal - margin as i64).max(0) as u64;
-    let high = (diagonal + span as i64 + margin as i64).max(0) as u64;
-    let high = high.min(window.len() as u64);
-    if low >= high {
+    let range = query_range(walk, table, extension);
+    let (query_start, span) = (range.start, range.end - range.start);
+    let Some(cells) = KernelBox::around(walk, range, config, table, window.len() as u64) else {
         return Ok(None);
-    }
+    };
+    let diagonal = walk_diagonal(walk) + query_start as i64;
+    let (low, high) = (cells.columns.start, cells.columns.end);
     let band = i64::from(config.max_band());
-    if optimum.as_ref().is_some_and(|saved| {
+    if results.optimum.as_ref().is_some_and(|saved| {
         saved.strand == walk.strand
             && saved.query_start == query_start
             && saved.contig == (low, high)
@@ -112,38 +125,27 @@ fn align_query_range(
     }) {
         return Ok(None);
     }
-    let (forward_low, forward_high) = if walk.strand.is_reverse() {
-        (window.len() as u64 - high, window.len() as u64 - low)
-    } else {
-        (low, high)
-    };
-    // Rows before the first and after the last that can meet the contig within the band, and
-    // an endpoint completion's reach, hold no cells: the kernel reads only the rows between.
-    let a = u64::from(table.anchors().a);
-    let reach = band + a as i64;
-    let first_row = (low as i64 - diagonal - reach).clamp(0, span as i64) as u64;
-    let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, span as i64);
-    let rows = last_row as u64 - first_row;
     let mut bases = Vec::new();
-    table.copy_bases(query_start + first_row, rows, &mut bases)?;
-    let scores = AlignmentConfig {
-        band_width: config.max_band(),
-        diagonal_offset: diagonal - low as i64 + first_row as i64,
-        ..config.alignment
+    table.copy_bases(
+        cells.rows.start,
+        cells.rows.end - cells.rows.start,
+        &mut bases,
+    )?;
+    let (aligned, scores) = cells.kernel_input(&bases, window, offset, config);
+    let found = match shared_result(input, &cells, extension, config, workspace, results) {
+        Some(found) => found,
+        None => {
+            let found = kernel(workspace, aligned, walk.strand, scores)?;
+            results.kernels.push((cells, found.clone()));
+            found
+        }
     };
-    let aligned = AlignmentInput {
-        query: &bases,
-        query_offset: query_start + first_row,
-        contig: &window[forward_low as usize..forward_high as usize],
-        contig_offset: offset + forward_low,
-    };
-    let alignment = match workspace.align(aligned, walk.strand, scores) {
-        Ok(alignment) => alignment,
-        Err(AlignmentError::NoAlignment) => return Ok(None),
-        Err(error) => return Err(error),
+    let Some(alignment) = found else {
+        return Ok(None);
     };
     let kernel_score = alignment.score;
     // A completion reaches a rows beyond the alignment, which the window keeps.
+    let a = u64::from(table.anchors().a);
     let alignment = if alignment.query_interval.start - query_start <= a
         && span - (alignment.query_interval.end - query_start) <= a
     {
@@ -160,7 +162,7 @@ fn align_query_range(
     );
     let outside = outside * i64::from(config.alignment.match_score);
     if alignment.score >= kernel_score && i64::from(alignment.score) > outside {
-        *optimum = Some(DenseOptimum {
+        results.optimum = Some(DenseOptimum {
             strand: walk.strand,
             query_start,
             contig: (low, high),
@@ -168,6 +170,239 @@ fn align_query_range(
         });
     }
     Ok(Some(alignment))
+}
+
+/// The best local alignment of a kernel input, `None` when no cell scores positive.
+fn kernel(
+    workspace: &mut AlignmentWorkspace,
+    aligned: AlignmentInput<'_>,
+    strand: Strand,
+    scores: AlignmentConfig,
+) -> Result<Option<Alignment>, AlignmentError> {
+    match workspace.align(aligned, strand, scores) {
+        Ok(alignment) => Ok(Some(alignment)),
+        Err(AlignmentError::NoAlignment) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The kernel result of `cells` taken from a larger box, `None` when it must be aligned alone.
+/// When no aligned box holds `cells`, one box over the near later walks is aligned for all.
+fn shared_result(
+    input: DenseWalk<'_>,
+    cells: &KernelBox,
+    extension: u64,
+    config: BandConfig,
+    workspace: &mut AlignmentWorkspace,
+    results: &mut DenseResults,
+) -> Option<Option<Alignment>> {
+    let (window_length, offset) = (input.window.len() as u64, input.offset);
+    // The kernel's scores only grow with more cells, and it breaks ties by fixed positions and
+    // state order. So the best path of a larger box that lies inside `cells` is also the path
+    // the kernel finds in `cells`, and a box without a positive cell has none in its parts.
+    let fits = |found: &Option<Alignment>| {
+        found
+            .as_ref()
+            .is_none_or(|alignment| cells.holds_path(alignment, window_length, offset))
+    };
+    let mut held = results
+        .kernels
+        .iter()
+        .filter(|(larger, _)| larger.holds(cells))
+        .peekable();
+    if held.peek().is_some() {
+        return held
+            .find(|(_, found)| fits(found))
+            .map(|(_, found)| found.clone());
+    }
+    let union = near_walks_box(input, cells, extension, config);
+    if union == *cells {
+        return None;
+    }
+    let mut bases = Vec::new();
+    let span = union.rows.end - union.rows.start;
+    // A box the kernel cannot align is left out: the walk's own call reports its errors.
+    input
+        .table
+        .copy_bases(union.rows.start, span, &mut bases)
+        .ok()?;
+    let (aligned, scores) = union.kernel_input(&bases, input.window, offset, config);
+    let found = kernel(workspace, aligned, union.strand, scores).ok()?;
+    let shared = fits(&found).then(|| found.clone());
+    results.kernels.push((union, found));
+    shared
+}
+
+/// The smallest box that holds `cells` and the boxes of the later walks near its walk (on the
+/// same strand, the diagonal within one band, the start within one margin), up to four times
+/// the cells of `cells`.
+fn near_walks_box(
+    input: DenseWalk<'_>,
+    cells: &KernelBox,
+    extension: u64,
+    config: BandConfig,
+) -> KernelBox {
+    let DenseWalk {
+        walk, later, table, ..
+    } = input;
+    let (band, margin) = (i64::from(config.max_band()), config.drift_margin() as i64);
+    let (diagonal, query) = (walk_diagonal(walk), i64::from(walk.query));
+    let limit = cells.cells().saturating_mul(4);
+    let window_length = input.window.len() as u64;
+    let mut union = cells.clone();
+    let near = later.iter().take_while(|other| {
+        other.strand == walk.strand && (table.circular() || walk_diagonal(other) <= diagonal + band)
+    });
+    for other in near {
+        if (walk_diagonal(other) - diagonal).abs() > band
+            || (i64::from(other.query) - query).abs() > margin
+        {
+            continue;
+        }
+        let range = query_range(other, table, extension);
+        let Some(other) = KernelBox::around(other, range, config, table, window_length) else {
+            continue;
+        };
+        let wider = union.union(&other);
+        if wider.cells() <= limit {
+            union = wider;
+        }
+    }
+    union
+}
+
+/// Oriented window position minus query position at the start of a walk.
+fn walk_diagonal(walk: &Walk) -> i64 {
+    i64::from(walk.contig) - i64::from(walk.query)
+}
+
+/// The cells of one kernel call: query rows (counted on over the origin of a circular query),
+/// oriented window columns, and the band, the diagonals (column minus row) from `diagonals.0`
+/// to `diagonals.1`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct KernelBox {
+    strand: Strand,
+    rows: Range<u64>,
+    columns: Range<u64>,
+    diagonals: (i64, i64),
+}
+
+impl KernelBox {
+    /// The cells aligned around `walk` over the query positions `range`, `None` when the window
+    /// holds no column for them.
+    fn around(
+        walk: &Walk,
+        range: Range<u64>,
+        config: BandConfig,
+        table: &QueryTable,
+        window_length: u64,
+    ) -> Option<Self> {
+        let (query_start, span) = (range.start, range.end - range.start);
+        let margin = config.drift_margin() as i64;
+        let diagonal = walk_diagonal(walk) + query_start as i64;
+        let low = (diagonal - margin).max(0) as u64;
+        let high = ((diagonal + span as i64 + margin).max(0) as u64).min(window_length);
+        if low >= high {
+            return None;
+        }
+        // Rows before the first and after the last that can meet the contig within the band,
+        // and an endpoint completion's reach, hold no cells: the kernel reads only the rows
+        // between.
+        let band = i64::from(config.max_band());
+        let reach = band + i64::from(table.anchors().a);
+        let first_row = (low as i64 - diagonal - reach).clamp(0, span as i64) as u64;
+        let last_row = (high as i64 - diagonal + reach).clamp(first_row as i64, span as i64);
+        Some(Self {
+            strand: walk.strand,
+            rows: query_start + first_row..query_start + last_row as u64,
+            columns: low..high,
+            diagonals: (walk_diagonal(walk) - band, walk_diagonal(walk) + band),
+        })
+    }
+
+    /// The smallest box that holds both boxes, on the strand of `self`.
+    fn union(&self, other: &Self) -> Self {
+        Self {
+            strand: self.strand,
+            rows: self.rows.start.min(other.rows.start)..self.rows.end.max(other.rows.end),
+            columns: self.columns.start.min(other.columns.start)
+                ..self.columns.end.max(other.columns.end),
+            diagonals: (
+                self.diagonals.0.min(other.diagonals.0),
+                self.diagonals.1.max(other.diagonals.1),
+            ),
+        }
+    }
+
+    /// An upper bound of the cells: rows times band diagonals.
+    fn cells(&self) -> u64 {
+        let width = (self.diagonals.1 - self.diagonals.0 + 1) as u64;
+        (self.rows.end - self.rows.start).saturating_mul(width)
+    }
+
+    /// Whether every cell of `other` lies in this box.
+    fn holds(&self, other: &Self) -> bool {
+        self.strand == other.strand
+            && self.rows.start <= other.rows.start
+            && other.rows.end <= self.rows.end
+            && self.columns.start <= other.columns.start
+            && other.columns.end <= self.columns.end
+            && self.diagonals.0 <= other.diagonals.0
+            && other.diagonals.1 <= self.diagonals.1
+    }
+
+    /// Whether every cell of the path of `alignment` (of the window of `window_length` bases
+    /// from contig position `offset`) lies in this box.
+    fn holds_path(&self, alignment: &Alignment, window_length: u64, offset: u64) -> bool {
+        let (start, end) = (
+            alignment.contig_interval.start - offset,
+            alignment.contig_interval.end - offset,
+        );
+        let columns = if alignment.strand.is_reverse() {
+            window_length - end..window_length - start
+        } else {
+            start..end
+        };
+        let diagonals = path_diagonals(alignment, window_length, offset, 0);
+        self.strand == alignment.strand
+            && self.rows.start <= alignment.query_interval.start
+            && alignment.query_interval.end <= self.rows.end
+            && self.columns.start <= columns.start
+            && columns.end <= self.columns.end
+            && self.diagonals.0 <= diagonals.0
+            && diagonals.1 <= self.diagonals.1
+    }
+
+    /// The kernel input and scores of this box, with `bases` the query bases of its rows.
+    fn kernel_input<'a>(
+        &self,
+        bases: &'a [u8],
+        window: &'a [u8],
+        offset: u64,
+        config: BandConfig,
+    ) -> (AlignmentInput<'a>, AlignmentConfig) {
+        let length = window.len() as u64;
+        let (low, high) = if self.strand.is_reverse() {
+            (length - self.columns.end, length - self.columns.start)
+        } else {
+            (self.columns.start, self.columns.end)
+        };
+        // The narrowest band around a whole diagonal that reaches both outer diagonals.
+        let width = (self.diagonals.1 - self.diagonals.0 + 1) / 2;
+        let centre = self.diagonals.0 + width;
+        let scores = AlignmentConfig {
+            band_width: width as u32,
+            diagonal_offset: centre - self.columns.start as i64 + self.rows.start as i64,
+            ..config.alignment
+        };
+        let aligned = AlignmentInput {
+            query: bases,
+            query_offset: self.rows.start,
+            contig: &window[low as usize..high as usize],
+            contig_offset: offset + low,
+        };
+        (aligned, scores)
+    }
 }
 
 /// The most paired bases of any diagonal outside the band of width `band` around `centre`, in a

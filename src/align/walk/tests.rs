@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 use crate::align::{
-    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, ChainConfig, DenseOptimum,
-    JoinContext, JoinLimits, JoinScratch, QueryTable, Strand, Walk, align_dense_walk, dense_walks,
-    format_cigar, holds_walk, walk_alignment,
+    AlignmentConfig, AlignmentWorkspace, AnchorConfig, BandConfig, ChainConfig, DenseResults,
+    DenseWalk, JoinContext, JoinLimits, JoinScratch, QueryTable, Strand, Walk, align_dense_walk,
+    dense_walks, format_cigar, holds_walk, walk_alignment,
 };
 use crate::test_support::{random_bases, rng};
 
@@ -129,9 +129,16 @@ fn optimum_reuse_matches() {
     let contig = [vec![b'A'; 100], vec![b'G'; 20], vec![b'C'; 100]].concat();
     let table = linear(&query);
     let mut workspace = AlignmentWorkspace::default();
-    let mut saved: Option<DenseOptimum> = None;
-    let mut align = |walk: &Walk, config, saved: &mut Option<DenseOptimum>| {
-        align_dense_walk(walk, &contig, 0, &table, config, &mut workspace, saved).unwrap()
+    let mut saved = DenseResults::default();
+    let mut align = |walk: &Walk, config, saved: &mut DenseResults| {
+        let input = DenseWalk {
+            walk,
+            later: &[],
+            window: &contig,
+            offset: 0,
+            table: &table,
+        };
+        align_dense_walk(input, config, &mut workspace, saved).unwrap()
     };
     let config = BandConfig::default();
     let walk = Walk {
@@ -142,10 +149,12 @@ fn optimum_reuse_matches() {
     };
     let first = align(&walk, config, &mut saved).unwrap();
     assert_eq!(format_cigar(&first.runs), "100=20D100=");
-    assert!(saved.is_some());
     let other = Walk { contig: 4, ..walk };
     assert!(align(&other, config, &mut saved).is_none());
-    assert_eq!(Some(first), align(&other, config, &mut None));
+    assert_eq!(
+        Some(first),
+        align(&other, config, &mut DenseResults::default())
+    );
     let reverse = Walk {
         strand: Strand::Reverse,
         ..walk
@@ -186,7 +195,14 @@ fn gapped_walk_widens() {
     };
     let table = linear(&query);
     let mut workspace = AlignmentWorkspace::default();
-    let found = align_dense_walk(&walk, &contig, 0, &table, config, &mut workspace, &mut None)
+    let input = DenseWalk {
+        walk: &walk,
+        later: &[],
+        window: &contig,
+        offset: 0,
+        table: &table,
+    };
+    let found = align_dense_walk(input, config, &mut workspace, &mut DenseResults::default())
         .unwrap()
         .unwrap();
     assert!(
