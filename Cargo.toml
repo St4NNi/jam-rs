@@ -22,6 +22,10 @@ readme = "README.md"
 name = "jam"
 path = "src/main.rs"
 
+[[bench]]
+name = "trace"
+harness = false
+
 [lib]
 name = "jam_rs"
 path = "src/lib.rs"
@@ -54,6 +58,9 @@ statrs = "0.18"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
 tikv-jemallocator = "0.6"
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
 
 [profile.release]
 opt-level = 3
