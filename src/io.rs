@@ -74,7 +74,7 @@ pub fn expand_input_paths(input_paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
 
 pub fn is_sequence_file(path: &Path) -> bool {
     if let Some(ext) = path.extension().map(|e| e.to_string_lossy().to_lowercase()) {
-        if matches!(ext.as_str(), "gz" | "bz2" | "xz" | "zst" | "zstd")
+        if matches!(ext.as_str(), "gz" | "bgz" | "bz2" | "xz" | "zst" | "zstd")
             && let Some(stem_ext) = path.file_stem().and_then(|s| Path::new(s).extension())
         {
             let stem_ext = stem_ext.to_string_lossy().to_lowercase();
@@ -202,6 +202,11 @@ mod tests {
 
         let unique = extract_unique_hashes(&entries);
         assert_eq!(unique, vec![100, 200, 300]);
+    }
+
+    #[test]
+    fn recognizes_bgzf_sequence_files() {
+        assert!(is_sequence_file(Path::new("assembly.fa.bgz")));
     }
 
     #[test]
