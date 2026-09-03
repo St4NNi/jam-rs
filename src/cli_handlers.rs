@@ -1,13 +1,55 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::fs::remove_file;
 use std::io::Write;
-use std::{fs::remove_file, path::PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
+use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
+use crate::jidx_writer::sync_directory;
 use crate::query::QueryEngine;
 use crate::reader::JamReader;
 use crate::writer::{BuildConfig, build};
 use std::sync::Arc;
+
+pub(crate) fn handle_jidx_build_command(
+    database: PathBuf,
+    manifest: PathBuf,
+    output: PathBuf,
+    config: JidxBuildConfig,
+    force: bool,
+) -> Result<()> {
+    if output.try_exists()? {
+        if !output.is_file() {
+            return Err(anyhow::anyhow!("Output path is not a file: {:?}", output));
+        }
+        if !force {
+            return Err(anyhow::anyhow!(
+                "Output file {:?} already exists. Use --force to overwrite.",
+                output
+            ));
+        }
+    }
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staged = tempfile::Builder::new()
+        .prefix(".jam-jidx-")
+        .tempfile_in(parent)?
+        .into_temp_path();
+    remove_file(&staged)?;
+    build_local_jidx(database, manifest, &staged, config)?;
+    if force {
+        staged.persist(&output).map_err(|error| error.error)?;
+    } else {
+        staged
+            .persist_noclobber(&output)
+            .map_err(|error| error.error)?;
+    }
+    sync_directory(parent)?;
+    Ok(())
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn handle_sketch_command(
@@ -903,7 +945,10 @@ pub fn handle_stats_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_distance_chunk_size, normalize_distance_cutoff};
+    use super::{
+        compute_distance_chunk_size, handle_jidx_build_command, normalize_distance_cutoff,
+    };
+    use crate::jidx_builder::JidxBuildConfig;
 
     #[test]
     fn distance_chunk_size_handles_small_query_counts() {
@@ -926,5 +971,23 @@ mod tests {
     #[test]
     fn distance_cutoff_positive_is_kept() {
         assert_eq!(normalize_distance_cutoff(0.25), Some(0.25));
+    }
+
+    #[test]
+    fn failed_forced_jidx_build_preserves_existing_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("existing.jidx");
+        std::fs::write(&output, b"old index").unwrap();
+        assert!(
+            handle_jidx_build_command(
+                directory.path().join("missing.jam"),
+                directory.path().join("missing.json"),
+                output.clone(),
+                JidxBuildConfig::default(),
+                true,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(output).unwrap(), b"old index");
     }
 }

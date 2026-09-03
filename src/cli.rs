@@ -86,6 +86,29 @@ pub enum Commands {
         singleton: bool,
     },
 
+    /// Build a query-independent JIDX from indexed BGZF assemblies
+    #[command(arg_required_else_help = true)]
+    Jidx {
+        /// JAM database whose samples are described by the manifest
+        #[arg(short, long)]
+        database: PathBuf,
+        /// JSON manifest containing BGZF, FAI, and GZI paths
+        #[arg(short = 'M', long)]
+        manifest: PathBuf,
+        /// Output JIDX file
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Exact seed k-mer size
+        #[arg(short = 'k', long = "kmer-size", default_value = "21")]
+        kmer_size: u8,
+        /// Bases per deterministic seed-selection segment
+        #[arg(long, default_value = "256")]
+        segment_bases: u32,
+        /// Minimum-hash seeds retained per segment
+        #[arg(long, default_value = "2")]
+        seeds_per_segment: u16,
+    },
+
     /// Build and analyze hash bias tables for filtering
     #[command(arg_required_else_help = true)]
     Bias {
@@ -167,4 +190,15 @@ pub enum BiasCommands {
         #[arg(short, long)]
         output: Option<PathBuf>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn command_definitions_are_valid() {
+        Cli::command().debug_assert();
+    }
 }

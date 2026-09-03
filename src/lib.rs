@@ -26,6 +26,7 @@ pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
 use clap::Parser;
+use cli::handlers::handle_jidx_build_command;
 use cli::{BiasCommands, Cli, Commands};
 
 pub fn run() -> Result<()> {
@@ -116,6 +117,25 @@ pub fn run() -> Result<()> {
             cli.force,
             cli.silent,
             cli.memory.unwrap_or(2),
+        ),
+
+        Commands::Jidx {
+            database,
+            manifest,
+            output,
+            kmer_size,
+            segment_bases,
+            seeds_per_segment,
+        } => handle_jidx_build_command(
+            database,
+            manifest,
+            output,
+            jidx_builder::JidxBuildConfig {
+                k: kmer_size,
+                segment_bases,
+                seeds_per_segment,
+            },
+            cli.force,
         ),
 
         Commands::Stats { input, short, full } => {
