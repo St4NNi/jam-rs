@@ -27,6 +27,8 @@ impl ServedShard {
     /// not fit the shard's k and minimizer window.
     pub fn new(name: String, shard: Shard, model: MissModel) -> Result<Self, ServiceError> {
         Searcher::new(&shard, &model)?;
+        // A server answers many searches, so it reads the sketch into RAM once at start.
+        shard.sketch().load()?;
         Ok(Self { name, shard, model })
     }
 

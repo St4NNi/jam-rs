@@ -36,9 +36,15 @@ pub struct Sketch {
 }
 
 impl Sketch {
-    /// Maps the sketch at `path` into RAM and checks its header and size.
+    /// Reads the whole sketch into RAM, so lookups never wait for storage.
+    pub fn load(&self) -> Result<(), IndexError> {
+        self.file.load().map_err(IndexError::from)
+    }
+
+    /// Maps the sketch at `path` and checks its header and size. Pages are read when a lookup
+    /// first needs them; `load` reads them all at once.
     pub fn open(path: &Path) -> Result<Self, IndexError> {
-        let file = MappedFile::open(path, true)?;
+        let file = MappedFile::open(path, false)?;
         let bytes = file.bytes();
         let header = bytes
             .get(..HEADER_BYTES)

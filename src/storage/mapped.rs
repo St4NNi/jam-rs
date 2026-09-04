@@ -32,6 +32,14 @@ impl MappedFile {
         Ok(Self { map: Some(map) })
     }
 
+    /// Reads every page of the file into RAM now, so later reads never wait for storage.
+    pub fn load(&self) -> io::Result<()> {
+        match &self.map {
+            Some(map) => map.advise(memmap2::Advice::PopulateRead),
+            None => Ok(()),
+        }
+    }
+
     /// All bytes of the file.
     pub fn bytes(&self) -> &[u8] {
         self.map.as_deref().unwrap_or_default()
