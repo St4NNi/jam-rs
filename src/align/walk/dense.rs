@@ -47,7 +47,7 @@ struct Start {
 
 /// The walks of every match start of a k-mer with more than `above` query occurrences, on both
 /// strands, and the reverse complement of the window that reverse walks are read from. Starts,
-/// that copy and the walks are priced against `budget` bytes before they are allocated.
+/// that copy and the walks are priced against `budget` bytes as the starts are found.
 pub fn dense_walks(
     table: &QueryTable,
     window: &[u8],
@@ -64,7 +64,6 @@ pub fn dense_walks(
     {
         return Ok(walks);
     }
-    // Count, price and only then hold the reverse complement and the starts.
     let copies = if table.circular() {
         window.len().div_ceil(table.query_length() as usize)
     } else {
@@ -75,16 +74,6 @@ pub fn dense_walks(
             .saturating_mul(size_of::<Start>() + copies.saturating_mul(size_of::<Walk>()))
             .saturating_add(window.len())
     };
-    let mut count = 0usize;
-    match_starts(table, window, above, &mut |_, _| count += 1);
-    if price(count) > budget {
-        return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
-    }
-    let reverse = reverse_complement(window);
-    match_starts(table, &reverse, above, &mut |_, _| count += 1);
-    if price(count) > budget {
-        return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
-    }
     let length = i64::from(table.query_length());
     let diagonal = |contig: u32, query: u32| {
         let diagonal = i64::from(contig) - i64::from(query);
@@ -94,17 +83,37 @@ pub fn dense_walks(
             diagonal
         }
     };
-    let mut walks = Vec::with_capacity(count.saturating_mul(copies));
-    let mut starts = Vec::with_capacity(count);
-    for (strand, sequence) in [(Strand::Forward, window), (Strand::Reverse, &reverse[..])] {
-        starts.clear();
-        match_starts(table, sequence, above, &mut |contig, query| {
+    // One scan finds the starts of both strands; the starts are priced as they come, and none
+    // are kept once they pass the budget.
+    let (mut count, mut forward, mut backward) = (0usize, Vec::new(), Vec::new());
+    match_starts(table, window, above, &mut |strand, contig, query| {
+        count += 1;
+        if price(count) <= budget {
+            let starts = if strand.is_reverse() {
+                &mut backward
+            } else {
+                &mut forward
+            };
             starts.push(Start {
                 diagonal: diagonal(contig, query),
                 contig,
                 query,
-            })
-        });
+            });
+        }
+    });
+    if price(count) > budget {
+        return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
+    }
+    let reverse = if backward.is_empty() {
+        Vec::new()
+    } else {
+        reverse_complement(window)
+    };
+    let mut walks = Vec::with_capacity(count.saturating_mul(copies));
+    for (strand, sequence, starts) in [
+        (Strand::Forward, window, &mut forward),
+        (Strand::Reverse, &reverse[..], &mut backward),
+    ] {
         starts.sort_unstable();
         for group in starts.chunk_by(|a, b| a.diagonal == b.diagonal) {
             walk_diagonal(table, sequence, strand, group, config, &mut walks);
@@ -154,25 +163,38 @@ fn periodic_walks(
     Ok(Some(DenseWalks { walks, reverse }))
 }
 
-/// Calls `visit(contig, query)` for every match start of an oriented window: a k-mer with more
-/// than `above` query occurrences, at a query position whose preceding base differs.
+/// Calls `visit(strand, contig, query)` for every match start of the window on both strands: a
+/// k-mer with more than `above` query occurrences, at a query position whose preceding base
+/// differs. Reverse starts count positions in the reverse complement of the window.
 fn match_starts(
     table: &QueryTable,
-    oriented: &[u8],
+    window: &[u8],
     above: usize,
-    visit: &mut dyn FnMut(u32, u32),
+    visit: &mut dyn FnMut(Strand, u32, u32),
 ) {
-    kmers(oriented, table.anchors().a, |kmer| {
-        let (start, code) = (kmer.position, kmer.forward);
-        if table.multiplicity(code) <= above {
-            return;
+    let a = usize::from(table.anchors().a);
+    kmers(window, table.anchors().a, |kmer| {
+        let start = kmer.position;
+        if table.multiplicity(kmer.forward) > above {
+            let left = start
+                .checked_sub(1)
+                .and_then(|at| base_code(window[at]))
+                .unwrap_or(4);
+            for query in table.match_starts(kmer.forward, left) {
+                visit(Strand::Forward, start as u32, query);
+            }
         }
-        let left = start
-            .checked_sub(1)
-            .and_then(|at| base_code(oriented[at]))
-            .unwrap_or(4);
-        for query in table.match_starts(code, left) {
-            visit(start as u32, query);
+        if table.multiplicity(kmer.reverse) > above {
+            // In the reverse complement this k-mer starts at `len - start - a`, after the
+            // complement of the base that follows it here.
+            let left = window
+                .get(start + a)
+                .and_then(|&base| base_code(base))
+                .map_or(4, |code| 3 - code);
+            let contig = (window.len() - start - a) as u32;
+            for query in table.match_starts(kmer.reverse, left) {
+                visit(Strand::Reverse, contig, query);
+            }
         }
     });
 }
