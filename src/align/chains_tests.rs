@@ -216,7 +216,7 @@ fn mutated_copy_chains() {
     assert_eq!(found.len(), 1);
     assert!(found[0].anchors.len() > 100);
     let poly = [vec![b'A'; 300], random_bases(&mut rng(10), 100)].concat();
-    let table = QueryTable::new(
+    let (table, low) = QueryTable::split(
         &poly,
         false,
         AnchorConfig::default(),
@@ -226,13 +226,6 @@ fn mutated_copy_chains() {
     let mut anchors = Vec::new();
     find_anchors(&table, &[b'A'; 500], &mut anchors, None, 0);
     assert!(anchors.is_empty());
-    let low = QueryTable::low_complexity(
-        &poly,
-        false,
-        AnchorConfig::default(),
-        ChainConfig::default(),
-    )
-    .unwrap();
     find_anchors(&low, &[b'A'; 500], &mut anchors, None, 0);
     assert!(!anchors.is_empty());
     assert!(
@@ -271,4 +264,39 @@ fn drift_splits_chain() {
     assert_eq!(position(parts[1].anchors[0]), (900, 300));
     assert_eq!(parts[1].offsets, [0, 100, 200]);
     assert_eq!(split_by_drift(&chain, 1_000, 3).len(), 1);
+}
+
+#[test]
+fn split_by_entropy() {
+    let mut generator = rng(12);
+    let query = [
+        random_bases(&mut generator, 2000),
+        b"AT".repeat(50),
+        vec![b'A'; 40],
+        b"AACAAG".repeat(10),
+        random_bases(&mut generator, 2000),
+    ]
+    .concat();
+    let config = AnchorConfig::default();
+    let (table, low) = QueryTable::split(&query, false, config, ChainConfig::default()).unwrap();
+    let mut low_kmers = 0;
+    crate::seeds::kmers(&query, config.a, |kmer| {
+        let mut counts = [0u32; 4];
+        for at in 0..config.a {
+            counts[((kmer.forward >> (2 * at)) & 3) as usize] += 1;
+        }
+        let entropy: f64 = counts
+            .iter()
+            .filter(|&&count| count > 0)
+            .map(|&count| {
+                let share = f64::from(count) / f64::from(config.a);
+                -share * share.log2()
+            })
+            .sum();
+        let passes = entropy >= config.min_entropy;
+        low_kmers += usize::from(!passes);
+        assert_eq!(table.multiplicity(kmer.forward) > 0, passes);
+        assert_eq!(low.multiplicity(kmer.forward) > 0, !passes);
+    });
+    assert!(low_kmers > 100);
 }

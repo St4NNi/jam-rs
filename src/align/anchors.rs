@@ -9,6 +9,7 @@ use super::chains::ChainConfig;
 use super::{AlignmentError, Strand};
 use crate::seeds::{base_code, complement, kmers};
 use jamhash::jamhash_u64;
+use rayon::slice::ParallelSliceMut;
 
 /// How anchors are found.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -86,31 +87,18 @@ impl QueryTable {
         anchors: AnchorConfig,
         chains: ChainConfig,
     ) -> Result<Self, AlignmentError> {
-        Self::with_kmers(query, circular, anchors, chains, |forward| {
-            base_entropy(forward, anchors.a) >= anchors.min_entropy
-        })
+        Ok(Self::split(query, circular, anchors, chains)?.0)
     }
 
-    /// The table of the k-mers that `new` leaves out for their low entropy, all left to dense
-    /// walks. Short conserved blocks can rebuild a longer copy across a clustered difference.
-    pub fn low_complexity(
+    /// The table of the query k-mers that pass the entropy limit, and the table of the k-mers
+    /// below it, all left to dense walks, from one scan of the query. Short conserved blocks of
+    /// the second can rebuild a longer copy across a clustered difference.
+    pub fn split(
         query: &[u8],
         circular: bool,
         anchors: AnchorConfig,
         chains: ChainConfig,
-    ) -> Result<Self, AlignmentError> {
-        Self::with_kmers(query, circular, anchors, chains, |forward| {
-            base_entropy(forward, anchors.a) < anchors.min_entropy
-        })
-    }
-
-    fn with_kmers(
-        query: &[u8],
-        circular: bool,
-        anchors: AnchorConfig,
-        chains: ChainConfig,
-        keep: impl Fn(u64) -> bool,
-    ) -> Result<Self, AlignmentError> {
+    ) -> Result<(Self, Self), AlignmentError> {
         anchors.validate()?;
         chains.validate()?;
         let query_length = u32::try_from(query.len())
@@ -118,7 +106,6 @@ impl QueryTable {
             .filter(|&length| length < REVERSE)
             .ok_or(AlignmentError::QueryTooLong)?;
         let a = usize::from(anchors.a);
-        let period = period(query, circular, a);
         let mut scanned = query.to_vec();
         if circular && query.len() >= a {
             scanned.extend_from_slice(&query[..a - 1]);
@@ -128,63 +115,33 @@ impl QueryTable {
             None if circular => query[query.len() - 1],
             None => b'N',
         };
-        // (k-mer, left code, occurrence): sorting puts the forward occurrences of a k-mer first,
-        // by left code, and its reverse ones (code 5) last.
-        let mut pairs: Vec<(u64, u8, u32)> = Vec::new();
+        let passes = EntropyLimit::new(anchors);
+        let (mut kept, mut low): (Vec<KmerPair>, Vec<KmerPair>) = (Vec::new(), Vec::new());
         kmers(&scanned, anchors.a, |kmer| {
             let (start, forward, reverse) = (kmer.position, kmer.forward, kmer.reverse);
-            if start < query.len() && keep(forward) {
+            if start < query.len() {
+                let pairs = if passes.holds(forward) {
+                    &mut kept
+                } else {
+                    &mut low
+                };
                 let left = base_code(before(start)).unwrap_or(4);
-                pairs.push((forward, left, start as u32));
-                pairs.push((reverse, 5, start as u32 | REVERSE));
+                pairs.push((jamhash_u64(forward), forward, left, start as u32));
+                pairs.push((jamhash_u64(reverse), reverse, 5, start as u32 | REVERSE));
             }
         });
-        pairs.sort_unstable();
-        let distinct = pairs.chunk_by(|a, b| a.0 == b.0).count();
-        let max_occurrences = pairs
-            .chunk_by(|a, b| a.0 == b.0)
-            .map(<[_]>::len)
-            .max()
-            .unwrap_or(0);
-        let slots = (distinct * 2).next_power_of_two().max(16);
-        let empty = Slot {
-            key: EMPTY,
-            start: 0,
-            count: 0,
-        };
-        let mut table = vec![empty; slots];
-        let mut filter = vec![0u64; ((distinct * 8).next_power_of_two().max(1024)) / 64];
-        let mut occurrences = Vec::with_capacity(pairs.len());
-        let mut left = Vec::with_capacity(pairs.len());
-        for group in pairs.chunk_by(|a, b| a.0 == b.0) {
-            let hash = jamhash_u64(group[0].0);
-            let mut slot = (hash as usize) & (slots - 1);
-            while table[slot].key != EMPTY {
-                slot = (slot + 1) & (slots - 1);
-            }
-            table[slot] = Slot {
-                key: group[0].0,
-                start: occurrences.len() as u32,
-                count: group.len() as u32,
-            };
-            let bit = filter_bit(hash, filter.len());
-            filter[bit / 64] |= 1 << (bit % 64);
-            occurrences.extend(group.iter().map(|pair| pair.2));
-            left.extend(group.iter().map(|pair| pair.1));
-        }
-        Ok(Self {
+        let shape = TableShape {
             anchors,
             chains,
             query_length,
             circular,
-            period,
-            slots: table,
-            filter,
-            max_occurrences,
-            occurrences,
-            left,
-            query: scanned,
-        })
+            period: period(query, circular, a),
+        };
+        let low_scanned = scanned.clone();
+        Ok(rayon::join(
+            || shape.table(kept, scanned),
+            || shape.table(low, low_scanned),
+        ))
     }
 
     /// The occurrences of `key`: query positions, with `REVERSE` set for the reverse strand.
@@ -200,7 +157,7 @@ impl QueryTable {
             return 0..0;
         }
         let mask = self.slots.len() - 1;
-        let mut slot = (hash as usize) & mask;
+        let mut slot = home_slot(hash, self.slots.len());
         loop {
             let found = self.slots[slot];
             if found.key == key {
@@ -428,6 +385,107 @@ pub(super) struct Phase {
     pub(super) diagonal: i64,
 }
 
+/// One query k-mer on one strand: the hash and 2-bit code of the k-mer, the left code, and the
+/// occurrence. Sorting puts the k-mers in the order of their slots, then the forward occurrences
+/// of a k-mer first, by left code, and its reverse ones (code 5) last.
+type KmerPair = (u64, u64, u8, u32);
+
+/// What the two tables of one query share.
+#[derive(Clone, Copy)]
+struct TableShape {
+    anchors: AnchorConfig,
+    chains: ChainConfig,
+    query_length: u32,
+    circular: bool,
+    period: Option<usize>,
+}
+
+impl TableShape {
+    /// The table of the k-mer `pairs` of the query `scanned`.
+    fn table(self, mut pairs: Vec<KmerPair>, scanned: Vec<u8>) -> QueryTable {
+        pairs.par_sort_unstable();
+        let same_kmer = |a: &KmerPair, b: &KmerPair| a.1 == b.1;
+        let distinct = pairs.chunk_by(same_kmer).count();
+        let max_occurrences = pairs.chunk_by(same_kmer).map(<[_]>::len).max().unwrap_or(0);
+        let slots = (distinct * 2).next_power_of_two().max(16);
+        let empty = Slot {
+            key: EMPTY,
+            start: 0,
+            count: 0,
+        };
+        let mut table = vec![empty; slots];
+        let mut filter = vec![0u64; ((distinct * 8).next_power_of_two().max(1024)) / 64];
+        let mut occurrences = Vec::with_capacity(pairs.len());
+        let mut left = Vec::with_capacity(pairs.len());
+        // In slot order the inserts walk through the table instead of jumping around in it.
+        for group in pairs.chunk_by(same_kmer) {
+            let hash = group[0].0;
+            let mut slot = home_slot(hash, slots);
+            while table[slot].key != EMPTY {
+                slot = (slot + 1) & (slots - 1);
+            }
+            table[slot] = Slot {
+                key: group[0].1,
+                start: occurrences.len() as u32,
+                count: group.len() as u32,
+            };
+            let bit = filter_bit(hash, filter.len());
+            filter[bit / 64] |= 1 << (bit % 64);
+            occurrences.extend(group.iter().map(|pair| pair.3));
+            left.extend(group.iter().map(|pair| pair.2));
+        }
+        QueryTable {
+            anchors: self.anchors,
+            chains: self.chains,
+            query_length: self.query_length,
+            circular: self.circular,
+            period: self.period,
+            slots: table,
+            filter,
+            max_occurrences,
+            occurrences,
+            left,
+            query: scanned,
+        }
+    }
+}
+
+/// Which compositions of an anchor k-mer reach the entropy limit, by base counts, so a scan
+/// counts bases instead of taking logarithms.
+struct EntropyLimit {
+    a: usize,
+    passes: Vec<bool>,
+}
+
+impl EntropyLimit {
+    fn new(anchors: AnchorConfig) -> Self {
+        let a = usize::from(anchors.a);
+        let side = a + 1;
+        let mut passes = vec![false; side * side * side];
+        for count_a in 0..=a {
+            for count_c in 0..=a - count_a {
+                for count_g in 0..=a - count_a - count_c {
+                    let counts = [count_a, count_c, count_g, a - count_a - count_c - count_g];
+                    passes[(count_a * side + count_c) * side + count_g] =
+                        base_entropy(counts, a) >= anchors.min_entropy;
+                }
+            }
+        }
+        Self { a, passes }
+    }
+
+    /// Whether the 2-bit k-mer `kmer` reaches the limit.
+    fn holds(&self, kmer: u64) -> bool {
+        let mask = (u64::MAX >> (64 - 2 * self.a)) & 0x5555_5555_5555_5555;
+        let (high, low) = ((kmer >> 1) & mask, kmer & mask);
+        let t = (high & low).count_ones() as usize;
+        let g = (high & !low).count_ones() as usize;
+        let c = (!high & low & mask).count_ones() as usize;
+        let side = self.a + 1;
+        self.passes[((self.a - t - g - c) * side + c) * side + g]
+    }
+}
+
 /// One slot of the open-addressing table: a k-mer and where its occurrences lie.
 #[derive(Clone, Copy)]
 struct Slot {
@@ -441,24 +499,26 @@ const EMPTY: u64 = u64::MAX;
 /// The bit of an occurrence that marks the reverse strand; a query stays shorter than it.
 const REVERSE: u32 = 1 << 31;
 
+/// The first slot to try for a key with hash `hash` in a table of `slots` slots (a power of
+/// two): the high bits, so keys sorted by hash fill the slots in order.
+#[inline(always)]
+fn home_slot(hash: u64, slots: usize) -> usize {
+    (hash >> (64 - slots.trailing_zeros())) as usize
+}
+
 /// The bit of a key with hash `hash` in a filter of `words` 64-bit words (a power of two).
 #[inline(always)]
 fn filter_bit(hash: u64, words: usize) -> usize {
     (hash >> (64 - (words * 64).trailing_zeros())) as usize
 }
 
-/// The Shannon entropy in bits of the bases of a 2-bit k-mer; k-mers below the entropy limit
-/// are left to dense walks.
-fn base_entropy(kmer: u64, k: u8) -> f64 {
-    let mut counts = [0u8; 4];
-    for at in 0..k {
-        counts[((kmer >> (2 * at)) & 3) as usize] += 1;
-    }
+/// The Shannon entropy in bits of `k` bases with the base counts `counts`.
+fn base_entropy(counts: [usize; 4], k: usize) -> f64 {
     counts
         .iter()
         .filter(|&&count| count > 0)
         .map(|&count| {
-            let share = f64::from(count) / f64::from(k);
+            let share = count as f64 / k as f64;
             -share * share.log2()
         })
         .sum()

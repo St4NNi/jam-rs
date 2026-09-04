@@ -156,23 +156,27 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = LossBudget::new(config.loss_budget.chance() / 2.0)?;
-        let prepared = match config.last_stage {
-            SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
-            _ => None,
-        };
-        let request = Request {
-            config,
-            prepared: prepared.as_ref(),
-            control,
-            events,
+        // The query tables are built on the threads of the search too.
+        let search = || {
+            let prepared = match config.last_stage {
+                SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
+                _ => None,
+            };
+            let request = Request {
+                config,
+                prepared: prepared.as_ref(),
+                control,
+                events,
+            };
+            Ok(self.run(query, circular, budget, &request))
         };
         if config.threads == 0 {
-            return Ok(self.run(query, circular, budget, &request));
+            return search();
         }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.threads)
             .build()?;
-        Ok(pool.install(|| self.run(query, circular, budget, &request)))
+        pool.install(search)
     }
 
     /// Stage 1 runs in parallel chunks; then each worker takes the next candidate entry, highest

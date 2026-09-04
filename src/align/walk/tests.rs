@@ -195,7 +195,7 @@ fn shared_kernels_match() {
     contig.extend_from_slice(&query[3_210..3_700]);
     contig.extend(random_bases(&mut generator, 1_000));
     for circular in [false, true] {
-        let table = QueryTable::low_complexity(
+        let (_, table) = QueryTable::split(
             &query,
             circular,
             AnchorConfig::default(),

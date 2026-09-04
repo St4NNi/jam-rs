@@ -28,8 +28,7 @@ impl PreparedQuery {
             return Err(AlignStageError::EmptyQuery);
         }
         let bases = query.to_ascii_uppercase();
-        let table = QueryTable::new(&bases, circular, config.anchors, config.chains)?;
-        let low = QueryTable::low_complexity(&bases, circular, config.anchors, config.chains)?;
+        let (table, low) = QueryTable::split(&bases, circular, config.anchors, config.chains)?;
         Ok(Self {
             table,
             low: (low.max_occurrences() > 0).then_some(low),
