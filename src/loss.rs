@@ -39,9 +39,25 @@ pub struct MissModel {
 
 impl MissModel {
     /// The model for the k and w of a seed scheme, with the table averaged over 1,000 layouts
-    /// per length.
+    /// per length. The table of the default k and w is stored, so it is read, not averaged.
     pub fn new(scheme: SeedScheme) -> Result<Self, LossError> {
-        Self::with_layouts(scheme, 1000)
+        let default = SeedScheme::default();
+        if (scheme.k, scheme.w) != (default.k, default.w) {
+            return Self::with_layouts(scheme, LAYOUTS);
+        }
+        scheme.validate()?;
+        let (values, _) = DEFAULT_LN_MISS.as_chunks::<{ size_of::<f64>() }>();
+        let ln_miss = values
+            .iter()
+            .map(|&bytes| f64::from_le_bytes(bytes))
+            .collect();
+        Ok(Self {
+            k: usize::from(scheme.k),
+            w: usize::from(scheme.w),
+            lengths: table_lengths(usize::from(scheme.k)),
+            identities: identity_grid(),
+            ln_miss,
+        })
     }
 
     /// As `new`, averaging over `layouts` random layouts per stretch length.
@@ -51,11 +67,7 @@ impl MissModel {
             return Err(LossError::NoLayouts);
         }
         let (k, w) = (usize::from(scheme.k), usize::from(scheme.w));
-        let lengths: Vec<f64> = LENGTHS
-            .into_iter()
-            .filter(|&length| length >= k as u64)
-            .map(|length| length as f64)
-            .collect();
+        let lengths = table_lengths(k);
         let identities = identity_grid();
         let rows: Vec<Vec<f64>> = lengths
             .par_iter()
@@ -143,6 +155,15 @@ const LENGTHS: [u64; 21] = [
     5000, 6500, 8000,
 ];
 
+/// The lengths of the table for k-mers of `k` bases.
+fn table_lengths(k: usize) -> Vec<f64> {
+    LENGTHS
+        .into_iter()
+        .filter(|&length| length >= k as u64)
+        .map(|length| length as f64)
+        .collect()
+}
+
 /// The identities of the table: 0.700 to 0.990 in steps of 0.005, then 0.995 and 0.999.
 fn identity_grid() -> Vec<f64> {
     let mut grid: Vec<f64> = (0..=58)
@@ -151,6 +172,13 @@ fn identity_grid() -> Vec<f64> {
     grid.extend([0.995, 0.999]);
     grid
 }
+
+/// The layouts a table averages over per stretch length.
+const LAYOUTS: usize = 1000;
+
+/// The table of the default k and w, averaged over `LAYOUTS` layouts per length, as
+/// little-endian f64 values row by row; a test checks it against a new average.
+const DEFAULT_LN_MISS: &[u8] = include_bytes!("loss_default_table.bin");
 
 /// The largest k the model supports, as the seed scheme does.
 const MAX_K: usize = 32;

@@ -170,3 +170,16 @@ fn budget_is_chance() {
         assert_eq!(LossBudget::new(bad).unwrap_err(), LossError::InvalidBudget);
     }
 }
+
+#[test]
+fn default_table_stored() {
+    let scheme = SeedScheme::default();
+    let (stored, built) = (
+        MissModel::new(scheme).unwrap(),
+        MissModel::with_layouts(scheme, LAYOUTS).unwrap(),
+    );
+    assert_eq!((stored.k, stored.w), (built.k, built.w));
+    assert_eq!(stored.lengths, built.lengths);
+    assert_eq!(stored.identities, built.identities);
+    assert_eq!(stored.ln_miss, built.ln_miss);
+}
