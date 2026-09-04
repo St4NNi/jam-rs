@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::align::{Alignment, Chain, EditOperation, Interval, Strand, Walk};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// The paired stretches of one alignment: (query position, oriented window position, length).
 /// Window positions run on the alignment's strand; query positions run on past the origin of a
@@ -60,8 +60,9 @@ impl AlignedPath {
     }
 }
 
-/// Paired stretches by strand and diagonal, as (query start, length).
-type Segments = HashMap<(bool, i64), Vec<(u64, u64)>>;
+/// Paired stretches by strand and diagonal, as (query start, length), sorted so the diagonals of
+/// a band are found as one range.
+type Segments = BTreeMap<(bool, i64), Vec<(u64, u64)>>;
 
 /// The paired stretches of the alignments made from one window, by strand and diagonal, so a
 /// chain is compared only with the stretches on its own diagonals. Touching stretches of one
@@ -229,10 +230,9 @@ impl PathIndex {
         for &shift in shifts(circular) {
             let moved = shift * query_length as i64;
             let (low, high) = (start + moved, start + length + moved);
-            for line in diagonal - moved - band..=diagonal - moved + band {
-                let Some(list) = self.aligned.get(&(walk.strand.is_reverse(), line)) else {
-                    continue;
-                };
+            let reverse = walk.strand.is_reverse();
+            let lines = (reverse, diagonal - moved - band)..=(reverse, diagonal - moved + band);
+            for (&(_, line), list) in self.aligned.range(lines) {
                 for &(at, run) in list {
                     let (at, end) = (at as i64, (at + run) as i64);
                     if at.max(low) < end.min(high) {
