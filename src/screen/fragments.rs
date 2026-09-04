@@ -116,7 +116,7 @@ impl BatchAlignment<'_> {
         query: &PreparedQuery,
         possible: &PossibleEntry,
         locate: &mut LocateWorkspace,
-        align: &mut AlignStageWorkspace,
+        align: &AlignStageWorkspace,
     ) -> Result<(Vec<ScreenFragment>, FragmentWork), ScreenError> {
         let mut work = FragmentWork::default();
         let outcome = locate_entry(

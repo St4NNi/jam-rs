@@ -60,14 +60,14 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
         return None;
     };
     let prepared = PreparedQuery::new(query, false, &config.align).unwrap();
-    let mut workspace = AlignStageWorkspace::default();
+    let workspace = AlignStageWorkspace::default();
     let aligned = align_entry(
         shard,
         &prepared,
         &located,
         &config.align,
         rule,
-        &mut workspace,
+        &workspace,
         control,
     )
     .unwrap();

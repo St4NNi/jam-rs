@@ -14,14 +14,6 @@ use std::ops::Range;
 #[derive(Default)]
 pub(super) struct WindowBuffers {
     anchors: Vec<Anchor>,
-    bases: Vec<Vec<u8>>,
-}
-
-impl WindowBuffers {
-    /// Keeps the bases buffer of a window that is done for the next read.
-    pub fn recycle(&mut self, window: PreparedWindow) {
-        self.bases.push(window.bases);
-    }
 }
 
 /// One alignment window as read in one widening round, with its chains and dense walks.
@@ -107,7 +99,7 @@ pub(super) fn prepare_window(
     buffers: &mut WindowBuffers,
     work: &mut AlignWork,
 ) -> Result<PreparedWindow, AlignStageError> {
-    let mut bases = buffers.bases.pop().unwrap_or_default();
+    let mut bases = Vec::new();
     packed.read(contig as usize, range.clone(), &mut bases)?;
     work.windows += 1;
     work.bases_read += bases.len() as u64;
@@ -216,10 +208,7 @@ mod tests {
         assert_eq!(forward_extent(&copy.chains[0], 1200, 15), (100, 1099));
         assert_eq!(copy.near_edges(15, 200), (true, true));
         assert_eq!(copy.near_edges(15, 50), (false, false));
-        buffers.recycle(copy);
-        assert_eq!(buffers.bases.len(), 1);
         let run = read(3000..3200, &mut buffers);
-        assert!(buffers.bases.is_empty());
         // The run of T pairs the run of A of the query on the reverse strand only, as walks.
         assert!(!run.walks.is_empty() && run.walks.iter().all(|walk| walk.strand.is_reverse()));
         assert_eq!(run.oriented(&run.walks[0]), vec![b'A'; 200]);

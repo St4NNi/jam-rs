@@ -134,15 +134,9 @@ pub(super) fn align_located(
     let config = AlignStageConfig::default();
     let prepared = PreparedQuery::new(query, circular, &config).unwrap();
     let control = no_stop();
-    let mut workspace = AlignStageWorkspace::default();
+    let workspace = AlignStageWorkspace::default();
     align_entry(
-        shard,
-        &prepared,
-        located,
-        &config,
-        rule,
-        &mut workspace,
-        control,
+        shard, &prepared, located, &config, rule, &workspace, control,
     )
     .unwrap()
 }
@@ -613,7 +607,7 @@ fn stop_between_windows() {
         &located,
         &config,
         &rule("0.5"),
-        &mut AlignStageWorkspace::default(),
+        &AlignStageWorkspace::default(),
         control,
     );
     assert!(matches!(
@@ -638,8 +632,8 @@ fn bad_windows_rejected() {
         deadline: None,
         stop: &stop,
     };
-    let mut workspace = AlignStageWorkspace::default();
-    let run = |config: &AlignStageConfig, workspace: &mut AlignStageWorkspace| {
+    let workspace = AlignStageWorkspace::default();
+    let run = |config: &AlignStageConfig, workspace: &AlignStageWorkspace| {
         align_entry(
             &fixture.shard,
             &query,
@@ -651,13 +645,13 @@ fn bad_windows_rejected() {
         )
     };
     assert!(matches!(
-        run(&config, &mut workspace),
+        run(&config, &workspace),
         Err(AlignStageError::WindowOutsideContig { .. })
     ));
     let mut other = config;
     other.anchors.a = 17;
     assert!(matches!(
-        run(&other, &mut workspace),
+        run(&other, &workspace),
         Err(AlignStageError::InvalidConfig(_))
     ));
 }

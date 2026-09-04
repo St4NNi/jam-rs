@@ -25,6 +25,7 @@ use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
 use crate::index::{IndexError, PackedSequence};
 use place::Collected;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, PoisonError};
 use thiserror::Error;
 
 /// Why stage 3 could not decide an entry.
@@ -52,9 +53,28 @@ pub enum AlignStageError {
     },
 }
 
-/// Reusable buffers of one worker thread, kept across entries.
+/// Reusable buffers of stage 3, kept across entries. The windows of a contig are aligned on
+/// several threads, so the buffers are lent to one thread per window; all workers of a search
+/// can share one workspace.
 #[derive(Default)]
 pub struct AlignStageWorkspace {
+    idle: Mutex<Vec<WindowWorkspace>>,
+}
+
+impl AlignStageWorkspace {
+    /// Runs `work` with buffers that no other thread uses meanwhile.
+    fn lend<T>(&self, work: impl FnOnce(&mut WindowWorkspace) -> T) -> T {
+        let idle = || self.idle.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut buffers = idle().pop().unwrap_or_default();
+        let result = work(&mut buffers);
+        idle().push(buffers);
+        result
+    }
+}
+
+/// The buffers that aligning one window uses.
+#[derive(Default)]
+struct WindowWorkspace {
     alignment: AlignmentWorkspace,
     windows: window::WindowBuffers,
     /// Query k-mers near the end of a dense walk, for `gap_continuation`.
@@ -113,7 +133,7 @@ pub fn align_entry(
     located: &LocatedEntry,
     config: &AlignStageConfig,
     rule: &DecisionRule,
-    workspace: &mut AlignStageWorkspace,
+    workspace: &AlignStageWorkspace,
     control: SearchControl<'_>,
 ) -> Result<AlignedEntry, AlignStageError> {
     control.check()?;
@@ -130,7 +150,7 @@ pub fn align_packed_entry(
     located: &LocatedEntry,
     config: &AlignStageConfig,
     rule: &DecisionRule,
-    workspace: &mut AlignStageWorkspace,
+    workspace: &AlignStageWorkspace,
     control: SearchControl<'_>,
 ) -> Result<AlignedEntry, AlignStageError> {
     let (fragments, work) =
@@ -158,7 +178,7 @@ pub fn entry_fragments(
     located: &LocatedEntry,
     config: &AlignStageConfig,
     rule: &DecisionRule,
-    workspace: &mut AlignStageWorkspace,
+    workspace: &AlignStageWorkspace,
     control: SearchControl<'_>,
 ) -> Result<(Vec<Fragment>, AlignWork), AlignStageError> {
     config.validate()?;

@@ -6,7 +6,7 @@ use super::contig::{ContigJob, WindowOutput};
 use super::paths::{AlignedPath, PathIndex};
 use super::place::query_room;
 use super::window::PreparedWindow;
-use super::{AlignStageError, AlignStageWorkspace};
+use super::{AlignStageError, WindowWorkspace};
 use crate::align::{
     Alignment, DenseResults, DenseWalk, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
     align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
@@ -15,21 +15,20 @@ use crate::decide::Fragment;
 use crate::seeds::base_code;
 use std::cmp::Reverse;
 
-/// Aligns the walks of `window`: every long walk is an ungapped fragment, walks with changes are
-/// also aligned with gaps (kept once per copy), and short walks are joined across their
-/// divergent pieces when the join reaches the fragment limits.
+/// Aligns the walks of `window`: every long walk is an ungapped fragment, and walks with changes
+/// are also aligned with gaps (kept once per copy). Short walks are joined later, by
+/// `join_short_walks`.
 pub(super) fn align_walks(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
-    workspace: &mut AlignStageWorkspace,
+    output: &mut WindowOutput,
+    workspace: &mut WindowWorkspace,
 ) -> Result<(), AlignStageError> {
     if window.walks.is_empty() {
         return Ok(());
     }
     let gapped = walk_fragments(job, window, output, workspace)?;
-    keep_gapped(job, window, output, gapped)?;
-    join_short_walks(job, window, output, &mut workspace.joins)
+    keep_gapped(job, window, output, gapped)
 }
 
 /// Keeps the ungapped fragment of every long walk that no earlier alignment covers, and returns
@@ -37,8 +36,8 @@ pub(super) fn align_walks(
 fn walk_fragments(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
-    workspace: &mut AlignStageWorkspace,
+    output: &mut WindowOutput,
+    workspace: &mut WindowWorkspace,
 ) -> Result<Vec<(Alignment, usize)>, AlignStageError> {
     let (query, config) = (job.query, job.config);
     let mut results = DenseResults::default();
@@ -124,8 +123,8 @@ fn mismatched(walked: WalkAlignment<'_>, oriented: &[u8], query: &[u8]) -> bool 
 fn gapped_alignment(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
-    workspace: &mut AlignStageWorkspace,
+    output: &mut WindowOutput,
+    workspace: &mut WindowWorkspace,
     walked: WalkAlignment<'_>,
     results: &mut DenseResults,
 ) -> Result<Option<Alignment>, AlignStageError> {
@@ -182,7 +181,7 @@ fn gapped_alignment(
 fn keep_gapped(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
+    output: &mut WindowOutput,
     mut gapped: Vec<(Alignment, usize)>,
 ) -> Result<(), AlignStageError> {
     gapped.sort_unstable_by_key(|(alignment, index)| (Reverse(alignment.score), *index));
@@ -202,27 +201,24 @@ fn keep_gapped(
             alignment,
             job.query.length(),
             job.query.circular(),
-        )?)?;
+        )?);
     }
     Ok(())
 }
 
-/// Joins walks shorter than a fragment that no counted fragment of the contig holds, longest
-/// first, across the divergent pieces between them. A join is kept when it reaches the fragment
-/// limits of the rule, whatever its score.
-fn join_short_walks(
+/// Joins walks shorter than a fragment that no counted fragment of the window (in `aligned` or a
+/// join made before) holds, longest first, across the divergent pieces between them. Returns the
+/// joins that reach the fragment limits of the rule, whatever their score.
+pub(super) fn join_short_walks(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
+    aligned: &[Fragment],
     scratch: &mut JoinScratch,
-) -> Result<(), AlignStageError> {
-    // The fragments of a round that widens are dropped, so no join is needed.
-    if *output.grown {
-        return Ok(());
-    }
+) -> Result<Vec<Fragment>, AlignStageError> {
     let (query, rule, walks) = (job.query, job.rule, &window.walks);
-    let held = |output: &WindowOutput<'_>, walk: &Walk| {
-        output.fragments.since(output.first).iter().any(|fragment| {
+    let mut joined: Vec<Fragment> = Vec::new();
+    let held = |joined: &[Fragment], walk: &Walk| {
+        aligned.iter().chain(joined).any(|fragment| {
             rule.counts_fragment(&fragment.alignment)
                 && holds_walk(
                     &fragment.alignment,
@@ -236,11 +232,11 @@ fn join_short_walks(
     let mut short: Vec<usize> = (0..walks.len())
         .filter(|&index| {
             u64::from(walks[index].length) < rule.min_fragment_columns
-                && !held(output, &walks[index])
+                && !held(&joined, &walks[index])
         })
         .collect();
     if short.is_empty() {
-        return Ok(());
+        return Ok(joined);
     }
     let context = JoinContext {
         table: &query.table,
@@ -263,20 +259,18 @@ fn join_short_walks(
     short.sort_unstable_by_key(|&index| (Reverse(walks[index].length), index));
     for index in short {
         job.control.check()?;
-        if held(output, &walks[index]) {
+        if held(&joined, &walks[index]) {
             continue;
         }
         let oriented = window.oriented(&walks[index]);
-        let joined = scratch.join_through(walks, index, oriented, window.start, &context)?;
-        if let Some(joined) = joined {
-            output.work.alignments += 1;
-            output.fragments.push(Fragment::place(
+        if let Some(join) = scratch.join_through(walks, index, oriented, window.start, &context)? {
+            joined.push(Fragment::place(
                 job.contig,
-                joined,
+                join,
                 query.length(),
                 query.circular(),
-            )?)?;
+            )?);
         }
     }
-    Ok(())
+    Ok(joined)
 }

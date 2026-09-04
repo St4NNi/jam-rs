@@ -8,12 +8,13 @@ use super::place::Collected;
 use super::window::{PreparedWindow, merge_spans, prepare_window, widen};
 use super::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
-    SearchControl, chains, walks,
+    SearchControl, WindowWorkspace, chains, walks,
 };
 use crate::align::Alignment;
 use crate::decide::DecisionRule;
 use crate::decide::Fragment;
 use crate::index::PackedSequence;
+use rayon::prelude::*;
 use std::ops::Range;
 
 /// Bases from a cut window edge within which a chain asks for a wider window: the chaining gap,
@@ -33,17 +34,15 @@ pub(super) struct ContigJob<'a> {
     pub control: SearchControl<'a>,
 }
 
-/// What aligning one window of a round changes: the window's span, whether the round grew a
-/// window, the paths aligned in the window, the entry's fragments and the counters.
-pub(super) struct WindowOutput<'a> {
-    pub span: &'a mut Range<u64>,
+/// What aligning one window of a round gives: the window's span (grown when an alignment reaches
+/// a cut edge), whether it grew, the paths aligned in the window, its fragments and its counters.
+pub(super) struct WindowOutput {
+    pub span: Range<u64>,
     pub step: u64,
-    pub grown: &'a mut bool,
+    pub grown: bool,
     pub paths: PathIndex,
-    pub fragments: &'a mut Collected,
-    /// Where the fragments of this contig start.
-    pub first: super::place::Mark,
-    pub work: &'a mut AlignWork,
+    pub fragments: Vec<Fragment>,
+    pub work: AlignWork,
 }
 
 impl<'a> ContigJob<'a> {
@@ -72,7 +71,7 @@ impl<'a> ContigJob<'a> {
     pub fn align(
         &self,
         ranges: &[Range<u64>],
-        workspace: &mut AlignStageWorkspace,
+        workspace: &AlignStageWorkspace,
         fragments: &mut Collected,
         work: &mut AlignWork,
     ) -> Result<(), AlignStageError> {
@@ -83,22 +82,8 @@ impl<'a> ContigJob<'a> {
             self.control.check()?;
             let (prepared, mut grown) = self.prepare_round(&mut spans, step, workspace, work)?;
             if !grown {
-                for (window, span) in prepared.iter().zip(spans.iter_mut()) {
-                    self.control.check()?;
-                    let output = WindowOutput {
-                        span,
-                        step,
-                        grown: &mut grown,
-                        paths: PathIndex::default(),
-                        fragments,
-                        first,
-                        work,
-                    };
-                    self.align_window(window, output, workspace)?;
-                }
-            }
-            for window in prepared {
-                workspace.windows.recycle(window);
+                grown =
+                    self.align_round(&prepared, &mut spans, step, workspace, fragments, work)?;
             }
             if !grown {
                 return Ok(());
@@ -127,13 +112,13 @@ impl<'a> ContigJob<'a> {
         Ok(spans)
     }
 
-    /// Reads every window of a round and finds its chains and walks. Windows with a chain or a
-    /// walk near a cut edge grow before anything is aligned.
+    /// Reads every window of a round and finds its chains and walks, on several threads. Windows
+    /// with a chain or a walk near a cut edge grow before anything is aligned.
     fn prepare_round(
         &self,
         spans: &mut [Range<u64>],
         step: u64,
-        workspace: &mut AlignStageWorkspace,
+        workspace: &AlignStageWorkspace,
         work: &mut AlignWork,
     ) -> Result<(Vec<PreparedWindow>, bool), AlignStageError> {
         let config = self.config;
@@ -145,20 +130,32 @@ impl<'a> ContigJob<'a> {
                 limit: config.max_window_bases,
             });
         }
+        let read = |span: &Range<u64>| {
+            self.control.check()?;
+            let mut read_work = AlignWork::default();
+            let window = workspace.lend(|buffers| {
+                let range = span.clone();
+                let (packed, query) = (self.packed, self.query);
+                prepare_window(
+                    packed,
+                    self.contig,
+                    range,
+                    query,
+                    config,
+                    &mut buffers.windows,
+                    &mut read_work,
+                )
+            })?;
+            Ok((window, read_work))
+        };
+        let read: Vec<Result<_, AlignStageError>> = spans.par_iter().map(read).collect();
         let (k, reach) = (u64::from(config.anchors.a), edge_reach(config));
         let mut prepared = Vec::with_capacity(spans.len());
         let (mut bytes, mut grown) = (0usize, false);
-        for span in spans.iter_mut() {
-            self.control.check()?;
-            let window = prepare_window(
-                self.packed,
-                self.contig,
-                span.clone(),
-                self.query,
-                config,
-                &mut workspace.windows,
-                work,
-            )?;
+        // In window order, so the first failure and the byte limit act as one thread would.
+        for (span, result) in spans.iter_mut().zip(read) {
+            let (window, read_work) = result?;
+            work.add(&read_work);
             bytes += window.bytes();
             if bytes > config.max_prepared_bytes {
                 return Err(AlignStageError::TooLarge {
@@ -174,19 +171,82 @@ impl<'a> ContigJob<'a> {
         Ok((prepared, grown))
     }
 
+    /// Aligns the chains and dense walks of every window on several threads, then joins the short
+    /// walks of the windows before the first one that grows, and adds the fragments in window
+    /// order. Returns whether a window grew.
+    fn align_round(
+        &self,
+        prepared: &[PreparedWindow],
+        spans: &mut [Range<u64>],
+        step: u64,
+        workspace: &AlignStageWorkspace,
+        fragments: &mut Collected,
+        work: &mut AlignWork,
+    ) -> Result<bool, AlignStageError> {
+        let aligned: Vec<Result<WindowOutput, AlignStageError>> = prepared
+            .par_iter()
+            .zip(spans.par_iter())
+            .map(|(window, span)| {
+                let output = WindowOutput {
+                    span: span.clone(),
+                    step,
+                    grown: false,
+                    paths: PathIndex::default(),
+                    fragments: Vec::new(),
+                    work: AlignWork::default(),
+                };
+                workspace.lend(|buffers| self.align_window(window, output, buffers))
+            })
+            .collect();
+        // Joins are made only while no window has grown, as their fragments would be dropped.
+        let joined = aligned
+            .iter()
+            .position(|output| output.as_ref().map_or(true, |output| output.grown))
+            .unwrap_or(aligned.len());
+        let joins: Vec<Result<Vec<Fragment>, AlignStageError>> = prepared[..joined]
+            .par_iter()
+            .zip(aligned[..joined].par_iter())
+            .map(|(window, output)| {
+                let held = output.as_ref().map_or(&[][..], |output| &output.fragments);
+                workspace
+                    .lend(|buffers| walks::join_short_walks(self, window, held, &mut buffers.joins))
+            })
+            .collect();
+        let mut joins = joins.into_iter();
+        let mut grown = false;
+        for (span, output) in spans.iter_mut().zip(aligned) {
+            let output = output?;
+            *span = output.span;
+            grown |= output.grown;
+            work.add(&output.work);
+            for fragment in output.fragments {
+                fragments.push(fragment)?;
+            }
+            if let Some(join) = joins.next() {
+                let joined = join?;
+                work.alignments += joined.len() as u64;
+                for fragment in joined {
+                    fragments.push(fragment)?;
+                }
+            }
+        }
+        Ok(grown)
+    }
+
     /// Aligns the chains and then the dense walks of one window.
     fn align_window(
         &self,
         window: &PreparedWindow,
-        mut output: WindowOutput<'_>,
-        workspace: &mut AlignStageWorkspace,
-    ) -> Result<(), AlignStageError> {
+        mut output: WindowOutput,
+        workspace: &mut WindowWorkspace,
+    ) -> Result<WindowOutput, AlignStageError> {
         chains::align_chains(self, window, &mut output, &mut workspace.alignment)?;
-        walks::align_walks(self, window, &mut output, workspace)
+        walks::align_walks(self, window, &mut output, workspace)?;
+        Ok(output)
     }
 }
 
-impl WindowOutput<'_> {
+impl WindowOutput {
     /// Grows the window when `alignment` reaches a cut window edge with query bases left beyond
     /// it (`room`: before and after it on the query). Returns whether it did.
     pub fn widen_at_edges(
@@ -209,13 +269,13 @@ impl WindowOutput<'_> {
         let right = read.end < job.contig_length && after && contig.end + k >= read.end;
         if left || right {
             widen(
-                self.span,
+                &mut self.span,
                 &read,
                 (left, right),
                 self.step,
                 job.contig_length,
             );
-            *self.grown = true;
+            self.grown = true;
         }
         left || right
     }
@@ -237,7 +297,7 @@ impl WindowOutput<'_> {
             alignment,
             job.query.length(),
             job.query.circular(),
-        )?)?;
+        )?);
         Ok(true)
     }
 }

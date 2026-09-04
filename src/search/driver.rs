@@ -162,9 +162,11 @@ impl<'a> Searcher<'a> {
                 SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
                 _ => None,
             };
+            let workspace = AlignStageWorkspace::default();
             let request = Request {
                 config,
                 prepared: prepared.as_ref(),
+                workspace: &workspace,
                 control,
                 events,
             };
@@ -332,7 +334,7 @@ impl<'a> Searcher<'a> {
             located,
             &request.config.align,
             &request.config.rule,
-            &mut worker.align_workspace,
+            request.workspace,
             request.control,
         )?;
         worker.align.counts.add(&aligned.work);
@@ -355,6 +357,8 @@ struct Request<'a> {
     config: &'a SearchConfig,
     /// The query prepared for stage 3, when the search goes that far.
     prepared: Option<&'a PreparedQuery>,
+    /// The buffers of stage 3, lent to the threads that align windows.
+    workspace: &'a AlignStageWorkspace,
     control: SearchControl<'a>,
     events: &'a SyncSender<EntryEvent>,
 }
@@ -363,7 +367,6 @@ struct Request<'a> {
 #[derive(Default)]
 struct Worker {
     locate_workspace: LocateWorkspace,
-    align_workspace: AlignStageWorkspace,
     locate: LocateWork,
     align: AlignStageWork,
 }

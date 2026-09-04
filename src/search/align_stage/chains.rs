@@ -20,7 +20,7 @@ const LEFTOVER_REACH: u64 = 64;
 pub(super) fn align_chains(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
+    output: &mut WindowOutput,
     workspace: &mut AlignmentWorkspace,
 ) -> Result<(), AlignStageError> {
     let config = job.config;
@@ -68,7 +68,7 @@ fn chain_too_sparse(config: &AlignStageConfig, chain: &Chain) -> bool {
 fn align_part(
     job: &ContigJob<'_>,
     window: &PreparedWindow,
-    output: &mut WindowOutput<'_>,
+    output: &mut WindowOutput,
     workspace: &mut AlignmentWorkspace,
     part: &Chain,
     reach: u64,

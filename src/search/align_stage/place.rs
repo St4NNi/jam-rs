@@ -75,11 +75,6 @@ impl Collected {
         self.bytes = mark.bytes;
     }
 
-    /// The fragments added after `mark`.
-    pub(super) fn since(&self, mark: Mark) -> &[Fragment] {
-        &self.list[mark.length..]
-    }
-
     pub(super) fn into_list(self) -> Vec<Fragment> {
         self.list
     }
@@ -128,7 +123,6 @@ mod tests {
         collected.push(fragment.clone()).unwrap();
         let mark = collected.mark();
         collected.push(fragment.clone()).unwrap();
-        assert_eq!(collected.since(mark).len(), 1);
         assert!(collected.push(fragment.clone()).is_err());
         collected.reset(mark);
         collected.push(fragment).unwrap();
