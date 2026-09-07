@@ -2,11 +2,9 @@ use crate::jidx::{
     CONTIG_POSTING_SIZE, CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_POSTING_SIZE,
     DOCUMENT_RECORD_SIZE, DocumentRecord, FilterKind, HEADER_SIZE, Header, JidxError, PAGE_SIZE,
     PostingCodec, SECTION_COUNT, SEED_RECORD_SIZE, SectionDescriptor, SectionKind, SeedScheme,
-    StringRef, put_u32, sha256, sha256_reader,
+    StringRef, put_u32, seed_length, sha256, sha256_reader,
 };
-use crate::jidx_postings::{
-    SeedEntry, SeedOccurrence, encode_occurrence, encode_seed, validate_packed_key,
-};
+use crate::jidx_postings::{SeedEntry, SeedOccurrence, encode_occurrence, encode_seed};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -43,6 +41,7 @@ pub struct MetagenomeInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JidxInput {
     pub k: u8,
+    pub rescue_k15: bool,
     pub minimizer_window: u16,
     pub jam_sha256: [u8; 32],
     pub manifest_sha256: [u8; 32],
@@ -151,6 +150,7 @@ pub fn write_jidx(
     let body_sha256 = sha256_reader(&mut *file)?;
     let header = Header {
         k: input.k,
+        rescue_k15: input.rescue_k15,
         seed_scheme: SeedScheme::SlidingMinimizer,
         posting_codec: PostingCodec::Raw,
         filter: FilterKind::None,
@@ -202,6 +202,7 @@ struct Prepared {
 fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
     if input.metagenomes.is_empty()
         || !(1..=32).contains(&input.k)
+        || (input.rescue_k15 && input.k != 21)
         || input.minimizer_window == 0
         || input.jam_sha256 == [0; 32]
         || input.manifest_sha256 == [0; 32]
@@ -349,17 +350,18 @@ fn validate_contig(input: &ContigInput, index: &JidxInput) -> Result<(), JidxWri
     }
     let mut seeds = input.seeds.iter().collect::<Vec<_>>();
     seeds.sort_unstable_by_key(|seed| (seed.position, seed.packed_key));
-    if seeds
-        .windows(2)
-        .any(|pair| pair[0].position == pair[1].position)
-    {
+    if seeds.windows(2).any(|pair| {
+        pair[0].position == pair[1].position
+            && seed_length(index.k, index.rescue_k15, pair[0].packed_key).ok()
+                == seed_length(index.k, index.rescue_k15, pair[1].packed_key).ok()
+    }) {
         return Err(JidxWriteError::Invalid("duplicate seed position"));
     }
     for seed in seeds {
-        validate_packed_key(seed.packed_key, index.k)?;
+        let k = seed_length(index.k, index.rescue_k15, seed.packed_key)?;
         if seed
             .position
-            .checked_add(u64::from(index.k))
+            .checked_add(u64::from(k))
             .is_none_or(|end| end > input.length)
         {
             return Err(JidxWriteError::Invalid("seed position"));
@@ -494,6 +496,7 @@ mod tests {
     fn input() -> JidxInput {
         JidxInput {
             k: 5,
+            rescue_k15: false,
             minimizer_window: 16,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],

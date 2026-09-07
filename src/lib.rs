@@ -125,6 +125,7 @@ pub fn run() -> Result<()> {
             output,
             kmer_size,
             minimizer_window,
+            rescue_k15,
         } => handle_jidx_build_command(
             database,
             manifest,
@@ -132,6 +133,7 @@ pub fn run() -> Result<()> {
             jidx_builder::JidxBuildConfig {
                 k: kmer_size,
                 minimizer_window,
+                rescue_k15,
             },
             cli.force,
         ),

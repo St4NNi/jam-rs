@@ -1,6 +1,6 @@
 use crate::jidx::{
     CONTIG_POSTING_SIZE, DOCUMENT_POSTING_SIZE, Header, JidxError, SEED_RECORD_SIZE, SectionKind,
-    read_u32, read_u64,
+    read_u32, read_u64, seed_length,
 };
 use crate::jidx_reader::JidxReader;
 
@@ -22,7 +22,7 @@ pub struct SeedOccurrence {
 
 pub(crate) fn lookup(reader: &JidxReader, packed_key: u64) -> Result<Option<SeedEntry>, JidxError> {
     let header = reader.header();
-    validate_packed_key(packed_key, header.k)?;
+    seed_length(header.k, header.rescue_k15, packed_key)?;
     let mut low = 0;
     let mut high = header.seed_count;
     while low < high {
@@ -161,7 +161,7 @@ fn seed_record(reader: &JidxReader, index: u64) -> Result<SeedRecord, JidxError>
 }
 
 fn validate_record(header: &Header, record: SeedRecord) -> Result<(), JidxError> {
-    validate_packed_key(record.packed_key, header.k)?;
+    seed_length(header.k, header.rescue_k15, record.packed_key)?;
     if record.document_count == 0
         || record.document_count > header.document_count
         || record.occurrence_count == 0
@@ -258,13 +258,6 @@ fn validate_occurrence_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxEr
             return Err(JidxError::Invalid("contig postings"));
         }
         previous = Some((contig_id, position));
-    }
-    Ok(())
-}
-
-pub(crate) fn validate_packed_key(key: u64, k: u8) -> Result<(), JidxError> {
-    if k < 32 && key >= 1u64 << (2 * k) {
-        return Err(JidxError::Invalid("packed seed"));
     }
     Ok(())
 }

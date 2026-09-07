@@ -104,6 +104,9 @@ pub enum Commands {
         /// K-mer starts per sliding minimizer window
         #[arg(long, default_value = "16")]
         minimizer_window: u16,
+        /// Include generic positioned k15 rescue seeds in a k21 index
+        #[arg(long)]
+        rescue_k15: bool,
     },
 
     /// Trace every sequence in a query file through a JAM and JIDX pair

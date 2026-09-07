@@ -1,6 +1,6 @@
 use crate::jidx::{
     CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_RECORD_SIZE, DocumentRecord, HEADER_SIZE, Header,
-    JidxError, PAGE_SIZE, SectionKind, StringRef, sha256,
+    JidxError, PAGE_SIZE, SectionKind, StringRef, seed_length, sha256,
 };
 use memmap2::{Mmap, MmapOptions};
 use std::collections::HashSet;
@@ -95,6 +95,7 @@ impl JidxReader {
         seed: SeedEntry,
     ) -> Result<Vec<SeedOccurrence>, JidxReaderError> {
         let occurrences = crate::jidx_postings::occurrences(self, seed)?;
+        let k = seed_length(self.header.k, self.header.rescue_k15, seed.packed_key)?;
         let mut metagenomes = Vec::new();
         for occurrence in &occurrences {
             let contig = self
@@ -102,7 +103,7 @@ impl JidxReader {
                 .ok_or(JidxError::Invalid("missing occurrence contig"))?;
             if occurrence
                 .position
-                .checked_add(u64::from(self.header.k))
+                .checked_add(u64::from(k))
                 .is_none_or(|end| end > contig.length)
             {
                 return Err(JidxError::Invalid("contig posting position").into());

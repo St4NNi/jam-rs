@@ -6,6 +6,7 @@ pub const MAGIC: [u8; 8] = *b"JIDX\0\0\0\0";
 pub const VERSION: u16 = 2;
 pub const HEADER_SIZE: usize = 512;
 pub const PAGE_SIZE: u64 = 4096;
+pub const RESCUE_K15_TAG: u64 = 1 << 63;
 pub const SECTION_COUNT: usize = 8;
 pub const DOCUMENT_RECORD_SIZE: u32 = 80;
 pub const CONTIG_RECORD_SIZE: u32 = 40;
@@ -15,6 +16,21 @@ pub const CONTIG_POSTING_SIZE: u32 = 16;
 
 const SECTION_TABLE_OFFSET: usize = 144;
 const SECTION_DESCRIPTOR_SIZE: usize = 24;
+
+pub(crate) fn seed_length(k: u8, rescue_k15: bool, packed_key: u64) -> Result<u8, JidxError> {
+    if !(1..=32).contains(&k) || (rescue_k15 && k != 21) {
+        return Err(JidxError::Invalid("seed family"));
+    }
+    let (key, length) = if rescue_k15 && packed_key & RESCUE_K15_TAG != 0 {
+        (packed_key & !RESCUE_K15_TAG, 15)
+    } else {
+        (packed_key, k)
+    };
+    if length < 32 && key >> (2 * length) != 0 {
+        return Err(JidxError::Invalid("packed seed key"));
+    }
+    Ok(length)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeedScheme {
@@ -143,6 +159,7 @@ pub struct SectionDescriptor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Header {
     pub k: u8,
+    pub rescue_k15: bool,
     pub seed_scheme: SeedScheme,
     pub posting_codec: PostingCodec,
     pub filter: FilterKind,
@@ -184,6 +201,7 @@ impl Header {
             put_u64(&mut bytes, start + 16, section.length);
         }
         put_u16(&mut bytes, 336, self.minimizer_window);
+        bytes[338] = u8::from(self.rescue_k15);
         Ok(bytes)
     }
 
@@ -215,7 +233,7 @@ impl Header {
         if read_u32(bytes, 12) != 0 || read_u16(bytes, 22) != 0 {
             return Err(JidxError::Invalid("header flags"));
         }
-        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[338..].iter().any(|byte| *byte != 0)
+        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[339..].iter().any(|byte| *byte != 0)
         {
             return Err(JidxError::Invalid("header reservation"));
         }
@@ -235,6 +253,11 @@ impl Header {
         }
         let header = Self {
             k: bytes[16],
+            rescue_k15: match bytes[338] {
+                0 => false,
+                1 => true,
+                _ => return Err(JidxError::Invalid("rescue seed flag")),
+            },
             seed_scheme: SeedScheme::from_code(bytes[17])?,
             posting_codec: PostingCodec::from_code(bytes[18])?,
             filter: FilterKind::from_code(bytes[19])?,
@@ -277,7 +300,7 @@ impl Header {
     }
 
     fn validate_layout(&self, file_len: u64) -> Result<(), JidxError> {
-        if !(1..=32).contains(&self.k) {
+        if !(1..=32).contains(&self.k) || (self.rescue_k15 && self.k != 21) {
             return Err(JidxError::Invalid("k-mer size"));
         }
         if self.minimizer_window == 0 {
@@ -518,6 +541,7 @@ mod tests {
         }
         let header = Header {
             k: 21,
+            rescue_k15: false,
             seed_scheme: SeedScheme::SlidingMinimizer,
             posting_codec: PostingCodec::Raw,
             filter: FilterKind::None,
@@ -555,6 +579,16 @@ mod tests {
             Header::decode(&file),
             Err(JidxError::UnsupportedVersion(1))
         ));
+    }
+
+    #[test]
+    fn rescue_keys_require_the_declared_family() {
+        assert_eq!(seed_length(21, true, RESCUE_K15_TAG | 7).unwrap(), 15);
+        assert_eq!(seed_length(21, true, 7).unwrap(), 21);
+        assert_eq!(seed_length(32, false, RESCUE_K15_TAG | 7).unwrap(), 32);
+        assert!(seed_length(21, false, RESCUE_K15_TAG).is_err());
+        assert!(seed_length(21, true, RESCUE_K15_TAG | (1 << 30)).is_err());
+        assert!(seed_length(32, true, 7).is_err());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::alignment::{AlignmentConfig, AlignmentError, AlignmentWorkspace, Interval, Strand};
 use crate::bgzf::{BgzfError, BgzfReader};
-use crate::jidx::{JidxError, sha256_reader};
+use crate::jidx::{JidxError, RESCUE_K15_TAG, seed_length, sha256_reader};
 use crate::jidx_reader::{ContigId, JidxReader, JidxReaderError, MetagenomeId};
 use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
@@ -66,6 +66,7 @@ pub struct TraceIndexIdentity {
     pub manifest_sha256: String,
     pub body_sha256: String,
     pub seed_k: u8,
+    pub rescue_k15: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -182,7 +183,12 @@ impl TraceEngine {
         let query_length =
             u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
         let sketch_candidates = self.screen_candidates(&query_id, &query, config)?;
-        let query_seeds = unique_query_seeds(&query, self.index.header().k, config.circular)?;
+        let query_seeds = query_seeds(
+            &query,
+            self.index.header().k,
+            self.index.header().rescue_k15,
+            config.circular,
+        )?;
         let mut query_seeds_by_key = BTreeMap::<u64, Vec<QuerySeed>>::new();
         for seed in query_seeds {
             query_seeds_by_key
@@ -196,6 +202,11 @@ impl TraceEngine {
             let Some(index_seed) = self.index.find_seed(packed_key)? else {
                 continue;
             };
+            let seed_k = seed_length(
+                self.index.header().k,
+                self.index.header().rescue_k15,
+                packed_key,
+            )?;
             let occurrences = self.index.seed_occurrences(index_seed)?;
             for seed in query_seeds {
                 for occurrence in &occurrences {
@@ -215,7 +226,7 @@ impl TraceEngine {
                             .checked_sub(
                                 occurrence
                                     .position
-                                    .checked_add(u64::from(self.index.header().k))
+                                    .checked_add(u64::from(seed_k))
                                     .ok_or(TraceError::Invalid("occurrence position"))?,
                             )
                             .ok_or(TraceError::Invalid("occurrence position"))?,
@@ -226,6 +237,7 @@ impl TraceEngine {
                             metagenome_id: contig.metagenome_id,
                             contig_id: contig.id,
                             strand,
+                            k: seed_k,
                         })
                         .or_default()
                         .push(SeedHit {
@@ -304,6 +316,7 @@ impl TraceEngine {
                 manifest_sha256: digest_hex(self.index.header().manifest_sha256),
                 body_sha256: digest_hex(self.index.header().body_sha256),
                 seed_k: self.index.header().k,
+                rescue_k15: self.index.header().rescue_k15,
             },
             completion,
             candidates_screened,
@@ -403,12 +416,12 @@ impl TraceEngine {
         query_length: u64,
         config: TraceConfig,
     ) -> Result<Vec<AlignmentTask>, TraceError> {
-        let k = u64::from(self.index.header().k);
         let mut tasks = Vec::new();
         for (key, region) in regions {
-            if region.hits < config.min_seed_hits {
+            if region.hits < minimum_region_hits(key.k, config.min_seed_hits) {
                 continue;
             }
+            let k = u64::from(key.k);
             let contig = self
                 .index
                 .contig(key.contig_id)?
@@ -633,6 +646,7 @@ struct RegionKey {
     metagenome_id: MetagenomeId,
     contig_id: ContigId,
     strand: Strand,
+    k: u8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -716,7 +730,24 @@ struct AlignmentTask {
     diagonal_offset: i64,
 }
 
-fn unique_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySeed>, TraceError> {
+fn query_seeds(
+    query: &[u8],
+    k: u8,
+    rescue_k15: bool,
+    circular: bool,
+) -> Result<Vec<QuerySeed>, TraceError> {
+    let mut seeds = extract_query_seeds(query, k, circular)?;
+    if rescue_k15 {
+        let mut rescue = extract_query_seeds(query, 15, circular)?;
+        for seed in &mut rescue {
+            seed.packed_key |= RESCUE_K15_TAG;
+        }
+        seeds.extend(rescue);
+    }
+    Ok(seeds)
+}
+
+fn extract_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySeed>, TraceError> {
     if query.len() < usize::from(k) {
         return Ok(Vec::new());
     }
@@ -738,6 +769,14 @@ fn unique_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySe
         seeds.push(seed);
     }
     Ok(seeds)
+}
+
+fn minimum_region_hits(k: u8, configured: u32) -> u32 {
+    if k == 15 {
+        configured.max(3)
+    } else {
+        configured
+    }
 }
 
 fn digest_hex(digest: [u8; 32]) -> String {
@@ -939,6 +978,7 @@ mod tests {
             JidxBuildConfig {
                 k: 5,
                 minimizer_window: 4,
+                rescue_k15: false,
             },
         )
         .unwrap();
@@ -1015,6 +1055,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(first.completion, SearchCompletion::Complete);
         assert_eq!(first.index.seed_k, 5);
+        assert!(!first.index.rescue_k15);
         assert_eq!(first.index.manifest_sha256.len(), 64);
         assert_eq!(first.index.body_sha256.len(), 64);
         assert_eq!(first.metagenomes.len(), 2);
@@ -1132,7 +1173,7 @@ mod tests {
 
     #[test]
     fn retains_every_repeated_query_seed_position() {
-        let seeds = unique_query_seeds(b"AAAAAA", 3, false).unwrap();
+        let seeds = query_seeds(b"AAAAAA", 3, false, false).unwrap();
         assert_eq!(
             seeds.iter().map(|seed| seed.position).collect::<Vec<_>>(),
             vec![0, 1, 2, 3]
@@ -1150,6 +1191,7 @@ mod tests {
             metagenome_id: 0,
             contig_id: 0,
             strand: Strand::Forward,
+            k: 21,
         };
         let grouped = form_regions(
             BTreeMap::from([(
@@ -1180,6 +1222,7 @@ mod tests {
             metagenome_id: 0,
             contig_id: 0,
             strand: Strand::Forward,
+            k: 21,
         };
         let grouped = form_regions(
             BTreeMap::from([(
@@ -1207,5 +1250,27 @@ mod tests {
         let mut spans = vec![(100, 110), (15, 20), (0, 10), (8, 15), (200, 205)];
         coalesce_spans(&mut spans);
         assert_eq!(spans, vec![(0, 20), (100, 110), (200, 205)]);
+    }
+
+    #[test]
+    fn extracts_every_tagged_k15_rescue_position() {
+        let seeds = query_seeds(b"ACGTACGTACGTACGTACGTA", 21, true, false).unwrap();
+        assert_eq!(
+            seeds
+                .iter()
+                .filter(|seed| seed.packed_key & RESCUE_K15_TAG != 0)
+                .map(|seed| seed.position)
+                .collect::<Vec<_>>(),
+            (0..7).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            seeds
+                .iter()
+                .filter(|seed| seed.packed_key & RESCUE_K15_TAG == 0)
+                .count(),
+            1
+        );
+        assert_eq!(minimum_region_hits(15, 2), 3);
+        assert_eq!(minimum_region_hits(21, 2), 2);
     }
 }

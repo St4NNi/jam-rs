@@ -1,5 +1,5 @@
 use crate::bgzf::BgzfReader;
-use crate::jidx::{sha256, sha256_reader};
+use crate::jidx::{RESCUE_K15_TAG, sha256, sha256_reader};
 use crate::jidx_reader::{Contig, Metagenome};
 use crate::jidx_writer::{
     ContigInput, JidxInput, JidxWriteError, JidxWriteStats, MetagenomeInput, SelectedSeed,
@@ -19,6 +19,7 @@ use thiserror::Error;
 pub struct JidxBuildConfig {
     pub k: u8,
     pub minimizer_window: u16,
+    pub rescue_k15: bool,
 }
 
 impl Default for JidxBuildConfig {
@@ -26,6 +27,7 @@ impl Default for JidxBuildConfig {
         Self {
             k: 21,
             minimizer_window: 16,
+            rescue_k15: false,
         }
     }
 }
@@ -102,7 +104,7 @@ pub fn build_local_jidx(
                 line_width: record.line_width,
             };
             let sequence = reader.read_contig_range(contig, 0, record.length)?;
-            let seeds = select_seeds(&sequence, config)?;
+            let seeds = select_index_seeds(&sequence, config)?;
             source_bases = source_bases
                 .checked_add(record.length)
                 .ok_or(JidxBuildError::Invalid("source bases"))?;
@@ -129,6 +131,7 @@ pub fn build_local_jidx(
         &JidxInput {
             k: config.k,
             minimizer_window: config.minimizer_window,
+            rescue_k15: config.rescue_k15,
             jam_sha256,
             manifest_sha256,
             metagenomes,
@@ -141,10 +144,36 @@ pub fn build_local_jidx(
 }
 
 fn validate_config(config: JidxBuildConfig) -> Result<(), JidxBuildError> {
-    if !(1..=32).contains(&config.k) || config.minimizer_window == 0 {
+    if !(1..=32).contains(&config.k)
+        || config.minimizer_window == 0
+        || (config.rescue_k15 && config.k != 21)
+    {
         return Err(JidxBuildError::Invalid("seed selection"));
     }
     Ok(())
+}
+
+fn select_index_seeds(
+    sequence: &[u8],
+    config: JidxBuildConfig,
+) -> Result<Vec<SelectedSeed>, JidxBuildError> {
+    let mut seeds = select_seeds(sequence, config)?;
+    if config.rescue_k15 {
+        let mut rescue = select_seeds(
+            sequence,
+            JidxBuildConfig {
+                k: 15,
+                minimizer_window: config.minimizer_window,
+                rescue_k15: false,
+            },
+        )?;
+        for seed in &mut rescue {
+            seed.packed_key |= RESCUE_K15_TAG;
+        }
+        seeds.extend(rescue);
+        seeds.sort_unstable_by_key(|seed| (seed.position, seed.packed_key));
+    }
+    Ok(seeds)
 }
 
 fn validate_names(database: &JamReader, manifest: &Manifest) -> Result<(), JidxBuildError> {
@@ -381,6 +410,7 @@ mod tests {
             JidxBuildConfig {
                 k: 5,
                 minimizer_window: 16,
+                rescue_k15: false,
             },
         )
         .unwrap();
@@ -405,6 +435,7 @@ mod tests {
         let config = JidxBuildConfig {
             k: 5,
             minimizer_window: 4,
+            rescue_k15: false,
         };
         let first = select_seeds(sequence, config).unwrap();
         assert_eq!(select_seeds(sequence, config).unwrap(), first);
@@ -434,6 +465,7 @@ mod tests {
         let config = JidxBuildConfig {
             k: 3,
             minimizer_window: 4,
+            rescue_k15: false,
         };
         let tied = select_seeds(b"AAAAAA", config).unwrap();
         assert_eq!(
@@ -451,21 +483,31 @@ mod tests {
     }
 
     #[test]
-    fn reverse_complement_selection_is_equivalent() {
-        let sequence = b"ACGTTGCAACGATCGTAGGCTAACCGT";
+    fn rescue_keys_preserve_reverse_complement_positions() {
+        let sequence = b"ACGTTGCAACGATCGTAGGCTAACCGTAGCTACGATTCGA";
         let config = JidxBuildConfig {
-            k: 5,
+            k: 21,
             minimizer_window: 4,
+            rescue_k15: true,
         };
-        let forward = select_seeds(sequence, config).unwrap();
-        let reverse = select_seeds(&sequence.reverse_complement(), config).unwrap();
-        let last_start = sequence.len() as u64 - u64::from(config.k);
+        let forward = select_index_seeds(sequence, config).unwrap();
+        let reverse = select_index_seeds(&sequence.reverse_complement(), config).unwrap();
+        assert!(
+            forward
+                .iter()
+                .any(|seed| seed.packed_key & RESCUE_K15_TAG == 0)
+        );
+        assert!(forward.iter().any(|seed| {
+            seed.packed_key & RESCUE_K15_TAG != 0 && (seed.packed_key & !RESCUE_K15_TAG) < 1 << 30
+        }));
         let mirrored: BTreeSet<_> = forward
             .iter()
             .map(|seed| {
+                let k =
+                    crate::jidx::seed_length(config.k, config.rescue_k15, seed.packed_key).unwrap();
                 (
                     seed.packed_key,
-                    last_start - seed.position,
+                    sequence.len() as u64 - u64::from(k) - seed.position,
                     !seed.canonical_orientation,
                 )
             })
@@ -480,13 +522,30 @@ mod tests {
     }
 
     #[test]
-    fn zero_minimizer_window_is_rejected() {
+    fn invalid_selection_configs_are_rejected() {
         assert!(
             validate_config(JidxBuildConfig {
                 k: 21,
                 minimizer_window: 0,
+                rescue_k15: false,
             })
             .is_err()
+        );
+        assert!(
+            validate_config(JidxBuildConfig {
+                k: 20,
+                minimizer_window: 16,
+                rescue_k15: true,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_config(JidxBuildConfig {
+                k: 21,
+                minimizer_window: 16,
+                rescue_k15: true,
+            })
+            .is_ok()
         );
     }
 }
