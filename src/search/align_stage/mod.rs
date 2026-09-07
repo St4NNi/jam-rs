@@ -78,7 +78,7 @@ struct WindowWorkspace {
     alignment: AlignmentWorkspace,
     windows: window::WindowBuffers,
     /// Query k-mers near the end of a dense walk, for `gap_continuation`.
-    probe: Vec<(u64, u32)>,
+    probe: rustc_hash::FxHashMap<u64, (u32, u32)>,
     joins: JoinScratch,
 }
 

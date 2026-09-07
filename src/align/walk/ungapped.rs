@@ -8,6 +8,7 @@ use crate::align::anchors::QueryTable;
 use crate::align::cigar::{append_runs, counts};
 use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
 use crate::seeds::kmers;
+use rustc_hash::FxHashMap;
 
 /// The ungapped alignment of one walk. `oriented` is the window on the walk's strand (the
 /// reverse complement for the reverse strand); the window starts `offset` bases into the contig.
@@ -62,13 +63,13 @@ pub fn walk_alignment(
 
 /// Whether an end of `walk` can reach a conserved block on another diagonal: an exact k-mer
 /// within the drift beyond the query end pairs with one beyond the contig end at another
-/// distance. `codes` is reused scratch of at most `max_drift + 1` codes.
+/// distance. `distances` is reused scratch: the nearest and farthest distance of each query k-mer.
 pub fn gap_continuation(
     walk: &Walk,
     oriented: &[u8],
     table: &QueryTable,
     config: BandConfig,
-    codes: &mut Vec<(u64, u32)>,
+    distances: &mut FxHashMap<u64, (u32, u32)>,
 ) -> Result<bool, AlignmentError> {
     let query = table.query();
     let a = usize::from(table.anchors().a);
@@ -115,20 +116,20 @@ pub fn gap_continuation(
         {
             continue;
         }
-        codes.clear();
+        distances.clear();
         kmers(&query_side, table.anchors().a, |kmer| {
-            let (at, code) = (kmer.position, kmer.forward);
-            codes.push((code, distance(at, query_bases) as u32))
+            let at = distance(kmer.position, query_bases) as u32;
+            let span = distances.entry(kmer.forward).or_insert((at, at));
+            *span = (span.0.min(at), span.1.max(at));
         });
-        codes.sort_unstable();
         let mut found = false;
         kmers(contig_side, table.anchors().a, |kmer| {
-            let (at, code) = (kmer.position, kmer.forward);
-            let at = distance(at, contig_bases) as u32;
-            // Pairs of one code are ordered by distance, so another distance is at an end.
-            let first = codes.partition_point(|pair| pair.0 < code);
-            let last = codes.partition_point(|pair| pair.0 <= code);
-            found |= first < last && (codes[first].1 != at || codes[last - 1].1 != at);
+            let at = distance(kmer.position, contig_bases) as u32;
+            // Another distance of the code exists when the nearest or the farthest differs.
+            found = found
+                || distances
+                    .get(&kmer.forward)
+                    .is_some_and(|&(nearest, farthest)| nearest != at || farthest != at);
         });
         if found {
             return Ok(true);
