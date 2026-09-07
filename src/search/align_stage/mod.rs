@@ -24,6 +24,7 @@ use crate::align::{AlignmentError, AlignmentWorkspace, JoinScratch};
 use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
 use crate::index::{IndexError, PackedSequence};
 use place::Collected;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, PoisonError};
 use thiserror::Error;
@@ -184,12 +185,28 @@ pub fn entry_fragments(
     config.validate()?;
     rule.validate()?;
     query.check(config)?;
+    // Contigs are aligned on all threads, as an entry may hold thousands of contigs with one
+    // window each; their fragments are added in contig order, so the limit acts as on one thread.
+    let aligned: Vec<Result<(Vec<Fragment>, AlignWork), AlignStageError>> = located
+        .alignment_windows
+        .par_iter()
+        .map(|windows| {
+            control.check()?;
+            let job = contig::ContigJob::new(packed, windows.contig, query, config, rule, control)?;
+            let mut fragments = Collected::new(config.max_fragment_bytes);
+            let mut work = AlignWork::default();
+            job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
+            Ok((fragments.into_list(), work))
+        })
+        .collect();
     let mut fragments = Collected::new(config.max_fragment_bytes);
     let mut work = AlignWork::default();
-    for windows in &located.alignment_windows {
-        control.check()?;
-        let job = contig::ContigJob::new(packed, windows.contig, query, config, rule, control)?;
-        job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
+    for result in aligned {
+        let (contig_fragments, contig_work) = result?;
+        work.add(&contig_work);
+        for fragment in contig_fragments {
+            fragments.push(fragment)?;
+        }
     }
     Ok((fragments.into_list(), work))
 }
