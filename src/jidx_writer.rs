@@ -78,20 +78,20 @@ pub fn write_jidx(
         .prefix(".jidx-")
         .tempfile_in(parent)?;
     let checksum_input = temporary.reopen()?;
-    let file = temporary.as_file_mut();
+    let mut file = BufWriter::with_capacity(1024 * 1024, temporary.as_file_mut());
     file.write_all(&[0; HEADER_SIZE])?;
 
-    write_padding(file, prepared.sections[0].offset)?;
+    write_padding(&mut file, prepared.sections[0].offset)?;
     file.write_all(&prepared.strings)?;
-    write_padding(file, prepared.sections[1].offset)?;
+    write_padding(&mut file, prepared.sections[1].offset)?;
     for record in prepared.documents {
         file.write_all(&record.encode())?;
     }
-    write_padding(file, prepared.sections[2].offset)?;
+    write_padding(&mut file, prepared.sections[2].offset)?;
     for record in prepared.contigs {
         file.write_all(&record.encode())?;
     }
-    write_padding(file, prepared.sections[3].offset)?;
+    write_padding(&mut file, prepared.sections[3].offset)?;
     let mut document_offset = 0;
     let mut occurrence_offset = 0;
     for (key, occurrences) in &prepared.seeds {
@@ -112,7 +112,7 @@ pub fn write_jidx(
             .checked_add(byte_len(occurrences.len(), CONTIG_POSTING_SIZE)?)
             .ok_or(JidxWriteError::Invalid("contig postings"))?;
     }
-    write_padding(file, prepared.sections[4].offset)?;
+    write_padding(&mut file, prepared.sections[4].offset)?;
     for occurrences in prepared.seeds.values() {
         for document in documents_for(occurrences, &prepared.contig_documents) {
             let mut bytes = [0; DOCUMENT_POSTING_SIZE as usize];
@@ -120,26 +120,22 @@ pub fn write_jidx(
             file.write_all(&bytes)?;
         }
     }
-    write_padding(file, prepared.sections[5].offset)?;
+    write_padding(&mut file, prepared.sections[5].offset)?;
     for occurrences in prepared.seeds.values() {
         for occurrence in occurrences {
             file.write_all(&encode_occurrence(*occurrence))?;
         }
     }
-    write_padding(file, prepared.sections[6].offset)?;
+    write_padding(&mut file, prepared.sections[6].offset)?;
     file.write_all(&prepared.gzi)?;
-    write_padding(file, prepared.sections[7].offset)?;
+    write_padding(&mut file, prepared.sections[7].offset)?;
     file.flush()?;
     let mut checksum_input = BufReader::new(checksum_input);
     checksum_input.seek(SeekFrom::Start(PAGE_SIZE))?;
-    {
-        let mut checksums = BufWriter::new(&mut *file);
-        let mut page = [0; PAGE_SIZE as usize];
-        for _ in 0..prepared.sections[7].length / 32 {
-            checksum_input.read_exact(&mut page)?;
-            checksums.write_all(&sha256(&page))?;
-        }
-        checksums.flush()?;
+    let mut page = [0; PAGE_SIZE as usize];
+    for _ in 0..prepared.sections[7].length / 32 {
+        checksum_input.read_exact(&mut page)?;
+        file.write_all(&sha256(&page))?;
     }
     let file_bytes = file.stream_position()?;
     if file_bytes != prepared.file_bytes {
@@ -147,7 +143,7 @@ pub fn write_jidx(
     }
     file.flush()?;
     file.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
-    let body_sha256 = sha256_reader(&mut *file)?;
+    let body_sha256 = sha256_reader(&mut **file.get_mut())?;
     let header = Header {
         k: input.k,
         rescue_k15: input.rescue_k15,
@@ -170,9 +166,10 @@ pub fn write_jidx(
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header.encode()?)?;
     file.flush()?;
-    file.sync_all()?;
+    file.get_ref().sync_all()?;
     file.seek(SeekFrom::Start(0))?;
-    let file_sha256 = sha256_reader(&mut *file)?;
+    let file_sha256 = sha256_reader(&mut **file.get_mut())?;
+    drop(file);
     temporary
         .persist_noclobber(path)
         .map_err(|error| error.error)?;
@@ -432,7 +429,7 @@ fn section_layout(
     ))
 }
 
-fn write_padding(file: &mut File, target: u64) -> io::Result<()> {
+fn write_padding(file: &mut BufWriter<&mut File>, target: u64) -> io::Result<()> {
     let position = file.stream_position()?;
     let padding = target
         .checked_sub(position)
