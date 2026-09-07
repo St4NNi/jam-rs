@@ -714,12 +714,8 @@ fn anchored_semiglobal(
             max_cells: config.max_cells,
         });
     }
-    if cells.len() < matrix_cells {
-        cells.resize(matrix_cells, EndpointCell::default());
-    } else {
-        cells[..matrix_cells].fill(EndpointCell::default());
-        cells.truncate(matrix_cells);
-    }
+    cells.resize(matrix_cells, EndpointCell::default());
+    cells.fill(EndpointCell::default());
     cells[0].scores[MATCH as usize] = 0;
     for (column, cell) in cells.iter_mut().enumerate().take(columns).skip(1) {
         cell.scores[INSERTION as usize] = config.gap_open_score.saturating_add(
@@ -1233,5 +1229,17 @@ mod tests {
             anchored_semiglobal(&mut cells, b"ACGTACGT", b"ACGTACGTCCCC", config()).unwrap();
         assert_eq!((result.query_bases, result.target_bases), (8, 8));
         assert_eq!(cigar_from_runs(&result.runs).unwrap(), "8=");
+    }
+
+    #[test]
+    fn semiglobal_workspace_growth_matches_fresh_workspace() {
+        let mut reused = Vec::new();
+        anchored_semiglobal(&mut reused, b"A", b"A", config()).unwrap();
+        let reused_result = anchored_semiglobal(&mut reused, b"C", b"AAA", config()).unwrap();
+        let fresh_result = anchored_semiglobal(&mut Vec::new(), b"C", b"AAA", config()).unwrap();
+
+        assert_eq!(reused_result.runs, fresh_result.runs);
+        assert_eq!(reused_result.query_bases, fresh_result.query_bases);
+        assert_eq!(reused_result.target_bases, fresh_result.target_bases);
     }
 }
