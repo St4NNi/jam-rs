@@ -7,7 +7,7 @@ use crate::io::{extract_unique_hashes, read_entries, write_entries};
 use crate::sketch::{SketchConfig, SketchResult};
 use bytemuck;
 use memmap2::MmapMut;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,7 +67,7 @@ struct ProcessedBucket {
     bucket_id: usize,
     entry_count: u64,
     unique_hash_count: u64,
-    filter_bytes: Vec<u8>,
+    filter_size: usize,
     sample_hash_counts: std::collections::HashMap<u32, u64>,
 }
 
@@ -239,12 +239,18 @@ pub fn run(
         if !entries.is_empty() {
             write_entries(&bucket_path, &entries)?;
         }
+        if !filter_bytes.is_empty() {
+            std::fs::write(
+                temp_path.join(format!("filter_{bucket_id:03}.bin")),
+                &filter_bytes,
+            )?;
+        }
 
         processed.push(ProcessedBucket {
             bucket_id,
             entry_count: entries.len() as u64,
             unique_hash_count,
-            filter_bytes,
+            filter_size: filter_bytes.len(),
             sample_hash_counts,
         });
     }
@@ -285,7 +291,7 @@ pub fn run(
             &format!("bucket {} entry byte size", bucket.bucket_id),
         )?;
         let bucket_size = checked_add_usize(
-            bucket.filter_bytes.len(),
+            bucket.filter_size,
             entries_bytes_len,
             &format!("bucket {} region size", bucket.bucket_id),
         )?;
@@ -328,7 +334,7 @@ pub fn run(
 
     for bucket in &processed {
         let bucket_offset = bucket_offsets[bucket.bucket_id];
-        let filter_size = bucket.filter_bytes.len();
+        let filter_size = bucket.filter_size;
         let entry_count = usize::try_from(bucket.entry_count).map_err(|_| {
             CompactError::SizeOverflow(format!(
                 "bucket {} entry count does not fit usize: {}",
@@ -341,8 +347,9 @@ pub fn run(
             &format!("bucket {} entry byte size", bucket.bucket_id),
         )?;
 
-        if !bucket.filter_bytes.is_empty() {
-            mmap[bucket_offset..bucket_offset + filter_size].copy_from_slice(&bucket.filter_bytes);
+        if filter_size > 0 {
+            std::fs::File::open(temp_path.join(format!("filter_{:03}.bin", bucket.bucket_id)))?
+                .read_exact(&mut mmap[bucket_offset..bucket_offset + filter_size])?;
         }
 
         let entry_offset = checked_add_usize(
