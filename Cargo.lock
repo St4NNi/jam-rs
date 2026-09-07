@@ -1853,6 +1853,7 @@ dependencies = [
  "rand_core",
  "rand_pcg",
  "rayon",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",
