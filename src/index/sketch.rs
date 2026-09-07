@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 pub const SKETCH_FILE: &str = "sketch";
 
 const MAGIC: [u8; 16] = *b"jam sketch\0\0\0\0\0\0";
-const VERSION: u32 = 1;
+// Version 1 files may hold wrong ids for rare color sets, so they are refused.
+const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 128;
 const BLOCK_HEADER_BYTES: usize = 8;
 const MAX_ESCAPES: usize = (1 << 24) - 1;
