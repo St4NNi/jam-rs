@@ -9,6 +9,7 @@ pub mod jidx;
 pub mod jidx_builder;
 mod jidx_postings;
 pub mod jidx_reader;
+mod jidx_runs;
 pub mod jidx_writer;
 pub mod mosaic;
 pub mod query;

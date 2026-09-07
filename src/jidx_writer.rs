@@ -1,14 +1,15 @@
 use crate::jidx::{
     CONTIG_POSTING_SIZE, CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_POSTING_SIZE,
     DOCUMENT_RECORD_SIZE, DocumentRecord, FilterKind, HEADER_SIZE, Header, JidxError, PAGE_SIZE,
-    PostingCodec, SECTION_COUNT, SEED_RECORD_SIZE, SectionDescriptor, SectionKind, SeedScheme,
-    StringRef, put_u32, seed_length, sha256, sha256_reader,
+    PostingCodec, SECTION_COUNT, SectionDescriptor, SectionKind, SeedScheme, StringRef,
+    seed_length, sha256, sha256_reader,
 };
 use crate::jidx_postings::{SeedEntry, SeedOccurrence, encode_occurrence, encode_seed};
-use std::collections::{BTreeMap, HashSet};
+use crate::jidx_runs::{RunRecord, Runs};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -25,7 +26,6 @@ pub struct ContigInput {
     pub fasta_offset: u64,
     pub line_bases: u32,
     pub line_width: u32,
-    pub seeds: Vec<SelectedSeed>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,7 +35,6 @@ pub struct MetagenomeInput {
     pub bgzf_bytes: u64,
     pub bgzf_sha256: [u8; 32],
     pub gzi: Vec<u8>,
-    pub contigs: Vec<ContigInput>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,7 +44,6 @@ pub struct JidxInput {
     pub minimizer_window: u16,
     pub jam_sha256: [u8; 32],
     pub manifest_sha256: [u8; 32],
-    pub metagenomes: Vec<MetagenomeInput>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,274 +56,354 @@ pub struct JidxWriteStats {
     pub file_sha256: [u8; 32],
 }
 
-pub fn write_jidx(
-    path: impl AsRef<Path>,
-    input: &JidxInput,
-) -> Result<JidxWriteStats, JidxWriteError> {
-    let path = path.as_ref();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    if path.file_name().is_none() {
-        return Err(JidxWriteError::Invalid("output path"));
-    }
-    if path.try_exists()? {
-        return Err(JidxWriteError::Invalid("output exists"));
-    }
-    let prepared = prepare(input)?;
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".jidx-")
-        .tempfile_in(parent)?;
-    let checksum_input = temporary.reopen()?;
-    let mut file = BufWriter::with_capacity(1024 * 1024, temporary.as_file_mut());
-    file.write_all(&[0; HEADER_SIZE])?;
-
-    write_padding(&mut file, prepared.sections[0].offset)?;
-    file.write_all(&prepared.strings)?;
-    write_padding(&mut file, prepared.sections[1].offset)?;
-    for record in prepared.documents {
-        file.write_all(&record.encode())?;
-    }
-    write_padding(&mut file, prepared.sections[2].offset)?;
-    for record in prepared.contigs {
-        file.write_all(&record.encode())?;
-    }
-    write_padding(&mut file, prepared.sections[3].offset)?;
-    let mut document_offset = 0;
-    let mut occurrence_offset = 0;
-    for (key, occurrences) in &prepared.seeds {
-        let documents = documents_for(occurrences, &prepared.contig_documents);
-        file.write_all(&encode_seed(SeedEntry {
-            packed_key: *key,
-            document_frequency: u32::try_from(documents.len())
-                .map_err(|_| JidxWriteError::Invalid("document frequency"))?,
-            occurrence_count: u64::try_from(occurrences.len())
-                .map_err(|_| JidxWriteError::Invalid("occurrence count"))?,
-            document_offset,
-            occurrence_offset,
-        }))?;
-        document_offset = document_offset
-            .checked_add(byte_len(documents.len(), DOCUMENT_POSTING_SIZE)?)
-            .ok_or(JidxWriteError::Invalid("document postings"))?;
-        occurrence_offset = occurrence_offset
-            .checked_add(byte_len(occurrences.len(), CONTIG_POSTING_SIZE)?)
-            .ok_or(JidxWriteError::Invalid("contig postings"))?;
-    }
-    write_padding(&mut file, prepared.sections[4].offset)?;
-    for occurrences in prepared.seeds.values() {
-        for document in documents_for(occurrences, &prepared.contig_documents) {
-            let mut bytes = [0; DOCUMENT_POSTING_SIZE as usize];
-            put_u32(&mut bytes, 0, document);
-            file.write_all(&bytes)?;
-        }
-    }
-    write_padding(&mut file, prepared.sections[5].offset)?;
-    for occurrences in prepared.seeds.values() {
-        for occurrence in occurrences {
-            file.write_all(&encode_occurrence(*occurrence))?;
-        }
-    }
-    write_padding(&mut file, prepared.sections[6].offset)?;
-    file.write_all(&prepared.gzi)?;
-    write_padding(&mut file, prepared.sections[7].offset)?;
-    file.flush()?;
-    let mut checksum_input = BufReader::new(checksum_input);
-    checksum_input.seek(SeekFrom::Start(PAGE_SIZE))?;
-    let mut page = [0; PAGE_SIZE as usize];
-    for _ in 0..prepared.sections[7].length / 32 {
-        checksum_input.read_exact(&mut page)?;
-        file.write_all(&sha256(&page))?;
-    }
-    let file_bytes = file.stream_position()?;
-    if file_bytes != prepared.file_bytes {
-        return Err(JidxWriteError::Invalid("written length"));
-    }
-    file.flush()?;
-    file.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
-    let body_sha256 = sha256_reader(&mut **file.get_mut())?;
-    let header = Header {
-        k: input.k,
-        rescue_k15: input.rescue_k15,
-        seed_scheme: SeedScheme::SlidingMinimizer,
-        posting_codec: PostingCodec::Raw,
-        filter: FilterKind::None,
-        document_count: u32::try_from(input.metagenomes.len())
-            .map_err(|_| JidxWriteError::Invalid("metagenome count"))?,
-        contig_count: u32::try_from(prepared.contig_documents.len())
-            .map_err(|_| JidxWriteError::Invalid("contig count"))?,
-        seed_count: u64::try_from(prepared.seeds.len())
-            .map_err(|_| JidxWriteError::Invalid("seed count"))?,
-        occurrence_count: prepared.occurrences,
-        minimizer_window: input.minimizer_window,
-        jam_sha256: input.jam_sha256,
-        manifest_sha256: input.manifest_sha256,
-        body_sha256,
-        sections: prepared.sections,
-    };
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&header.encode()?)?;
-    file.flush()?;
-    file.get_ref().sync_all()?;
-    file.seek(SeekFrom::Start(0))?;
-    let file_sha256 = sha256_reader(&mut **file.get_mut())?;
-    drop(file);
-    temporary
-        .persist_noclobber(path)
-        .map_err(|error| error.error)?;
-    sync_directory(parent)?;
-    Ok(JidxWriteStats {
-        metagenomes: header.document_count,
-        contigs: header.contig_count,
-        seeds: header.seed_count,
-        occurrences: header.occurrence_count,
-        file_bytes,
-        file_sha256,
-    })
-}
-
-struct Prepared {
+pub struct JidxWriter {
+    path: PathBuf,
+    input: JidxInput,
+    scratch: tempfile::TempDir,
+    runs: Runs,
     strings: Vec<u8>,
     gzi: Vec<u8>,
     documents: Vec<DocumentRecord>,
     contigs: Vec<ContigRecord>,
-    contig_documents: Vec<u32>,
-    seeds: BTreeMap<u64, Vec<SeedOccurrence>>,
-    occurrences: u64,
-    sections: [SectionDescriptor; SECTION_COUNT],
-    file_bytes: u64,
+    current_metagenome: Option<MetagenomeInput>,
+    contig_start: u32,
+    contig_names: HashSet<String>,
+    previous_seed: Option<(u64, u64, u8)>,
 }
 
-fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
-    if input.metagenomes.is_empty()
-        || !(1..=32).contains(&input.k)
-        || (input.rescue_k15 && input.k != 21)
-        || input.minimizer_window == 0
-        || input.jam_sha256 == [0; 32]
-        || input.manifest_sha256 == [0; 32]
-    {
-        return Err(JidxWriteError::Invalid("index metadata"));
-    }
-    let mut metagenomes: Vec<_> = input.metagenomes.iter().collect();
-    metagenomes.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    if metagenomes
-        .windows(2)
-        .any(|pair| pair[0].name == pair[1].name)
-    {
-        return Err(JidxWriteError::Invalid("duplicate metagenome"));
+impl JidxWriter {
+    pub fn new(path: impl AsRef<Path>, input: &JidxInput) -> Result<Self, JidxWriteError> {
+        Self::with_run_records(
+            path.as_ref(),
+            input,
+            64 * 1024 * 1024 / std::mem::size_of::<RunRecord>(),
+        )
     }
 
-    let mut strings = Vec::new();
-    let mut gzi = Vec::new();
-    let mut documents = Vec::with_capacity(metagenomes.len());
-    let mut contigs = Vec::new();
-    let mut contig_documents = Vec::new();
-    let mut seeds = BTreeMap::<u64, Vec<SeedOccurrence>>::new();
-    for (document_id, metagenome) in metagenomes.into_iter().enumerate() {
-        validate_metagenome(metagenome)?;
-        let document_id =
-            u32::try_from(document_id).map_err(|_| JidxWriteError::Invalid("metagenome count"))?;
-        let mut contig_names = HashSet::new();
-        if metagenome.contigs.is_empty()
-            || metagenome
-                .contigs
-                .iter()
-                .any(|contig| !contig_names.insert(&contig.name))
+    fn with_run_records(
+        path: &Path,
+        input: &JidxInput,
+        max_records: usize,
+    ) -> Result<Self, JidxWriteError> {
+        if path.file_name().is_none() || path.try_exists()? {
+            return Err(JidxWriteError::Invalid("output path or existing output"));
+        }
+        if !(1..=32).contains(&input.k)
+            || (input.rescue_k15 && input.k != 21)
+            || input.minimizer_window == 0
+            || input.jam_sha256 == [0; 32]
+            || input.manifest_sha256 == [0; 32]
         {
+            return Err(JidxWriteError::Invalid("index metadata"));
+        }
+        let scratch = tempfile::Builder::new()
+            .prefix(".jidx-runs-")
+            .tempdir_in(output_parent(path))?;
+        let runs = Runs::new(scratch.path(), max_records)?;
+        Ok(Self {
+            path: path.to_owned(),
+            input: input.clone(),
+            scratch,
+            runs,
+            strings: Vec::new(),
+            gzi: Vec::new(),
+            documents: Vec::new(),
+            contigs: Vec::new(),
+            current_metagenome: None,
+            contig_start: 0,
+            contig_names: HashSet::new(),
+            previous_seed: None,
+        })
+    }
+
+    pub fn begin_metagenome(&mut self, input: MetagenomeInput) -> Result<(), JidxWriteError> {
+        validate_metagenome(&input)?;
+        if self
+            .current_metagenome
+            .as_ref()
+            .is_some_and(|previous| previous.name >= input.name)
+        {
+            return Err(JidxWriteError::Invalid("metagenome order"));
+        }
+        self.finish_metagenome()?;
+        self.contig_start = u32::try_from(self.contigs.len())
+            .map_err(|_| JidxWriteError::Invalid("contig count"))?;
+        self.contig_names.clear();
+        self.current_metagenome = Some(input);
+        Ok(())
+    }
+
+    fn finish_metagenome(&mut self) -> Result<(), JidxWriteError> {
+        let Some(input) = self.current_metagenome.take() else {
+            return Ok(());
+        };
+        let contig_count = u32::try_from(self.contigs.len())
+            .map_err(|_| JidxWriteError::Invalid("contig count"))?
+            - self.contig_start;
+        if contig_count == 0 {
             return Err(JidxWriteError::Invalid("metagenome contigs"));
         }
-        let contig_start =
-            u32::try_from(contigs.len()).map_err(|_| JidxWriteError::Invalid("contig count"))?;
-        for contig in &metagenome.contigs {
-            validate_contig(contig, input)?;
-            let contig_id = u32::try_from(contigs.len())
-                .map_err(|_| JidxWriteError::Invalid("contig count"))?;
-            contigs.push(ContigRecord {
-                document_id,
-                name: push_string(&mut strings, &contig.name)?,
-                length: contig.length,
-                fasta_offset: contig.fasta_offset,
-                line_bases: contig.line_bases,
-                line_width: contig.line_width,
-            });
-            contig_documents.push(document_id);
-            for seed in &contig.seeds {
-                seeds
-                    .entry(seed.packed_key)
-                    .or_default()
-                    .push(SeedOccurrence {
-                        contig_id,
-                        position: seed.position,
-                        canonical_orientation: seed.canonical_orientation,
-                    });
-            }
-        }
-        documents.push(DocumentRecord {
-            name: push_string(&mut strings, &metagenome.name)?,
-            bgzf_uri: push_string(&mut strings, &metagenome.bgzf_uri)?,
-            bgzf_bytes: metagenome.bgzf_bytes,
-            contig_start,
-            contig_count: u32::try_from(contigs.len())
-                .map_err(|_| JidxWriteError::Invalid("contig count"))?
-                - contig_start,
-            bgzf_sha256: metagenome.bgzf_sha256,
-            gzi_offset: u64::try_from(gzi.len())
-                .map_err(|_| JidxWriteError::Invalid("GZI offset"))?,
-            gzi_length: u64::try_from(metagenome.gzi.len())
-                .map_err(|_| JidxWriteError::Invalid("GZI length"))?,
+        self.documents.push(DocumentRecord {
+            name: push_string(&mut self.strings, &input.name)?,
+            bgzf_uri: push_string(&mut self.strings, &input.bgzf_uri)?,
+            bgzf_bytes: input.bgzf_bytes,
+            contig_start: self.contig_start,
+            contig_count,
+            bgzf_sha256: input.bgzf_sha256,
+            gzi_offset: self.gzi.len() as u64,
+            gzi_length: input.gzi.len() as u64,
         });
-        gzi.extend_from_slice(&metagenome.gzi);
+        self.gzi.extend_from_slice(&input.gzi);
+        Ok(())
     }
-    for occurrences in seeds.values_mut() {
-        occurrences.sort_unstable_by_key(|occurrence| (occurrence.contig_id, occurrence.position));
-        if occurrences.windows(2).any(|pair| {
-            (pair[0].contig_id, pair[0].position) == (pair[1].contig_id, pair[1].position)
-        }) {
-            return Err(JidxWriteError::Invalid("duplicate seed occurrence"));
+
+    pub fn begin_contig(&mut self, input: ContigInput) -> Result<u32, JidxWriteError> {
+        if self.current_metagenome.is_none() || !self.contig_names.insert(input.name.clone()) {
+            return Err(JidxWriteError::Invalid("metagenome contigs"));
         }
+        validate_contig(&input)?;
+        let contig_id = u32::try_from(self.contigs.len())
+            .map_err(|_| JidxWriteError::Invalid("contig count"))?;
+        self.contigs.push(ContigRecord {
+            document_id: u32::try_from(self.documents.len())
+                .map_err(|_| JidxWriteError::Invalid("metagenome count"))?,
+            name: push_string(&mut self.strings, &input.name)?,
+            length: input.length,
+            fasta_offset: input.fasta_offset,
+            line_bases: input.line_bases,
+            line_width: input.line_width,
+        });
+        self.previous_seed = None;
+        Ok(contig_id)
     }
-    let occurrences = seeds.values().try_fold(0u64, |total, values| {
-        total
-            .checked_add(
-                u64::try_from(values.len())
-                    .map_err(|_| JidxWriteError::Invalid("occurrence count"))?,
-            )
-            .ok_or(JidxWriteError::Invalid("occurrence count"))
-    })?;
-    let document_postings = seeds.values().try_fold(0u64, |total, values| {
-        total
-            .checked_add(
-                u64::try_from(documents_for(values, &contig_documents).len())
-                    .map_err(|_| JidxWriteError::Invalid("document postings"))?,
-            )
-            .ok_or(JidxWriteError::Invalid("document postings"))
-    })?;
-    let lengths = [
-        u64::try_from(strings.len()).map_err(|_| JidxWriteError::Invalid("string table"))?,
-        byte_len(documents.len(), DOCUMENT_RECORD_SIZE)?,
-        byte_len(contigs.len(), CONTIG_RECORD_SIZE)?,
-        byte_len(seeds.len(), SEED_RECORD_SIZE)?,
-        document_postings
-            .checked_mul(u64::from(DOCUMENT_POSTING_SIZE))
-            .ok_or(JidxWriteError::Invalid("document postings"))?,
-        occurrences
-            .checked_mul(u64::from(CONTIG_POSTING_SIZE))
-            .ok_or(JidxWriteError::Invalid("contig postings"))?,
-        u64::try_from(gzi.len()).map_err(|_| JidxWriteError::Invalid("GZI length"))?,
-        0,
-    ];
-    let (sections, file_bytes) = section_layout(lengths)?;
-    Ok(Prepared {
-        strings,
-        gzi,
-        documents,
-        contigs,
-        contig_documents,
-        seeds,
-        occurrences,
-        sections,
-        file_bytes,
-    })
+
+    pub fn add_seeds(
+        &mut self,
+        contig_id: u32,
+        seeds: &[SelectedSeed],
+    ) -> Result<(), JidxWriteError> {
+        if self.current_metagenome.is_none()
+            || contig_id < self.contig_start
+            || contig_id as usize + 1 != self.contigs.len()
+        {
+            return Err(JidxWriteError::Invalid("active contig"));
+        }
+        let length = self.contigs[contig_id as usize].length;
+        for seed in seeds {
+            let k = seed_length(self.input.k, self.input.rescue_k15, seed.packed_key)?;
+            if seed
+                .position
+                .checked_add(u64::from(k))
+                .is_none_or(|end| end > length)
+            {
+                return Err(JidxWriteError::Invalid("seed position"));
+            }
+            if self
+                .previous_seed
+                .is_some_and(|(position, key, previous_k)| {
+                    (position, key) >= (seed.position, seed.packed_key)
+                        || (position == seed.position && previous_k == k)
+                })
+            {
+                return Err(JidxWriteError::Invalid(
+                    "duplicate or unordered seed position",
+                ));
+            }
+            self.runs.push(RunRecord {
+                packed_key: seed.packed_key,
+                contig_id,
+                position: seed.position,
+                canonical_orientation: seed.canonical_orientation,
+            })?;
+            self.previous_seed = Some((seed.position, seed.packed_key, k));
+        }
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<JidxWriteStats, JidxWriteError> {
+        self.finish_metagenome()?;
+        if self.documents.is_empty() {
+            return Err(JidxWriteError::Invalid("index metadata"));
+        }
+        self.contig_names.clear();
+        let mut merged = self.runs.finish()?;
+        let mut seed_file = BufWriter::with_capacity(
+            1024 * 1024,
+            File::create(self.scratch.path().join("seeds"))?,
+        );
+        let mut document_file = BufWriter::with_capacity(
+            1024 * 1024,
+            File::create(self.scratch.path().join("documents"))?,
+        );
+        let mut occurrence_file = BufWriter::with_capacity(
+            1024 * 1024,
+            File::create(self.scratch.path().join("occurrences"))?,
+        );
+        let mut entry: Option<SeedEntry> = None;
+        let mut last_document = None;
+        let mut previous = None;
+        let mut seed_count = 0u64;
+        let mut occurrence_count = 0u64;
+        let mut document_count = 0u64;
+        while let Some(row) = merged.next_record()? {
+            if entry.is_some_and(|entry| entry.packed_key != row.packed_key) {
+                seed_file.write_all(&encode_seed(entry.take().expect("active seed")))?;
+                last_document = None;
+            }
+            if entry.is_none() {
+                seed_count = seed_count
+                    .checked_add(1)
+                    .ok_or(JidxWriteError::Invalid("seed count"))?;
+                entry = Some(SeedEntry {
+                    packed_key: row.packed_key,
+                    document_frequency: 0,
+                    occurrence_count: 0,
+                    document_offset: document_count
+                        .checked_mul(u64::from(DOCUMENT_POSTING_SIZE))
+                        .ok_or(JidxWriteError::Invalid("document postings"))?,
+                    occurrence_offset: occurrence_count
+                        .checked_mul(u64::from(CONTIG_POSTING_SIZE))
+                        .ok_or(JidxWriteError::Invalid("contig postings"))?,
+                });
+            }
+            if previous == Some((row.packed_key, row.contig_id, row.position)) {
+                return Err(JidxWriteError::Invalid("duplicate seed occurrence"));
+            }
+            previous = Some((row.packed_key, row.contig_id, row.position));
+            let entry = entry.as_mut().expect("active seed");
+            let document = self
+                .contigs
+                .get(row.contig_id as usize)
+                .ok_or(JidxWriteError::Invalid("contig ordinal"))?
+                .document_id;
+            if last_document != Some(document) {
+                document_file.write_all(&document.to_le_bytes())?;
+                entry.document_frequency = entry
+                    .document_frequency
+                    .checked_add(1)
+                    .ok_or(JidxWriteError::Invalid("document frequency"))?;
+                document_count = document_count
+                    .checked_add(1)
+                    .ok_or(JidxWriteError::Invalid("document postings"))?;
+                last_document = Some(document);
+            }
+            occurrence_file.write_all(&encode_occurrence(SeedOccurrence {
+                contig_id: row.contig_id,
+                position: row.position,
+                canonical_orientation: row.canonical_orientation,
+            }))?;
+            entry.occurrence_count = entry
+                .occurrence_count
+                .checked_add(1)
+                .ok_or(JidxWriteError::Invalid("occurrence count"))?;
+            occurrence_count = occurrence_count
+                .checked_add(1)
+                .ok_or(JidxWriteError::Invalid("occurrence count"))?;
+        }
+        if let Some(entry) = entry {
+            seed_file.write_all(&encode_seed(entry))?;
+        }
+        seed_file.flush()?;
+        document_file.flush()?;
+        occurrence_file.flush()?;
+        let lengths = [
+            self.strings.len() as u64,
+            byte_len(self.documents.len(), DOCUMENT_RECORD_SIZE)?,
+            byte_len(self.contigs.len(), CONTIG_RECORD_SIZE)?,
+            seed_file.get_ref().metadata()?.len(),
+            document_file.get_ref().metadata()?.len(),
+            occurrence_file.get_ref().metadata()?.len(),
+            self.gzi.len() as u64,
+            0,
+        ];
+        drop((merged, seed_file, document_file, occurrence_file));
+        let (sections, expected_file_bytes) = section_layout(lengths)?;
+        let parent = output_parent(&self.path);
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".jidx-")
+            .tempfile_in(parent)?;
+        let checksum_input = temporary.reopen()?;
+        let mut file = BufWriter::with_capacity(1024 * 1024, temporary.as_file_mut());
+        file.write_all(&[0; HEADER_SIZE])?;
+        write_padding(&mut file, sections[0].offset)?;
+        file.write_all(&self.strings)?;
+        write_padding(&mut file, sections[1].offset)?;
+        for record in &self.documents {
+            file.write_all(&record.encode())?;
+        }
+        write_padding(&mut file, sections[2].offset)?;
+        for record in &self.contigs {
+            file.write_all(&record.encode())?;
+        }
+        for (section, name) in sections[3..6]
+            .iter()
+            .zip(["seeds", "documents", "occurrences"])
+        {
+            write_padding(&mut file, section.offset)?;
+            io::copy(&mut File::open(self.scratch.path().join(name))?, &mut file)?;
+        }
+        write_padding(&mut file, sections[6].offset)?;
+        file.write_all(&self.gzi)?;
+        write_padding(&mut file, sections[7].offset)?;
+        file.flush()?;
+        let mut checksum_input = BufReader::new(checksum_input);
+        checksum_input.seek(SeekFrom::Start(PAGE_SIZE))?;
+        let mut page = [0; PAGE_SIZE as usize];
+        for _ in 0..sections[7].length / 32 {
+            checksum_input.read_exact(&mut page)?;
+            file.write_all(&sha256(&page))?;
+        }
+        let file_bytes = file.stream_position()?;
+        if file_bytes != expected_file_bytes {
+            return Err(JidxWriteError::Invalid("written length"));
+        }
+        file.flush()?;
+        file.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+        let body_sha256 = sha256_reader(&mut **file.get_mut())?;
+        let header = Header {
+            k: self.input.k,
+            rescue_k15: self.input.rescue_k15,
+            seed_scheme: SeedScheme::SlidingMinimizer,
+            posting_codec: PostingCodec::Raw,
+            filter: FilterKind::None,
+            document_count: u32::try_from(self.documents.len())
+                .map_err(|_| JidxWriteError::Invalid("metagenome count"))?,
+            contig_count: u32::try_from(self.contigs.len())
+                .map_err(|_| JidxWriteError::Invalid("contig count"))?,
+            seed_count,
+            occurrence_count,
+            minimizer_window: self.input.minimizer_window,
+            jam_sha256: self.input.jam_sha256,
+            manifest_sha256: self.input.manifest_sha256,
+            body_sha256,
+            sections,
+        };
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&header.encode()?)?;
+        file.flush()?;
+        file.get_ref().sync_all()?;
+        file.seek(SeekFrom::Start(0))?;
+        let file_sha256 = sha256_reader(&mut **file.get_mut())?;
+        drop(file);
+        temporary
+            .persist_noclobber(&self.path)
+            .map_err(|error| error.error)?;
+        sync_directory(parent)?;
+        Ok(JidxWriteStats {
+            metagenomes: header.document_count,
+            contigs: header.contig_count,
+            seeds: header.seed_count,
+            occurrences: header.occurrence_count,
+            file_bytes,
+            file_sha256,
+        })
+    }
+}
+
+fn output_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
 }
 
 fn validate_metagenome(input: &MetagenomeInput) -> Result<(), JidxWriteError> {
@@ -337,32 +415,13 @@ fn validate_metagenome(input: &MetagenomeInput) -> Result<(), JidxWriteError> {
     Ok(())
 }
 
-fn validate_contig(input: &ContigInput, index: &JidxInput) -> Result<(), JidxWriteError> {
+fn validate_contig(input: &ContigInput) -> Result<(), JidxWriteError> {
     if input.length == 0
         || input.line_bases == 0
         || input.line_width < input.line_bases
         || input.line_width > input.line_bases.saturating_add(2)
     {
         return Err(JidxWriteError::Invalid("contig metadata"));
-    }
-    let mut seeds = input.seeds.iter().collect::<Vec<_>>();
-    seeds.sort_unstable_by_key(|seed| (seed.position, seed.packed_key));
-    if seeds.windows(2).any(|pair| {
-        pair[0].position == pair[1].position
-            && seed_length(index.k, index.rescue_k15, pair[0].packed_key).ok()
-                == seed_length(index.k, index.rescue_k15, pair[1].packed_key).ok()
-    }) {
-        return Err(JidxWriteError::Invalid("duplicate seed position"));
-    }
-    for seed in seeds {
-        let k = seed_length(index.k, index.rescue_k15, seed.packed_key)?;
-        if seed
-            .position
-            .checked_add(u64::from(k))
-            .is_none_or(|end| end > input.length)
-        {
-            return Err(JidxWriteError::Invalid("seed position"));
-        }
     }
     Ok(())
 }
@@ -378,17 +437,6 @@ fn push_string(strings: &mut Vec<u8>, value: &str) -> Result<StringRef, JidxWrit
     };
     strings.extend_from_slice(value.as_bytes());
     Ok(reference)
-}
-
-fn documents_for(occurrences: &[SeedOccurrence], contig_documents: &[u32]) -> Vec<u32> {
-    let mut documents = Vec::new();
-    for occurrence in occurrences {
-        let document = contig_documents[occurrence.contig_id as usize];
-        if documents.last().copied() != Some(document) {
-            documents.push(document);
-        }
-    }
-    documents
 }
 
 fn byte_len(count: usize, record_size: u32) -> Result<u64, JidxWriteError> {
@@ -464,32 +512,6 @@ mod tests {
     use super::*;
     use crate::jidx_reader::JidxReader;
 
-    fn metagenome(name: &str, contig: &str, seeds: &[(u64, u64)]) -> MetagenomeInput {
-        let marker = name.as_bytes()[0];
-        MetagenomeInput {
-            name: name.into(),
-            bgzf_uri: format!("{name}.bgz"),
-            bgzf_bytes: 100,
-            bgzf_sha256: [marker; 32],
-            gzi: vec![0; 8],
-            contigs: vec![ContigInput {
-                name: contig.into(),
-                length: 100,
-                fasta_offset: 4,
-                line_bases: 100,
-                line_width: 101,
-                seeds: seeds
-                    .iter()
-                    .map(|(packed_key, position)| SelectedSeed {
-                        packed_key: *packed_key,
-                        position: *position,
-                        canonical_orientation: position % 2 == 0,
-                    })
-                    .collect(),
-            }],
-        }
-    }
-
     fn input() -> JidxInput {
         JidxInput {
             k: 5,
@@ -497,29 +519,68 @@ mod tests {
             minimizer_window: 16,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],
-            metagenomes: vec![
-                metagenome("z", "z-contig", &[(7, 3), (9, 40)]),
-                metagenome("a", "a-contig", &[(7, 2)]),
-            ],
         }
     }
 
+    fn metagenome(name: &str) -> MetagenomeInput {
+        MetagenomeInput {
+            name: name.into(),
+            bgzf_uri: format!("{name}.bgz"),
+            bgzf_bytes: 100,
+            bgzf_sha256: [name.as_bytes()[0]; 32],
+            gzi: vec![0; 8],
+        }
+    }
+
+    fn contig(name: &str) -> ContigInput {
+        ContigInput {
+            name: name.into(),
+            length: 100,
+            fasta_offset: 4,
+            line_bases: 100,
+            line_width: 101,
+        }
+    }
+
+    fn fixture(path: &Path, max_records: usize) -> Result<JidxWriteStats, JidxWriteError> {
+        let mut writer = JidxWriter::with_run_records(path, &input(), max_records)?;
+        for (name, positions) in [("a", &[(7, 2)][..]), ("z", &[(7, 3), (9, 40)][..])] {
+            writer.begin_metagenome(metagenome(name))?;
+            let id = writer.begin_contig(contig(&format!("{name}-contig")))?;
+            for (packed_key, position) in positions {
+                writer.add_seeds(
+                    id,
+                    &[SelectedSeed {
+                        packed_key: *packed_key,
+                        position: *position,
+                        canonical_orientation: position % 2 == 0,
+                    }],
+                )?;
+            }
+        }
+        writer.finish()
+    }
+
     #[test]
-    fn writes_deterministic_complete_index() {
+    fn writes_deterministic_complete_index_across_spills() {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first.jidx");
         let second = directory.path().join("second.jidx");
-        let input = input();
-        let stats = write_jidx(&first, &input).unwrap();
-        let mut reversed = input.clone();
-        reversed.metagenomes.reverse();
-        write_jidx(&second, &reversed).unwrap();
+        let stats = fixture(&first, 1).unwrap();
+        fixture(&second, 100).unwrap();
         assert_eq!(
             std::fs::read(&first).unwrap(),
             std::fs::read(&second).unwrap()
         );
-        assert_eq!((stats.metagenomes, stats.contigs, stats.seeds), (2, 2, 2));
-
+        assert_eq!(
+            (
+                stats.metagenomes,
+                stats.contigs,
+                stats.seeds,
+                stats.occurrences
+            ),
+            (2, 2, 2, 3)
+        );
         let reader = JidxReader::open(&first).unwrap();
         reader.verify_checksum().unwrap();
         assert_eq!(reader.metagenome(0).unwrap().unwrap().name, "a");
@@ -532,34 +593,58 @@ mod tests {
     fn publication_does_not_replace_existing_output() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("index.jidx");
-        write_jidx(&path, &input()).unwrap();
+        fixture(&path, 2).unwrap();
         let before = std::fs::read(&path).unwrap();
-        assert!(write_jidx(&path, &input()).is_err());
+        assert!(fixture(&path, 2).is_err());
         assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[test]
-    fn accepts_all_minimizer_ties() {
+    fn accepts_ties_and_rejects_duplicate_positions_across_batches() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("index.jidx");
-        let mut input = input();
-        input.metagenomes[0].contigs[0].seeds = vec![
-            SelectedSeed {
-                packed_key: 1,
-                position: 0,
-                canonical_orientation: false,
-            },
-            SelectedSeed {
-                packed_key: 2,
-                position: 1,
-                canonical_orientation: false,
-            },
-            SelectedSeed {
-                packed_key: 3,
-                position: 2,
-                canonical_orientation: false,
-            },
-        ];
-        assert!(write_jidx(path, &input).is_ok());
+        let mut writer = JidxWriter::with_run_records(&path, &input(), 1).unwrap();
+        writer.begin_metagenome(metagenome("a")).unwrap();
+        let id = writer.begin_contig(contig("contig")).unwrap();
+        for position in 0..3 {
+            writer
+                .add_seeds(
+                    id,
+                    &[SelectedSeed {
+                        packed_key: 1,
+                        position,
+                        canonical_orientation: false,
+                    }],
+                )
+                .unwrap();
+        }
+        assert!(
+            writer
+                .add_seeds(
+                    id,
+                    &[SelectedSeed {
+                        packed_key: 2,
+                        position: 2,
+                        canonical_orientation: false,
+                    }]
+                )
+                .is_err()
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn rejects_empty_or_repeated_metagenomes_and_contigs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("index.jidx");
+        let mut writer = JidxWriter::with_run_records(&path, &input(), 1).unwrap();
+        writer.begin_metagenome(metagenome("a")).unwrap();
+        assert!(writer.begin_metagenome(metagenome("z")).is_err());
+        let mut writer = JidxWriter::with_run_records(&path, &input(), 1).unwrap();
+        writer.begin_metagenome(metagenome("a")).unwrap();
+        writer.begin_contig(contig("contig")).unwrap();
+        assert!(writer.begin_contig(contig("contig")).is_err());
+        assert!(writer.begin_metagenome(metagenome("a")).is_err());
+        assert!(!path.exists());
     }
 }

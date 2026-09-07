@@ -2,8 +2,8 @@ use crate::bgzf::BgzfReader;
 use crate::jidx::{RESCUE_K15_TAG, sha256, sha256_reader};
 use crate::jidx_reader::{Contig, Metagenome};
 use crate::jidx_writer::{
-    ContigInput, JidxInput, JidxWriteError, JidxWriteStats, MetagenomeInput, SelectedSeed,
-    write_jidx,
+    ContigInput, JidxInput, JidxWriteError, JidxWriteStats, JidxWriter, MetagenomeInput,
+    SelectedSeed,
 };
 use crate::reader::{JamReader, ReaderError};
 use jamhash::jamhash_u64;
@@ -11,9 +11,11 @@ use needletail::Sequence;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+const SEED_CORE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JidxBuildConfig {
@@ -63,21 +65,33 @@ pub fn build_local_jidx(
     let jam_path = jam_path.as_ref();
     let manifest_path = manifest_path.as_ref();
     let manifest_bytes = std::fs::read(manifest_path)?;
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
+    let mut manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
     let database = JamReader::open(jam_path)?;
     validate_names(&database, &manifest)?;
     let jam_sha256 = file_digest(jam_path)?.1;
     let manifest_sha256 = sha256(&manifest_bytes);
     let base = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    manifest
+        .metagenomes
+        .sort_unstable_by(|left, right| left.name.cmp(&right.name));
 
-    let mut metagenomes = Vec::with_capacity(manifest.metagenomes.len());
+    let mut writer = JidxWriter::new(
+        output,
+        &JidxInput {
+            k: config.k,
+            minimizer_window: config.minimizer_window,
+            rescue_k15: config.rescue_k15,
+            jam_sha256,
+            manifest_sha256,
+        },
+    )?;
     let mut source_bases = 0u64;
     for entry in manifest.metagenomes {
         let bgzf_path = resolve_local(base, &entry.bgzf)?;
         let fai_path = resolve_local(base, &entry.fai)?;
         let gzi_path = resolve_local(base, &entry.gzi)?;
         let (bgzf_bytes, bgzf_sha256) = file_digest(&bgzf_path)?;
-        let fai = parse_fai(&std::fs::read(&fai_path)?)?;
+        let contig_count = visit_fai(&fai_path, true, |_| Ok(()))?;
         let gzi = std::fs::read(&gzi_path)?;
         let bgzf_uri = path_text(&bgzf_path)?;
         let source = Metagenome {
@@ -87,56 +101,36 @@ pub fn build_local_jidx(
             bgzf_bytes,
             bgzf_sha256,
             contig_start: 0,
-            contig_count: u32::try_from(fai.len())
-                .map_err(|_| JidxBuildError::Invalid("contig count"))?,
+            contig_count,
             gzi: &gzi,
         };
         let mut reader = BgzfReader::open(source, None, false)?;
-        let mut contigs = Vec::with_capacity(fai.len());
-        for (id, record) in fai.into_iter().enumerate() {
-            let contig = Contig {
-                id: u32::try_from(id).map_err(|_| JidxBuildError::Invalid("contig count"))?,
-                metagenome_id: 0,
-                name: &record.name,
-                length: record.length,
-                fasta_offset: record.offset,
-                line_bases: record.line_bases,
-                line_width: record.line_width,
-            };
-            let sequence = reader.read_contig_range(contig, 0, record.length)?;
-            let seeds = select_index_seeds(&sequence, config)?;
-            source_bases = source_bases
-                .checked_add(record.length)
-                .ok_or(JidxBuildError::Invalid("source bases"))?;
-            contigs.push(ContigInput {
-                name: record.name,
-                length: record.length,
-                fasta_offset: record.offset,
-                line_bases: record.line_bases,
-                line_width: record.line_width,
-                seeds,
-            });
-        }
-        metagenomes.push(MetagenomeInput {
+        writer.begin_metagenome(MetagenomeInput {
             name: entry.name,
             bgzf_uri,
             bgzf_bytes,
             bgzf_sha256,
             gzi,
-            contigs,
-        });
+        })?;
+        let streamed_count = visit_fai(&fai_path, false, |record| {
+            let contig_id = writer.begin_contig(ContigInput {
+                name: record.name.clone(),
+                length: record.length,
+                fasta_offset: record.offset,
+                line_bases: record.line_bases,
+                line_width: record.line_width,
+            })?;
+            write_contig_seeds(&mut writer, &mut reader, contig_id, &record, config)?;
+            source_bases = source_bases
+                .checked_add(record.length)
+                .ok_or(JidxBuildError::Invalid("source bases"))?;
+            Ok(())
+        })?;
+        if streamed_count != contig_count {
+            return Err(JidxBuildError::Invalid("contig count"));
+        }
     }
-    let written = write_jidx(
-        output,
-        &JidxInput {
-            k: config.k,
-            minimizer_window: config.minimizer_window,
-            rescue_k15: config.rescue_k15,
-            jam_sha256,
-            manifest_sha256,
-            metagenomes,
-        },
-    )?;
+    let written = writer.finish()?;
     Ok(JidxBuildStats {
         source_bases,
         written,
@@ -151,6 +145,71 @@ fn validate_config(config: JidxBuildConfig) -> Result<(), JidxBuildError> {
         return Err(JidxBuildError::Invalid("seed selection"));
     }
     Ok(())
+}
+
+fn write_contig_seeds(
+    writer: &mut JidxWriter,
+    reader: &mut BgzfReader,
+    contig_id: u32,
+    record: &FaiRecord,
+    config: JidxBuildConfig,
+) -> Result<(), JidxBuildError> {
+    let overlap = seed_overlap(config)?;
+    let mut core_start = 0u64;
+    while core_start < record.length {
+        let core_end = core_start
+            .saturating_add(SEED_CORE_BYTES)
+            .min(record.length);
+        let read_start = core_start.saturating_sub(overlap);
+        let read_end = core_end
+            .checked_add(overlap)
+            .ok_or(JidxBuildError::Invalid("seed chunk range"))?
+            .min(record.length);
+        let sequence = reader.read_contig_range(
+            Contig {
+                id: contig_id,
+                metagenome_id: 0,
+                name: &record.name,
+                length: record.length,
+                fasta_offset: record.offset,
+                line_bases: record.line_bases,
+                line_width: record.line_width,
+            },
+            read_start,
+            read_end,
+        )?;
+        let seeds = select_core_seeds(&sequence, read_start, core_start, core_end, config)?;
+        if !seeds.is_empty() {
+            writer.add_seeds(contig_id, &seeds)?;
+        }
+        core_start = core_end;
+    }
+    Ok(())
+}
+
+fn seed_overlap(config: JidxBuildConfig) -> Result<u64, JidxBuildError> {
+    u64::from(config.k)
+        .checked_add(u64::from(config.minimizer_window))
+        .and_then(|value| value.checked_sub(2))
+        .ok_or(JidxBuildError::Invalid("seed chunk overlap"))
+}
+
+fn select_core_seeds(
+    sequence: &[u8],
+    read_start: u64,
+    core_start: u64,
+    core_end: u64,
+    config: JidxBuildConfig,
+) -> Result<Vec<SelectedSeed>, JidxBuildError> {
+    let mut seeds = select_index_seeds(sequence, config)?;
+    for seed in &mut seeds {
+        seed.position = seed
+            .position
+            .checked_add(read_start)
+            .ok_or(JidxBuildError::Invalid("seed position"))?;
+    }
+    seeds.retain(|seed| (core_start..core_end).contains(&seed.position));
+    Ok(seeds)
 }
 
 fn select_index_seeds(
@@ -259,17 +318,26 @@ struct FaiRecord {
     line_width: u32,
 }
 
-fn parse_fai(bytes: &[u8]) -> Result<Vec<FaiRecord>, JidxBuildError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| JidxBuildError::Invalid("FAI encoding"))?;
-    let mut names = BTreeSet::new();
-    let mut records = Vec::new();
-    for line in text.lines() {
+fn visit_fai(
+    path: &Path,
+    validate_unique_names: bool,
+    mut visit: impl FnMut(FaiRecord) -> Result<(), JidxBuildError>,
+) -> Result<u32, JidxBuildError> {
+    let mut names = validate_unique_names.then(BTreeSet::new);
+    let mut count = 0u32;
+    for line in BufReader::new(File::open(path)?).lines() {
+        let line = line?;
         let fields: Vec<_> = line.split('\t').collect();
-        if fields.len() != 5 || fields[0].is_empty() || !names.insert(fields[0]) {
+        if fields.len() != 5
+            || fields[0].is_empty()
+            || names
+                .as_mut()
+                .is_some_and(|names| !names.insert(fields[0].to_owned()))
+        {
             return Err(JidxBuildError::Invalid("FAI record"));
         }
         let record = FaiRecord {
-            name: fields[0].to_string(),
+            name: fields[0].to_owned(),
             length: fields[1]
                 .parse()
                 .map_err(|_| JidxBuildError::Invalid("FAI length"))?,
@@ -290,12 +358,15 @@ fn parse_fai(bytes: &[u8]) -> Result<Vec<FaiRecord>, JidxBuildError> {
         {
             return Err(JidxBuildError::Invalid("FAI record"));
         }
-        records.push(record);
+        visit(record)?;
+        count = count
+            .checked_add(1)
+            .ok_or(JidxBuildError::Invalid("contig count"))?;
     }
-    if records.is_empty() {
+    if count == 0 {
         return Err(JidxBuildError::Invalid("FAI records"));
     }
-    Ok(records)
+    Ok(count)
 }
 
 fn resolve_local(base: &Path, value: &str) -> Result<PathBuf, JidxBuildError> {
@@ -353,6 +424,34 @@ mod tests {
     use crate::writer::{BuildConfig, build};
     use noodles_bgzf::{self as bgzf, gzi};
     use std::io::Write;
+
+    fn collect_chunked_seeds(
+        sequence: &[u8],
+        config: JidxBuildConfig,
+        core_bytes: u64,
+    ) -> Vec<SelectedSeed> {
+        let length = sequence.len() as u64;
+        let overlap = seed_overlap(config).unwrap();
+        let mut output = Vec::new();
+        let mut core_start = 0u64;
+        while core_start < length {
+            let core_end = core_start.saturating_add(core_bytes).min(length);
+            let read_start = core_start.saturating_sub(overlap);
+            let read_end = core_end.saturating_add(overlap).min(length);
+            output.extend(
+                select_core_seeds(
+                    &sequence[read_start as usize..read_end as usize],
+                    read_start,
+                    core_start,
+                    core_end,
+                    config,
+                )
+                .unwrap(),
+            );
+            core_start = core_end;
+        }
+        output
+    }
 
     #[test]
     fn builds_query_independent_index_from_local_bgzf() {
@@ -457,6 +556,26 @@ mod tests {
                         .iter()
                         .any(|selected| selected.position == *position as u64)
             }));
+        }
+    }
+
+    #[test]
+    fn chunked_selection_matches_whole_contigs() {
+        let mut sequence = b"ACGT".repeat(64);
+        sequence[45] = b'N';
+        sequence[70] = b'N';
+        sequence[91] = b'N';
+        sequence[115..170].fill(b'A');
+        let config = JidxBuildConfig {
+            k: 21,
+            minimizer_window: 16,
+            rescue_k15: true,
+        };
+        for sequence in [sequence.clone(), sequence.reverse_complement()] {
+            assert_eq!(
+                collect_chunked_seeds(&sequence, config, 23),
+                select_index_seeds(&sequence, config).unwrap()
+            );
         }
     }
 
