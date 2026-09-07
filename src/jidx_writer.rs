@@ -1,10 +1,9 @@
 use crate::jidx::{
-    CONTIG_POSTING_SIZE, CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_POSTING_SIZE,
-    DOCUMENT_RECORD_SIZE, DocumentRecord, FilterKind, HEADER_SIZE, Header, JidxError, PAGE_SIZE,
-    PostingCodec, SECTION_COUNT, SectionDescriptor, SectionKind, SeedScheme, StringRef,
-    seed_length, sha256, sha256_reader,
+    CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_POSTING_SIZE, DOCUMENT_RECORD_SIZE, DocumentRecord,
+    FilterKind, HEADER_SIZE, Header, JidxError, PAGE_SIZE, PostingCodec, SECTION_COUNT,
+    SectionDescriptor, SectionKind, SeedScheme, StringRef, seed_length, sha256, sha256_reader,
 };
-use crate::jidx_postings::{SeedEntry, SeedOccurrence, encode_occurrence, encode_seed};
+use crate::jidx_postings::{SeedEntry, SeedOccurrence, encode_seed};
 use crate::jidx_runs::{RunRecord, Runs};
 use std::collections::HashSet;
 use std::fs::File;
@@ -240,15 +239,34 @@ impl JidxWriter {
             File::create(self.scratch.path().join("occurrences"))?,
         );
         let mut entry: Option<SeedEntry> = None;
-        let mut last_document = None;
+        let mut group: Option<DocumentGroup> = None;
         let mut previous = None;
         let mut seed_count = 0u64;
         let mut occurrence_count = 0u64;
-        let mut document_count = 0u64;
+        let mut document_bytes = 0u64;
+        let mut occurrence_bytes = 0u64;
         while let Some(row) = merged.next_record()? {
-            if entry.is_some_and(|entry| entry.packed_key != row.packed_key) {
+            let document = self
+                .contigs
+                .get(row.contig_id as usize)
+                .ok_or(JidxWriteError::Invalid("contig ordinal"))?
+                .document_id;
+            let new_key = entry.is_some_and(|entry| entry.packed_key != row.packed_key);
+            if new_key
+                || group
+                    .as_ref()
+                    .is_some_and(|group| group.document_id != document)
+            {
+                document_bytes = document_bytes
+                    .checked_add(group.take().expect("active document").finish(
+                        &mut document_file,
+                        &mut occurrence_file,
+                        &mut occurrence_bytes,
+                    )?)
+                    .ok_or(JidxWriteError::Invalid("document postings"))?;
+            }
+            if new_key {
                 seed_file.write_all(&encode_seed(entry.take().expect("active seed")))?;
-                last_document = None;
             }
             if entry.is_none() {
                 seed_count = seed_count
@@ -257,48 +275,45 @@ impl JidxWriter {
                 entry = Some(SeedEntry {
                     packed_key: row.packed_key,
                     document_frequency: 0,
-                    occurrence_count: 0,
-                    document_offset: document_count
-                        .checked_mul(u64::from(DOCUMENT_POSTING_SIZE))
-                        .ok_or(JidxWriteError::Invalid("document postings"))?,
-                    occurrence_offset: occurrence_count
-                        .checked_mul(u64::from(CONTIG_POSTING_SIZE))
-                        .ok_or(JidxWriteError::Invalid("contig postings"))?,
+                    document_offset: document_bytes,
                 });
             }
             if previous == Some((row.packed_key, row.contig_id, row.position)) {
                 return Err(JidxWriteError::Invalid("duplicate seed occurrence"));
             }
             previous = Some((row.packed_key, row.contig_id, row.position));
-            let entry = entry.as_mut().expect("active seed");
-            let document = self
-                .contigs
-                .get(row.contig_id as usize)
-                .ok_or(JidxWriteError::Invalid("contig ordinal"))?
-                .document_id;
-            if last_document != Some(document) {
-                document_file.write_all(&document.to_le_bytes())?;
+            let occurrence = SeedOccurrence {
+                contig_id: row.contig_id,
+                position: row.position,
+                canonical_orientation: row.canonical_orientation,
+            };
+            if let Some(group) = &mut group {
+                group.push(occurrence, &mut occurrence_file, &mut occurrence_bytes)?;
+            } else {
+                let entry = entry.as_mut().expect("active seed");
                 entry.document_frequency = entry
                     .document_frequency
                     .checked_add(1)
                     .ok_or(JidxWriteError::Invalid("document frequency"))?;
-                document_count = document_count
-                    .checked_add(1)
-                    .ok_or(JidxWriteError::Invalid("document postings"))?;
-                last_document = Some(document);
+                group = Some(DocumentGroup {
+                    document_id: document,
+                    contig_start: self.documents[document as usize].contig_start,
+                    first: occurrence,
+                    previous: occurrence,
+                    count: 1,
+                    offset: occurrence_bytes,
+                });
             }
-            occurrence_file.write_all(&encode_occurrence(SeedOccurrence {
-                contig_id: row.contig_id,
-                position: row.position,
-                canonical_orientation: row.canonical_orientation,
-            }))?;
-            entry.occurrence_count = entry
-                .occurrence_count
-                .checked_add(1)
-                .ok_or(JidxWriteError::Invalid("occurrence count"))?;
             occurrence_count = occurrence_count
                 .checked_add(1)
                 .ok_or(JidxWriteError::Invalid("occurrence count"))?;
+        }
+        if let Some(group) = group {
+            group.finish(
+                &mut document_file,
+                &mut occurrence_file,
+                &mut occurrence_bytes,
+            )?;
         }
         if let Some(entry) = entry {
             seed_file.write_all(&encode_seed(entry))?;
@@ -364,7 +379,7 @@ impl JidxWriter {
             k: self.input.k,
             rescue_k15: self.input.rescue_k15,
             seed_scheme: SeedScheme::SlidingMinimizer,
-            posting_codec: PostingCodec::Raw,
+            posting_codec: PostingCodec::DeltaVarint,
             filter: FilterKind::None,
             document_count: u32::try_from(self.documents.len())
                 .map_err(|_| JidxWriteError::Invalid("metagenome count"))?,
@@ -398,6 +413,115 @@ impl JidxWriter {
             file_sha256,
         })
     }
+}
+
+struct DocumentGroup {
+    document_id: u32,
+    contig_start: u32,
+    first: SeedOccurrence,
+    previous: SeedOccurrence,
+    count: u64,
+    offset: u64,
+}
+
+impl DocumentGroup {
+    fn push(
+        &mut self,
+        occurrence: SeedOccurrence,
+        file: &mut BufWriter<File>,
+        bytes: &mut u64,
+    ) -> Result<(), JidxWriteError> {
+        if self.count == 1 {
+            write_delta(file, bytes, self.contig_start, None, self.first)?;
+        }
+        write_delta(
+            file,
+            bytes,
+            self.contig_start,
+            Some(self.previous),
+            occurrence,
+        )?;
+        self.previous = occurrence;
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(JidxWriteError::Invalid("occurrence count"))?;
+        Ok(())
+    }
+
+    fn finish(
+        self,
+        documents: &mut BufWriter<File>,
+        occurrences: &mut BufWriter<File>,
+        bytes: &mut u64,
+    ) -> Result<u64, JidxWriteError> {
+        let local_contig = self
+            .first
+            .contig_id
+            .checked_sub(self.contig_start)
+            .ok_or(JidxWriteError::Invalid("contig ordinal"))?;
+        let mut row = [0; 32];
+        crate::jidx::put_u32(&mut row, 0, self.document_id);
+        if self.count == 1 && local_contig != u32::MAX && self.first.position <= u64::MAX >> 1 {
+            crate::jidx::put_u32(&mut row, 4, local_contig);
+            crate::jidx::put_u64(
+                &mut row,
+                8,
+                (self.first.position << 1) | u64::from(self.first.canonical_orientation),
+            );
+            documents.write_all(&row[..DOCUMENT_POSTING_SIZE as usize])?;
+            Ok(u64::from(DOCUMENT_POSTING_SIZE))
+        } else {
+            if self.count == 1 {
+                write_delta(occurrences, bytes, self.contig_start, None, self.first)?;
+            }
+            crate::jidx::put_u32(&mut row, 4, u32::MAX);
+            crate::jidx::put_u64(&mut row, 8, self.offset);
+            crate::jidx::put_u64(&mut row, 16, self.count);
+            crate::jidx::put_u64(
+                &mut row,
+                24,
+                bytes
+                    .checked_sub(self.offset)
+                    .ok_or(JidxWriteError::Invalid("occurrence length"))?,
+            );
+            documents.write_all(&row)?;
+            Ok(row.len() as u64)
+        }
+    }
+}
+
+fn write_delta(
+    file: &mut BufWriter<File>,
+    bytes: &mut u64,
+    contig_start: u32,
+    previous: Option<SeedOccurrence>,
+    occurrence: SeedOccurrence,
+) -> Result<(), JidxWriteError> {
+    let delta_contig = occurrence
+        .contig_id
+        .checked_sub(previous.map_or(contig_start, |value| value.contig_id))
+        .ok_or(JidxWriteError::Invalid("contig order"))?;
+    let position = match previous {
+        Some(previous) if previous.contig_id == occurrence.contig_id => occurrence
+            .position
+            .checked_sub(previous.position)
+            .filter(|delta| *delta != 0)
+            .ok_or(JidxWriteError::Invalid("position order"))?,
+        _ => occurrence.position,
+    };
+    let mut buffer = unsigned_varint::encode::u64_buffer();
+    for value in [
+        (u64::from(delta_contig) << 1) | u64::from(occurrence.canonical_orientation),
+        position,
+    ] {
+        let encoded = unsigned_varint::encode::u64(value, &mut buffer);
+        file.write_all(encoded)?;
+        *bytes = bytes
+            .checked_add(encoded.len() as u64)
+            .ok_or(JidxWriteError::Invalid("occurrence bytes"))?;
+    }
+    Ok(())
 }
 
 fn output_parent(path: &Path) -> &Path {
@@ -597,6 +721,87 @@ mod tests {
         let before = std::fs::read(&path).unwrap();
         assert!(fixture(&path, 2).is_err());
         assert_eq!(std::fs::read(path).unwrap(), before);
+    }
+
+    #[test]
+    fn packs_document_groups_and_large_positions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("packed.jidx");
+        let mut writer = JidxWriter::with_run_records(&path, &input(), 1).unwrap();
+        writer.begin_metagenome(metagenome("a")).unwrap();
+        for (name, length, seeds) in [
+            ("z", 100, vec![(7, 2, false), (7, 10, true)]),
+            ("a", 100, vec![(7, 1, false), (9, 3, true)]),
+            ("huge", u64::MAX, vec![(11, 1u64 << 63, true)]),
+        ] {
+            let id = writer
+                .begin_contig(ContigInput {
+                    length,
+                    ..contig(name)
+                })
+                .unwrap();
+            for (packed_key, position, canonical_orientation) in seeds {
+                writer
+                    .add_seeds(
+                        id,
+                        &[SelectedSeed {
+                            packed_key,
+                            position,
+                            canonical_orientation,
+                        }],
+                    )
+                    .unwrap();
+            }
+        }
+        let stats = writer.finish().unwrap();
+        assert_eq!((stats.seeds, stats.occurrences), (3, 5));
+        let reader = JidxReader::open(&path).unwrap();
+        reader.verify_checksum().unwrap();
+        assert_eq!(reader.contig(0).unwrap().unwrap().name, "z");
+        let seven = reader.find_seed(7).unwrap().unwrap();
+        assert_eq!(
+            reader.seed_occurrences(seven).unwrap(),
+            [
+                SeedOccurrence {
+                    contig_id: 0,
+                    position: 2,
+                    canonical_orientation: false
+                },
+                SeedOccurrence {
+                    contig_id: 0,
+                    position: 10,
+                    canonical_orientation: true
+                },
+                SeedOccurrence {
+                    contig_id: 1,
+                    position: 1,
+                    canonical_orientation: false
+                },
+            ]
+        );
+        let eleven = reader.find_seed(11).unwrap().unwrap();
+        assert_eq!(
+            reader.seed_occurrences(eleven).unwrap()[0].position,
+            1u64 << 63
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let positions = reader.header().section(SectionKind::ContigPostings);
+        let start = positions.offset as usize;
+        assert_eq!(
+            &bytes[start..start + positions.length as usize],
+            &[
+                0, 2, 1, 8, 2, 1, 5, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 1,
+            ]
+        );
+        let documents = reader.header().section(SectionKind::DocumentPostings);
+        assert_eq!(documents.length, 80);
+        let start = documents.offset as usize;
+        assert_eq!(&bytes[start + 4..start + 8], &u32::MAX.to_le_bytes());
+        assert_eq!(&bytes[start + 16..start + 24], &3u64.to_le_bytes());
+        assert_eq!(&bytes[start + 24..start + 32], &6u64.to_le_bytes());
+        assert_eq!(&bytes[start + 36..start + 40], &1u32.to_le_bytes());
+        assert_eq!(&bytes[start + 40..start + 48], &7u64.to_le_bytes());
+        assert_eq!(&bytes[start + 56..start + 64], &6u64.to_le_bytes());
     }
 
     #[test]

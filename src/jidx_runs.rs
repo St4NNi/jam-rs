@@ -1,4 +1,3 @@
-use crate::jidx_postings::{SeedOccurrence, encode_occurrence};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::{self, File, OpenOptions};
@@ -20,11 +19,9 @@ impl RunRecord {
     fn encode(self) -> [u8; ROW_SIZE] {
         let mut bytes = [0; ROW_SIZE];
         bytes[..8].copy_from_slice(&self.packed_key.to_le_bytes());
-        bytes[8..].copy_from_slice(&encode_occurrence(SeedOccurrence {
-            contig_id: self.contig_id,
-            position: self.position,
-            canonical_orientation: self.canonical_orientation,
-        }));
+        bytes[8..12].copy_from_slice(&self.contig_id.to_le_bytes());
+        bytes[12] = u8::from(self.canonical_orientation);
+        bytes[16..24].copy_from_slice(&self.position.to_le_bytes());
         bytes
     }
 

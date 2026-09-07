@@ -3,16 +3,16 @@ use std::io::{self, Read};
 use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"JIDX\0\0\0\0";
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const HEADER_SIZE: usize = 512;
 pub const PAGE_SIZE: u64 = 4096;
 pub const RESCUE_K15_TAG: u64 = 1 << 63;
 pub const SECTION_COUNT: usize = 8;
 pub const DOCUMENT_RECORD_SIZE: u32 = 80;
 pub const CONTIG_RECORD_SIZE: u32 = 40;
-pub const SEED_RECORD_SIZE: u32 = 40;
-pub const DOCUMENT_POSTING_SIZE: u32 = 4;
-pub const CONTIG_POSTING_SIZE: u32 = 16;
+pub const SEED_RECORD_SIZE: u32 = 24;
+pub const DOCUMENT_POSTING_SIZE: u32 = 16;
+pub const CONTIG_POSTING_SIZE: u32 = 0;
 
 const SECTION_TABLE_OFFSET: usize = 144;
 const SECTION_DESCRIPTOR_SIZE: usize = 24;
@@ -54,19 +54,19 @@ impl SeedScheme {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PostingCodec {
-    Raw,
+    DeltaVarint,
 }
 
 impl PostingCodec {
     const fn code(self) -> u8 {
         match self {
-            Self::Raw => 1,
+            Self::DeltaVarint => 2,
         }
     }
 
     fn from_code(code: u8) -> Result<Self, JidxError> {
         match code {
-            1 => Ok(Self::Raw),
+            2 => Ok(Self::DeltaVarint),
             _ => Err(JidxError::Invalid("posting codec")),
         }
     }
@@ -123,7 +123,7 @@ impl SectionKind {
             Self::Documents => DOCUMENT_RECORD_SIZE,
             Self::Contigs => CONTIG_RECORD_SIZE,
             Self::Seeds => SEED_RECORD_SIZE,
-            Self::DocumentPostings => DOCUMENT_POSTING_SIZE,
+            Self::DocumentPostings => 0,
             Self::ContigPostings => CONTIG_POSTING_SIZE,
             Self::BlockChecksums => 32,
         }
@@ -339,7 +339,6 @@ impl Header {
         self.expect_length(SectionKind::Documents, u64::from(self.document_count))?;
         self.expect_length(SectionKind::Contigs, u64::from(self.contig_count))?;
         self.expect_length(SectionKind::Seeds, self.seed_count)?;
-        self.expect_length(SectionKind::ContigPostings, self.occurrence_count)?;
         self.expect_length(
             SectionKind::BlockChecksums,
             self.section(SectionKind::BlockChecksums).offset / PAGE_SIZE - 1,
@@ -522,7 +521,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> (Header, Vec<u8>) {
-        let lengths = [8, 80, 40, 40, 4, 16, 8, 224];
+        let lengths = [8, 80, 40, 24, 16, 16, 8, 224];
         let mut offset = HEADER_SIZE as u64;
         let sections = std::array::from_fn(|index| {
             offset = offset.next_multiple_of(PAGE_SIZE);
@@ -543,7 +542,7 @@ mod tests {
             k: 21,
             rescue_k15: false,
             seed_scheme: SeedScheme::SlidingMinimizer,
-            posting_codec: PostingCodec::Raw,
+            posting_codec: PostingCodec::DeltaVarint,
             filter: FilterKind::None,
             document_count: 1,
             contig_count: 1,
@@ -564,7 +563,7 @@ mod tests {
         let (header, file) = fixture();
         assert_eq!(
             &file[..24],
-            b"JIDX\0\0\0\0\x02\x00\x00\x02\0\0\0\0\x15\x02\x01\0\x08\0\0\0"
+            b"JIDX\0\0\0\0\x03\x00\x00\x02\0\0\0\0\x15\x02\x02\0\x08\0\0\0"
         );
         assert_eq!(&file[336..338], &16u16.to_le_bytes());
         assert_eq!(&file[338..HEADER_SIZE], &[0; 174]);

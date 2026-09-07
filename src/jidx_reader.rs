@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use thiserror::Error;
 
-pub use crate::jidx_postings::{SeedEntry, SeedOccurrence};
+pub use crate::jidx_postings::{SeedDocument, SeedEntry, SeedOccurrence};
 
 pub type MetagenomeId = u32;
 pub type ContigId = u32;
@@ -87,33 +87,57 @@ impl JidxReader {
     }
 
     pub fn seed_metagenomes(&self, seed: SeedEntry) -> Result<Vec<MetagenomeId>, JidxReaderError> {
+        Ok(self
+            .seed_documents(seed)?
+            .into_iter()
+            .map(|document| document.metagenome_id)
+            .collect())
+    }
+
+    pub fn seed_documents(&self, seed: SeedEntry) -> Result<Vec<SeedDocument>, JidxReaderError> {
         Ok(crate::jidx_postings::documents(self, seed)?)
+    }
+
+    pub fn seed_document_occurrences(
+        &self,
+        seed: SeedEntry,
+        document: SeedDocument,
+    ) -> Result<Vec<SeedOccurrence>, JidxReaderError> {
+        let occurrences = crate::jidx_postings::document_occurrences(self, seed, document)?;
+        let k = seed_length(self.header.k, self.header.rescue_k15, seed.packed_key)?;
+        for occurrence in &occurrences {
+            let contig = self
+                .contig(occurrence.contig_id)?
+                .ok_or(JidxError::Invalid("missing occurrence contig"))?;
+            if contig.metagenome_id != document.metagenome_id
+                || occurrence
+                    .position
+                    .checked_add(u64::from(k))
+                    .is_none_or(|end| end > contig.length)
+            {
+                return Err(JidxError::Invalid("contig posting position").into());
+            }
+        }
+        Ok(occurrences)
     }
 
     pub fn seed_occurrences(
         &self,
         seed: SeedEntry,
     ) -> Result<Vec<SeedOccurrence>, JidxReaderError> {
-        let occurrences = crate::jidx_postings::occurrences(self, seed)?;
-        let k = seed_length(self.header.k, self.header.rescue_k15, seed.packed_key)?;
-        let mut metagenomes = Vec::new();
-        for occurrence in &occurrences {
-            let contig = self
-                .contig(occurrence.contig_id)?
-                .ok_or(JidxError::Invalid("missing occurrence contig"))?;
-            if occurrence
-                .position
-                .checked_add(u64::from(k))
-                .is_none_or(|end| end > contig.length)
-            {
-                return Err(JidxError::Invalid("contig posting position").into());
-            }
-            if metagenomes.last().copied() != Some(contig.metagenome_id) {
-                metagenomes.push(contig.metagenome_id);
-            }
-        }
-        if metagenomes != self.seed_metagenomes(seed)? {
-            return Err(JidxError::Invalid("seed document postings").into());
+        let documents = self.seed_documents(seed)?;
+        let total = documents.iter().try_fold(0usize, |total, document| {
+            usize::try_from(document.occurrence_count)
+                .ok()
+                .and_then(|count| total.checked_add(count))
+                .ok_or(JidxError::Invalid("occurrence count"))
+        })?;
+        let mut occurrences = Vec::new();
+        occurrences
+            .try_reserve_exact(total)
+            .map_err(|_| JidxError::Invalid("occurrence count"))?;
+        for document in documents {
+            occurrences.extend(self.seed_document_occurrences(seed, document)?);
         }
         Ok(occurrences)
     }
@@ -184,15 +208,15 @@ impl JidxReader {
         )?)?)
     }
 
-    fn document_record(&self, id: MetagenomeId) -> Result<DocumentRecord, JidxReaderError> {
+    pub(crate) fn document_record(&self, id: MetagenomeId) -> Result<DocumentRecord, JidxError> {
         if id >= self.header.document_count {
-            return Err(JidxError::Invalid("metagenome ID").into());
+            return Err(JidxError::Invalid("metagenome ID"));
         }
-        Ok(DocumentRecord::decode(self.record_bytes(
+        DocumentRecord::decode(self.record_bytes(
             SectionKind::Documents,
             u64::from(id),
             DOCUMENT_RECORD_SIZE,
-        )?)?)
+        )?)
     }
 
     fn resolve_string(&self, reference: StringRef) -> Result<&str, JidxReaderError> {
@@ -315,12 +339,7 @@ impl JidxReader {
         Ok(bytes)
     }
 
-    fn record_bytes(
-        &self,
-        kind: SectionKind,
-        index: u64,
-        size: u32,
-    ) -> Result<&[u8], JidxReaderError> {
+    fn record_bytes(&self, kind: SectionKind, index: u64, size: u32) -> Result<&[u8], JidxError> {
         let section = self.header.section(kind);
         let relative = index
             .checked_mul(u64::from(size))
@@ -332,7 +351,7 @@ impl JidxReader {
         let end = start
             .checked_add(u64::from(size))
             .ok_or(JidxError::Invalid("record range"))?;
-        Ok(self.checked_bytes(start, end)?)
+        self.checked_bytes(start, end)
     }
 
     fn validate_documents(&self) -> Result<(), JidxReaderError> {
@@ -399,10 +418,7 @@ pub enum JidxReaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jidx::{
-        CONTIG_POSTING_SIZE, DOCUMENT_POSTING_SIZE, SECTION_COUNT, SEED_RECORD_SIZE,
-        SectionDescriptor, VERSION, sha256,
-    };
+    use crate::jidx::{SECTION_COUNT, SEED_RECORD_SIZE, SectionDescriptor, VERSION, sha256};
     use std::io::{Seek, SeekFrom, Write};
     use std::path::PathBuf;
 
@@ -462,12 +478,15 @@ mod tests {
         put_u64(&mut seed, 0, 0x1234);
         put_u64(&mut seed, 8, 0);
         put_u32(&mut seed, 16, 1);
-        put_u64(&mut seed, 24, 0);
-        put_u64(&mut seed, 32, 1);
-        let document_posting = u32::from(bad_document_posting).to_le_bytes().to_vec();
-        let mut contig_posting = vec![0; CONTIG_POSTING_SIZE as usize];
-        contig_posting[4] = 1;
-        put_u64(&mut contig_posting, 8, if bad_occurrence { 90 } else { 2 });
+        let mut document_posting = vec![0; 16];
+        put_u32(&mut document_posting, 0, u32::from(bad_document_posting));
+        put_u32(&mut document_posting, 4, 0);
+        put_u64(
+            &mut document_posting,
+            8,
+            ((if bad_occurrence { 90 } else { 2 }) << 1) | 1,
+        );
+        let contig_posting = Vec::new();
         let payloads = [
             strings,
             document,
@@ -477,22 +496,23 @@ mod tests {
             contig_posting,
             0u64.to_le_bytes().to_vec(),
         ];
-        let sizes = [
-            0,
-            DOCUMENT_RECORD_SIZE,
-            CONTIG_RECORD_SIZE,
-            SEED_RECORD_SIZE,
-            DOCUMENT_POSTING_SIZE,
-            CONTIG_POSTING_SIZE,
-            0,
-            32,
-        ];
+        write_fixture(payloads, 1, 1, 1, 1, corrupt_padding)
+    }
+
+    fn write_fixture(
+        payloads: [Vec<u8>; 7],
+        document_count: u32,
+        contig_count: u32,
+        seed_count: u64,
+        occurrence_count: u64,
+        corrupt_padding: bool,
+    ) -> (tempfile::TempDir, PathBuf) {
         let mut offset = PAGE_SIZE;
         let mut sections = Vec::with_capacity(SECTION_COUNT);
         for (index, payload) in payloads.iter().enumerate() {
             let descriptor = SectionDescriptor {
                 kind: SectionKind::ALL[index],
-                record_size: sizes[index],
+                record_size: SectionKind::ALL[index].record_size(),
                 offset,
                 length: payload.len() as u64,
             };
@@ -530,12 +550,12 @@ mod tests {
         put_u16(&mut header, 10, HEADER_SIZE as u16);
         header[16] = 21;
         header[17] = 2;
-        header[18] = 1;
+        header[18] = 2;
         put_u16(&mut header, 20, SECTION_COUNT as u16);
-        put_u32(&mut header, 24, 1);
-        put_u32(&mut header, 28, 1);
-        put_u64(&mut header, 32, 1);
-        put_u64(&mut header, 40, 1);
+        put_u32(&mut header, 24, document_count);
+        put_u32(&mut header, 28, contig_count);
+        put_u64(&mut header, 32, seed_count);
+        put_u64(&mut header, 40, occurrence_count);
         header[48..80].fill(1);
         header[80..112].fill(2);
         header[112..144].copy_from_slice(&body_sha256);
@@ -555,6 +575,93 @@ mod tests {
         let path = directory.path().join("fixture.jidx");
         std::fs::write(&path, file).unwrap();
         (directory, path)
+    }
+
+    fn external_fixture() -> (tempfile::TempDir, PathBuf) {
+        let mut strings = Vec::new();
+        let doc0 = push_string(&mut strings, "doc0");
+        let uri0 = push_string(&mut strings, "doc0.bgz");
+        let doc1 = push_string(&mut strings, "doc1");
+        let uri1 = push_string(&mut strings, "doc1.bgz");
+        let names = [
+            push_string(&mut strings, "contig0"),
+            push_string(&mut strings, "contig1"),
+            push_string(&mut strings, "contig2"),
+        ];
+
+        let mut documents = vec![0; 2 * DOCUMENT_RECORD_SIZE as usize];
+        for (index, (name, uri, start, count, gzi_offset)) in
+            [(doc0, uri0, 0, 2, 0), (doc1, uri1, 2, 1, 8)]
+                .into_iter()
+                .enumerate()
+        {
+            let offset = index * DOCUMENT_RECORD_SIZE as usize;
+            put_string(&mut documents, offset, name);
+            put_string(&mut documents, offset + 8, uri);
+            put_u64(&mut documents, offset + 16, 100);
+            put_u32(&mut documents, offset + 24, start);
+            put_u32(&mut documents, offset + 28, count);
+            documents[offset + 32..offset + 64].fill(3 + index as u8);
+            put_u64(&mut documents, offset + 64, gzi_offset);
+            put_u64(&mut documents, offset + 72, 8);
+        }
+
+        let mut contigs = vec![0; 3 * CONTIG_RECORD_SIZE as usize];
+        for (index, (document, length)) in
+            [(0, u64::MAX), (0, 100), (1, 100)].into_iter().enumerate()
+        {
+            let offset = index * CONTIG_RECORD_SIZE as usize;
+            put_u32(&mut contigs, offset, document);
+            put_string(&mut contigs, offset + 4, names[index]);
+            put_u64(&mut contigs, offset + 16, length);
+            put_u64(&mut contigs, offset + 24, 5);
+            put_u32(&mut contigs, offset + 32, 100);
+            put_u32(&mut contigs, offset + 36, 101);
+        }
+
+        let mut seeds = vec![0; 2 * SEED_RECORD_SIZE as usize];
+        put_u64(&mut seeds, 0, 0x1234);
+        put_u64(&mut seeds, 8, 0);
+        put_u32(&mut seeds, 16, 2);
+        put_u64(&mut seeds, SEED_RECORD_SIZE as usize, 0x1235);
+        put_u64(&mut seeds, SEED_RECORD_SIZE as usize + 8, 48);
+        put_u32(&mut seeds, SEED_RECORD_SIZE as usize + 16, 1);
+
+        let mut document_postings = vec![0; 80];
+        put_u32(&mut document_postings, 0, 0);
+        put_u32(&mut document_postings, 4, 1);
+        put_u64(&mut document_postings, 8, 5);
+        put_u32(&mut document_postings, 16, 1);
+        put_u32(&mut document_postings, 20, u32::MAX);
+        put_u64(&mut document_postings, 24, 0);
+        put_u64(&mut document_postings, 32, 2);
+        put_u64(&mut document_postings, 40, 4);
+        put_u32(&mut document_postings, 48, 0);
+        put_u32(&mut document_postings, 52, u32::MAX);
+        put_u64(&mut document_postings, 56, 4);
+        put_u64(&mut document_postings, 64, 1);
+        put_u64(&mut document_postings, 72, 11);
+
+        let cold = vec![
+            0x00, 0x05, 0x01, 0x04, 0x00, 0x85, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80,
+            0x01,
+        ];
+        write_fixture(
+            [
+                strings,
+                documents,
+                contigs,
+                seeds,
+                document_postings,
+                cold,
+                vec![0; 16],
+            ],
+            2,
+            3,
+            2,
+            4,
+            false,
+        )
     }
 
     #[test]
@@ -646,5 +753,97 @@ mod tests {
         let reader = JidxReader::open(path).unwrap();
         let seed = reader.find_seed(0x1234).unwrap().unwrap();
         assert!(reader.seed_occurrences(seed).is_err());
+    }
+
+    #[test]
+    fn golden_inline_and_external_groups_decode_independently() {
+        let (_directory, path) = external_fixture();
+        let reader = JidxReader::open(path).unwrap();
+        reader.verify_checksum().unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        let documents = reader.seed_documents(seed).unwrap();
+        assert_eq!(
+            documents
+                .iter()
+                .map(|document| (document.metagenome_id, document.occurrence_count))
+                .collect::<Vec<_>>(),
+            [(0, 1), (1, 2)]
+        );
+        assert_eq!(
+            reader
+                .seed_document_occurrences(seed, documents[0])
+                .unwrap(),
+            [SeedOccurrence {
+                contig_id: 1,
+                position: 2,
+                canonical_orientation: true,
+            }]
+        );
+        assert_eq!(
+            reader
+                .seed_document_occurrences(seed, documents[1])
+                .unwrap(),
+            [
+                SeedOccurrence {
+                    contig_id: 2,
+                    position: 5,
+                    canonical_orientation: false,
+                },
+                SeedOccurrence {
+                    contig_id: 2,
+                    position: 9,
+                    canonical_orientation: true,
+                },
+            ]
+        );
+
+        let large = reader.find_seed(0x1235).unwrap().unwrap();
+        assert_eq!(
+            reader.seed_occurrences(large).unwrap()[0].position,
+            (1u64 << 63) + 5
+        );
+        assert!(
+            reader
+                .seed_document_occurrences(large, documents[1])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn document_metadata_does_not_decode_an_untouched_cold_group() {
+        let (_directory, path) = external_fixture();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(6 * PAGE_SIZE)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        drop(file);
+
+        let reader = JidxReader::open(path).unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        let documents = reader.seed_documents(seed).unwrap();
+        assert_eq!(documents[1].occurrence_count, 2);
+        assert!(matches!(
+            reader.seed_document_occurrences(seed, documents[1]),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+    }
+
+    #[test]
+    fn document_metadata_rejects_per_seed_count_above_header_total() {
+        let (_directory, path) = external_fixture();
+        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(40)).unwrap();
+        file.write_all(&2u64.to_le_bytes()).unwrap();
+        file.seek(SeekFrom::Start(6 * PAGE_SIZE)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        drop(file);
+
+        let reader = JidxReader::open(path).unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        assert!(matches!(
+            reader.seed_documents(seed),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "occurrence count"
+            )))
+        ));
     }
 }
