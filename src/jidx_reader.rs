@@ -380,15 +380,14 @@ mod tests {
         }
         let header = Header {
             k: 21,
-            seed_scheme: SeedScheme::WindowMinHash,
+            seed_scheme: SeedScheme::SlidingMinimizer,
             posting_codec: PostingCodec::Raw,
             filter: FilterKind::None,
             document_count: 1,
             contig_count: 1,
             seed_count: 1,
             occurrence_count: 1,
-            segment_bases: 256,
-            seeds_per_segment: 2,
+            minimizer_window: 16,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],
             body_sha256: sha256(&file[HEADER_SIZE..]),

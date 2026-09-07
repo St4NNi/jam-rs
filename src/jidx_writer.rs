@@ -48,8 +48,7 @@ pub struct MetagenomeInput {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JidxInput {
     pub k: u8,
-    pub segment_bases: u32,
-    pub seeds_per_segment: u16,
+    pub minimizer_window: u16,
     pub jam_sha256: [u8; 32],
     pub manifest_sha256: [u8; 32],
     pub metagenomes: Vec<MetagenomeInput>,
@@ -141,7 +140,7 @@ pub fn write_jidx(
     let body_sha256 = sha256_reader(&mut *file)?;
     let header = Header {
         k: input.k,
-        seed_scheme: SeedScheme::WindowMinHash,
+        seed_scheme: SeedScheme::SlidingMinimizer,
         posting_codec: PostingCodec::Raw,
         filter: FilterKind::None,
         document_count: u32::try_from(input.metagenomes.len())
@@ -151,8 +150,7 @@ pub fn write_jidx(
         seed_count: u64::try_from(prepared.seeds.len())
             .map_err(|_| JidxWriteError::Invalid("seed count"))?,
         occurrence_count: prepared.occurrences,
-        segment_bases: input.segment_bases,
-        seeds_per_segment: input.seeds_per_segment,
+        minimizer_window: input.minimizer_window,
         jam_sha256: input.jam_sha256,
         manifest_sha256: input.manifest_sha256,
         body_sha256,
@@ -192,9 +190,7 @@ struct Prepared {
 fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
     if input.metagenomes.is_empty()
         || !(1..=32).contains(&input.k)
-        || input.segment_bases < u32::from(input.k)
-        || input.seeds_per_segment == 0
-        || u32::from(input.seeds_per_segment) > input.segment_bases - u32::from(input.k) + 1
+        || input.minimizer_window == 0
         || input.jam_sha256 == [0; 32]
         || input.manifest_sha256 == [0; 32]
     {
@@ -348,8 +344,6 @@ fn validate_contig(input: &ContigInput, index: &JidxInput) -> Result<(), JidxWri
     {
         return Err(JidxWriteError::Invalid("duplicate seed position"));
     }
-    let mut segment = None;
-    let mut count = 0u16;
     for seed in seeds {
         validate_packed_key(seed.packed_key, index.k)?;
         if seed
@@ -358,17 +352,6 @@ fn validate_contig(input: &ContigInput, index: &JidxInput) -> Result<(), JidxWri
             .is_none_or(|end| end > input.length)
         {
             return Err(JidxWriteError::Invalid("seed position"));
-        }
-        let current = seed.position / u64::from(index.segment_bases);
-        if segment != Some(current) {
-            segment = Some(current);
-            count = 0;
-        }
-        count = count
-            .checked_add(1)
-            .ok_or(JidxWriteError::Invalid("segment seed count"))?;
-        if count > index.seeds_per_segment {
-            return Err(JidxWriteError::Invalid("segment seed count"));
         }
     }
     Ok(())
@@ -500,8 +483,7 @@ mod tests {
     fn input() -> JidxInput {
         JidxInput {
             k: 5,
-            segment_bases: 32,
-            seeds_per_segment: 2,
+            minimizer_window: 16,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],
             metagenomes: vec![
@@ -546,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_more_seeds_than_the_recorded_window_policy() {
+    fn accepts_all_minimizer_ties() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("index.jidx");
         let mut input = input();
@@ -567,6 +549,6 @@ mod tests {
                 canonical_orientation: false,
             },
         ];
-        assert!(write_jidx(path, &input).is_err());
+        assert!(write_jidx(path, &input).is_ok());
     }
 }

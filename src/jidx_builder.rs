@@ -18,16 +18,14 @@ use thiserror::Error;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct JidxBuildConfig {
     pub k: u8,
-    pub segment_bases: u32,
-    pub seeds_per_segment: u16,
+    pub minimizer_window: u16,
 }
 
 impl Default for JidxBuildConfig {
     fn default() -> Self {
         Self {
             k: 21,
-            segment_bases: 256,
-            seeds_per_segment: 2,
+            minimizer_window: 16,
         }
     }
 }
@@ -143,8 +141,7 @@ pub fn build_local_jidx(
         output,
         &JidxInput {
             k: config.k,
-            segment_bases: config.segment_bases,
-            seeds_per_segment: config.seeds_per_segment,
+            minimizer_window: config.minimizer_window,
             jam_sha256,
             manifest_sha256,
             metagenomes,
@@ -157,11 +154,7 @@ pub fn build_local_jidx(
 }
 
 fn validate_config(config: JidxBuildConfig) -> Result<(), JidxBuildError> {
-    if !(1..=32).contains(&config.k)
-        || config.segment_bases < u32::from(config.k)
-        || config.seeds_per_segment == 0
-        || u32::from(config.seeds_per_segment) > config.segment_bases - u32::from(config.k) + 1
-    {
+    if !(1..=32).contains(&config.k) || config.minimizer_window == 0 {
         return Err(JidxBuildError::Invalid("seed selection"));
     }
     Ok(())
@@ -190,15 +183,14 @@ fn select_seeds(
     let normalized = sequence.normalize(false);
     let mut output = Vec::new();
     let mut candidates = Vec::new();
-    let mut current_segment = None;
+    let mut previous_position = None;
     for (position, kmer, orientation) in normalized.bit_kmers(config.k, true) {
         let position =
             u64::try_from(position).map_err(|_| JidxBuildError::Invalid("seed position"))?;
-        let segment = position / u64::from(config.segment_bases);
-        if current_segment.is_some_and(|current| current != segment) {
-            append_minima(&mut output, &mut candidates, config.seeds_per_segment);
+        if previous_position.is_some_and(|previous| position != previous + 1) {
+            append_minimizers(&mut output, &mut candidates, config.minimizer_window);
         }
-        current_segment = Some(segment);
+        previous_position = Some(position);
         candidates.push((
             jamhash_u64(kmer.0),
             SelectedSeed {
@@ -208,35 +200,37 @@ fn select_seeds(
             },
         ));
     }
-    append_minima(&mut output, &mut candidates, config.seeds_per_segment);
-    output.sort_unstable_by_key(|seed| seed.position);
+    append_minimizers(&mut output, &mut candidates, config.minimizer_window);
     Ok(output)
 }
 
-fn append_minima(
+fn append_minimizers(
     output: &mut Vec<SelectedSeed>,
     candidates: &mut Vec<(u64, SelectedSeed)>,
-    count: u16,
+    window: u16,
 ) {
-    candidates.sort_unstable_by(|left, right| {
-        (
-            left.0,
-            left.1.packed_key,
-            left.1.position,
-            left.1.canonical_orientation,
-        )
-            .cmp(&(
-                right.0,
-                right.1.packed_key,
-                right.1.position,
-                right.1.canonical_orientation,
-            ))
-    });
+    if candidates.is_empty() {
+        return;
+    }
+    let window = usize::from(window).min(candidates.len());
+    let mut selected = vec![false; candidates.len()];
+    for (offset, slice) in candidates.windows(window).enumerate() {
+        let minimum = slice
+            .iter()
+            .map(|(hash, seed)| (*hash, seed.packed_key))
+            .min()
+            .expect("a minimizer window is nonempty");
+        for (index, (hash, seed)) in slice.iter().enumerate() {
+            if (*hash, seed.packed_key) == minimum {
+                selected[offset + index] = true;
+            }
+        }
+    }
     output.extend(
         candidates
             .iter()
-            .take(usize::from(count))
-            .map(|(_, seed)| *seed),
+            .zip(selected)
+            .filter_map(|((_, seed), selected)| selected.then_some(*seed)),
     );
     candidates.clear();
 }
@@ -399,28 +393,103 @@ mod tests {
             &output,
             JidxBuildConfig {
                 k: 5,
-                segment_bases: 16,
-                seeds_per_segment: 2,
+                minimizer_window: 16,
             },
         )
         .unwrap();
         assert_eq!(stats.source_bases, sequence.len() as u64);
         assert!(stats.written.seeds > 0);
-        assert!(stats.written.occurrences <= 10);
         JidxReader::open(output).unwrap().verify_checksum().unwrap();
     }
 
     #[test]
-    fn window_selection_is_bounded_and_deterministic() {
+    fn sliding_windows_are_covered_deterministically() {
         let sequence = b"ACGTTGCAACGATCGTACGTTGCAACGATCGT";
         let config = JidxBuildConfig {
             k: 5,
-            segment_bases: 16,
-            seeds_per_segment: 2,
+            minimizer_window: 4,
         };
         let first = select_seeds(sequence, config).unwrap();
         assert_eq!(select_seeds(sequence, config).unwrap(), first);
-        assert!(first.len() <= 4);
         assert!(first.iter().all(|seed| seed.packed_key < 1 << 10));
+
+        let candidates: Vec<_> = sequence
+            .bit_kmers(config.k, true)
+            .map(|(position, kmer, _)| (position, jamhash_u64(kmer.0), kmer.0))
+            .collect();
+        for window in candidates.windows(usize::from(config.minimizer_window)) {
+            let minimum = window
+                .iter()
+                .map(|(_, hash, key)| (*hash, *key))
+                .min()
+                .unwrap();
+            assert!(window.iter().any(|(position, hash, key)| {
+                (*hash, *key) == minimum
+                    && first
+                        .iter()
+                        .any(|selected| selected.position == *position as u64)
+            }));
+        }
+    }
+
+    #[test]
+    fn tied_minima_and_short_runs_are_retained() {
+        let config = JidxBuildConfig {
+            k: 3,
+            minimizer_window: 4,
+        };
+        let tied = select_seeds(b"AAAAAA", config).unwrap();
+        assert_eq!(
+            tied.iter().map(|seed| seed.position).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+
+        let split = select_seeds(b"AAAAANCCCCC", config).unwrap();
+        assert_eq!(
+            split.iter().map(|seed| seed.position).collect::<Vec<_>>(),
+            vec![0, 1, 2, 6, 7, 8]
+        );
+        assert_eq!(select_seeds(b"ACG", config).unwrap()[0].position, 0);
+        assert!(select_seeds(b"AC", config).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reverse_complement_selection_is_equivalent() {
+        let sequence = b"ACGTTGCAACGATCGTAGGCTAACCGT";
+        let config = JidxBuildConfig {
+            k: 5,
+            minimizer_window: 4,
+        };
+        let forward = select_seeds(sequence, config).unwrap();
+        let reverse = select_seeds(&sequence.reverse_complement(), config).unwrap();
+        let last_start = sequence.len() as u64 - u64::from(config.k);
+        let mirrored: BTreeSet<_> = forward
+            .iter()
+            .map(|seed| {
+                (
+                    seed.packed_key,
+                    last_start - seed.position,
+                    !seed.canonical_orientation,
+                )
+            })
+            .collect();
+        assert_eq!(
+            reverse
+                .iter()
+                .map(|seed| (seed.packed_key, seed.position, seed.canonical_orientation))
+                .collect::<BTreeSet<_>>(),
+            mirrored
+        );
+    }
+
+    #[test]
+    fn zero_minimizer_window_is_rejected() {
+        assert!(
+            validate_config(JidxBuildConfig {
+                k: 21,
+                minimizer_window: 0,
+            })
+            .is_err()
+        );
     }
 }

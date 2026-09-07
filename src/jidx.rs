@@ -3,7 +3,7 @@ use std::io::{self, Read};
 use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"JIDX\0\0\0\0";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const HEADER_SIZE: usize = 320;
 pub const SECTION_COUNT: usize = 6;
 pub const DOCUMENT_RECORD_SIZE: u32 = 160;
@@ -17,19 +17,19 @@ const SECTION_DESCRIPTOR_SIZE: usize = 24;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SeedScheme {
-    WindowMinHash,
+    SlidingMinimizer,
 }
 
 impl SeedScheme {
     const fn code(self) -> u8 {
         match self {
-            Self::WindowMinHash => 1,
+            Self::SlidingMinimizer => 2,
         }
     }
 
     fn from_code(code: u8) -> Result<Self, JidxError> {
         match code {
-            1 => Ok(Self::WindowMinHash),
+            2 => Ok(Self::SlidingMinimizer),
             _ => Err(JidxError::Invalid("seed scheme")),
         }
     }
@@ -142,8 +142,7 @@ pub struct Header {
     pub contig_count: u32,
     pub seed_count: u64,
     pub occurrence_count: u64,
-    pub segment_bases: u32,
-    pub seeds_per_segment: u16,
+    pub minimizer_window: u16,
     pub jam_sha256: [u8; 32],
     pub manifest_sha256: [u8; 32],
     pub body_sha256: [u8; 32],
@@ -176,8 +175,7 @@ impl Header {
             put_u64(&mut bytes, start + 8, section.offset);
             put_u64(&mut bytes, start + 16, section.length);
         }
-        put_u32(&mut bytes, 288, self.segment_bases);
-        put_u16(&mut bytes, 292, self.seeds_per_segment);
+        put_u16(&mut bytes, 288, self.minimizer_window);
         Ok(bytes)
     }
 
@@ -209,7 +207,7 @@ impl Header {
         if read_u32(bytes, 12) != 0 || read_u16(bytes, 22) != 0 {
             return Err(JidxError::Invalid("header flags"));
         }
-        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[294..].iter().any(|byte| *byte != 0)
+        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[290..].iter().any(|byte| *byte != 0)
         {
             return Err(JidxError::Invalid("header reservation"));
         }
@@ -236,8 +234,7 @@ impl Header {
             contig_count: read_u32(bytes, 28),
             seed_count: read_u64(bytes, 32),
             occurrence_count: read_u64(bytes, 40),
-            segment_bases: read_u32(bytes, 288),
-            seeds_per_segment: read_u16(bytes, 292),
+            minimizer_window: read_u16(bytes, 288),
             jam_sha256: bytes[48..80].try_into().expect("JIDX jam digest"),
             manifest_sha256: bytes[80..112].try_into().expect("JIDX manifest digest"),
             body_sha256: bytes[112..144].try_into().expect("JIDX body digest"),
@@ -275,10 +272,7 @@ impl Header {
         if !(1..=32).contains(&self.k) {
             return Err(JidxError::Invalid("k-mer size"));
         }
-        if self.segment_bases < u32::from(self.k)
-            || self.seeds_per_segment == 0
-            || u32::from(self.seeds_per_segment) > self.segment_bases - u32::from(self.k) + 1
-        {
+        if self.minimizer_window == 0 {
             return Err(JidxError::Invalid("seed selection"));
         }
         if self.document_count == 0
@@ -540,15 +534,14 @@ mod tests {
         }
         let header = Header {
             k: 21,
-            seed_scheme: SeedScheme::WindowMinHash,
+            seed_scheme: SeedScheme::SlidingMinimizer,
             posting_codec: PostingCodec::Raw,
             filter: FilterKind::None,
             document_count: 1,
             contig_count: 1,
             seed_count: 1,
             occurrence_count: 1,
-            segment_bases: 256,
-            seeds_per_segment: 2,
+            minimizer_window: 16,
             jam_sha256: [1; 32],
             manifest_sha256: [2; 32],
             body_sha256: sha256(&file[HEADER_SIZE..]),
@@ -561,7 +554,23 @@ mod tests {
     #[test]
     fn header_roundtrip_validates_all_sections() {
         let (header, file) = fixture();
+        assert_eq!(
+            &file[..24],
+            b"JIDX\0\0\0\0\x02\x00\x40\x01\0\0\0\0\x15\x02\x01\0\x06\0\0\0"
+        );
+        assert_eq!(&file[288..290], &16u16.to_le_bytes());
+        assert_eq!(&file[290..HEADER_SIZE], &[0; 30]);
         assert_eq!(Header::decode(&file).unwrap(), header);
+    }
+
+    #[test]
+    fn obsolete_seed_layout_is_rejected() {
+        let (_, mut file) = fixture();
+        file[8..10].copy_from_slice(&1u16.to_le_bytes());
+        assert!(matches!(
+            Header::decode(&file),
+            Err(JidxError::UnsupportedVersion(1))
+        ));
     }
 
     #[test]

@@ -124,16 +124,14 @@ pub fn run() -> Result<()> {
             manifest,
             output,
             kmer_size,
-            segment_bases,
-            seeds_per_segment,
+            minimizer_window,
         } => handle_jidx_build_command(
             database,
             manifest,
             output,
             jidx_builder::JidxBuildConfig {
                 k: kmer_size,
-                segment_bases,
-                seeds_per_segment,
+                minimizer_window,
             },
             cli.force,
         ),
@@ -145,6 +143,7 @@ pub fn run() -> Result<()> {
             output,
             query_id,
             linear,
+            no_sketch,
             min_containment,
             max_metagenomes,
             min_seed_hits,
@@ -171,7 +170,12 @@ pub fn run() -> Result<()> {
                 query_id,
                 config: trace::TraceConfig {
                     min_containment,
-                    max_metagenomes,
+                    max_metagenomes: if max_metagenomes == 0 {
+                        usize::MAX
+                    } else {
+                        max_metagenomes
+                    },
+                    use_sketch: !no_sketch,
                     min_seed_hits,
                     circular: !linear,
                     verify_resources,

@@ -101,12 +101,9 @@ pub enum Commands {
         /// Exact seed k-mer size
         #[arg(short = 'k', long = "kmer-size", default_value = "21")]
         kmer_size: u8,
-        /// Bases per deterministic seed-selection segment
-        #[arg(long, default_value = "256")]
-        segment_bases: u32,
-        /// Minimum-hash seeds retained per segment
-        #[arg(long, default_value = "2")]
-        seeds_per_segment: u16,
+        /// K-mer starts per sliding minimizer window
+        #[arg(long, default_value = "16")]
+        minimizer_window: u16,
     },
 
     /// Trace every sequence in a query file through a JAM and JIDX pair
@@ -130,13 +127,16 @@ pub enum Commands {
         /// Treat query coordinates as linear
         #[arg(long)]
         linear: bool,
-        /// Minimum JAM query containment
+        /// Skip JAM ranking and use direct positional lookup
+        #[arg(long)]
+        no_sketch: bool,
+        /// Minimum JAM query containment for ranking
         #[arg(long, default_value = "0.01")]
         min_containment: f64,
-        /// Maximum metagenomes aligned per query
-        #[arg(long, default_value = "100")]
+        /// Maximum metagenomes aligned per query (0: all)
+        #[arg(long, default_value = "0")]
         max_metagenomes: usize,
-        /// Minimum exact seed hits in one diagonal region
+        /// Minimum exact seed hits in one gap-tolerant region
         #[arg(long, default_value = "2")]
         min_seed_hits: u32,
         /// Verify complete BGZF, FAI, and GZI checksums before reading

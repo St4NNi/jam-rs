@@ -19,6 +19,7 @@ use thiserror::Error;
 pub struct TraceConfig {
     pub min_containment: f64,
     pub max_metagenomes: usize,
+    pub use_sketch: bool,
     pub min_seed_hits: u32,
     pub diagonal_bin_bases: u64,
     pub flank_bases: u64,
@@ -34,7 +35,8 @@ impl Default for TraceConfig {
     fn default() -> Self {
         Self {
             min_containment: 0.01,
-            max_metagenomes: 100,
+            max_metagenomes: usize::MAX,
+            use_sketch: true,
             min_seed_hits: 2,
             diagonal_bin_bases: 64,
             flank_bases: 256,
@@ -52,8 +54,24 @@ impl Default for TraceConfig {
 pub struct TraceResult {
     pub query_id: String,
     pub query_length: u64,
+    pub index: TraceIndexIdentity,
+    pub completion: SearchCompletion,
     pub candidates_screened: u32,
     pub metagenomes: Vec<MetagenomeTrace>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TraceIndexIdentity {
+    pub manifest_sha256: String,
+    pub body_sha256: String,
+    pub seed_k: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SearchCompletion {
+    Complete,
+    CandidateBudgetExceeded { candidates_omitted: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -151,64 +169,69 @@ impl TraceEngine {
         }
         let query_length =
             u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
-        let candidates = self.screen_candidates(&query_id, &query, config)?;
-        let candidate_ids: HashSet<_> = candidates.iter().map(|candidate| candidate.id).collect();
+        let sketch_candidates = self.screen_candidates(&query_id, &query, config)?;
         let query_seeds = unique_query_seeds(&query, self.index.header().k, config.circular)?;
-        let mut regions = BTreeMap::<RegionKey, RegionAccumulator>::new();
-        let mut seed_hits = HashMap::<MetagenomeId, u64>::new();
+        let mut query_seeds_by_key = BTreeMap::<u64, Vec<QuerySeed>>::new();
         for seed in query_seeds {
-            let Some(index_seed) = self.index.find_seed(seed.packed_key)? else {
+            query_seeds_by_key
+                .entry(seed.packed_key)
+                .or_default()
+                .push(seed);
+        }
+        let mut region_hits = BTreeMap::<RegionKey, Vec<SeedHit>>::new();
+        let mut seed_hits = HashMap::<MetagenomeId, u64>::new();
+        for (packed_key, query_seeds) in query_seeds_by_key {
+            let Some(index_seed) = self.index.find_seed(packed_key)? else {
                 continue;
             };
-            if !self
-                .index
-                .seed_metagenomes(index_seed)?
-                .iter()
-                .any(|id| candidate_ids.contains(id))
-            {
-                continue;
-            }
-            for occurrence in self.index.seed_occurrences(index_seed)? {
-                let contig = self
-                    .index
-                    .contig(occurrence.contig_id)?
-                    .ok_or(TraceError::Invalid("missing occurrence contig"))?;
-                if !candidate_ids.contains(&contig.metagenome_id) {
-                    continue;
+            let occurrences = self.index.seed_occurrences(index_seed)?;
+            for seed in query_seeds {
+                for occurrence in &occurrences {
+                    let contig = self
+                        .index
+                        .contig(occurrence.contig_id)?
+                        .ok_or(TraceError::Invalid("missing occurrence contig"))?;
+                    let strand = if seed.canonical_orientation == occurrence.canonical_orientation {
+                        Strand::Forward
+                    } else {
+                        Strand::Reverse
+                    };
+                    let oriented_position = match strand {
+                        Strand::Forward => occurrence.position,
+                        Strand::Reverse => contig
+                            .length
+                            .checked_sub(
+                                occurrence
+                                    .position
+                                    .checked_add(u64::from(self.index.header().k))
+                                    .ok_or(TraceError::Invalid("occurrence position"))?,
+                            )
+                            .ok_or(TraceError::Invalid("occurrence position"))?,
+                    };
+                    let diagonal = i128::from(oriented_position) - i128::from(seed.position);
+                    region_hits
+                        .entry(RegionKey {
+                            metagenome_id: contig.metagenome_id,
+                            contig_id: contig.id,
+                            strand,
+                        })
+                        .or_default()
+                        .push(SeedHit {
+                            query: seed.position,
+                            target: oriented_position,
+                            diagonal,
+                        });
+                    let hits = seed_hits.entry(contig.metagenome_id).or_default();
+                    *hits = hits.saturating_add(1);
                 }
-                let strand = if seed.canonical_orientation == occurrence.canonical_orientation {
-                    Strand::Forward
-                } else {
-                    Strand::Reverse
-                };
-                let oriented_position = match strand {
-                    Strand::Forward => occurrence.position,
-                    Strand::Reverse => contig
-                        .length
-                        .checked_sub(
-                            occurrence
-                                .position
-                                .checked_add(u64::from(self.index.header().k))
-                                .ok_or(TraceError::Invalid("occurrence position"))?,
-                        )
-                        .ok_or(TraceError::Invalid("occurrence position"))?,
-                };
-                let diagonal = i128::from(oriented_position) - i128::from(seed.position);
-                let bin = i64::try_from(diagonal.div_euclid(i128::from(config.diagonal_bin_bases)))
-                    .map_err(|_| TraceError::Invalid("alignment diagonal"))?;
-                regions
-                    .entry(RegionKey {
-                        metagenome_id: contig.metagenome_id,
-                        contig_id: contig.id,
-                        strand,
-                        bin,
-                    })
-                    .and_modify(|region| region.add(seed.position, oriented_position))
-                    .or_insert_with(|| RegionAccumulator::new(seed.position, oriented_position));
-                let hits = seed_hits.entry(contig.metagenome_id).or_default();
-                *hits = hits.saturating_add(1);
             }
         }
+
+        let (candidates, completion) =
+            self.rank_candidates(sketch_candidates, &seed_hits, config.max_metagenomes)?;
+        let candidate_ids: HashSet<_> = candidates.iter().map(|candidate| candidate.id).collect();
+        region_hits.retain(|key, _| candidate_ids.contains(&key.metagenome_id));
+        let regions = form_regions(region_hits, config.diagonal_bin_bases);
 
         let tasks = self.tasks(regions, query_length, config)?;
         let (loaded, reads) = self.load_ranges(&tasks, config.verify_resources)?;
@@ -263,6 +286,12 @@ impl TraceEngine {
         Ok(TraceResult {
             query_id,
             query_length,
+            index: TraceIndexIdentity {
+                manifest_sha256: digest_hex(self.index.header().manifest_sha256),
+                body_sha256: digest_hex(self.index.header().body_sha256),
+                seed_k: self.index.header().k,
+            },
+            completion,
             candidates_screened,
             metagenomes,
         })
@@ -274,6 +303,9 @@ impl TraceEngine {
         query: &[u8],
         config: TraceConfig,
     ) -> Result<Vec<Candidate>, TraceError> {
+        if !config.use_sketch {
+            return Ok(Vec::new());
+        }
         let sketch = QuerySketch::from_sequence(query_id, query, self.screen.reader())?;
         let result = self
             .screen
@@ -301,6 +333,7 @@ impl TraceEngine {
                     name,
                     shared_hashes: candidate.hit_count,
                     containment: candidate.containment,
+                    exact_seed_hits: 0,
                 })
             })
             .collect::<Result<Vec<_>, TraceError>>()?;
@@ -311,13 +344,58 @@ impl TraceEngine {
                 .then_with(|| right.shared_hashes.cmp(&left.shared_hashes))
                 .then_with(|| left.name.cmp(&right.name))
         });
-        candidates.truncate(config.max_metagenomes);
         Ok(candidates)
+    }
+
+    fn rank_candidates(
+        &self,
+        sketch_candidates: Vec<Candidate>,
+        seed_hits: &HashMap<MetagenomeId, u64>,
+        max_metagenomes: usize,
+    ) -> Result<(Vec<Candidate>, SearchCompletion), TraceError> {
+        let mut candidates = BTreeMap::new();
+        for candidate in sketch_candidates {
+            candidates.insert(candidate.id, candidate);
+        }
+        for (&id, &exact_seed_hits) in seed_hits {
+            if let Some(candidate) = candidates.get_mut(&id) {
+                candidate.exact_seed_hits = exact_seed_hits;
+                continue;
+            }
+            let name = self
+                .index
+                .metagenome(id)?
+                .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
+                .name
+                .to_string();
+            candidates.insert(
+                id,
+                Candidate {
+                    id,
+                    name,
+                    shared_hashes: 0,
+                    containment: 0.0,
+                    exact_seed_hits,
+                },
+            );
+        }
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by(|left, right| {
+            right
+                .exact_seed_hits
+                .cmp(&left.exact_seed_hits)
+                .then_with(|| right.containment.total_cmp(&left.containment))
+                .then_with(|| right.shared_hashes.cmp(&left.shared_hashes))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        let completion = candidate_completion(candidates.len(), max_metagenomes)?;
+        candidates.truncate(max_metagenomes);
+        Ok((candidates, completion))
     }
 
     fn tasks(
         &self,
-        regions: BTreeMap<RegionKey, RegionAccumulator>,
+        regions: Vec<(RegionKey, RegionAccumulator)>,
         query_length: u64,
         config: TraceConfig,
     ) -> Result<Vec<AlignmentTask>, TraceError> {
@@ -416,7 +494,6 @@ impl TraceEngine {
                     .index
                     .contig(contig_id)?
                     .ok_or(TraceError::Invalid("missing source contig"))?;
-                // ponytail: read one covering span per selected contig; split only if sparse spans dominate I/O.
                 let sequence = reader.read_contig_range(contig, start, end)?;
                 loaded.insert(
                     (metagenome_id, contig_id),
@@ -521,6 +598,7 @@ struct Candidate {
     name: String,
     shared_hashes: u32,
     containment: f64,
+    exact_seed_hits: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -535,7 +613,13 @@ struct RegionKey {
     metagenome_id: MetagenomeId,
     contig_id: ContigId,
     strand: Strand,
-    bin: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SeedHit {
+    query: u64,
+    target: u64,
+    diagonal: i128,
 }
 
 struct RegionAccumulator {
@@ -543,27 +627,62 @@ struct RegionAccumulator {
     query_end: u64,
     target_start: u64,
     target_end: u64,
+    diagonal_min: i128,
+    diagonal_max: i128,
     hits: u32,
 }
 
 impl RegionAccumulator {
-    fn new(query: u64, target: u64) -> Self {
+    fn new(hit: SeedHit) -> Self {
         Self {
-            query_start: query,
-            query_end: query,
-            target_start: target,
-            target_end: target,
+            query_start: hit.query,
+            query_end: hit.query,
+            target_start: hit.target,
+            target_end: hit.target,
+            diagonal_min: hit.diagonal,
+            diagonal_max: hit.diagonal,
             hits: 1,
         }
     }
 
-    fn add(&mut self, query: u64, target: u64) {
-        self.query_start = self.query_start.min(query);
-        self.query_end = self.query_end.max(query);
-        self.target_start = self.target_start.min(target);
-        self.target_end = self.target_end.max(target);
+    fn accepts(&self, hit: SeedHit, max_diagonal_drift: u64) -> bool {
+        hit.query > self.query_end
+            && hit.target > self.target_end
+            && self.diagonal_min.min(hit.diagonal) + i128::from(max_diagonal_drift)
+                >= self.diagonal_max.max(hit.diagonal)
+    }
+
+    fn add(&mut self, hit: SeedHit) {
+        self.query_end = hit.query;
+        self.target_end = hit.target;
+        self.diagonal_min = self.diagonal_min.min(hit.diagonal);
+        self.diagonal_max = self.diagonal_max.max(hit.diagonal);
         self.hits = self.hits.saturating_add(1);
     }
+}
+
+fn form_regions(
+    hits_by_contig: BTreeMap<RegionKey, Vec<SeedHit>>,
+    max_diagonal_drift: u64,
+) -> Vec<(RegionKey, RegionAccumulator)> {
+    let mut output = Vec::new();
+    for (key, mut hits) in hits_by_contig {
+        hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
+        let mut regions = Vec::<RegionAccumulator>::new();
+        for hit in hits {
+            if let Some(region) = regions
+                .iter_mut()
+                .rev()
+                .find(|region| region.accepts(hit, max_diagonal_drift))
+            {
+                region.add(hit);
+            } else {
+                regions.push(RegionAccumulator::new(hit));
+            }
+        }
+        output.extend(regions.into_iter().map(|region| (key, region)));
+    }
+    output
 }
 
 struct AlignmentTask {
@@ -585,7 +704,7 @@ fn unique_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySe
     if circular {
         sequence.extend_from_slice(&query[..usize::from(k) - 1]);
     }
-    let mut seeds = BTreeMap::<u64, Option<QuerySeed>>::new();
+    let mut seeds = Vec::new();
     for (position, kmer, orientation) in sequence.bit_kmers(k, true) {
         if position >= query.len() {
             break;
@@ -596,13 +715,34 @@ fn unique_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySe
                 .map_err(|_| TraceError::Invalid("query seed position"))?,
             canonical_orientation: orientation,
         };
-        seeds
-            .entry(seed.packed_key)
-            .and_modify(|existing| *existing = None)
-            .or_insert(Some(seed));
+        seeds.push(seed);
     }
-    // ponytail: ignore repeated query keys; add bounded repeat pairing only if repeat-only recall matters.
-    Ok(seeds.into_values().flatten().collect())
+    Ok(seeds)
+}
+
+fn digest_hex(digest: [u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        output.push(char::from(HEX[usize::from(byte >> 4)]));
+        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    output
+}
+
+fn candidate_completion(
+    candidate_count: usize,
+    max_metagenomes: usize,
+) -> Result<SearchCompletion, TraceError> {
+    let omitted = candidate_count.saturating_sub(max_metagenomes);
+    if omitted == 0 {
+        Ok(SearchCompletion::Complete)
+    } else {
+        Ok(SearchCompletion::CandidateBudgetExceeded {
+            candidates_omitted: u32::try_from(omitted)
+                .map_err(|_| TraceError::Invalid("candidate count"))?,
+        })
+    }
 }
 
 fn linearize_query(
@@ -715,9 +855,11 @@ mod tests {
         let sequence = sequence();
         let fasta = directory.path().join("sample.fa");
         std::fs::write(&fasta, format!(">sample\n{sequence}\n")).unwrap();
+        let fasta2 = directory.path().join("sample2.fa");
+        std::fs::write(&fasta2, format!(">sample2\n{sequence}\n")).unwrap();
         let jam = directory.path().join("database.jam");
         build(
-            &[fasta],
+            &[fasta, fasta2],
             &jam,
             &BuildConfig {
                 kmer_size: 5,
@@ -746,7 +888,10 @@ mod tests {
         std::fs::write(
             &manifest,
             format!(
-                "{{\"metagenomes\":[{{\"name\":\"sample\",\"bgzf\":\"{}\",\"fai\":\"{}\",\"gzi\":\"{}\"}}]}}",
+                "{{\"metagenomes\":[{{\"name\":\"sample\",\"bgzf\":\"{}\",\"fai\":\"{}\",\"gzi\":\"{}\"}},{{\"name\":\"sample2\",\"bgzf\":\"{}\",\"fai\":\"{}\",\"gzi\":\"{}\"}}]}}",
+                bgzf_path.display(),
+                fai_path.display(),
+                gzi_path.display(),
                 bgzf_path.display(),
                 fai_path.display(),
                 gzi_path.display()
@@ -760,8 +905,7 @@ mod tests {
             &jidx,
             JidxBuildConfig {
                 k: 5,
-                segment_bases: 16,
-                seeds_per_segment: 2,
+                minimizer_window: 4,
             },
         )
         .unwrap();
@@ -787,7 +931,11 @@ mod tests {
             .search("plasmid", sequence.as_bytes(), config)
             .unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.metagenomes.len(), 1);
+        assert_eq!(first.completion, SearchCompletion::Complete);
+        assert_eq!(first.index.seed_k, 5);
+        assert_eq!(first.index.manifest_sha256.len(), 64);
+        assert_eq!(first.index.body_sha256.len(), 64);
+        assert_eq!(first.metagenomes.len(), 2);
         assert_eq!(first.metagenomes[0].mosaic.covered_bases, 128);
         assert_eq!(first.metagenomes[0].contigs[0].name, "contig");
         serde_json::to_vec(&first).unwrap();
@@ -812,6 +960,81 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&published).unwrap()["query_id"],
             "sample"
         );
+
+        let direct = engine
+            .search(
+                "direct",
+                sequence.as_bytes(),
+                TraceConfig {
+                    use_sketch: false,
+                    ..config
+                },
+            )
+            .unwrap();
+        assert_eq!(direct.completion, SearchCompletion::Complete);
+        assert_eq!(direct.metagenomes.len(), 2);
+        assert_eq!(direct.metagenomes[0].shared_hashes, 0);
+        assert_eq!(direct.metagenomes[0].mosaic.covered_bases, 128);
+
+        let capped = engine
+            .search(
+                "capped",
+                sequence.as_bytes(),
+                TraceConfig {
+                    max_metagenomes: 1,
+                    ..config
+                },
+            )
+            .unwrap();
+        assert_eq!(capped.metagenomes.len(), 1);
+        assert_eq!(
+            capped.completion,
+            SearchCompletion::CandidateBudgetExceeded {
+                candidates_omitted: 1
+            }
+        );
+
+        let absent = (0..1 << 10)
+            .map(|packed| {
+                (0..5)
+                    .rev()
+                    .map(|shift| b"ACGT"[(packed >> (shift * 2)) & 3] as char)
+                    .collect::<String>()
+            })
+            .find(|word| {
+                let reverse_complement = word
+                    .bytes()
+                    .rev()
+                    .map(|base| match base {
+                        b'A' => 'T',
+                        b'C' => 'G',
+                        b'G' => 'C',
+                        b'T' => 'A',
+                        _ => unreachable!(),
+                    })
+                    .collect::<String>();
+                !sequence.contains(word) && !sequence.contains(&reverse_complement)
+            })
+            .unwrap();
+        let partial = format!("{}{}", &sequence[..64], absent.repeat(13));
+        let sketch_miss = engine
+            .search(
+                "sketch-miss",
+                partial.as_bytes(),
+                TraceConfig {
+                    min_containment: 1.0,
+                    circular: false,
+                    ..config
+                },
+            )
+            .unwrap();
+        assert_eq!(sketch_miss.metagenomes.len(), 2);
+        assert!(
+            sketch_miss
+                .metagenomes
+                .iter()
+                .all(|metagenome| metagenome.shared_hashes == 0)
+        );
     }
 
     #[test]
@@ -820,5 +1043,77 @@ mod tests {
             query_segments(120, Interval::new(10, 20).unwrap(), 128, true).unwrap(),
             vec![Interval::new(2, 12).unwrap()]
         );
+    }
+
+    #[test]
+    fn retains_every_repeated_query_seed_position() {
+        let seeds = unique_query_seeds(b"AAAAAA", 3, false).unwrap();
+        assert_eq!(
+            seeds.iter().map(|seed| seed.position).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert!(
+            seeds
+                .iter()
+                .all(|seed| seed.packed_key == seeds[0].packed_key)
+        );
+    }
+
+    #[test]
+    fn groups_hits_across_diagonal_boundaries_and_small_indels() {
+        let key = RegionKey {
+            metagenome_id: 0,
+            contig_id: 0,
+            strand: Strand::Forward,
+        };
+        let grouped = form_regions(
+            BTreeMap::from([(
+                key,
+                vec![
+                    SeedHit {
+                        query: 0,
+                        target: 63,
+                        diagonal: 63,
+                    },
+                    SeedHit {
+                        query: 20,
+                        target: 85,
+                        diagonal: 65,
+                    },
+                ],
+            )]),
+            4,
+        );
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].0, key);
+        assert_eq!(grouped[0].1.hits, 2);
+    }
+
+    #[test]
+    fn separates_hits_beyond_diagonal_drift() {
+        let key = RegionKey {
+            metagenome_id: 0,
+            contig_id: 0,
+            strand: Strand::Forward,
+        };
+        let grouped = form_regions(
+            BTreeMap::from([(
+                key,
+                vec![
+                    SeedHit {
+                        query: 0,
+                        target: 10,
+                        diagonal: 10,
+                    },
+                    SeedHit {
+                        query: 20,
+                        target: 40,
+                        diagonal: 20,
+                    },
+                ],
+            )]),
+            4,
+        );
+        assert_eq!(grouped.len(), 2);
     }
 }
