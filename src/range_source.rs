@@ -5,7 +5,6 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
 
-// ponytail: one 1 MiB block; add a bounded multi-block cache only if profiles show reuse.
 const S3_BLOCK_BYTES: u64 = 1024 * 1024;
 
 pub enum RangeSource {
@@ -62,7 +61,7 @@ pub struct S3Source {
     bucket: Box<Bucket>,
     key: String,
     length: u64,
-    etag: Option<String>,
+    etag: String,
     position: u64,
     cache_offset: u64,
     cache: Vec<u8>,
@@ -141,11 +140,15 @@ impl RangeSource {
         if status != 200 || length != expected_size {
             return Err(RangeSourceError::SizeMismatch);
         }
+        let etag = head.e_tag.ok_or(RangeSourceError::S3)?;
+        if etag.trim().is_empty() || etag.trim_start().starts_with("W/") {
+            return Err(RangeSourceError::S3);
+        }
         Ok(Self::S3(S3Source {
             bucket,
             key,
             length,
-            etag: head.e_tag,
+            etag,
             position: 0,
             cache_offset: 0,
             cache: Vec::new(),
@@ -274,10 +277,7 @@ impl S3Source {
         let expected_range = format!("bytes {}-{}/{}", self.position, end, self.length);
         let range_valid = response.status_code() != 206
             || header("content-range") == Some(expected_range.as_str());
-        let etag_valid = self
-            .etag
-            .as_deref()
-            .is_none_or(|etag| header("etag") == Some(etag));
+        let etag_valid = header("etag") == Some(self.etag.as_str());
         if !status_valid || !range_valid || !etag_valid || response.as_slice().len() != expected {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -331,22 +331,27 @@ mod tests {
     use crate::jidx::sha256;
     use s3::creds::Credentials;
     use std::io::{BufRead, BufReader, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    fn read_request(stream: &TcpStream) -> String {
+        let mut request = String::new();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+            request.push_str(&line);
+        }
+        request
+    }
 
     fn serve(listener: TcpListener, data: Vec<u8>) {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = String::new();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-                request.push_str(&line);
-            }
+            let request = read_request(&stream);
             if request.starts_with("HEAD ") {
                 write!(
                     stream,
@@ -377,6 +382,19 @@ mod tests {
         }
     }
 
+    fn serve_head(listener: TcpListener, length: usize, etag: Option<&str>) {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        let etag = etag
+            .map(|etag| format!("ETag: {etag}\r\n"))
+            .unwrap_or_default();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n{etag}Connection: close\r\n\r\n"
+        )
+        .unwrap();
+    }
+
     #[test]
     fn s3_reads_checked_ranges_and_reuses_cache() {
         let data: Vec<_> = (0..100).collect();
@@ -399,5 +417,27 @@ mod tests {
         assert!(source.verify_sha256(sha256(&data)).unwrap());
         assert_eq!(source.stats().read_requests, 1);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn s3_rejects_missing_empty_and_weak_validators() {
+        for (etag, valid) in [
+            (None, false),
+            (Some(""), false),
+            (Some("W/\"fixture\""), false),
+            (Some("\"\""), true),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = thread::spawn(move || serve_head(listener, 100, etag));
+            let credentials =
+                Credentials::new(Some("access"), Some("secret"), None, None, None).unwrap();
+            let config = S3Config::new("test", Some(&endpoint), true, credentials).unwrap();
+            assert_eq!(
+                RangeSource::open("s3://bucket/object", 100, Some(&config)).is_ok(),
+                valid,
+            );
+            server.join().unwrap();
+        }
     }
 }
