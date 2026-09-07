@@ -959,7 +959,7 @@ fn complement(base: u8) -> u8 {
         b'A' => b'T',
         b'C' => b'G',
         b'G' => b'C',
-        b'T' => b'A',
+        b'T' | b'U' => b'A',
         b'R' => b'Y',
         b'Y' => b'R',
         b'S' => b'S',
@@ -1160,6 +1160,14 @@ mod tests {
             .unwrap();
         assert_eq!(alignment.target_interval, Interval::new(100, 107).unwrap());
         assert_eq!(alignment.strand, Strand::Reverse);
+    }
+
+    #[test]
+    fn complements_every_accepted_iupac_symbol() {
+        for (&base, &expected) in b"ACGTURYSWKMBDHVN".iter().zip(b"TGCAAYRSWMKVHDBN") {
+            assert_eq!(complement(base), expected);
+            assert_eq!(complement(base.to_ascii_lowercase()), expected);
+        }
     }
 
     #[test]
