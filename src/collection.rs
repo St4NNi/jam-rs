@@ -1,12 +1,12 @@
 use crate::jidx::sha256;
 use crate::range_source::S3Config;
 use crate::trace::{
-    Candidate, MetagenomeTrace, SearchCompletion, TraceConfig, TraceEngine, TraceError,
-    candidate_completion, compare_candidates, digest_hex, prepare_query,
+    Candidate, MetagenomeTrace, PreparedQuery, SearchCompletion, TraceCensus, TraceConfig,
+    TraceEngine, TraceError, candidate_completion, compare_candidates, digest_hex, prepare_query,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Deserialize)]
@@ -45,6 +45,15 @@ pub struct CollectionTraceEngine {
     k: u8,
     rescue_k15: bool,
     s3: Option<S3Config>,
+}
+
+struct PlannedQuery {
+    prepared: PreparedQuery,
+    completion: SearchCompletion,
+    candidates_screened: u32,
+    key_order: Vec<u64>,
+    selected: BTreeMap<usize, Vec<Candidate>>,
+    metagenomes: Vec<CollectionMetagenomeTrace>,
 }
 
 impl CollectionTraceEngine {
@@ -110,92 +119,191 @@ impl CollectionTraceEngine {
         config: TraceConfig,
     ) -> Result<CollectionTraceResult, TraceError> {
         let prepared = prepare_query(query_id, sequence, config, self.k, self.rescue_k15)?;
-        let worker_limit = rayon::current_num_threads();
-        let mut censuses = Vec::with_capacity(self.shards.len());
-        for shards in self.shards.chunks(worker_limit) {
-            censuses.extend(
-                shards
-                    .par_iter()
-                    .map(|shard| {
-                        open_shard(shard, self.s3.clone())?.candidate_census(&prepared, config)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+        self.search_prepared(vec![prepared], config)?
+            .pop()
+            .ok_or(TraceError::Invalid("empty collection query batch"))
+    }
+
+    pub(crate) fn search_batch(
+        &self,
+        queries: &[(String, Vec<u8>)],
+        config: TraceConfig,
+    ) -> Result<Vec<CollectionTraceResult>, TraceError> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
         }
-        let mut frequencies = BTreeMap::<u64, u64>::new();
-        let mut candidates = Vec::new();
-        for (ordinal, census) in censuses.into_iter().enumerate() {
-            for (key, frequency) in census.frequencies {
-                let total = frequencies.entry(key).or_default();
-                *total = total
-                    .checked_add(u64::from(frequency))
-                    .ok_or(TraceError::Invalid("collection document frequency"))?;
-            }
-            candidates.extend(
-                census
-                    .candidates
-                    .into_iter()
-                    .map(|candidate| (ordinal, candidate)),
-            );
-        }
-        candidates.sort_by(|(left_shard, left), (right_shard, right)| {
-            compare_candidates(left, right)
-                .then_with(|| left_shard.cmp(right_shard))
-                .then_with(|| left.id.cmp(&right.id))
-        });
-        let completion = candidate_completion(candidates.len(), config.max_metagenomes)?;
-        candidates.truncate(config.max_metagenomes);
-        let candidates_screened = u32::try_from(candidates.len())
-            .map_err(|_| TraceError::Invalid("collection candidate count"))?;
-        let mut selected = BTreeMap::<usize, Vec<Candidate>>::new();
-        for (ordinal, candidate) in candidates {
-            selected.entry(ordinal).or_default().push(candidate);
-        }
-        let mut key_order = frequencies.into_iter().collect::<Vec<_>>();
-        key_order.sort_unstable_by_key(|&(key, frequency)| (frequency, key));
-        let key_order = key_order
-            .into_iter()
-            .map(|(key, _)| key)
+        let prepared = queries
+            .par_iter()
+            .map(|(id, sequence)| {
+                prepare_query(id.as_str(), sequence, config, self.k, self.rescue_k15)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.search_prepared(prepared, config)
+    }
+
+    fn search_prepared(
+        &self,
+        prepared: Vec<PreparedQuery>,
+        config: TraceConfig,
+    ) -> Result<Vec<CollectionTraceResult>, TraceError> {
+        let worker_limit = rayon::current_num_threads().max(1);
+        let live_shards = worker_limit.div_ceil(prepared.len()).max(1);
+        let mut censuses = (0..prepared.len())
+            .map(|_| Vec::with_capacity(self.shards.len()))
             .collect::<Vec<_>>();
-        let mut selected = selected.into_iter().collect::<Vec<_>>();
-        let mut metagenomes = Vec::new();
-        for shards in selected.chunks_mut(worker_limit) {
-            let traces = shards
-                .par_iter_mut()
-                .map(|(ordinal, candidates)| {
-                    let engine = open_shard(&self.shards[*ordinal], self.s3.clone())?;
-                    Ok(engine
-                        .trace_selected(&prepared, std::mem::take(candidates), &key_order, config)?
-                        .into_iter()
-                        .map(|trace| CollectionMetagenomeTrace {
-                            shard_ordinal: *ordinal as u32,
-                            trace,
-                        })
-                        .collect::<Vec<_>>())
+        for (chunk, shards) in self.shards.chunks(live_shards).enumerate() {
+            let shard_censuses = shards
+                .par_iter()
+                .map(|shard| {
+                    let engine = open_shard(shard, self.s3.clone())?;
+                    prepared
+                        .par_iter()
+                        .map(|query| engine.candidate_census(query, config))
+                        .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, TraceError>>()?;
-            metagenomes.extend(traces.into_iter().flatten());
+            for (offset, shard) in shard_censuses.into_iter().enumerate() {
+                let ordinal = chunk * live_shards + offset;
+                for (query, census) in shard.into_iter().enumerate() {
+                    censuses[query].push((ordinal, census));
+                }
+            }
         }
-        metagenomes.sort_by(|left, right| {
-            right
-                .trace
-                .exact_seed_hits
-                .cmp(&left.trace.exact_seed_hits)
-                .then_with(|| right.trace.containment.total_cmp(&left.trace.containment))
-                .then_with(|| right.trace.shared_hashes.cmp(&left.trace.shared_hashes))
-                .then_with(|| left.trace.name.cmp(&right.trace.name))
-                .then_with(|| left.shard_ordinal.cmp(&right.shard_ordinal))
-                .then_with(|| left.trace.metagenome_id.cmp(&right.trace.metagenome_id))
-        });
-        Ok(CollectionTraceResult {
-            root_sha256: self.root_sha256.clone(),
-            query_id: prepared.query_id,
-            query_length: prepared.query_length,
-            completion,
-            candidates_screened,
-            metagenomes,
-        })
+
+        let mut plans = prepared
+            .into_iter()
+            .zip(censuses)
+            .map(|(query, censuses)| plan_query(query, censuses, config))
+            .collect::<Result<Vec<_>, _>>()?;
+        let selected_shards = plans
+            .iter()
+            .flat_map(|plan| plan.selected.keys().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        for ordinals in selected_shards.chunks(live_shards) {
+            let work = ordinals
+                .iter()
+                .map(|&ordinal| {
+                    let queries = plans
+                        .iter_mut()
+                        .enumerate()
+                        .filter_map(|(query, plan)| {
+                            plan.selected
+                                .remove(&ordinal)
+                                .map(|candidates| (query, candidates))
+                        })
+                        .collect::<Vec<_>>();
+                    (ordinal, queries)
+                })
+                .collect::<Vec<_>>();
+            let traces = work
+                .into_par_iter()
+                .map(|(ordinal, queries)| {
+                    let engine = open_shard(&self.shards[ordinal], self.s3.clone())?;
+                    queries
+                        .into_par_iter()
+                        .map(|(query, candidates)| {
+                            let traces = engine.trace_selected(
+                                &plans[query].prepared,
+                                candidates,
+                                &plans[query].key_order,
+                                config,
+                            )?;
+                            Ok((
+                                query,
+                                traces
+                                    .into_iter()
+                                    .map(|trace| CollectionMetagenomeTrace {
+                                        shard_ordinal: ordinal as u32,
+                                        trace,
+                                    })
+                                    .collect::<Vec<_>>(),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, TraceError>>()
+                })
+                .collect::<Result<Vec<_>, TraceError>>()?;
+            for (query, traces) in traces.into_iter().flatten() {
+                plans[query].metagenomes.extend(traces);
+            }
+        }
+
+        Ok(plans
+            .into_iter()
+            .map(|mut plan| {
+                sort_metagenomes(&mut plan.metagenomes);
+                CollectionTraceResult {
+                    root_sha256: self.root_sha256.clone(),
+                    query_id: plan.prepared.query_id,
+                    query_length: plan.prepared.query_length,
+                    completion: plan.completion,
+                    candidates_screened: plan.candidates_screened,
+                    metagenomes: plan.metagenomes,
+                }
+            })
+            .collect())
     }
+}
+
+fn plan_query(
+    prepared: PreparedQuery,
+    censuses: Vec<(usize, TraceCensus)>,
+    config: TraceConfig,
+) -> Result<PlannedQuery, TraceError> {
+    let mut frequencies = BTreeMap::<u64, u64>::new();
+    let mut candidates = Vec::new();
+    for (ordinal, census) in censuses {
+        for (key, frequency) in census.frequencies {
+            let total = frequencies.entry(key).or_default();
+            *total = total
+                .checked_add(u64::from(frequency))
+                .ok_or(TraceError::Invalid("collection document frequency"))?;
+        }
+        candidates.extend(
+            census
+                .candidates
+                .into_iter()
+                .map(|candidate| (ordinal, candidate)),
+        );
+    }
+    candidates.sort_by(|(left_shard, left), (right_shard, right)| {
+        compare_candidates(left, right)
+            .then_with(|| left_shard.cmp(right_shard))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let completion = candidate_completion(candidates.len(), config.max_metagenomes)?;
+    candidates.truncate(config.max_metagenomes);
+    let candidates_screened = u32::try_from(candidates.len())
+        .map_err(|_| TraceError::Invalid("collection candidate count"))?;
+    let mut selected = BTreeMap::<usize, Vec<Candidate>>::new();
+    for (ordinal, candidate) in candidates {
+        selected.entry(ordinal).or_default().push(candidate);
+    }
+    let mut key_order = frequencies.into_iter().collect::<Vec<_>>();
+    key_order.sort_unstable_by_key(|&(key, frequency)| (frequency, key));
+    Ok(PlannedQuery {
+        prepared,
+        completion,
+        candidates_screened,
+        key_order: key_order.into_iter().map(|(key, _)| key).collect(),
+        selected,
+        metagenomes: Vec::new(),
+    })
+}
+
+fn sort_metagenomes(metagenomes: &mut [CollectionMetagenomeTrace]) {
+    metagenomes.sort_by(|left, right| {
+        right
+            .trace
+            .exact_seed_hits
+            .cmp(&left.trace.exact_seed_hits)
+            .then_with(|| right.trace.containment.total_cmp(&left.trace.containment))
+            .then_with(|| right.trace.shared_hashes.cmp(&left.trace.shared_hashes))
+            .then_with(|| left.trace.name.cmp(&right.trace.name))
+            .then_with(|| left.shard_ordinal.cmp(&right.shard_ordinal))
+            .then_with(|| left.trace.metagenome_id.cmp(&right.trace.metagenome_id))
+    });
 }
 
 fn open_shard(shard: &CollectionShard, s3: Option<S3Config>) -> Result<TraceEngine, TraceError> {
@@ -402,6 +510,27 @@ mod tests {
         assert_eq!(negative.completion, SearchCompletion::Complete);
         assert_eq!(negative.candidates_screened, 0);
 
+        let batch_queries = vec![
+            ("query".to_string(), sequence.as_bytes().to_vec()),
+            ("partial".to_string(), partial_query.as_bytes().to_vec()),
+            (
+                "negative".to_string(),
+                b"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN".to_vec(),
+            ),
+        ];
+        let singles = batch_queries
+            .iter()
+            .map(|(id, sequence)| engine.search(id.as_str(), sequence, config).unwrap())
+            .collect::<Vec<_>>();
+        for threads in [1, 2, 4] {
+            let batch = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| engine.search_batch(&batch_queries, config).unwrap());
+            assert_eq!(batch, singles);
+        }
+
         let query = directory.path().join("query.fa");
         std::fs::write(
             &query,
@@ -456,6 +585,62 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read_to_string(output).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn batch_applies_global_caps_independently_per_query() {
+        let directory = tempfile::tempdir().unwrap();
+        let sequence = |mut state: u64| {
+            (0..192)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    b"ACGT"[(state >> 62) as usize] as char
+                })
+                .collect::<String>()
+        };
+        let first = sequence(17);
+        let second = sequence(91);
+        let shards = [
+            shard(directory.path(), &["alpha"], &first, 4),
+            shard(directory.path(), &["bravo"], &second, 4),
+            shard(directory.path(), &["zulu"], &first, 4),
+            shard(directory.path(), &["yankee"], &second, 4),
+        ];
+        let root = directory.path().join("collection.json");
+        std::fs::write(
+            &root,
+            serde_json::to_vec(&json!({"version": 1, "shards": shards})).unwrap(),
+        )
+        .unwrap();
+        let engine = CollectionTraceEngine::open(root, None).unwrap();
+        let config = TraceConfig {
+            use_sketch: false,
+            circular: false,
+            max_metagenomes: 1,
+            ..TraceConfig::default()
+        };
+        let queries = vec![
+            ("first".to_string(), first.into_bytes()),
+            ("second".to_string(), second.into_bytes()),
+        ];
+        let batch = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| engine.search_batch(&queries, config).unwrap());
+        let singles = queries
+            .iter()
+            .map(|(id, sequence)| engine.search(id.as_str(), sequence, config).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(batch, singles);
+        assert_eq!(batch[0].metagenomes[0].trace.name, "alpha");
+        assert_eq!(batch[1].metagenomes[0].trace.name, "bravo");
+        assert!(batch.iter().all(|result| matches!(
+            result.completion,
+            SearchCompletion::CandidateBudgetExceeded {
+                candidates_omitted: 3
+            }
+        )));
     }
 
     #[test]

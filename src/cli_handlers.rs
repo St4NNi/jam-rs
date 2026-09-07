@@ -124,7 +124,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     }
     let batch_size = match &engine {
         Engine::Shard(_) => rayon::current_num_threads(),
-        Engine::Collection(_) => 1,
+        Engine::Collection(_) => rayon::current_num_threads().clamp(1, 4),
     };
     let mut input = parse_fastx_file(&args.query)?;
     let mut temporary = tempfile::Builder::new()
@@ -172,8 +172,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                     }
                 }
                 Engine::Collection(engine) => {
-                    for (id, sequence) in queries {
-                        let result = engine.search(id, &sequence, args.config)?;
+                    for result in engine.search_batch(&queries, args.config)? {
                         serde_json::to_writer(&mut output, &result)?;
                         output.write_all(b"\n")?;
                     }
