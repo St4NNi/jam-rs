@@ -2,6 +2,7 @@ pub mod alignment;
 pub mod bgzf;
 pub mod bias;
 pub mod cli;
+pub mod collection;
 pub mod core_utils;
 pub mod format;
 pub mod io;
@@ -27,7 +28,7 @@ pub use jamhash::jamhash_u64;
 
 use anyhow::Result;
 use clap::Parser;
-use cli::handlers::{TraceArgs, handle_jidx_build_command, handle_trace_command};
+use cli::handlers::{TraceArgs, TraceInput, handle_jidx_build_command, handle_trace_command};
 use cli::{BiasCommands, Cli, Commands};
 
 pub fn run() -> Result<()> {
@@ -144,6 +145,7 @@ pub fn run() -> Result<()> {
             database,
             index,
             manifest,
+            collection,
             audit_index,
             output,
             query_id,
@@ -169,9 +171,19 @@ pub fn run() -> Result<()> {
             };
             handle_trace_command(TraceArgs {
                 query,
-                database,
-                index,
-                manifest,
+                input: match (collection, database, index, manifest) {
+                    (Some(root), None, None, None) => TraceInput::Collection(root),
+                    (None, Some(database), Some(index), Some(manifest)) => TraceInput::Shard {
+                        database,
+                        index,
+                        manifest,
+                    },
+                    _ => {
+                        return Err(anyhow::anyhow!(
+                            "Use --collection or --database, --index, and --manifest"
+                        ));
+                    }
+                },
                 audit_index,
                 output,
                 query_id,

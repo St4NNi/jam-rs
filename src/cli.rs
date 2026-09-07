@@ -109,21 +109,39 @@ pub enum Commands {
         rescue_k15: bool,
     },
 
-    /// Trace every sequence in a query file through a JAM and JIDX pair
+    /// Trace query sequences through a shard or collection
     #[command(arg_required_else_help = true)]
     Trace {
         /// Query FASTA or FASTQ file
         #[arg(short, long)]
         query: PathBuf,
         /// JAM database used for metagenome screening
-        #[arg(short, long)]
-        database: PathBuf,
+        #[arg(
+            short,
+            long,
+            required_unless_present = "collection",
+            conflicts_with = "collection"
+        )]
+        database: Option<PathBuf>,
         /// Query-independent JIDX file
-        #[arg(short, long)]
-        index: PathBuf,
+        #[arg(
+            short,
+            long,
+            required_unless_present = "collection",
+            conflicts_with = "collection"
+        )]
+        index: Option<PathBuf>,
         /// Root manifest used to build the JIDX
-        #[arg(short = 'M', long)]
-        manifest: PathBuf,
+        #[arg(
+            short = 'M',
+            long,
+            required_unless_present = "collection",
+            conflicts_with = "collection"
+        )]
+        manifest: Option<PathBuf>,
+        /// JSON root binding disjoint JAM/JIDX shards
+        #[arg(long)]
+        collection: Option<PathBuf>,
         /// Atomic JSONL output
         #[arg(short, long)]
         output: PathBuf,

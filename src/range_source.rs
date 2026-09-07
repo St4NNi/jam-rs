@@ -12,6 +12,7 @@ pub enum RangeSource {
     S3(S3Source),
 }
 
+#[derive(Clone)]
 pub struct S3Config {
     region: Region,
     credentials: Credentials,

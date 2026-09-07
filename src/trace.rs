@@ -173,7 +173,6 @@ impl TraceEngine {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn index(&self) -> &JidxReader {
         &self.index
     }
@@ -986,7 +985,7 @@ pub enum TraceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::handlers::{TraceArgs, handle_trace_command};
+    use crate::cli::handlers::{TraceArgs, TraceInput, handle_trace_command};
     use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
     use crate::writer::{BuildConfig, build};
     use noodles_bgzf::{self as bgzf, gzi};
@@ -1200,9 +1199,11 @@ mod tests {
         let output = directory.path().join("trace.jsonl");
         handle_trace_command(TraceArgs {
             query: query.clone(),
-            database: jam.clone(),
-            index: jidx.clone(),
-            manifest: manifest.clone(),
+            input: TraceInput::Shard {
+                database: jam.clone(),
+                index: jidx.clone(),
+                manifest: manifest.clone(),
+            },
             audit_index: false,
             output: output.clone(),
             query_id: None,
@@ -1222,9 +1223,11 @@ mod tests {
         let batch_output = directory.path().join("batch.jsonl");
         handle_trace_command(TraceArgs {
             query,
-            database: jam,
-            index: jidx,
-            manifest,
+            input: TraceInput::Shard {
+                database: jam,
+                index: jidx,
+                manifest,
+            },
             audit_index: false,
             output: batch_output.clone(),
             query_id: None,

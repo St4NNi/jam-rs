@@ -7,6 +7,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::bias::{BiasCreateConfig, CMSConfig, HashBiasTable};
+use crate::collection::CollectionTraceEngine;
 use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
 use crate::jidx_writer::sync_directory;
 use crate::query::QueryEngine;
@@ -55,11 +56,18 @@ pub(crate) fn handle_jidx_build_command(
     Ok(())
 }
 
+pub(crate) enum TraceInput {
+    Shard {
+        database: PathBuf,
+        index: PathBuf,
+        manifest: PathBuf,
+    },
+    Collection(PathBuf),
+}
+
 pub(crate) struct TraceArgs {
     pub query: PathBuf,
-    pub database: PathBuf,
-    pub index: PathBuf,
-    pub manifest: PathBuf,
+    pub input: TraceInput,
     pub audit_index: bool,
     pub output: PathBuf,
     pub query_id: Option<String>,
@@ -92,10 +100,32 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         return Err(anyhow::anyhow!("Invalid output path: {:?}", args.output));
     }
 
-    let engine = TraceEngine::open(args.database, args.index, args.manifest, args.s3)?;
-    if args.audit_index {
-        engine.verify_index()?;
+    enum Engine {
+        Shard(Box<TraceEngine>),
+        Collection(Box<CollectionTraceEngine>),
     }
+    let engine = match args.input {
+        TraceInput::Shard {
+            database,
+            index,
+            manifest,
+        } => Engine::Shard(Box::new(TraceEngine::open(
+            database, index, manifest, args.s3,
+        )?)),
+        TraceInput::Collection(root) => {
+            Engine::Collection(Box::new(CollectionTraceEngine::open(root, args.s3)?))
+        }
+    };
+    if args.audit_index {
+        match &engine {
+            Engine::Shard(engine) => engine.verify_index()?,
+            Engine::Collection(engine) => engine.verify_index()?,
+        }
+    }
+    let batch_size = match &engine {
+        Engine::Shard(_) => rayon::current_num_threads(),
+        Engine::Collection(_) => 1,
+    };
     let mut input = parse_fastx_file(&args.query)?;
     let mut temporary = tempfile::Builder::new()
         .prefix(".jam-trace-")
@@ -104,8 +134,8 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     {
         let mut output = BufWriter::new(temporary.as_file_mut());
         loop {
-            let mut queries = Vec::with_capacity(rayon::current_num_threads());
-            for _ in 0..rayon::current_num_threads() {
+            let mut queries = Vec::with_capacity(batch_size);
+            for _ in 0..batch_size {
                 let Some(record) = input.next() else { break };
                 let record = record?;
                 if count != 0 && args.query_id.is_some() {
@@ -130,13 +160,24 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             if queries.is_empty() {
                 break;
             }
-            let results = queries
-                .par_iter()
-                .map(|(id, sequence)| engine.search(id.as_str(), sequence, args.config))
-                .collect::<Result<Vec<_>, _>>()?;
-            for result in results {
-                serde_json::to_writer(&mut output, &result)?;
-                output.write_all(b"\n")?;
+            match &engine {
+                Engine::Shard(engine) => {
+                    let results = queries
+                        .par_iter()
+                        .map(|(id, sequence)| engine.search(id.as_str(), sequence, args.config))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    for result in results {
+                        serde_json::to_writer(&mut output, &result)?;
+                        output.write_all(b"\n")?;
+                    }
+                }
+                Engine::Collection(engine) => {
+                    for (id, sequence) in queries {
+                        let result = engine.search(id, &sequence, args.config)?;
+                        serde_json::to_writer(&mut output, &result)?;
+                        output.write_all(b"\n")?;
+                    }
+                }
             }
         }
         output.flush()?;
@@ -1053,8 +1094,8 @@ pub fn handle_stats_command(
 #[cfg(test)]
 mod tests {
     use super::{
-        TraceArgs, compute_distance_chunk_size, handle_jidx_build_command, handle_trace_command,
-        normalize_distance_cutoff,
+        TraceArgs, TraceInput, compute_distance_chunk_size, handle_jidx_build_command,
+        handle_trace_command, normalize_distance_cutoff,
     };
     use crate::jidx_builder::JidxBuildConfig;
     use crate::trace::TraceConfig;
@@ -1108,9 +1149,11 @@ mod tests {
         assert!(
             handle_trace_command(TraceArgs {
                 query: directory.path().join("missing.fa"),
-                database: directory.path().join("missing.jam"),
-                index: directory.path().join("missing.jidx"),
-                manifest: directory.path().join("missing.json"),
+                input: TraceInput::Shard {
+                    database: directory.path().join("missing.jam"),
+                    index: directory.path().join("missing.jidx"),
+                    manifest: directory.path().join("missing.json"),
+                },
                 audit_index: false,
                 output: output.clone(),
                 query_id: None,
