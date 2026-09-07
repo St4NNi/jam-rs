@@ -558,9 +558,9 @@ impl TraceEngine {
                     Err(AlignmentError::NoAlignment) => return Ok(None),
                     Err(error) => return Err(error.into()),
                 };
-                let alignment = workspace
+                let completed = workspace
                     .complete_endpoints(
-                        core,
+                        core.clone(),
                         &query_window,
                         target,
                         task.target_start,
@@ -568,6 +568,11 @@ impl TraceEngine {
                         alignment_config,
                     )?
                     .alignment;
+                let alignment = if completed.identity() >= config.min_identity {
+                    completed
+                } else {
+                    core
+                };
                 if alignment.identity() < config.min_identity
                     || alignment.query_interval.len() < config.min_aligned_bases
                 {
@@ -958,6 +963,52 @@ mod tests {
         let first = engine
             .search("plasmid", sequence.as_bytes(), config)
             .unwrap();
+        let padded_query = [
+            b"N".repeat(64),
+            sequence.as_bytes().to_vec(),
+            b"N".repeat(64),
+        ]
+        .concat();
+        let padded_target = [
+            b"A".repeat(64),
+            sequence.as_bytes().to_vec(),
+            b"T".repeat(64),
+        ]
+        .concat();
+        let fragments = engine
+            .align_tasks(
+                &padded_query,
+                &[AlignmentTask {
+                    metagenome_id: 0,
+                    contig_id: 0,
+                    strand: Strand::Forward,
+                    query_start: 0,
+                    query_span: padded_query.len() as u64,
+                    target_start: 0,
+                    target_end: padded_target.len() as u64,
+                    diagonal_offset: 0,
+                }],
+                &BTreeMap::from([(
+                    (0, 0),
+                    vec![LoadedRange {
+                        offset: 0,
+                        end: padded_target.len() as u64,
+                        sequence: padded_target,
+                    }],
+                )]),
+                TraceConfig {
+                    endpoint_bases: 64,
+                    circular: false,
+                    ..config
+                },
+            )
+            .unwrap();
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].1.alignment.identity(), 1.0);
+        assert_eq!(
+            fragments[0].1.alignment.query_interval,
+            Interval::new(64, 192).unwrap()
+        );
         let second = engine
             .search("plasmid", sequence.as_bytes(), config)
             .unwrap();
