@@ -237,6 +237,19 @@ fn walk_diagonal(
     }
 }
 
+/// The bases an extension compares at once.
+const BLOCK: usize = 8;
+
+/// The number of equal bytes in two blocks of `BLOCK` bytes.
+fn equal_bytes(contig: &[u8], query: &[u8]) -> u32 {
+    let word = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().unwrap_or([0; BLOCK]));
+    let differ = word(contig) ^ word(query);
+    // The high bit of each byte is set when the byte is not zero.
+    const LOW: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+    let nonzero = ((differ & LOW) + LOW) | differ;
+    BLOCK as u32 - (nonzero & !LOW).count_ones()
+}
+
 /// Running state of one ungapped extension.
 struct Extension {
     /// The scores of an equal and of a different base.
@@ -284,16 +297,35 @@ impl Extension {
         (self.best, self.best_length) = (self.score, self.length);
     }
 
+    /// Adds a block of `BLOCK` bases when no base of it can reach a new best score or drop too
+    /// far, as then only the number of equal bases counts. Returns whether it did.
+    fn far_block(&mut self, contig: &[u8], query: &[u8]) -> bool {
+        let bases = BLOCK as i64;
+        if self.score + bases * self.matched > self.best
+            || self.best - self.score - bases * self.mismatched > self.drop
+        {
+            return false;
+        }
+        let equal = i64::from(equal_bytes(contig, query));
+        self.score += equal * self.matched + (bases - equal) * self.mismatched;
+        self.length += BLOCK;
+        true
+    }
+
     /// Extends over equally long `contig` and `query` from their starts; false once the walk ends.
     fn forward(&mut self, contig: &[u8], query: &[u8]) -> bool {
         let mut at = 0;
         while at < contig.len() {
-            if at + 8 <= contig.len()
+            if at + BLOCK <= contig.len()
                 && self.score >= self.best
-                && contig[at..at + 8] == query[at..at + 8]
+                && contig[at..at + BLOCK] == query[at..at + BLOCK]
             {
-                self.equal_block(8);
-                at += 8;
+                self.equal_block(BLOCK);
+                at += BLOCK;
+            } else if at + BLOCK <= contig.len()
+                && self.far_block(&contig[at..at + BLOCK], &query[at..at + BLOCK])
+            {
+                at += BLOCK;
             } else if self.step(contig[at] == query[at]) {
                 at += 1;
             } else {
@@ -307,9 +339,15 @@ impl Extension {
     fn backward(&mut self, contig: &[u8], query: &[u8]) -> bool {
         let mut at = contig.len();
         while at > 0 {
-            if at >= 8 && self.score >= self.best && contig[at - 8..at] == query[at - 8..at] {
-                self.equal_block(8);
-                at -= 8;
+            let block = at.saturating_sub(BLOCK)..at;
+            if at >= BLOCK
+                && self.score >= self.best
+                && contig[block.clone()] == query[block.clone()]
+            {
+                self.equal_block(BLOCK);
+                at -= BLOCK;
+            } else if at >= BLOCK && self.far_block(&contig[block.clone()], &query[block]) {
+                at -= BLOCK;
             } else if self.step(contig[at - 1] == query[at - 1]) {
                 at -= 1;
             } else {
@@ -371,4 +409,84 @@ fn walk(
 
 fn minimum_length(table: &QueryTable) -> u64 {
     table.chains().min_length(table.anchors().a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{random_bases, rng};
+    use rand::RngExt;
+
+    /// The extension of one base at a time, without blocks.
+    fn stepped(extension: &mut Extension, pairs: impl Iterator<Item = (u8, u8)>) -> bool {
+        pairs
+            .into_iter()
+            .all(|(contig, query)| extension.step(contig == query))
+    }
+
+    #[test]
+    fn blocks_extend_stepwise() {
+        let mut random = rng(11);
+        let table = QueryTable::new(
+            &random_bases(&mut random, 100),
+            false,
+            crate::align::AnchorConfig::default(),
+            crate::align::ChainConfig {
+                max_gap: 200,
+                ..crate::align::ChainConfig::default()
+            },
+        )
+        .unwrap();
+        let config = BandConfig::default();
+        for round in 0..400 {
+            let length = random.random_range(0..1500);
+            let contig = random_bases(&mut random, length);
+            // From a copy to unrelated bases, so walks end anywhere.
+            let changes = [0.0, 0.05, 0.3, 0.75][round % 4];
+            let query: Vec<u8> = contig
+                .iter()
+                .map(|&base| {
+                    if random.random_bool(changes) {
+                        b"ACGT"[random.random_range(0..4)]
+                    } else {
+                        base
+                    }
+                })
+                .collect();
+            let state =
+                |extension: &Extension| (extension.score, extension.best, extension.best_length);
+            let (mut fast, mut slow) = (
+                Extension::new(&table, config),
+                Extension::new(&table, config),
+            );
+            let pairs = contig.iter().copied().zip(query.iter().copied());
+            let went = fast.forward(&contig, &query);
+            assert_eq!(went, stepped(&mut slow, pairs.clone()));
+            assert_eq!(fast.best_length, slow.best_length);
+            if went {
+                assert_eq!(state(&fast), state(&slow));
+            }
+            let (mut fast, mut slow) = (
+                Extension::new(&table, config),
+                Extension::new(&table, config),
+            );
+            let went = fast.backward(&contig, &query);
+            assert_eq!(went, stepped(&mut slow, pairs.rev()));
+            assert_eq!(
+                (went, fast.best, fast.best_length),
+                (went, slow.best, slow.best_length)
+            );
+        }
+    }
+
+    #[test]
+    fn equal_bytes_counted() {
+        assert_eq!(equal_bytes(b"ACGTACGT", b"ACGTACGT"), 8);
+        assert_eq!(equal_bytes(b"ACGTACGT", b"TGCATGCA"), 0);
+        assert_eq!(equal_bytes(b"AAAAAAAA", b"AxAAAyAA"), 6);
+        assert_eq!(
+            equal_bytes(&[0, 255, 128, 1, 0, 0, 0, 0], &[0, 255, 0, 1, 0, 0, 0, 1]),
+            6
+        );
+    }
 }
