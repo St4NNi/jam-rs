@@ -819,6 +819,53 @@ mod tests {
         )
     }
 
+    fn multi_page_filter_fixture() -> (tempfile::TempDir, PathBuf) {
+        let keys = (0..5_000u64).collect::<Vec<_>>();
+        let mut strings = Vec::new();
+        let name = push_string(&mut strings, "doc");
+        let bgzf = push_string(&mut strings, "seq.bgz");
+        let contig_name = push_string(&mut strings, "contig");
+        let mut document = vec![0; DOCUMENT_RECORD_SIZE as usize];
+        put_string(&mut document, 0, name);
+        put_string(&mut document, 8, bgzf);
+        put_u64(&mut document, 16, 100);
+        put_u32(&mut document, 28, 1);
+        document[32..64].fill(3);
+        put_u64(&mut document, 72, 8);
+        let mut contig = vec![0; CONTIG_RECORD_SIZE as usize];
+        put_string(&mut contig, 4, contig_name);
+        put_u64(&mut contig, 16, 100);
+        put_u64(&mut contig, 24, 5);
+        put_u32(&mut contig, 32, 100);
+        put_u32(&mut contig, 36, 101);
+        let mut seeds = vec![0; keys.len() * SEED_RECORD_SIZE as usize];
+        let mut document_postings = vec![0; keys.len() * 16];
+        for (index, key) in keys.iter().copied().enumerate() {
+            let seed = index * SEED_RECORD_SIZE as usize;
+            put_u64(&mut seeds, seed, key);
+            put_u64(&mut seeds, seed + 8, (index * 16) as u64);
+            put_u32(&mut seeds, seed + 16, 1);
+            put_u64(&mut document_postings, index * 16 + 8, 5);
+        }
+        write_fixture(
+            [
+                strings,
+                document,
+                contig,
+                seeds,
+                document_postings,
+                Vec::new(),
+                0u64.to_le_bytes().to_vec(),
+                seed_filters(&keys),
+            ],
+            1,
+            1,
+            keys.len() as u64,
+            keys.len() as u64,
+            false,
+        )
+    }
+
     #[test]
     fn reads_compact_metagenome_and_contig_ids() {
         let (_directory, path) = fixture(false, false, false, false);
@@ -910,6 +957,20 @@ mod tests {
     }
 
     #[test]
+    fn page_local_filter_matches_binary_fuse_reference() {
+        let (_directory, path) = external_fixture_with_keys([0, 1_000_000]);
+        let reader = JidxReader::open(path).unwrap();
+        let directory = reader.filter_directory.as_ref().unwrap();
+        for key in [0, 1_000_000].into_iter().chain(1..100_000u64) {
+            assert_eq!(
+                crate::jidx_filters::contains(&reader, directory, key).unwrap(),
+                crate::jidx_filters::reference_contains(&reader, directory, key).unwrap(),
+                "key {key}"
+            );
+        }
+    }
+
+    #[test]
     fn corrupt_filter_directory_and_payload_remain_errors() {
         let (_directory, directory_path) = fixture(false, false, false, false);
         let filter_offset = section_offset(&directory_path, SectionKind::SeedFilters);
@@ -976,6 +1037,48 @@ mod tests {
         );
         rewrite_checksums(&mismatch_path);
         let reader = JidxReader::open(mismatch_path).unwrap();
+        assert!(reader.verify_checksum().is_err());
+    }
+
+    #[test]
+    fn multi_page_filter_checks_accessed_pages_and_audits_untouched_pages() {
+        let key = 1_234u64;
+        let (_directory, accessed_path) = multi_page_filter_fixture();
+        let (_, filter_length) = section_range(&accessed_path, SectionKind::SeedFilters);
+        assert!(filter_length > 2 * PAGE_SIZE);
+        let reader = JidxReader::open(&accessed_path).unwrap();
+        let offsets = crate::jidx_filters::fingerprint_offsets(
+            &reader,
+            reader.filter_directory.as_ref().unwrap(),
+            key,
+        )
+        .unwrap();
+        drop(reader);
+        corrupt_byte(&accessed_path, offsets[0]);
+        let reader = JidxReader::open(accessed_path).unwrap();
+        assert!(reader.find_seed(key).is_err());
+        assert!(reader.find_seed(key).is_err());
+
+        let (_directory, untouched_path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(&untouched_path).unwrap();
+        let directory = reader.filter_directory.as_ref().unwrap();
+        let accessed_pages = crate::jidx_filters::fingerprint_offsets(&reader, directory, key)
+            .unwrap()
+            .map(|offset| offset / PAGE_SIZE);
+        let untouched = (0..5_000u64)
+            .filter(|candidate| *candidate != key)
+            .find_map(|candidate| {
+                crate::jidx_filters::fingerprint_offsets(&reader, directory, candidate)
+                    .unwrap()
+                    .into_iter()
+                    .find(|offset| !accessed_pages.contains(&(offset / PAGE_SIZE)))
+            })
+            .unwrap();
+        drop(reader);
+        corrupt_byte(&untouched_path, untouched);
+        rewrite_checksums(&untouched_path);
+        let reader = JidxReader::open(untouched_path).unwrap();
+        assert!(reader.find_seed(key).unwrap().is_some());
         assert!(reader.verify_checksum().is_err());
     }
 

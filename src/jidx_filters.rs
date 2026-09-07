@@ -160,7 +160,106 @@ pub(crate) fn contains(
     if key < record.first_key {
         return Ok(false);
     }
+    page_local_contains(reader, *record, key)
+}
+
+#[cfg(test)]
+pub(crate) fn reference_contains(
+    reader: &JidxReader,
+    directory: &FilterDirectory,
+    key: u64,
+) -> Result<bool, JidxError> {
+    validate_identity(reader, directory)?;
+    let index = directory
+        .records
+        .partition_point(|record| record.last_key < key);
+    let Some(record) = directory.records.get(index) else {
+        return Ok(false);
+    };
+    if key < record.first_key {
+        return Ok(false);
+    }
     Ok(filter(reader, *record)?.contains(&key))
+}
+
+#[cfg(test)]
+pub(crate) fn fingerprint_offsets(
+    reader: &JidxReader,
+    directory: &FilterDirectory,
+    key: u64,
+) -> Result<[u64; 3], JidxError> {
+    validate_identity(reader, directory)?;
+    let index = directory
+        .records
+        .partition_point(|record| record.last_key < key);
+    let record = *directory
+        .records
+        .get(index)
+        .filter(|record| key >= record.first_key)
+        .ok_or(JidxError::Invalid("seed filter test key"))?;
+    let descriptor_end = record
+        .filter_start
+        .checked_add(DESCRIPTOR_SIZE as u64)
+        .ok_or(JidxError::Invalid("seed filter descriptor"))?;
+    let descriptor_bytes = reader.checked_bytes(record.filter_start, descriptor_end)?;
+    let fingerprint_length = usize::try_from(record.filter_end - descriptor_end)
+        .map_err(|_| JidxError::Invalid("seed filter fingerprints"))?;
+    validate_descriptor(descriptor_bytes, fingerprint_length)?;
+    let (_, indexes) = fingerprint_indices(descriptor_bytes, key);
+    Ok(indexes.map(|index| descriptor_end + u64::from(index)))
+}
+
+fn page_local_contains(
+    reader: &JidxReader,
+    record: FilterRecord,
+    key: u64,
+) -> Result<bool, JidxError> {
+    let descriptor_end = record
+        .filter_start
+        .checked_add(DESCRIPTOR_SIZE as u64)
+        .ok_or(JidxError::Invalid("seed filter descriptor"))?;
+    let descriptor_bytes = reader.checked_bytes(record.filter_start, descriptor_end)?;
+    let fingerprint_length = record
+        .filter_end
+        .checked_sub(descriptor_end)
+        .and_then(|length| usize::try_from(length).ok())
+        .ok_or(JidxError::Invalid("seed filter fingerprints"))?;
+    validate_descriptor(descriptor_bytes, fingerprint_length)?;
+    let (fingerprint, indexes) = fingerprint_indices(descriptor_bytes, key);
+    let mut value = fingerprint;
+    for index in indexes {
+        let start = descriptor_end
+            .checked_add(u64::from(index))
+            .ok_or(JidxError::Invalid("seed filter fingerprint"))?;
+        let end = start
+            .checked_add(1)
+            .ok_or(JidxError::Invalid("seed filter fingerprint"))?;
+        let byte = reader
+            .checked_bytes(start, end)?
+            .first()
+            .copied()
+            .ok_or(JidxError::Invalid("seed filter fingerprint"))?;
+        value ^= byte;
+    }
+    Ok(value == 0)
+}
+
+// Pinned xorf 0.12 BinaryFuse8 DMA addressing; descriptors are validated first.
+// The avalanche is Austin Appleby's public-domain MurmurHash3 fmix64.
+fn fingerprint_indices(descriptor: &[u8], key: u64) -> (u8, [u32; 3]) {
+    let mut hash = key.wrapping_add(read_u64(descriptor, 0));
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    hash ^= hash >> 33;
+    let segment_length = read_u32(descriptor, 8);
+    let segment_mask = read_u32(descriptor, 12);
+    let segment_count_length = read_u32(descriptor, 16);
+    let first = ((u128::from(hash) * u128::from(segment_count_length)) >> 64) as u32;
+    let second = (first + segment_length) ^ ((hash >> 18) as u32 & segment_mask);
+    let third = (first + 2 * segment_length) ^ (hash as u32 & segment_mask);
+    (xorf::fingerprint!(hash) as u8, [first, second, third])
 }
 
 pub(crate) fn audit(reader: &JidxReader, directory: &FilterDirectory) -> Result<(), JidxError> {
