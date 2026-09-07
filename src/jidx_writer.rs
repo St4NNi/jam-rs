@@ -321,6 +321,12 @@ impl JidxWriter {
         seed_file.flush()?;
         document_file.flush()?;
         occurrence_file.flush()?;
+        let filter_path = self.scratch.path().join("filters");
+        crate::jidx_filters::build(
+            File::open(self.scratch.path().join("seeds"))?,
+            &filter_path,
+            seed_count,
+        )?;
         let lengths = [
             self.strings.len() as u64,
             byte_len(self.documents.len(), DOCUMENT_RECORD_SIZE)?,
@@ -329,6 +335,7 @@ impl JidxWriter {
             document_file.get_ref().metadata()?.len(),
             occurrence_file.get_ref().metadata()?.len(),
             self.gzi.len() as u64,
+            std::fs::metadata(&filter_path)?.len(),
             0,
         ];
         drop((merged, seed_file, document_file, occurrence_file));
@@ -360,11 +367,13 @@ impl JidxWriter {
         write_padding(&mut file, sections[6].offset)?;
         file.write_all(&self.gzi)?;
         write_padding(&mut file, sections[7].offset)?;
+        io::copy(&mut File::open(filter_path)?, &mut file)?;
+        write_padding(&mut file, sections[8].offset)?;
         file.flush()?;
         let mut checksum_input = BufReader::new(checksum_input);
         checksum_input.seek(SeekFrom::Start(PAGE_SIZE))?;
         let mut page = [0; PAGE_SIZE as usize];
-        for _ in 0..sections[7].length / 32 {
+        for _ in 0..sections[8].length / 32 {
             checksum_input.read_exact(&mut page)?;
             file.write_all(&sha256(&page))?;
         }
@@ -380,7 +389,7 @@ impl JidxWriter {
             rescue_k15: self.input.rescue_k15,
             seed_scheme: SeedScheme::SlidingMinimizer,
             posting_codec: PostingCodec::DeltaVarint,
-            filter: FilterKind::None,
+            filter: FilterKind::BinaryFuse8,
             document_count: u32::try_from(self.documents.len())
                 .map_err(|_| JidxWriteError::Invalid("metagenome count"))?,
             contig_count: u32::try_from(self.contigs.len())

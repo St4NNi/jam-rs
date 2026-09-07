@@ -42,6 +42,7 @@ pub struct JidxReader {
     mmap: Mmap,
     header: Header,
     verified_pages: Box<[AtomicU64]>,
+    filter_directory: Option<crate::jidx_filters::FilterDirectory>,
 }
 
 impl JidxReader {
@@ -64,6 +65,12 @@ impl JidxReader {
             mmap,
             header,
             verified_pages,
+            filter_directory: None,
+        };
+        let filter_directory = crate::jidx_filters::load(&reader)?;
+        let reader = Self {
+            filter_directory: Some(filter_directory),
+            ..reader
         };
         reader.validate_documents()?;
         Ok(reader)
@@ -77,6 +84,12 @@ impl JidxReader {
         self.header.verify_body(&self.mmap)?;
         self.validate_contigs()?;
         crate::jidx_postings::validate_table(self)?;
+        crate::jidx_filters::audit(
+            self,
+            self.filter_directory
+                .as_ref()
+                .ok_or(JidxError::Invalid("missing seed filter directory"))?,
+        )?;
         for index in 0..self.header.seed_count {
             let seed = crate::jidx_postings::entry(self, index)?;
             self.seed_occurrences(seed)?;
@@ -85,6 +98,16 @@ impl JidxReader {
     }
 
     pub fn find_seed(&self, packed_key: u64) -> Result<Option<SeedEntry>, JidxReaderError> {
+        seed_length(self.header.k, self.header.rescue_k15, packed_key)?;
+        if !crate::jidx_filters::contains(
+            self,
+            self.filter_directory
+                .as_ref()
+                .ok_or(JidxError::Invalid("missing seed filter directory"))?,
+            packed_key,
+        )? {
+            return Ok(None);
+        }
         Ok(crate::jidx_postings::lookup(self, packed_key)?)
     }
 
@@ -437,8 +460,9 @@ pub enum JidxReaderError {
 mod tests {
     use super::*;
     use crate::jidx::{SECTION_COUNT, SEED_RECORD_SIZE, SectionDescriptor, VERSION, sha256};
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
+    use xorf::{BinaryFuse8, DmaSerializable, Filter};
 
     fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -463,6 +487,75 @@ mod tests {
         put_u32(bytes, offset + 4, value.1);
     }
 
+    fn seed_filters(keys: &[u64]) -> Vec<u8> {
+        if keys.is_empty() {
+            return Vec::new();
+        }
+        let filter = BinaryFuse8::try_from(keys).unwrap();
+        let fingerprints = filter.dma_fingerprints();
+        let filter_length = 20 + fingerprints.len();
+        let mut bytes = vec![0; PAGE_SIZE as usize + filter_length];
+        put_u64(&mut bytes, 0, keys[0]);
+        put_u64(&mut bytes, 8, *keys.last().unwrap());
+        put_u64(&mut bytes, 16, PAGE_SIZE);
+        put_u64(&mut bytes, 24, filter_length as u64);
+        put_u32(&mut bytes, 32, keys.len() as u32);
+        put_u16(&mut bytes, 36, 20);
+        filter.dma_copy_descriptor_to(&mut bytes[PAGE_SIZE as usize..PAGE_SIZE as usize + 20]);
+        bytes[PAGE_SIZE as usize + 20..].copy_from_slice(fingerprints);
+        bytes
+    }
+
+    fn section_range(path: &Path, kind: SectionKind) -> (u64, u64) {
+        let mut header = [0; HEADER_SIZE];
+        File::open(path).unwrap().read_exact(&mut header).unwrap();
+        let descriptor = 144 + (kind as usize - 1) * 24;
+        (
+            u64::from_le_bytes(header[descriptor + 8..descriptor + 16].try_into().unwrap()),
+            u64::from_le_bytes(header[descriptor + 16..descriptor + 24].try_into().unwrap()),
+        )
+    }
+
+    fn section_offset(path: &Path, kind: SectionKind) -> u64 {
+        section_range(path, kind).0
+    }
+
+    fn corrupt_byte(path: &Path, offset: u64) {
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut byte = [0];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0xff;
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&byte).unwrap();
+    }
+
+    fn replace_bytes(path: &Path, offset: u64, replacement: &[u8]) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let offset = offset as usize;
+        bytes[offset..offset + replacement.len()].copy_from_slice(replacement);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn rewrite_checksums(path: &Path) {
+        let mut bytes = std::fs::read(path).unwrap();
+        let (checksum_offset, checksum_length) = section_range(path, SectionKind::BlockChecksums);
+        let checksum_count = checksum_length / 32;
+        for page in 1..=checksum_count {
+            let page_start = (page * PAGE_SIZE) as usize;
+            let digest = sha256(&bytes[page_start..page_start + PAGE_SIZE as usize]);
+            let checksum_start = (checksum_offset + (page - 1) * 32) as usize;
+            bytes[checksum_start..checksum_start + 32].copy_from_slice(&digest);
+        }
+        let body_sha256 = sha256(&bytes[HEADER_SIZE..]);
+        bytes[112..144].copy_from_slice(&body_sha256);
+        std::fs::write(path, bytes).unwrap();
+    }
+
     fn fixture(
         bad_metagenome_id: bool,
         corrupt_padding: bool,
@@ -474,6 +567,7 @@ mod tests {
             corrupt_padding,
             bad_document_posting,
             bad_occurrence,
+            true,
             None,
         )
     }
@@ -483,6 +577,7 @@ mod tests {
         corrupt_padding: bool,
         bad_document_posting: bool,
         bad_occurrence: bool,
+        include_seed: bool,
         string_pages: Option<u64>,
     ) -> (tempfile::TempDir, PathBuf) {
         let mut strings = Vec::new();
@@ -511,18 +606,27 @@ mod tests {
         put_u32(&mut contig, 32, 100);
         put_u32(&mut contig, 36, 101);
 
-        let mut seed = vec![0; SEED_RECORD_SIZE as usize];
-        put_u64(&mut seed, 0, 0x1234);
-        put_u64(&mut seed, 8, 0);
-        put_u32(&mut seed, 16, 1);
-        let mut document_posting = vec![0; 16];
-        put_u32(&mut document_posting, 0, u32::from(bad_document_posting));
-        put_u32(&mut document_posting, 4, 0);
-        put_u64(
-            &mut document_posting,
-            8,
-            ((if bad_occurrence { 90 } else { 2 }) << 1) | 1,
-        );
+        let mut seed = vec![
+            0;
+            if include_seed {
+                SEED_RECORD_SIZE as usize
+            } else {
+                0
+            }
+        ];
+        let mut document_posting = vec![0; if include_seed { 16 } else { 0 }];
+        if include_seed {
+            put_u64(&mut seed, 0, 0x1234);
+            put_u64(&mut seed, 8, 0);
+            put_u32(&mut seed, 16, 1);
+            put_u32(&mut document_posting, 0, u32::from(bad_document_posting));
+            put_u32(&mut document_posting, 4, 0);
+            put_u64(
+                &mut document_posting,
+                8,
+                ((if bad_occurrence { 90 } else { 2 }) << 1) | 1,
+            );
+        }
         let contig_posting = Vec::new();
         let payloads = [
             strings,
@@ -532,12 +636,20 @@ mod tests {
             document_posting,
             contig_posting,
             0u64.to_le_bytes().to_vec(),
+            seed_filters(if include_seed { &[0x1234] } else { &[] }),
         ];
-        write_fixture(payloads, 1, 1, 1, 1, corrupt_padding)
+        write_fixture(
+            payloads,
+            1,
+            1,
+            if include_seed { 1 } else { 0 },
+            if include_seed { 1 } else { 0 },
+            corrupt_padding,
+        )
     }
 
     fn write_fixture(
-        payloads: [Vec<u8>; 7],
+        payloads: [Vec<u8>; 8],
         document_count: u32,
         contig_count: u32,
         seed_count: u64,
@@ -588,6 +700,7 @@ mod tests {
         header[16] = 21;
         header[17] = 2;
         header[18] = 2;
+        header[19] = 1;
         put_u16(&mut header, 20, SECTION_COUNT as u16);
         put_u32(&mut header, 24, document_count);
         put_u32(&mut header, 28, contig_count);
@@ -603,7 +716,7 @@ mod tests {
             put_u64(&mut header, start + 8, section.offset);
             put_u64(&mut header, start + 16, section.length);
         }
-        put_u16(&mut header, 336, 16);
+        put_u16(&mut header, 360, 16);
         file[..HEADER_SIZE].copy_from_slice(&header);
         if corrupt_padding {
             file[sections[2].offset as usize + sections[2].length as usize] ^= 1;
@@ -615,6 +728,10 @@ mod tests {
     }
 
     fn external_fixture() -> (tempfile::TempDir, PathBuf) {
+        external_fixture_with_keys([0x1234, 0x1235])
+    }
+
+    fn external_fixture_with_keys(keys: [u64; 2]) -> (tempfile::TempDir, PathBuf) {
         let mut strings = Vec::new();
         let doc0 = push_string(&mut strings, "doc0");
         let uri0 = push_string(&mut strings, "doc0.bgz");
@@ -657,10 +774,10 @@ mod tests {
         }
 
         let mut seeds = vec![0; 2 * SEED_RECORD_SIZE as usize];
-        put_u64(&mut seeds, 0, 0x1234);
+        put_u64(&mut seeds, 0, keys[0]);
         put_u64(&mut seeds, 8, 0);
         put_u32(&mut seeds, 16, 2);
-        put_u64(&mut seeds, SEED_RECORD_SIZE as usize, 0x1235);
+        put_u64(&mut seeds, SEED_RECORD_SIZE as usize, keys[1]);
         put_u64(&mut seeds, SEED_RECORD_SIZE as usize + 8, 48);
         put_u32(&mut seeds, SEED_RECORD_SIZE as usize + 16, 1);
 
@@ -692,6 +809,7 @@ mod tests {
                 document_postings,
                 cold,
                 vec![0; 16],
+                seed_filters(&keys),
             ],
             2,
             3,
@@ -736,19 +854,18 @@ mod tests {
 
     #[test]
     fn accessed_page_checksum_is_verified_lazily() {
-        let (_directory, path) = fixture(false, false, false, false);
-        let mut file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.seek(SeekFrom::Start(4 * PAGE_SIZE)).unwrap();
-        file.write_all(&[0x35]).unwrap();
-        drop(file);
+        let (_directory, path) = external_fixture();
+        corrupt_byte(&path, section_offset(&path, SectionKind::ContigPostings));
 
         let reader = JidxReader::open(path).unwrap();
+        let seed = reader.find_seed(0x1234).unwrap().unwrap();
+        let documents = reader.seed_documents(seed).unwrap();
         assert!(matches!(
-            reader.find_seed(0x1234),
+            reader.seed_document_occurrences(seed, documents[1]),
             Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
         ));
         assert!(matches!(
-            reader.find_seed(0x1234),
+            reader.seed_document_occurrences(seed, documents[1]),
             Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
         ));
     }
@@ -756,7 +873,8 @@ mod tests {
     #[test]
     fn verified_page_bitmap_retains_more_than_4096_pages() {
         let pages = 4097u64;
-        let (_directory, path) = fixture_with_string_pages(false, false, false, false, Some(pages));
+        let (_directory, path) =
+            fixture_with_string_pages(false, false, false, false, true, Some(pages));
         let reader = JidxReader::open(path).unwrap();
         let strings = reader.header.section(SectionKind::Strings);
         reader
@@ -778,6 +896,96 @@ mod tests {
         assert_eq!((seed.packed_key, seed.document_frequency), (0x1234, 1));
         assert!(reader.find_seed(0x1233).unwrap().is_none());
         assert!(reader.find_seed(0x1235).unwrap().is_none());
+    }
+
+    #[test]
+    fn filter_false_positive_still_requires_exact_lookup() {
+        let (_directory, path) = external_fixture_with_keys([0, 1_000_000]);
+        let reader = JidxReader::open(path).unwrap();
+        let directory = reader.filter_directory.as_ref().unwrap();
+        let false_positive = (1..1_000_000u64)
+            .find(|key| crate::jidx_filters::contains(&reader, directory, *key).unwrap())
+            .unwrap();
+        assert!(reader.find_seed(false_positive).unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_filter_directory_and_payload_remain_errors() {
+        let (_directory, directory_path) = fixture(false, false, false, false);
+        let filter_offset = section_offset(&directory_path, SectionKind::SeedFilters);
+        corrupt_byte(&directory_path, filter_offset);
+        assert!(JidxReader::open(&directory_path).is_err());
+        assert!(JidxReader::open(&directory_path).is_err());
+
+        let (_directory, payload_path) = fixture(false, false, false, false);
+        let filter_offset = section_offset(&payload_path, SectionKind::SeedFilters);
+        corrupt_byte(&payload_path, filter_offset + PAGE_SIZE);
+        let reader = JidxReader::open(payload_path).unwrap();
+        assert!(reader.find_seed(0x1234).is_err());
+        assert!(reader.find_seed(0x1234).is_err());
+    }
+
+    #[test]
+    fn checksummed_filter_structure_and_audit_fail_closed() {
+        let (_directory, range_path) = fixture(false, false, false, false);
+        let filter_offset = section_offset(&range_path, SectionKind::SeedFilters);
+        replace_bytes(
+            &range_path,
+            filter_offset + 16,
+            &(PAGE_SIZE + 1).to_le_bytes(),
+        );
+        rewrite_checksums(&range_path);
+        assert!(JidxReader::open(range_path).is_err());
+
+        let (_directory, descriptor_path) = fixture(false, false, false, false);
+        let filter_offset = section_offset(&descriptor_path, SectionKind::SeedFilters);
+        replace_bytes(
+            &descriptor_path,
+            filter_offset + PAGE_SIZE + 8,
+            &0u32.to_le_bytes(),
+        );
+        rewrite_checksums(&descriptor_path);
+        let reader = JidxReader::open(descriptor_path).unwrap();
+        assert!(reader.find_seed(0x1234).is_err());
+        assert!(reader.find_seed(0x1234).is_err());
+
+        let (_directory, padding_path) = fixture(false, false, false, false);
+        let filter_offset = section_offset(&padding_path, SectionKind::SeedFilters);
+        replace_bytes(&padding_path, filter_offset + 40, &[1]);
+        rewrite_checksums(&padding_path);
+        let reader = JidxReader::open(padding_path).unwrap();
+        assert!(reader.verify_checksum().is_err());
+
+        let (_directory, mismatch_path) = fixture(false, false, false, false);
+        let wrong_key = (0..1_000_000u64)
+            .find(|key| {
+                *key != 0x1234
+                    && !BinaryFuse8::try_from(&[*key][..])
+                        .unwrap()
+                        .contains(&0x1234)
+            })
+            .unwrap();
+        let wrong_filter = seed_filters(&[wrong_key]);
+        let (filter_offset, filter_length) =
+            section_range(&mismatch_path, SectionKind::SeedFilters);
+        assert_eq!(wrong_filter.len() as u64, filter_length);
+        replace_bytes(
+            &mismatch_path,
+            filter_offset + PAGE_SIZE,
+            &wrong_filter[PAGE_SIZE as usize..],
+        );
+        rewrite_checksums(&mismatch_path);
+        let reader = JidxReader::open(mismatch_path).unwrap();
+        assert!(reader.verify_checksum().is_err());
+    }
+
+    #[test]
+    fn empty_seed_table_has_an_empty_filter_directory() {
+        let (_directory, path) = fixture_with_string_pages(false, false, false, false, false, None);
+        let reader = JidxReader::open(path).unwrap();
+        assert_eq!(reader.header().seed_count, 0);
+        assert!(reader.find_seed(0).unwrap().is_none());
+        reader.verify_checksum().unwrap();
     }
 
     #[test]

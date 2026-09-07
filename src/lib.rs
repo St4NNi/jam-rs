@@ -8,6 +8,7 @@ pub mod format;
 pub mod io;
 pub mod jidx;
 pub mod jidx_builder;
+mod jidx_filters;
 mod jidx_postings;
 pub mod jidx_reader;
 mod jidx_runs;

@@ -2305,7 +2305,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "45e820b97864028eb5069aabf2d90ad7bc279a0ed0292f1306451ce4b91adc13"
 dependencies = [
  "libm",
- "rand",
  "serde",
  "serde_bytes",
 ]

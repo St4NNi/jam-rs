@@ -3,11 +3,11 @@ use std::io::{self, Read};
 use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"JIDX\0\0\0\0";
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 pub const HEADER_SIZE: usize = 512;
 pub const PAGE_SIZE: u64 = 4096;
 pub const RESCUE_K15_TAG: u64 = 1 << 63;
-pub const SECTION_COUNT: usize = 8;
+pub const SECTION_COUNT: usize = 9;
 pub const DOCUMENT_RECORD_SIZE: u32 = 80;
 pub const CONTIG_RECORD_SIZE: u32 = 40;
 pub const SEED_RECORD_SIZE: u32 = 24;
@@ -74,19 +74,19 @@ impl PostingCodec {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FilterKind {
-    None,
+    BinaryFuse8,
 }
 
 impl FilterKind {
     const fn code(self) -> u8 {
         match self {
-            Self::None => 0,
+            Self::BinaryFuse8 => 1,
         }
     }
 
     fn from_code(code: u8) -> Result<Self, JidxError> {
         match code {
-            0 => Ok(Self::None),
+            1 => Ok(Self::BinaryFuse8),
             _ => Err(JidxError::Invalid("filter kind")),
         }
     }
@@ -102,7 +102,8 @@ pub enum SectionKind {
     DocumentPostings = 5,
     ContigPostings = 6,
     Gzi = 7,
-    BlockChecksums = 8,
+    SeedFilters = 8,
+    BlockChecksums = 9,
 }
 
 impl SectionKind {
@@ -114,12 +115,13 @@ impl SectionKind {
         Self::DocumentPostings,
         Self::ContigPostings,
         Self::Gzi,
+        Self::SeedFilters,
         Self::BlockChecksums,
     ];
 
     pub(crate) const fn record_size(self) -> u32 {
         match self {
-            Self::Strings | Self::Gzi => 0,
+            Self::Strings | Self::Gzi | Self::SeedFilters => 0,
             Self::Documents => DOCUMENT_RECORD_SIZE,
             Self::Contigs => CONTIG_RECORD_SIZE,
             Self::Seeds => SEED_RECORD_SIZE,
@@ -138,7 +140,8 @@ impl SectionKind {
             5 => Ok(Self::DocumentPostings),
             6 => Ok(Self::ContigPostings),
             7 => Ok(Self::Gzi),
-            8 => Ok(Self::BlockChecksums),
+            8 => Ok(Self::SeedFilters),
+            9 => Ok(Self::BlockChecksums),
             _ => Err(JidxError::Invalid("section kind")),
         }
     }
@@ -200,8 +203,8 @@ impl Header {
             put_u64(&mut bytes, start + 8, section.offset);
             put_u64(&mut bytes, start + 16, section.length);
         }
-        put_u16(&mut bytes, 336, self.minimizer_window);
-        bytes[338] = u8::from(self.rescue_k15);
+        put_u16(&mut bytes, 360, self.minimizer_window);
+        bytes[362] = u8::from(self.rescue_k15);
         Ok(bytes)
     }
 
@@ -233,7 +236,7 @@ impl Header {
         if read_u32(bytes, 12) != 0 || read_u16(bytes, 22) != 0 {
             return Err(JidxError::Invalid("header flags"));
         }
-        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[339..].iter().any(|byte| *byte != 0)
+        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[363..].iter().any(|byte| *byte != 0)
         {
             return Err(JidxError::Invalid("header reservation"));
         }
@@ -253,7 +256,7 @@ impl Header {
         }
         let header = Self {
             k: bytes[16],
-            rescue_k15: match bytes[338] {
+            rescue_k15: match bytes[362] {
                 0 => false,
                 1 => true,
                 _ => return Err(JidxError::Invalid("rescue seed flag")),
@@ -265,7 +268,7 @@ impl Header {
             contig_count: read_u32(bytes, 28),
             seed_count: read_u64(bytes, 32),
             occurrence_count: read_u64(bytes, 40),
-            minimizer_window: read_u16(bytes, 336),
+            minimizer_window: read_u16(bytes, 360),
             jam_sha256: bytes[48..80].try_into().expect("JIDX jam digest"),
             manifest_sha256: bytes[80..112].try_into().expect("JIDX manifest digest"),
             body_sha256: bytes[112..144].try_into().expect("JIDX body digest"),
@@ -521,7 +524,7 @@ mod tests {
     use super::*;
 
     fn fixture() -> (Header, Vec<u8>) {
-        let lengths = [8, 80, 40, 24, 16, 16, 8, 224];
+        let lengths = [8, 80, 40, 24, 16, 16, 8, 64, 256];
         let mut offset = HEADER_SIZE as u64;
         let sections = std::array::from_fn(|index| {
             offset = offset.next_multiple_of(PAGE_SIZE);
@@ -543,7 +546,7 @@ mod tests {
             rescue_k15: false,
             seed_scheme: SeedScheme::SlidingMinimizer,
             posting_codec: PostingCodec::DeltaVarint,
-            filter: FilterKind::None,
+            filter: FilterKind::BinaryFuse8,
             document_count: 1,
             contig_count: 1,
             seed_count: 1,
@@ -563,10 +566,11 @@ mod tests {
         let (header, file) = fixture();
         assert_eq!(
             &file[..24],
-            b"JIDX\0\0\0\0\x03\x00\x00\x02\0\0\0\0\x15\x02\x02\0\x08\0\0\0"
+            b"JIDX\0\0\0\0\x04\x00\x00\x02\0\0\0\0\x15\x02\x02\x01\x09\0\0\0"
         );
-        assert_eq!(&file[336..338], &16u16.to_le_bytes());
-        assert_eq!(&file[338..HEADER_SIZE], &[0; 174]);
+        assert_eq!(&file[336..340], &[9, 0, 0, 0]);
+        assert_eq!(&file[360..362], &16u16.to_le_bytes());
+        assert_eq!(&file[362..HEADER_SIZE], &[0; 150]);
         assert_eq!(Header::decode(&file).unwrap(), header);
     }
 
