@@ -105,12 +105,14 @@ fn rare_ids_escaped() {
         .enumerate()
         .map(|(i, id)| (i as u16 * 3, *id))
         .collect();
-    let mut block = Vec::new();
-    encode_bucket(&seeds, &mut block);
-    block.extend_from_slice(&[0; BIT_PADDING]);
+    // The block follows the bytes of an earlier block, as in a partition of a build.
+    let mut bytes = vec![0xff; 6];
+    encode_bucket(&seeds, &mut bytes);
+    bytes.extend_from_slice(&[0; BIT_PADDING]);
+    let block = &bytes[6..];
     for (fingerprint, id) in &seeds {
-        assert_eq!(find_in_block(&block, *fingerprint), Some(ColorSetId(*id)));
-        assert_eq!(find_in_block(&block, fingerprint + 1), None);
+        assert_eq!(find_in_block(block, *fingerprint), Some(ColorSetId(*id)));
+        assert_eq!(find_in_block(block, fingerprint + 1), None);
     }
 }
 

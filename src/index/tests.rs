@@ -384,3 +384,32 @@ fn packed_on_s3() {
     assert!(shard.packed_path(0).is_err());
     assert!(shard.packed(0).is_err());
 }
+
+/// A shard with more buckets than partitions holds several bucket blocks per partition, and its
+/// many color sets give rare ids that blocks store as escapes. Every seed must still find its
+/// entry.
+#[test]
+fn escaped_sets_found() {
+    let mut rng = rng(0xe5c);
+    let shared = random_bases(&mut rng, 40_000);
+    let entries: Vec<Vec<Vec<u8>>> = (0..60)
+        .map(|_| {
+            let mut sequence = random_bases(&mut rng, 40_000);
+            for _ in 0..4 {
+                let from = rng.random_range(0..38_000);
+                sequence.extend_from_slice(&shared[from..from + 2_000]);
+            }
+            vec![sequence]
+        })
+        .collect();
+    let directory = tempfile::tempdir().unwrap();
+    let inputs = write_entries(directory.path(), &entries);
+    let output = directory.path().join("shard");
+    let options = BuildOptions {
+        bucket_bits: Some(13),
+        ..options(directory.path(), 2)
+    };
+    build_shard(&inputs, &output, &options).unwrap();
+    let shard = Shard::open(&output).unwrap();
+    check_every_seed(&shard, &entries);
+}

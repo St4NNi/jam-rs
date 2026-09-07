@@ -211,11 +211,12 @@ pub(crate) fn encode_color_set(entries: &[u32], out: &mut Vec<u8>) {
 }
 
 /// Appends the block of one bucket: its seeds as (fingerprint, color set id), fingerprints
-/// ascending and distinct.
+/// ascending and distinct. `out` may already hold other blocks.
 pub(crate) fn encode_bucket(seeds: &[(u16, u32)], out: &mut Vec<u8>) {
     if seeds.is_empty() {
         return;
     }
+    let escaped = out.len() + BLOCK_HEADER_BYTES + 2 * seeds.len();
     let ids: Vec<u32> = seeds.iter().map(|(_, id)| *id).collect();
     let (width, escapes) = choose_width(&ids);
     out.extend_from_slice(&(seeds.len() as u32).to_le_bytes());
@@ -229,7 +230,7 @@ pub(crate) fn encode_bucket(seeds: &[(u16, u32)], out: &mut Vec<u8>) {
         if u64::from(id) < direct {
             values.push(u64::from(id));
         } else {
-            values.push(direct + (out.len() - BLOCK_HEADER_BYTES - 2 * seeds.len()) as u64 / 4);
+            values.push(direct + (out.len() - escaped) as u64 / 4);
             out.extend_from_slice(&id.to_le_bytes());
         }
     }
