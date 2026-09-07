@@ -1068,10 +1068,10 @@ mod tests {
         std::fs::write(&query, format!(">sample description\n{sequence}\n")).unwrap();
         let output = directory.path().join("trace.jsonl");
         handle_trace_command(TraceArgs {
-            query,
-            database: jam,
-            index: jidx,
-            manifest,
+            query: query.clone(),
+            database: jam.clone(),
+            index: jidx.clone(),
+            manifest: manifest.clone(),
             audit_index: false,
             output: output.clone(),
             query_id: None,
@@ -1086,6 +1086,31 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&published).unwrap()["query_id"],
             "sample"
         );
+
+        std::fs::write(&query, format!(">second\n{sequence}\n>first\n{sequence}\n")).unwrap();
+        let batch_output = directory.path().join("batch.jsonl");
+        handle_trace_command(TraceArgs {
+            query,
+            database: jam,
+            index: jidx,
+            manifest,
+            audit_index: false,
+            output: batch_output.clone(),
+            query_id: None,
+            config,
+            s3: None,
+            force: false,
+        })
+        .unwrap();
+        let batch = std::fs::read_to_string(batch_output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let singles = ["second", "first"].map(|id| {
+            serde_json::to_value(engine.search(id, sequence.as_bytes(), config).unwrap()).unwrap()
+        });
+        assert_eq!(batch, singles);
 
         let direct = engine
             .search(

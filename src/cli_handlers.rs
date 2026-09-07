@@ -1,6 +1,7 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use needletail::parse_fastx_file;
+use rayon::prelude::*;
 use std::fs::remove_file;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -102,28 +103,41 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     let mut count = 0usize;
     {
         let mut output = BufWriter::new(temporary.as_file_mut());
-        while let Some(record) = input.next() {
-            let record = record?;
-            if count != 0 && args.query_id.is_some() {
-                return Err(anyhow::anyhow!(
-                    "--query-id requires a query file with one record"
-                ));
+        loop {
+            let mut queries = Vec::with_capacity(rayon::current_num_threads());
+            for _ in 0..rayon::current_num_threads() {
+                let Some(record) = input.next() else { break };
+                let record = record?;
+                if count != 0 && args.query_id.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "--query-id requires a query file with one record"
+                    ));
+                }
+                let id = match &args.query_id {
+                    Some(id) => id.clone(),
+                    None => std::str::from_utf8(
+                        record
+                            .id()
+                            .split(|byte| byte.is_ascii_whitespace())
+                            .next()
+                            .unwrap_or_default(),
+                    )?
+                    .to_string(),
+                };
+                queries.push((id, record.seq().into_owned()));
+                count += 1;
             }
-            let id = match &args.query_id {
-                Some(id) => id.clone(),
-                None => std::str::from_utf8(
-                    record
-                        .id()
-                        .split(|byte| byte.is_ascii_whitespace())
-                        .next()
-                        .unwrap_or_default(),
-                )?
-                .to_string(),
-            };
-            let result = engine.search(id, record.seq().as_ref(), args.config)?;
-            serde_json::to_writer(&mut output, &result)?;
-            output.write_all(b"\n")?;
-            count += 1;
+            if queries.is_empty() {
+                break;
+            }
+            let results = queries
+                .par_iter()
+                .map(|(id, sequence)| engine.search(id.as_str(), sequence, args.config))
+                .collect::<Result<Vec<_>, _>>()?;
+            for result in results {
+                serde_json::to_writer(&mut output, &result)?;
+                output.write_all(b"\n")?;
+            }
         }
         output.flush()?;
     }
