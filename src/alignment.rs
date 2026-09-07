@@ -1,3 +1,4 @@
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 use thiserror::Error;
@@ -97,7 +98,7 @@ impl AlignmentConfig {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 pub struct Alignment {
     pub score: i32,
     pub strand: Strand,
@@ -109,6 +110,24 @@ pub struct Alignment {
     pub deletions: u64,
     pub cigar: String,
     pub edit_script: Vec<EditRun>,
+}
+
+impl Serialize for Alignment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer.serialize_struct("Alignment", 11)?;
+        record.serialize_field("score", &self.score)?;
+        record.serialize_field("strand", &self.strand)?;
+        record.serialize_field("query_interval", &self.query_interval)?;
+        record.serialize_field("target_interval", &self.target_interval)?;
+        record.serialize_field("matches", &self.matches)?;
+        record.serialize_field("substitutions", &self.substitutions)?;
+        record.serialize_field("insertions", &self.insertions)?;
+        record.serialize_field("deletions", &self.deletions)?;
+        record.serialize_field("cigar", &self.cigar)?;
+        record.serialize_field("edit_script", &self.edit_script)?;
+        record.serialize_field("identity", &self.identity())?;
+        record.end()
+    }
 }
 
 impl Alignment {
@@ -1124,6 +1143,12 @@ mod tests {
         assert_eq!(alignment.cigar, "4=1I4=");
         assert_eq!(alignment.insertions, 1);
         assert_eq!(alignment.identity(), 8.0 / 9.0);
+        let json = serde_json::to_value(&alignment).unwrap();
+        assert_eq!(json["identity"].as_f64().unwrap(), alignment.identity());
+        assert_eq!(
+            serde_json::from_value::<Alignment>(json).unwrap(),
+            alignment
+        );
         alignment.validate_cigar().unwrap();
     }
 
