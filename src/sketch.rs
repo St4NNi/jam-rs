@@ -109,6 +109,7 @@ impl BucketWriter {
         match self.receiver.recv_timeout(timeout) {
             Ok(entry) => {
                 self.writer.write(&entry)?;
+                self.drain()?;
                 Ok(true)
             }
             Err(crossfire::RecvTimeoutError::Timeout) => Ok(true),
@@ -869,6 +870,24 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn drain_ready_entries_while_sender_is_connected() {
+        let temp = tempfile::tempdir().unwrap();
+        let (sender, receiver) = mpsc::bounded_blocking(4);
+        let mut bucket = BucketWriter {
+            receiver,
+            writer: EntryWriter::new(temp.path().join("bucket.bin"), 64).unwrap(),
+            bucket_id: 0,
+        };
+        for hash in 0..4 {
+            sender.send(Entry::new(hash, 0)).unwrap();
+        }
+        assert!(bucket.drain_until_disconnected(Duration::ZERO).unwrap());
+        assert_eq!(bucket.writer.count(), 4);
+        drop(sender);
+        assert!(!bucket.drain_until_disconnected(Duration::ZERO).unwrap());
+    }
 
     fn make_fasta(seqs: &[(&str, &str)]) -> NamedTempFile {
         let mut f = NamedTempFile::with_suffix(".fa").unwrap();
