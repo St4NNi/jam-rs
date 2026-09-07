@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
 
 pub use crate::jidx_postings::{SeedDocument, SeedEntry, SeedOccurrence};
@@ -41,7 +41,7 @@ pub struct Contig<'a> {
 pub struct JidxReader {
     mmap: Mmap,
     header: Header,
-    verified_pages: Mutex<HashSet<u64>>,
+    verified_pages: Box<[AtomicU64]>,
 }
 
 impl JidxReader {
@@ -58,10 +58,12 @@ impl JidxReader {
         // SAFETY: the mapping is read-only and retained by the reader for all returned borrows.
         let mmap = unsafe { MmapOptions::new().map(&file)? };
         let header = Header::decode_header(&mmap[..HEADER_SIZE], file_len)?;
+        let verified_pages =
+            verified_page_cache(header.section(SectionKind::BlockChecksums).offset)?;
         let reader = Self {
             mmap,
             header,
-            verified_pages: Mutex::new(HashSet::new()),
+            verified_pages,
         };
         reader.validate_documents()?;
         Ok(reader)
@@ -280,12 +282,17 @@ impl JidxReader {
         let first_page = start / PAGE_SIZE;
         let last_page = (end - 1) / PAGE_SIZE;
         for page in first_page..=last_page {
-            let cached = self
+            let page_bit = page
+                .checked_sub(1)
+                .ok_or(JidxError::Invalid("page checksum"))?;
+            let word_index =
+                usize::try_from(page_bit / 64).map_err(|_| JidxError::Invalid("page checksum"))?;
+            let bit_mask = 1u64 << (page_bit % 64);
+            let word = self
                 .verified_pages
-                .lock()
-                .map_err(|_| JidxError::Invalid("page checksum cache"))?
-                .contains(&page);
-            if cached {
+                .get(word_index)
+                .ok_or(JidxError::Invalid("page checksum"))?;
+            if word.load(Ordering::Relaxed) & bit_mask != 0 {
                 continue;
             }
 
@@ -326,15 +333,8 @@ impl JidxReader {
             if self.mmap.get(checksum_start..checksum_end) != Some(actual.as_slice()) {
                 return Err(JidxError::ChecksumMismatch);
             }
-
-            let mut cache = self
-                .verified_pages
-                .lock()
-                .map_err(|_| JidxError::Invalid("page checksum cache"))?;
-            if cache.len() >= 4096 {
-                cache.clear();
-            }
-            cache.insert(page);
+            // The mmap is immutable; this bit memoizes only the completed hash comparison.
+            word.fetch_or(bit_mask, Ordering::Relaxed);
         }
         Ok(bytes)
     }
@@ -407,6 +407,24 @@ impl JidxReader {
     }
 }
 
+fn verified_page_cache(checksum_offset: u64) -> Result<Box<[AtomicU64]>, JidxError> {
+    let data_pages = checksum_offset
+        .checked_div(PAGE_SIZE)
+        .and_then(|pages| pages.checked_sub(1))
+        .ok_or(JidxError::Invalid("page checksum cache"))?;
+    let words = data_pages
+        .checked_add(63)
+        .ok_or(JidxError::Invalid("page checksum cache"))?
+        / 64;
+    let words = usize::try_from(words).map_err(|_| JidxError::Invalid("page checksum cache"))?;
+    let mut cache = Vec::new();
+    cache
+        .try_reserve_exact(words)
+        .map_err(|_| JidxError::Invalid("page checksum cache"))?;
+    cache.resize_with(words, || AtomicU64::new(0));
+    Ok(cache.into_boxed_slice())
+}
+
 #[derive(Debug, Error)]
 pub enum JidxReaderError {
     #[error("JIDX I/O failed: {0}")]
@@ -451,10 +469,29 @@ mod tests {
         bad_document_posting: bool,
         bad_occurrence: bool,
     ) -> (tempfile::TempDir, PathBuf) {
+        fixture_with_string_pages(
+            bad_metagenome_id,
+            corrupt_padding,
+            bad_document_posting,
+            bad_occurrence,
+            None,
+        )
+    }
+
+    fn fixture_with_string_pages(
+        bad_metagenome_id: bool,
+        corrupt_padding: bool,
+        bad_document_posting: bool,
+        bad_occurrence: bool,
+        string_pages: Option<u64>,
+    ) -> (tempfile::TempDir, PathBuf) {
         let mut strings = Vec::new();
         let name = push_string(&mut strings, "doc");
         let bgzf = push_string(&mut strings, "seq.bgz");
         let contig_name = push_string(&mut strings, "contig");
+        if let Some(pages) = string_pages {
+            strings.resize((pages * PAGE_SIZE) as usize, 0);
+        }
 
         let mut document = vec![0; DOCUMENT_RECORD_SIZE as usize];
         put_string(&mut document, 0, name);
@@ -710,6 +747,27 @@ mod tests {
             reader.find_seed(0x1234),
             Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
         ));
+        assert!(matches!(
+            reader.find_seed(0x1234),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+    }
+
+    #[test]
+    fn verified_page_bitmap_retains_more_than_4096_pages() {
+        let pages = 4097u64;
+        let (_directory, path) = fixture_with_string_pages(false, false, false, false, Some(pages));
+        let reader = JidxReader::open(path).unwrap();
+        let strings = reader.header.section(SectionKind::Strings);
+        reader
+            .checked_bytes(strings.offset, strings.offset + strings.length)
+            .unwrap();
+
+        for page in [1, pages] {
+            let page_bit = page - 1;
+            let word = &reader.verified_pages[(page_bit / 64) as usize];
+            assert_ne!(word.load(Ordering::Relaxed) & (1u64 << (page_bit % 64)), 0);
+        }
     }
 
     #[test]
