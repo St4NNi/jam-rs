@@ -75,27 +75,19 @@ pub fn build_local_jidx(
         let fai_path = resolve_local(base, &entry.fai)?;
         let gzi_path = resolve_local(base, &entry.gzi)?;
         let (bgzf_bytes, bgzf_sha256) = file_digest(&bgzf_path)?;
-        let (fai_bytes, fai_sha256) = file_digest(&fai_path)?;
-        let (gzi_bytes, gzi_sha256) = file_digest(&gzi_path)?;
         let fai = parse_fai(&std::fs::read(&fai_path)?)?;
+        let gzi = std::fs::read(&gzi_path)?;
         let bgzf_uri = path_text(&bgzf_path)?;
-        let fai_uri = path_text(&fai_path)?;
-        let gzi_uri = path_text(&gzi_path)?;
         let source = Metagenome {
             id: 0,
             name: &entry.name,
             bgzf_uri: &bgzf_uri,
-            fai_uri: &fai_uri,
-            gzi_uri: &gzi_uri,
             bgzf_bytes,
-            fai_bytes,
-            gzi_bytes,
             bgzf_sha256,
-            fai_sha256,
-            gzi_sha256,
             contig_start: 0,
             contig_count: u32::try_from(fai.len())
                 .map_err(|_| JidxBuildError::Invalid("contig count"))?,
+            gzi: &gzi,
         };
         let mut reader = BgzfReader::open(source, None, false)?;
         let mut contigs = Vec::with_capacity(fai.len());
@@ -126,14 +118,9 @@ pub fn build_local_jidx(
         metagenomes.push(MetagenomeInput {
             name: entry.name,
             bgzf_uri,
-            fai_uri,
-            gzi_uri,
             bgzf_bytes,
-            fai_bytes,
-            gzi_bytes,
             bgzf_sha256,
-            fai_sha256,
-            gzi_sha256,
+            gzi,
             contigs,
         });
     }
@@ -399,7 +386,17 @@ mod tests {
         .unwrap();
         assert_eq!(stats.source_bases, sequence.len() as u64);
         assert!(stats.written.seeds > 0);
-        JidxReader::open(output).unwrap().verify_checksum().unwrap();
+        let index = JidxReader::open(output).unwrap();
+        index.verify_checksum().unwrap();
+        std::fs::remove_file(fai_path).unwrap();
+        std::fs::remove_file(gzi_path).unwrap();
+        let metagenome = index.metagenome(0).unwrap().unwrap();
+        let contig = index.contig(0).unwrap().unwrap();
+        let mut reader = BgzfReader::open(metagenome, None, false).unwrap();
+        assert_eq!(
+            reader.read_contig_range(contig, 3, 17).unwrap(),
+            sequence.as_bytes()[3..17]
+        );
     }
 
     #[test]

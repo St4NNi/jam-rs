@@ -1,15 +1,15 @@
 use crate::jidx::{
     CONTIG_POSTING_SIZE, CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_POSTING_SIZE,
-    DOCUMENT_RECORD_SIZE, DocumentRecord, FilterKind, HEADER_SIZE, Header, JidxError, PostingCodec,
-    SECTION_COUNT, SEED_RECORD_SIZE, SectionDescriptor, SectionKind, SeedScheme, StringRef,
-    put_u32, sha256_reader,
+    DOCUMENT_RECORD_SIZE, DocumentRecord, FilterKind, HEADER_SIZE, Header, JidxError, PAGE_SIZE,
+    PostingCodec, SECTION_COUNT, SEED_RECORD_SIZE, SectionDescriptor, SectionKind, SeedScheme,
+    StringRef, put_u32, sha256, sha256_reader,
 };
 use crate::jidx_postings::{
     SeedEntry, SeedOccurrence, encode_occurrence, encode_seed, validate_packed_key,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use thiserror::Error;
 
@@ -34,14 +34,9 @@ pub struct ContigInput {
 pub struct MetagenomeInput {
     pub name: String,
     pub bgzf_uri: String,
-    pub fai_uri: String,
-    pub gzi_uri: String,
     pub bgzf_bytes: u64,
-    pub fai_bytes: u64,
-    pub gzi_bytes: u64,
     pub bgzf_sha256: [u8; 32],
-    pub fai_sha256: [u8; 32],
-    pub gzi_sha256: [u8; 32],
+    pub gzi: Vec<u8>,
     pub contigs: Vec<ContigInput>,
 }
 
@@ -83,6 +78,7 @@ pub fn write_jidx(
     let mut temporary = tempfile::Builder::new()
         .prefix(".jidx-")
         .tempfile_in(parent)?;
+    let checksum_input = temporary.reopen()?;
     let file = temporary.as_file_mut();
     file.write_all(&[0; HEADER_SIZE])?;
 
@@ -131,6 +127,21 @@ pub fn write_jidx(
             file.write_all(&encode_occurrence(*occurrence))?;
         }
     }
+    write_padding(file, prepared.sections[6].offset)?;
+    file.write_all(&prepared.gzi)?;
+    write_padding(file, prepared.sections[7].offset)?;
+    file.flush()?;
+    let mut checksum_input = BufReader::new(checksum_input);
+    checksum_input.seek(SeekFrom::Start(PAGE_SIZE))?;
+    {
+        let mut checksums = BufWriter::new(&mut *file);
+        let mut page = [0; PAGE_SIZE as usize];
+        for _ in 0..prepared.sections[7].length / 32 {
+            checksum_input.read_exact(&mut page)?;
+            checksums.write_all(&sha256(&page))?;
+        }
+        checksums.flush()?;
+    }
     let file_bytes = file.stream_position()?;
     if file_bytes != prepared.file_bytes {
         return Err(JidxWriteError::Invalid("written length"));
@@ -178,6 +189,7 @@ pub fn write_jidx(
 
 struct Prepared {
     strings: Vec<u8>,
+    gzi: Vec<u8>,
     documents: Vec<DocumentRecord>,
     contigs: Vec<ContigRecord>,
     contig_documents: Vec<u32>,
@@ -206,6 +218,7 @@ fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
     }
 
     let mut strings = Vec::new();
+    let mut gzi = Vec::new();
     let mut documents = Vec::with_capacity(metagenomes.len());
     let mut contigs = Vec::new();
     let mut contig_documents = Vec::new();
@@ -214,18 +227,18 @@ fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
         validate_metagenome(metagenome)?;
         let document_id =
             u32::try_from(document_id).map_err(|_| JidxWriteError::Invalid("metagenome count"))?;
-        let mut source_contigs: Vec<_> = metagenome.contigs.iter().collect();
-        source_contigs.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-        if source_contigs.is_empty()
-            || source_contigs
-                .windows(2)
-                .any(|pair| pair[0].name == pair[1].name)
+        let mut contig_names = HashSet::new();
+        if metagenome.contigs.is_empty()
+            || metagenome
+                .contigs
+                .iter()
+                .any(|contig| !contig_names.insert(&contig.name))
         {
             return Err(JidxWriteError::Invalid("metagenome contigs"));
         }
         let contig_start =
             u32::try_from(contigs.len()).map_err(|_| JidxWriteError::Invalid("contig count"))?;
-        for contig in source_contigs {
+        for contig in &metagenome.contigs {
             validate_contig(contig, input)?;
             let contig_id = u32::try_from(contigs.len())
                 .map_err(|_| JidxWriteError::Invalid("contig count"))?;
@@ -252,19 +265,18 @@ fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
         documents.push(DocumentRecord {
             name: push_string(&mut strings, &metagenome.name)?,
             bgzf_uri: push_string(&mut strings, &metagenome.bgzf_uri)?,
-            fai_uri: push_string(&mut strings, &metagenome.fai_uri)?,
-            gzi_uri: push_string(&mut strings, &metagenome.gzi_uri)?,
             bgzf_bytes: metagenome.bgzf_bytes,
-            fai_bytes: metagenome.fai_bytes,
-            gzi_bytes: metagenome.gzi_bytes,
             contig_start,
             contig_count: u32::try_from(contigs.len())
                 .map_err(|_| JidxWriteError::Invalid("contig count"))?
                 - contig_start,
             bgzf_sha256: metagenome.bgzf_sha256,
-            fai_sha256: metagenome.fai_sha256,
-            gzi_sha256: metagenome.gzi_sha256,
+            gzi_offset: u64::try_from(gzi.len())
+                .map_err(|_| JidxWriteError::Invalid("GZI offset"))?,
+            gzi_length: u64::try_from(metagenome.gzi.len())
+                .map_err(|_| JidxWriteError::Invalid("GZI length"))?,
         });
+        gzi.extend_from_slice(&metagenome.gzi);
     }
     for occurrences in seeds.values_mut() {
         occurrences.sort_unstable_by_key(|occurrence| (occurrence.contig_id, occurrence.position));
@@ -301,10 +313,13 @@ fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
         occurrences
             .checked_mul(u64::from(CONTIG_POSTING_SIZE))
             .ok_or(JidxWriteError::Invalid("contig postings"))?,
+        u64::try_from(gzi.len()).map_err(|_| JidxWriteError::Invalid("GZI length"))?,
+        0,
     ];
     let (sections, file_bytes) = section_layout(lengths)?;
     Ok(Prepared {
         strings,
+        gzi,
         documents,
         contigs,
         contig_documents,
@@ -316,15 +331,11 @@ fn prepare(input: &JidxInput) -> Result<Prepared, JidxWriteError> {
 }
 
 fn validate_metagenome(input: &MetagenomeInput) -> Result<(), JidxWriteError> {
-    if input.bgzf_bytes == 0
-        || input.fai_bytes == 0
-        || input.gzi_bytes == 0
-        || input.bgzf_sha256 == [0; 32]
-        || input.fai_sha256 == [0; 32]
-        || input.gzi_sha256 == [0; 32]
-    {
+    if input.bgzf_bytes == 0 || input.bgzf_sha256 == [0; 32] || input.gzi.len() < 8 {
         return Err(JidxWriteError::Invalid("metagenome metadata"));
     }
+    let mut gzi = noodles_bgzf::gzi::io::Reader::new(input.gzi.as_slice());
+    gzi.read_index()?;
     Ok(())
 }
 
@@ -393,11 +404,16 @@ fn section_layout(
 ) -> Result<([SectionDescriptor; SECTION_COUNT], u64), JidxWriteError> {
     let mut offset = HEADER_SIZE as u64;
     let mut sections = Vec::with_capacity(SECTION_COUNT);
-    for (kind, length) in SectionKind::ALL.into_iter().zip(lengths) {
+    for (kind, mut length) in SectionKind::ALL.into_iter().zip(lengths) {
         offset = offset
-            .checked_add(7)
+            .checked_add(PAGE_SIZE - 1)
             .ok_or(JidxWriteError::Invalid("file length"))?
-            & !7;
+            & !(PAGE_SIZE - 1);
+        if kind == SectionKind::BlockChecksums {
+            length = (offset / PAGE_SIZE - 1)
+                .checked_mul(32)
+                .ok_or(JidxWriteError::Invalid("checksum table length"))?;
+        }
         sections.push(SectionDescriptor {
             kind,
             record_size: kind.record_size(),
@@ -454,14 +470,9 @@ mod tests {
         MetagenomeInput {
             name: name.into(),
             bgzf_uri: format!("{name}.bgz"),
-            fai_uri: format!("{name}.bgz.fai"),
-            gzi_uri: format!("{name}.bgz.gzi"),
             bgzf_bytes: 100,
-            fai_bytes: 20,
-            gzi_bytes: 16,
             bgzf_sha256: [marker; 32],
-            fai_sha256: [marker.wrapping_add(1); 32],
-            gzi_sha256: [marker.wrapping_add(2); 32],
+            gzi: vec![0; 8],
             contigs: vec![ContigInput {
                 name: contig.into(),
                 length: 100,

@@ -140,6 +140,8 @@ pub fn run() -> Result<()> {
             query,
             database,
             index,
+            manifest,
+            audit_index,
             output,
             query_id,
             linear,
@@ -166,6 +168,8 @@ pub fn run() -> Result<()> {
                 query,
                 database,
                 index,
+                manifest,
+                audit_index,
                 output,
                 query_id,
                 config: trace::TraceConfig {

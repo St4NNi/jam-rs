@@ -4,9 +4,10 @@ use thiserror::Error;
 
 pub const MAGIC: [u8; 8] = *b"JIDX\0\0\0\0";
 pub const VERSION: u16 = 2;
-pub const HEADER_SIZE: usize = 320;
-pub const SECTION_COUNT: usize = 6;
-pub const DOCUMENT_RECORD_SIZE: u32 = 160;
+pub const HEADER_SIZE: usize = 512;
+pub const PAGE_SIZE: u64 = 4096;
+pub const SECTION_COUNT: usize = 8;
+pub const DOCUMENT_RECORD_SIZE: u32 = 80;
 pub const CONTIG_RECORD_SIZE: u32 = 40;
 pub const SEED_RECORD_SIZE: u32 = 40;
 pub const DOCUMENT_POSTING_SIZE: u32 = 4;
@@ -84,6 +85,8 @@ pub enum SectionKind {
     Seeds = 4,
     DocumentPostings = 5,
     ContigPostings = 6,
+    Gzi = 7,
+    BlockChecksums = 8,
 }
 
 impl SectionKind {
@@ -94,16 +97,19 @@ impl SectionKind {
         Self::Seeds,
         Self::DocumentPostings,
         Self::ContigPostings,
+        Self::Gzi,
+        Self::BlockChecksums,
     ];
 
     pub(crate) const fn record_size(self) -> u32 {
         match self {
-            Self::Strings => 0,
+            Self::Strings | Self::Gzi => 0,
             Self::Documents => DOCUMENT_RECORD_SIZE,
             Self::Contigs => CONTIG_RECORD_SIZE,
             Self::Seeds => SEED_RECORD_SIZE,
             Self::DocumentPostings => DOCUMENT_POSTING_SIZE,
             Self::ContigPostings => CONTIG_POSTING_SIZE,
+            Self::BlockChecksums => 32,
         }
     }
 
@@ -115,6 +121,8 @@ impl SectionKind {
             4 => Ok(Self::Seeds),
             5 => Ok(Self::DocumentPostings),
             6 => Ok(Self::ContigPostings),
+            7 => Ok(Self::Gzi),
+            8 => Ok(Self::BlockChecksums),
             _ => Err(JidxError::Invalid("section kind")),
         }
     }
@@ -175,7 +183,7 @@ impl Header {
             put_u64(&mut bytes, start + 8, section.offset);
             put_u64(&mut bytes, start + 16, section.length);
         }
-        put_u16(&mut bytes, 288, self.minimizer_window);
+        put_u16(&mut bytes, 336, self.minimizer_window);
         Ok(bytes)
     }
 
@@ -207,7 +215,7 @@ impl Header {
         if read_u32(bytes, 12) != 0 || read_u16(bytes, 22) != 0 {
             return Err(JidxError::Invalid("header flags"));
         }
-        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[290..].iter().any(|byte| *byte != 0)
+        if read_u16(bytes, 20) != SECTION_COUNT as u16 || bytes[338..].iter().any(|byte| *byte != 0)
         {
             return Err(JidxError::Invalid("header reservation"));
         }
@@ -234,7 +242,7 @@ impl Header {
             contig_count: read_u32(bytes, 28),
             seed_count: read_u64(bytes, 32),
             occurrence_count: read_u64(bytes, 40),
-            minimizer_window: read_u16(bytes, 288),
+            minimizer_window: read_u16(bytes, 336),
             jam_sha256: bytes[48..80].try_into().expect("JIDX jam digest"),
             manifest_sha256: bytes[80..112].try_into().expect("JIDX manifest digest"),
             body_sha256: bytes[112..144].try_into().expect("JIDX body digest"),
@@ -282,13 +290,16 @@ impl Header {
         {
             return Err(JidxError::Invalid("required metadata"));
         }
+        if self.section(SectionKind::Strings).offset != PAGE_SIZE {
+            return Err(JidxError::Invalid("first section offset"));
+        }
         let mut previous_end = HEADER_SIZE as u64;
         for (index, section) in self.sections.iter().enumerate() {
             let expected = SectionKind::ALL[index];
             if section.kind != expected || section.record_size != expected.record_size() {
                 return Err(JidxError::Invalid("section descriptor"));
             }
-            if section.offset < previous_end || section.offset % 8 != 0 {
+            if section.offset < previous_end || section.offset % PAGE_SIZE != 0 {
                 return Err(JidxError::Invalid("section order"));
             }
             previous_end = section
@@ -306,6 +317,10 @@ impl Header {
         self.expect_length(SectionKind::Contigs, u64::from(self.contig_count))?;
         self.expect_length(SectionKind::Seeds, self.seed_count)?;
         self.expect_length(SectionKind::ContigPostings, self.occurrence_count)?;
+        self.expect_length(
+            SectionKind::BlockChecksums,
+            self.section(SectionKind::BlockChecksums).offset / PAGE_SIZE - 1,
+        )?;
         let documents = self.section(SectionKind::DocumentPostings);
         if !documents
             .length
@@ -334,39 +349,16 @@ pub(crate) struct StringRef {
     pub length: u32,
 }
 
-impl StringRef {
-    pub fn resolve(self, strings: &[u8]) -> Result<&str, JidxError> {
-        let start =
-            usize::try_from(self.offset).map_err(|_| JidxError::Invalid("string offset"))?;
-        let length =
-            usize::try_from(self.length).map_err(|_| JidxError::Invalid("string length"))?;
-        let end = start
-            .checked_add(length)
-            .ok_or(JidxError::Invalid("string range"))?;
-        let bytes = strings
-            .get(start..end)
-            .ok_or(JidxError::Invalid("string range"))?;
-        if bytes.is_empty() || bytes.iter().any(|byte| matches!(byte, 0 | b'\n' | b'\r')) {
-            return Err(JidxError::Invalid("string value"));
-        }
-        std::str::from_utf8(bytes).map_err(|_| JidxError::Invalid("string encoding"))
-    }
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct DocumentRecord {
     pub name: StringRef,
     pub bgzf_uri: StringRef,
-    pub fai_uri: StringRef,
-    pub gzi_uri: StringRef,
     pub bgzf_bytes: u64,
-    pub fai_bytes: u64,
-    pub gzi_bytes: u64,
     pub contig_start: u32,
     pub contig_count: u32,
     pub bgzf_sha256: [u8; 32],
-    pub fai_sha256: [u8; 32],
-    pub gzi_sha256: [u8; 32],
+    pub gzi_offset: u64,
+    pub gzi_length: u64,
 }
 
 impl DocumentRecord {
@@ -374,16 +366,12 @@ impl DocumentRecord {
         let mut bytes = [0; DOCUMENT_RECORD_SIZE as usize];
         put_string_ref(&mut bytes, 0, self.name);
         put_string_ref(&mut bytes, 8, self.bgzf_uri);
-        put_string_ref(&mut bytes, 16, self.fai_uri);
-        put_string_ref(&mut bytes, 24, self.gzi_uri);
-        put_u64(&mut bytes, 32, self.bgzf_bytes);
-        put_u64(&mut bytes, 40, self.fai_bytes);
-        put_u64(&mut bytes, 48, self.gzi_bytes);
-        put_u32(&mut bytes, 56, self.contig_start);
-        put_u32(&mut bytes, 60, self.contig_count);
-        bytes[64..96].copy_from_slice(&self.bgzf_sha256);
-        bytes[96..128].copy_from_slice(&self.fai_sha256);
-        bytes[128..160].copy_from_slice(&self.gzi_sha256);
+        put_u64(&mut bytes, 16, self.bgzf_bytes);
+        put_u32(&mut bytes, 24, self.contig_start);
+        put_u32(&mut bytes, 28, self.contig_count);
+        bytes[32..64].copy_from_slice(&self.bgzf_sha256);
+        put_u64(&mut bytes, 64, self.gzi_offset);
+        put_u64(&mut bytes, 72, self.gzi_length);
         bytes
     }
 
@@ -394,16 +382,12 @@ impl DocumentRecord {
         Ok(Self {
             name: string_ref(bytes, 0),
             bgzf_uri: string_ref(bytes, 8),
-            fai_uri: string_ref(bytes, 16),
-            gzi_uri: string_ref(bytes, 24),
-            bgzf_bytes: read_u64(bytes, 32),
-            fai_bytes: read_u64(bytes, 40),
-            gzi_bytes: read_u64(bytes, 48),
-            contig_start: read_u32(bytes, 56),
-            contig_count: read_u32(bytes, 60),
-            bgzf_sha256: bytes[64..96].try_into().expect("JIDX BGZF digest"),
-            fai_sha256: bytes[96..128].try_into().expect("JIDX FAI digest"),
-            gzi_sha256: bytes[128..160].try_into().expect("JIDX GZI digest"),
+            bgzf_bytes: read_u64(bytes, 16),
+            contig_start: read_u32(bytes, 24),
+            contig_count: read_u32(bytes, 28),
+            bgzf_sha256: bytes[32..64].try_into().expect("JIDX BGZF digest"),
+            gzi_offset: read_u64(bytes, 64),
+            gzi_length: read_u64(bytes, 72),
         })
     }
 }
@@ -515,10 +499,10 @@ mod tests {
     use super::*;
 
     fn fixture() -> (Header, Vec<u8>) {
-        let lengths = [8, 160, 40, 40, 4, 16];
+        let lengths = [8, 80, 40, 40, 4, 16, 8, 224];
         let mut offset = HEADER_SIZE as u64;
         let sections = std::array::from_fn(|index| {
-            offset = offset.next_multiple_of(8);
+            offset = offset.next_multiple_of(PAGE_SIZE);
             let section = SectionDescriptor {
                 kind: SectionKind::ALL[index],
                 record_size: SectionKind::ALL[index].record_size(),
@@ -556,10 +540,10 @@ mod tests {
         let (header, file) = fixture();
         assert_eq!(
             &file[..24],
-            b"JIDX\0\0\0\0\x02\x00\x40\x01\0\0\0\0\x15\x02\x01\0\x06\0\0\0"
+            b"JIDX\0\0\0\0\x02\x00\x00\x02\0\0\0\0\x15\x02\x01\0\x08\0\0\0"
         );
-        assert_eq!(&file[288..290], &16u16.to_le_bytes());
-        assert_eq!(&file[290..HEADER_SIZE], &[0; 30]);
+        assert_eq!(&file[336..338], &16u16.to_le_bytes());
+        assert_eq!(&file[338..HEADER_SIZE], &[0; 174]);
         assert_eq!(Header::decode(&file).unwrap(), header);
     }
 

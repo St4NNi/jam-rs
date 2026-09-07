@@ -58,6 +58,8 @@ pub(crate) struct TraceArgs {
     pub query: PathBuf,
     pub database: PathBuf,
     pub index: PathBuf,
+    pub manifest: PathBuf,
+    pub audit_index: bool,
     pub output: PathBuf,
     pub query_id: Option<String>,
     pub config: TraceConfig,
@@ -89,8 +91,10 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         return Err(anyhow::anyhow!("Invalid output path: {:?}", args.output));
     }
 
-    let engine = TraceEngine::open(args.database, args.index, args.s3)?;
-    engine.verify_index()?;
+    let engine = TraceEngine::open(args.database, args.index, args.manifest, args.s3)?;
+    if args.audit_index {
+        engine.verify_index()?;
+    }
     let mut input = parse_fastx_file(&args.query)?;
     let mut temporary = tempfile::Builder::new()
         .prefix(".jam-trace-")
@@ -1092,6 +1096,8 @@ mod tests {
                 query: directory.path().join("missing.fa"),
                 database: directory.path().join("missing.jam"),
                 index: directory.path().join("missing.jidx"),
+                manifest: directory.path().join("missing.json"),
+                audit_index: false,
                 output: output.clone(),
                 query_id: None,
                 config: TraceConfig::default(),

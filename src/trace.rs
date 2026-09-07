@@ -10,9 +10,10 @@ use needletail::Sequence;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{self, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,6 +84,7 @@ pub struct MetagenomeTrace {
     pub exact_seed_hits: u64,
     pub compressed_bytes_read: u64,
     pub range_requests: u64,
+    pub bgzf_blocks_decoded: u64,
     pub contigs: Vec<TraceContig>,
     pub mosaic: Mosaic,
 }
@@ -94,6 +96,7 @@ pub struct TraceContig {
 }
 
 pub struct TraceEngine {
+    jam_path: PathBuf,
     screen: QueryEngine,
     index: JidxReader,
     sample_to_metagenome: Vec<MetagenomeId>,
@@ -104,23 +107,24 @@ impl TraceEngine {
     pub fn open(
         jam: impl AsRef<Path>,
         jidx: impl AsRef<Path>,
+        manifest: impl AsRef<Path>,
         s3: Option<S3Config>,
     ) -> Result<Self, TraceError> {
         let jam = jam.as_ref();
         let index = JidxReader::open(jidx)?;
-        let jam_sha256 = sha256_reader(BufReader::new(File::open(jam)?))?;
-        if jam_sha256 != index.header().jam_sha256 {
+        let manifest_sha256 = sha256_reader(BufReader::new(File::open(manifest)?))?;
+        if manifest_sha256 != index.header().manifest_sha256 {
             return Err(TraceError::Invalid(
-                "JIDX belongs to a different JAM database",
+                "JIDX belongs to a different root manifest",
             ));
         }
         let screen = QueryEngine::open(jam)?;
         let mut by_name = HashMap::new();
         for id in 0..index.header().document_count {
-            let metagenome = index
-                .metagenome(id)?
+            let name = index
+                .metagenome_name(id)?
                 .ok_or(TraceError::Invalid("missing JIDX metagenome"))?;
-            if by_name.insert(metagenome.name.to_string(), id).is_some() {
+            if by_name.insert(name.to_string(), id).is_some() {
                 return Err(TraceError::Invalid("duplicate JIDX metagenome"));
             }
         }
@@ -136,6 +140,7 @@ impl TraceEngine {
             return Err(TraceError::Invalid("JAM and JIDX names differ"));
         }
         Ok(Self {
+            jam_path: jam.to_path_buf(),
             screen,
             index,
             sample_to_metagenome,
@@ -144,6 +149,13 @@ impl TraceEngine {
     }
 
     pub fn verify_index(&self) -> Result<(), TraceError> {
+        if sha256_reader(BufReader::new(File::open(&self.jam_path)?))?
+            != self.index.header().jam_sha256
+        {
+            return Err(TraceError::Invalid(
+                "JIDX belongs to a different JAM database",
+            ));
+        }
         self.index.verify_checksum()?;
         Ok(())
     }
@@ -270,7 +282,8 @@ impl TraceEngine {
                     name: contig.name.to_string(),
                 });
             }
-            let stats = reads.get(&candidate.id).copied().unwrap_or_default();
+            let (stats, bgzf_blocks_decoded) =
+                reads.get(&candidate.id).copied().unwrap_or_default();
             metagenomes.push(MetagenomeTrace {
                 metagenome_id: candidate.id,
                 name: candidate.name,
@@ -279,6 +292,7 @@ impl TraceEngine {
                 exact_seed_hits: seed_hits.get(&candidate.id).copied().unwrap_or(0),
                 compressed_bytes_read: stats.bytes_read,
                 range_requests: stats.read_requests,
+                bgzf_blocks_decoded,
                 contigs,
                 mosaic,
             });
@@ -313,7 +327,7 @@ impl TraceEngine {
             .into_iter()
             .next()
             .ok_or(TraceError::Invalid("missing JAM query result"))?;
-        let mut candidates = result
+        result
             .matches
             .into_iter()
             .filter(|candidate| candidate.containment >= config.min_containment)
@@ -324,9 +338,8 @@ impl TraceEngine {
                     .ok_or(TraceError::Invalid("JAM sample ID"))?;
                 let name = self
                     .index
-                    .metagenome(id)?
+                    .metagenome_name(id)?
                     .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
-                    .name
                     .to_string();
                 Ok(Candidate {
                     id,
@@ -336,15 +349,7 @@ impl TraceEngine {
                     exact_seed_hits: 0,
                 })
             })
-            .collect::<Result<Vec<_>, TraceError>>()?;
-        candidates.sort_by(|left, right| {
-            right
-                .containment
-                .total_cmp(&left.containment)
-                .then_with(|| right.shared_hashes.cmp(&left.shared_hashes))
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        Ok(candidates)
+            .collect::<Result<Vec<_>, TraceError>>()
     }
 
     fn rank_candidates(
@@ -364,9 +369,8 @@ impl TraceEngine {
             }
             let name = self
                 .index
-                .metagenome(id)?
+                .metagenome_name(id)?
                 .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
-                .name
                 .to_string();
             candidates.insert(
                 id,
@@ -465,15 +469,15 @@ impl TraceEngine {
         tasks: &[AlignmentTask],
         verify: bool,
     ) -> Result<LoadedRanges, TraceError> {
-        let mut spans = BTreeMap::<(MetagenomeId, ContigId), (u64, u64)>::new();
+        let mut spans = BTreeMap::<(MetagenomeId, ContigId), Vec<(u64, u64)>>::new();
         for task in tasks {
             spans
                 .entry((task.metagenome_id, task.contig_id))
-                .and_modify(|span| {
-                    span.0 = span.0.min(task.target_start);
-                    span.1 = span.1.max(task.target_end);
-                })
-                .or_insert((task.target_start, task.target_end));
+                .or_default()
+                .push((task.target_start, task.target_end));
+        }
+        for contig_spans in spans.values_mut() {
+            coalesce_spans(contig_spans);
         }
         let mut loaded = BTreeMap::new();
         let mut reads = HashMap::new();
@@ -487,23 +491,28 @@ impl TraceEngine {
                 .metagenome(metagenome_id)?
                 .ok_or(TraceError::Invalid("missing source metagenome"))?;
             let mut reader = BgzfReader::open(source, self.s3.as_ref(), verify)?;
-            for (&(_, contig_id), &(start, end)) in
+            for (&(_, contig_id), contig_spans) in
                 spans.range((metagenome_id, 0)..=(metagenome_id, u32::MAX))
             {
                 let contig = self
                     .index
                     .contig(contig_id)?
                     .ok_or(TraceError::Invalid("missing source contig"))?;
-                let sequence = reader.read_contig_range(contig, start, end)?;
-                loaded.insert(
-                    (metagenome_id, contig_id),
-                    LoadedRange {
+                let loaded_ranges = loaded
+                    .entry((metagenome_id, contig_id))
+                    .or_insert_with(Vec::new);
+                for &(start, end) in contig_spans {
+                    loaded_ranges.push(LoadedRange {
                         offset: start,
-                        sequence,
-                    },
-                );
+                        end,
+                        sequence: reader.read_contig_range(contig, start, end)?,
+                    });
+                }
             }
-            reads.insert(metagenome_id, reader.range_stats());
+            reads.insert(
+                metagenome_id,
+                (reader.range_stats(), reader.blocks_decoded()),
+            );
         }
         Ok((loaded, reads))
     }
@@ -512,7 +521,7 @@ impl TraceEngine {
         &self,
         query: &[u8],
         tasks: &[AlignmentTask],
-        loaded: &BTreeMap<(MetagenomeId, ContigId), LoadedRange>,
+        loaded: &BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
         config: TraceConfig,
     ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
         tasks
@@ -522,7 +531,12 @@ impl TraceEngine {
                     linearize_query(query, task.query_start, task.query_span, config.circular)?;
                 let loaded = loaded
                     .get(&(task.metagenome_id, task.contig_id))
-                    .ok_or(TraceError::Invalid("missing loaded contig"))?;
+                    .and_then(|ranges| {
+                        ranges.iter().find(|range| {
+                            range.offset <= task.target_start && range.end >= task.target_end
+                        })
+                    })
+                    .ok_or(TraceError::Invalid("missing loaded range"))?;
                 let start = usize::try_from(task.target_start - loaded.offset)
                     .map_err(|_| TraceError::Invalid("loaded range"))?;
                 let end = usize::try_from(task.target_end - loaded.offset)
@@ -584,12 +598,13 @@ impl TraceEngine {
 }
 
 type LoadedRanges = (
-    BTreeMap<(MetagenomeId, ContigId), LoadedRange>,
-    HashMap<MetagenomeId, crate::range_source::RangeStats>,
+    BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
+    HashMap<MetagenomeId, (crate::range_source::RangeStats, u64)>,
 );
 
 struct LoadedRange {
     offset: u64,
+    end: u64,
     sequence: Vec<u8>,
 }
 
@@ -721,11 +736,9 @@ fn unique_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySe
 }
 
 fn digest_hex(digest: [u8; 32]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(64);
     for byte in digest {
-        output.push(char::from(HEX[usize::from(byte >> 4)]));
-        output.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        write!(&mut output, "{byte:02x}").expect("writing to a string cannot fail");
     }
     output
 }
@@ -743,6 +756,21 @@ fn candidate_completion(
                 .map_err(|_| TraceError::Invalid("candidate count"))?,
         })
     }
+}
+
+fn coalesce_spans(spans: &mut Vec<(u64, u64)>) {
+    spans.sort_unstable();
+    let mut merged = Vec::with_capacity(spans.len());
+    for &(start, end) in spans.iter() {
+        if let Some((_, previous_end)) = merged.last_mut()
+            && start <= *previous_end
+        {
+            *previous_end = (*previous_end).max(end);
+        } else {
+            merged.push((start, end));
+        }
+    }
+    *spans = merged;
 }
 
 fn linearize_query(
@@ -910,7 +938,10 @@ mod tests {
         )
         .unwrap();
 
-        let engine = TraceEngine::open(&jam, &jidx, None).unwrap();
+        let engine = TraceEngine::open(&jam, &jidx, &manifest, None).unwrap();
+        let wrong_manifest = directory.path().join("wrong-manifest.json");
+        std::fs::write(&wrong_manifest, b"{}").unwrap();
+        assert!(TraceEngine::open(&jam, &jidx, wrong_manifest, None).is_err());
         engine.verify_index().unwrap();
         let config = TraceConfig {
             min_seed_hits: 2,
@@ -938,6 +969,7 @@ mod tests {
         assert_eq!(first.metagenomes.len(), 2);
         assert_eq!(first.metagenomes[0].mosaic.covered_bases, 128);
         assert_eq!(first.metagenomes[0].contigs[0].name, "contig");
+        assert!(first.metagenomes[0].bgzf_blocks_decoded > 0);
         serde_json::to_vec(&first).unwrap();
 
         let query = directory.path().join("query.fa");
@@ -947,6 +979,8 @@ mod tests {
             query,
             database: jam,
             index: jidx,
+            manifest,
+            audit_index: false,
             output: output.clone(),
             query_id: None,
             config,
@@ -1115,5 +1149,12 @@ mod tests {
             4,
         );
         assert_eq!(grouped.len(), 2);
+    }
+
+    #[test]
+    fn coalesces_only_overlapping_or_adjacent_target_spans() {
+        let mut spans = vec![(100, 110), (15, 20), (0, 10), (8, 15), (200, 205)];
+        coalesce_spans(&mut spans);
+        assert_eq!(spans, vec![(0, 20), (100, 110), (200, 205)]);
     }
 }

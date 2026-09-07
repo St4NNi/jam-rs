@@ -118,6 +118,9 @@ pub enum Commands {
         /// Query-independent JIDX file
         #[arg(short, long)]
         index: PathBuf,
+        /// Root manifest used to build the JIDX
+        #[arg(short = 'M', long)]
+        manifest: PathBuf,
         /// Atomic JSONL output
         #[arg(short, long)]
         output: PathBuf,
@@ -139,7 +142,10 @@ pub enum Commands {
         /// Minimum exact seed hits in one gap-tolerant region
         #[arg(long, default_value = "2")]
         min_seed_hits: u32,
-        /// Verify complete BGZF, FAI, and GZI checksums before reading
+        /// Audit the complete JAM/JIDX files before searching
+        #[arg(long)]
+        audit_index: bool,
+        /// Verify complete BGZF checksums before reading
         #[arg(long)]
         verify_resources: bool,
         /// Region for S3 resources referenced by the JIDX

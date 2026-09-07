@@ -2,6 +2,7 @@ use crate::jidx::{
     CONTIG_POSTING_SIZE, DOCUMENT_POSTING_SIZE, Header, JidxError, SEED_RECORD_SIZE, SectionKind,
     read_u32, read_u64,
 };
+use crate::jidx_reader::JidxReader;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SeedEntry {
@@ -19,17 +20,14 @@ pub struct SeedOccurrence {
     pub canonical_orientation: bool,
 }
 
-pub(crate) fn lookup(
-    file: &[u8],
-    header: &Header,
-    packed_key: u64,
-) -> Result<Option<SeedEntry>, JidxError> {
+pub(crate) fn lookup(reader: &JidxReader, packed_key: u64) -> Result<Option<SeedEntry>, JidxError> {
+    let header = reader.header();
     validate_packed_key(packed_key, header.k)?;
     let mut low = 0;
     let mut high = header.seed_count;
     while low < high {
         let middle = low + (high - low) / 2;
-        let record = seed_record(file, header, middle)?;
+        let record = seed_record(reader, middle)?;
         match record.packed_key.cmp(&packed_key) {
             std::cmp::Ordering::Less => low = middle + 1,
             std::cmp::Ordering::Greater => high = middle,
@@ -42,20 +40,21 @@ pub(crate) fn lookup(
     Ok(None)
 }
 
-pub(crate) fn validate_table(file: &[u8], header: &Header) -> Result<(), JidxError> {
+pub(crate) fn validate_table(reader: &JidxReader) -> Result<(), JidxError> {
+    let header = reader.header();
     let mut previous = None;
     let mut document_offset = 0;
     let mut occurrence_offset = 0;
     for index in 0..header.seed_count {
-        let record = seed_record(file, header, index)?;
+        let record = seed_record(reader, index)?;
         validate_record(header, record)?;
         if record.document_offset != document_offset
             || record.occurrence_offset != occurrence_offset
         {
             return Err(JidxError::Invalid("posting order"));
         }
-        validate_document_bytes(document_bytes(file, header, record.into())?, header)?;
-        validate_occurrence_bytes(occurrence_bytes(file, header, record.into())?, header)?;
+        validate_document_bytes(document_bytes(reader, record.into())?, header)?;
+        validate_occurrence_bytes(occurrence_bytes(reader, record.into())?, header)?;
         if previous.is_some_and(|key| key >= record.packed_key) {
             return Err(JidxError::Invalid("seed order"));
         }
@@ -75,18 +74,16 @@ pub(crate) fn validate_table(file: &[u8], header: &Header) -> Result<(), JidxErr
     Ok(())
 }
 
-pub(crate) fn entry(file: &[u8], header: &Header, index: u64) -> Result<SeedEntry, JidxError> {
-    let record = seed_record(file, header, index)?;
+pub(crate) fn entry(reader: &JidxReader, index: u64) -> Result<SeedEntry, JidxError> {
+    let header = reader.header();
+    let record = seed_record(reader, index)?;
     validate_record(header, record)?;
     Ok(record.into())
 }
 
-pub(crate) fn documents(
-    file: &[u8],
-    header: &Header,
-    seed: SeedEntry,
-) -> Result<Vec<u32>, JidxError> {
-    let bytes = document_bytes(file, header, seed)?;
+pub(crate) fn documents(reader: &JidxReader, seed: SeedEntry) -> Result<Vec<u32>, JidxError> {
+    let header = reader.header();
+    let bytes = document_bytes(reader, seed)?;
     validate_document_bytes(bytes, header)?;
     Ok(bytes
         .as_chunks::<4>()
@@ -97,11 +94,11 @@ pub(crate) fn documents(
 }
 
 pub(crate) fn occurrences(
-    file: &[u8],
-    header: &Header,
+    reader: &JidxReader,
     seed: SeedEntry,
 ) -> Result<Vec<SeedOccurrence>, JidxError> {
-    let bytes = occurrence_bytes(file, header, seed)?;
+    let header = reader.header();
+    let bytes = occurrence_bytes(reader, seed)?;
     validate_occurrence_bytes(bytes, header)?;
     Ok(bytes
         .as_chunks::<16>()
@@ -136,7 +133,8 @@ impl From<SeedRecord> for SeedEntry {
     }
 }
 
-fn seed_record(file: &[u8], header: &Header, index: u64) -> Result<SeedRecord, JidxError> {
+fn seed_record(reader: &JidxReader, index: u64) -> Result<SeedRecord, JidxError> {
+    let header = reader.header();
     let section = header.section(SectionKind::Seeds);
     let start = section
         .offset
@@ -149,11 +147,7 @@ fn seed_record(file: &[u8], header: &Header, index: u64) -> Result<SeedRecord, J
     let end = start
         .checked_add(u64::from(SEED_RECORD_SIZE))
         .ok_or(JidxError::Invalid("seed range"))?;
-    let start = usize::try_from(start).map_err(|_| JidxError::Invalid("seed offset"))?;
-    let end = usize::try_from(end).map_err(|_| JidxError::Invalid("seed range"))?;
-    let bytes = file
-        .get(start..end)
-        .ok_or(JidxError::Invalid("seed range"))?;
+    let bytes = reader.checked_bytes(start, end)?;
     if read_u32(bytes, 20) != 0 {
         return Err(JidxError::Invalid("seed reservation"));
     }
@@ -206,11 +200,8 @@ fn validate_record(header: &Header, record: SeedRecord) -> Result<(), JidxError>
     Ok(())
 }
 
-fn document_bytes<'a>(
-    file: &'a [u8],
-    header: &Header,
-    seed: SeedEntry,
-) -> Result<&'a [u8], JidxError> {
+fn document_bytes(reader: &JidxReader, seed: SeedEntry) -> Result<&[u8], JidxError> {
+    let header = reader.header();
     let section = header.section(SectionKind::DocumentPostings);
     let start = section
         .offset
@@ -222,18 +213,11 @@ fn document_bytes<'a>(
     let end = start
         .checked_add(length)
         .ok_or(JidxError::Invalid("document posting range"))?;
-    let start =
-        usize::try_from(start).map_err(|_| JidxError::Invalid("document posting offset"))?;
-    let end = usize::try_from(end).map_err(|_| JidxError::Invalid("document posting range"))?;
-    file.get(start..end)
-        .ok_or(JidxError::Invalid("document posting range"))
+    reader.checked_bytes(start, end)
 }
 
-fn occurrence_bytes<'a>(
-    file: &'a [u8],
-    header: &Header,
-    seed: SeedEntry,
-) -> Result<&'a [u8], JidxError> {
+fn occurrence_bytes(reader: &JidxReader, seed: SeedEntry) -> Result<&[u8], JidxError> {
+    let header = reader.header();
     let section = header.section(SectionKind::ContigPostings);
     let start = section
         .offset
@@ -246,10 +230,7 @@ fn occurrence_bytes<'a>(
     let end = start
         .checked_add(length)
         .ok_or(JidxError::Invalid("contig posting range"))?;
-    let start = usize::try_from(start).map_err(|_| JidxError::Invalid("contig posting offset"))?;
-    let end = usize::try_from(end).map_err(|_| JidxError::Invalid("contig posting range"))?;
-    file.get(start..end)
-        .ok_or(JidxError::Invalid("contig posting range"))
+    reader.checked_bytes(start, end)
 }
 
 fn validate_document_bytes(bytes: &[u8], header: &Header) -> Result<(), JidxError> {
