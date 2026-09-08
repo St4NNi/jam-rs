@@ -100,13 +100,21 @@ fn damage_is_detected() {
     write(&path, &contigs(5));
     let original = std::fs::read(&path).unwrap();
     let damaged = directory.path().join("damaged.packed");
-    for at in [0, 30, 70, 200] {
+    for at in [0, 30, 70] {
         let mut bytes = original.clone();
         bytes[at] ^= 1;
         std::fs::remove_file(&damaged).ok();
         std::fs::write(&damaged, &bytes).unwrap();
         assert!(open(&damaged).is_err(), "byte {at}");
     }
+    // Damage in the names is found when they are read.
+    let mut bytes = original.clone();
+    bytes[200] ^= 1;
+    std::fs::remove_file(&damaged).ok();
+    std::fs::write(&damaged, &bytes).unwrap();
+    let packed = open(&damaged).unwrap();
+    assert!(packed.contig_name(0).is_err());
+    assert!(packed.contigs([0]).is_err());
     let mut bytes = original.clone();
     let last = bytes.len() - 3;
     bytes[last] ^= 1;

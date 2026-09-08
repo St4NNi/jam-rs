@@ -140,7 +140,9 @@ impl Shard {
         })
     }
 
-    /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
+    /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest, and
+    /// its contig starts against those of the positions, as the checksum of its tables is only
+    /// checked once its names are read.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
         let record = self.entry_record(entry)?;
         let source = self.packed.open(entry as usize, &record.packed)?;
@@ -149,6 +151,7 @@ impl Shard {
         if size != record.packed.bytes
             || packed.bases() != record.bases
             || packed.contig_count() as u64 != record.contigs
+            || packed.contig_starts() != self.positions.contig_starts(entry)?
         {
             return Err(IndexError::format(format!(
                 "the packed sequence of {} differs from the manifest",
