@@ -5,7 +5,7 @@
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u16_at, u32_at, u64_at};
 use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
-use crate::storage::MappedFile;
+use crate::storage::{MappedFile, will_need_ranges};
 use integer_encoding::VarInt;
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -91,6 +91,46 @@ impl Sketch {
         }
         let block = bytes.get(self.layout.buckets + start..self.layout.buckets_end)?;
         find_in_block(block, key as u16)
+    }
+
+    /// Asks for the pages that looking up these hashes reads: first their directory slots, then,
+    /// once those are read, their bucket blocks. The pages then come in a few large reads instead
+    /// of one page fault after another.
+    pub fn prefetch_lookups(&self, hashes: impl Iterator<Item = u64> + Clone) {
+        let slot = |hash: u64| {
+            let key = seed_key(hash, self.bucket_bits + u32::from(FINGERPRINT_BITS));
+            (self.layout.directory + 8 * (key >> FINGERPRINT_BITS) as usize) as u64
+        };
+        let mut ranges: Vec<(u64, u64)> =
+            hashes.clone().map(slot).map(|at| (at, at + 16)).collect();
+        will_need_ranges(&self.file, &mut ranges);
+        let bytes = self.file.bytes();
+        ranges.clear();
+        for at in hashes.map(slot) {
+            let at = at as usize;
+            if let (Some(start), Some(end)) = (u64_at(bytes, at), u64_at(bytes, at + 8)) {
+                let buckets = self.layout.buckets as u64;
+                ranges.push((buckets + start, buckets + end));
+            }
+        }
+        will_need_ranges(&self.file, &mut ranges);
+    }
+
+    /// Asks for the pages of these color sets: first their offsets, then their entries.
+    pub fn prefetch_color_sets(&self, ids: impl Iterator<Item = ColorSetId> + Clone) {
+        let offset = |id: ColorSetId| (self.layout.set_offsets + 8 * id.0 as usize) as u64;
+        let mut ranges: Vec<(u64, u64)> = ids.clone().map(offset).map(|at| (at, at + 16)).collect();
+        will_need_ranges(&self.file, &mut ranges);
+        let bytes = self.file.bytes();
+        ranges.clear();
+        for at in ids.map(offset) {
+            let at = at as usize;
+            if let (Some(start), Some(end)) = (u64_at(bytes, at), u64_at(bytes, at + 8)) {
+                let sets = self.layout.sets as u64;
+                ranges.push((sets + start, sets + end));
+            }
+        }
+        will_need_ranges(&self.file, &mut ranges);
     }
 
     /// The distinct color sets.

@@ -156,11 +156,16 @@ fn look_up(
         .map(|(chunk, seeds)| {
             control.check()?;
             let first = (chunk * CHUNK_SEEDS) as u32;
-            Ok(seeds
+            sketch.prefetch_lookups(seeds.iter().map(|query_seed| query_seed.hash));
+            let found: Vec<(u32, ColorSetId)> = seeds
                 .iter()
                 .zip(first..)
-                .filter_map(|(query_seed, seed)| {
-                    let color_set = sketch.color_set(query_seed.hash)?;
+                .filter_map(|(query_seed, seed)| Some((seed, sketch.color_set(query_seed.hash)?)))
+                .collect();
+            sketch.prefetch_color_sets(found.iter().map(|&(_, color_set)| color_set));
+            Ok(found
+                .into_iter()
+                .filter_map(|(seed, color_set)| {
                     let entries = color_sets.entries(color_set)?.len();
                     Some(FoundSeed {
                         seed,
