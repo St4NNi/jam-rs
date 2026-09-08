@@ -48,7 +48,10 @@ impl Default for TraceConfig {
             endpoint_bases: 256,
             circular: true,
             verify_resources: false,
-            alignment: AlignmentConfig::default(),
+            alignment: AlignmentConfig {
+                max_cells: 1 << 24,
+                ..AlignmentConfig::default()
+            },
         }
     }
 }
@@ -1058,6 +1061,43 @@ mod tests {
                 b"ACGT"[(state >> 62) as usize] as char
             })
             .collect()
+    }
+
+    #[test]
+    fn trace_defaults_align_long_windows_with_explicit_caps_preserved() {
+        let sequence = vec![b'A'; 64_000];
+        let mut workspace = AlignmentWorkspace::default();
+        let explicit = TraceConfig {
+            alignment: AlignmentConfig::default(),
+            ..TraceConfig::default()
+        };
+        assert!(matches!(
+            workspace.align(&sequence, &sequence, explicit.alignment),
+            Err(AlignmentError::MatrixTooLarge {
+                cells,
+                max_cells: 4_000_000,
+            }) if cells > 4_000_000
+        ));
+
+        let config = TraceConfig::default();
+        for (target, strand) in [
+            (sequence.clone(), Strand::Forward),
+            (vec![b'T'; sequence.len()], Strand::Reverse),
+        ] {
+            let alignment = workspace
+                .align_oriented(&sequence, &target, 100, strand, config.alignment)
+                .unwrap();
+            alignment.validate_cigar().unwrap();
+            assert_eq!(alignment.query_interval, Interval::new(0, 64_000).unwrap());
+            assert_eq!(
+                alignment.target_interval,
+                Interval::new(100, 64_100).unwrap()
+            );
+            assert_eq!(alignment.strand, strand);
+            assert_eq!(alignment.cigar, "64000=");
+            assert_eq!(alignment.matches, 64_000);
+            assert_eq!(alignment.identity(), 1.0);
+        }
     }
 
     #[test]
