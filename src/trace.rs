@@ -230,6 +230,8 @@ impl TraceEngine {
         for candidate in sketch_candidates {
             candidates.insert(candidate.id, candidate);
         }
+        self.index
+            .verify_query_filter_pages(prepared.positions_by_key.keys())?;
         let mut frequencies = Vec::new();
         for (&packed_key, query_seeds) in &prepared.positions_by_key {
             let Some(index_seed) = self.index.find_seed(packed_key)? else {

@@ -1,6 +1,7 @@
 use crate::jidx::{JidxError, PAGE_SIZE, SEED_RECORD_SIZE, SectionKind};
 use crate::jidx_postings;
 use crate::jidx_reader::JidxReader;
+use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -96,17 +97,6 @@ pub(crate) fn load(reader: &JidxReader) -> Result<FilterDirectory, JidxError> {
         if u64::from(key_count) != expected_count {
             return Err(JidxError::Invalid("seed filter key count"));
         }
-        let first_ordinal = group
-            .checked_mul(GROUP_KEYS)
-            .ok_or(JidxError::Invalid("seed filter ordinal"))?;
-        let last_ordinal = first_ordinal
-            .checked_add(expected_count - 1)
-            .ok_or(JidxError::Invalid("seed filter ordinal"))?;
-        if jidx_postings::entry(reader, first_ordinal)?.packed_key != first_key
-            || jidx_postings::entry(reader, last_ordinal)?.packed_key != last_key
-        {
-            return Err(JidxError::Invalid("seed filter key range"));
-        }
         let filter_start = section
             .offset
             .checked_add(filter_offset)
@@ -143,6 +133,72 @@ pub(crate) fn load(reader: &JidxReader) -> Result<FilterDirectory, JidxError> {
         section_offset: section.offset,
         section_length: section.length,
     })
+}
+
+pub(crate) fn verify_query_pages(
+    reader: &JidxReader,
+    directory: &FilterDirectory,
+    keys: impl IntoIterator<Item = u64>,
+) -> Result<(), JidxError> {
+    validate_identity(reader, directory)?;
+    let mut record_index = None;
+    let mut descriptor = [0; DESCRIPTOR_SIZE];
+    let mut pages = BTreeSet::new();
+
+    for key in keys {
+        let index = directory
+            .records
+            .partition_point(|record| record.last_key < key);
+        let Some(record) = directory.records.get(index).copied() else {
+            continue;
+        };
+        if key < record.first_key {
+            continue;
+        }
+        if record_index != Some(index) {
+            verify_pages(reader, &pages)?;
+            pages.clear();
+            let descriptor_end = record
+                .filter_start
+                .checked_add(DESCRIPTOR_SIZE as u64)
+                .ok_or(JidxError::Invalid("seed filter descriptor"))?;
+            let bytes = reader.checked_bytes(record.filter_start, descriptor_end)?;
+            let fingerprint_length = record
+                .filter_end
+                .checked_sub(descriptor_end)
+                .and_then(|length| usize::try_from(length).ok())
+                .ok_or(JidxError::Invalid("seed filter fingerprints"))?;
+            validate_descriptor(bytes, fingerprint_length)?;
+            descriptor.copy_from_slice(bytes);
+            record_index = Some(index);
+        }
+
+        let (_, indexes) = fingerprint_indices(&descriptor, key);
+        let descriptor_end = record
+            .filter_start
+            .checked_add(DESCRIPTOR_SIZE as u64)
+            .ok_or(JidxError::Invalid("seed filter descriptor"))?;
+        for fingerprint_index in indexes {
+            let offset = descriptor_end
+                .checked_add(u64::from(fingerprint_index))
+                .ok_or(JidxError::Invalid("seed filter fingerprint"))?;
+            pages.insert(offset / PAGE_SIZE);
+        }
+    }
+    verify_pages(reader, &pages)
+}
+
+fn verify_pages(reader: &JidxReader, pages: &BTreeSet<u64>) -> Result<(), JidxError> {
+    for &page in pages {
+        let start = page
+            .checked_mul(PAGE_SIZE)
+            .ok_or(JidxError::Invalid("seed filter fingerprint"))?;
+        let end = start
+            .checked_add(PAGE_SIZE)
+            .ok_or(JidxError::Invalid("seed filter fingerprint"))?;
+        reader.checked_bytes(start, end)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn contains(
@@ -272,6 +328,15 @@ pub(crate) fn audit(reader: &JidxReader, directory: &FilterDirectory) -> Result<
         .ok_or(JidxError::Invalid("seed filter directory"))?;
     let mut ordinal = 0u64;
     for record in &directory.records {
+        let last_ordinal = u64::from(record.key_count)
+            .checked_sub(1)
+            .and_then(|count| ordinal.checked_add(count))
+            .ok_or(JidxError::Invalid("seed filter ordinal"))?;
+        if jidx_postings::entry(reader, ordinal)?.packed_key != record.first_key
+            || jidx_postings::entry(reader, last_ordinal)?.packed_key != record.last_key
+        {
+            return Err(JidxError::Invalid("seed filter key range"));
+        }
         let filter_offset = record
             .filter_start
             .checked_sub(directory.section_offset)

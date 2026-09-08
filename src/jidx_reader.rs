@@ -97,6 +97,19 @@ impl JidxReader {
         Ok(())
     }
 
+    pub(crate) fn verify_query_filter_pages<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a u64>,
+    ) -> Result<(), JidxReaderError> {
+        Ok(crate::jidx_filters::verify_query_pages(
+            self,
+            self.filter_directory
+                .as_ref()
+                .ok_or(JidxError::Invalid("missing seed filter directory"))?,
+            keys.into_iter().copied(),
+        )?)
+    }
+
     pub fn find_seed(&self, packed_key: u64) -> Result<Option<SeedEntry>, JidxReaderError> {
         seed_length(self.header.k, self.header.rescue_k15, packed_key)?;
         if !crate::jidx_filters::contains(
@@ -971,6 +984,47 @@ mod tests {
     }
 
     #[test]
+    fn query_filter_page_verification_touches_only_exact_pages() {
+        let key = 1_234u64;
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(&path).unwrap();
+        let offsets = crate::jidx_filters::fingerprint_offsets(
+            &reader,
+            reader.filter_directory.as_ref().unwrap(),
+            key,
+        )
+        .unwrap();
+        let mut expected = reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        for page in offsets.map(|offset| offset / PAGE_SIZE) {
+            let page_bit = page - 1;
+            expected[(page_bit / 64) as usize] |= 1u64 << (page_bit % 64);
+        }
+
+        reader.verify_query_filter_pages([&key]).unwrap();
+
+        assert_eq!(
+            reader
+                .verified_pages
+                .iter()
+                .map(|word| word.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        drop(reader);
+        corrupt_byte(&path, offsets[0]);
+        let reader = JidxReader::open(path).unwrap();
+        assert!(matches!(
+            reader.verify_query_filter_pages([&key]),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+    }
+
+    #[test]
     fn corrupt_filter_directory_and_payload_remain_errors() {
         let (_directory, directory_path) = fixture(false, false, false, false);
         let filter_offset = section_offset(&directory_path, SectionKind::SeedFilters);
@@ -997,6 +1051,14 @@ mod tests {
         );
         rewrite_checksums(&range_path);
         assert!(JidxReader::open(range_path).is_err());
+
+        let (_directory, key_range_path) = fixture(false, false, false, false);
+        let filter_offset = section_offset(&key_range_path, SectionKind::SeedFilters);
+        replace_bytes(&key_range_path, filter_offset, &0x1235u64.to_le_bytes());
+        replace_bytes(&key_range_path, filter_offset + 8, &0x1235u64.to_le_bytes());
+        rewrite_checksums(&key_range_path);
+        let reader = JidxReader::open(key_range_path).unwrap();
+        assert!(reader.verify_checksum().is_err());
 
         let (_directory, descriptor_path) = fixture(false, false, false, false);
         let filter_offset = section_offset(&descriptor_path, SectionKind::SeedFilters);
