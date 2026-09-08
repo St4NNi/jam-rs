@@ -5,7 +5,7 @@
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u32_at, u64_at};
 use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, seed_key};
-use crate::storage::ReadAt;
+use crate::storage::{ReadAt, will_need_ranges};
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -140,6 +140,38 @@ impl Positions {
                 out.push(SeedLocation::from_value(value as u32));
             }
         }
+        Ok(())
+    }
+
+    /// Asks for the bytes that looking up these hashes in one entry reads: first their slot
+    /// directory places, then, once those are read, the records of their slots. The reads of all
+    /// the seeds then go out together instead of one after another.
+    pub fn prefetch_seeds(
+        &self,
+        entry: u32,
+        hashes: impl Iterator<Item = u64> + Clone,
+    ) -> Result<(), IndexError> {
+        let section = self.section(entry)?;
+        let suffix_bits = u32::from(section.suffix_bits);
+        let directory = section.offset + section.contig_bytes();
+        let place = |hash: u64| directory + 4 * (seed_key(hash, POSITION_KEY_BITS) >> suffix_bits);
+        let mut ranges: Vec<(u64, u64)> =
+            hashes.clone().map(place).map(|at| (at, at + 8)).collect();
+        will_need_ranges(self.source.as_ref(), &mut ranges);
+        ranges.clear();
+        let records = directory + section.directory_bytes();
+        let record_bits = section.record_bits();
+        let mut slot_range = [0u8; 8];
+        for at in hashes.map(place) {
+            self.source.read_exact_at(at, &mut slot_range)?;
+            let first = u64::from(u32_at(&slot_range, 0).unwrap_or_default());
+            let end = u64::from(u32_at(&slot_range, 4).unwrap_or_default()).min(section.locations);
+            if first < end {
+                let end_byte = (end * record_bits).div_ceil(8) + BIT_PADDING as u64;
+                ranges.push((records + first * record_bits / 8, records + end_byte));
+            }
+        }
+        will_need_ranges(self.source.as_ref(), &mut ranges);
         Ok(())
     }
 

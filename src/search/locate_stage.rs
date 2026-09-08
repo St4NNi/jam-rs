@@ -155,6 +155,12 @@ fn read_seed_hits(
     workspace.bins.clear();
     let expanded = possible.seed_hits.iter().map(|&seed| (seed, true));
     let frequent = request.frequent_seeds.iter().map(|&seed| (seed, false));
+    let hashes = expanded.clone().chain(frequent.clone());
+    let distinct = request.query.distinct();
+    shard.positions().prefetch_seeds(
+        possible.entry,
+        hashes.map(|(seed, _)| distinct[seed as usize].hash),
+    )?;
     for (index, (seed, from_sketch)) in expanded.chain(frequent).enumerate() {
         if index % LOOKUPS_PER_CHECK == 0 {
             control.check()?;
