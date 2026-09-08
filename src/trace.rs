@@ -318,62 +318,91 @@ impl TraceEngine {
             .map(|candidate| candidate.id)
             .collect::<HashSet<_>>();
         let mut region_hits = BTreeMap::<RegionKey, Vec<SeedHit>>::new();
-        for &packed_key in key_order {
-            let Some(query_seeds) = prepared.positions_by_key.get(&packed_key) else {
+        let mut packed_keys = Vec::new();
+        packed_keys
+            .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
+            .map_err(|_| TraceError::Invalid("query seed batch"))?;
+        let mut filter_keys = Vec::new();
+        filter_keys
+            .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
+            .map_err(|_| TraceError::Invalid("query seed batch"))?;
+        for key_chunk in key_order.chunks(SEED_LOOKUP_BATCH_KEYS) {
+            packed_keys.clear();
+            for &packed_key in key_chunk {
+                if prepared.positions_by_key.contains_key(&packed_key) {
+                    packed_keys.push(packed_key);
+                }
+            }
+            if packed_keys.is_empty() {
                 continue;
-            };
-            let Some(index_seed) = self.index.find_seed(packed_key)? else {
-                continue;
-            };
-            let seed_k = seed_length(
-                self.index.header().k,
-                self.index.header().rescue_k15,
-                packed_key,
-            )?;
-            let documents = self.index.seed_documents(index_seed)?;
-            for document in documents
-                .into_iter()
-                .filter(|document| candidate_ids.contains(&document.metagenome_id))
-            {
-                let occurrences = self.index.seed_document_occurrences(index_seed, document)?;
-                for seed in query_seeds {
-                    for occurrence in &occurrences {
-                        let contig = self
-                            .index
-                            .contig(occurrence.contig_id)?
-                            .ok_or(TraceError::Invalid("missing occurrence contig"))?;
-                        let strand =
-                            if seed.canonical_orientation == occurrence.canonical_orientation {
-                                Strand::Forward
-                            } else {
-                                Strand::Reverse
+            }
+            filter_keys.clear();
+            filter_keys.extend_from_slice(&packed_keys);
+            filter_keys.sort_unstable();
+            filter_keys.dedup();
+            self.index.verify_query_filter_pages(filter_keys.iter())?;
+            let index_seeds = self.index.find_seeds_batch(&packed_keys)?;
+            self.index.advise_first_document_rows(&index_seeds);
+
+            for (&packed_key, index_seed) in packed_keys.iter().zip(index_seeds) {
+                let query_seeds = prepared
+                    .positions_by_key
+                    .get(&packed_key)
+                    .expect("present query key");
+                let Some(index_seed) = index_seed else {
+                    continue;
+                };
+                let seed_k = seed_length(
+                    self.index.header().k,
+                    self.index.header().rescue_k15,
+                    packed_key,
+                )?;
+                let documents = self.index.seed_documents(index_seed)?;
+                for document in documents
+                    .into_iter()
+                    .filter(|document| candidate_ids.contains(&document.metagenome_id))
+                {
+                    let occurrences = self.index.seed_document_occurrences(index_seed, document)?;
+                    for seed in query_seeds {
+                        for occurrence in &occurrences {
+                            let contig = self
+                                .index
+                                .contig(occurrence.contig_id)?
+                                .ok_or(TraceError::Invalid("missing occurrence contig"))?;
+                            let strand =
+                                if seed.canonical_orientation == occurrence.canonical_orientation {
+                                    Strand::Forward
+                                } else {
+                                    Strand::Reverse
+                                };
+                            let oriented_position = match strand {
+                                Strand::Forward => occurrence.position,
+                                Strand::Reverse => contig
+                                    .length
+                                    .checked_sub(
+                                        occurrence
+                                            .position
+                                            .checked_add(u64::from(seed_k))
+                                            .ok_or(TraceError::Invalid("occurrence position"))?,
+                                    )
+                                    .ok_or(TraceError::Invalid("occurrence position"))?,
                             };
-                        let oriented_position = match strand {
-                            Strand::Forward => occurrence.position,
-                            Strand::Reverse => contig
-                                .length
-                                .checked_sub(
-                                    occurrence
-                                        .position
-                                        .checked_add(u64::from(seed_k))
-                                        .ok_or(TraceError::Invalid("occurrence position"))?,
-                                )
-                                .ok_or(TraceError::Invalid("occurrence position"))?,
-                        };
-                        let diagonal = i128::from(oriented_position) - i128::from(seed.position);
-                        region_hits
-                            .entry(RegionKey {
-                                metagenome_id: contig.metagenome_id,
-                                contig_id: contig.id,
-                                strand,
-                                k: seed_k,
-                            })
-                            .or_default()
-                            .push(SeedHit {
-                                query: seed.position,
-                                target: oriented_position,
-                                diagonal,
-                            });
+                            let diagonal =
+                                i128::from(oriented_position) - i128::from(seed.position);
+                            region_hits
+                                .entry(RegionKey {
+                                    metagenome_id: contig.metagenome_id,
+                                    contig_id: contig.id,
+                                    strand,
+                                    k: seed_k,
+                                })
+                                .or_default()
+                                .push(SeedHit {
+                                    query: seed.position,
+                                    target: oriented_position,
+                                    diagonal,
+                                });
+                        }
                     }
                 }
             }
@@ -1035,7 +1064,7 @@ mod tests {
     fn candidate_census_matches_scalar_across_batch_boundary() {
         let directory = tempfile::tempdir().unwrap();
         let mut state = 97u64;
-        let sequence = (0..6_000)
+        let sequence = (0..50_000)
             .map(|_| {
                 state = state
                     .wrapping_mul(6_364_136_223_846_793_005)
@@ -1129,6 +1158,41 @@ mod tests {
         assert!(census.candidates.iter().all(|candidate| {
             scalar_hits.get(&candidate.id).copied() == Some(candidate.exact_seed_hits)
         }));
+
+        let packed_order = census
+            .frequencies
+            .iter()
+            .map(|&(key, _)| key)
+            .collect::<Vec<_>>();
+        assert!(packed_order.len() > SEED_LOOKUP_BATCH_KEYS);
+        let mut rarity_order = packed_order.clone();
+        rarity_order.reverse();
+        assert_ne!(rarity_order, packed_order);
+        assert!(
+            engine
+                .trace_selected(&prepared, Vec::new(), &rarity_order, config)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            engine
+                .trace_selected(&prepared, Vec::new(), &packed_order, config)
+                .unwrap()
+                .is_empty()
+        );
+
+        let missing = (0..1u64 << 42)
+            .find(|key| !prepared.positions_by_key.contains_key(key))
+            .unwrap();
+        let mut repeated_and_missing = rarity_order.clone();
+        repeated_and_missing.insert(SEED_LOOKUP_BATCH_KEYS - 1, missing);
+        repeated_and_missing.insert(SEED_LOOKUP_BATCH_KEYS, rarity_order[SEED_LOOKUP_BATCH_KEYS]);
+        assert!(
+            engine
+                .trace_selected(&prepared, Vec::new(), &repeated_and_missing, config)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
