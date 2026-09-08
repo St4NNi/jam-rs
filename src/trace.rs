@@ -1123,7 +1123,7 @@ mod tests {
             &jidx,
             JidxBuildConfig {
                 k: 21,
-                minimizer_window: 16,
+                minimizer_window: 1,
                 rescue_k15: false,
             },
         )

@@ -17,7 +17,7 @@ pub use crate::jidx_postings::{SeedDocument, SeedEntry, SeedOccurrence};
 pub type MetagenomeId = u32;
 pub type ContigId = u32;
 
-pub(crate) const SEED_LOOKUP_BATCH_KEYS: usize = 4_096;
+pub(crate) const SEED_LOOKUP_BATCH_KEYS: usize = 32_768;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metagenome<'a> {
