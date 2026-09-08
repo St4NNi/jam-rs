@@ -102,6 +102,7 @@ pub(crate) fn lookup_batch(
             break;
         }
         midpoints.sort_unstable();
+        reader.advise_seed_record_pages(&midpoints);
 
         let mut start = 0usize;
         while start < midpoints.len() {

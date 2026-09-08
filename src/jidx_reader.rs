@@ -2,6 +2,8 @@ use crate::jidx::{
     CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_RECORD_SIZE, DocumentRecord, HEADER_SIZE, Header,
     JidxError, PAGE_SIZE, SectionKind, StringRef, seed_length, sha256,
 };
+#[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
+use memmap2::Advice;
 use memmap2::{Mmap, MmapOptions};
 use std::collections::HashSet;
 use std::fs::File;
@@ -103,6 +105,15 @@ impl JidxReader {
         &self,
         keys: impl IntoIterator<Item = &'a u64>,
     ) -> Result<(), JidxReaderError> {
+        #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            let seeds = self.header.section(SectionKind::Seeds);
+            if let (Ok(offset), Ok(length)) =
+                (usize::try_from(seeds.offset), usize::try_from(seeds.length))
+            {
+                let _ = self.mmap.advise_range(Advice::Random, offset, length);
+            }
+        }
         Ok(crate::jidx_filters::verify_query_pages(
             self,
             self.filter_directory
@@ -110,6 +121,78 @@ impl JidxReader {
                 .ok_or(JidxError::Invalid("missing seed filter directory"))?,
             keys.into_iter().copied(),
         )?)
+    }
+
+    #[cfg(any(
+        test,
+        all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))
+    ))]
+    pub(crate) fn seed_record_page_span(&self, ordinal: u64) -> Option<(usize, usize)> {
+        let seeds = self.header.section(SectionKind::Seeds);
+        if ordinal >= self.header.seed_count {
+            return None;
+        }
+        let record_start = ordinal
+            .checked_mul(u64::from(crate::jidx::SEED_RECORD_SIZE))?
+            .checked_add(seeds.offset)?;
+        let record_end = record_start.checked_add(u64::from(crate::jidx::SEED_RECORD_SIZE))?;
+        let seeds_end = seeds.offset.checked_add(seeds.length)?;
+        if record_end > seeds_end {
+            return None;
+        }
+        let page_start = record_start / PAGE_SIZE * PAGE_SIZE;
+        let page_end = record_end
+            .checked_add(PAGE_SIZE - 1)?
+            .checked_div(PAGE_SIZE)?
+            .checked_mul(PAGE_SIZE)?;
+        let padding_end = seeds_end
+            .checked_add(PAGE_SIZE - 1)?
+            .checked_div(PAGE_SIZE)?
+            .checked_mul(PAGE_SIZE)?;
+        let next_section = self.header.section(SectionKind::DocumentPostings);
+        let mmap_len = u64::try_from(self.mmap.len()).ok()?;
+        if page_end > padding_end || padding_end > next_section.offset || page_end > mmap_len {
+            return None;
+        }
+        Some((
+            usize::try_from(page_start).ok()?,
+            usize::try_from(page_end.checked_sub(page_start)?).ok()?,
+        ))
+    }
+
+    pub(crate) fn advise_seed_record_pages(&self, midpoints: &[(u64, usize)]) {
+        #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            let mut previous = None;
+            let mut run = None::<(usize, usize)>;
+            for &(ordinal, _) in midpoints {
+                if previous == Some(ordinal) {
+                    continue;
+                }
+                previous = Some(ordinal);
+                let Some((start, length)) = self.seed_record_page_span(ordinal) else {
+                    continue;
+                };
+                let Some(end) = start.checked_add(length) else {
+                    continue;
+                };
+                if let Some((run_start, run_end)) = run {
+                    if start <= run_end {
+                        run = Some((run_start, run_end.max(end)));
+                        continue;
+                    }
+                    let _ =
+                        self.mmap
+                            .advise_range(Advice::WillNeed, run_start, run_end - run_start);
+                }
+                run = Some((start, end));
+            }
+            if let Some((start, end)) = run {
+                let _ = self.mmap.advise_range(Advice::WillNeed, start, end - start);
+            }
+        }
+        #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
+        let _ = midpoints;
     }
 
     pub(crate) fn find_seeds_batch(
@@ -1063,6 +1146,50 @@ mod tests {
             reader.verify_query_filter_pages([&key]),
             Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
         ));
+    }
+
+    #[test]
+    fn seed_record_page_spans_are_bounded_and_advice_stays_lazy() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(path).unwrap();
+        let seeds = reader.header.section(SectionKind::Seeds);
+        let page = usize::try_from(PAGE_SIZE).unwrap();
+        let offset = usize::try_from(seeds.offset).unwrap();
+        assert_eq!(reader.seed_record_page_span(0), Some((offset, page)));
+        assert_eq!(reader.seed_record_page_span(169), Some((offset, page)));
+        assert_eq!(reader.seed_record_page_span(170), Some((offset, 2 * page)));
+
+        let final_span = reader
+            .seed_record_page_span(reader.header.seed_count - 1)
+            .unwrap();
+        let final_end = final_span.0 + final_span.1;
+        assert!(final_end as u64 >= seeds.offset + seeds.length);
+        assert!(final_end as u64 <= reader.header.section(SectionKind::DocumentPostings).offset);
+        assert!(final_end <= reader.mmap.len());
+        assert_eq!(reader.seed_record_page_span(reader.header.seed_count), None);
+
+        let before = reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        reader.advise_seed_record_pages(&[
+            (0, 0),
+            (0, 1),
+            (169, 2),
+            (170, 3),
+            (341, 4),
+            (342, 5),
+            (reader.header.seed_count - 1, 6),
+        ]);
+        assert_eq!(
+            reader
+                .verified_pages
+                .iter()
+                .map(|word| word.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            before
+        );
     }
 
     #[test]
