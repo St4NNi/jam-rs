@@ -253,6 +253,23 @@ impl PackedSequence {
             .collect()
     }
 
+    /// Asks the source for the packed bytes of bases `range` of a contig (contig coordinates),
+    /// whole checksum blocks, so that a later read finds them. It never changes what is read.
+    pub fn will_need(&self, contig: usize, range: Range<u64>) {
+        let Ok(contig_range) = self.contig_range(contig) else {
+            return;
+        };
+        let start = (contig_range.start + range.start) / 4 / BLOCK_BYTES * BLOCK_BYTES;
+        let end = (contig_range.start + range.end)
+            .div_ceil(4)
+            .next_multiple_of(BLOCK_BYTES);
+        let end = end.min(self.bases().div_ceil(4));
+        if start < end {
+            self.source
+                .will_need(self.packed_offset + start, end - start);
+        }
+    }
+
     /// Entry coordinates of a contig.
     pub fn contig_range(&self, contig: usize) -> Result<Range<u64>, IndexError> {
         match (self.starts.get(contig), self.starts.get(contig + 1)) {

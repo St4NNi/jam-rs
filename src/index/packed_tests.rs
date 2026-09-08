@@ -75,6 +75,8 @@ fn packed_round_trip() {
     assert_eq!(table[&1].length, contigs[1].1.len() as u64);
     assert_eq!(table[&1].name.as_bytes(), contigs[1].0);
     assert!(packed.contigs([5]).is_err());
+    packed.will_need(1, 0..10);
+    packed.will_need(9, 0..10);
     assert!(packed.read(2, 0..70_001, &mut out).is_err());
     assert!(packed.contig_name(5).is_err());
 }
