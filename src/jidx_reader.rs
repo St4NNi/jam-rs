@@ -15,6 +15,8 @@ pub use crate::jidx_postings::{SeedDocument, SeedEntry, SeedOccurrence};
 pub type MetagenomeId = u32;
 pub type ContigId = u32;
 
+pub(crate) const SEED_LOOKUP_BATCH_KEYS: usize = 4_096;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metagenome<'a> {
     pub id: MetagenomeId,
@@ -108,6 +110,45 @@ impl JidxReader {
                 .ok_or(JidxError::Invalid("missing seed filter directory"))?,
             keys.into_iter().copied(),
         )?)
+    }
+
+    pub(crate) fn find_seeds_batch(
+        &self,
+        packed_keys: &[u64],
+    ) -> Result<Vec<Option<SeedEntry>>, JidxReaderError> {
+        if packed_keys.len() > SEED_LOOKUP_BATCH_KEYS {
+            return Err(JidxError::Invalid("seed lookup batch").into());
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(packed_keys.len())
+            .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+        output.resize(packed_keys.len(), None);
+        let mut positive_keys = Vec::new();
+        positive_keys
+            .try_reserve_exact(packed_keys.len())
+            .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+        let mut positive_indexes = Vec::new();
+        positive_indexes
+            .try_reserve_exact(packed_keys.len())
+            .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+
+        let directory = self
+            .filter_directory
+            .as_ref()
+            .ok_or(JidxError::Invalid("missing seed filter directory"))?;
+        for (index, &packed_key) in packed_keys.iter().enumerate() {
+            seed_length(self.header.k, self.header.rescue_k15, packed_key)?;
+            if crate::jidx_filters::contains(self, directory, packed_key)? {
+                positive_keys.push(packed_key);
+                positive_indexes.push(index);
+            }
+        }
+        let positive_results = crate::jidx_postings::lookup_batch(self, &positive_keys)?;
+        for (index, result) in positive_indexes.into_iter().zip(positive_results) {
+            output[index] = result;
+        }
+        Ok(output)
     }
 
     pub fn find_seed(&self, packed_key: u64) -> Result<Option<SeedEntry>, JidxReaderError> {
@@ -1021,6 +1062,191 @@ mod tests {
         assert!(matches!(
             reader.verify_query_filter_pages([&key]),
             Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+    }
+
+    #[test]
+    fn batch_seed_lookup_matches_scalar_across_pages_and_gaps() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(path).unwrap();
+        assert_eq!(reader.find_seeds_batch(&[]).unwrap(), Vec::new());
+
+        let mut state = 41u64;
+        let mut keys = vec![0, 1, 170, 4_998, 4_999, 5_000, (1u64 << 42) - 1];
+        for _ in 0..4_090 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            keys.push(state % 6_000);
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        let scalar = keys
+            .iter()
+            .map(|&key| reader.find_seed(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(reader.find_seeds_batch(&keys).unwrap(), scalar);
+        let duplicates = [170, 170, 5_000, 170];
+        let scalar = duplicates
+            .iter()
+            .map(|&key| reader.find_seed(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(reader.find_seeds_batch(&duplicates).unwrap(), scalar);
+        assert_eq!(
+            reader
+                .find_seeds_batch(&vec![5_000; SEED_LOOKUP_BATCH_KEYS])
+                .unwrap(),
+            vec![None; SEED_LOOKUP_BATCH_KEYS]
+        );
+        assert!(
+            reader
+                .find_seeds_batch(&vec![0; SEED_LOOKUP_BATCH_KEYS + 1])
+                .is_err()
+        );
+        let invalid = 1u64 << 42;
+        assert!(matches!(
+            reader.find_seed(invalid),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "packed seed key"
+            )))
+        ));
+        assert!(matches!(
+            reader.find_seeds_batch(&[invalid]),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "packed seed key"
+            )))
+        ));
+    }
+
+    #[test]
+    fn batch_seed_lookup_matches_scalar_for_mixed_seed_families() {
+        let (_directory, path) =
+            external_fixture_with_keys([0x1234, crate::jidx::RESCUE_K15_TAG | 0x123]);
+        replace_bytes(&path, 362, &[1]);
+        let reader = JidxReader::open(path).unwrap();
+        let mut keys = vec![
+            0,
+            0x1233,
+            0x1234,
+            0x1235,
+            crate::jidx::RESCUE_K15_TAG | 0x122,
+            crate::jidx::RESCUE_K15_TAG | 0x123,
+            crate::jidx::RESCUE_K15_TAG | 0x124,
+            crate::jidx::RESCUE_K15_TAG | ((1u64 << 30) - 1),
+        ];
+        keys.sort_unstable();
+        let scalar = keys
+            .iter()
+            .map(|&key| reader.find_seed(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(reader.find_seeds_batch(&keys).unwrap(), scalar);
+    }
+
+    #[test]
+    fn batch_filter_negatives_do_not_touch_seed_table() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(&path).unwrap();
+        let seeds = reader.header.section(SectionKind::Seeds);
+        drop(reader);
+        corrupt_byte(&path, seeds.offset);
+
+        let reader = JidxReader::open(path).unwrap();
+        assert_eq!(reader.find_seeds_batch(&[5_000]).unwrap(), vec![None]);
+    }
+
+    #[test]
+    fn batch_seed_lookup_matches_scalar_pages_and_error_chain() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let keys = [0, 170, 1_234, 2_500, 4_999, 5_000];
+        let scalar_reader = JidxReader::open(&path).unwrap();
+        let scalar = keys
+            .iter()
+            .map(|&key| scalar_reader.find_seed(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let scalar_pages = scalar_reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+
+        let batch_reader = JidxReader::open(&path).unwrap();
+        assert_eq!(batch_reader.find_seeds_batch(&keys).unwrap(), scalar);
+        let batch_pages = batch_reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        assert_eq!(batch_pages, scalar_pages);
+
+        let seeds = batch_reader.header.section(SectionKind::Seeds);
+        let first_page = seeds.offset / PAGE_SIZE;
+        let last_page = (seeds.offset + seeds.length - 1) / PAGE_SIZE;
+        assert!((first_page..=last_page).any(|page| {
+            let page_bit = page - 1;
+            batch_pages[(page_bit / 64) as usize] & (1u64 << (page_bit % 64)) == 0
+        }));
+        let probe_reader = JidxReader::open(&path).unwrap();
+        let before = probe_reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        probe_reader.find_seed(keys[1]).unwrap();
+        let accessed_page = (first_page..=last_page)
+            .find(|&page| {
+                let page_bit = page - 1;
+                let mask = 1u64 << (page_bit % 64);
+                before[(page_bit / 64) as usize] & mask == 0
+                    && probe_reader.verified_pages[(page_bit / 64) as usize].load(Ordering::Relaxed)
+                        & mask
+                        != 0
+            })
+            .unwrap();
+        drop(probe_reader);
+        drop(batch_reader);
+        drop(scalar_reader);
+        corrupt_byte(&path, accessed_page * PAGE_SIZE);
+
+        let scalar_reader = JidxReader::open(&path).unwrap();
+        assert!(matches!(
+            scalar_reader.find_seed(keys[1]),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+        let batch_reader = JidxReader::open(path).unwrap();
+        assert!(matches!(
+            batch_reader.find_seeds_batch(&[keys[1]]),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+    }
+
+    #[test]
+    fn batch_seed_lookup_preserves_cross_page_reservation_error() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(&path).unwrap();
+        let seeds = reader.header.section(SectionKind::Seeds);
+        drop(reader);
+        let record_start = seeds.offset + 170 * u64::from(SEED_RECORD_SIZE);
+        assert_eq!(record_start % PAGE_SIZE, PAGE_SIZE - 16);
+        replace_bytes(&path, record_start + 20, &1u32.to_le_bytes());
+        rewrite_checksums(&path);
+
+        let scalar_reader = JidxReader::open(&path).unwrap();
+        assert!(matches!(
+            scalar_reader.find_seed(170),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "seed reservation"
+            )))
+        ));
+        let batch_reader = JidxReader::open(path).unwrap();
+        assert!(matches!(
+            batch_reader.find_seeds_batch(&[170]),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "seed reservation"
+            )))
         ));
     }
 

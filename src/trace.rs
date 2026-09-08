@@ -1,7 +1,9 @@
 use crate::alignment::{AlignmentConfig, AlignmentError, AlignmentWorkspace, Interval, Strand};
 use crate::bgzf::{BgzfError, BgzfReader};
 use crate::jidx::{JidxError, RESCUE_K15_TAG, seed_length, sha256_reader};
-use crate::jidx_reader::{ContigId, JidxReader, JidxReaderError, MetagenomeId};
+use crate::jidx_reader::{
+    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS,
+};
 use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
@@ -233,40 +235,65 @@ impl TraceEngine {
         self.index
             .verify_query_filter_pages(prepared.positions_by_key.keys())?;
         let mut frequencies = Vec::new();
-        for (&packed_key, query_seeds) in &prepared.positions_by_key {
-            let Some(index_seed) = self.index.find_seed(packed_key)? else {
-                continue;
-            };
-            frequencies.push((packed_key, index_seed.document_frequency));
-            let query_positions = u64::try_from(query_seeds.len())
-                .map_err(|_| TraceError::Invalid("query seed count"))?;
-            for document in self.index.seed_documents(index_seed)? {
-                let hits = document
-                    .occurrence_count
-                    .checked_mul(query_positions)
-                    .ok_or(TraceError::Invalid("exact seed hit count"))?;
-                if let Some(candidate) = candidates.get_mut(&document.metagenome_id) {
-                    candidate.exact_seed_hits = candidate
-                        .exact_seed_hits
-                        .checked_add(hits)
-                        .ok_or(TraceError::Invalid("exact seed hit count"))?;
+        let mut entries = prepared.positions_by_key.iter();
+        let mut chunk = Vec::new();
+        chunk
+            .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
+            .map_err(|_| TraceError::Invalid("query seed batch"))?;
+        let mut packed_keys = Vec::new();
+        packed_keys
+            .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
+            .map_err(|_| TraceError::Invalid("query seed batch"))?;
+        loop {
+            chunk.clear();
+            packed_keys.clear();
+            for _ in 0..SEED_LOOKUP_BATCH_KEYS {
+                let Some((&packed_key, query_seeds)) = entries.next() else {
+                    break;
+                };
+                chunk.push((packed_key, query_seeds));
+                packed_keys.push(packed_key);
+            }
+            if chunk.is_empty() {
+                break;
+            }
+
+            let index_seeds = self.index.find_seeds_batch(&packed_keys)?;
+            for ((packed_key, query_seeds), index_seed) in chunk.iter().copied().zip(index_seeds) {
+                let Some(index_seed) = index_seed else {
                     continue;
+                };
+                frequencies.push((packed_key, index_seed.document_frequency));
+                let query_positions = u64::try_from(query_seeds.len())
+                    .map_err(|_| TraceError::Invalid("query seed count"))?;
+                for document in self.index.seed_documents(index_seed)? {
+                    let hits = document
+                        .occurrence_count
+                        .checked_mul(query_positions)
+                        .ok_or(TraceError::Invalid("exact seed hit count"))?;
+                    if let Some(candidate) = candidates.get_mut(&document.metagenome_id) {
+                        candidate.exact_seed_hits = candidate
+                            .exact_seed_hits
+                            .checked_add(hits)
+                            .ok_or(TraceError::Invalid("exact seed hit count"))?;
+                        continue;
+                    }
+                    let name = self
+                        .index
+                        .metagenome_name(document.metagenome_id)?
+                        .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
+                        .to_string();
+                    candidates.insert(
+                        document.metagenome_id,
+                        Candidate {
+                            id: document.metagenome_id,
+                            name,
+                            shared_hashes: 0,
+                            containment: 0.0,
+                            exact_seed_hits: hits,
+                        },
+                    );
                 }
-                let name = self
-                    .index
-                    .metagenome_name(document.metagenome_id)?
-                    .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
-                    .to_string();
-                candidates.insert(
-                    document.metagenome_id,
-                    Candidate {
-                        id: document.metagenome_id,
-                        name,
-                        shared_hashes: 0,
-                        containment: 0.0,
-                        exact_seed_hits: hits,
-                    },
-                );
             }
         }
         let mut candidates = candidates.into_values().collect::<Vec<_>>();
@@ -1001,6 +1028,106 @@ mod tests {
                 b"ACGT"[(state >> 62) as usize] as char
             })
             .collect()
+    }
+
+    #[test]
+    fn candidate_census_matches_scalar_across_batch_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = 97u64;
+        let sequence = (0..6_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                b"ACGT"[(state >> 62) as usize] as char
+            })
+            .collect::<String>();
+        let fasta = directory.path().join("sample.fa");
+        std::fs::write(&fasta, format!(">sample\n{sequence}\n")).unwrap();
+        let jam = directory.path().join("database.jam");
+        build(
+            &[fasta],
+            &jam,
+            &BuildConfig {
+                kmer_size: 21,
+                fscale: 1,
+                singleton: true,
+                memory: 1,
+                ..BuildConfig::default()
+            },
+        )
+        .unwrap();
+
+        let bgzf_path = directory.path().join("sample.bgz");
+        let fai_path = directory.path().join("sample.bgz.fai");
+        let gzi_path = directory.path().join("sample.bgz.gzi");
+        let mut raw = b">contig\n".to_vec();
+        for line in sequence.as_bytes().chunks(80) {
+            raw.extend_from_slice(line);
+            raw.push(b'\n');
+        }
+        let mut writer = bgzf::io::Writer::new(File::create(&bgzf_path).unwrap());
+        writer.write_all(&raw).unwrap();
+        writer.finish().unwrap();
+        std::fs::write(
+            &fai_path,
+            format!("contig\t{}\t8\t80\t81\n", sequence.len()),
+        )
+        .unwrap();
+        gzi::fs::write(&gzi_path, &gzi::Index::default()).unwrap();
+        let manifest = directory.path().join("manifest.json");
+        std::fs::write(
+            &manifest,
+            format!(
+                "{{\"metagenomes\":[{{\"name\":\"sample\",\"bgzf\":\"{}\",\"fai\":\"{}\",\"gzi\":\"{}\"}}]}}",
+                bgzf_path.display(),
+                fai_path.display(),
+                gzi_path.display()
+            ),
+        )
+        .unwrap();
+        let jidx = directory.path().join("database.jidx");
+        build_local_jidx(
+            &jam,
+            &manifest,
+            &jidx,
+            JidxBuildConfig {
+                k: 21,
+                minimizer_window: 16,
+                rescue_k15: false,
+            },
+        )
+        .unwrap();
+
+        let engine = TraceEngine::open(&jam, &jidx, &manifest, None).unwrap();
+        let config = TraceConfig {
+            use_sketch: false,
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let prepared = prepare_query("batch", sequence.as_bytes(), config, 21, false).unwrap();
+        assert!(prepared.positions_by_key.len() > SEED_LOOKUP_BATCH_KEYS);
+        let census = engine.candidate_census(&prepared, config).unwrap();
+
+        let mut scalar_frequencies = Vec::new();
+        let mut scalar_hits = BTreeMap::<MetagenomeId, u64>::new();
+        for (&packed_key, query_seeds) in &prepared.positions_by_key {
+            let Some(seed) = engine.index.find_seed(packed_key).unwrap() else {
+                continue;
+            };
+            scalar_frequencies.push((packed_key, seed.document_frequency));
+            let query_positions = u64::try_from(query_seeds.len()).unwrap();
+            for document in engine.index.seed_documents(seed).unwrap() {
+                *scalar_hits.entry(document.metagenome_id).or_default() +=
+                    document.occurrence_count * query_positions;
+            }
+        }
+
+        assert_eq!(census.frequencies, scalar_frequencies);
+        assert_eq!(census.candidates.len(), scalar_hits.len());
+        assert!(census.candidates.iter().all(|candidate| {
+            scalar_hits.get(&candidate.id).copied() == Some(candidate.exact_seed_hits)
+        }));
     }
 
     #[test]

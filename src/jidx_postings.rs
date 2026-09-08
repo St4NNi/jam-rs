@@ -43,6 +43,12 @@ enum DocumentLocation {
     },
 }
 
+struct BatchLookupState {
+    low: u64,
+    high: u64,
+    result: Option<SeedEntry>,
+}
+
 pub(crate) fn lookup(reader: &JidxReader, packed_key: u64) -> Result<Option<SeedEntry>, JidxError> {
     let header = reader.header();
     seed_length(header.k, header.rescue_k15, packed_key)?;
@@ -61,6 +67,72 @@ pub(crate) fn lookup(reader: &JidxReader, packed_key: u64) -> Result<Option<Seed
         }
     }
     Ok(None)
+}
+
+pub(crate) fn lookup_batch(
+    reader: &JidxReader,
+    packed_keys: &[u64],
+) -> Result<Vec<Option<SeedEntry>>, JidxError> {
+    let header = reader.header();
+    let mut states = Vec::new();
+    states
+        .try_reserve_exact(packed_keys.len())
+        .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+    for &packed_key in packed_keys {
+        seed_length(header.k, header.rescue_k15, packed_key)?;
+        states.push(BatchLookupState {
+            low: 0,
+            high: header.seed_count,
+            result: None,
+        });
+    }
+
+    let mut midpoints = Vec::<(u64, usize)>::new();
+    midpoints
+        .try_reserve_exact(packed_keys.len())
+        .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+    loop {
+        midpoints.clear();
+        for (index, state) in states.iter().enumerate() {
+            if state.low < state.high {
+                midpoints.push((state.low + (state.high - state.low) / 2, index));
+            }
+        }
+        if midpoints.is_empty() {
+            break;
+        }
+        midpoints.sort_unstable();
+
+        let mut start = 0usize;
+        while start < midpoints.len() {
+            let midpoint = midpoints[start].0;
+            let record = seed_record(reader, midpoint)?;
+            let mut end = start + 1;
+            while end < midpoints.len() && midpoints[end].0 == midpoint {
+                end += 1;
+            }
+            for &(_, index) in &midpoints[start..end] {
+                let state = &mut states[index];
+                match record.packed_key.cmp(&packed_keys[index]) {
+                    std::cmp::Ordering::Less => state.low = midpoint + 1,
+                    std::cmp::Ordering::Greater => state.high = midpoint,
+                    std::cmp::Ordering::Equal => {
+                        validate_record(header, record)?;
+                        state.result = Some(record.into());
+                        state.low = state.high;
+                    }
+                }
+            }
+            start = end;
+        }
+    }
+
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(states.len())
+        .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+    output.extend(states.into_iter().map(|state| state.result));
+    Ok(output)
 }
 
 pub(crate) fn validate_table(reader: &JidxReader) -> Result<(), JidxError> {
