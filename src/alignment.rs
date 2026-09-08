@@ -1,6 +1,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
+use std::sync::{Condvar, Mutex};
 use thiserror::Error;
 
 const MATCH: u8 = 0;
@@ -181,6 +182,207 @@ pub struct AlignmentWorkspace {
     row_widths: Vec<usize>,
     operations: Vec<EditOperation>,
     reverse: Vec<u8>,
+}
+
+pub(crate) const TRACE_ALIGNMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
+// Covers the seven retained workspace Vecs and conservative simultaneous task temporaries.
+const TRACE_ALIGNMENT_ALLOCATION_COUNT: usize = 24;
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub(crate) enum AlignmentAdmissionError {
+    #[error("alignment workspace byte bound overflows")]
+    ByteOverflow,
+    #[error("alignment workspace requires {requested} bytes, exceeding workspace budget {budget}")]
+    RequestExceedsBudget { requested: usize, budget: usize },
+}
+
+struct AlignmentBytePool {
+    budget: usize,
+    available: Mutex<usize>,
+    wake: Condvar,
+}
+
+impl AlignmentBytePool {
+    const fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            available: Mutex::new(budget),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self, bytes: usize) -> Result<AlignmentBytePermit<'_>, AlignmentAdmissionError> {
+        if bytes > self.budget {
+            return Err(AlignmentAdmissionError::RequestExceedsBudget {
+                requested: bytes,
+                budget: self.budget,
+            });
+        }
+        let mut available = self
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *available < bytes {
+            available = self
+                .wake
+                .wait(available)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *available -= bytes;
+        Ok(AlignmentBytePermit { pool: self, bytes })
+    }
+
+    #[cfg(test)]
+    fn available(&self) -> usize {
+        *self
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+struct AlignmentBytePermit<'a> {
+    pool: &'a AlignmentBytePool,
+    bytes: usize,
+}
+
+impl Drop for AlignmentBytePermit<'_> {
+    fn drop(&mut self) {
+        let mut available = self
+            .pool
+            .available
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *available += self.bytes;
+        debug_assert!(*available <= self.pool.budget);
+        self.pool.wake.notify_all();
+    }
+}
+
+static TRACE_ALIGNMENT_POOL: AlignmentBytePool =
+    AlignmentBytePool::new(TRACE_ALIGNMENT_BUDGET_BYTES);
+
+pub(crate) struct TraceAlignmentWorkspace {
+    // Accumulated result vectors returned by completed tasks are caller-owned and excluded.
+    workspace: AlignmentWorkspace,
+    _permit: AlignmentBytePermit<'static>,
+}
+
+impl TraceAlignmentWorkspace {
+    pub(crate) fn acquire(
+        max_query_bases: usize,
+        max_target_bases: usize,
+        endpoint_bases: usize,
+        config: AlignmentConfig,
+    ) -> Result<Self, AlignmentAdmissionError> {
+        let bytes =
+            trace_alignment_bytes(max_query_bases, max_target_bases, endpoint_bases, config)?;
+        let permit = TRACE_ALIGNMENT_POOL.acquire(bytes)?;
+        Ok(Self {
+            workspace: AlignmentWorkspace::default(),
+            _permit: permit,
+        })
+    }
+
+    pub(crate) fn workspace_mut(&mut self) -> &mut AlignmentWorkspace {
+        &mut self.workspace
+    }
+}
+
+fn trace_alignment_bytes(
+    max_query_bases: usize,
+    max_target_bases: usize,
+    endpoint_bases: usize,
+    config: AlignmentConfig,
+) -> Result<usize, AlignmentAdmissionError> {
+    let query_rows = max_query_bases
+        .checked_add(1)
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let target_columns = max_target_bases
+        .checked_add(1)
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let band_columns = usize::try_from(config.band_width)
+        .map_err(|_| AlignmentAdmissionError::ByteOverflow)?
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let core_cells = query_rows
+        .checked_mul(target_columns.min(band_columns))
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?
+        .min(config.max_cells);
+    let endpoint_query = max_query_bases.min(endpoint_bases);
+    let endpoint_target = max_target_bases.min(endpoint_bases);
+    let endpoint_cells = endpoint_query
+        .checked_add(1)
+        .and_then(|rows| {
+            endpoint_target
+                .checked_add(1)
+                .and_then(|columns| rows.checked_mul(columns))
+        })
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?
+        .min(config.max_cells);
+    let path_bases = max_query_bases
+        .checked_add(max_target_bases)
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let endpoint_path_bases = endpoint_query
+        .checked_add(endpoint_target)
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+
+    let retained = checked_sum(&[
+        doubled_vec_bytes::<Cell>(core_cells)?,
+        doubled_vec_bytes::<EndpointCell>(endpoint_cells)?,
+        doubled_vec_bytes::<usize>(query_rows)?
+            .checked_mul(3)
+            .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        doubled_vec_bytes::<EditOperation>(path_bases)?,
+        doubled_vec_bytes::<u8>(max_target_bases)?,
+    ])?;
+    let run_entries = path_bases
+        .checked_mul(3)
+        .and_then(|value| {
+            endpoint_path_bases
+                .checked_mul(4)
+                .and_then(|extra| value.checked_add(extra))
+        })
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let cigar_bytes = path_bases
+        .checked_mul(12)
+        .and_then(|value| {
+            endpoint_path_bases
+                .checked_mul(8)
+                .and_then(|extra| value.checked_add(extra))
+        })
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let temporary = checked_sum(&[
+        doubled_vec_bytes::<u8>(max_query_bases)?,
+        doubled_vec_bytes::<u8>(endpoint_query)?,
+        doubled_vec_bytes::<u8>(endpoint_target)?,
+        doubled_vec_bytes::<EditOperation>(endpoint_path_bases)?,
+        doubled_vec_bytes::<EditRun>(run_entries)?,
+        cigar_bytes,
+    ])?;
+    let allocator_margin = TRACE_ALIGNMENT_ALLOCATION_COUNT
+        .checked_mul(4096)
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    retained
+        .checked_add(temporary)
+        .and_then(|value| value.checked_add(allocator_margin))
+        .ok_or(AlignmentAdmissionError::ByteOverflow)
+}
+
+fn doubled_vec_bytes<T>(length: usize) -> Result<usize, AlignmentAdmissionError> {
+    length
+        .checked_mul(2)
+        .and_then(|capacity| capacity.checked_mul(std::mem::size_of::<T>()))
+        .ok_or(AlignmentAdmissionError::ByteOverflow)
+}
+
+fn checked_sum(values: &[usize]) -> Result<usize, AlignmentAdmissionError> {
+    values.iter().try_fold(0usize, |total, value| {
+        total
+            .checked_add(*value)
+            .ok_or(AlignmentAdmissionError::ByteOverflow)
+    })
 }
 
 impl AlignmentWorkspace {
@@ -1132,6 +1334,61 @@ mod tests {
             band_width: 8,
             ..AlignmentConfig::default()
         }
+    }
+
+    #[test]
+    fn trace_alignment_permits_exclude_wait_and_release() {
+        let pool = AlignmentBytePool::new(10);
+        let first = pool.acquire(8).unwrap();
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+            let pool_ref = &pool;
+            let waiter = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                let second = pool_ref.acquire(3).unwrap();
+                acquired_tx.send(pool_ref.available()).unwrap();
+                drop(second);
+            });
+            started_rx.recv().unwrap();
+            assert_eq!(pool.available(), 2);
+            assert!(acquired_rx.try_recv().is_err());
+            drop(first);
+            assert_eq!(
+                acquired_rx
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .unwrap(),
+                7
+            );
+            waiter.join().unwrap();
+        });
+        assert_eq!(pool.available(), 10);
+        assert!(matches!(
+            pool.acquire(11),
+            Err(AlignmentAdmissionError::RequestExceedsBudget {
+                requested: 11,
+                budget: 10
+            })
+        ));
+    }
+
+    #[test]
+    fn admitted_workspace_preserves_alignment_and_bounds_default_trace() {
+        let mut plain = AlignmentWorkspace::default();
+        let expected = plain.align(b"ACGTACGT", b"ACGTGACGT", config()).unwrap();
+        let mut admitted = TraceAlignmentWorkspace::acquire(8, 9, 0, config()).unwrap();
+        let actual = admitted
+            .workspace_mut()
+            .align(b"ACGTACGT", b"ACGTGACGT", config())
+            .unwrap();
+        assert_eq!(actual, expected);
+        let trace_config = AlignmentConfig {
+            max_cells: 1 << 24,
+            ..AlignmentConfig::default()
+        };
+        let bytes = trace_alignment_bytes(64 * 1024, 64 * 1024, 256, trace_config).unwrap();
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(bytes, 550_656_080);
     }
 
     #[test]

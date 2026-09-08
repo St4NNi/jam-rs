@@ -1,4 +1,6 @@
-use crate::alignment::{AlignmentConfig, AlignmentError, AlignmentWorkspace, Interval, Strand};
+use crate::alignment::{
+    AlignmentConfig, AlignmentError, Interval, Strand, TraceAlignmentWorkspace,
+};
 use crate::bgzf::{BgzfError, BgzfReader};
 use crate::jidx::{JidxError, RESCUE_K15_TAG, seed_length, sha256, sha256_reader};
 use crate::jidx_reader::{
@@ -775,9 +777,34 @@ impl TraceEngine {
         loaded: &BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
         config: TraceConfig,
     ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
+        let (max_query_bases, max_target_bases) =
+            tasks
+                .iter()
+                .try_fold((0usize, 0usize), |(query_bases, target_bases), task| {
+                    let query = usize::try_from(task.query_span)
+                        .map_err(|_| TraceError::Invalid("query window"))?;
+                    let target = task
+                        .target_end
+                        .checked_sub(task.target_start)
+                        .and_then(|span| usize::try_from(span).ok())
+                        .ok_or(TraceError::Invalid("loaded range"))?;
+                    Ok::<_, TraceError>((query_bases.max(query), target_bases.max(target)))
+                })?;
+        let workspace = || {
+            TraceAlignmentWorkspace::acquire(
+                max_query_bases,
+                max_target_bases,
+                config.endpoint_bases,
+                config.alignment,
+            )
+        };
         tasks
             .par_iter()
-            .map_init(AlignmentWorkspace::default, |workspace, task| {
+            .map_init(workspace, |workspace, task| {
+                let workspace = workspace
+                    .as_mut()
+                    .map_err(|error| TraceError::AlignmentAdmission(error.to_string()))?
+                    .workspace_mut();
                 let query_window =
                     linearize_query(query, task.query_start, task.query_span, config.circular)?;
                 let loaded = loaded
@@ -1184,6 +1211,8 @@ pub enum TraceError {
     Bgzf(#[from] BgzfError),
     #[error(transparent)]
     Alignment(#[from] AlignmentError),
+    #[error("alignment workspace admission failed: {0}")]
+    AlignmentAdmission(String),
     #[error(transparent)]
     Mosaic(#[from] MosaicError),
     #[error("invalid trace input: {0}")]
@@ -1193,6 +1222,7 @@ pub enum TraceError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::alignment::AlignmentWorkspace;
     use crate::cli::handlers::{TraceArgs, TraceInput, handle_trace_command};
     use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
     use crate::writer::{BuildConfig, build};
