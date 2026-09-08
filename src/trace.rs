@@ -259,6 +259,7 @@ impl TraceEngine {
             }
 
             let index_seeds = self.index.find_seeds_batch(&packed_keys)?;
+            self.index.advise_first_document_rows(&index_seeds);
             for ((packed_key, query_seeds), index_seed) in chunk.iter().copied().zip(index_seeds) {
                 let Some(index_seed) = index_seed else {
                     continue;

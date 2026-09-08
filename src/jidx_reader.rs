@@ -195,6 +195,71 @@ impl JidxReader {
         let _ = midpoints;
     }
 
+    #[cfg(any(
+        test,
+        all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))
+    ))]
+    pub(crate) fn first_document_row_page_span(&self, seed: SeedEntry) -> Option<(usize, usize)> {
+        if seed.document_frequency == 0 {
+            return None;
+        }
+        let documents = self.header.section(SectionKind::DocumentPostings);
+        let row_start = documents.offset.checked_add(seed.document_offset)?;
+        let row_end = row_start.checked_add(u64::from(crate::jidx::DOCUMENT_POSTING_SIZE))?;
+        let documents_end = documents.offset.checked_add(documents.length)?;
+        if row_end > documents_end {
+            return None;
+        }
+        let page_start = row_start / PAGE_SIZE * PAGE_SIZE;
+        let page_end = row_end
+            .checked_add(PAGE_SIZE - 1)?
+            .checked_div(PAGE_SIZE)?
+            .checked_mul(PAGE_SIZE)?;
+        let padding_end = documents_end
+            .checked_add(PAGE_SIZE - 1)?
+            .checked_div(PAGE_SIZE)?
+            .checked_mul(PAGE_SIZE)?;
+        let next_section = self.header.section(SectionKind::ContigPostings);
+        let mmap_len = u64::try_from(self.mmap.len()).ok()?;
+        if page_end > padding_end || padding_end > next_section.offset || page_end > mmap_len {
+            return None;
+        }
+        Some((
+            usize::try_from(page_start).ok()?,
+            usize::try_from(page_end.checked_sub(page_start)?).ok()?,
+        ))
+    }
+
+    pub(crate) fn advise_first_document_rows(&self, seeds: &[Option<SeedEntry>]) {
+        #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            let mut run = None::<(usize, usize)>;
+            for seed in seeds.iter().flatten() {
+                let Some((start, length)) = self.first_document_row_page_span(*seed) else {
+                    continue;
+                };
+                let Some(end) = start.checked_add(length) else {
+                    continue;
+                };
+                if let Some((run_start, run_end)) = run {
+                    if start >= run_start && start <= run_end {
+                        run = Some((run_start, run_end.max(end)));
+                        continue;
+                    }
+                    let _ =
+                        self.mmap
+                            .advise_range(Advice::WillNeed, run_start, run_end - run_start);
+                }
+                run = Some((start, end));
+            }
+            if let Some((start, end)) = run {
+                let _ = self.mmap.advise_range(Advice::WillNeed, start, end - start);
+            }
+        }
+        #[cfg(not(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64"))))]
+        let _ = seeds;
+    }
+
     pub(crate) fn find_seeds_batch(
         &self,
         packed_keys: &[u64],
@@ -1190,6 +1255,131 @@ mod tests {
                 .collect::<Vec<_>>(),
             before
         );
+    }
+
+    #[test]
+    fn first_document_row_spans_are_bounded_and_advice_stays_lazy() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(path).unwrap();
+        let documents = reader.header.section(SectionKind::DocumentPostings);
+        let page = usize::try_from(PAGE_SIZE).unwrap();
+        let offset = usize::try_from(documents.offset).unwrap();
+        let seed = SeedEntry {
+            packed_key: 0,
+            document_frequency: 1,
+            document_offset: 0,
+        };
+        assert_eq!(
+            reader.first_document_row_page_span(seed),
+            Some((offset, page))
+        );
+        let boundary = SeedEntry {
+            document_offset: PAGE_SIZE - u64::from(crate::jidx::DOCUMENT_POSTING_SIZE),
+            ..seed
+        };
+        assert_eq!(
+            reader.first_document_row_page_span(boundary),
+            Some((offset, page))
+        );
+        let adjacent = SeedEntry {
+            document_offset: PAGE_SIZE,
+            ..seed
+        };
+        assert_eq!(
+            reader.first_document_row_page_span(adjacent),
+            Some((offset + page, page))
+        );
+        let final_seed = SeedEntry {
+            document_offset: documents.length - u64::from(crate::jidx::DOCUMENT_POSTING_SIZE),
+            ..seed
+        };
+        let final_span = reader.first_document_row_page_span(final_seed).unwrap();
+        let final_end = final_span.0 + final_span.1;
+        assert!(final_end as u64 >= documents.offset + documents.length);
+        assert!(final_end as u64 <= reader.header.section(SectionKind::ContigPostings).offset);
+        assert!(final_end <= reader.mmap.len());
+        assert!(
+            reader
+                .first_document_row_page_span(SeedEntry {
+                    document_frequency: 0,
+                    ..seed
+                })
+                .is_none()
+        );
+        assert!(
+            reader
+                .first_document_row_page_span(SeedEntry {
+                    document_offset: documents.length,
+                    ..seed
+                })
+                .is_none()
+        );
+
+        let before = reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        let same_page = SeedEntry {
+            document_offset: u64::from(crate::jidx::DOCUMENT_POSTING_SIZE),
+            ..seed
+        };
+        let gap = SeedEntry {
+            document_offset: 3 * PAGE_SIZE,
+            ..seed
+        };
+        let decrease = SeedEntry {
+            document_offset: 2 * PAGE_SIZE,
+            ..seed
+        };
+        reader.advise_first_document_rows(&[
+            None,
+            Some(seed),
+            Some(seed),
+            Some(same_page),
+            Some(adjacent),
+            Some(gap),
+            Some(decrease),
+            Some(final_seed),
+        ]);
+        assert_eq!(
+            reader
+                .verified_pages
+                .iter()
+                .map(|word| word.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            before
+        );
+    }
+
+    #[test]
+    fn first_document_row_advice_preserves_public_errors() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let reader = JidxReader::open(&path).unwrap();
+        let seed = reader.find_seed(170).unwrap().unwrap();
+        let documents = reader.header.section(SectionKind::DocumentPostings);
+        drop(reader);
+        corrupt_byte(&path, documents.offset + seed.document_offset);
+
+        let reader = JidxReader::open(&path).unwrap();
+        let seed = reader.find_seed(170).unwrap().unwrap();
+        reader.advise_first_document_rows(&[Some(seed)]);
+        assert!(matches!(
+            reader.seed_documents(seed),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+
+        let invalid = SeedEntry {
+            document_offset: documents.length,
+            ..seed
+        };
+        reader.advise_first_document_rows(&[Some(invalid)]);
+        assert!(matches!(
+            reader.seed_documents(invalid),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "document posting range"
+            )))
+        ));
     }
 
     #[test]
