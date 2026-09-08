@@ -1,8 +1,8 @@
 use crate::jidx::sha256;
 use crate::range_source::S3Config;
 use crate::trace::{
-    Candidate, MetagenomeTrace, PreparedQuery, SearchCompletion, TraceCensus, TraceConfig,
-    TraceEngine, TraceError, candidate_completion, compare_candidates, digest_hex, prepare_query,
+    Candidate, MetagenomeTrace, PreparedQuery, SearchCompletion, TraceConfig, TraceEngine,
+    TraceError, candidate_completion, compare_candidates, digest_hex, prepare_query,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -148,9 +148,10 @@ impl CollectionTraceEngine {
     ) -> Result<Vec<CollectionTraceResult>, TraceError> {
         let worker_limit = rayon::current_num_threads().max(1);
         let live_shards = worker_limit.div_ceil(prepared.len()).max(1);
-        let mut censuses = (0..prepared.len())
-            .map(|_| Vec::with_capacity(self.shards.len()))
+        let mut frequencies = (0..prepared.len())
+            .map(|_| BTreeMap::<u64, u64>::new())
             .collect::<Vec<_>>();
+        let mut candidates = (0..prepared.len()).map(|_| Vec::new()).collect::<Vec<_>>();
         for (chunk, shards) in self.shards.chunks(live_shards).enumerate() {
             let shard_censuses = shards
                 .par_iter()
@@ -165,15 +166,29 @@ impl CollectionTraceEngine {
             for (offset, shard) in shard_censuses.into_iter().enumerate() {
                 let ordinal = chunk * live_shards + offset;
                 for (query, census) in shard.into_iter().enumerate() {
-                    censuses[query].push((ordinal, census));
+                    for (key, frequency) in census.frequencies {
+                        let total = frequencies[query].entry(key).or_default();
+                        *total = total
+                            .checked_add(u64::from(frequency))
+                            .ok_or(TraceError::Invalid("collection document frequency"))?;
+                    }
+                    candidates[query].extend(
+                        census
+                            .candidates
+                            .into_iter()
+                            .map(|candidate| (ordinal, candidate)),
+                    );
                 }
             }
         }
 
         let mut plans = prepared
             .into_iter()
-            .zip(censuses)
-            .map(|(query, censuses)| plan_query(query, censuses, config))
+            .zip(frequencies)
+            .zip(candidates)
+            .map(|((query, frequencies), candidates)| {
+                plan_query(query, frequencies, candidates, config)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let selected_shards = plans
             .iter()
@@ -248,25 +263,10 @@ impl CollectionTraceEngine {
 
 fn plan_query(
     prepared: PreparedQuery,
-    censuses: Vec<(usize, TraceCensus)>,
+    frequencies: BTreeMap<u64, u64>,
+    mut candidates: Vec<(usize, Candidate)>,
     config: TraceConfig,
 ) -> Result<PlannedQuery, TraceError> {
-    let mut frequencies = BTreeMap::<u64, u64>::new();
-    let mut candidates = Vec::new();
-    for (ordinal, census) in censuses {
-        for (key, frequency) in census.frequencies {
-            let total = frequencies.entry(key).or_default();
-            *total = total
-                .checked_add(u64::from(frequency))
-                .ok_or(TraceError::Invalid("collection document frequency"))?;
-        }
-        candidates.extend(
-            census
-                .candidates
-                .into_iter()
-                .map(|candidate| (ordinal, candidate)),
-        );
-    }
     candidates.sort_by(|(left_shard, left), (right_shard, right)| {
         compare_candidates(left, right)
             .then_with(|| left_shard.cmp(right_shard))
