@@ -6,11 +6,12 @@ use super::*;
 use crate::align::{Interval, parse_cigar};
 use crate::decide::DecisionRule;
 
-fn contigs() -> Vec<Contig> {
-    vec![Contig {
+fn contigs() -> BTreeMap<u32, Contig> {
+    let contig = Contig {
         name: "plasmid_1".into(),
         length: 5_000,
-    }]
+    };
+    BTreeMap::from([(0, contig)])
 }
 
 fn fragment(strand: Strand, cigar: &str) -> Fragment {
@@ -49,7 +50,7 @@ fn fragment_record_fields() {
     let record = FragmentRecord::new(&reverse, 8, &contigs()).unwrap();
     assert_eq!(record.cigar, "1=1D3=1X3=");
     assert_eq!(record.strand, Strand::Reverse);
-    assert!(FragmentRecord::new(&reverse, 0, &[]).is_err());
+    assert!(FragmentRecord::new(&reverse, 0, &BTreeMap::new()).is_err());
 }
 
 #[test]

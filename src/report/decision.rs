@@ -8,6 +8,7 @@ use crate::align::{Alignment, EditRun, Interval, Strand, format_cigar};
 use crate::decide::{Decision, Fragment};
 use crate::index::Contig;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One fragment of a mosaic, placed on the query and on a named contig.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -54,14 +55,14 @@ pub struct DecisionRecord {
 }
 
 impl FragmentRecord {
-    /// The record of `fragment`; `contigs` is the contig table of its entry.
+    /// The record of `fragment`; `contigs` holds the contigs of its entry by contig index.
     pub fn new(
         fragment: &Fragment,
         new_bases: u64,
-        contigs: &[Contig],
+        contigs: &BTreeMap<u32, Contig>,
     ) -> Result<Self, ReportError> {
         let contig = contigs
-            .get(fragment.contig_index as usize)
+            .get(&fragment.contig_index)
             .ok_or(ReportError::UnknownContig(fragment.contig_index))?;
         let alignment = &fragment.alignment;
         let counts = alignment.counts();
@@ -106,8 +107,9 @@ fn contig_order_cigar(alignment: &Alignment) -> String {
 }
 
 impl DecisionRecord {
-    /// The record of `decision`; `contigs` is the contig table of the entry.
-    pub fn new(decision: &Decision, contigs: &[Contig]) -> Result<Self, ReportError> {
+    /// The record of `decision`; `contigs` holds the contigs of the entry that its fragments
+    /// refer to, by contig index.
+    pub fn new(decision: &Decision, contigs: &BTreeMap<u32, Contig>) -> Result<Self, ReportError> {
         let mosaic = &decision.mosaic;
         let query_length = mosaic.query_length;
         let counts = decision.counts;

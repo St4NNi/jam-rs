@@ -8,6 +8,7 @@ use super::control::Stopped;
 use super::error::SearchError;
 use crate::index::Contig;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A stage of the search; as the last stage of a search it is its level.
 #[derive(
@@ -59,10 +60,10 @@ pub enum EntryEvent {
     /// Stage 2 found where to align the entry.
     Located(LocatedEntry),
     /// Stage 3 aligned the entry and it qualifies; the decision holds its mosaic, and `contigs`
-    /// the contig table that its fragments refer to.
+    /// the contigs that its fragments refer to, by contig index.
     Confirmed {
         aligned: AlignedEntry,
-        contigs: Vec<Contig>,
+        contigs: BTreeMap<u32, Contig>,
     },
     /// The entry left the search at `stage`.
     Dropped {

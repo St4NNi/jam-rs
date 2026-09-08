@@ -360,7 +360,10 @@ impl<'a> Searcher<'a> {
             });
         }
         worker.align.confirmed_entries += 1;
-        let contigs = packed.contigs()?;
+        let mosaic = &aligned.decision.mosaic;
+        let primary = mosaic.primary.iter().map(|selected| &selected.fragment);
+        let fragments = primary.chain(&mosaic.alternatives);
+        let contigs = packed.contigs(fragments.map(|fragment| fragment.contig_index))?;
         Ok(EntryEvent::Confirmed { aligned, contigs })
     }
 }

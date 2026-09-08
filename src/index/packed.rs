@@ -7,6 +7,7 @@ use super::IndexError;
 use super::bits::{u32_at, u64_at};
 use crate::seeds::base_code;
 use crate::storage::ReadAt;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -148,12 +149,12 @@ pub struct Contig {
     pub length: u64,
 }
 
-/// An open packed sequence. Contig starts, runs and block checksums stay in memory; names and
-/// bases are read on request.
+/// An open packed sequence. Contig starts, names, runs and block checksums stay in memory; bases
+/// are read on request.
 pub struct PackedSequence {
     source: Arc<dyn ReadAt>,
     starts: Vec<u64>,
-    names_offset: u64,
+    names: Vec<u8>,
     name_ends: Vec<u64>,
     runs: Vec<Run>,
     block_crcs: Vec<u32>,
@@ -216,8 +217,8 @@ impl PackedSequence {
         self.name_ends.len()
     }
 
-    /// The name of a contig, read from the source.
-    pub fn contig_name(&self, contig: usize) -> Result<Vec<u8>, IndexError> {
+    /// The name of a contig.
+    pub fn contig_name(&self, contig: usize) -> Result<&[u8], IndexError> {
         let end = *self
             .name_ends
             .get(contig)
@@ -225,24 +226,29 @@ impl PackedSequence {
         let start = contig
             .checked_sub(1)
             .map_or(0, |previous| self.name_ends[previous]);
-        let mut name = vec![0; (end - start) as usize];
-        self.source
-            .read_exact_at(self.names_offset + start, &mut name)?;
-        if !valid_name(&name) {
-            return Err(IndexError::format("contig name"));
-        }
+        let name = self
+            .names
+            .get(start as usize..end as usize)
+            .filter(|name| valid_name(name))
+            .ok_or_else(|| IndexError::format("contig name"))?;
         Ok(name)
     }
 
-    /// The names and lengths of all contigs, in order; the names are read from the source.
-    pub fn contigs(&self) -> Result<Vec<Contig>, IndexError> {
-        (0..self.contig_count())
+    /// The names and lengths of the given contigs, by contig index.
+    pub fn contigs(
+        &self,
+        contigs: impl IntoIterator<Item = u32>,
+    ) -> Result<BTreeMap<u32, Contig>, IndexError> {
+        contigs
+            .into_iter()
             .map(|contig| {
-                let name = self.contig_name(contig)?;
-                Ok(Contig {
-                    name: String::from_utf8_lossy(&name).into_owned(),
-                    length: self.starts[contig + 1] - self.starts[contig],
-                })
+                let name = self.contig_name(contig as usize)?;
+                let range = self.contig_range(contig as usize)?;
+                let contig_record = Contig {
+                    name: String::from_utf8_lossy(name).into_owned(),
+                    length: range.end - range.start,
+                };
+                Ok((contig, contig_record))
             })
             .collect()
     }
@@ -380,10 +386,14 @@ impl PackedSequence {
         if !ordered || !runs_valid {
             return Err(IndexError::format("packed sequence tables"));
         }
+        let names = tables
+            .get(names_at..names_at + names as usize)
+            .ok_or_else(|| IndexError::format("packed sequence tables"))?
+            .to_vec();
         Ok(Self {
             source,
             starts,
-            names_offset: HEADER_BYTES + names_at as u64,
+            names,
             name_ends,
             runs,
             block_crcs,

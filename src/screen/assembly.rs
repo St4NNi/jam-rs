@@ -318,7 +318,7 @@ impl<'a> Screener<'a> {
             return Ok((record.name.clone(), length));
         }
         let contig_name = packed.contig_name(contig as usize)?;
-        let contig_name = String::from_utf8_lossy(&contig_name);
+        let contig_name = String::from_utf8_lossy(contig_name);
         Ok((format!("{}/{contig_name}", record.name), length))
     }
 }

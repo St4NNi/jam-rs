@@ -70,10 +70,11 @@ fn packed_round_trip() {
         start += length;
     }
     assert_eq!(packed.contig_at(total as u64), None);
-    let table = packed.contigs().unwrap();
-    assert_eq!(table.len(), contigs.len());
-    assert_eq!(table[1].length, contigs[1].1.len() as u64);
-    assert_eq!(table[1].name.as_bytes(), contigs[1].0);
+    let table = packed.contigs([1, 0]).unwrap();
+    assert_eq!(table.len(), 2);
+    assert_eq!(table[&1].length, contigs[1].1.len() as u64);
+    assert_eq!(table[&1].name.as_bytes(), contigs[1].0);
+    assert!(packed.contigs([5]).is_err());
     assert!(packed.read(2, 0..70_001, &mut out).is_err());
     assert!(packed.contig_name(5).is_err());
 }
