@@ -43,6 +43,7 @@ pub struct Contig<'a> {
 }
 
 pub struct JidxReader {
+    file: File,
     mmap: Mmap,
     header: Header,
     verified_pages: Box<[AtomicU64]>,
@@ -66,6 +67,7 @@ impl JidxReader {
         let verified_pages =
             verified_page_cache(header.section(SectionKind::BlockChecksums).offset)?;
         let reader = Self {
+            file,
             mmap,
             header,
             verified_pages,
@@ -82,6 +84,28 @@ impl JidxReader {
 
     pub fn header(&self) -> &Header {
         &self.header
+    }
+
+    pub(crate) fn cache_file_identity(&self) -> std::io::Result<Option<[u64; 7]>> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = self.file.metadata()?;
+            Ok(Some([
+                metadata.dev(),
+                metadata.ino(),
+                metadata.len(),
+                metadata.mtime() as u64,
+                metadata.mtime_nsec() as u64,
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ]))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = &self.file;
+            Ok(None)
+        }
     }
 
     pub fn verify_checksum(&self) -> Result<(), JidxReaderError> {

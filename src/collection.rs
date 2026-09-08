@@ -1,8 +1,9 @@
 use crate::jidx::sha256;
 use crate::range_source::S3Config;
 use crate::trace::{
-    Candidate, MetagenomeTrace, PreparedQuery, SearchCompletion, TraceConfig, TraceEngine,
-    TraceError, candidate_completion, compare_candidates, digest_hex, prepare_query,
+    CachedSeedLookups, Candidate, LOOKUP_CACHE_BYTES, MetagenomeTrace, PreparedQuery,
+    SearchCompletion, TraceConfig, TraceEngine, TraceError, candidate_completion,
+    compare_candidates, digest_hex, prepare_query,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,7 @@ struct PlannedQuery {
     candidates_screened: u32,
     key_order: Vec<u64>,
     selected: BTreeMap<usize, Vec<Candidate>>,
+    lookups: Vec<Option<CachedSeedLookups>>,
     metagenomes: Vec<CollectionMetagenomeTrace>,
 }
 
@@ -148,6 +150,11 @@ impl CollectionTraceEngine {
     ) -> Result<Vec<CollectionTraceResult>, TraceError> {
         let worker_limit = rayon::current_num_threads().max(1);
         let live_shards = worker_limit.div_ceil(prepared.len()).max(1);
+        let cache_limit =
+            CachedSeedLookups::seed_limit(LOOKUP_CACHE_BYTES / prepared.len() / self.shards.len());
+        let mut lookups = (0..prepared.len())
+            .map(|_| (0..self.shards.len()).map(|_| None).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
         let mut frequencies = (0..prepared.len())
             .map(|_| BTreeMap::<u64, u64>::new())
             .collect::<Vec<_>>();
@@ -159,13 +166,14 @@ impl CollectionTraceEngine {
                     let engine = open_shard(shard, self.s3.clone())?;
                     prepared
                         .par_iter()
-                        .map(|query| engine.candidate_census(query, config))
+                        .map(|query| engine.candidate_census(query, config, cache_limit))
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, TraceError>>()?;
             for (offset, shard) in shard_censuses.into_iter().enumerate() {
                 let ordinal = chunk * live_shards + offset;
                 for (query, census) in shard.into_iter().enumerate() {
+                    lookups[query][ordinal] = census.lookups;
                     for (key, frequency) in census.frequencies {
                         let total = frequencies[query].entry(key).or_default();
                         *total = total
@@ -186,8 +194,9 @@ impl CollectionTraceEngine {
             .into_iter()
             .zip(frequencies)
             .zip(candidates)
-            .map(|((query, frequencies), candidates)| {
-                plan_query(query, frequencies, candidates, config)
+            .zip(lookups)
+            .map(|(((query, frequencies), candidates), lookups)| {
+                plan_query(query, frequencies, candidates, lookups, config)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let selected_shards = plans
@@ -206,7 +215,7 @@ impl CollectionTraceEngine {
                         .filter_map(|(query, plan)| {
                             plan.selected
                                 .remove(&ordinal)
-                                .map(|candidates| (query, candidates))
+                                .map(|candidates| (query, candidates, plan.lookups[ordinal].take()))
                         })
                         .collect::<Vec<_>>();
                     (ordinal, queries)
@@ -218,11 +227,12 @@ impl CollectionTraceEngine {
                     let engine = open_shard(&self.shards[ordinal], self.s3.clone())?;
                     queries
                         .into_par_iter()
-                        .map(|(query, candidates)| {
+                        .map(|(query, candidates, lookups)| {
                             let traces = engine.trace_selected(
                                 &plans[query].prepared,
                                 candidates,
                                 &plans[query].key_order,
+                                lookups.as_ref(),
                                 config,
                             )?;
                             Ok((
@@ -265,6 +275,7 @@ fn plan_query(
     prepared: PreparedQuery,
     frequencies: BTreeMap<u64, u64>,
     mut candidates: Vec<(usize, Candidate)>,
+    mut lookups: Vec<Option<CachedSeedLookups>>,
     config: TraceConfig,
 ) -> Result<PlannedQuery, TraceError> {
     candidates.sort_by(|(left_shard, left), (right_shard, right)| {
@@ -280,6 +291,11 @@ fn plan_query(
     for (ordinal, candidate) in candidates {
         selected.entry(ordinal).or_default().push(candidate);
     }
+    for (ordinal, lookups) in lookups.iter_mut().enumerate() {
+        if !selected.contains_key(&ordinal) {
+            *lookups = None;
+        }
+    }
     let mut key_order = frequencies.into_iter().collect::<Vec<_>>();
     key_order.sort_unstable_by_key(|&(key, frequency)| (frequency, key));
     Ok(PlannedQuery {
@@ -288,6 +304,7 @@ fn plan_query(
         candidates_screened,
         key_order: key_order.into_iter().map(|(key, _)| key).collect(),
         selected,
+        lookups,
         metagenomes: Vec::new(),
     })
 }
