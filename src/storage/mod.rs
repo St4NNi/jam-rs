@@ -54,6 +54,29 @@ impl ReadAt for Vec<u8> {
     }
 }
 
+/// Ranges closer than this many bytes are hinted as one, so reads become fewer and larger.
+const HINT_GAP: u64 = 32 << 10;
+
+/// Tells `source` that the byte ranges `start..end` will be read soon, joining ranges that lie
+/// close together. It never changes what is read.
+pub fn will_need_ranges(source: &dyn ReadAt, ranges: &mut [(u64, u64)]) {
+    ranges.sort_unstable();
+    let mut joined: Option<(u64, u64)> = None;
+    for &(start, end) in ranges.iter() {
+        match &mut joined {
+            Some(last) if start <= last.1.saturating_add(HINT_GAP) => last.1 = last.1.max(end),
+            _ => {
+                if let Some((first, last)) = joined.replace((start, end)) {
+                    source.will_need(first, last - first);
+                }
+            }
+        }
+    }
+    if let Some((first, last)) = joined {
+        source.will_need(first, last - first);
+    }
+}
+
 /// Locks `mutex`. A thread that panicked while holding it leaves data that is still whole here,
 /// so the lock is taken anyway.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -86,6 +109,34 @@ pub(crate) fn checked_end(offset: u64, length: usize, size: u64) -> io::Result<u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Records the hints it gets.
+    #[derive(Default)]
+    struct Hinted(Mutex<Vec<(u64, u64)>>);
+
+    impl ReadAt for Hinted {
+        fn read_exact_at(&self, _offset: u64, _buffer: &mut [u8]) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn size(&self) -> u64 {
+            u64::MAX
+        }
+
+        fn will_need(&self, offset: u64, length: u64) {
+            lock(&self.0).push((offset, length));
+        }
+    }
+
+    #[test]
+    fn close_ranges_joined() {
+        let source = Hinted::default();
+        let mut ranges = [(HINT_GAP * 10, HINT_GAP * 10 + 8), (0, 8), (100, 4_000)];
+        will_need_ranges(&source, &mut ranges);
+        assert_eq!(*lock(&source.0), vec![(0, 4_000), (HINT_GAP * 10, 8)]);
+        will_need_ranges(&source, &mut []);
+        assert_eq!(lock(&source.0).len(), 2);
+    }
 
     #[test]
     fn vec_reads_offsets() {
