@@ -5,7 +5,7 @@
 use super::{DecisionRecord, ReportError};
 use crate::search::{
     AlignStageWork, Completion, DropReason, EntryEvent, LocateWork, SearchStage, SearchSummary,
-    SketchWork, Stopped,
+    SearchTimes, SketchWork, Stopped,
 };
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,7 @@ pub struct Summary {
     pub sketch: SketchWork,
     pub locate: LocateWork,
     pub align: AlignStageWork,
+    pub times: SearchTimes,
 }
 
 /// One line of output. `kind` names the record, `query` the query record and `entry` the entry.
@@ -170,6 +171,7 @@ impl Record {
             sketch: SketchWork::default(),
             locate: LocateWork::default(),
             align: AlignStageWork::default(),
+            times: SearchTimes::default(),
         })
     }
 
@@ -189,6 +191,7 @@ impl Record {
             sketch: summary.sketch,
             locate: summary.locate,
             align: summary.align,
+            times: summary.times,
         })
     }
 }

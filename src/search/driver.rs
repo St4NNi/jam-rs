@@ -16,6 +16,7 @@ use super::locate_stage::{
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
+use super::times::{PartStart, SearchTimes};
 use crate::decide::DecisionRule;
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
@@ -87,6 +88,8 @@ pub struct SearchSummary {
     pub sketch: SketchWork,
     pub locate: LocateWork,
     pub align: AlignStageWork,
+    /// Wall seconds, CPU seconds and major page faults of the parts of the search.
+    pub times: SearchTimes,
 }
 
 /// The work of stage 3, summed over entries.
@@ -158,6 +161,7 @@ impl<'a> Searcher<'a> {
         let budget = LossBudget::new(config.loss_budget.chance() / 2.0)?;
         // The query tables are built on the threads of the search too.
         let search = || {
+            let start = PartStart::now();
             let prepared = match config.last_stage {
                 SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
                 _ => None,
@@ -170,7 +174,7 @@ impl<'a> Searcher<'a> {
                 control,
                 events,
             };
-            Ok(self.run(query, circular, budget, &request))
+            Ok(self.run(query, circular, budget, &request, start))
         };
         if config.threads == 0 {
             return search();
@@ -189,6 +193,7 @@ impl<'a> Searcher<'a> {
         circular: bool,
         budget: LossBudget,
         request: &Request<'_>,
+        start: PartStart,
     ) -> SearchSummary {
         let Request {
             config,
@@ -213,7 +218,13 @@ impl<'a> Searcher<'a> {
             sketch: SketchWork::default(),
             locate: LocateWork::default(),
             align: AlignStageWork::default(),
+            times: SearchTimes {
+                open_shard_seconds: self.shard.open_seconds(),
+                ..SearchTimes::default()
+            },
         };
+        summary.times.prepare_query = start.finish();
+        let start = PartStart::now();
         let sketch = match sketch_stage(
             self.shard.sketch(),
             &query_kmers,
@@ -228,6 +239,7 @@ impl<'a> Searcher<'a> {
             }
         };
         summary.sketch = sketch.work;
+        summary.times.sketch = start.finish();
         for candidate in &sketch.candidates {
             let possible = EntryEvent::Possible {
                 entry: candidate.entry,
@@ -252,7 +264,9 @@ impl<'a> Searcher<'a> {
         let finish = |possible: &PossibleEntry, worker: &mut Worker| {
             self.finish_entry(possible, &locate, request, worker)
         };
+        let start = PartStart::now();
         queue.run(finish, &mut summary);
+        summary.times.entries = start.finish();
         summary
     }
 

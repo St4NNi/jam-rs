@@ -86,6 +86,7 @@ fn line(reply: Reply) -> String {
         summary.sketch.seconds = 0.0;
         summary.locate.seconds = 0.0;
         summary.align.seconds = 0.0;
+        summary.times = Default::default();
     }
     serde_json::to_string(&record).unwrap()
 }

@@ -85,6 +85,7 @@ fn summary_names_ending() {
         sketch: Default::default(),
         locate: Default::default(),
         align: Default::default(),
+        times: Default::default(),
     };
     let record = Record::summary("q1", &summary);
     round_trip(&record);

@@ -12,6 +12,7 @@ mod locate_stage;
 mod located;
 mod query;
 mod sketch_stage;
+mod times;
 
 #[cfg(test)]
 pub use align_stage::align_entry;
@@ -28,6 +29,7 @@ pub use locate_stage::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace
 pub use located::{ContigWindows, LocatedEntry};
 pub use query::QueryKmers;
 pub use sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
+pub use times::{PartTime, SearchTimes};
 
 #[cfg(test)]
 mod locate_stage_tests;

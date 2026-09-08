@@ -13,6 +13,7 @@ use crate::storage::MappedFile;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Sizes and counts of a shard, for `jam stats`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
@@ -44,6 +45,8 @@ pub struct Shard {
     manifest: Manifest,
     sketch: Sketch,
     positions: Positions,
+    /// Wall seconds that opening took.
+    open_seconds: f64,
 }
 
 impl Shard {
@@ -66,6 +69,7 @@ impl Shard {
     /// Opens the shard in `directory`, with its packed sequences where `packed` says. Only
     /// headers and sizes are checked; `verify` reads everything.
     pub fn open_with(directory: &Path, packed: &PackedOptions) -> Result<Self, IndexError> {
+        let started = Instant::now();
         let manifest = Manifest::read(directory)?;
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;
@@ -104,7 +108,13 @@ impl Shard {
             manifest,
             sketch,
             positions,
+            open_seconds: started.elapsed().as_secs_f64(),
         })
+    }
+
+    /// Wall seconds that opening the shard took.
+    pub fn open_seconds(&self) -> f64 {
+        self.open_seconds
     }
 
     /// The manifest of the shard.
