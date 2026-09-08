@@ -264,8 +264,16 @@ impl<'a> Searcher<'a> {
         let finish = |possible: &PossibleEntry, worker: &mut Worker| {
             self.finish_entry(possible, &locate, request, worker)
         };
+        let distinct = query_kmers.distinct();
+        let prefetch = |possible: &PossibleEntry| {
+            let seeds = possible.seed_hits.iter().chain(&sketch.frequent_seeds);
+            let hashes = seeds.map(|&seed| distinct[seed as usize].hash);
+            self.shard
+                .positions()
+                .prefetch_slots(possible.entry, hashes);
+        };
         let start = PartStart::now();
-        queue.run(finish, &mut summary);
+        queue.run(finish, prefetch, &mut summary);
         summary.times.entries = start.finish();
         summary
     }
@@ -432,15 +440,20 @@ impl<'a> EntryQueue<'a> {
     }
 
     /// Runs `finish` for every entry on the workers of the current thread pool, then adds their
-    /// work to `summary`. The first error, by worker, decides how the search ended.
-    fn run<F>(&self, finish: F, summary: &mut SearchSummary)
+    /// work to `summary`. The first error, by worker, decides how the search ended. Taking an
+    /// entry calls `prefetch` for the entry one worker count later, so its reads start early.
+    fn run<F, P>(&self, finish: F, prefetch: P, summary: &mut SearchSummary)
     where
         F: Fn(&PossibleEntry, &mut Worker) -> Result<(), Halt> + Sync,
+        P: Fn(&PossibleEntry) + Sync,
     {
         let workers = rayon::current_num_threads().min(self.candidates.len());
+        for possible in self.candidates.iter().take(workers) {
+            prefetch(possible);
+        }
         let ends: Vec<WorkerEnd> = (0..workers)
             .into_par_iter()
-            .map(|_| self.work_on(&finish))
+            .map(|_| self.work_on(&finish, &prefetch, workers))
             .collect();
         for end in ends {
             summary.locate.add(&end.worker.locate);
@@ -451,15 +464,19 @@ impl<'a> EntryQueue<'a> {
         }
     }
 
-    fn work_on<F>(&self, finish: &F) -> WorkerEnd
+    fn work_on<F, P>(&self, finish: &F, prefetch: &P, ahead: usize) -> WorkerEnd
     where
         F: Fn(&PossibleEntry, &mut Worker) -> Result<(), Halt>,
+        P: Fn(&PossibleEntry),
     {
         let mut worker = Worker::default();
-        while let Some(possible) = self.take() {
+        while let Some((index, possible)) = self.take_indexed() {
             if self.halted.load(Ordering::Relaxed) {
                 self.unfinished(possible.entry, SearchStage::Locate);
                 continue;
+            }
+            if let Some(later) = self.candidates.get(index + ahead) {
+                prefetch(later);
             }
             let result = match self.control.check() {
                 Err(stopped) => Err(Halt {
@@ -487,8 +504,13 @@ impl<'a> EntryQueue<'a> {
     }
 
     fn take(&self) -> Option<&'a PossibleEntry> {
-        self.candidates
-            .get(self.next.fetch_add(1, Ordering::Relaxed))
+        self.take_indexed().map(|(_, possible)| possible)
+    }
+
+    /// The next entry and its place in the queue.
+    fn take_indexed(&self) -> Option<(usize, &'a PossibleEntry)> {
+        let index = self.next.fetch_add(1, Ordering::Relaxed);
+        self.candidates.get(index).map(|possible| (index, possible))
     }
 
     fn unfinished(&self, entry: u32, stage: SearchStage) {

@@ -143,6 +143,22 @@ impl Positions {
         Ok(())
     }
 
+    /// Asks for the contig starts of an entry and the slot directory places of these hashes,
+    /// without waiting for any of them, so a later lookup of the entry finds them read.
+    pub fn prefetch_slots(&self, entry: u32, hashes: impl Iterator<Item = u64>) {
+        let Ok(section) = self.section(entry) else {
+            return;
+        };
+        let suffix_bits = u32::from(section.suffix_bits);
+        let directory = section.offset + section.contig_bytes();
+        let mut ranges: Vec<(u64, u64)> = hashes
+            .map(|hash| directory + 4 * (seed_key(hash, POSITION_KEY_BITS) >> suffix_bits))
+            .map(|at| (at, at + 8))
+            .collect();
+        ranges.push((section.offset, directory));
+        will_need_ranges(self.source.as_ref(), &mut ranges);
+    }
+
     /// Asks for the bytes that looking up these hashes in one entry reads: first their slot
     /// directory places, then, once those are read, the records of their slots. The reads of all
     /// the seeds then go out together instead of one after another.
