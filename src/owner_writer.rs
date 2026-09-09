@@ -5,7 +5,9 @@ use crate::owner_format::{
     OWNER_HEADER_SIZE, OWNER_PAGE_SIZE, OWNER_SECTION_COUNT, OwnerHeader, OwnerSection,
     OwnerSectionDescriptor, checksum_layout, put_u32, put_u64,
 };
-use crate::owner_postings::{MAX_KEYS_PER_BLOCK, OwnerKey, encode_block};
+use crate::owner_postings::{
+    MAX_KEYS_PER_BLOCK, OwnerKey, OwnerOccurrence, OwnerPostingsError, encode_block,
+};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::File;
@@ -23,28 +25,63 @@ pub struct OwnerKeyRange {
     pub complete: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnerMetadata {
     pub metagenomes: Vec<OwnerMetagenomeInput>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnerMetagenomeInput {
     pub name: String,
     pub bgzf_uri: String,
     pub bgzf_bytes: u64,
     pub bgzf_sha256: [u8; 32],
     pub gzi: Vec<u8>,
+    pub original_contig_start: u32,
+    pub original_contig_count: u32,
+    pub locus_bits: u8,
     pub contigs: Vec<OwnerContigInput>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnerContigInput {
+    pub local_contig: u32,
     pub name: String,
     pub length: u64,
     pub fasta_offset: u64,
     pub line_bases: u32,
     pub line_width: u32,
+}
+
+impl OwnerMetadata {
+    pub fn locus(
+        &self,
+        document: u32,
+        occurrence: OwnerOccurrence,
+    ) -> Result<u64, OwnerPostingsError> {
+        let invalid = || OwnerPostingsError("locus metadata");
+        let metagenome = self
+            .metagenomes
+            .get(document as usize)
+            .ok_or_else(invalid)?;
+        let index = metagenome
+            .contigs
+            .binary_search_by_key(&occurrence.local_contig, |contig| contig.local_contig)
+            .map_err(|_| invalid())?;
+        let contig = &metagenome.contigs[index];
+        if occurrence.position >= contig.length
+            || contig.line_bases == 0
+            || contig.line_width < contig.line_bases
+        {
+            return Err(invalid());
+        }
+        let line_bases = u64::from(contig.line_bases);
+        (occurrence.position / line_bases)
+            .checked_mul(u64::from(contig.line_width))
+            .and_then(|offset| offset.checked_add(occurrence.position % line_bases))
+            .and_then(|offset| contig.fasta_offset.checked_add(offset))
+            .ok_or_else(invalid)
+    }
 }
 
 pub struct OwnerWriteInput<'a> {
@@ -58,6 +95,7 @@ pub struct OwnerWriteInput<'a> {
     pub document_count: u32,
     pub contig_count: u32,
     pub keys: &'a [OwnerKey],
+    pub loci: &'a OwnerMetadata,
     pub metadata: Option<&'a OwnerMetadata>,
 }
 
@@ -152,21 +190,35 @@ pub fn write_owner(
     let mut documents = Vec::new();
     let mut contigs = Vec::new();
     let mut gzi = Vec::new();
-    if let Some(metadata) = input.metadata {
-        encode_metadata(
-            metadata,
-            &mut strings,
-            &mut documents,
-            &mut contigs,
-            &mut gzi,
-        )?;
+    encode_metadata(
+        input.loci,
+        &mut strings,
+        &mut documents,
+        &mut contigs,
+        &mut gzi,
+    )?;
+    let metadata_sha256 =
+        crate::owner_format::metadata_digest([&strings, &documents, &contigs, &gzi]);
+    if input.metadata.is_none() {
+        strings = Vec::new();
+        documents = Vec::new();
+        contigs = Vec::new();
+        gzi = Vec::new();
     }
     let mut directory = Vec::new();
     let mut hot = Vec::new();
     let mut cold = Vec::new();
     let mut occurrence_count = 0u64;
+    let widths = input
+        .loci
+        .metagenomes
+        .iter()
+        .map(|document| document.locus_bits)
+        .collect::<Vec<_>>();
     for block in input.keys.chunks(MAX_KEYS_PER_BLOCK) {
-        let encoded = encode_block(block)?;
+        let encoded = encode_block(block, &widths, |document, occurrence| {
+            input.loci.locus(document, occurrence)
+        })?;
         let first = block.first().expect("nonempty block").key;
         let last = block.last().expect("nonempty block").key;
         let mut record = [0; OWNER_BLOCK_SIZE as usize];
@@ -273,6 +325,7 @@ pub fn write_owner(
         generation_id: input.generation_id,
         body_sha256,
         checksum_root_sha256,
+        metadata_sha256,
         sections,
     };
     let header_bytes = header.encode()?;
@@ -309,6 +362,10 @@ fn validate_input(input: &OwnerWriteInput<'_>) -> Result<(), OwnerWriteError> {
         || input.document_count == 0
         || input.contig_count == 0
         || input.keys.len() > MAX_PROTOTYPE_KEYS
+        || input.loci.metagenomes.len() != input.document_count as usize
+        || input
+            .metadata
+            .is_some_and(|metadata| !std::ptr::eq(metadata, input.loci) && metadata != input.loci)
     {
         return Err(OwnerWriteError::Invalid("writer input"));
     }
@@ -320,7 +377,8 @@ fn validate_input(input: &OwnerWriteInput<'_>) -> Result<(), OwnerWriteError> {
     {
         return Err(OwnerWriteError::Invalid("key range or order"));
     }
-    if let Some(metadata) = input.metadata {
+    {
+        let metadata = input.loci;
         let mut bytes = 0;
         for metagenome in &metadata.metagenomes {
             bytes = validate_prototype_payload_bytes(&[
@@ -343,7 +401,7 @@ fn validate_input(input: &OwnerWriteInput<'_>) -> Result<(), OwnerWriteError> {
             .iter()
             .try_fold(0usize, |total, entry| {
                 total
-                    .checked_add(entry.contigs.len())
+                    .checked_add(entry.original_contig_count as usize)
                     .ok_or(OwnerWriteError::Invalid("metadata counts"))
             })?;
         if metadata.metagenomes.len() != input.document_count as usize
@@ -373,11 +431,14 @@ fn encode_metadata(
 ) -> Result<(), OwnerWriteError> {
     let mut names = HashSet::new();
     let mut contig_start = 0u32;
+    let mut original_start = 0u32;
     for (document_id, metagenome) in metadata.metagenomes.iter().enumerate() {
         if !names.insert(metagenome.name.as_str())
             || metagenome.bgzf_bytes == 0
             || metagenome.bgzf_sha256 == [0; 32]
-            || metagenome.contigs.is_empty()
+            || metagenome.original_contig_count == 0
+            || metagenome.original_contig_start != original_start
+            || !(1..=64).contains(&metagenome.locus_bits)
         {
             return Err(OwnerWriteError::Invalid("metagenome metadata"));
         }
@@ -401,14 +462,22 @@ fn encode_metadata(
         );
         put_u64(&mut record, 64, gzi.len() as u64);
         put_u64(&mut record, 72, metagenome.gzi.len() as u64);
+        put_u32(&mut record, 80, metagenome.original_contig_start);
+        put_u32(&mut record, 84, metagenome.original_contig_count);
+        record[88] = metagenome.locus_bits;
         documents.extend_from_slice(&record);
         let mut contig_names = HashSet::new();
+        let mut previous_contig = None;
+        let mut previous_end = 0;
         for contig in &metagenome.contigs {
             if !contig_names.insert(contig.name.as_str())
                 || contig.length == 0
                 || contig.line_bases == 0
                 || contig.line_width < contig.line_bases
                 || contig.line_width > contig.line_bases.saturating_add(2)
+                || contig.local_contig >= metagenome.original_contig_count
+                || previous_contig.is_some_and(|previous| previous >= contig.local_contig)
+                || contig.fasta_offset < previous_end
             {
                 return Err(OwnerWriteError::Invalid("contig metadata"));
             }
@@ -417,11 +486,30 @@ fn encode_metadata(
             put_u32(&mut record, 0, document_id as u32);
             put_u32(&mut record, 4, name.0);
             put_u32(&mut record, 8, name.1);
+            put_u32(
+                &mut record,
+                12,
+                metagenome
+                    .original_contig_start
+                    .checked_add(contig.local_contig)
+                    .ok_or(OwnerWriteError::Invalid("contig identity"))?,
+            );
             put_u64(&mut record, 16, contig.length);
             put_u64(&mut record, 24, contig.fasta_offset);
             put_u32(&mut record, 32, contig.line_bases);
             put_u32(&mut record, 36, contig.line_width);
             contigs.extend_from_slice(&record);
+            previous_contig = Some(contig.local_contig);
+            let last_position = contig.length - 1;
+            previous_end = (last_position / u64::from(contig.line_bases))
+                .checked_mul(u64::from(contig.line_width))
+                .and_then(|offset| offset.checked_add(last_position % u64::from(contig.line_bases)))
+                .and_then(|offset| offset.checked_add(contig.fasta_offset))
+                .and_then(|last| last.checked_add(1))
+                .ok_or(OwnerWriteError::Invalid("contig locus"))?;
+            if 64 - (previous_end - 1).leading_zeros() > u32::from(metagenome.locus_bits) {
+                return Err(OwnerWriteError::Invalid("document locus width"));
+            }
         }
         contig_start = contig_start
             .checked_add(
@@ -430,6 +518,9 @@ fn encode_metadata(
             )
             .ok_or(OwnerWriteError::Invalid("contig count"))?;
         gzi.extend_from_slice(&metagenome.gzi);
+        original_start = original_start
+            .checked_add(metagenome.original_contig_count)
+            .ok_or(OwnerWriteError::Invalid("contig count"))?;
     }
     Ok(())
 }

@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 
 pub(crate) const OWNER_MAGIC: [u8; 8] = *b"JOWNER\0\0";
-pub(crate) const OWNER_VERSION: u16 = 1;
+pub(crate) const OWNER_VERSION: u16 = 2;
 pub(crate) const OWNER_HEADER_SIZE: usize = 512;
 pub(crate) const OWNER_PAGE_SIZE: u64 = 4096;
 pub(crate) const OWNER_SECTION_COUNT: usize = 8;
@@ -15,6 +15,17 @@ pub(crate) const OWNER_SECTION_TABLE: usize = 136;
 pub(crate) const OWNER_SECTION_DESCRIPTOR_SIZE: usize = 24;
 pub(crate) const COMPLETE_RANGE: u32 = 1;
 pub(crate) const HAS_METADATA: u32 = 2;
+
+pub(crate) fn metadata_digest(parts: [&[u8]; 4]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(b"JOWNER-METADATA-V2\0");
+    for part in parts {
+        digest.update((part.len() as u64).to_le_bytes());
+        digest.update(part);
+    }
+    digest.finalize().into()
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u16)]
@@ -124,6 +135,7 @@ pub(crate) struct OwnerHeader {
     pub(crate) generation_id: [u8; 32],
     pub(crate) body_sha256: [u8; 32],
     pub(crate) checksum_root_sha256: [u8; 32],
+    pub(crate) metadata_sha256: [u8; 32],
     pub(crate) sections: [OwnerSectionDescriptor; OWNER_SECTION_COUNT],
 }
 
@@ -158,6 +170,7 @@ impl OwnerHeader {
         out[72..104].copy_from_slice(&self.generation_id);
         out[104..136].copy_from_slice(&self.body_sha256);
         out[328..360].copy_from_slice(&self.checksum_root_sha256);
+        out[360..392].copy_from_slice(&self.metadata_sha256);
         for (index, section) in self.sections.iter().enumerate() {
             let start = OWNER_SECTION_TABLE + index * OWNER_SECTION_DESCRIPTOR_SIZE;
             put_u16(&mut out, start, section.kind as u16);
@@ -178,7 +191,7 @@ impl OwnerHeader {
         if read_u16(bytes, 10) != OWNER_HEADER_SIZE as u16
             || read_u16(bytes, 22) != OWNER_SECTION_COUNT as u16
             || bytes[18..20].iter().any(|byte| *byte != 0)
-            || bytes[360..].iter().any(|byte| *byte != 0)
+            || bytes[392..].iter().any(|byte| *byte != 0)
         {
             return Err(OwnerReaderError::Invalid("header reservation"));
         }
@@ -215,6 +228,7 @@ impl OwnerHeader {
             generation_id: bytes[72..104].try_into().expect("owner generation ID"),
             body_sha256: bytes[104..136].try_into().expect("owner body digest"),
             checksum_root_sha256: bytes[328..360].try_into().expect("owner checksum root"),
+            metadata_sha256: bytes[360..392].try_into().expect("owner metadata digest"),
             sections: sections.try_into().expect("fixed owner section count"),
         };
         header.validate(file_len)?;
@@ -243,6 +257,7 @@ impl OwnerHeader {
             || self.generation_id == [0; 32]
             || self.body_sha256 == [0; 32]
             || self.checksum_root_sha256 == [0; 32]
+            || self.metadata_sha256 == [0; 32]
         {
             return Err(OwnerReaderError::Invalid("header values"));
         }
@@ -280,7 +295,11 @@ impl OwnerHeader {
             self.section(OwnerSection::BlockDirectory).length / u64::from(OWNER_BLOCK_SIZE);
         if previous_end != file_len
             || self.section(OwnerSection::Documents).length != document_bytes
-            || self.section(OwnerSection::Contigs).length != contig_bytes
+            || self.section(OwnerSection::Contigs).length > contig_bytes
+            || !self
+                .section(OwnerSection::Contigs)
+                .length
+                .is_multiple_of(u64::from(OWNER_CONTIG_SIZE))
             || !self
                 .section(OwnerSection::BlockDirectory)
                 .length
@@ -367,11 +386,16 @@ pub(crate) struct DocumentRecord {
     pub(crate) contig_count: u32,
     pub(crate) gzi_offset: u64,
     pub(crate) gzi_length: u64,
+    pub(crate) original_contig_start: u32,
+    pub(crate) original_contig_count: u32,
+    pub(crate) locus_bits: u8,
 }
 
 impl DocumentRecord {
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, OwnerReaderError> {
-        if bytes.len() != OWNER_DOCUMENT_SIZE as usize || bytes[80..].iter().any(|byte| *byte != 0)
+        if bytes.len() != OWNER_DOCUMENT_SIZE as usize
+            || bytes[89..].iter().any(|byte| *byte != 0)
+            || !(1..=64).contains(&bytes[88])
         {
             return Err(OwnerReaderError::Invalid("document record"));
         }
@@ -386,6 +410,9 @@ impl DocumentRecord {
             contig_count: read_u32(bytes, 60),
             gzi_offset: read_u64(bytes, 64),
             gzi_length: read_u64(bytes, 72),
+            original_contig_start: read_u32(bytes, 80),
+            original_contig_count: read_u32(bytes, 84),
+            locus_bits: bytes[88],
         })
     }
 }

@@ -96,6 +96,7 @@ fn lazy_checksums_authenticate_deep_leaf_pages() {
             document_count: source.header().document_count,
             contig_count: source.header().contig_count,
             keys: &keys,
+            loci: &metadata,
             metadata: Some(&metadata),
         },
     )
@@ -118,9 +119,8 @@ fn lazy_checksums_authenticate_deep_leaf_pages() {
     let leaf = (checksums.offset + (page - 1) * 32) as usize;
     bytes[leaf..leaf + 32].copy_from_slice(&digest);
     std::fs::write(&path, bytes).unwrap();
-    let reader = OwnerReader::open(manifest).unwrap();
     assert!(matches!(
-        reader.find_seeds_batch(&[keys[0].key]),
+        OwnerReader::open(manifest),
         Err(OwnerReaderError::ChecksumMismatch)
     ));
 }
@@ -205,6 +205,57 @@ fn missing_metadata_owner_flag_and_truncation_are_rejected() {
 }
 
 #[test]
+fn owners_with_different_locus_metadata_cannot_share_a_generation() {
+    let fixture = build_fixture_at(None);
+    let source = JidxReader::open(&fixture.jidx).unwrap();
+    let keys = owner_keys(&source);
+    let split = keys.len() / 2;
+    let mut loci = owner_metadata(&source);
+    let contig = loci
+        .metagenomes
+        .last_mut()
+        .unwrap()
+        .contigs
+        .last_mut()
+        .unwrap();
+    contig.fasta_offset += 1;
+    let mismatched = fixture.root.join("owner-mismatched-loci.jowner");
+    write_owner(
+        &mismatched,
+        OwnerWriteInput {
+            owner_ordinal: 1,
+            owner_count: 2,
+            range: OwnerKeyRange {
+                first: keys[split - 1].key + 1,
+                last: u64::MAX,
+                complete: true,
+            },
+            k: source.header().k,
+            rescue_k15: source.header().rescue_k15,
+            minimizer_window: source.header().minimizer_window,
+            generation_id: [7; 32],
+            document_count: source.header().document_count,
+            contig_count: source.header().contig_count,
+            keys: &keys[split..],
+            loci: &loci,
+            metadata: None,
+        },
+    )
+    .unwrap();
+    let manifest = fixture.root.join("mismatched-loci.json");
+    assert!(
+        publish_owner_manifest(
+            &manifest,
+            &[owner_paths(&fixture.root)[0].clone(), mismatched],
+            0,
+            true,
+        )
+        .is_err()
+    );
+    assert!(!manifest.exists());
+}
+
+#[test]
 fn invalid_occurrence_contig_and_position_are_rejected() {
     for invalid_position in [false, true] {
         let fixture = build_fixture_at(None);
@@ -222,35 +273,31 @@ fn invalid_occurrence_contig_and_position_are_rejected() {
         } else {
             "invalid-contig.jowner"
         });
-        let stats = write_owner(
-            &owner,
-            OwnerWriteInput {
-                owner_ordinal: 0,
-                owner_count: 1,
-                range: OwnerKeyRange {
-                    first: 0,
-                    last: u64::MAX,
-                    complete: true,
+        assert!(
+            write_owner(
+                &owner,
+                OwnerWriteInput {
+                    owner_ordinal: 0,
+                    owner_count: 1,
+                    range: OwnerKeyRange {
+                        first: 0,
+                        last: u64::MAX,
+                        complete: true,
+                    },
+                    k: source.header().k,
+                    rescue_k15: source.header().rescue_k15,
+                    minimizer_window: source.header().minimizer_window,
+                    generation_id: [9; 32],
+                    document_count: source.header().document_count,
+                    contig_count: source.header().contig_count,
+                    keys: &keys,
+                    loci: &metadata,
+                    metadata: Some(&metadata),
                 },
-                k: source.header().k,
-                rescue_k15: source.header().rescue_k15,
-                minimizer_window: source.header().minimizer_window,
-                generation_id: [9; 32],
-                document_count: source.header().document_count,
-                contig_count: source.header().contig_count,
-                keys: &keys,
-                metadata: Some(&metadata),
-            },
-        )
-        .unwrap();
-        assert_ne!(stats.file_sha256, [0; 32]);
-        let manifest = fixture.root.join(if invalid_position {
-            "invalid-position.json"
-        } else {
-            "invalid-contig.json"
-        });
-        assert!(publish_owner_manifest(&manifest, &[owner], 0, true).is_err());
-        assert!(!manifest.exists());
+            )
+            .is_err()
+        );
+        assert!(!owner.exists());
     }
 }
 

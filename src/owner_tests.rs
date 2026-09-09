@@ -9,7 +9,7 @@ use crate::owner_postings::{OwnerKey, OwnerMember, OwnerOccurrence};
 use crate::owner_reader::OwnerReader;
 use crate::owner_writer::{
     OwnerContigInput, OwnerKeyRange, OwnerMetadata, OwnerMetagenomeInput, OwnerWriteInput,
-    write_owner,
+    publish_owner_manifest, write_owner,
 };
 use crate::trace::{MetagenomeTrace, TraceConfig, TraceEngine, TraceResult};
 use crate::writer::{BuildConfig, build};
@@ -141,11 +141,98 @@ fn owner_header_supports_more_than_two_billion_contigs_without_allocation() {
         generation_id: [1; 32],
         body_sha256: [2; 32],
         checksum_root_sha256: [3; 32],
+        metadata_sha256: [4; 32],
         sections: sections.try_into().unwrap(),
     };
     let bytes = header.encode().unwrap();
     let decoded = OwnerHeader::decode(&bytes, offset + checksum_length).unwrap();
     assert_eq!(decoded.contig_count, contig_count);
+}
+
+#[test]
+fn sparse_metadata_preserves_high_original_contig_ids_and_extent_boundaries() {
+    let fixture = build_fixture_at(None);
+    let source = JidxReader::open(&fixture.jidx).unwrap();
+    let source_metadata = owner_metadata(&source);
+    let source_keys = owner_keys(&source);
+    let source_member = source_keys
+        .iter()
+        .flat_map(|key| key.members.iter().map(move |member| (key.key, member)))
+        .find(|(_, member)| {
+            member.document_id == 1
+                && member
+                    .occurrences
+                    .iter()
+                    .any(|entry| entry.local_contig == 0)
+        })
+        .unwrap();
+    let occurrence = *source_member
+        .1
+        .occurrences
+        .iter()
+        .find(|entry| entry.local_contig == 0)
+        .unwrap();
+    let mut empty = source_metadata.metagenomes[0].clone();
+    empty.name = "empty-low-extent".to_string();
+    empty.original_contig_start = 0;
+    empty.original_contig_count = 4_000_000_000;
+    empty.locus_bits = 1;
+    empty.contigs.clear();
+    let mut high = source_metadata.metagenomes[1].clone();
+    high.name = "selected-high-extent".to_string();
+    high.original_contig_start = 4_000_000_000;
+    high.original_contig_count = 1;
+    high.contigs.truncate(1);
+    high.contigs[0].local_contig = 0;
+    let metadata = OwnerMetadata {
+        metagenomes: vec![empty, high],
+    };
+    let keys = vec![OwnerKey {
+        key: source_member.0,
+        members: vec![OwnerMember {
+            document_id: 1,
+            occurrences: vec![occurrence],
+        }],
+    }];
+    let owner = fixture.root.join("sparse-high.jowner");
+    write_owner(
+        &owner,
+        OwnerWriteInput {
+            owner_ordinal: 0,
+            owner_count: 1,
+            range: OwnerKeyRange {
+                first: 0,
+                last: u64::MAX,
+                complete: true,
+            },
+            k: source.header().k,
+            rescue_k15: source.header().rescue_k15,
+            minimizer_window: source.header().minimizer_window,
+            generation_id: [13; 32],
+            document_count: 2,
+            contig_count: 4_000_000_001,
+            keys: &keys,
+            loci: &metadata,
+            metadata: Some(&metadata),
+        },
+    )
+    .unwrap();
+    let manifest = fixture.root.join("sparse-high.json");
+    publish_owner_manifest(&manifest, &[owner], 0, true).unwrap();
+    let reader = OwnerReader::open(manifest).unwrap();
+    reader.verify_checksum().unwrap();
+    assert_eq!(
+        reader.metagenome(0).unwrap().unwrap().contig_count,
+        4_000_000_000
+    );
+    assert!(reader.contig(0).unwrap().is_none());
+    let contig = reader.contig(4_000_000_000).unwrap().unwrap();
+    assert_eq!(contig.metagenome_id, 1);
+    let seed = reader.find_seeds_batch(&[keys[0].key]).unwrap()[0].unwrap();
+    let document = reader.seed_documents(seed).unwrap()[0];
+    let decoded = reader.seed_document_occurrences(seed, document).unwrap();
+    assert_eq!(decoded[0].contig_id, 4_000_000_000);
+    assert_eq!(decoded[0].position, occurrence.position);
 }
 fn build_fixture() -> Fixture {
     build_fixture_at(None)
@@ -272,6 +359,7 @@ pub(crate) fn build_fixture_at(output: Option<PathBuf>) -> Fixture {
                 document_count: source.header().document_count,
                 contig_count: source.header().contig_count,
                 keys: owned_keys,
+                loci: &metadata,
                 metadata: (ordinal == 0).then_some(&metadata),
             },
         )
@@ -345,25 +433,40 @@ pub(crate) fn owner_metadata(source: &JidxReader) -> OwnerMetadata {
         metagenomes: (0..source.header().document_count)
             .map(|document_id| {
                 let metagenome = source.metagenome(document_id).unwrap().unwrap();
+                let contigs = (metagenome.contig_start
+                    ..metagenome.contig_start + metagenome.contig_count)
+                    .map(|contig_id| {
+                        let contig = source.contig(contig_id).unwrap().unwrap();
+                        OwnerContigInput {
+                            local_contig: contig_id - metagenome.contig_start,
+                            name: contig.name.to_string(),
+                            length: contig.length,
+                            fasta_offset: contig.fasta_offset,
+                            line_bases: contig.line_bases,
+                            line_width: contig.line_width,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let maximum_byte = contigs
+                    .iter()
+                    .map(|contig| {
+                        let position = contig.length - 1;
+                        contig.fasta_offset
+                            + position / u64::from(contig.line_bases) * u64::from(contig.line_width)
+                            + position % u64::from(contig.line_bases)
+                    })
+                    .max()
+                    .unwrap();
                 OwnerMetagenomeInput {
                     name: metagenome.name.to_string(),
                     bgzf_uri: metagenome.bgzf_uri.to_string(),
                     bgzf_bytes: metagenome.bgzf_bytes,
                     bgzf_sha256: metagenome.bgzf_sha256,
                     gzi: metagenome.gzi.to_vec(),
-                    contigs: (metagenome.contig_start
-                        ..metagenome.contig_start + metagenome.contig_count)
-                        .map(|contig_id| {
-                            let contig = source.contig(contig_id).unwrap().unwrap();
-                            OwnerContigInput {
-                                name: contig.name.to_string(),
-                                length: contig.length,
-                                fasta_offset: contig.fasta_offset,
-                                line_bases: contig.line_bases,
-                                line_width: contig.line_width,
-                            }
-                        })
-                        .collect(),
+                    original_contig_start: metagenome.contig_start,
+                    original_contig_count: metagenome.contig_count,
+                    locus_bits: (64 - maximum_byte.leading_zeros()) as u8,
+                    contigs,
                 }
             })
             .collect(),
