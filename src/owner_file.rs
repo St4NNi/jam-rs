@@ -5,8 +5,10 @@ use crate::owner_format::{
     OWNER_HEADER_SIZE, OWNER_PAGE_SIZE, OwnerDocument, OwnerHeader, OwnerReaderError, OwnerSection,
     OwnerSeed, checksum_layout, read_u32, read_u64,
 };
+use crate::owner_observer::{self, OwnerReadObserver};
 use crate::owner_postings::{
-    MAX_KEYS_PER_BLOCK, OwnerHotKey, OwnerHotMember, decode_member, parse_hot,
+    MAX_KEYS_PER_BLOCK, OwnerAnchor, OwnerHotBlock, OwnerHotKey, OwnerHotMember,
+    decode_member_window, find_key, key_members, locate_member, parse_hot,
 };
 use memmap2::{Mmap, MmapOptions};
 use std::fs::File;
@@ -27,17 +29,19 @@ pub(crate) struct OwnerFile {
     verified_pages: Box<[AtomicU64]>,
     hot_cache: Mutex<HotCache>,
     hot_cache_bytes: Arc<AtomicUsize>,
+    observer: Arc<OwnerReadObserver>,
 }
 
 #[derive(Default)]
 struct HotCache {
-    blocks: std::collections::BTreeMap<u64, Arc<Vec<OwnerHotKey>>>,
+    blocks: std::collections::BTreeMap<u64, Arc<OwnerHotBlock>>,
 }
 
 impl OwnerFile {
     pub(crate) fn open(
         path: PathBuf,
         hot_cache_bytes: Arc<AtomicUsize>,
+        observer: Arc<OwnerReadObserver>,
     ) -> Result<Self, OwnerReaderError> {
         let file = File::open(path)?;
         let file_identity = file_identity(&file)?;
@@ -61,7 +65,11 @@ impl OwnerFile {
             verified_pages,
             hot_cache: Mutex::new(HotCache::default()),
             hot_cache_bytes,
+            observer,
         };
+        owner
+            .observer
+            .record_open(0, 1, OWNER_HEADER_SIZE as u64, 0, 1);
         owner.verify_unchanged()?;
         owner.verify_checksum_root()?;
         owner.verify_unchanged()?;
@@ -94,14 +102,11 @@ impl OwnerFile {
             let record = self.validated_block_record(block_ordinal)?;
             let decoded = self.hot_block(block_ordinal, record)?;
             for (position, key) in requests {
-                out[position] = decoded
-                    .binary_search_by_key(&key, |entry| entry.key)
-                    .ok()
-                    .map(|index| OwnerSeed {
-                        packed_key: key,
-                        document_frequency: decoded[index].document_frequency,
-                        block_ordinal,
-                    });
+                out[position] = find_key(&decoded, key).map(|entry| OwnerSeed {
+                    packed_key: key,
+                    document_frequency: entry.document_frequency,
+                    block_ordinal,
+                });
                 if out[position].is_none() && !self.header.complete_range() {
                     return Err(OwnerReaderError::KeyNotCovered(key));
                 }
@@ -116,26 +121,21 @@ impl OwnerFile {
     ) -> Result<Vec<OwnerDocument>, OwnerReaderError> {
         let record = self.validated_block_record(seed.block_ordinal)?;
         let decoded = self.hot_block(seed.block_ordinal, record)?;
-        let hot = decoded
-            .binary_search_by_key(&seed.packed_key, |entry| entry.key)
-            .ok()
-            .map(|index| &decoded[index])
+        let hot = find_key(&decoded, seed.packed_key)
             .ok_or(OwnerReaderError::Invalid("missing cached seed"))?;
         if hot.document_frequency != seed.document_frequency {
             return Err(OwnerReaderError::Invalid("seed frequency"));
         }
-        hot.members
+        key_members(&decoded, hot)?
             .iter()
-            .enumerate()
-            .map(|(member_ordinal, member)| {
+            .map(|member| {
                 Ok(OwnerDocument {
                     metagenome_id: member.document_id,
                     occurrence_count: member.occurrence_count,
                     seed_key: seed.packed_key,
                     owner_ordinal: self.header.owner_ordinal,
                     block_ordinal: seed.block_ordinal,
-                    member_ordinal: u64::try_from(member_ordinal)
-                        .map_err(|_| OwnerReaderError::Invalid("member count"))?,
+                    member_ordinal: member.member_ordinal,
                 })
             })
             .collect()
@@ -144,7 +144,8 @@ impl OwnerFile {
     pub(crate) fn document_occurrences(
         &self,
         document: OwnerDocument,
-    ) -> Result<Vec<crate::owner_postings::OwnerOccurrence>, OwnerReaderError> {
+        document_widths: &[u8],
+    ) -> Result<Vec<(u64, bool)>, OwnerReaderError> {
         if document.owner_ordinal != self.header.owner_ordinal
             || document.block_ordinal >= self.block_count()?
         {
@@ -152,56 +153,61 @@ impl OwnerFile {
         }
         let record = self.validated_block_record(document.block_ordinal)?;
         let decoded = self.hot_block(document.block_ordinal, record)?;
-        let hot = decoded
-            .binary_search_by_key(&document.seed_key, |entry| entry.key)
-            .ok()
-            .map(|index| &decoded[index])
+        let hot = find_key(&decoded, document.seed_key)
             .ok_or(OwnerReaderError::Invalid("missing seed document"))?;
-        let member: &OwnerHotMember = hot
-            .members
+        let member: &OwnerHotMember = key_members(&decoded, hot)?
             .get(
-                usize::try_from(document.member_ordinal)
-                    .map_err(|_| OwnerReaderError::Invalid("member count"))?,
+                usize::try_from(
+                    document
+                        .member_ordinal
+                        .checked_sub(hot.member_start)
+                        .ok_or(OwnerReaderError::Invalid("seed document"))?,
+                )
+                .map_err(|_| OwnerReaderError::Invalid("member count"))?,
             )
             .filter(|member| {
                 member.document_id == document.metagenome_id
                     && member.occurrence_count == document.occurrence_count
             })
             .ok_or(OwnerReaderError::Invalid("seed document"))?;
-        let decoded_bytes = usize::try_from(member.occurrence_count)
-            .ok()
-            .and_then(|count| {
-                count.checked_mul(std::mem::size_of::<crate::owner_postings::OwnerOccurrence>())
-            })
-            .ok_or(OwnerReaderError::Invalid("decoded occurrence bytes"))?;
-        if decoded_bytes > MAX_DECODED_OCCURRENCE_BYTES {
+        if member
+            .occurrence_count
+            .checked_mul(std::mem::size_of::<crate::owner_postings::OwnerOccurrence>() as u64)
+            .is_none_or(|bytes| bytes > MAX_DECODED_OCCURRENCE_BYTES as u64)
+        {
             return Err(OwnerReaderError::Invalid("decoded occurrence bytes"));
         }
-        let member_end = member
-            .cold_offset
-            .checked_add(member.cold_length)
-            .filter(|end| *end <= record.cold_length)
-            .ok_or(OwnerReaderError::Invalid("cold member range"))?;
+        let window = locate_member(&decoded, member.member_ordinal)?;
+        let window_start = window.start_bit / 8;
+        let window_end = window.end_bit.div_ceil(8);
+        if window_end > record.cold_length {
+            return Err(OwnerReaderError::Invalid("cold member range"));
+        }
         let cold = self.header.section(OwnerSection::ColdPostings);
         let block_start = cold
             .offset
             .checked_add(record.cold_offset)
             .ok_or(OwnerReaderError::Invalid("cold member range"))?;
         let start = block_start
-            .checked_add(member.cold_offset)
+            .checked_add(window_start)
             .ok_or(OwnerReaderError::Invalid("cold member range"))?;
         let end = block_start
-            .checked_add(member_end)
+            .checked_add(window_end)
             .ok_or(OwnerReaderError::Invalid("cold member range"))?;
-        let occurrences = decode_member(
+        let occurrences = decode_member_window(
             self.checked_bytes(start, end)?,
-            OwnerHotMember {
-                cold_offset: 0,
-                ..*member
-            },
+            window_start,
+            window,
+            &decoded,
+            document_widths,
+            MAX_DECODED_OCCURRENCE_BYTES,
         )?;
+        self.observer.record_cold(
+            end - start,
+            occurrences.loci.len() as u64 + occurrences.skipped_occurrences,
+        );
         self.verify_unchanged()?;
-        Ok(occurrences)
+        Ok(occurrences.loci)
     }
 
     fn find_block(&self, key: u64) -> Result<Option<(u64, BlockRecord)>, OwnerReaderError> {
@@ -209,6 +215,7 @@ impl OwnerFile {
         let mut low = 0;
         let mut high = count;
         while low < high {
+            self.observer.record_directory(1, 0, 0);
             let middle = low + (high - low) / 2;
             let record = self.validated_block_record(middle)?;
             if record.last_key < key {
@@ -234,6 +241,8 @@ impl OwnerFile {
         }
         let section = self.header.section(OwnerSection::BlockDirectory);
         let start = section.offset + ordinal * u64::from(OWNER_BLOCK_SIZE);
+        self.observer
+            .record_directory(0, 1, u64::from(OWNER_BLOCK_SIZE));
         let bytes = self.checked_bytes(start, start + u64::from(OWNER_BLOCK_SIZE))?;
         BlockRecord::decode(bytes)
     }
@@ -333,7 +342,7 @@ impl OwnerFile {
         Ok(())
     }
 
-    fn parse_hot_bounded(&self, hot: &[u8]) -> Result<Vec<OwnerHotKey>, OwnerReaderError> {
+    fn parse_hot_bounded(&self, hot: &[u8]) -> Result<OwnerHotBlock, OwnerReaderError> {
         let decoded_bound = decoded_hot_bound(hot)?;
         if decoded_bound > MAX_DECODED_HOT_BYTES {
             return Err(OwnerReaderError::Invalid("decoded hot postings"));
@@ -345,7 +354,7 @@ impl OwnerFile {
         &self,
         ordinal: u64,
         record: BlockRecord,
-    ) -> Result<Arc<Vec<OwnerHotKey>>, OwnerReaderError> {
+    ) -> Result<Arc<OwnerHotBlock>, OwnerReaderError> {
         self.verify_unchanged()?;
         if let Some(decoded) = self
             .hot_cache
@@ -355,15 +364,27 @@ impl OwnerFile {
             .get(&ordinal)
             .cloned()
         {
+            self.observer
+                .record_hot_request(self.header.owner_ordinal, ordinal, 0, true);
             return Ok(decoded);
         }
+        self.observer.record_hot_request(
+            self.header.owner_ordinal,
+            ordinal,
+            record.hot_length,
+            false,
+        );
         let hot = self.block_bytes(record, true)?;
         let charge = decoded_hot_bound(hot)?;
         let decoded = Arc::new(self.parse_hot_bounded(hot)?);
+        self.observer
+            .record_hot_decode(charge as u64, decoded.members.len() as u64);
         self.verify_unchanged()?;
-        if decoded.len() != record.key_count as usize
-            || decoded.first().map(|entry| entry.key) != Some(record.first_key)
-            || decoded.last().map(|entry| entry.key) != Some(record.last_key)
+        if decoded.keys.len() != record.key_count as usize
+            || decoded.keys.first().map(|entry| entry.key) != Some(record.first_key)
+            || decoded.keys.last().map(|entry| entry.key) != Some(record.last_key)
+            || decoded.document_count != self.header.document_count
+            || decoded.cold_bits.div_ceil(8) != record.cold_length
         {
             return Err(OwnerReaderError::Invalid("block contents"));
         }
@@ -390,15 +411,30 @@ impl OwnerFile {
     }
 
     pub(crate) fn audit_metadata(&self) -> Result<(), OwnerReaderError> {
+        let metadata_sections = [
+            OwnerSection::Strings,
+            OwnerSection::Documents,
+            OwnerSection::Contigs,
+            OwnerSection::Gzi,
+        ]
+        .map(|kind| self.section_bytes(kind, 0, self.header.section(kind).length));
+        let [strings, documents, contigs, gzi] = metadata_sections;
+        if crate::owner_format::metadata_digest([strings?, documents?, contigs?, gzi?])
+            != self.header.metadata_sha256
+        {
+            return Err(OwnerReaderError::Invalid("metadata digest"));
+        }
         let mut document_names = std::collections::HashSet::new();
         let mut expected_contig = 0u32;
+        let mut expected_original = 0u32;
         let mut expected_gzi = 0u64;
         for document_id in 0..self.header.document_count {
             let record = self.document_record(document_id)?;
             if record.bgzf_bytes == 0
                 || record.bgzf_sha256 == [0; 32]
-                || record.contig_count == 0
+                || record.original_contig_count == 0
                 || record.contig_start != expected_contig
+                || record.original_contig_start != expected_original
                 || record.gzi_offset != expected_gzi
                 || !document_names.insert(self.string(record.name_offset, record.name_length)?)
             {
@@ -417,23 +453,41 @@ impl OwnerFile {
                 .checked_add(record.contig_count)
                 .ok_or(OwnerReaderError::Invalid("contig metadata"))?;
             let mut contig_names = std::collections::HashSet::new();
-            for contig_id in record.contig_start..contig_end {
-                let contig = self
-                    .contig(contig_id)?
-                    .ok_or(OwnerReaderError::Invalid("contig metadata"))?;
+            let mut previous_id = None;
+            let mut previous_end = 0;
+            for row in record.contig_start..contig_end {
+                let contig = self.contig_row(row)?;
                 if contig.metagenome_id != document_id
                     || contig.length == 0
                     || contig.line_bases == 0
                     || contig.line_width < contig.line_bases
                     || contig.line_width > contig.line_bases.saturating_add(2)
                     || !contig_names.insert(contig.name)
+                    || previous_id.is_some_and(|id| id >= contig.id)
+                    || contig.fasta_offset < previous_end
                 {
                     return Err(OwnerReaderError::Invalid("contig metadata"));
                 }
+                previous_id = Some(contig.id);
+                let last = contig.length - 1;
+                previous_end = (last / u64::from(contig.line_bases))
+                    .checked_mul(u64::from(contig.line_width))
+                    .and_then(|offset| offset.checked_add(last % u64::from(contig.line_bases)))
+                    .and_then(|offset| offset.checked_add(contig.fasta_offset))
+                    .and_then(|offset| offset.checked_add(1))
+                    .ok_or(OwnerReaderError::Invalid("contig locus"))?;
+                if 64 - (previous_end - 1).leading_zeros() > u32::from(record.locus_bits) {
+                    return Err(OwnerReaderError::Invalid("document locus width"));
+                }
             }
             expected_contig = contig_end;
+            expected_original = expected_original
+                .checked_add(record.original_contig_count)
+                .ok_or(OwnerReaderError::Invalid("contig metadata"))?;
         }
-        if expected_contig != self.header.contig_count
+        if u64::from(expected_contig) * u64::from(OWNER_CONTIG_SIZE)
+            != self.header.section(OwnerSection::Contigs).length
+            || expected_original != self.header.contig_count
             || expected_gzi != self.header.section(OwnerSection::Gzi).length
         {
             return Err(OwnerReaderError::Invalid("metadata coverage"));
@@ -447,6 +501,7 @@ impl OwnerFile {
         }
         let section = self.header.section(OwnerSection::Documents);
         let start = section.offset + u64::from(id) * u64::from(OWNER_DOCUMENT_SIZE);
+        self.observer.record_metadata(1, 0, 0, 0);
         DocumentRecord::decode(self.checked_bytes(start, start + u64::from(OWNER_DOCUMENT_SIZE))?)
     }
 
@@ -461,8 +516,8 @@ impl OwnerFile {
             bgzf_uri: self.string(record.uri_offset, record.uri_length)?,
             bgzf_bytes: record.bgzf_bytes,
             bgzf_sha256: record.bgzf_sha256,
-            contig_start: record.contig_start,
-            contig_count: record.contig_count,
+            contig_start: record.original_contig_start,
+            contig_count: record.original_contig_count,
             gzi: self.section_bytes(OwnerSection::Gzi, record.gzi_offset, record.gzi_length)?,
         }))
     }
@@ -471,19 +526,59 @@ impl OwnerFile {
         if id >= self.header.contig_count {
             return Ok(None);
         }
-        let section = self.header.section(OwnerSection::Contigs);
-        let start = section.offset + u64::from(id) * u64::from(OWNER_CONTIG_SIZE);
-        let bytes = self.checked_bytes(start, start + u64::from(OWNER_CONTIG_SIZE))?;
+        if self.header.section(OwnerSection::Contigs).length
+            == u64::from(self.header.contig_count) * u64::from(OWNER_CONTIG_SIZE)
+        {
+            return self.contig_row(id).map(Some);
+        }
+        let mut low = 0u32;
+        let mut high = u32::try_from(
+            self.header.section(OwnerSection::Contigs).length / u64::from(OWNER_CONTIG_SIZE),
+        )
+        .map_err(|_| OwnerReaderError::Invalid("contig count"))?;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if read_u32(self.contig_bytes(middle)?, 12) < id {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if u64::from(low) * u64::from(OWNER_CONTIG_SIZE)
+            == self.header.section(OwnerSection::Contigs).length
+        {
+            return Ok(None);
+        }
+        let contig = self.contig_row(low)?;
+        Ok((contig.id == id).then_some(contig))
+    }
+
+    fn contig_bytes(&self, row: u32) -> Result<&[u8], OwnerReaderError> {
+        self.observer.record_metadata(0, 1, 0, 0);
+        self.section_bytes(
+            OwnerSection::Contigs,
+            u64::from(row) * u64::from(OWNER_CONTIG_SIZE),
+            u64::from(OWNER_CONTIG_SIZE),
+        )
+    }
+
+    fn contig_row(&self, row: u32) -> Result<Contig<'_>, OwnerReaderError> {
+        let bytes = self.contig_bytes(row)?;
+        let id = read_u32(bytes, 12);
         let document = read_u32(bytes, 0);
         let owner = self.document_record(document)?;
         let contig_end = owner
-            .contig_start
-            .checked_add(owner.contig_count)
+            .original_contig_start
+            .checked_add(owner.original_contig_count)
             .ok_or(OwnerReaderError::Invalid("contig ownership"))?;
-        if id < owner.contig_start || id >= contig_end {
+        if id < owner.original_contig_start
+            || id >= contig_end
+            || row < owner.contig_start
+            || row - owner.contig_start >= owner.contig_count
+        {
             return Err(OwnerReaderError::Invalid("contig ownership"));
         }
-        Ok(Some(Contig {
+        Ok(Contig {
             id,
             metagenome_id: document,
             name: self.string(read_u32(bytes, 4), read_u32(bytes, 8))?,
@@ -491,10 +586,67 @@ impl OwnerFile {
             fasta_offset: read_u64(bytes, 24),
             line_bases: read_u32(bytes, 32),
             line_width: read_u32(bytes, 36),
-        }))
+        })
+    }
+
+    pub(crate) fn locus_occurrence(
+        &self,
+        document: u32,
+        locus: u64,
+        orientation: bool,
+        k: u8,
+    ) -> Result<crate::jidx_reader::SeedOccurrence, OwnerReaderError> {
+        let record = self.document_record(document)?;
+        let mut low = record.contig_start;
+        let mut high = low
+            .checked_add(record.contig_count)
+            .ok_or(OwnerReaderError::Invalid("contig range"))?;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            if read_u64(self.contig_bytes(middle)?, 24) <= locus {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if low == record.contig_start {
+            return Err(OwnerReaderError::Invalid("locus contig"));
+        }
+        let bytes = self.contig_bytes(low - 1)?;
+        let contig_id = read_u32(bytes, 12);
+        let offset = locus
+            .checked_sub(read_u64(bytes, 24))
+            .ok_or(OwnerReaderError::Invalid("locus position"))?;
+        let line_bases = u64::from(read_u32(bytes, 32));
+        let line_width = u64::from(read_u32(bytes, 36));
+        if read_u32(bytes, 0) != document
+            || line_bases == 0
+            || line_width < line_bases
+            || offset % line_width >= line_bases
+            || contig_id < record.original_contig_start
+            || contig_id - record.original_contig_start >= record.original_contig_count
+        {
+            return Err(OwnerReaderError::Invalid("locus metadata"));
+        }
+        let position = (offset / line_width)
+            .checked_mul(line_bases)
+            .and_then(|position| position.checked_add(offset % line_width))
+            .ok_or(OwnerReaderError::Invalid("locus position"))?;
+        if position
+            .checked_add(u64::from(k))
+            .is_none_or(|end| end > read_u64(bytes, 16))
+        {
+            return Err(OwnerReaderError::Invalid("occurrence position"));
+        }
+        Ok(crate::jidx_reader::SeedOccurrence {
+            contig_id,
+            position,
+            canonical_orientation: orientation,
+        })
     }
 
     fn string(&self, offset: u32, length: u32) -> Result<&str, OwnerReaderError> {
+        self.observer.record_metadata(0, 0, u64::from(length), 0);
         std::str::from_utf8(self.section_bytes(
             OwnerSection::Strings,
             u64::from(offset),
@@ -520,6 +672,9 @@ impl OwnerFile {
         if end > section.offset + section.length {
             return Err(OwnerReaderError::Invalid("section range"));
         }
+        if kind == OwnerSection::Gzi {
+            self.observer.record_metadata(0, 0, 0, length);
+        }
         self.checked_bytes(start, end)
     }
 
@@ -528,6 +683,9 @@ impl OwnerFile {
         if start > end || end > self.mmap.len() as u64 {
             return Err(OwnerReaderError::Invalid("file range"));
         }
+        self.observer
+            .add(owner_observer::REQUESTED_BYTES, end - start);
+        self.observer.add(owner_observer::READ_CALLS, 1);
         if start < self.header.section(OwnerSection::PageChecksums).offset {
             let first = start.max(OWNER_PAGE_SIZE) / OWNER_PAGE_SIZE;
             let last = end.saturating_sub(1) / OWNER_PAGE_SIZE;
@@ -545,6 +703,7 @@ impl OwnerFile {
         let index = page - 1;
         let word = &self.verified_pages[index as usize / 64];
         let mask = 1u64 << (index % 64);
+        self.observer.record_integrity(1, 0, 0, 0, 0);
         if self.file_identity.is_some() && word.load(Ordering::Acquire) & mask != 0 {
             return Ok(());
         }
@@ -552,6 +711,7 @@ impl OwnerFile {
         let checksum_section = self.header.section(OwnerSection::PageChecksums);
         let expected_start = checksum_section.offset + index * 32;
         let expected = &self.mmap[expected_start as usize..expected_start as usize + 32];
+        self.observer.record_integrity(0, 1, 0, OWNER_PAGE_SIZE, 0);
         if sha256(&self.mmap[start as usize..start as usize + OWNER_PAGE_SIZE as usize]) != expected
         {
             return Err(OwnerReaderError::ChecksumMismatch);
@@ -559,7 +719,9 @@ impl OwnerFile {
         self.verify_checksum_chain(index)?;
         self.verify_unchanged()?;
         if self.file_identity.is_some() {
-            word.fetch_or(mask, Ordering::Release);
+            if word.fetch_or(mask, Ordering::Release) & mask == 0 {
+                self.observer.record_integrity(0, 0, 1, 0, 0);
+            }
         }
         Ok(())
     }
@@ -587,6 +749,7 @@ impl OwnerFile {
                 .ok_or(OwnerReaderError::Invalid("checksum chain"))?;
             let digest =
                 sha256(&self.mmap[start as usize..start as usize + OWNER_PAGE_SIZE as usize]);
+            self.observer.record_integrity(0, 0, 0, 0, 1);
             if let Some(next) = levels.get(index + 1) {
                 let expected = checksums
                     .offset
@@ -614,6 +777,8 @@ impl OwnerFile {
             .pop()
             .expect("checksum layout is nonempty");
         let start = checksums.offset + last.offset;
+        self.observer
+            .add(owner_observer::CHECKSUM_ROOT_PAGES_HASHED, 1);
         if sha256(&self.mmap[start as usize..start as usize + OWNER_PAGE_SIZE as usize])
             != self.header.checksum_root_sha256
         {
@@ -623,6 +788,9 @@ impl OwnerFile {
     }
 
     pub(crate) fn verify_unchanged(&self) -> io::Result<()> {
+        if self.file_identity.is_some() {
+            self.observer.add(owner_observer::FILE_IDENTITY_CHECKS, 1);
+        }
         if let Some(expected) = self.file_identity
             && file_identity(&self._file)? != Some(expected)
         {
@@ -646,15 +814,26 @@ impl OwnerFile {
 }
 
 fn decoded_hot_bound(hot: &[u8]) -> Result<usize, OwnerReaderError> {
-    hot.len()
-        .checked_div(3)
-        .and_then(|members| members.checked_mul(std::mem::size_of::<OwnerHotMember>()))
+    let invalid = || OwnerReaderError::Invalid("decoded hot postings");
+    if hot.len() < 40 {
+        return Err(invalid());
+    }
+    let members = usize::try_from(read_u64(hot, 16)).map_err(|_| invalid())?;
+    let anchors = read_u32(hot, 32) as usize;
+    let keys = u16::from_le_bytes(hot[10..12].try_into().expect("key count")) as usize;
+    members
+        .checked_mul(std::mem::size_of::<OwnerHotMember>())
         .and_then(|bytes| {
-            MAX_KEYS_PER_BLOCK
-                .checked_mul(std::mem::size_of::<OwnerHotKey>())
+            anchors
+                .checked_mul(std::mem::size_of::<OwnerAnchor>())
+                .and_then(|anchors| bytes.checked_add(anchors))
+        })
+        .and_then(|bytes| {
+            keys.checked_mul(std::mem::size_of::<OwnerHotKey>())
                 .and_then(|keys| bytes.checked_add(keys))
         })
-        .ok_or(OwnerReaderError::Invalid("decoded hot postings"))
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<OwnerHotBlock>()))
+        .ok_or_else(invalid)
 }
 
 fn file_identity(file: &File) -> io::Result<Option<[u64; 7]>> {

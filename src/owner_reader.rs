@@ -4,6 +4,7 @@ use crate::owner_file::OwnerFile;
 use crate::owner_format::{
     OWNER_HEADER_SIZE, OwnerDocument, OwnerHeader, OwnerReaderError, OwnerSeed,
 };
+use crate::owner_observer::{OwnerReadObserver, OwnerReadSnapshot};
 use serde::Deserialize;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -32,12 +33,31 @@ pub(crate) struct OwnerReader {
     ranges: Vec<(u64, u64, usize)>,
     metadata_owner: usize,
     complete: bool,
+    document_widths: Vec<u8>,
+    observer: Arc<OwnerReadObserver>,
+    report_on_drop: bool,
 }
 
 impl OwnerReader {
     pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, OwnerReaderError> {
+        let report = std::env::var_os("JAM_OWNER_OBSERVE").is_some_and(|value| value == "1");
+        let observer = if report {
+            OwnerReadObserver::enabled(4096).map_err(OwnerReaderError::Invalid)?
+        } else {
+            OwnerReadObserver::disabled()
+        };
+        let mut reader = Self::open_with_observer(path, Arc::new(observer))?;
+        reader.report_on_drop = report;
+        Ok(reader)
+    }
+
+    pub(crate) fn open_with_observer(
+        path: impl AsRef<Path>,
+        observer: Arc<OwnerReadObserver>,
+    ) -> Result<Self, OwnerReaderError> {
         let path = path.as_ref();
         let bytes = std::fs::read(path)?;
+        observer.record_open(bytes.len() as u64, 0, 0, 0, 0);
         let manifest: OwnerManifest = serde_json::from_slice(&bytes)
             .map_err(|_| OwnerReaderError::Invalid("owner manifest JSON"))?;
         if manifest.version != 1 || manifest.owners.is_empty() {
@@ -52,7 +72,11 @@ impl OwnerReader {
         let mut files = Vec::with_capacity(manifest.owners.len());
         let hot_cache_bytes = Arc::new(AtomicUsize::new(0));
         for (ordinal, entry) in manifest.owners.into_iter().enumerate() {
-            let file = OwnerFile::open(parent.join(entry.path), Arc::clone(&hot_cache_bytes))?;
+            let file = OwnerFile::open(
+                parent.join(entry.path),
+                Arc::clone(&hot_cache_bytes),
+                Arc::clone(&observer),
+            )?;
             if file.header.owner_ordinal != ordinal as u32
                 || file.header.owner_count != expected_count
                 || hex(&sha256(&file.mmap[..OWNER_HEADER_SIZE])) != entry.header_sha256
@@ -69,6 +93,7 @@ impl OwnerReader {
                     != (contract.k, contract.rescue_k15, contract.minimizer_window)
                 || (header.document_count, header.contig_count)
                     != (contract.document_count, contract.contig_count)
+                || header.metadata_sha256 != contract.metadata_sha256
         }) {
             return Err(OwnerReaderError::Invalid("owner generation contract"));
         }
@@ -100,13 +125,27 @@ impl OwnerReader {
         {
             return Err(OwnerReaderError::Invalid("incomplete owner generation"));
         }
+        let document_widths = (0..contract.document_count)
+            .map(|id| {
+                files[manifest.metadata_owner as usize]
+                    .document_record(id)
+                    .map(|record| record.locus_bits)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             root_sha256: sha256(&bytes),
             files,
             ranges,
             metadata_owner: manifest.metadata_owner as usize,
             complete: manifest.complete,
+            document_widths,
+            observer,
+            report_on_drop: false,
         })
+    }
+
+    pub(crate) fn read_snapshot(&self) -> OwnerReadSnapshot {
+        self.observer.snapshot()
     }
 
     pub(crate) fn header(&self) -> &OwnerHeader {
@@ -174,6 +213,7 @@ impl OwnerReader {
             let owner = self.owner_for(key)?;
             grouped.entry(owner).or_default().push((position, key));
         }
+        let touched = grouped.len() as u64;
         for (owner, requests) in grouped {
             let found = self.files[owner]
                 .find_seeds_batch(&requests.iter().map(|&(_, key)| key).collect::<Vec<_>>())?;
@@ -181,6 +221,13 @@ impl OwnerReader {
                 out[position] = seed;
             }
         }
+        let present = out.iter().filter(|seed| seed.is_some()).count() as u64;
+        self.observer.record_route(
+            keys.len() as u64,
+            present,
+            keys.len() as u64 - present,
+            touched,
+        );
         Ok(out)
     }
 
@@ -202,37 +249,22 @@ impl OwnerReader {
         }
         let owner = usize::try_from(document.owner_ordinal)
             .map_err(|_| OwnerReaderError::Invalid("owner ordinal"))?;
-        let local = self.files[owner].document_occurrences(document)?;
-        let record = self.files[self.metadata_owner].document_record(document.metagenome_id)?;
-        let contig_end = record
-            .contig_start
-            .checked_add(record.contig_count)
-            .ok_or(OwnerReaderError::Invalid("contig ordinal"))?;
+        let local = self
+            .files
+            .get(owner)
+            .ok_or(OwnerReaderError::Invalid("owner ordinal"))?
+            .document_occurrences(document, &self.document_widths)?;
         let k = seed_length(self.k(), self.rescue_k15(), seed.packed_key)
             .map_err(|_| OwnerReaderError::Invalid("seed key"))?;
         local
             .into_iter()
-            .map(|occurrence| {
-                let contig_id = record
-                    .contig_start
-                    .checked_add(occurrence.local_contig)
-                    .filter(|id| *id < contig_end)
-                    .ok_or(OwnerReaderError::Invalid("contig ordinal"))?;
-                let contig = self
-                    .contig(contig_id)?
-                    .ok_or(OwnerReaderError::Invalid("contig ordinal"))?;
-                if occurrence
-                    .position
-                    .checked_add(u64::from(k))
-                    .is_none_or(|end| end > contig.length)
-                {
-                    return Err(OwnerReaderError::Invalid("occurrence position"));
-                }
-                Ok(crate::jidx_reader::SeedOccurrence {
-                    contig_id,
-                    position: occurrence.position,
-                    canonical_orientation: occurrence.canonical_orientation,
-                })
+            .map(|(locus, orientation)| {
+                self.files[self.metadata_owner].locus_occurrence(
+                    document.metagenome_id,
+                    locus,
+                    orientation,
+                    k,
+                )
             })
             .collect()
     }
@@ -262,15 +294,15 @@ impl OwnerReader {
                 let record = file.block_record(ordinal)?;
                 let decoded_hot = file.hot_block(ordinal, record)?;
                 keys = keys
-                    .checked_add(decoded_hot.len() as u64)
+                    .checked_add(decoded_hot.keys.len() as u64)
                     .ok_or(OwnerReaderError::Invalid("key count"))?;
-                for entry in decoded_hot.iter() {
+                for entry in &decoded_hot.keys {
                     let seed = OwnerSeed {
                         packed_key: entry.key,
                         document_frequency: entry.document_frequency,
                         block_ordinal: ordinal,
                     };
-                    for (member_ordinal, member) in entry.members.iter().enumerate() {
+                    for member in crate::owner_postings::key_members(&decoded_hot, entry)? {
                         let decoded = self.seed_document_occurrences(
                             seed,
                             OwnerDocument {
@@ -279,7 +311,7 @@ impl OwnerReader {
                                 seed_key: entry.key,
                                 owner_ordinal: owner as u32,
                                 block_ordinal: ordinal,
-                                member_ordinal: member_ordinal as u64,
+                                member_ordinal: member.member_ordinal,
                             },
                         )?;
                         if decoded.len() as u64 != member.occurrence_count {
@@ -304,6 +336,16 @@ impl OwnerReader {
             return Err(OwnerReaderError::KeyNotCovered(key));
         }
         Ok(self.ranges[position - 1].2)
+    }
+}
+
+impl Drop for OwnerReader {
+    fn drop(&mut self) {
+        if self.report_on_drop {
+            if let Ok(json) = serde_json::to_string(&self.read_snapshot()) {
+                eprintln!("owner_read_stats {json}");
+            }
+        }
     }
 }
 
