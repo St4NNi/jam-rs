@@ -107,85 +107,6 @@ pub fn encode_block(keys: &[OwnerKey]) -> Result<EncodedOwnerBlock, OwnerPosting
     Ok(EncodedOwnerBlock { hot, cold })
 }
 
-pub fn lookup_hot(hot: &[u8], key: u64) -> Result<Option<OwnerHotKey>, OwnerPostingsError> {
-    Ok(parse_hot(hot)?.into_iter().find(|entry| entry.key == key))
-}
-
-pub fn decode_block(hot: &[u8], cold: &[u8]) -> Result<Vec<OwnerKey>, OwnerPostingsError> {
-    let directory = parse_hot(hot)?;
-    let declared_cold = declared_cold_length(hot)?;
-    if u64::try_from(cold.len()).ok() != Some(declared_cold) {
-        return Err(invalid("cold data"));
-    }
-    let mut keys = Vec::with_capacity(directory.len());
-    for entry in directory {
-        let mut members = Vec::with_capacity(entry.members.len());
-        for member in entry.members {
-            members.push(OwnerMember {
-                document_id: member.document_id,
-                occurrences: decode_member(cold, member)?,
-            });
-        }
-        keys.push(OwnerKey {
-            key: entry.key,
-            members,
-        });
-    }
-    Ok(keys)
-}
-
-pub fn decode_member(
-    cold: &[u8],
-    member: OwnerHotMember,
-) -> Result<Vec<OwnerOccurrence>, OwnerPostingsError> {
-    let start = usize::try_from(member.cold_offset).map_err(|_| invalid("cold range"))?;
-    let length = usize::try_from(member.cold_length).map_err(|_| invalid("cold range"))?;
-    let end = start
-        .checked_add(length)
-        .ok_or_else(|| invalid("cold range"))?;
-    let mut bytes = cold.get(start..end).ok_or_else(|| invalid("cold range"))?;
-    let count =
-        usize::try_from(member.occurrence_count).map_err(|_| invalid("occurrence count"))?;
-    if count == 0 || count > bytes.len() / 2 {
-        return Err(invalid("occurrence count"));
-    }
-    let mut occurrences = Vec::with_capacity(count);
-    let mut previous_contig = 0u32;
-    let mut previous_position = 0u64;
-    for index in 0..count {
-        let contig_code = take_varint(&mut bytes)?;
-        let contig_value = contig_code >> 1;
-        let canonical_orientation = contig_code & 1 == 1;
-        let position_code = take_varint(&mut bytes)?;
-        let local_contig = if index == 0 {
-            u32::try_from(contig_value).map_err(|_| invalid("local contig"))?
-        } else {
-            let delta = u32::try_from(contig_value).map_err(|_| invalid("local contig"))?;
-            previous_contig
-                .checked_add(delta)
-                .ok_or_else(|| invalid("local contig"))?
-        };
-        let position = if index != 0 && local_contig == previous_contig {
-            previous_position
-                .checked_add(position_code)
-                .ok_or_else(|| invalid("position"))?
-        } else {
-            position_code
-        };
-        occurrences.push(OwnerOccurrence {
-            local_contig,
-            position,
-            canonical_orientation,
-        });
-        previous_contig = local_contig;
-        previous_position = position;
-    }
-    if !bytes.is_empty() {
-        return Err(invalid("cold length"));
-    }
-    Ok(occurrences)
-}
-
 pub fn parse_hot(hot: &[u8]) -> Result<Vec<OwnerHotKey>, OwnerPostingsError> {
     let mut directory = directory(hot)?;
     let key_count = usize::from(u16::from_le_bytes(
@@ -242,64 +163,27 @@ pub fn parse_hot(hot: &[u8]) -> Result<Vec<OwnerHotKey>, OwnerPostingsError> {
     Ok(keys)
 }
 
-fn directory(hot: &[u8]) -> Result<&[u8], OwnerPostingsError> {
-    if hot.len() < HEADER_SIZE || hot[..8] != MAGIC {
-        return Err(invalid("header"));
+pub fn decode_block(hot: &[u8], cold: &[u8]) -> Result<Vec<OwnerKey>, OwnerPostingsError> {
+    let directory = parse_hot(hot)?;
+    let declared_cold = declared_cold_length(hot)?;
+    if u64::try_from(cold.len()).ok() != Some(declared_cold) {
+        return Err(invalid("cold data"));
     }
-    if u16::from_le_bytes(hot[8..10].try_into().expect("owner version")) != VERSION
-        || u32::from_le_bytes(hot[12..16].try_into().expect("owner reservation")) != 0
-    {
-        return Err(invalid("header"));
+    let mut keys = Vec::with_capacity(directory.len());
+    for entry in directory {
+        let mut members = Vec::with_capacity(entry.members.len());
+        for member in entry.members {
+            members.push(OwnerMember {
+                document_id: member.document_id,
+                occurrences: decode_member(cold, member)?,
+            });
+        }
+        keys.push(OwnerKey {
+            key: entry.key,
+            members,
+        });
     }
-    let key_count = usize::from(u16::from_le_bytes(
-        hot[10..12].try_into().expect("owner key count"),
-    ));
-    if key_count == 0 || key_count > MAX_KEYS_PER_BLOCK {
-        return Err(invalid("key count"));
-    }
-    Ok(&hot[HEADER_SIZE..])
-}
-
-fn declared_cold_length(hot: &[u8]) -> Result<u64, OwnerPostingsError> {
-    directory(hot)?;
-    Ok(u64::from_le_bytes(
-        hot[16..24].try_into().expect("owner cold length"),
-    ))
-}
-
-fn encode_occurrences(
-    occurrences: &[OwnerOccurrence],
-    output: &mut Vec<u8>,
-) -> Result<(), OwnerPostingsError> {
-    let mut previous: Option<OwnerOccurrence> = None;
-    for occurrence in occurrences {
-        let (contig, position) = match previous {
-            None => (u64::from(occurrence.local_contig), occurrence.position),
-            Some(previous) if occurrence.local_contig == previous.local_contig => {
-                let position = occurrence
-                    .position
-                    .checked_sub(previous.position)
-                    .ok_or_else(|| invalid("occurrence order"))?;
-                (0, position)
-            }
-            Some(previous) => {
-                let contig = occurrence
-                    .local_contig
-                    .checked_sub(previous.local_contig)
-                    .filter(|delta| *delta != 0)
-                    .ok_or_else(|| invalid("occurrence order"))?;
-                (u64::from(contig), occurrence.position)
-            }
-        };
-        let contig_code = contig
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(u64::from(occurrence.canonical_orientation)))
-            .ok_or_else(|| invalid("local contig"))?;
-        put_varint(output, contig_code);
-        put_varint(output, position);
-        previous = Some(*occurrence);
-    }
-    Ok(())
+    Ok(keys)
 }
 
 fn delta_u64(
