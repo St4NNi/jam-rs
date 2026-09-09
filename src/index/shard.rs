@@ -9,7 +9,7 @@ use super::positions::{POSITIONS_FILE, Positions};
 use super::sketch::{SKETCH_FILE, Sketch};
 use super::sources::{PackedLocation, PackedOptions, PackedSources};
 use super::{AtPath, IndexError};
-use crate::storage::MappedFile;
+use crate::storage::LocalFile;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -74,10 +74,8 @@ impl Shard {
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;
         let sketch = Sketch::open(&directory.join(SKETCH_FILE))?;
-        let positions = Positions::open(Arc::new(MappedFile::open(
-            &directory.join(POSITIONS_FILE),
-            false,
-        )?))?;
+        let positions =
+            Positions::open(Arc::new(LocalFile::open(directory.join(POSITIONS_FILE))?))?;
         let file_size = |name: &str| {
             let path = directory.join(name);
             std::fs::metadata(&path).map(|m| m.len()).at(&path)
