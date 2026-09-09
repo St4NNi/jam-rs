@@ -20,8 +20,8 @@ mod owner_file;
 mod owner_format;
 #[cfg(test)]
 mod owner_integrity_tests;
-pub mod owner_postings;
 pub mod owner_observer;
+pub mod owner_postings;
 mod owner_reader;
 #[cfg(test)]
 mod owner_tests;
