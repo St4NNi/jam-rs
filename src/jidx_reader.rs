@@ -7,7 +7,7 @@ use crate::jidx::{
 use memmap2::Advice;
 use memmap2::{Mmap, MmapOptions};
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{File, Metadata};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -26,6 +26,71 @@ const EXACT_BLOCK_MAX_BYTES: u64 = 64 * 1024 * 1024;
 const RESIDENT_FRONT_METADATA_BYTES: usize = 384 * 1024 * 1024;
 const FRONT_METADATA_CHUNK_BYTES: usize = 1024 * 1024;
 const FRONT_METADATA_CHECKSUM_BYTES: usize = FRONT_METADATA_CHUNK_BYTES / PAGE_SIZE as usize * 32;
+const SHARED_VERIFIED_PAGE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VerifiedPageBitmapIdentity {
+    file: [u64; 7],
+    header_sha256: [u8; 32],
+    body_sha256: [u8; 32],
+    checksum_offset: u64,
+    checksum_length: u64,
+    words: usize,
+}
+
+struct VerifiedPageBitmap {
+    identity: VerifiedPageBitmapIdentity,
+    pages: Vec<AtomicU64>,
+}
+
+#[derive(Default)]
+struct VerifiedPageBitmapCache {
+    bitmap: Option<Arc<VerifiedPageBitmap>>,
+}
+
+impl VerifiedPageBitmapCache {
+    fn get(
+        &mut self,
+        identity: VerifiedPageBitmapIdentity,
+        words: usize,
+    ) -> Option<Arc<VerifiedPageBitmap>> {
+        if let Some(bitmap) = self.bitmap.as_ref()
+            && bitmap.identity == identity
+        {
+            return Some(Arc::clone(bitmap));
+        }
+        if self
+            .bitmap
+            .as_ref()
+            .is_some_and(|bitmap| Arc::strong_count(bitmap) != 1)
+        {
+            return None;
+        }
+        drop(self.bitmap.take());
+
+        let fixed_bytes = std::mem::size_of::<VerifiedPageBitmap>()
+            .checked_add(2 * std::mem::size_of::<usize>())?;
+        let minimum_payload_bytes = words.checked_mul(std::mem::size_of::<AtomicU64>())?;
+        if fixed_bytes.checked_add(minimum_payload_bytes)? > SHARED_VERIFIED_PAGE_BYTES {
+            return None;
+        }
+        let mut pages = Vec::new();
+        pages.try_reserve_exact(words).ok()?;
+        pages.resize_with(words, || AtomicU64::new(0));
+        let payload_capacity_bytes = pages
+            .capacity()
+            .checked_mul(std::mem::size_of::<AtomicU64>())?;
+        let admission_bytes = fixed_bytes.checked_add(payload_capacity_bytes)?;
+        if admission_bytes > SHARED_VERIFIED_PAGE_BYTES {
+            return None;
+        }
+        let bitmap = Arc::new(VerifiedPageBitmap { identity, pages });
+        self.bitmap = Some(Arc::clone(&bitmap));
+        Some(bitmap)
+    }
+}
+
+static SHARED_VERIFIED_PAGES: OnceLock<Mutex<VerifiedPageBitmapCache>> = OnceLock::new();
 
 pub(crate) struct ExactBlockFence {
     first_keys: Box<[u64]>,
@@ -125,6 +190,7 @@ pub struct JidxReader {
     mmap: Mmap,
     header: Header,
     verified_pages: Box<[AtomicU64]>,
+    shared_verified_pages: Option<Arc<VerifiedPageBitmap>>,
     filter_directory: Option<crate::jidx_filters::FilterDirectory>,
     exact_block_fence: Option<Arc<ExactBlockFence>>,
     filter_cache_identity: OnceLock<Option<FilterCacheIdentity>>,
@@ -135,8 +201,19 @@ pub struct JidxReader {
 
 impl JidxReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JidxReaderError> {
+        Self::open_with_page_cache(
+            path,
+            Some(SHARED_VERIFIED_PAGES.get_or_init(|| Mutex::new(Default::default()))),
+        )
+    }
+
+    fn open_with_page_cache(
+        path: impl AsRef<Path>,
+        page_cache: Option<&Mutex<VerifiedPageBitmapCache>>,
+    ) -> Result<Self, JidxReaderError> {
         let file = File::open(path)?;
-        let file_len = file.metadata()?.len();
+        let file_metadata = file.metadata()?;
+        let file_len = file_metadata.len();
         if file_len < HEADER_SIZE as u64 {
             return Err(JidxError::FileTooSmall {
                 expected: HEADER_SIZE,
@@ -148,13 +225,29 @@ impl JidxReader {
         let mmap = unsafe { MmapOptions::new().map(&file)? };
         let header = Header::decode_header(&mmap[..HEADER_SIZE], file_len)?;
         let exact_block_fence = load_exact_block_fence(&mmap[..HEADER_SIZE], file_len, &header)?;
-        let verified_pages =
-            verified_page_cache(header.section(SectionKind::BlockChecksums).offset)?;
+        let checksums = header.section(SectionKind::BlockChecksums);
+        let verified_page_words = verified_page_words(checksums.offset)?;
+        let shared_verified_pages = page_cache.and_then(|cache| {
+            shared_verified_pages(
+                cache,
+                &file,
+                &file_metadata,
+                &mmap[..HEADER_SIZE],
+                &header,
+                verified_page_words,
+            )
+        });
+        let verified_pages = if shared_verified_pages.is_some() {
+            Vec::new().into_boxed_slice()
+        } else {
+            verified_page_cache(checksums.offset)?
+        };
         let reader = Self {
             file,
             mmap,
             header,
             verified_pages,
+            shared_verified_pages,
             filter_directory: None,
             exact_block_fence,
             filter_cache_identity: OnceLock::new(),
@@ -815,8 +908,16 @@ impl JidxReader {
         Ok(self.checked_bytes(start, end)?)
     }
 
+    fn verified_page_bitmap(&self) -> &[AtomicU64] {
+        self.shared_verified_pages
+            .as_ref()
+            .map(|bitmap| bitmap.pages.as_slice())
+            .unwrap_or(self.verified_pages.as_ref())
+    }
+
     pub(crate) fn checked_bytes(&self, start: u64, end: u64) -> Result<&[u8], JidxError> {
         let checksums = self.header.section(SectionKind::BlockChecksums);
+        let verified_pages = self.verified_page_bitmap();
         if start > end || start < PAGE_SIZE || end > checksums.offset {
             return Err(JidxError::Invalid("checked range"));
         }
@@ -840,8 +941,7 @@ impl JidxReader {
             let word_index =
                 usize::try_from(page_bit / 64).map_err(|_| JidxError::Invalid("page checksum"))?;
             let bit_mask = 1u64 << (page_bit % 64);
-            let word = self
-                .verified_pages
+            let word = verified_pages
                 .get(word_index)
                 .ok_or(JidxError::Invalid("page checksum"))?;
             if word.load(Ordering::Relaxed) & bit_mask != 0 {
@@ -1404,7 +1504,7 @@ fn decode_exact_block_fence(
     Ok(fence)
 }
 
-fn verified_page_cache(checksum_offset: u64) -> Result<Box<[AtomicU64]>, JidxError> {
+fn verified_page_words(checksum_offset: u64) -> Result<usize, JidxError> {
     let data_pages = checksum_offset
         .checked_div(PAGE_SIZE)
         .and_then(|pages| pages.checked_sub(1))
@@ -1413,13 +1513,68 @@ fn verified_page_cache(checksum_offset: u64) -> Result<Box<[AtomicU64]>, JidxErr
         .checked_add(63)
         .ok_or(JidxError::Invalid("page checksum cache"))?
         / 64;
-    let words = usize::try_from(words).map_err(|_| JidxError::Invalid("page checksum cache"))?;
+    usize::try_from(words).map_err(|_| JidxError::Invalid("page checksum cache"))
+}
+
+fn verified_page_cache(checksum_offset: u64) -> Result<Box<[AtomicU64]>, JidxError> {
+    let words = verified_page_words(checksum_offset)?;
     let mut cache = Vec::new();
     cache
         .try_reserve_exact(words)
         .map_err(|_| JidxError::Invalid("page checksum cache"))?;
     cache.resize_with(words, || AtomicU64::new(0));
     Ok(cache.into_boxed_slice())
+}
+
+#[cfg(unix)]
+fn shared_verified_pages(
+    cache: &Mutex<VerifiedPageBitmapCache>,
+    file: &File,
+    before: &Metadata,
+    raw_header: &[u8],
+    header: &Header,
+    words: usize,
+) -> Option<Arc<VerifiedPageBitmap>> {
+    use std::os::unix::fs::MetadataExt;
+
+    fn file_identity(metadata: &Metadata) -> [u64; 7] {
+        [
+            metadata.dev(),
+            metadata.ino(),
+            metadata.len(),
+            metadata.mtime() as u64,
+            metadata.mtime_nsec() as u64,
+            metadata.ctime() as u64,
+            metadata.ctime_nsec() as u64,
+        ]
+    }
+
+    let before = file_identity(before);
+    if file_identity(&file.metadata().ok()?) != before {
+        return None;
+    }
+    let checksums = header.section(SectionKind::BlockChecksums);
+    let identity = VerifiedPageBitmapIdentity {
+        file: before,
+        header_sha256: sha256(raw_header),
+        body_sha256: header.body_sha256,
+        checksum_offset: checksums.offset,
+        checksum_length: checksums.length,
+        words,
+    };
+    cache.lock().ok()?.get(identity, words)
+}
+
+#[cfg(not(unix))]
+fn shared_verified_pages(
+    _cache: &Mutex<VerifiedPageBitmapCache>,
+    _file: &File,
+    _before: &Metadata,
+    _raw_header: &[u8],
+    _header: &Header,
+    _words: usize,
+) -> Option<Arc<VerifiedPageBitmap>> {
+    None
 }
 
 #[derive(Debug, Error)]
@@ -1947,7 +2102,7 @@ mod tests {
 
         for page in [1, pages] {
             let page_bit = page - 1;
-            let word = &reader.verified_pages[(page_bit / 64) as usize];
+            let word = &reader.verified_page_bitmap()[(page_bit / 64) as usize];
             assert_ne!(word.load(Ordering::Relaxed) & (1u64 << (page_bit % 64)), 0);
         }
     }
@@ -1999,7 +2154,7 @@ mod tests {
         )
         .unwrap();
         let mut expected = reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2012,7 +2167,7 @@ mod tests {
 
         assert_eq!(
             reader
-                .verified_pages
+                .verified_page_bitmap()
                 .iter()
                 .map(|word| word.load(Ordering::Relaxed))
                 .collect::<Vec<_>>(),
@@ -2049,7 +2204,7 @@ mod tests {
         assert_eq!(reader.seed_record_page_span(reader.header.seed_count), None);
 
         let before = reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2064,7 +2219,7 @@ mod tests {
         ]);
         assert_eq!(
             reader
-                .verified_pages
+                .verified_page_bitmap()
                 .iter()
                 .map(|word| word.load(Ordering::Relaxed))
                 .collect::<Vec<_>>(),
@@ -2131,7 +2286,7 @@ mod tests {
         );
 
         let before = reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2159,7 +2314,7 @@ mod tests {
         ]);
         assert_eq!(
             reader
-                .verified_pages
+                .verified_page_bitmap()
                 .iter()
                 .map(|word| word.load(Ordering::Relaxed))
                 .collect::<Vec<_>>(),
@@ -2271,7 +2426,7 @@ mod tests {
         reader.exact_block_fence = Some(Arc::new(fence));
         #[cfg(unix)]
         let verified_before = reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2279,7 +2434,7 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             reader
-                .verified_pages
+                .verified_page_bitmap()
                 .iter()
                 .map(|word| word.load(Ordering::Relaxed))
                 .collect::<Vec<_>>(),
@@ -2314,14 +2469,14 @@ mod tests {
         first.exact_block_fence = Some(Arc::clone(&fence));
         assert!(first.resident_filter_body.get().is_none());
         let verified_before = first
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
         first.verify_query_filter_pages(keys.iter()).unwrap();
         assert_eq!(
             first
-                .verified_pages
+                .verified_page_bitmap()
                 .iter()
                 .map(|word| word.load(Ordering::Relaxed))
                 .collect::<Vec<_>>(),
@@ -2457,7 +2612,7 @@ mod tests {
         assert!(first.contig(u32::MAX).unwrap().is_none());
         assert!(first.resident_front_metadata.get().is_none());
         let before = first
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2478,7 +2633,7 @@ mod tests {
         assert_eq!(
             before,
             first
-                .verified_pages
+                .verified_page_bitmap()
                 .iter()
                 .map(|word| word.load(Ordering::Relaxed))
                 .collect::<Vec<_>>()
@@ -2869,22 +3024,22 @@ mod tests {
     fn batch_seed_lookup_matches_scalar_pages_and_error_chain() {
         let (_directory, path) = multi_page_filter_fixture();
         let keys = [0, 170, 1_234, 2_500, 4_999, 5_000];
-        let scalar_reader = JidxReader::open(&path).unwrap();
+        let scalar_reader = JidxReader::open_with_page_cache(&path, None).unwrap();
         let scalar = keys
             .iter()
             .map(|&key| scalar_reader.find_seed(key))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         let scalar_pages = scalar_reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
 
-        let batch_reader = JidxReader::open(&path).unwrap();
+        let batch_reader = JidxReader::open_with_page_cache(&path, None).unwrap();
         assert_eq!(batch_reader.find_seeds_batch(&keys).unwrap(), scalar);
         let batch_pages = batch_reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2897,9 +3052,9 @@ mod tests {
             let page_bit = page - 1;
             batch_pages[(page_bit / 64) as usize] & (1u64 << (page_bit % 64)) == 0
         }));
-        let probe_reader = JidxReader::open(&path).unwrap();
+        let probe_reader = JidxReader::open_with_page_cache(&path, None).unwrap();
         let before = probe_reader
-            .verified_pages
+            .verified_page_bitmap()
             .iter()
             .map(|word| word.load(Ordering::Relaxed))
             .collect::<Vec<_>>();
@@ -2909,7 +3064,8 @@ mod tests {
                 let page_bit = page - 1;
                 let mask = 1u64 << (page_bit % 64);
                 before[(page_bit / 64) as usize] & mask == 0
-                    && probe_reader.verified_pages[(page_bit / 64) as usize].load(Ordering::Relaxed)
+                    && probe_reader.verified_page_bitmap()[(page_bit / 64) as usize]
+                        .load(Ordering::Relaxed)
                         & mask
                         != 0
             })
@@ -3210,5 +3366,272 @@ mod tests {
                 "occurrence count"
             )))
         ));
+    }
+
+    #[cfg(unix)]
+    fn bitmap_identity(words: usize) -> VerifiedPageBitmapIdentity {
+        VerifiedPageBitmapIdentity {
+            file: [1, 2, 3, 4, 5, 6, 7],
+            header_sha256: [8; 32],
+            body_sha256: [9; 32],
+            checksum_offset: PAGE_SIZE * 65,
+            checksum_length: PAGE_SIZE,
+            words,
+        }
+    }
+
+    #[cfg(unix)]
+    fn bitmap_word(page: u64) -> (usize, u64) {
+        let bit = page - 1;
+        ((bit / 64) as usize, 1u64 << (bit % 64))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verified_pages_reuse_successful_bits_for_stable_file() {
+        let cache = Mutex::new(VerifiedPageBitmapCache::default());
+        let (_directory, path) =
+            fixture_with_string_pages(false, false, false, false, true, Some(3));
+        let first = JidxReader::open_with_page_cache(&path, Some(&cache)).unwrap();
+        let strings = first.header.section(SectionKind::Strings);
+        let start = strings.offset + PAGE_SIZE;
+        first.checked_bytes(start, start + 1).unwrap();
+        let page = start / PAGE_SIZE;
+        let (word, mask) = bitmap_word(page);
+        let first_bitmap = Arc::clone(first.shared_verified_pages.as_ref().unwrap());
+        assert!(first.verified_pages.is_empty());
+        assert_ne!(first_bitmap.pages[word].load(Ordering::Relaxed) & mask, 0);
+        drop(first);
+
+        let second = JidxReader::open_with_page_cache(path, Some(&cache)).unwrap();
+        assert!(Arc::ptr_eq(
+            &first_bitmap,
+            second.shared_verified_pages.as_ref().unwrap()
+        ));
+        assert_ne!(
+            second.shared_verified_pages.as_ref().unwrap().pages[word].load(Ordering::Relaxed)
+                & mask,
+            0
+        );
+        second.checked_bytes(start, start + 1).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verified_pages_checksum_failure_never_sets_bit() {
+        let cache = Mutex::new(VerifiedPageBitmapCache::default());
+        let (_directory, path) = external_fixture();
+        let posting_offset = section_offset(&path, SectionKind::ContigPostings);
+        corrupt_byte(&path, posting_offset);
+        let page = posting_offset / PAGE_SIZE;
+        let (word, mask) = bitmap_word(page);
+
+        let first = JidxReader::open_with_page_cache(&path, Some(&cache)).unwrap();
+        let first_bitmap = Arc::clone(first.shared_verified_pages.as_ref().unwrap());
+        let seed = first.find_seed(0x1234).unwrap().unwrap();
+        let documents = first.seed_documents(seed).unwrap();
+        assert!(matches!(
+            first.seed_document_occurrences(seed, documents[1]),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+        assert_eq!(first_bitmap.pages[word].load(Ordering::Relaxed) & mask, 0);
+        drop(first);
+
+        let second = JidxReader::open_with_page_cache(path, Some(&cache)).unwrap();
+        assert!(Arc::ptr_eq(
+            &first_bitmap,
+            second.shared_verified_pages.as_ref().unwrap()
+        ));
+        let seed = second.find_seed(0x1234).unwrap().unwrap();
+        let documents = second.seed_documents(seed).unwrap();
+        assert!(matches!(
+            second.seed_document_occurrences(seed, documents[1]),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+        assert_eq!(first_bitmap.pages[word].load(Ordering::Relaxed) & mask, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verified_pages_do_not_hide_later_open_validation_failure() {
+        let cache = Mutex::new(VerifiedPageBitmapCache::default());
+        let (_directory, path) = fixture(false, false, false, false);
+        let documents = section_offset(&path, SectionKind::Documents);
+        replace_bytes(&path, documents + 16, &0u64.to_le_bytes());
+        rewrite_checksums(&path);
+        let page = documents / PAGE_SIZE;
+        let (word, mask) = bitmap_word(page);
+
+        let first = match JidxReader::open_with_page_cache(&path, Some(&cache)) {
+            Ok(_) => panic!("invalid metadata was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            first,
+            JidxReaderError::Format(JidxError::Invalid("metagenome metadata"))
+        ));
+        let bitmap = Arc::clone(cache.lock().unwrap().bitmap.as_ref().unwrap());
+        assert_ne!(bitmap.pages[word].load(Ordering::Relaxed) & mask, 0);
+
+        let second = match JidxReader::open_with_page_cache(path, Some(&cache)) {
+            Ok(_) => panic!("invalid metadata was accepted after bitmap reuse"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            second,
+            JidxReaderError::Format(JidxError::Invalid("metagenome metadata"))
+        ));
+        assert_ne!(bitmap.pages[word].load(Ordering::Relaxed) & mask, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verified_pages_invalidate_rename_and_in_place_mutation() {
+        let cache = Mutex::new(VerifiedPageBitmapCache::default());
+        let (_directory, path) = external_fixture();
+        let first = JidxReader::open_with_page_cache(&path, Some(&cache)).unwrap();
+        let first_identity = first
+            .shared_verified_pages
+            .as_ref()
+            .unwrap()
+            .identity
+            .clone();
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, std::fs::read(&path).unwrap()).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        let private = JidxReader::open_with_page_cache(&path, Some(&cache)).unwrap();
+        assert!(private.shared_verified_pages.is_none());
+        assert!(!private.verified_pages.is_empty());
+        drop(private);
+        drop(first);
+
+        let renamed = JidxReader::open_with_page_cache(&path, Some(&cache)).unwrap();
+        assert_ne!(
+            renamed.shared_verified_pages.as_ref().unwrap().identity,
+            first_identity
+        );
+        let renamed_identity = renamed
+            .shared_verified_pages
+            .as_ref()
+            .unwrap()
+            .identity
+            .clone();
+        let posting = section_offset(&path, SectionKind::DocumentPostings);
+        renamed.checked_bytes(posting, posting + 1).unwrap();
+        let page = posting / PAGE_SIZE;
+        let (word, mask) = bitmap_word(page);
+        assert_ne!(
+            renamed.shared_verified_pages.as_ref().unwrap().pages[word].load(Ordering::Relaxed)
+                & mask,
+            0
+        );
+        drop(renamed);
+
+        corrupt_byte(&path, posting);
+        let mutated = JidxReader::open_with_page_cache(path, Some(&cache)).unwrap();
+        assert_ne!(
+            mutated.shared_verified_pages.as_ref().unwrap().identity,
+            renamed_identity
+        );
+        assert_eq!(
+            mutated.shared_verified_pages.as_ref().unwrap().pages[word].load(Ordering::Relaxed)
+                & mask,
+            0
+        );
+        assert!(matches!(
+            mutated.checked_bytes(posting, posting + 1),
+            Err(JidxError::ChecksumMismatch)
+        ));
+        assert_eq!(
+            mutated.shared_verified_pages.as_ref().unwrap().pages[word].load(Ordering::Relaxed)
+                & mask,
+            0
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verified_page_cache_enforces_identity_activity_and_cap() {
+        let mut cache = VerifiedPageBitmapCache::default();
+        let identity = bitmap_identity(1);
+        let first = cache.get(identity.clone(), 1).unwrap();
+        let payload_capacity_bytes = first.pages.capacity() * std::mem::size_of::<AtomicU64>();
+        let admission_bytes = std::mem::size_of::<VerifiedPageBitmap>()
+            + 2 * std::mem::size_of::<usize>()
+            + payload_capacity_bytes;
+        assert!(payload_capacity_bytes > 0);
+        assert!(payload_capacity_bytes < admission_bytes);
+        assert!(admission_bytes <= SHARED_VERIFIED_PAGE_BYTES);
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache.get(identity.clone(), 1).unwrap()
+        ));
+
+        let mut changed = identity;
+        changed.header_sha256 = [10; 32];
+        assert!(cache.get(changed.clone(), 1).is_none());
+        drop(first);
+        let replacement = cache.get(changed, 1).unwrap();
+        assert_eq!(Arc::strong_count(&replacement), 2);
+
+        let oversized = SHARED_VERIFIED_PAGE_BYTES / std::mem::size_of::<AtomicU64>() + 1;
+        drop(replacement);
+        assert!(cache.get(bitmap_identity(oversized), oversized).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_verified_pages_concurrent_identity_and_private_fallback_are_exact() {
+        let cache = Arc::new(Mutex::new(VerifiedPageBitmapCache::default()));
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let (_directory, path) = external_fixture();
+        let threads = (0..4)
+            .map(|_| {
+                let cache = Arc::clone(&cache);
+                let barrier = Arc::clone(&barrier);
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let reader = JidxReader::open_with_page_cache(&path, Some(&cache)).unwrap();
+                    let pointer =
+                        Arc::as_ptr(reader.shared_verified_pages.as_ref().unwrap()) as usize;
+                    barrier.wait();
+                    pointer
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let pointers = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<HashSet<_>>();
+        assert_eq!(pointers.len(), 1);
+
+        let stale = JidxReader::open_with_page_cache(&path, None).unwrap();
+        let stale_metadata = stale.file.metadata().unwrap();
+        corrupt_byte(&path, section_offset(&path, SectionKind::ContigPostings));
+        assert!(
+            shared_verified_pages(
+                &cache,
+                &stale.file,
+                &stale_metadata,
+                &stale.mmap[..HEADER_SIZE],
+                &stale.header,
+                stale.verified_page_bitmap().len(),
+            )
+            .is_none()
+        );
+
+        let poisoned = Mutex::new(VerifiedPageBitmapCache::default());
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _guard = poisoned.lock().unwrap();
+                panic!("poison injected page cache");
+            })
+            .is_err()
+        );
+        let private = JidxReader::open_with_page_cache(path, Some(&poisoned)).unwrap();
+        assert!(private.shared_verified_pages.is_none());
+        assert!(!private.verified_pages.is_empty());
     }
 }
