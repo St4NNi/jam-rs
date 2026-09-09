@@ -1,15 +1,17 @@
 use crate::jidx::{
     CONTIG_RECORD_SIZE, ContigRecord, DOCUMENT_RECORD_SIZE, DocumentRecord, HEADER_SIZE, Header,
-    JidxError, PAGE_SIZE, SectionKind, StringRef, seed_length, sha256,
+    JidxError, PAGE_SIZE, SEED_RECORD_SIZE, SectionKind, StringRef, read_u32, read_u64,
+    seed_length, sha256,
 };
 #[cfg(all(target_os = "linux", any(target_arch = "x86", target_arch = "x86_64")))]
 use memmap2::Advice;
 use memmap2::{Mmap, MmapOptions};
 use std::collections::HashSet;
 use std::fs::File;
-use std::io;
-use std::path::Path;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 
 pub use crate::jidx_postings::{SeedDocument, SeedEntry, SeedOccurrence};
@@ -18,6 +20,40 @@ pub type MetagenomeId = u32;
 pub type ContigId = u32;
 
 pub(crate) const SEED_LOOKUP_BATCH_KEYS: usize = 32_768;
+const EXACT_BLOCK_RECORDS: u64 = 512;
+const EXACT_BLOCK_HEADER_SIZE: usize = 4096;
+const EXACT_BLOCK_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+pub(crate) struct ExactBlockFence {
+    first_keys: Box<[u64]>,
+    source_file_len: u64,
+    seeds_offset: u64,
+    seeds_length: u64,
+    seed_count: u64,
+    source_header_sha256: [u8; 32],
+    source_body_sha256: [u8; 32],
+}
+
+impl ExactBlockFence {
+    pub(crate) fn block_for(&self, key: u64) -> Option<u64> {
+        self.first_keys
+            .partition_point(|first| *first <= key)
+            .checked_sub(1)
+            .and_then(|block| u64::try_from(block).ok())
+    }
+
+    pub(crate) fn first_key(&self, block: u64) -> Option<u64> {
+        self.first_keys.get(usize::try_from(block).ok()?).copied()
+    }
+}
+
+struct ExactBlockFenceCache {
+    path: PathBuf,
+    sha256: [u8; 32],
+    fence: Arc<ExactBlockFence>,
+}
+
+static EXACT_BLOCK_FENCE_CACHE: OnceLock<Mutex<Option<ExactBlockFenceCache>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metagenome<'a> {
@@ -48,6 +84,7 @@ pub struct JidxReader {
     header: Header,
     verified_pages: Box<[AtomicU64]>,
     filter_directory: Option<crate::jidx_filters::FilterDirectory>,
+    exact_block_fence: Option<Arc<ExactBlockFence>>,
 }
 
 impl JidxReader {
@@ -64,6 +101,7 @@ impl JidxReader {
         // SAFETY: the mapping is read-only and retained by the reader for all returned borrows.
         let mmap = unsafe { MmapOptions::new().map(&file)? };
         let header = Header::decode_header(&mmap[..HEADER_SIZE], file_len)?;
+        let exact_block_fence = load_exact_block_fence(&mmap[..HEADER_SIZE], file_len, &header)?;
         let verified_pages =
             verified_page_cache(header.section(SectionKind::BlockChecksums).offset)?;
         let reader = Self {
@@ -72,6 +110,7 @@ impl JidxReader {
             header,
             verified_pages,
             filter_directory: None,
+            exact_block_fence,
         };
         let filter_directory = crate::jidx_filters::load(&reader)?;
         let reader = Self {
@@ -84,6 +123,10 @@ impl JidxReader {
 
     pub fn header(&self) -> &Header {
         &self.header
+    }
+
+    pub(crate) fn exact_block_fence(&self) -> Option<&ExactBlockFence> {
+        self.exact_block_fence.as_deref()
     }
 
     pub(crate) fn cache_file_identity(&self) -> std::io::Result<Option<[u64; 7]>> {
@@ -656,6 +699,183 @@ impl JidxReader {
     }
 }
 
+fn load_exact_block_fence(
+    source_header: &[u8],
+    source_file_len: u64,
+    header: &Header,
+) -> Result<Option<Arc<ExactBlockFence>>, JidxReaderError> {
+    let path = std::env::var_os("JAM_EXACT_BLOCK_FENCE");
+    let expected_sha = std::env::var_os("JAM_EXACT_BLOCK_FENCE_SHA256");
+    let (path, expected_sha) = match (path, expected_sha) {
+        (None, None) => return Ok(None),
+        (Some(path), Some(expected_sha)) => (path, expected_sha),
+        _ => return Err(JidxError::Invalid("exact block fence environment").into()),
+    };
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err(JidxError::Invalid("exact block fence path").into());
+    }
+    let expected_sha = parse_sha256(
+        expected_sha
+            .to_str()
+            .ok_or(JidxError::Invalid("exact block fence digest"))?,
+    )?;
+    let cache = EXACT_BLOCK_FENCE_CACHE.get_or_init(|| Mutex::new(None));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| JidxError::Invalid("exact block fence cache"))?;
+    if let Some(cached) = cache.as_ref()
+        && cached.path == path
+        && cached.sha256 == expected_sha
+    {
+        validate_exact_block_source(&cached.fence, source_header, source_file_len, header)?;
+        return Ok(Some(Arc::clone(&cached.fence)));
+    }
+
+    let expected_len = header
+        .seed_count
+        .checked_add(EXACT_BLOCK_RECORDS - 1)
+        .and_then(|count| (count / EXACT_BLOCK_RECORDS).checked_mul(8))
+        .and_then(|body| body.checked_add(EXACT_BLOCK_HEADER_SIZE as u64))
+        .ok_or(JidxError::Invalid("exact block fence length"))?;
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if expected_len > EXACT_BLOCK_MAX_BYTES || !metadata.is_file() || metadata.len() != expected_len
+    {
+        return Err(JidxError::Invalid("exact block fence length").into());
+    }
+    let file = File::open(&path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.len() != expected_len {
+        return Err(JidxError::Invalid("exact block fence length").into());
+    }
+    let mut bytes = Vec::with_capacity(expected_len as usize);
+    file.take(expected_len + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != expected_len {
+        return Err(JidxError::Invalid("exact block fence length").into());
+    }
+    if sha256(&bytes) != expected_sha {
+        return Err(JidxError::ChecksumMismatch.into());
+    }
+    let fence = Arc::new(decode_exact_block_fence(
+        &bytes,
+        source_header,
+        source_file_len,
+        header,
+    )?);
+    *cache = Some(ExactBlockFenceCache {
+        path,
+        sha256: expected_sha,
+        fence: Arc::clone(&fence),
+    });
+    Ok(Some(fence))
+}
+
+fn parse_sha256(value: &str) -> Result<[u8; 32], JidxError> {
+    if value.len() != 64 || !value.is_ascii() {
+        return Err(JidxError::Invalid("exact block fence digest"));
+    }
+    let mut digest = [0; 32];
+    for (index, byte) in digest.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+            .map_err(|_| JidxError::Invalid("exact block fence digest"))?;
+    }
+    Ok(digest)
+}
+
+fn validate_exact_block_source(
+    fence: &ExactBlockFence,
+    source_header: &[u8],
+    source_file_len: u64,
+    header: &Header,
+) -> Result<(), JidxError> {
+    let expected_count = header
+        .seed_count
+        .checked_add(EXACT_BLOCK_RECORDS - 1)
+        .ok_or(JidxError::Invalid("exact block fence count"))?
+        / EXACT_BLOCK_RECORDS;
+    if u64::try_from(fence.first_keys.len()).ok() != Some(expected_count)
+        || source_header.len() != HEADER_SIZE
+        || fence.source_file_len != source_file_len
+        || fence.seeds_offset != header.section(SectionKind::Seeds).offset
+        || fence.seeds_length != header.section(SectionKind::Seeds).length
+        || fence.seed_count != header.seed_count
+        || fence.source_header_sha256 != sha256(source_header)
+        || fence.source_body_sha256 != header.body_sha256
+    {
+        return Err(JidxError::Invalid("exact block fence source"));
+    }
+    Ok(())
+}
+
+fn decode_exact_block_fence(
+    bytes: &[u8],
+    source_header: &[u8],
+    source_file_len: u64,
+    header: &Header,
+) -> Result<ExactBlockFence, JidxError> {
+    if bytes.len() < EXACT_BLOCK_HEADER_SIZE
+        || bytes[..8] != *b"JXFENCE1"
+        || u16::from_le_bytes(bytes[8..10].try_into().unwrap()) != 1
+        || u16::from_le_bytes(bytes[10..12].try_into().unwrap()) != EXACT_BLOCK_HEADER_SIZE as u16
+        || read_u32(bytes, 12) != SEED_RECORD_SIZE
+        || read_u32(bytes, 16) != EXACT_BLOCK_RECORDS as u32
+        || bytes[20..24].iter().any(|byte| *byte != 0)
+        || bytes[168..4064].iter().any(|byte| *byte != 0)
+        || sha256(&bytes[..4064]) != bytes[4064..4096]
+    {
+        return Err(JidxError::Invalid("exact block fence header"));
+    }
+    let seeds = header.section(SectionKind::Seeds);
+    let fence_count = header
+        .seed_count
+        .checked_add(EXACT_BLOCK_RECORDS - 1)
+        .ok_or(JidxError::Invalid("exact block fence count"))?
+        / EXACT_BLOCK_RECORDS;
+    let body_len = fence_count
+        .checked_mul(8)
+        .ok_or(JidxError::Invalid("exact block fence length"))?;
+    let file_len =
+        u64::try_from(bytes.len()).map_err(|_| JidxError::Invalid("exact block fence length"))?;
+    if read_u64(bytes, 24) != source_file_len
+        || read_u64(bytes, 32) != seeds.offset
+        || read_u64(bytes, 40) != seeds.length
+        || read_u64(bytes, 48) != header.seed_count
+        || read_u64(bytes, 56) != fence_count
+        || bytes[64..96] != sha256(source_header)
+        || bytes[96..128] != header.body_sha256
+        || read_u64(bytes, 128) != body_len
+        || file_len != EXACT_BLOCK_HEADER_SIZE as u64 + body_len
+        || sha256(&bytes[EXACT_BLOCK_HEADER_SIZE..]) != bytes[136..168]
+    {
+        return Err(JidxError::Invalid("exact block fence binding"));
+    }
+    let mut first_keys = Vec::new();
+    first_keys
+        .try_reserve_exact(
+            usize::try_from(fence_count)
+                .map_err(|_| JidxError::Invalid("exact block fence count"))?,
+        )
+        .map_err(|_| JidxError::Invalid("exact block fence count"))?;
+    for chunk in bytes[EXACT_BLOCK_HEADER_SIZE..].as_chunks::<8>().0 {
+        let key = u64::from_le_bytes(*chunk);
+        if first_keys.last().is_some_and(|previous| *previous >= key) {
+            return Err(JidxError::Invalid("exact block fence order"));
+        }
+        first_keys.push(key);
+    }
+    let fence = ExactBlockFence {
+        first_keys: first_keys.into_boxed_slice(),
+        source_file_len,
+        seeds_offset: seeds.offset,
+        seeds_length: seeds.length,
+        seed_count: header.seed_count,
+        source_header_sha256: sha256(source_header),
+        source_body_sha256: header.body_sha256,
+    };
+    validate_exact_block_source(&fence, source_header, source_file_len, header)?;
+    Ok(fence)
+}
+
 fn verified_page_cache(checksum_offset: u64) -> Result<Box<[AtomicU64]>, JidxError> {
     let data_pages = checksum_offset
         .checked_div(PAGE_SIZE)
@@ -780,6 +1000,42 @@ mod tests {
         let body_sha256 = sha256(&bytes[HEADER_SIZE..]);
         bytes[112..144].copy_from_slice(&body_sha256);
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn exact_fence_bytes(path: &Path) -> (Vec<u8>, Header, Vec<u8>) {
+        let source = std::fs::read(path).unwrap();
+        let header = Header::decode_header(&source[..HEADER_SIZE], source.len() as u64).unwrap();
+        let seeds = header.section(SectionKind::Seeds);
+        let mut body = Vec::new();
+        for ordinal in (0..header.seed_count).step_by(EXACT_BLOCK_RECORDS as usize) {
+            let offset = (seeds.offset + ordinal * u64::from(SEED_RECORD_SIZE)) as usize;
+            body.extend_from_slice(&source[offset..offset + 8]);
+        }
+        let mut bytes = vec![0; EXACT_BLOCK_HEADER_SIZE + body.len()];
+        bytes[..8].copy_from_slice(b"JXFENCE1");
+        put_u16(&mut bytes, 8, 1);
+        put_u16(&mut bytes, 10, EXACT_BLOCK_HEADER_SIZE as u16);
+        put_u32(&mut bytes, 12, SEED_RECORD_SIZE);
+        put_u32(&mut bytes, 16, EXACT_BLOCK_RECORDS as u32);
+        put_u64(&mut bytes, 24, source.len() as u64);
+        put_u64(&mut bytes, 32, seeds.offset);
+        put_u64(&mut bytes, 40, seeds.length);
+        put_u64(&mut bytes, 48, header.seed_count);
+        put_u64(&mut bytes, 56, body.len() as u64 / 8);
+        bytes[64..96].copy_from_slice(&sha256(&source[..HEADER_SIZE]));
+        bytes[96..128].copy_from_slice(&header.body_sha256);
+        put_u64(&mut bytes, 128, body.len() as u64);
+        bytes[136..168].copy_from_slice(&sha256(&body));
+        bytes[EXACT_BLOCK_HEADER_SIZE..].copy_from_slice(&body);
+        let header_sha = sha256(&bytes[..4064]);
+        bytes[4064..4096].copy_from_slice(&header_sha);
+        (source, header, bytes)
+    }
+
+    fn exact_fence(path: &Path) -> ExactBlockFence {
+        let (source, header, bytes) = exact_fence_bytes(path);
+        decode_exact_block_fence(&bytes, &source[..HEADER_SIZE], source.len() as u64, &header)
+            .unwrap()
     }
 
     fn fixture(
@@ -1459,6 +1715,123 @@ mod tests {
                 "packed seed key"
             )))
         ));
+    }
+
+    #[test]
+    fn exact_block_lookup_matches_scalar_with_boundaries_gaps_and_duplicates() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let mut reader = JidxReader::open(&path).unwrap();
+        let keys = [4_999, 512, 511, 513, 0, 5_000, 1_024, 511, 4_998, 6_000];
+        let scalar = keys
+            .iter()
+            .map(|&key| reader.find_seed(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        reader.exact_block_fence = Some(Arc::new(exact_fence(&path)));
+        assert_eq!(reader.find_seeds_batch(&keys).unwrap(), scalar);
+    }
+
+    #[test]
+    fn exact_block_fence_rejects_header_binding_body_and_order_changes() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let (source, header, valid) = exact_fence_bytes(&path);
+        for offset in [12, 16, 48, 64, 96, 128, 136, 168, 4064, 4096 + 8] {
+            let mut bytes = valid.clone();
+            bytes[offset] ^= 1;
+            assert!(
+                decode_exact_block_fence(
+                    &bytes,
+                    &source[..HEADER_SIZE],
+                    source.len() as u64,
+                    &header
+                )
+                .is_err()
+            );
+        }
+        assert!(parse_sha256(&format!("a{}b", "é".repeat(31))).is_err());
+    }
+
+    #[test]
+    fn exact_block_lookup_preserves_mixed_seed_families() {
+        let (_directory, path) =
+            external_fixture_with_keys([0x1234, crate::jidx::RESCUE_K15_TAG | 0x123]);
+        replace_bytes(&path, 362, &[1]);
+        let mut reader = JidxReader::open(&path).unwrap();
+        let keys = [
+            crate::jidx::RESCUE_K15_TAG | 0x124,
+            0x1234,
+            crate::jidx::RESCUE_K15_TAG | 0x123,
+            0x1233,
+        ];
+        let scalar = keys
+            .iter()
+            .map(|&key| reader.find_seed(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        reader.exact_block_fence = Some(Arc::new(exact_fence(&path)));
+        assert_eq!(reader.find_seeds_batch(&keys).unwrap(), scalar);
+    }
+
+    #[test]
+    fn exact_block_lookup_checks_each_page_before_decoding() {
+        for page in 0..3 {
+            let (_directory, path) = multi_page_filter_fixture();
+            let fence = Arc::new(exact_fence(&path));
+            let seeds = section_offset(&path, SectionKind::Seeds);
+            corrupt_byte(&path, seeds + page * PAGE_SIZE + 2_000);
+            let mut reader = JidxReader::open(&path).unwrap();
+            reader.exact_block_fence = Some(Arc::clone(&fence));
+            assert!(matches!(
+                reader.find_seeds_batch(&[0]),
+                Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+            ));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires JAM_EXACT_BLOCK_SMOKE_SOURCE and the two fence environment variables"]
+    fn exact_block_external_builder_reader_cross_smoke() {
+        let source = std::env::var_os("JAM_EXACT_BLOCK_SMOKE_SOURCE").unwrap();
+        let reader = JidxReader::open(source).unwrap();
+        assert!(reader.exact_block_fence().is_some());
+        let mut keys = (0..reader.header().seed_count)
+            .map(|ordinal| {
+                crate::jidx_postings::entry(&reader, ordinal)
+                    .unwrap()
+                    .packed_key
+            })
+            .collect::<Vec<_>>();
+        let present = keys.clone();
+        for window in present.windows(2) {
+            if let Some(candidate) = window[0].checked_add(1)
+                && candidate < window[1]
+                && seed_length(reader.header().k, reader.header().rescue_k15, candidate).is_ok()
+            {
+                keys.push(candidate);
+            }
+        }
+        if let Some(first) = present.first().copied().filter(|first| *first > 0) {
+            let candidate = first - 1;
+            if seed_length(reader.header().k, reader.header().rescue_k15, candidate).is_ok() {
+                keys.push(candidate);
+            }
+        }
+        if let Some(candidate) = present.last().and_then(|last| last.checked_add(1))
+            && seed_length(reader.header().k, reader.header().rescue_k15, candidate).is_ok()
+        {
+            keys.push(candidate);
+        }
+        keys.extend(present.first().copied());
+        keys.extend(present.last().copied());
+        keys.reverse();
+        for chunk in keys.chunks(SEED_LOOKUP_BATCH_KEYS) {
+            let scalar = chunk
+                .iter()
+                .map(|&key| reader.find_seed(key))
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(reader.find_seeds_batch(chunk).unwrap(), scalar);
+        }
     }
 
     #[test]

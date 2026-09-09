@@ -73,6 +73,9 @@ pub(crate) fn lookup_batch(
     reader: &JidxReader,
     packed_keys: &[u64],
 ) -> Result<Vec<Option<SeedEntry>>, JidxError> {
+    if let Some(fence) = reader.exact_block_fence() {
+        return lookup_exact_blocks(reader, fence, packed_keys);
+    }
     let header = reader.header();
     let mut states = Vec::new();
     states
@@ -134,6 +137,108 @@ pub(crate) fn lookup_batch(
         .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
     output.extend(states.into_iter().map(|state| state.result));
     Ok(output)
+}
+
+fn lookup_exact_blocks(
+    reader: &JidxReader,
+    fence: &crate::jidx_reader::ExactBlockFence,
+    packed_keys: &[u64],
+) -> Result<Vec<Option<SeedEntry>>, JidxError> {
+    let header = reader.header();
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(packed_keys.len())
+        .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+    output.resize(packed_keys.len(), None);
+    let mut requests = Vec::new();
+    requests
+        .try_reserve_exact(packed_keys.len())
+        .map_err(|_| JidxError::Invalid("seed lookup batch"))?;
+    for (index, &packed_key) in packed_keys.iter().enumerate() {
+        seed_length(header.k, header.rescue_k15, packed_key)?;
+        if let Some(block) = fence.block_for(packed_key) {
+            requests.push((block, index));
+        }
+    }
+    requests.sort_unstable();
+
+    let mut start = 0;
+    while start < requests.len() {
+        let block = requests[start].0;
+        let mut end = start + 1;
+        while end < requests.len() && requests[end].0 == block {
+            end += 1;
+        }
+        let records = exact_block(reader, fence, block)?;
+        let record_count = records.len() / SEED_RECORD_SIZE as usize;
+        for &(_, index) in &requests[start..end] {
+            let packed_key = packed_keys[index];
+            let mut low = 0usize;
+            let mut high = record_count;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                match block_key(records, middle).cmp(&packed_key) {
+                    std::cmp::Ordering::Less => low = middle + 1,
+                    std::cmp::Ordering::Greater => high = middle,
+                    std::cmp::Ordering::Equal => {
+                        let offset = middle * SEED_RECORD_SIZE as usize;
+                        let record = decode_seed_record(
+                            &records[offset..offset + SEED_RECORD_SIZE as usize],
+                        )?;
+                        validate_record(header, record)?;
+                        output[index] = Some(record.into());
+                        break;
+                    }
+                }
+            }
+        }
+        start = end;
+    }
+    Ok(output)
+}
+
+fn exact_block<'a>(
+    reader: &'a JidxReader,
+    fence: &crate::jidx_reader::ExactBlockFence,
+    block: u64,
+) -> Result<&'a [u8], JidxError> {
+    const RECORDS: u64 = 512;
+    let ordinal = block
+        .checked_mul(RECORDS)
+        .ok_or(JidxError::Invalid("exact block range"))?;
+    let record_count = reader
+        .header()
+        .seed_count
+        .saturating_sub(ordinal)
+        .min(RECORDS);
+    if record_count == 0 {
+        return Err(JidxError::Invalid("exact block range"));
+    }
+    let section = reader.header().section(SectionKind::Seeds);
+    let start = section
+        .offset
+        .checked_add(
+            ordinal
+                .checked_mul(u64::from(SEED_RECORD_SIZE))
+                .ok_or(JidxError::Invalid("exact block range"))?,
+        )
+        .ok_or(JidxError::Invalid("exact block range"))?;
+    let end = start
+        .checked_add(
+            record_count
+                .checked_mul(u64::from(SEED_RECORD_SIZE))
+                .ok_or(JidxError::Invalid("exact block range"))?,
+        )
+        .ok_or(JidxError::Invalid("exact block range"))?;
+    let bytes = reader.checked_bytes(start, end)?;
+    if fence.first_key(block) != Some(block_key(bytes, 0)) {
+        return Err(JidxError::Invalid("exact block fence key"));
+    }
+    Ok(bytes)
+}
+
+fn block_key(bytes: &[u8], index: usize) -> u64 {
+    read_u64(bytes, index * SEED_RECORD_SIZE as usize)
 }
 
 pub(crate) fn validate_table(reader: &JidxReader) -> Result<(), JidxError> {
@@ -482,7 +587,11 @@ fn seed_record(reader: &JidxReader, index: u64) -> Result<SeedRecord, JidxError>
         .checked_add(u64::from(SEED_RECORD_SIZE))
         .ok_or(JidxError::Invalid("seed range"))?;
     let bytes = reader.checked_bytes(start, end)?;
-    if read_u32(bytes, 20) != 0 {
+    decode_seed_record(bytes)
+}
+
+fn decode_seed_record(bytes: &[u8]) -> Result<SeedRecord, JidxError> {
+    if bytes.len() != SEED_RECORD_SIZE as usize || read_u32(bytes, 20) != 0 {
         return Err(JidxError::Invalid("seed reservation"));
     }
     Ok(SeedRecord {
