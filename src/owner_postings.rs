@@ -1,9 +1,12 @@
 use std::fmt;
 
 pub const MAX_KEYS_PER_BLOCK: usize = 256;
+pub const MEMBER_ANCHOR_STRIDE: u64 = 16;
+pub const LONG_MEMBER_OCCURRENCES: u64 = 256;
 const MAGIC: [u8; 8] = *b"JOWNBLK\0";
-const VERSION: u16 = 1;
-const HEADER_SIZE: usize = 24;
+const VERSION: u16 = 2;
+const HEADER_SIZE: usize = 40;
+const MAX_HOT_DECODE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedOwnerBlock {
@@ -31,22 +34,51 @@ pub struct OwnerOccurrence {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnerHotBlock {
+    pub keys: Vec<OwnerHotKey>,
+    pub members: Vec<OwnerHotMember>,
+    pub anchors: Vec<OwnerAnchor>,
+    pub cold_bits: u64,
+    pub document_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnerHotKey {
     pub key: u64,
     pub document_frequency: u64,
-    pub members: Vec<OwnerHotMember>,
+    pub member_start: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnerHotMember {
     pub document_id: u32,
     pub occurrence_count: u64,
-    pub cold_offset: u64,
-    pub cold_length: u64,
+    pub member_ordinal: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OwnerPostingsError(&'static str);
+pub struct OwnerAnchor {
+    pub member_ordinal: u64,
+    pub cold_bit_offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnerMemberWindow {
+    pub first_member: u64,
+    pub target_member: u64,
+    pub start_bit: u64,
+    pub end_bit: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodedOwnerMember {
+    pub loci: Vec<(u64, bool)>,
+    pub skipped_members: u64,
+    pub skipped_occurrences: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OwnerPostingsError(pub &'static str);
 
 impl fmt::Display for OwnerPostingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -56,111 +88,333 @@ impl fmt::Display for OwnerPostingsError {
 
 impl std::error::Error for OwnerPostingsError {}
 
-pub fn encode_block(keys: &[OwnerKey]) -> Result<EncodedOwnerBlock, OwnerPostingsError> {
-    if keys.is_empty() || keys.len() > MAX_KEYS_PER_BLOCK {
-        return Err(invalid("key count"));
+pub fn encode_block<F>(
+    keys: &[OwnerKey],
+    document_widths: &[u8],
+    mut to_locus: F,
+) -> Result<EncodedOwnerBlock, OwnerPostingsError>
+where
+    F: FnMut(u32, OwnerOccurrence) -> Result<u64, OwnerPostingsError>,
+{
+    if keys.is_empty()
+        || keys.len() > MAX_KEYS_PER_BLOCK
+        || document_widths.is_empty()
+        || document_widths.len() > u32::MAX as usize
+        || document_widths.iter().any(|width| *width > 64)
+    {
+        return Err(invalid("block input"));
     }
-    let mut directory = Vec::new();
-    let mut cold = Vec::new();
+    let mut body = Vec::new();
+    let mut cold = BitWriter::default();
+    let mut anchors = Vec::new();
+    let mut member_ordinal = 0u64;
     let mut previous_key = None;
     for entry in keys {
-        let key_code = delta_u64(previous_key, entry.key, "key order")?;
-        put_varint(&mut directory, key_code);
-        let document_frequency =
-            u64::try_from(entry.members.len()).map_err(|_| invalid("document frequency"))?;
-        if document_frequency == 0 {
+        put_varint(&mut body, delta_u64(previous_key, entry.key, "key order")?);
+        let df = u64::try_from(entry.members.len()).map_err(|_| invalid("document frequency"))?;
+        if df == 0 || df > document_widths.len() as u64 {
             return Err(invalid("document frequency"));
         }
-        put_varint(&mut directory, document_frequency);
-        let mut previous_document = None;
+        put_varint(&mut body, df);
+        let (document_ids, dense) = encode_document_ids(&entry.members, document_widths.len())?;
+        let all_singleton = entry
+            .members
+            .iter()
+            .all(|member| member.occurrences.len() == 1);
+        body.push(u8::from(dense) | (u8::from(all_singleton) << 1));
+        body.extend_from_slice(&document_ids);
+        if !all_singleton {
+            let mut non_singletons = vec![0; entry.members.len().div_ceil(8)];
+            for (index, member) in entry.members.iter().enumerate() {
+                if member.occurrences.len() != 1 {
+                    set_bit(&mut non_singletons, index);
+                }
+            }
+            body.extend_from_slice(&non_singletons);
+            for member in &entry.members {
+                if member.occurrences.len() != 1 {
+                    put_varint(
+                        &mut body,
+                        u64::try_from(member.occurrences.len())
+                            .map_err(|_| invalid("occurrence count"))?,
+                    );
+                }
+            }
+        }
         for member in &entry.members {
-            let document_code = delta_u32(previous_document, member.document_id, "document order")?;
-            put_varint(&mut directory, u64::from(document_code));
             let count =
                 u64::try_from(member.occurrences.len()).map_err(|_| invalid("occurrence count"))?;
             if count == 0 {
                 return Err(invalid("occurrence count"));
             }
-            let start = cold.len();
-            encode_occurrences(&member.occurrences, &mut cold)?;
-            let length = u64::try_from(cold.len() - start).map_err(|_| invalid("cold length"))?;
-            put_varint(&mut directory, count);
-            put_varint(&mut directory, length);
-            previous_document = Some(member.document_id);
+            if member_ordinal.is_multiple_of(MEMBER_ANCHOR_STRIDE)
+                || count > LONG_MEMBER_OCCURRENCES
+            {
+                push_anchor(&mut anchors, member_ordinal, cold.len())?;
+            }
+            let width = document_width(document_widths, member.document_id)?;
+            encode_loci(member, width, &mut to_locus, &mut cold)?;
+            member_ordinal = member_ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("member count"))?;
+            if count > LONG_MEMBER_OCCURRENCES {
+                push_anchor(&mut anchors, member_ordinal, cold.len())?;
+            }
         }
         previous_key = Some(entry.key);
     }
-
-    let directory_length = u64::try_from(directory.len()).map_err(|_| invalid("directory"))?;
-    let cold_length = u64::try_from(cold.len()).map_err(|_| invalid("cold data"))?;
-    let capacity = HEADER_SIZE
-        .checked_add(directory.len())
-        .ok_or_else(|| invalid("block length"))?;
-    let mut hot = Vec::with_capacity(capacity);
-    hot.extend_from_slice(&MAGIC);
-    hot.extend_from_slice(&VERSION.to_le_bytes());
-    hot.extend_from_slice(&(keys.len() as u16).to_le_bytes());
-    hot.extend_from_slice(&0u32.to_le_bytes());
-    hot.extend_from_slice(&cold_length.to_le_bytes());
-    hot.extend_from_slice(&directory);
-    debug_assert_eq!(directory_length as usize, hot.len() - HEADER_SIZE);
-    Ok(EncodedOwnerBlock { hot, cold })
+    push_anchor(&mut anchors, member_ordinal, cold.len())?;
+    let anchor_count = u32::try_from(anchors.len()).map_err(|_| invalid("anchor count"))?;
+    let mut previous_member = None;
+    let mut previous_bit = None;
+    for anchor in &anchors {
+        put_varint(
+            &mut body,
+            delta_u64(previous_member, anchor.member_ordinal, "anchor order")?,
+        );
+        put_varint(
+            &mut body,
+            delta_u64(previous_bit, anchor.cold_bit_offset, "anchor order")?,
+        );
+        previous_member = Some(anchor.member_ordinal);
+        previous_bit = Some(anchor.cold_bit_offset);
+    }
+    let mut hot = vec![0; HEADER_SIZE];
+    hot[..8].copy_from_slice(&MAGIC);
+    put_u16(&mut hot, 8, VERSION);
+    put_u16(&mut hot, 10, keys.len() as u16);
+    put_u32(&mut hot, 12, document_widths.len() as u32);
+    put_u64(&mut hot, 16, member_ordinal);
+    put_u64(&mut hot, 24, cold.len());
+    put_u32(&mut hot, 32, anchor_count);
+    hot.extend_from_slice(&body);
+    Ok(EncodedOwnerBlock {
+        hot,
+        cold: cold.finish(),
+    })
 }
 
-pub fn parse_hot(hot: &[u8]) -> Result<Vec<OwnerHotKey>, OwnerPostingsError> {
-    let mut directory = directory(hot)?;
-    let key_count = usize::from(u16::from_le_bytes(
-        hot[10..12].try_into().expect("owner key count"),
-    ));
-    let cold_length = declared_cold_length(hot)?;
-    let mut cold_offset = 0u64;
-    let mut keys = Vec::with_capacity(key_count);
+pub fn parse_hot(hot: &[u8]) -> Result<OwnerHotBlock, OwnerPostingsError> {
+    let (key_count, document_count, member_count, cold_bits, anchor_count, mut input) =
+        decode_header(hot)?;
+    decoded_hot_bound(key_count, member_count, anchor_count)?;
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(key_count)
+        .map_err(|_| invalid("decoded hot size"))?;
+    let member_capacity = usize::try_from(member_count).map_err(|_| invalid("member count"))?;
+    let mut members = Vec::new();
+    members
+        .try_reserve_exact(member_capacity)
+        .map_err(|_| invalid("decoded hot size"))?;
     let mut previous_key = None;
     for _ in 0..key_count {
-        let key = apply_delta_u64(previous_key, take_varint(&mut directory)?, "key order")?;
-        let document_frequency = take_varint(&mut directory)?;
-        let member_count =
-            usize::try_from(document_frequency).map_err(|_| invalid("document frequency"))?;
-        if member_count == 0 || member_count > directory.len() / 3 {
+        let key = apply_delta_u64(previous_key, take_varint(&mut input)?, "key order")?;
+        let df = take_varint(&mut input)?;
+        let remaining = member_count
+            .checked_sub(members.len() as u64)
+            .ok_or_else(|| invalid("member count"))?;
+        if df == 0 || df > u64::from(document_count) || df > remaining {
             return Err(invalid("document frequency"));
         }
-        let mut members = Vec::with_capacity(member_count);
-        let mut previous_document = None;
-        for _ in 0..member_count {
-            let document_code = take_varint(&mut directory)?;
-            let document_id = apply_delta_u32(previous_document, document_code, "document order")?;
-            let occurrence_count = take_varint(&mut directory)?;
-            let cold_length_for_member = take_varint(&mut directory)?;
-            if occurrence_count == 0 || cold_length_for_member < occurrence_count.saturating_mul(2)
-            {
-                return Err(invalid("member length"));
-            }
-            let next_cold = cold_offset
-                .checked_add(cold_length_for_member)
-                .ok_or_else(|| invalid("cold range"))?;
-            if next_cold > cold_length {
-                return Err(invalid("cold range"));
-            }
+        decoded_hot_transient_bound(key_count, member_count, anchor_count, df)?;
+        let flags = take_byte(&mut input)?;
+        if flags & !3 != 0 {
+            return Err(invalid("member flags"));
+        }
+        let ids = decode_document_ids(&mut input, df, document_count, flags & 1 != 0)?;
+        let counts = decode_counts(&mut input, df, flags & 2 != 0)?;
+        let member_start = members.len() as u64;
+        for (document_id, occurrence_count) in ids.into_iter().zip(counts) {
             members.push(OwnerHotMember {
                 document_id,
                 occurrence_count,
-                cold_offset,
-                cold_length: cold_length_for_member,
+                member_ordinal: members.len() as u64,
             });
-            cold_offset = next_cold;
-            previous_document = Some(document_id);
         }
         keys.push(OwnerHotKey {
             key,
-            document_frequency,
-            members,
+            document_frequency: df,
+            member_start,
         });
         previous_key = Some(key);
     }
-    if !directory.is_empty() || cold_offset != cold_length {
-        return Err(invalid("block coverage"));
+    if members.len() as u64 != member_count {
+        return Err(invalid("member count"));
     }
-    Ok(keys)
+    let mut anchors = Vec::new();
+    anchors
+        .try_reserve_exact(anchor_count)
+        .map_err(|_| invalid("decoded hot size"))?;
+    let mut previous_member = None;
+    let mut previous_bit = None;
+    for _ in 0..anchor_count {
+        let member_ordinal =
+            apply_delta_u64(previous_member, take_varint(&mut input)?, "anchor order")?;
+        let cold_bit_offset =
+            apply_delta_u64(previous_bit, take_varint(&mut input)?, "anchor order")?;
+        anchors.push(OwnerAnchor {
+            member_ordinal,
+            cold_bit_offset,
+        });
+        previous_member = Some(member_ordinal);
+        previous_bit = Some(cold_bit_offset);
+    }
+    if !input.is_empty()
+        || anchors.first().copied()
+            != Some(OwnerAnchor {
+                member_ordinal: 0,
+                cold_bit_offset: 0,
+            })
+        || anchors.last().copied()
+            != Some(OwnerAnchor {
+                member_ordinal: member_count,
+                cold_bit_offset: cold_bits,
+            })
+        || anchors.iter().any(|anchor| {
+            anchor.member_ordinal > member_count || anchor.cold_bit_offset > cold_bits
+        })
+    {
+        return Err(invalid("anchor coverage"));
+    }
+    if !validate_anchor_ordinals(&anchors, &members)? {
+        return Err(invalid("anchor set"));
+    }
+    Ok(OwnerHotBlock {
+        keys,
+        members,
+        anchors,
+        cold_bits,
+        document_count,
+    })
+}
+
+pub fn find_key(hot: &OwnerHotBlock, key: u64) -> Option<&OwnerHotKey> {
+    hot.keys
+        .binary_search_by_key(&key, |entry| entry.key)
+        .ok()
+        .map(|index| &hot.keys[index])
+}
+
+pub fn key_members<'a>(
+    hot: &'a OwnerHotBlock,
+    key: &OwnerHotKey,
+) -> Result<&'a [OwnerHotMember], OwnerPostingsError> {
+    let start = usize::try_from(key.member_start).map_err(|_| invalid("member range"))?;
+    let length = usize::try_from(key.document_frequency).map_err(|_| invalid("member range"))?;
+    hot.members
+        .get(
+            start
+                ..start
+                    .checked_add(length)
+                    .ok_or_else(|| invalid("member range"))?,
+        )
+        .ok_or_else(|| invalid("member range"))
+}
+
+pub fn locate_member(
+    hot: &OwnerHotBlock,
+    member_ordinal: u64,
+) -> Result<OwnerMemberWindow, OwnerPostingsError> {
+    if member_ordinal >= hot.members.len() as u64 {
+        return Err(invalid("member ordinal"));
+    }
+    let after = hot
+        .anchors
+        .partition_point(|anchor| anchor.member_ordinal <= member_ordinal);
+    let before = after
+        .checked_sub(1)
+        .ok_or_else(|| invalid("anchor range"))?;
+    let first = hot
+        .anchors
+        .get(before)
+        .ok_or_else(|| invalid("anchor range"))?;
+    let end = hot
+        .anchors
+        .get(after)
+        .ok_or_else(|| invalid("anchor range"))?;
+    Ok(OwnerMemberWindow {
+        first_member: first.member_ordinal,
+        target_member: member_ordinal,
+        start_bit: first.cold_bit_offset,
+        end_bit: end.cold_bit_offset,
+    })
+}
+
+pub fn decode_member_window(
+    cold_window: &[u8],
+    window_byte_start: u64,
+    window: OwnerMemberWindow,
+    hot: &OwnerHotBlock,
+    document_widths: &[u8],
+    max_decoded_bytes: usize,
+) -> Result<DecodedOwnerMember, OwnerPostingsError> {
+    if locate_member(hot, window.target_member)? != window
+        || document_widths.len() != hot.document_count as usize
+    {
+        return Err(invalid("member window"));
+    }
+    let expected_start = window.start_bit / 8;
+    let expected_end = window.end_bit.div_ceil(8);
+    if window_byte_start != expected_start
+        || u64::try_from(cold_window.len()).ok() != Some(expected_end - expected_start)
+    {
+        return Err(invalid("cold window"));
+    }
+    let mut reader = BitReader::window(
+        cold_window,
+        window.start_bit - expected_start * 8,
+        window.end_bit - expected_start * 8,
+    )?;
+    let mut skipped_occurrences = 0u64;
+    let mut loci = Vec::new();
+    for ordinal in window.first_member..=window.target_member {
+        let member = *hot
+            .members
+            .get(ordinal as usize)
+            .ok_or_else(|| invalid("member ordinal"))?;
+        let width = document_width(document_widths, member.document_id)?;
+        if ordinal == window.target_member {
+            loci = decode_loci(
+                &mut reader,
+                member.occurrence_count,
+                width,
+                max_decoded_bytes,
+            )?;
+        } else {
+            if member.occurrence_count > LONG_MEMBER_OCCURRENCES {
+                return Err(invalid("unanchored long member"));
+            }
+            skip_loci(
+                &mut reader,
+                member.occurrence_count,
+                width,
+                max_decoded_bytes,
+            )?;
+            skipped_occurrences = skipped_occurrences
+                .checked_add(member.occurrence_count)
+                .ok_or_else(|| invalid("skipped occurrences"))?;
+        }
+    }
+    let after = hot
+        .anchors
+        .partition_point(|anchor| anchor.member_ordinal <= window.target_member);
+    let target_end = window
+        .target_member
+        .checked_add(1)
+        .ok_or_else(|| invalid("member ordinal"))?;
+    if hot.anchors[after].member_ordinal == target_end
+        && reader.position() != window.end_bit - expected_start * 8
+    {
+        return Err(invalid("member boundary"));
+    }
+    if window.end_bit == hot.cold_bits {
+        validate_tail_padding(cold_window, window.end_bit - expected_start * 8)?;
+    }
+    Ok(DecodedOwnerMember {
+        loci,
+        skipped_members: window.target_member - window.first_member,
+        skipped_occurrences,
+    })
 }
 
 pub fn decode_block(hot: &[u8], cold: &[u8]) -> Result<Vec<OwnerKey>, OwnerPostingsError> {
