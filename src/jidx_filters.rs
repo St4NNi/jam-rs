@@ -1,15 +1,36 @@
 use crate::jidx::{JidxError, PAGE_SIZE, SEED_RECORD_SIZE, SectionKind};
 use crate::jidx_postings;
-use crate::jidx_reader::JidxReader;
+use crate::jidx_reader::{FilterCacheIdentity, JidxReader};
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 use xorf::{BinaryFuse8, BinaryFuse8Ref, DmaSerializable, Filter, FilterRef};
 
 const GROUP_KEYS: u64 = 1_000_000;
 const DIRECTORY_RECORD_SIZE: u64 = 40;
 const DESCRIPTOR_SIZE: usize = 20;
+const RESIDENT_FILTER_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Default)]
+struct FilterBodyCache {
+    entries: Vec<(FilterCacheIdentity, Arc<Vec<u8>>)>,
+    payload_bytes: u64,
+}
+
+impl FilterBodyCache {
+    fn admitted_bytes(&self, length: u64) -> Option<u64> {
+        if length == 0 || length > RESIDENT_FILTER_BYTES {
+            return None;
+        }
+        self.payload_bytes
+            .checked_add(length)
+            .filter(|total| *total <= RESIDENT_FILTER_BYTES)
+    }
+}
+
+static FILTER_BODY_CACHE: OnceLock<Mutex<FilterBodyCache>> = OnceLock::new();
 
 pub(crate) struct FilterDirectory {
     records: Box<[FilterRecord]>,
@@ -141,6 +162,9 @@ pub(crate) fn verify_query_pages(
     keys: impl IntoIterator<Item = u64>,
 ) -> Result<(), JidxError> {
     validate_identity(reader, directory)?;
+    if reader.resident_filter_body(directory)?.is_some() {
+        return Ok(());
+    }
     let mut record_index = None;
     let mut descriptor = [0; DESCRIPTOR_SIZE];
     let mut pages = BTreeSet::new();
@@ -207,6 +231,7 @@ pub(crate) fn contains(
     key: u64,
 ) -> Result<bool, JidxError> {
     validate_identity(reader, directory)?;
+    let resident = reader.resident_filter_body(directory)?;
     let index = directory
         .records
         .partition_point(|record| record.last_key < key);
@@ -216,7 +241,71 @@ pub(crate) fn contains(
     if key < record.first_key {
         return Ok(false);
     }
+    if let Some(body) = resident {
+        return resident_contains(body, directory, *record, key);
+    }
     page_local_contains(reader, *record, key)
+}
+
+pub(crate) fn acquire_resident_body(
+    reader: &JidxReader,
+    directory: &FilterDirectory,
+) -> Result<Option<Arc<Vec<u8>>>, JidxError> {
+    validate_identity(reader, directory)?;
+    let Some(identity) = reader.filter_cache_identity().cloned() else {
+        return Ok(None);
+    };
+    let Some(cache) = FILTER_BODY_CACHE
+        .get_or_init(|| Mutex::new(FilterBodyCache::default()))
+        .lock()
+        .ok()
+    else {
+        return Ok(None);
+    };
+    let mut cache = cache;
+    if let Some((_, body)) = cache.entries.iter().find(|(stored, _)| stored == &identity) {
+        return Ok(Some(Arc::clone(body)));
+    }
+    let Some(admitted) = cache.admitted_bytes(identity.section_length) else {
+        return Ok(None);
+    };
+    if cache.entries.try_reserve(1).is_err() {
+        return Ok(None);
+    }
+    let Some(body) = reader.read_verified_filter_body(&identity)? else {
+        return Ok(None);
+    };
+    if u64::try_from(body.len()).ok() != Some(identity.section_length) {
+        return Err(JidxError::Invalid("resident seed filter length"));
+    }
+    let body = Arc::new(body);
+    cache.payload_bytes = admitted;
+    cache.entries.push((identity, Arc::clone(&body)));
+    Ok(Some(body))
+}
+
+fn resident_contains(
+    body: &[u8],
+    directory: &FilterDirectory,
+    record: FilterRecord,
+    key: u64,
+) -> Result<bool, JidxError> {
+    let start = record
+        .filter_start
+        .checked_sub(directory.section_offset)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(JidxError::Invalid("resident seed filter range"))?;
+    let end = record
+        .filter_end
+        .checked_sub(directory.section_offset)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or(JidxError::Invalid("resident seed filter range"))?;
+    let bytes = body
+        .get(start..end)
+        .ok_or(JidxError::Invalid("resident seed filter range"))?;
+    let (descriptor, fingerprints) = bytes.split_at(DESCRIPTOR_SIZE);
+    validate_descriptor(descriptor, fingerprints.len())?;
+    Ok(BinaryFuse8Ref::from_dma(descriptor, fingerprints).contains(&key))
 }
 
 #[cfg(test)]
@@ -669,6 +758,20 @@ mod tests {
         let path = directory.path().join("filters");
         build(Cursor::new([]), &path, 0).unwrap();
         assert_eq!(std::fs::metadata(path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn resident_filter_admission_is_bounded_and_rejects_empty_entries() {
+        let mut cache = FilterBodyCache::default();
+        assert_eq!(cache.admitted_bytes(0), None);
+        assert_eq!(
+            cache.admitted_bytes(RESIDENT_FILTER_BYTES),
+            Some(RESIDENT_FILTER_BYTES)
+        );
+        assert_eq!(cache.admitted_bytes(RESIDENT_FILTER_BYTES + 1), None);
+        cache.payload_bytes = RESIDENT_FILTER_BYTES - 7;
+        assert_eq!(cache.admitted_bytes(7), Some(RESIDENT_FILTER_BYTES));
+        assert_eq!(cache.admitted_bytes(8), None);
     }
 
     #[test]

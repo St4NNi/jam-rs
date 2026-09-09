@@ -55,6 +55,15 @@ struct ExactBlockFenceCache {
 
 static EXACT_BLOCK_FENCE_CACHE: OnceLock<Mutex<Option<ExactBlockFenceCache>>> = OnceLock::new();
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FilterCacheIdentity {
+    pub(crate) file: [u64; 7],
+    pub(crate) header_sha256: [u8; 32],
+    pub(crate) body_sha256: [u8; 32],
+    pub(crate) section_offset: u64,
+    pub(crate) section_length: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Metagenome<'a> {
     pub id: MetagenomeId,
@@ -85,6 +94,8 @@ pub struct JidxReader {
     verified_pages: Box<[AtomicU64]>,
     filter_directory: Option<crate::jidx_filters::FilterDirectory>,
     exact_block_fence: Option<Arc<ExactBlockFence>>,
+    filter_cache_identity: OnceLock<Option<FilterCacheIdentity>>,
+    resident_filter_body: OnceLock<Option<Arc<Vec<u8>>>>,
 }
 
 impl JidxReader {
@@ -111,6 +122,8 @@ impl JidxReader {
             verified_pages,
             filter_directory: None,
             exact_block_fence,
+            filter_cache_identity: OnceLock::new(),
+            resident_filter_body: OnceLock::new(),
         };
         let filter_directory = crate::jidx_filters::load(&reader)?;
         let reader = Self {
@@ -127,6 +140,38 @@ impl JidxReader {
 
     pub(crate) fn exact_block_fence(&self) -> Option<&ExactBlockFence> {
         self.exact_block_fence.as_deref()
+    }
+
+    pub(crate) fn resident_filter_body(
+        &self,
+        directory: &crate::jidx_filters::FilterDirectory,
+    ) -> Result<Option<&Arc<Vec<u8>>>, JidxError> {
+        if self.exact_block_fence.is_none() {
+            return Ok(None);
+        }
+        if self.resident_filter_body.get().is_none() {
+            let body = crate::jidx_filters::acquire_resident_body(self, directory)?;
+            let _ = self.resident_filter_body.set(body);
+        }
+        Ok(self.resident_filter_body.get().and_then(Option::as_ref))
+    }
+
+    pub(crate) fn filter_cache_identity(&self) -> Option<&FilterCacheIdentity> {
+        self.exact_block_fence.as_ref()?;
+        self.filter_cache_identity
+            .get_or_init(|| {
+                let file = self.cache_file_identity().ok().flatten()?;
+                let header = self.header.encode().ok()?;
+                let section = self.header.section(SectionKind::SeedFilters);
+                Some(FilterCacheIdentity {
+                    file,
+                    header_sha256: sha256(&header),
+                    body_sha256: self.header.body_sha256,
+                    section_offset: section.offset,
+                    section_length: section.length,
+                })
+            })
+            .as_ref()
     }
 
     pub(crate) fn cache_file_identity(&self) -> std::io::Result<Option<[u64; 7]>> {
@@ -629,6 +674,123 @@ impl JidxReader {
             word.fetch_or(bit_mask, Ordering::Relaxed);
         }
         Ok(bytes)
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn read_verified_filter_body(
+        &self,
+        identity: &FilterCacheIdentity,
+    ) -> Result<Option<Vec<u8>>, JidxError> {
+        use std::os::unix::fs::FileExt;
+
+        const DATA_CHUNK: usize = 1024 * 1024;
+        const CHECKSUM_CHUNK: usize = DATA_CHUNK / PAGE_SIZE as usize * 32;
+        match self.cache_file_identity() {
+            Ok(Some(current)) if current == identity.file => {}
+            Ok(Some(_)) => return Err(JidxError::Invalid("resident seed filter identity")),
+            _ => return Ok(None),
+        }
+        let section = self.header.section(SectionKind::SeedFilters);
+        if identity.section_offset != section.offset
+            || identity.section_length != section.length
+            || identity.body_sha256 != self.header.body_sha256
+            || identity.header_sha256 != sha256(&self.header.encode()?)
+        {
+            return Err(JidxError::Invalid("resident seed filter identity"));
+        }
+        let length = usize::try_from(section.length)
+            .map_err(|_| JidxError::Invalid("resident seed filter length"))?;
+        let mut body = Vec::new();
+        if body.try_reserve_exact(length).is_err() {
+            return Ok(None);
+        }
+        body.resize(length, 0);
+        let page_count = section
+            .length
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(JidxError::Invalid("resident seed filter pages"))?
+            / PAGE_SIZE;
+        let checksums = self.header.section(SectionKind::BlockChecksums);
+        let first_page = section.offset / PAGE_SIZE;
+        let mut data = Vec::new();
+        let mut expected = Vec::new();
+        if data.try_reserve_exact(DATA_CHUNK).is_err()
+            || expected.try_reserve_exact(CHECKSUM_CHUNK).is_err()
+        {
+            return Ok(None);
+        }
+        data.resize(DATA_CHUNK, 0);
+        expected.resize(CHECKSUM_CHUNK, 0);
+
+        let mut page_offset = 0u64;
+        let mut copied = 0usize;
+        while page_offset < page_count {
+            let pages = (page_count - page_offset).min((DATA_CHUNK as u64) / PAGE_SIZE);
+            let data_length = usize::try_from(pages * PAGE_SIZE).unwrap();
+            let checksum_length = usize::try_from(pages * 32).unwrap();
+            let data_offset = section
+                .offset
+                .checked_add(
+                    page_offset
+                        .checked_mul(PAGE_SIZE)
+                        .ok_or(JidxError::Invalid("resident seed filter range"))?,
+                )
+                .ok_or(JidxError::Invalid("resident seed filter range"))?;
+            let checksum_offset = checksums
+                .offset
+                .checked_add(
+                    first_page
+                        .checked_add(page_offset)
+                        .and_then(|page| page.checked_sub(1))
+                        .and_then(|page| page.checked_mul(32))
+                        .ok_or(JidxError::Invalid("resident seed filter checksum"))?,
+                )
+                .ok_or(JidxError::Invalid("resident seed filter checksum"))?;
+            if self
+                .file
+                .read_exact_at(&mut data[..data_length], data_offset)
+                .is_err()
+                || self
+                    .file
+                    .read_exact_at(&mut expected[..checksum_length], checksum_offset)
+                    .is_err()
+            {
+                return Ok(None);
+            }
+            for page in 0..usize::try_from(pages).unwrap() {
+                let data_start = page * PAGE_SIZE as usize;
+                let checksum_start = page * 32;
+                if sha256(&data[data_start..data_start + PAGE_SIZE as usize])
+                    != expected[checksum_start..checksum_start + 32]
+                {
+                    return Err(JidxError::ChecksumMismatch);
+                }
+            }
+            let copy_length = (length - copied).min(data_length);
+            body[copied..copied + copy_length].copy_from_slice(&data[..copy_length]);
+            copied += copy_length;
+            page_offset += pages;
+        }
+        if copied != length {
+            return Err(JidxError::Invalid("resident seed filter length"));
+        }
+        match self.cache_file_identity() {
+            Ok(Some(current)) if current == identity.file => {}
+            Ok(Some(_)) => return Err(JidxError::Invalid("resident seed filter identity")),
+            _ => return Ok(None),
+        }
+        if sha256(&self.header.encode()?) != identity.header_sha256 {
+            return Err(JidxError::Invalid("resident seed filter identity"));
+        }
+        Ok(Some(body))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn read_verified_filter_body(
+        &self,
+        _identity: &FilterCacheIdentity,
+    ) -> Result<Option<Vec<u8>>, JidxError> {
+        Ok(None)
     }
 
     fn record_bytes(&self, kind: SectionKind, index: u64, size: u32) -> Result<&[u8], JidxError> {
@@ -1732,6 +1894,161 @@ mod tests {
     }
 
     #[test]
+    fn resident_filter_is_lazy_reused_and_matches_reference() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let control = JidxReader::open(&path).unwrap();
+        let keys = [0, 1, 170, 2_500, 4_999, 5_000, 6_000];
+        let expected = keys
+            .iter()
+            .map(|&key| {
+                crate::jidx_filters::reference_contains(
+                    &control,
+                    control.filter_directory.as_ref().unwrap(),
+                    key,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        control.verify_query_filter_pages(keys.iter()).unwrap();
+        assert!(control.find_seed(170).unwrap().is_some());
+        assert_eq!(control.find_seeds_batch(&[170, 6_000]).unwrap()[1], None);
+        assert!(control.filter_cache_identity.get().is_none());
+        assert!(control.resident_filter_body.get().is_none());
+
+        let fence = Arc::new(exact_fence(&path));
+        let mut first = JidxReader::open(&path).unwrap();
+        first.exact_block_fence = Some(Arc::clone(&fence));
+        assert!(first.resident_filter_body.get().is_none());
+        let verified_before = first
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        first.verify_query_filter_pages(keys.iter()).unwrap();
+        assert_eq!(
+            first
+                .verified_pages
+                .iter()
+                .map(|word| word.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            verified_before
+        );
+        let first_body = first
+            .resident_filter_body
+            .get()
+            .and_then(Option::as_ref)
+            .unwrap();
+        let actual = keys
+            .iter()
+            .map(|&key| {
+                crate::jidx_filters::contains(&first, first.filter_directory.as_ref().unwrap(), key)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(actual, expected);
+
+        let mut second = JidxReader::open(&path).unwrap();
+        second.exact_block_fence = Some(fence);
+        second.verify_query_filter_pages(keys.iter()).unwrap();
+        let second_body = second
+            .resident_filter_body
+            .get()
+            .and_then(Option::as_ref)
+            .unwrap();
+        assert!(Arc::ptr_eq(first_body, second_body));
+
+        let mut scalar = JidxReader::open(&path).unwrap();
+        scalar.exact_block_fence = Some(Arc::new(exact_fence(&path)));
+        assert!(scalar.resident_filter_body.get().is_none());
+        assert!(scalar.find_seed(6_000).unwrap().is_none());
+        assert!(Arc::ptr_eq(
+            first_body,
+            scalar
+                .resident_filter_body
+                .get()
+                .and_then(Option::as_ref)
+                .unwrap()
+        ));
+    }
+
+    #[test]
+    fn resident_filter_corruption_never_falls_back() {
+        for final_page_padding in [false, true] {
+            let (_directory, path) = multi_page_filter_fixture();
+            let fence = Arc::new(exact_fence(&path));
+            let mut reader = JidxReader::open(&path).unwrap();
+            reader.exact_block_fence = Some(fence);
+            let filter = reader.header.section(SectionKind::SeedFilters);
+            let corruption = if final_page_padding {
+                let end = filter.offset + filter.length;
+                assert!(end < reader.header.section(SectionKind::BlockChecksums).offset);
+                end
+            } else {
+                filter.offset + PAGE_SIZE + 20
+            };
+            corrupt_byte(&path, corruption);
+            assert!(matches!(
+                reader.verify_query_filter_pages([&0]),
+                Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+            ));
+            assert!(reader.resident_filter_body.get().is_none());
+        }
+    }
+
+    #[test]
+    fn resident_filter_concurrent_first_use_reuses_one_body() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let fence = Arc::new(exact_fence(&path));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let mut readers = Vec::new();
+        for _ in 0..2 {
+            let mut reader = JidxReader::open(&path).unwrap();
+            reader.exact_block_fence = Some(Arc::clone(&fence));
+            readers.push(reader);
+        }
+        let handles = readers
+            .into_iter()
+            .map(|reader| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    reader.verify_query_filter_pages([&170]).unwrap();
+                    Arc::clone(
+                        reader
+                            .resident_filter_body
+                            .get()
+                            .and_then(Option::as_ref)
+                            .unwrap(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let bodies = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(&bodies[0], &bodies[1]));
+    }
+
+    #[test]
+    fn resident_filter_identity_change_is_an_error() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let fence = Arc::new(exact_fence(&path));
+        let mut reader = JidxReader::open(&path).unwrap();
+        reader.exact_block_fence = Some(fence);
+        assert!(reader.filter_cache_identity().is_some());
+        let filter = reader.header.section(SectionKind::SeedFilters);
+        corrupt_byte(&path, filter.offset + PAGE_SIZE + 20);
+        assert!(matches!(
+            reader.verify_query_filter_pages([&0]),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "resident seed filter identity"
+            )))
+        ));
+    }
+
+    #[test]
     fn exact_block_fence_rejects_header_binding_body_and_order_changes() {
         let (_directory, path) = multi_page_filter_fixture();
         let (source, header, valid) = exact_fence_bytes(&path);
@@ -1832,6 +2149,13 @@ mod tests {
                 .unwrap();
             assert_eq!(reader.find_seeds_batch(chunk).unwrap(), scalar);
         }
+        assert!(
+            reader
+                .resident_filter_body
+                .get()
+                .and_then(Option::as_ref)
+                .is_some()
+        );
     }
 
     #[test]
