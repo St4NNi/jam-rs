@@ -1325,26 +1325,30 @@ unsafe fn fill_wave_avx2(
         let mut insertions = [0i32; 8];
         let mut deletions = [0i32; 8];
         let mut traces = [0i32; 8];
-        let mut lane_best = [0i32; 8];
         _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
         _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
         _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
         _mm256_storeu_si256(traces.as_mut_ptr().cast(), trace);
         let (lane_best_scores, _) = choose_avx2(match_scores, insertion_scores, deletion_scores);
-        _mm256_storeu_si256(lane_best.as_mut_ptr().cast(), lane_best_scores);
         for (lane, &trace) in traces.iter().enumerate() {
             let query_index = row + lane;
             let target_index = wave - query_index;
             let trace_index = row_offsets[query_index] + target_index - row_starts[query_index];
             traceback[trace_index] = trace as u16;
         }
-        let mut block_lane = 0usize;
-        for lane in 1..8 {
-            if lane_best[lane] > lane_best[block_lane] {
-                block_lane = lane;
-            }
-        }
-        if lane_best[block_lane] > 0 {
+        let mut block_best = _mm256_max_epi32(
+            lane_best_scores,
+            _mm256_permute2x128_si256::<0x01>(lane_best_scores, lane_best_scores),
+        );
+        block_best = _mm256_max_epi32(block_best, _mm256_shuffle_epi32::<0x4e>(block_best));
+        block_best = _mm256_max_epi32(block_best, _mm256_shuffle_epi32::<0xb1>(block_best));
+        let block_score = _mm256_extract_epi32::<0>(block_best);
+        if block_score > 0 {
+            let best_lanes = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(
+                lane_best_scores,
+                block_best,
+            )));
+            let block_lane = best_lanes.trailing_zeros() as usize;
             // Lanes are in ascending query-index order. The first lane with the block maximum
             // is therefore lexicographically earliest; every lesser or later equal lane loses
             // after this unchanged BestCell comparison.
@@ -1615,47 +1619,51 @@ fn anchored_semiglobal(
     }
     for row in 1..rows {
         let first = row * columns;
-        cells[first].scores[DELETION as usize] = config.gap_open_score.saturating_add(
+        let (previous, current) = cells.split_at_mut(first);
+        let previous = &previous[first - columns..first];
+        let current = &mut current[..columns];
+        current[0].scores[DELETION as usize] = config.gap_open_score.saturating_add(
             config
                 .gap_extend_score
                 .saturating_mul(i32::try_from(row).unwrap_or(i32::MAX)),
         );
-        cells[first].previous[DELETION as usize] = if row == 1 { MATCH } else { DELETION };
+        current[0].previous[DELETION as usize] = if row == 1 { MATCH } else { DELETION };
         for column in 1..columns {
-            let index = first + column;
-            let (score, state) = maximum(cells[index - columns - 1].scores);
-            cells[index].scores[MATCH as usize] = score.saturating_add(
+            let (score, state) = maximum(previous[column - 1].scores);
+            let left = current[column - 1].scores;
+            let cell = &mut current[column];
+            cell.scores[MATCH as usize] = score.saturating_add(
                 if query[row - 1].eq_ignore_ascii_case(&target[column - 1]) {
                     config.match_score
                 } else {
                     config.mismatch_score
                 },
             );
-            cells[index].previous[MATCH as usize] = state;
+            cell.previous[MATCH as usize] = state;
 
-            let above = cells[index - columns].scores;
+            let above = previous[column].scores;
             let (score, state) = maximum([
                 above[MATCH as usize].saturating_add(gap_open(config)),
                 above[INSERTION as usize].saturating_add(gap_open(config)),
                 above[DELETION as usize].saturating_add(config.gap_extend_score),
             ]);
-            cells[index].scores[DELETION as usize] = score;
-            cells[index].previous[DELETION as usize] = state;
+            cell.scores[DELETION as usize] = score;
+            cell.previous[DELETION as usize] = state;
 
-            let left = cells[index - 1].scores;
             let (score, state) = maximum([
                 left[MATCH as usize].saturating_add(gap_open(config)),
                 left[INSERTION as usize].saturating_add(config.gap_extend_score),
                 left[DELETION as usize].saturating_add(gap_open(config)),
             ]);
-            cells[index].scores[INSERTION as usize] = score;
-            cells[index].previous[INSERTION as usize] = state;
+            cell.scores[INSERTION as usize] = score;
+            cell.previous[INSERTION as usize] = state;
         }
     }
 
     let mut best = (NEGATIVE, 0usize, 0usize, START);
     for row in 0..rows {
-        for column in 0..columns {
+        let first_column = if row + 1 == rows { 0 } else { columns - 1 };
+        for column in first_column..columns {
             if (row + 1 != rows && column + 1 != columns) || (row == 0 && column == 0) {
                 continue;
             }
