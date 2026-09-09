@@ -20,7 +20,7 @@ pub type MetagenomeId = u32;
 pub type ContigId = u32;
 
 pub(crate) const SEED_LOOKUP_BATCH_KEYS: usize = 32_768;
-const EXACT_BLOCK_RECORDS: u64 = 512;
+const EXACT_BLOCK_RECORDS: u64 = 128;
 const EXACT_BLOCK_HEADER_SIZE: usize = 4096;
 const EXACT_BLOCK_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -674,6 +674,88 @@ impl JidxReader {
             word.fetch_or(bit_mask, Ordering::Relaxed);
         }
         Ok(bytes)
+    }
+
+    pub(crate) fn copied_seed_block<'a>(
+        &'a self,
+        start: u64,
+        end: u64,
+        scratch: &'a mut Vec<u8>,
+    ) -> Result<&'a [u8], JidxReaderError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+
+            const MAX_BLOCK_PAGES: u64 = 2;
+            let seeds = self.header.section(SectionKind::Seeds);
+            let seeds_end = seeds
+                .offset
+                .checked_add(seeds.length)
+                .ok_or(JidxError::Invalid("exact block range"))?;
+            if start >= end || start < seeds.offset || end > seeds_end {
+                return Err(JidxError::Invalid("exact block range").into());
+            }
+            let page_start = start / PAGE_SIZE * PAGE_SIZE;
+            let page_end = end
+                .checked_add(PAGE_SIZE - 1)
+                .ok_or(JidxError::Invalid("exact block range"))?
+                .checked_div(PAGE_SIZE)
+                .and_then(|page| page.checked_mul(PAGE_SIZE))
+                .ok_or(JidxError::Invalid("exact block range"))?;
+            let page_length = page_end
+                .checked_sub(page_start)
+                .ok_or(JidxError::Invalid("exact block range"))?;
+            if page_length == 0 || page_length > MAX_BLOCK_PAGES * PAGE_SIZE {
+                return Err(JidxError::Invalid("exact block pages").into());
+            }
+            let page_length = usize::try_from(page_length)
+                .map_err(|_| JidxError::Invalid("exact block pages"))?;
+            scratch.clear();
+            scratch
+                .try_reserve_exact(page_length)
+                .map_err(|_| JidxError::Invalid("exact block pages"))?;
+            scratch.resize(page_length, 0);
+            self.file.read_exact_at(scratch, page_start)?;
+
+            let checksums = self.header.section(SectionKind::BlockChecksums);
+            for (local_page, bytes) in scratch
+                .as_chunks::<{ PAGE_SIZE as usize }>()
+                .0
+                .iter()
+                .enumerate()
+            {
+                let page = page_start / PAGE_SIZE
+                    + u64::try_from(local_page).map_err(|_| JidxError::Invalid("page checksum"))?;
+                let checksum_start = checksums
+                    .offset
+                    .checked_add(
+                        page.checked_sub(1)
+                            .and_then(|page| page.checked_mul(32))
+                            .ok_or(JidxError::Invalid("page checksum"))?,
+                    )
+                    .ok_or(JidxError::Invalid("page checksum"))?;
+                let checksum_end = checksum_start
+                    .checked_add(32)
+                    .ok_or(JidxError::Invalid("page checksum"))?;
+                let checksum_start = usize::try_from(checksum_start)
+                    .map_err(|_| JidxError::Invalid("page checksum"))?;
+                let checksum_end = usize::try_from(checksum_end)
+                    .map_err(|_| JidxError::Invalid("page checksum"))?;
+                if self.mmap.get(checksum_start..checksum_end) != Some(sha256(bytes).as_slice()) {
+                    return Err(JidxError::ChecksumMismatch.into());
+                }
+            }
+            let relative_start = usize::try_from(start - page_start)
+                .map_err(|_| JidxError::Invalid("exact block range"))?;
+            let relative_end = usize::try_from(end - page_start)
+                .map_err(|_| JidxError::Invalid("exact block range"))?;
+            Ok(&scratch[relative_start..relative_end])
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = scratch;
+            Ok(self.checked_bytes(start, end)?)
+        }
     }
 
     #[cfg(unix)]
@@ -1882,15 +1964,36 @@ mod tests {
     #[test]
     fn exact_block_lookup_matches_scalar_with_boundaries_gaps_and_duplicates() {
         let (_directory, path) = multi_page_filter_fixture();
-        let mut reader = JidxReader::open(&path).unwrap();
-        let keys = [4_999, 512, 511, 513, 0, 5_000, 1_024, 511, 4_998, 6_000];
+        let keys = [
+            4_999, 4_992, 128, 127, 129, 255, 256, 383, 384, 0, 5_000, 127, 4_998, 6_000,
+        ];
+        let scalar_reader = JidxReader::open(&path).unwrap();
         let scalar = keys
             .iter()
-            .map(|&key| reader.find_seed(key))
+            .map(|&key| scalar_reader.find_seed(key))
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        reader.exact_block_fence = Some(Arc::new(exact_fence(&path)));
+        let mut reader = JidxReader::open(&path).unwrap();
+        let fence = exact_fence(&path);
+        assert_eq!(fence.first_key(39), Some(4_992));
+        assert_eq!(fence.first_key(40), None);
+        reader.exact_block_fence = Some(Arc::new(fence));
+        #[cfg(unix)]
+        let verified_before = reader
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
         assert_eq!(reader.find_seeds_batch(&keys).unwrap(), scalar);
+        #[cfg(unix)]
+        assert_eq!(
+            reader
+                .verified_pages
+                .iter()
+                .map(|word| word.load(Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+            verified_before
+        );
     }
 
     #[test]
@@ -2091,18 +2194,92 @@ mod tests {
 
     #[test]
     fn exact_block_lookup_checks_each_page_before_decoding() {
-        for page in 0..3 {
+        for (block, page, byte) in [
+            (0, 0, 3_500),
+            (1, 0, 100),
+            (1, 1, 100),
+            (2, 0, 100),
+            (2, 1, 3_900),
+            (3, 0, 100),
+        ] {
             let (_directory, path) = multi_page_filter_fixture();
             let fence = Arc::new(exact_fence(&path));
             let seeds = section_offset(&path, SectionKind::Seeds);
-            corrupt_byte(&path, seeds + page * PAGE_SIZE + 2_000);
+            let block_start = seeds + block * EXACT_BLOCK_RECORDS * u64::from(SEED_RECORD_SIZE);
+            assert_eq!(
+                block_start % PAGE_SIZE,
+                [0, 3_072, 2_048, 1_024][block as usize]
+            );
+            let first_page = block_start / PAGE_SIZE * PAGE_SIZE;
+            corrupt_byte(&path, first_page + page * PAGE_SIZE + byte);
             let mut reader = JidxReader::open(&path).unwrap();
             reader.exact_block_fence = Some(Arc::clone(&fence));
             assert!(matches!(
-                reader.find_seeds_batch(&[0]),
+                reader.find_seeds_batch(&[block * EXACT_BLOCK_RECORDS]),
                 Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
             ));
         }
+    }
+
+    #[test]
+    fn exact_block_lookup_uses_per_call_scratch() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let batches = [
+            vec![0, 1, 127, 128, 255, 256, 4_999, 5_000],
+            vec![384, 383, 257, 256, 129, 128, 127, 6_000],
+        ];
+        let control = JidxReader::open(&path).unwrap();
+        let expected = batches
+            .iter()
+            .map(|batch| {
+                batch
+                    .iter()
+                    .map(|&key| control.find_seed(key))
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let mut reader = JidxReader::open(&path).unwrap();
+        reader.exact_block_fence = Some(Arc::new(exact_fence(&path)));
+        let reader = Arc::new(reader);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles = batches
+            .into_iter()
+            .map(|batch| {
+                let reader = Arc::clone(&reader);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    reader.find_seeds_batch(&batch).unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let actual = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exact_block_short_positional_read_returns_io() {
+        let (_directory, path) = multi_page_filter_fixture();
+        let mut reader = JidxReader::open(&path).unwrap();
+        reader.exact_block_fence = Some(Arc::new(exact_fence(&path)));
+        reader.verify_query_filter_pages([&0]).unwrap();
+        let seeds = reader.header.section(SectionKind::Seeds);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(seeds.offset + 100)
+            .unwrap();
+        assert!(matches!(
+            reader.find_seeds_batch(&[0]),
+            Err(JidxReaderError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::jidx::{
     DOCUMENT_POSTING_SIZE, Header, JidxError, SEED_RECORD_SIZE, SectionKind, read_u32, read_u64,
     seed_length,
 };
-use crate::jidx_reader::JidxReader;
+use crate::jidx_reader::{JidxReader, JidxReaderError};
 
 const EXTERNAL_SENTINEL: u32 = u32::MAX;
 const EXTERNAL_DOCUMENT_POSTING_SIZE: u64 = 32;
@@ -72,7 +72,7 @@ pub(crate) fn lookup(reader: &JidxReader, packed_key: u64) -> Result<Option<Seed
 pub(crate) fn lookup_batch(
     reader: &JidxReader,
     packed_keys: &[u64],
-) -> Result<Vec<Option<SeedEntry>>, JidxError> {
+) -> Result<Vec<Option<SeedEntry>>, JidxReaderError> {
     if let Some(fence) = reader.exact_block_fence() {
         return lookup_exact_blocks(reader, fence, packed_keys);
     }
@@ -143,7 +143,7 @@ fn lookup_exact_blocks(
     reader: &JidxReader,
     fence: &crate::jidx_reader::ExactBlockFence,
     packed_keys: &[u64],
-) -> Result<Vec<Option<SeedEntry>>, JidxError> {
+) -> Result<Vec<Option<SeedEntry>>, JidxReaderError> {
     let header = reader.header();
     let mut output = Vec::new();
     output
@@ -162,6 +162,7 @@ fn lookup_exact_blocks(
     }
     requests.sort_unstable();
 
+    let mut scratch = Vec::new();
     let mut start = 0;
     while start < requests.len() {
         let block = requests[start].0;
@@ -169,7 +170,7 @@ fn lookup_exact_blocks(
         while end < requests.len() && requests[end].0 == block {
             end += 1;
         }
-        let records = exact_block(reader, fence, block)?;
+        let records = exact_block(reader, fence, block, &mut scratch)?;
         let record_count = records.len() / SEED_RECORD_SIZE as usize;
         for &(_, index) in &requests[start..end] {
             let packed_key = packed_keys[index];
@@ -201,8 +202,9 @@ fn exact_block<'a>(
     reader: &'a JidxReader,
     fence: &crate::jidx_reader::ExactBlockFence,
     block: u64,
-) -> Result<&'a [u8], JidxError> {
-    const RECORDS: u64 = 512;
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8], JidxReaderError> {
+    const RECORDS: u64 = 128;
     let ordinal = block
         .checked_mul(RECORDS)
         .ok_or(JidxError::Invalid("exact block range"))?;
@@ -212,7 +214,7 @@ fn exact_block<'a>(
         .saturating_sub(ordinal)
         .min(RECORDS);
     if record_count == 0 {
-        return Err(JidxError::Invalid("exact block range"));
+        return Err(JidxError::Invalid("exact block range").into());
     }
     let section = reader.header().section(SectionKind::Seeds);
     let start = section
@@ -230,9 +232,9 @@ fn exact_block<'a>(
                 .ok_or(JidxError::Invalid("exact block range"))?,
         )
         .ok_or(JidxError::Invalid("exact block range"))?;
-    let bytes = reader.checked_bytes(start, end)?;
+    let bytes = reader.copied_seed_block(start, end, scratch)?;
     if fence.first_key(block) != Some(block_key(bytes, 0)) {
-        return Err(JidxError::Invalid("exact block fence key"));
+        return Err(JidxError::Invalid("exact block fence key").into());
     }
     Ok(bytes)
 }
