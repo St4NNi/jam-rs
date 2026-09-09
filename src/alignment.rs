@@ -1,5 +1,7 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+use std::arch::x86_64::*;
 use std::fmt::Write as _;
 use std::sync::{Condvar, Mutex};
 use thiserror::Error;
@@ -694,6 +696,423 @@ impl AlignmentWorkspace {
         }
         self.operations.reverse();
         Ok((query_index, target_index))
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn prepare_wave(scores: &mut Vec<i32>, length: usize) {
+    if scores.capacity() < length {
+        scores.reserve_exact(length - scores.len());
+    }
+    scores.resize(length, 0);
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[derive(Clone, Copy)]
+struct WaveRange {
+    start: usize,
+    end: usize,
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+impl WaveRange {
+    fn width(self) -> usize {
+        self.end - self.start + 1
+    }
+
+    fn contains(self, row: usize) -> bool {
+        row >= self.start && row <= self.end
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn wave_range(
+    query_len: usize,
+    target_len: usize,
+    config: AlignmentConfig,
+    wave: usize,
+) -> Option<WaveRange> {
+    let query_len = i128::try_from(query_len).ok()?;
+    let target_len = i128::try_from(target_len).ok()?;
+    let wave = i128::try_from(wave).ok()?;
+    let diagonal = i128::from(config.diagonal_offset);
+    let band = i128::from(config.band_width);
+    let lower = 0
+        .max(wave - target_len)
+        .max(ceil_div2(wave - (diagonal + band)));
+    let upper = query_len
+        .min(wave)
+        .min((wave - (diagonal - band)).div_euclid(2));
+    if lower > upper {
+        return None;
+    }
+    Some(WaveRange {
+        start: usize::try_from(lower).ok()?,
+        end: usize::try_from(upper).ok()?,
+    })
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn ceil_div2(value: i128) -> i128 {
+    -(-value).div_euclid(2)
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[derive(Clone, Copy)]
+struct ScoreWave<'a> {
+    range: WaveRange,
+    scores: &'a [i32],
+    stride: usize,
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+impl ScoreWave<'_> {
+    fn cell(self, row: usize) -> Option<[i32; 3]> {
+        self.range.contains(row).then(|| {
+            let offset = row - self.range.start;
+            [
+                self.scores[offset],
+                self.scores[self.stride + offset],
+                self.scores[2 * self.stride + offset],
+            ]
+        })
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[allow(clippy::too_many_arguments)]
+fn fill_wave_scalar(
+    query: &[u8],
+    target: &[u8],
+    config: AlignmentConfig,
+    gap_open_score: i32,
+    wave: usize,
+    row: usize,
+    current_range: WaveRange,
+    stride: usize,
+    older: Option<ScoreWave<'_>>,
+    previous: Option<ScoreWave<'_>>,
+    current: &mut [i32],
+    traceback: &mut [u16],
+    row_offsets: &[usize],
+    row_starts: &[usize],
+    best: &mut BestCell,
+) {
+    let target_index = wave - row;
+    let wave_offset = row - current_range.start;
+    let trace_index = row_offsets[row] + target_index - row_starts[row];
+    if row == 0 && target_index == 0 {
+        current[wave_offset] = 0;
+        current[stride + wave_offset] = 0;
+        current[2 * stride + wave_offset] = 0;
+        traceback[trace_index] = 0;
+        return;
+    }
+    let mut cell = Cell::default();
+    if row > 0
+        && target_index > 0
+        && let Some(previous) = older.and_then(|wave| wave.cell(row - 1))
+    {
+        let (score, state) = best_score(previous);
+        let substitution = if query[row - 1].eq_ignore_ascii_case(&target[target_index - 1]) {
+            config.match_score
+        } else {
+            config.mismatch_score
+        };
+        let score = score.saturating_add(substitution);
+        if score > 0 {
+            cell.scores[MATCH as usize] = score;
+            cell.previous[MATCH as usize] = if score == substitution { START } else { state };
+        }
+    }
+    if let Some(previous) = previous.and_then(|wave| wave.cell(row)) {
+        let (score, state) = choose([
+            (
+                previous[INSERTION as usize] + config.gap_extend_score,
+                INSERTION,
+            ),
+            (previous[MATCH as usize] + gap_open_score, MATCH),
+            (previous[DELETION as usize] + gap_open_score, DELETION),
+        ]);
+        if score > 0 {
+            cell.scores[INSERTION as usize] = score;
+            cell.previous[INSERTION as usize] = state;
+        }
+    }
+    if row > 0
+        && let Some(previous) = previous.and_then(|wave| wave.cell(row - 1))
+    {
+        let (score, state) = choose([
+            (
+                previous[DELETION as usize] + config.gap_extend_score,
+                DELETION,
+            ),
+            (previous[MATCH as usize] + gap_open_score, MATCH),
+            (previous[INSERTION as usize] + gap_open_score, INSERTION),
+        ]);
+        if score > 0 {
+            cell.scores[DELETION as usize] = score;
+            cell.previous[DELETION as usize] = state;
+        }
+    }
+    current[wave_offset] = cell.scores[MATCH as usize];
+    current[stride + wave_offset] = cell.scores[INSERTION as usize];
+    current[2 * stride + wave_offset] = cell.scores[DELETION as usize];
+    traceback[trace_index] = encode_traceback(cell);
+    best.consider(row, target_index, cell);
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn best_score(scores: [i32; 3]) -> (i32, u8) {
+    choose([
+        (scores[MATCH as usize], MATCH),
+        (scores[INSERTION as usize], INSERTION),
+        (scores[DELETION as usize], DELETION),
+    ])
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn encode_traceback(cell: Cell) -> u16 {
+    let mut traceback = 0u16;
+    for state in 0..=DELETION {
+        let index = state as usize;
+        if cell.scores[index] > 0 {
+            debug_assert!(cell.previous[index] <= START);
+            traceback |= 1 << state;
+            traceback |= u16::from(cell.previous[index]) << (3 + 2 * state);
+        }
+    }
+    traceback
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn traceback_positive(traceback: u16, state: u8) -> bool {
+    traceback & (1 << state) != 0
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+fn traceback_previous(traceback: u16, state: u8) -> u8 {
+    ((traceback >> (3 + 2 * state)) & 3) as u8
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+unsafe fn load_wave(scores: ScoreWave<'_>, state: usize, row: usize) -> __m256i {
+    debug_assert!(scores.range.contains(row));
+    debug_assert!(scores.range.contains(row + 7));
+    let offset = state * scores.stride + row - scores.range.start;
+    // SAFETY: the caller proves rows row..row+7 are inside this wave and each state plane
+    // has stride elements in a buffer of exactly three strides.
+    unsafe { _mm256_loadu_si256(scores.scores.as_ptr().add(offset).cast()) }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+unsafe fn choose_avx2(m: __m256i, i: __m256i, d: __m256i) -> (__m256i, __m256i) {
+    unsafe {
+        let zero = _mm256_setzero_si256();
+        let one = _mm256_set1_epi32(1);
+        let two = _mm256_set1_epi32(2);
+        let i_better = _mm256_cmpgt_epi32(i, m);
+        let mut score = _mm256_blendv_epi8(m, i, i_better);
+        let mut state = _mm256_blendv_epi8(zero, one, i_better);
+        let d_better = _mm256_cmpgt_epi32(d, score);
+        score = _mm256_blendv_epi8(score, d, d_better);
+        state = _mm256_blendv_epi8(state, two, d_better);
+        (score, state)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+unsafe fn saturating_add_avx2(left: __m256i, right: __m256i) -> __m256i {
+    unsafe {
+        let sum = _mm256_add_epi32(left, right);
+        let overflow = _mm256_srai_epi32::<31>(_mm256_and_si256(
+            _mm256_xor_si256(left, sum),
+            _mm256_xor_si256(right, sum),
+        ));
+        let saturation =
+            _mm256_xor_si256(_mm256_srai_epi32::<31>(left), _mm256_set1_epi32(i32::MAX));
+        _mm256_blendv_epi8(sum, saturation, overflow)
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+unsafe fn lowercase_ascii_8(bytes: __m128i) -> __m128i {
+    unsafe {
+        let upper = _mm_and_si128(
+            _mm_cmpgt_epi8(bytes, _mm_set1_epi8((b'A' - 1) as i8)),
+            _mm_cmpgt_epi8(_mm_set1_epi8((b'Z' + 1) as i8), bytes),
+        );
+        _mm_or_si128(bytes, _mm_and_si128(upper, _mm_set1_epi8(0x20)))
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[allow(clippy::too_many_arguments)]
+unsafe fn fill_wave_avx2(
+    query: &[u8],
+    target: &[u8],
+    config: AlignmentConfig,
+    gap_open_score: i32,
+    wave: usize,
+    row: usize,
+    current_range: WaveRange,
+    stride: usize,
+    older: ScoreWave<'_>,
+    previous: ScoreWave<'_>,
+    current: &mut [i32],
+    traceback: &mut [u16],
+    row_offsets: &[usize],
+    row_starts: &[usize],
+    best: &mut BestCell,
+) {
+    unsafe {
+        debug_assert!(row > 0);
+        debug_assert!(row + 7 < wave);
+        debug_assert!(row + 7 <= query.len());
+        debug_assert!(current_range.contains(row));
+        debug_assert!(current_range.contains(row + 7));
+        debug_assert!(current.len() >= 3 * stride);
+        let first_target = wave - row;
+        debug_assert!(first_target >= 8 && first_target <= target.len());
+
+        let query_bytes = _mm_loadl_epi64(query.as_ptr().add(row - 1).cast());
+        let target_bytes = _mm_loadl_epi64(target.as_ptr().add(first_target - 8).cast());
+        let reverse = _mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, -1, -1, -1, -1, -1, -1, -1, -1);
+        let target_bytes = _mm_shuffle_epi8(target_bytes, reverse);
+        let equal = _mm_cmpeq_epi8(
+            lowercase_ascii_8(query_bytes),
+            lowercase_ascii_8(target_bytes),
+        );
+        let equal = _mm256_cvtepi8_epi32(equal);
+        let substitution = _mm256_blendv_epi8(
+            _mm256_set1_epi32(config.mismatch_score),
+            _mm256_set1_epi32(config.match_score),
+            equal,
+        );
+
+        let (diagonal, diagonal_state) = choose_avx2(
+            load_wave(older, MATCH as usize, row - 1),
+            load_wave(older, INSERTION as usize, row - 1),
+            load_wave(older, DELETION as usize, row - 1),
+        );
+        let match_raw = saturating_add_avx2(diagonal, substitution);
+        let zero = _mm256_setzero_si256();
+        let match_positive = _mm256_cmpgt_epi32(match_raw, zero);
+        let match_scores = _mm256_and_si256(match_raw, match_positive);
+        let match_start = _mm256_cmpeq_epi32(match_raw, substitution);
+        let match_previous = _mm256_blendv_epi8(
+            diagonal_state,
+            _mm256_set1_epi32(i32::from(START)),
+            match_start,
+        );
+
+        let left_m = _mm256_add_epi32(
+            load_wave(previous, MATCH as usize, row),
+            _mm256_set1_epi32(gap_open_score),
+        );
+        let left_i = _mm256_add_epi32(
+            load_wave(previous, INSERTION as usize, row),
+            _mm256_set1_epi32(config.gap_extend_score),
+        );
+        let left_d = _mm256_add_epi32(
+            load_wave(previous, DELETION as usize, row),
+            _mm256_set1_epi32(gap_open_score),
+        );
+        let (insertion_raw, insertion_previous) = choose_avx2(left_m, left_i, left_d);
+        let insertion_positive = _mm256_cmpgt_epi32(insertion_raw, zero);
+        let insertion_scores = _mm256_and_si256(insertion_raw, insertion_positive);
+
+        let above_m = _mm256_add_epi32(
+            load_wave(previous, MATCH as usize, row - 1),
+            _mm256_set1_epi32(gap_open_score),
+        );
+        let above_i = _mm256_add_epi32(
+            load_wave(previous, INSERTION as usize, row - 1),
+            _mm256_set1_epi32(gap_open_score),
+        );
+        let above_d = _mm256_add_epi32(
+            load_wave(previous, DELETION as usize, row - 1),
+            _mm256_set1_epi32(config.gap_extend_score),
+        );
+        let (deletion_raw, deletion_previous) = choose_avx2(above_m, above_i, above_d);
+        let deletion_positive = _mm256_cmpgt_epi32(deletion_raw, zero);
+        let deletion_scores = _mm256_and_si256(deletion_raw, deletion_positive);
+
+        let wave_offset = row - current_range.start;
+        _mm256_storeu_si256(current.as_mut_ptr().add(wave_offset).cast(), match_scores);
+        _mm256_storeu_si256(
+            current.as_mut_ptr().add(stride + wave_offset).cast(),
+            insertion_scores,
+        );
+        _mm256_storeu_si256(
+            current.as_mut_ptr().add(2 * stride + wave_offset).cast(),
+            deletion_scores,
+        );
+
+        let mut trace = _mm256_and_si256(match_positive, _mm256_set1_epi32(1));
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi32::<3>(_mm256_and_si256(match_previous, match_positive)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_and_si256(insertion_positive, _mm256_set1_epi32(2)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi32::<5>(_mm256_and_si256(insertion_previous, insertion_positive)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_and_si256(deletion_positive, _mm256_set1_epi32(4)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi32::<7>(_mm256_and_si256(deletion_previous, deletion_positive)),
+        );
+
+        let mut matches = [0i32; 8];
+        let mut insertions = [0i32; 8];
+        let mut deletions = [0i32; 8];
+        let mut traces = [0i32; 8];
+        let mut lane_best = [0i32; 8];
+        _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
+        _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
+        _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
+        _mm256_storeu_si256(traces.as_mut_ptr().cast(), trace);
+        let (lane_best_scores, _) = choose_avx2(match_scores, insertion_scores, deletion_scores);
+        _mm256_storeu_si256(lane_best.as_mut_ptr().cast(), lane_best_scores);
+        for (lane, &trace) in traces.iter().enumerate() {
+            let query_index = row + lane;
+            let target_index = wave - query_index;
+            let trace_index = row_offsets[query_index] + target_index - row_starts[query_index];
+            traceback[trace_index] = trace as u16;
+        }
+        let mut block_lane = 0usize;
+        for lane in 1..8 {
+            if lane_best[lane] > lane_best[block_lane] {
+                block_lane = lane;
+            }
+        }
+        if lane_best[block_lane] > 0 {
+            // Lanes are in ascending query-index order. The first lane with the block maximum
+            // is therefore lexicographically earliest; every lesser or later equal lane loses
+            // after this unchanged BestCell comparison.
+            let query_index = row + block_lane;
+            let target_index = wave - query_index;
+            best.consider(
+                query_index,
+                target_index,
+                Cell {
+                    scores: [
+                        matches[block_lane],
+                        insertions[block_lane],
+                        deletions[block_lane],
+                    ],
+                    previous: [0; 3],
+                },
+            );
+        }
     }
 }
 
