@@ -21,6 +21,7 @@ mod owner_format;
 #[cfg(test)]
 mod owner_integrity_tests;
 pub mod owner_postings;
+pub mod owner_observer;
 mod owner_reader;
 #[cfg(test)]
 mod owner_tests;
