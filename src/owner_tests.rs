@@ -29,6 +29,11 @@ pub(crate) struct Fixture {
     pub(crate) owner_manifest: PathBuf,
     auxiliary: Vec<PathBuf>,
 }
+
+pub(crate) struct ScaleFixture {
+    pub(crate) fixture: Fixture,
+    pub(crate) independent_queries: Vec<(String, Vec<u8>)>,
+}
 #[test]
 fn owner_generation_preserves_evidence_trace_and_standalone_deployment() {
     let fixture = build_fixture();
@@ -239,6 +244,31 @@ fn build_fixture() -> Fixture {
 }
 
 pub(crate) fn build_fixture_at(output: Option<PathBuf>) -> Fixture {
+    build_fixture_with_background(output, 640, &[])
+}
+
+pub(crate) fn build_scale_fixture_at(output: PathBuf, background_bases: usize) -> ScaleFixture {
+    let independent_queries = (0..8)
+        .map(|ordinal| {
+            (
+                format!("independent-hit-{ordinal}"),
+                random_sequence(700_001 + ordinal, 224),
+            )
+        })
+        .collect::<Vec<_>>();
+    let fixture =
+        build_fixture_with_background(Some(output), background_bases, &independent_queries);
+    ScaleFixture {
+        fixture,
+        independent_queries,
+    }
+}
+
+fn build_fixture_with_background(
+    output: Option<PathBuf>,
+    background_bases: usize,
+    independent_queries: &[(String, Vec<u8>)],
+) -> Fixture {
     let temp_root = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .expect("TMPDIR must be explicit for owner fixtures");
@@ -254,6 +284,11 @@ pub(crate) fn build_fixture_at(output: Option<PathBuf>) -> Fixture {
     }
     let query = random_sequence(17, 224);
     let reverse = reverse_complement(&query);
+    let mut background = random_sequence(10_007, background_bases);
+    for (ordinal, (_, sequence)) in independent_queries.iter().enumerate() {
+        let start = (ordinal + 1) * background.len() / (independent_queries.len() + 1);
+        background[start..start + sequence.len()].copy_from_slice(sequence);
+    }
     let targets = [
         (
             "doc-a",
@@ -270,7 +305,7 @@ pub(crate) fn build_fixture_at(output: Option<PathBuf>) -> Fixture {
             "doc-b",
             [random_sequence(43, 97), reverse, random_sequence(47, 109)].concat(),
         ),
-        ("doc-c", random_sequence(10_007, 640)),
+        ("doc-c", background),
     ];
     let mut fasta_inputs = Vec::new();
     let mut manifest_entries = Vec::new();
@@ -626,8 +661,29 @@ fn write_bgzf(directory: &Path, name: &str, sequence: &[u8]) -> (PathBuf, PathBu
         format!("{contig}\t{}\t{offset}\t64\t65\n", sequence.len()),
     )
     .unwrap();
-    gzi::fs::write(&gzi_path, &gzi::Index::default()).unwrap();
+    gzi::fs::write(&gzi_path, &synthetic_gzi(&bgzf_path)).unwrap();
     (bgzf_path, fai_path, gzi_path)
+}
+
+fn synthetic_gzi(path: &Path) -> gzi::Index {
+    let bytes = std::fs::read(path).unwrap();
+    let mut entries = Vec::new();
+    let mut compressed = 0usize;
+    let mut uncompressed = 0u64;
+    while compressed < bytes.len() {
+        let header = bytes.get(compressed..compressed + 18).unwrap();
+        assert_eq!(&header[..4], &[0x1f, 0x8b, 0x08, 0x04]);
+        let block_bytes = usize::from(u16::from_le_bytes([header[16], header[17]])) + 1;
+        let end = compressed + block_bytes;
+        let isize = u32::from_le_bytes(bytes[end - 4..end].try_into().unwrap());
+        if compressed != 0 && isize != 0 {
+            entries.push((compressed as u64, uncompressed));
+        }
+        uncompressed += u64::from(isize);
+        compressed = end;
+    }
+    assert_eq!(compressed, bytes.len());
+    gzi::Index::from(entries)
 }
 
 fn write_fasta(path: &Path, name: &str, sequence: &[u8], width: usize) {
