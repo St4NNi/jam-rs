@@ -1,6 +1,6 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use std::fmt::Write as _;
 use std::sync::{Condvar, Mutex};
@@ -177,11 +177,10 @@ impl Alignment {
 
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     cells: Vec<Cell>,
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    cells: Vec<u16>,
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(target_arch = "x86_64")]
+    compact_cells: Vec<u16>,
+    #[cfg(target_arch = "x86_64")]
     waves: [Vec<i32>; 3],
     endpoint_cells: Vec<EndpointCell>,
     row_offsets: Vec<usize>,
@@ -394,7 +393,14 @@ fn checked_sum(values: &[usize]) -> Result<usize, AlignmentAdmissionError> {
 
 impl AlignmentWorkspace {
     pub fn capacity_cells(&self) -> usize {
-        self.cells.capacity()
+        #[cfg(target_arch = "x86_64")]
+        {
+            self.cells.capacity().max(self.compact_cells.capacity())
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            self.cells.capacity()
+        }
     }
 
     pub fn align(
@@ -470,8 +476,21 @@ impl AlignmentWorkspace {
         }
     }
 
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     fn align_raw(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> Result<RawAlignment, AlignmentError> {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: the runtime feature check guards every AVX2 instruction in this path.
+            return unsafe { self.align_raw_avx2(query, target, config) };
+        }
+        self.align_raw_scalar(query, target, config)
+    }
+
+    fn align_raw_scalar(
         &mut self,
         query: &[u8],
         target: &[u8],
@@ -597,7 +616,7 @@ impl AlignmentWorkspace {
             return Err(AlignmentError::NoAlignment);
         }
 
-        let (query_start, target_start) = self.traceback(query, target, best)?;
+        let (query_start, target_start) = self.traceback_scalar(query, target, best)?;
         let edit_script = runs_from_operations(&self.operations)?;
         let summary = summarize_runs(&edit_script)?;
         Ok(RawAlignment {
@@ -610,8 +629,9 @@ impl AlignmentWorkspace {
         })
     }
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
-    fn align_raw(
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn align_raw_avx2(
         &mut self,
         query: &[u8],
         target: &[u8],
@@ -643,7 +663,7 @@ impl AlignmentWorkspace {
             });
         }
 
-        self.cells.resize(total_cells, 0);
+        self.compact_cells.resize(total_cells, 0);
         let last_wave = query
             .len()
             .checked_add(target.len())
@@ -719,7 +739,7 @@ impl AlignmentWorkspace {
                                 stride: max_wave_width,
                             }),
                             current,
-                            &mut self.cells,
+                            &mut self.compact_cells,
                             &self.row_offsets,
                             &self.row_starts,
                             &mut best,
@@ -743,7 +763,7 @@ impl AlignmentWorkspace {
                                 older,
                                 previous,
                                 current,
-                                &mut self.cells,
+                                &mut self.compact_cells,
                                 &self.row_offsets,
                                 &self.row_starts,
                                 &mut best,
@@ -773,7 +793,7 @@ impl AlignmentWorkspace {
                             stride: max_wave_width,
                         }),
                         current,
-                        &mut self.cells,
+                        &mut self.compact_cells,
                         &self.row_offsets,
                         &self.row_starts,
                         &mut best,
@@ -846,8 +866,7 @@ impl AlignmentWorkspace {
             .then(|| self.row_offsets[query_index] + target_index - start)
     }
 
-    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
-    fn traceback(
+    fn traceback_scalar(
         &mut self,
         query: &[u8],
         target: &[u8],
@@ -897,7 +916,7 @@ impl AlignmentWorkspace {
         Ok((query_index, target_index))
     }
 
-    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    #[cfg(target_arch = "x86_64")]
     fn traceback_compact(
         &mut self,
         query: &[u8],
@@ -912,7 +931,7 @@ impl AlignmentWorkspace {
             let index = self
                 .cell_index_checked(query_index, target_index)
                 .ok_or(AlignmentError::TracebackOutsideBand)?;
-            let traceback = self.cells[index];
+            let traceback = self.compact_cells[index];
             if state > DELETION || !traceback_positive(traceback, state) {
                 break;
             }
@@ -949,7 +968,7 @@ impl AlignmentWorkspace {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn prepare_wave(scores: &mut Vec<i32>, length: usize) {
     if scores.capacity() < length {
         scores.reserve_exact(length - scores.len());
@@ -957,14 +976,14 @@ fn prepare_wave(scores: &mut Vec<i32>, length: usize) {
     scores.resize(length, 0);
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct WaveRange {
     start: usize,
     end: usize,
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 impl WaveRange {
     fn width(self) -> usize {
         self.end - self.start + 1
@@ -975,7 +994,7 @@ impl WaveRange {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn wave_range(
     query_len: usize,
     target_len: usize,
@@ -1002,12 +1021,12 @@ fn wave_range(
     })
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn ceil_div2(value: i128) -> i128 {
     -(-value).div_euclid(2)
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct ScoreWave<'a> {
     range: WaveRange,
@@ -1015,7 +1034,7 @@ struct ScoreWave<'a> {
     stride: usize,
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 impl ScoreWave<'_> {
     fn cell(self, row: usize) -> Option<[i32; 3]> {
         self.range.contains(row).then(|| {
@@ -1029,7 +1048,7 @@ impl ScoreWave<'_> {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
 fn fill_wave_scalar(
     query: &[u8],
@@ -1112,7 +1131,7 @@ fn fill_wave_scalar(
     best.consider(row, target_index, cell);
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn best_score(scores: [i32; 3]) -> (i32, u8) {
     choose([
         (scores[MATCH as usize], MATCH),
@@ -1121,7 +1140,7 @@ fn best_score(scores: [i32; 3]) -> (i32, u8) {
     ])
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn encode_traceback(cell: Cell) -> u16 {
     let mut traceback = 0u16;
     for state in 0..=DELETION {
@@ -1135,17 +1154,18 @@ fn encode_traceback(cell: Cell) -> u16 {
     traceback
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn traceback_positive(traceback: u16, state: u8) -> bool {
     traceback & (1 << state) != 0
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 fn traceback_previous(traceback: u16, state: u8) -> u8 {
     ((traceback >> (3 + 2 * state)) & 3) as u8
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 unsafe fn load_wave(scores: ScoreWave<'_>, state: usize, row: usize) -> __m256i {
     debug_assert!(scores.range.contains(row));
     debug_assert!(scores.range.contains(row + 7));
@@ -1155,37 +1175,34 @@ unsafe fn load_wave(scores: ScoreWave<'_>, state: usize, row: usize) -> __m256i 
     unsafe { _mm256_loadu_si256(scores.scores.as_ptr().add(offset).cast()) }
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 unsafe fn choose_avx2(m: __m256i, i: __m256i, d: __m256i) -> (__m256i, __m256i) {
-    unsafe {
-        let zero = _mm256_setzero_si256();
-        let one = _mm256_set1_epi32(1);
-        let two = _mm256_set1_epi32(2);
-        let i_better = _mm256_cmpgt_epi32(i, m);
-        let mut score = _mm256_blendv_epi8(m, i, i_better);
-        let mut state = _mm256_blendv_epi8(zero, one, i_better);
-        let d_better = _mm256_cmpgt_epi32(d, score);
-        score = _mm256_blendv_epi8(score, d, d_better);
-        state = _mm256_blendv_epi8(state, two, d_better);
-        (score, state)
-    }
+    let zero = _mm256_setzero_si256();
+    let one = _mm256_set1_epi32(1);
+    let two = _mm256_set1_epi32(2);
+    let i_better = _mm256_cmpgt_epi32(i, m);
+    let mut score = _mm256_blendv_epi8(m, i, i_better);
+    let mut state = _mm256_blendv_epi8(zero, one, i_better);
+    let d_better = _mm256_cmpgt_epi32(d, score);
+    score = _mm256_blendv_epi8(score, d, d_better);
+    state = _mm256_blendv_epi8(state, two, d_better);
+    (score, state)
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
 unsafe fn saturating_add_avx2(left: __m256i, right: __m256i) -> __m256i {
-    unsafe {
-        let sum = _mm256_add_epi32(left, right);
-        let overflow = _mm256_srai_epi32::<31>(_mm256_and_si256(
-            _mm256_xor_si256(left, sum),
-            _mm256_xor_si256(right, sum),
-        ));
-        let saturation =
-            _mm256_xor_si256(_mm256_srai_epi32::<31>(left), _mm256_set1_epi32(i32::MAX));
-        _mm256_blendv_epi8(sum, saturation, overflow)
-    }
+    let sum = _mm256_add_epi32(left, right);
+    let overflow = _mm256_srai_epi32::<31>(_mm256_and_si256(
+        _mm256_xor_si256(left, sum),
+        _mm256_xor_si256(right, sum),
+    ));
+    let saturation = _mm256_xor_si256(_mm256_srai_epi32::<31>(left), _mm256_set1_epi32(i32::MAX));
+    _mm256_blendv_epi8(sum, saturation, overflow)
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 unsafe fn lowercase_ascii_8(bytes: __m128i) -> __m128i {
     unsafe {
         let upper = _mm_and_si128(
@@ -1196,8 +1213,9 @@ unsafe fn lowercase_ascii_8(bytes: __m128i) -> __m128i {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+#[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
+#[target_feature(enable = "avx2")]
 unsafe fn fill_wave_avx2(
     query: &[u8],
     target: &[u8],
@@ -2008,6 +2026,46 @@ mod tests {
         AlignmentConfig {
             band_width: 8,
             ..AlignmentConfig::default()
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn runtime_dispatch_matches_scalar_and_forced_avx2() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let cases: [(&[u8], &[u8], i64); 4] = [
+            (b"ACGTACG", b"ACGTTCG", 0),
+            (b"ACGTACGT", b"ACGTTGGT", 0),
+            (b"ACGTACGTA", b"ACGTTACGTA", 2),
+            (b"TTACGTACG", b"ACGTACG", -2),
+        ];
+        for (query, target, diagonal_offset) in cases {
+            let config = AlignmentConfig {
+                band_width: 16,
+                diagonal_offset,
+                max_cells: 10_000,
+                ..AlignmentConfig::default()
+            };
+            for strand in [Strand::Forward, Strand::Reverse] {
+                let oriented_target = match strand {
+                    Strand::Forward => target.to_vec(),
+                    Strand::Reverse => target.iter().rev().map(|base| complement(*base)).collect(),
+                };
+                let mut dispatched = AlignmentWorkspace::default();
+                let actual = dispatched.align_oriented(query, target, 17, strand, config);
+                let mut scalar = AlignmentWorkspace::default();
+                let expected = scalar
+                    .align_raw_scalar(query, &oriented_target, config)
+                    .and_then(|raw| finish(raw, strand, 17, target.len()));
+                let mut avx2 = AlignmentWorkspace::default();
+                // SAFETY: this test returns early unless AVX2 is available.
+                let forced = unsafe { avx2.align_raw_avx2(query, &oriented_target, config) }
+                    .and_then(|raw| finish(raw, strand, 17, target.len()));
+                assert_eq!(actual, expected);
+                assert_eq!(forced, expected);
+            }
         }
     }
 
