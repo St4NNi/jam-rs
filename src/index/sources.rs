@@ -5,7 +5,7 @@
 
 use super::IndexError;
 use super::manifest::{FileRecord, PACKED_DIRECTORY};
-use crate::storage::{BlockCache, LocalFile, MappedFile, ReadAt, S3Config, S3Object};
+use crate::storage::{BlockCache, LocalFile, ReadAt, S3Config, S3Object};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -131,9 +131,7 @@ impl PackedSources {
     /// The source of a packed sequence file without the cache, for example to verify it.
     pub(crate) fn open_uncached(&self, file: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
         Ok(match &self.location {
-            Location::Local(directory) => {
-                Arc::new(MappedFile::open(&directory.join(&file.path), false)?)
-            }
+            Location::Local(directory) => Arc::new(LocalFile::open(directory.join(&file.path))?),
             Location::S3 { prefix, config } => Arc::new(open_s3(prefix, config, file)?),
         })
     }
