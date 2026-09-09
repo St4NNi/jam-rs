@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use thiserror::Error;
 
@@ -23,6 +23,9 @@ pub(crate) const SEED_LOOKUP_BATCH_KEYS: usize = 32_768;
 const EXACT_BLOCK_RECORDS: u64 = 128;
 const EXACT_BLOCK_HEADER_SIZE: usize = 4096;
 const EXACT_BLOCK_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const RESIDENT_FRONT_METADATA_BYTES: usize = 384 * 1024 * 1024;
+const FRONT_METADATA_CHUNK_BYTES: usize = 1024 * 1024;
+const FRONT_METADATA_CHECKSUM_BYTES: usize = FRONT_METADATA_CHUNK_BYTES / PAGE_SIZE as usize * 32;
 
 pub(crate) struct ExactBlockFence {
     first_keys: Box<[u64]>,
@@ -54,6 +57,36 @@ struct ExactBlockFenceCache {
 }
 
 static EXACT_BLOCK_FENCE_CACHE: OnceLock<Mutex<Option<ExactBlockFenceCache>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FrontMetadataIdentity {
+    file: [u64; 7],
+    header_sha256: [u8; 32],
+    body_sha256: [u8; 32],
+    range_start: u64,
+    range_end: u64,
+}
+
+struct ResidentFrontMetadata {
+    identity: FrontMetadataIdentity,
+    bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+struct FrontMetadataCache {
+    entries: Vec<Arc<ResidentFrontMetadata>>,
+    payload_capacity_bytes: usize,
+}
+
+impl FrontMetadataCache {
+    fn admitted_capacity(&self, capacity: usize) -> Option<usize> {
+        self.payload_capacity_bytes
+            .checked_add(capacity)
+            .filter(|total| *total <= RESIDENT_FRONT_METADATA_BYTES)
+    }
+}
+
+static FRONT_METADATA_CACHE: OnceLock<Mutex<FrontMetadataCache>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FilterCacheIdentity {
@@ -96,6 +129,8 @@ pub struct JidxReader {
     exact_block_fence: Option<Arc<ExactBlockFence>>,
     filter_cache_identity: OnceLock<Option<FilterCacheIdentity>>,
     resident_filter_body: OnceLock<Option<Arc<Vec<u8>>>>,
+    front_metadata_enabled: AtomicBool,
+    resident_front_metadata: OnceLock<Option<Arc<ResidentFrontMetadata>>>,
 }
 
 impl JidxReader {
@@ -124,6 +159,8 @@ impl JidxReader {
             exact_block_fence,
             filter_cache_identity: OnceLock::new(),
             resident_filter_body: OnceLock::new(),
+            front_metadata_enabled: AtomicBool::new(false),
+            resident_front_metadata: OnceLock::new(),
         };
         let filter_directory = crate::jidx_filters::load(&reader)?;
         let reader = Self {
@@ -154,6 +191,183 @@ impl JidxReader {
             let _ = self.resident_filter_body.set(body);
         }
         Ok(self.resident_filter_body.get().and_then(Option::as_ref))
+    }
+
+    pub(crate) fn enable_selected_front_metadata(&self) {
+        if self.exact_block_fence.is_some() {
+            self.front_metadata_enabled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn attach_front_metadata(&self) -> Result<(), JidxReaderError> {
+        if !self.front_metadata_enabled.load(Ordering::Relaxed)
+            || self.exact_block_fence.is_none()
+            || self.resident_front_metadata.get().is_some()
+        {
+            return Ok(());
+        }
+        let resident = acquire_resident_front_metadata(self)?;
+        let _ = self.resident_front_metadata.set(resident);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn front_metadata_identity(&self) -> Result<Option<FrontMetadataIdentity>, JidxReaderError> {
+        use std::os::unix::fs::FileExt;
+
+        let Some(file) = self.cache_file_identity()? else {
+            return Ok(None);
+        };
+        let strings = self.header.section(SectionKind::Strings);
+        let documents = self.header.section(SectionKind::Documents);
+        let contigs = self.header.section(SectionKind::Contigs);
+        let seeds = self.header.section(SectionKind::Seeds);
+        let strings_end = strings
+            .offset
+            .checked_add(strings.length)
+            .ok_or(JidxError::Invalid("resident front metadata range"))?;
+        let documents_end = documents
+            .offset
+            .checked_add(documents.length)
+            .ok_or(JidxError::Invalid("resident front metadata range"))?;
+        let contigs_end = contigs
+            .offset
+            .checked_add(contigs.length)
+            .ok_or(JidxError::Invalid("resident front metadata range"))?;
+        if strings.offset != PAGE_SIZE
+            || strings_end > documents.offset
+            || documents_end > contigs.offset
+            || contigs_end > seeds.offset
+            || !seeds.offset.is_multiple_of(PAGE_SIZE)
+        {
+            return Err(JidxError::Invalid("resident front metadata range").into());
+        }
+        let mut raw_header = [0; HEADER_SIZE];
+        self.file.read_exact_at(&mut raw_header, 0)?;
+        if raw_header != self.header.encode()? {
+            return Err(JidxError::Invalid("resident front metadata header").into());
+        }
+        Ok(Some(FrontMetadataIdentity {
+            file,
+            header_sha256: sha256(&raw_header),
+            body_sha256: self.header.body_sha256,
+            range_start: strings.offset,
+            range_end: seeds.offset,
+        }))
+    }
+
+    #[cfg(not(unix))]
+    fn front_metadata_identity(&self) -> Result<Option<FrontMetadataIdentity>, JidxReaderError> {
+        Ok(None)
+    }
+
+    #[cfg(unix)]
+    fn read_verified_front_metadata(
+        &self,
+        identity: &FrontMetadataIdentity,
+        body: &mut [u8],
+    ) -> Result<(), JidxReaderError> {
+        use std::os::unix::fs::FileExt;
+
+        let length = identity
+            .range_end
+            .checked_sub(identity.range_start)
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or(JidxError::Invalid("resident front metadata length"))?;
+        if body.len() != length || length == 0 || length % PAGE_SIZE as usize != 0 {
+            return Err(JidxError::Invalid("resident front metadata length").into());
+        }
+        let checksums = self.header.section(SectionKind::BlockChecksums);
+        let checksums_end = checksums
+            .offset
+            .checked_add(checksums.length)
+            .ok_or(JidxError::Invalid("resident front metadata checksum"))?;
+        let mut checksum_scratch = [0; FRONT_METADATA_CHECKSUM_BYTES];
+        let mut copied = 0usize;
+        while copied < body.len() {
+            let chunk_length = (body.len() - copied).min(FRONT_METADATA_CHUNK_BYTES);
+            if !chunk_length.is_multiple_of(PAGE_SIZE as usize) {
+                return Err(JidxError::Invalid("resident front metadata pages").into());
+            }
+            let data_offset = identity
+                .range_start
+                .checked_add(
+                    u64::try_from(copied)
+                        .map_err(|_| JidxError::Invalid("resident front metadata range"))?,
+                )
+                .ok_or(JidxError::Invalid("resident front metadata range"))?;
+            let data = &mut body[copied..copied + chunk_length];
+            self.file.read_exact_at(data, data_offset)?;
+            let pages = chunk_length / PAGE_SIZE as usize;
+            let checksum_length = pages
+                .checked_mul(32)
+                .ok_or(JidxError::Invalid("resident front metadata checksum"))?;
+            let first_page = data_offset / PAGE_SIZE;
+            let checksum_offset = checksums
+                .offset
+                .checked_add(
+                    first_page
+                        .checked_sub(1)
+                        .and_then(|page| page.checked_mul(32))
+                        .ok_or(JidxError::Invalid("resident front metadata checksum"))?,
+                )
+                .ok_or(JidxError::Invalid("resident front metadata checksum"))?;
+            let checksum_end = checksum_offset
+                .checked_add(
+                    u64::try_from(checksum_length)
+                        .map_err(|_| JidxError::Invalid("resident front metadata checksum"))?,
+                )
+                .ok_or(JidxError::Invalid("resident front metadata checksum"))?;
+            if checksum_length > checksum_scratch.len() || checksum_end > checksums_end {
+                return Err(JidxError::Invalid("resident front metadata checksum").into());
+            }
+            self.file
+                .read_exact_at(&mut checksum_scratch[..checksum_length], checksum_offset)?;
+            for page in 0..pages {
+                let data_start = page * PAGE_SIZE as usize;
+                let checksum_start = page * 32;
+                if sha256(&data[data_start..data_start + PAGE_SIZE as usize])
+                    != checksum_scratch[checksum_start..checksum_start + 32]
+                {
+                    return Err(JidxError::ChecksumMismatch.into());
+                }
+            }
+            copied += chunk_length;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn read_verified_front_metadata(
+        &self,
+        _identity: &FrontMetadataIdentity,
+        _body: &mut [u8],
+    ) -> Result<(), JidxReaderError> {
+        Ok(())
+    }
+
+    fn front_metadata_bytes(&self, start: u64, end: u64) -> Result<&[u8], JidxError> {
+        let checksums = self.header.section(SectionKind::BlockChecksums);
+        if start > end || start < PAGE_SIZE || end > checksums.offset {
+            return Err(JidxError::Invalid("checked range"));
+        }
+        let Some(resident) = self.resident_front_metadata.get().and_then(Option::as_ref) else {
+            return self.checked_bytes(start, end);
+        };
+        if start >= resident.identity.range_start && end <= resident.identity.range_end {
+            let relative_start = usize::try_from(start - resident.identity.range_start)
+                .map_err(|_| JidxError::Invalid("resident front metadata range"))?;
+            let relative_end = usize::try_from(end - resident.identity.range_start)
+                .map_err(|_| JidxError::Invalid("resident front metadata range"))?;
+            return resident
+                .bytes
+                .get(relative_start..relative_end)
+                .ok_or(JidxError::Invalid("resident front metadata range"));
+        }
+        if start < resident.identity.range_end && end > resident.identity.range_start {
+            return Err(JidxError::Invalid("resident front metadata range"));
+        }
+        self.checked_bytes(start, end)
     }
 
     pub(crate) fn filter_cache_identity(&self) -> Option<&FilterCacheIdentity> {
@@ -513,6 +727,7 @@ impl JidxReader {
         if id >= self.header.contig_count {
             return Ok(None);
         }
+        self.attach_front_metadata()?;
         let record = self.contig_record(id)?;
         let document = self.document_record(record.document_id)?;
         let document_end = document
@@ -574,7 +789,7 @@ impl JidxReader {
         if end > section_end {
             return Err(JidxError::Invalid("string range").into());
         }
-        let bytes = self.checked_bytes(start, end)?;
+        let bytes = self.front_metadata_bytes(start, end)?;
         if bytes.is_empty() || bytes.iter().any(|byte| matches!(byte, 0 | b'\n' | b'\r')) {
             return Err(JidxError::Invalid("string value").into());
         }
@@ -887,7 +1102,7 @@ impl JidxReader {
         let end = start
             .checked_add(u64::from(size))
             .ok_or(JidxError::Invalid("record range"))?;
-        self.checked_bytes(start, end)
+        self.front_metadata_bytes(start, end)
     }
 
     fn validate_documents(&self) -> Result<(), JidxReaderError> {
@@ -941,6 +1156,75 @@ impl JidxReader {
         }
         Ok(())
     }
+}
+
+fn acquire_resident_front_metadata(
+    reader: &JidxReader,
+) -> Result<Option<Arc<ResidentFrontMetadata>>, JidxReaderError> {
+    if reader.exact_block_fence.is_none() {
+        return Ok(None);
+    }
+    let Some(cache) = FRONT_METADATA_CACHE
+        .get_or_init(|| Mutex::new(FrontMetadataCache::default()))
+        .lock()
+        .ok()
+    else {
+        return Ok(None);
+    };
+    let mut cache = cache;
+    let Some(identity) = reader.front_metadata_identity()? else {
+        return Ok(None);
+    };
+    let Some(length) = identity
+        .range_end
+        .checked_sub(identity.range_start)
+        .and_then(|length| usize::try_from(length).ok())
+    else {
+        return Err(JidxError::Invalid("resident front metadata length").into());
+    };
+    if length == 0 || length > RESIDENT_FRONT_METADATA_BYTES {
+        return Ok(None);
+    }
+    if let Some(resident) = cache
+        .entries
+        .iter()
+        .find(|resident| resident.identity == identity)
+    {
+        return Ok(Some(Arc::clone(resident)));
+    }
+    if cache.admitted_capacity(length).is_none() {
+        return Ok(None);
+    }
+    if cache.entries.try_reserve(1).is_err() {
+        return Ok(None);
+    }
+    let mut body = Vec::new();
+    if body.try_reserve_exact(length).is_err() {
+        return Ok(None);
+    }
+    let Some(admitted) = cache.admitted_capacity(body.capacity()) else {
+        return Ok(None);
+    };
+    body.resize(length, 0);
+    reader.read_verified_front_metadata(&identity, &mut body)?;
+    validate_front_metadata_identity(&identity, reader.front_metadata_identity()?.as_ref())?;
+    let resident = Arc::new(ResidentFrontMetadata {
+        identity,
+        bytes: body,
+    });
+    cache.payload_capacity_bytes = admitted;
+    cache.entries.push(Arc::clone(&resident));
+    Ok(Some(resident))
+}
+
+fn validate_front_metadata_identity(
+    expected: &FrontMetadataIdentity,
+    current: Option<&FrontMetadataIdentity>,
+) -> Result<(), JidxReaderError> {
+    if current != Some(expected) {
+        return Err(JidxError::Invalid("resident front metadata identity").into());
+    }
+    Ok(())
 }
 
 fn load_exact_block_fence(
@@ -1280,6 +1564,13 @@ mod tests {
         let (source, header, bytes) = exact_fence_bytes(path);
         decode_exact_block_fence(&bytes, &source[..HEADER_SIZE], source.len() as u64, &header)
             .unwrap()
+    }
+
+    fn front_metadata_reader(path: &Path) -> JidxReader {
+        let fence = Arc::new(exact_fence(path));
+        let mut reader = JidxReader::open(path).unwrap();
+        reader.exact_block_fence = Some(fence);
+        reader
     }
 
     fn fixture(
@@ -2149,6 +2440,208 @@ mod tests {
                 "resident seed filter identity"
             )))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resident_front_metadata_is_lazy_reused_and_keeps_mmap_bits_separate() {
+        let (_directory, path) = external_fixture();
+        let first = front_metadata_reader(&path);
+        assert!(!first.front_metadata_enabled.load(Ordering::Relaxed));
+        assert!(first.resident_front_metadata.get().is_none());
+        let seed = first.find_seed(0x1234).unwrap().unwrap();
+        first.seed_documents(seed).unwrap();
+        assert!(first.resident_front_metadata.get().is_none());
+
+        first.enable_selected_front_metadata();
+        assert!(first.contig(u32::MAX).unwrap().is_none());
+        assert!(first.resident_front_metadata.get().is_none());
+        let before = first
+            .verified_pages
+            .iter()
+            .map(|word| word.load(Ordering::Relaxed))
+            .collect::<Vec<_>>();
+        assert_eq!(first.contig(0).unwrap().unwrap().name, "contig0");
+        let first_resident = Arc::clone(
+            first
+                .resident_front_metadata
+                .get()
+                .and_then(Option::as_ref)
+                .unwrap(),
+        );
+        let seeds = first.header.section(SectionKind::Seeds);
+        assert_eq!(
+            first_resident.bytes.len() as u64,
+            seeds.offset - first_resident.identity.range_start
+        );
+        assert!(first_resident.bytes.capacity() <= RESIDENT_FRONT_METADATA_BYTES);
+        assert_eq!(
+            before,
+            first
+                .verified_pages
+                .iter()
+                .map(|word| word.load(Ordering::Relaxed))
+                .collect::<Vec<_>>()
+        );
+
+        let second = front_metadata_reader(&path);
+        second.enable_selected_front_metadata();
+        assert_eq!(second.contig(0).unwrap().unwrap().name, "contig0");
+        let second_resident = second
+            .resident_front_metadata
+            .get()
+            .and_then(Option::as_ref)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first_resident, second_resident));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resident_front_metadata_concurrent_first_use_publishes_one_body() {
+        let (_directory, path) = external_fixture();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let reader = front_metadata_reader(&path);
+                reader.enable_selected_front_metadata();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    reader.contig(0).unwrap();
+                    Arc::clone(
+                        reader
+                            .resident_front_metadata
+                            .get()
+                            .and_then(Option::as_ref)
+                            .unwrap(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let resident = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert!(Arc::ptr_eq(&resident[0], &resident[1]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resident_front_metadata_identity_and_capacity_are_exact() {
+        let (_directory, path) = external_fixture();
+        let reader = front_metadata_reader(&path);
+        let identity = reader.front_metadata_identity().unwrap().unwrap();
+        validate_front_metadata_identity(&identity, Some(&identity)).unwrap();
+        assert!(validate_front_metadata_identity(&identity, None).is_err());
+        for index in 0..identity.file.len() {
+            let mut changed = identity.clone();
+            changed.file[index] ^= 1;
+            assert!(validate_front_metadata_identity(&identity, Some(&changed)).is_err());
+        }
+        for changed in [
+            FrontMetadataIdentity {
+                header_sha256: [0; 32],
+                ..identity.clone()
+            },
+            FrontMetadataIdentity {
+                body_sha256: [0; 32],
+                ..identity.clone()
+            },
+            FrontMetadataIdentity {
+                range_end: identity.range_end + PAGE_SIZE,
+                ..identity.clone()
+            },
+        ] {
+            assert!(validate_front_metadata_identity(&identity, Some(&changed)).is_err());
+        }
+        let mut body = Vec::<u8>::new();
+        body.try_reserve_exact(12_345).unwrap();
+        let capacity = body.capacity();
+        let cache = FrontMetadataCache {
+            entries: Vec::new(),
+            payload_capacity_bytes: RESIDENT_FRONT_METADATA_BYTES - capacity,
+        };
+        assert_eq!(
+            cache.admitted_capacity(capacity),
+            Some(RESIDENT_FRONT_METADATA_BYTES)
+        );
+        assert!(cache.admitted_capacity(capacity + 1).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resident_front_metadata_corruption_header_and_short_read_fail_closed() {
+        let (_directory, data_path) = external_fixture();
+        let data_reader = front_metadata_reader(&data_path);
+        data_reader.enable_selected_front_metadata();
+        corrupt_byte(&data_path, section_offset(&data_path, SectionKind::Contigs));
+        assert!(matches!(
+            data_reader.contig(0),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+        assert!(data_reader.resident_front_metadata.get().is_none());
+
+        let (_directory, checksum_path) = external_fixture();
+        let checksum_reader = front_metadata_reader(&checksum_path);
+        checksum_reader.enable_selected_front_metadata();
+        let contigs = section_offset(&checksum_path, SectionKind::Contigs);
+        let checksums = section_offset(&checksum_path, SectionKind::BlockChecksums);
+        corrupt_byte(&checksum_path, checksums + (contigs / PAGE_SIZE - 1) * 32);
+        assert!(matches!(
+            checksum_reader.contig(0),
+            Err(JidxReaderError::Format(JidxError::ChecksumMismatch))
+        ));
+        assert!(checksum_reader.resident_front_metadata.get().is_none());
+
+        let (_directory, header_path) = external_fixture();
+        let cached_header_reader = front_metadata_reader(&header_path);
+        cached_header_reader.enable_selected_front_metadata();
+        cached_header_reader.contig(0).unwrap();
+        let header_reader = front_metadata_reader(&header_path);
+        header_reader.enable_selected_front_metadata();
+        corrupt_byte(&header_path, 363);
+        assert!(matches!(
+            header_reader.contig(0),
+            Err(JidxReaderError::Format(JidxError::Invalid(
+                "resident front metadata header"
+            )))
+        ));
+
+        let (_directory, short_path) = external_fixture();
+        let short_reader = front_metadata_reader(&short_path);
+        short_reader.enable_selected_front_metadata();
+        let seeds = short_reader.header.section(SectionKind::Seeds);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&short_path)
+            .unwrap()
+            .set_len(seeds.offset - 1)
+            .unwrap();
+        assert!(matches!(
+            short_reader.contig(0),
+            Err(JidxReaderError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[test]
+    fn resident_front_metadata_no_fence_keeps_existing_path() {
+        let (_directory, path) = external_fixture();
+        let reader = JidxReader::open(path).unwrap();
+        reader.enable_selected_front_metadata();
+        assert!(!reader.front_metadata_enabled.load(Ordering::Relaxed));
+        assert_eq!(reader.contig(0).unwrap().unwrap().name, "contig0");
+        assert!(reader.resident_front_metadata.get().is_none());
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn resident_front_metadata_non_unix_falls_back() {
+        let (_directory, path) = external_fixture();
+        let reader = front_metadata_reader(&path);
+        reader.enable_selected_front_metadata();
+        assert_eq!(reader.contig(0).unwrap().unwrap().name, "contig0");
+        assert!(matches!(reader.resident_front_metadata.get(), Some(None)));
     }
 
     #[test]

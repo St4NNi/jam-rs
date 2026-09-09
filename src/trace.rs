@@ -501,6 +501,7 @@ impl TraceEngine {
         config: TraceConfig,
     ) -> Result<Vec<MetagenomeTrace>, TraceError> {
         validate_config(config)?;
+        self.index.enable_selected_front_metadata();
         let lookups = if let Some(lookups) = lookups {
             if lookups.header_sha256 != sha256(&self.index.header().encode()?)
                 || lookups.query_identity != prepared.lookup_identity
