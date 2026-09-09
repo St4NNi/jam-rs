@@ -14,7 +14,7 @@ pub mod jidx_reader;
 mod jidx_runs;
 pub mod jidx_writer;
 pub mod mosaic;
-mod owner_postings;
+pub mod owner_postings;
 pub mod query;
 pub mod range_source;
 pub mod reader;

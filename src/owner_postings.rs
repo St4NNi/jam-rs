@@ -1,52 +1,52 @@
 use std::fmt;
 
-pub(crate) const MAX_KEYS_PER_BLOCK: usize = 256;
+pub const MAX_KEYS_PER_BLOCK: usize = 256;
 const MAGIC: [u8; 8] = *b"JOWNBLK\0";
 const VERSION: u16 = 1;
 const HEADER_SIZE: usize = 24;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EncodedOwnerBlock {
-    pub(crate) hot: Vec<u8>,
-    pub(crate) cold: Vec<u8>,
+pub struct EncodedOwnerBlock {
+    pub hot: Vec<u8>,
+    pub cold: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerKey {
-    pub(crate) key: u64,
-    pub(crate) members: Vec<OwnerMember>,
+pub struct OwnerKey {
+    pub key: u64,
+    pub members: Vec<OwnerMember>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerMember {
-    pub(crate) document_id: u32,
-    pub(crate) occurrences: Vec<OwnerOccurrence>,
+pub struct OwnerMember {
+    pub document_id: u32,
+    pub occurrences: Vec<OwnerOccurrence>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerOccurrence {
-    pub(crate) local_contig: u32,
-    pub(crate) position: u64,
-    pub(crate) canonical_orientation: bool,
+pub struct OwnerOccurrence {
+    pub local_contig: u32,
+    pub position: u64,
+    pub canonical_orientation: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerHotKey {
-    pub(crate) key: u64,
-    pub(crate) document_frequency: u64,
-    pub(crate) members: Vec<OwnerHotMember>,
+pub struct OwnerHotKey {
+    pub key: u64,
+    pub document_frequency: u64,
+    pub members: Vec<OwnerHotMember>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerHotMember {
-    pub(crate) document_id: u32,
-    pub(crate) occurrence_count: u64,
-    pub(crate) cold_offset: u64,
-    pub(crate) cold_length: u64,
+pub struct OwnerHotMember {
+    pub document_id: u32,
+    pub occurrence_count: u64,
+    pub cold_offset: u64,
+    pub cold_length: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerPostingsError(&'static str);
+pub struct OwnerPostingsError(&'static str);
 
 impl fmt::Display for OwnerPostingsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -56,7 +56,7 @@ impl fmt::Display for OwnerPostingsError {
 
 impl std::error::Error for OwnerPostingsError {}
 
-pub(crate) fn encode_block(keys: &[OwnerKey]) -> Result<EncodedOwnerBlock, OwnerPostingsError> {
+pub fn encode_block(keys: &[OwnerKey]) -> Result<EncodedOwnerBlock, OwnerPostingsError> {
     if keys.is_empty() || keys.len() > MAX_KEYS_PER_BLOCK {
         return Err(invalid("key count"));
     }
@@ -107,11 +107,11 @@ pub(crate) fn encode_block(keys: &[OwnerKey]) -> Result<EncodedOwnerBlock, Owner
     Ok(EncodedOwnerBlock { hot, cold })
 }
 
-pub(crate) fn lookup_hot(hot: &[u8], key: u64) -> Result<Option<OwnerHotKey>, OwnerPostingsError> {
+pub fn lookup_hot(hot: &[u8], key: u64) -> Result<Option<OwnerHotKey>, OwnerPostingsError> {
     Ok(parse_hot(hot)?.into_iter().find(|entry| entry.key == key))
 }
 
-pub(crate) fn decode_block(hot: &[u8], cold: &[u8]) -> Result<Vec<OwnerKey>, OwnerPostingsError> {
+pub fn decode_block(hot: &[u8], cold: &[u8]) -> Result<Vec<OwnerKey>, OwnerPostingsError> {
     let directory = parse_hot(hot)?;
     let declared_cold = declared_cold_length(hot)?;
     if u64::try_from(cold.len()).ok() != Some(declared_cold) {
@@ -134,7 +134,7 @@ pub(crate) fn decode_block(hot: &[u8], cold: &[u8]) -> Result<Vec<OwnerKey>, Own
     Ok(keys)
 }
 
-pub(crate) fn decode_member(
+pub fn decode_member(
     cold: &[u8],
     member: OwnerHotMember,
 ) -> Result<Vec<OwnerOccurrence>, OwnerPostingsError> {
@@ -186,7 +186,7 @@ pub(crate) fn decode_member(
     Ok(occurrences)
 }
 
-pub(crate) fn parse_hot(hot: &[u8]) -> Result<Vec<OwnerHotKey>, OwnerPostingsError> {
+pub fn parse_hot(hot: &[u8]) -> Result<Vec<OwnerHotKey>, OwnerPostingsError> {
     let mut directory = directory(hot)?;
     let key_count = usize::from(u16::from_le_bytes(
         hot[10..12].try_into().expect("owner key count"),
