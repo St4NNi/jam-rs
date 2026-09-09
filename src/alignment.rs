@@ -177,7 +177,12 @@ impl Alignment {
 
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     cells: Vec<Cell>,
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    cells: Vec<u16>,
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    waves: [Vec<i32>; 3],
     endpoint_cells: Vec<EndpointCell>,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
@@ -187,7 +192,7 @@ pub struct AlignmentWorkspace {
 }
 
 pub(crate) const TRACE_ALIGNMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
-// Covers the seven retained workspace Vecs and conservative simultaneous task temporaries.
+// Covers at most ten retained workspace Vecs and conservative simultaneous task temporaries.
 const TRACE_ALIGNMENT_ALLOCATION_COUNT: usize = 24;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -465,6 +470,7 @@ impl AlignmentWorkspace {
         }
     }
 
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     fn align_raw(
         &mut self,
         query: &[u8],
@@ -604,6 +610,198 @@ impl AlignmentWorkspace {
         })
     }
 
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn align_raw(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> Result<RawAlignment, AlignmentError> {
+        config.validate()?;
+        if query.is_empty() {
+            return Err(AlignmentError::EmptyQuery);
+        }
+        if target.is_empty() {
+            return Err(AlignmentError::EmptyTarget);
+        }
+
+        self.prepare_rows(query.len(), target.len(), config)?;
+        let total_cells = self
+            .row_offsets
+            .last()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(self.row_widths.last().copied().unwrap_or(0))
+            .ok_or(AlignmentError::LengthOverflow)?;
+        if total_cells == 0 {
+            return Err(AlignmentError::BandExcludesInput);
+        }
+        if total_cells > config.max_cells {
+            return Err(AlignmentError::MatrixTooLarge {
+                cells: total_cells,
+                max_cells: config.max_cells,
+            });
+        }
+
+        self.cells.resize(total_cells, 0);
+        let last_wave = query
+            .len()
+            .checked_add(target.len())
+            .ok_or(AlignmentError::LengthOverflow)?;
+        let mut max_wave_width = 0usize;
+        let mut wave_cells = 0usize;
+        for wave in 0..=last_wave {
+            if let Some(range) = wave_range(query.len(), target.len(), config, wave) {
+                max_wave_width = max_wave_width.max(range.width());
+                wave_cells = wave_cells.saturating_add(range.width());
+            }
+        }
+        debug_assert_eq!(wave_cells, total_cells);
+        let wave_scores = max_wave_width
+            .checked_mul(3)
+            .ok_or(AlignmentError::LengthOverflow)?;
+        for wave in &mut self.waves {
+            prepare_wave(wave, wave_scores);
+        }
+
+        let gap_open_score = gap_open(config);
+        let mut best = BestCell::default();
+        let mut older_range = None;
+        let mut previous_range = None;
+        for wave in 0..=last_wave {
+            let current_range = wave_range(query.len(), target.len(), config, wave);
+            if let Some(current_range) = current_range {
+                let (older_previous, current) = self.waves.split_at_mut(2);
+                let older = older_range.map(|range| ScoreWave {
+                    range,
+                    scores: &older_previous[0],
+                    stride: max_wave_width,
+                });
+                let previous = previous_range.map(|range| ScoreWave {
+                    range,
+                    scores: &older_previous[1],
+                    stride: max_wave_width,
+                });
+                let current = &mut current[0];
+                let mut row = current_range.start;
+                let vector_range = older.zip(previous).and_then(|(older, previous)| {
+                    let start = current_range
+                        .start
+                        .max(older.range.start.saturating_add(1))
+                        .max(previous.range.start.saturating_add(1))
+                        .max(1);
+                    let end = current_range
+                        .end
+                        .min(older.range.end.saturating_add(1))
+                        .min(previous.range.end)
+                        .min(wave.saturating_sub(1));
+                    (start <= end).then_some((start, end, older, previous))
+                });
+                if let Some((start, end, older, previous)) = vector_range {
+                    while row < start {
+                        fill_wave_scalar(
+                            query,
+                            target,
+                            config,
+                            gap_open_score,
+                            wave,
+                            row,
+                            current_range,
+                            max_wave_width,
+                            older_range.map(|range| ScoreWave {
+                                range,
+                                scores: &older_previous[0],
+                                stride: max_wave_width,
+                            }),
+                            previous_range.map(|range| ScoreWave {
+                                range,
+                                scores: &older_previous[1],
+                                stride: max_wave_width,
+                            }),
+                            current,
+                            &mut self.cells,
+                            &self.row_offsets,
+                            &self.row_starts,
+                            &mut best,
+                        );
+                        row += 1;
+                    }
+                    while row.checked_add(7).is_some_and(|last| last <= end) {
+                        // SAFETY: vector_range proves eight current, diagonal, left, and above
+                        // cells are in their wave slices. row>=1 and row+7<=wave-1 prove the
+                        // eight query and reverse-loaded target bytes are also in bounds.
+                        unsafe {
+                            fill_wave_avx2(
+                                query,
+                                target,
+                                config,
+                                gap_open_score,
+                                wave,
+                                row,
+                                current_range,
+                                max_wave_width,
+                                older,
+                                previous,
+                                current,
+                                &mut self.cells,
+                                &self.row_offsets,
+                                &self.row_starts,
+                                &mut best,
+                            );
+                        }
+                        row += 8;
+                    }
+                }
+                while row <= current_range.end {
+                    fill_wave_scalar(
+                        query,
+                        target,
+                        config,
+                        gap_open_score,
+                        wave,
+                        row,
+                        current_range,
+                        max_wave_width,
+                        older_range.map(|range| ScoreWave {
+                            range,
+                            scores: &older_previous[0],
+                            stride: max_wave_width,
+                        }),
+                        previous_range.map(|range| ScoreWave {
+                            range,
+                            scores: &older_previous[1],
+                            stride: max_wave_width,
+                        }),
+                        current,
+                        &mut self.cells,
+                        &self.row_offsets,
+                        &self.row_starts,
+                        &mut best,
+                    );
+                    row += 1;
+                }
+            }
+            self.waves.rotate_left(1);
+            older_range = previous_range;
+            previous_range = current_range;
+        }
+        if best.score <= 0 {
+            return Err(AlignmentError::NoAlignment);
+        }
+
+        let (query_start, target_start) = self.traceback_compact(query, target, best)?;
+        let edit_script = runs_from_operations(&self.operations)?;
+        let summary = summarize_runs(&edit_script)?;
+        Ok(RawAlignment {
+            score: best.score,
+            query_interval: Interval::new(query_start as u64, best.query_index as u64)?,
+            target_interval: Interval::new(target_start as u64, best.target_index as u64)?,
+            cigar: cigar_from_runs(&edit_script)?,
+            edit_script,
+            summary,
+        })
+    }
+
     fn prepare_rows(
         &mut self,
         query_len: usize,
@@ -648,6 +846,7 @@ impl AlignmentWorkspace {
             .then(|| self.row_offsets[query_index] + target_index - start)
     }
 
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
     fn traceback(
         &mut self,
         query: &[u8],
@@ -667,6 +866,57 @@ impl AlignmentWorkspace {
                 break;
             }
             let previous = cell.previous[state as usize];
+            match state {
+                MATCH if query_index > 0 && target_index > 0 => {
+                    self.operations.push(
+                        if query[query_index - 1].eq_ignore_ascii_case(&target[target_index - 1]) {
+                            EditOperation::Equal
+                        } else {
+                            EditOperation::Substitution
+                        },
+                    );
+                    query_index -= 1;
+                    target_index -= 1;
+                }
+                INSERTION if target_index > 0 => {
+                    self.operations.push(EditOperation::Insertion);
+                    target_index -= 1;
+                }
+                DELETION if query_index > 0 => {
+                    self.operations.push(EditOperation::Deletion);
+                    query_index -= 1;
+                }
+                _ => return Err(AlignmentError::InvalidTraceback),
+            }
+            if previous == START {
+                break;
+            }
+            state = previous;
+        }
+        self.operations.reverse();
+        Ok((query_index, target_index))
+    }
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    fn traceback_compact(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        best: BestCell,
+    ) -> Result<(usize, usize), AlignmentError> {
+        let mut query_index = best.query_index;
+        let mut target_index = best.target_index;
+        let mut state = best.state;
+        self.operations.clear();
+        while query_index > 0 || target_index > 0 {
+            let index = self
+                .cell_index_checked(query_index, target_index)
+                .ok_or(AlignmentError::TracebackOutsideBand)?;
+            let traceback = self.cells[index];
+            if state > DELETION || !traceback_positive(traceback, state) {
+                break;
+            }
+            let previous = traceback_previous(traceback, state);
             match state {
                 MATCH if query_index > 0 && target_index > 0 => {
                     self.operations.push(
