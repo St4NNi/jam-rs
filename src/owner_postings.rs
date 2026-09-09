@@ -4,7 +4,7 @@ pub const MAX_KEYS_PER_BLOCK: usize = 256;
 pub const MEMBER_ANCHOR_STRIDE: u64 = 16;
 pub const LONG_MEMBER_OCCURRENCES: u64 = 256;
 const MAGIC: [u8; 8] = *b"JOWNBLK\0";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const HEADER_SIZE: usize = 40;
 const MAX_HOT_DECODE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -104,12 +104,12 @@ where
     {
         return Err(invalid("block input"));
     }
-    let mut body = Vec::new();
+    let mut body = vec![0; keys.len().div_ceil(4)];
     let mut cold = BitWriter::default();
     let mut anchors = Vec::new();
     let mut member_ordinal = 0u64;
     let mut previous_key = None;
-    for entry in keys {
+    for (key_ordinal, entry) in keys.iter().enumerate() {
         put_varint(&mut body, delta_u64(previous_key, entry.key, "key order")?);
         let df = u64::try_from(entry.members.len()).map_err(|_| invalid("document frequency"))?;
         if df == 0 || df > document_widths.len() as u64 {
@@ -121,7 +121,8 @@ where
             .members
             .iter()
             .all(|member| member.occurrences.len() == 1);
-        body.push(u8::from(dense) | (u8::from(all_singleton) << 1));
+        body[key_ordinal / 4] |=
+            (u8::from(dense) | (u8::from(all_singleton) << 1)) << (2 * (key_ordinal % 4));
         body.extend_from_slice(&document_ids);
         if !all_singleton {
             let mut non_singletons = vec![0; entry.members.len().div_ceil(8)];
@@ -197,6 +198,8 @@ where
 pub fn parse_hot(hot: &[u8]) -> Result<OwnerHotBlock, OwnerPostingsError> {
     let (key_count, document_count, member_count, cold_bits, anchor_count, mut input) =
         decode_header(hot)?;
+    let controls = take_bytes(&mut input, key_count.div_ceil(4))?;
+    validate_unused_bits(controls, key_count * 2)?;
     decoded_hot_bound(key_count, member_count, anchor_count)?;
     let mut keys = Vec::new();
     keys.try_reserve_exact(key_count)
@@ -207,7 +210,7 @@ pub fn parse_hot(hot: &[u8]) -> Result<OwnerHotBlock, OwnerPostingsError> {
         .try_reserve_exact(member_capacity)
         .map_err(|_| invalid("decoded hot size"))?;
     let mut previous_key = None;
-    for _ in 0..key_count {
+    for key_ordinal in 0..key_count {
         let key = apply_delta_u64(previous_key, take_varint(&mut input)?, "key order")?;
         let df = take_varint(&mut input)?;
         let remaining = member_count
@@ -217,10 +220,7 @@ pub fn parse_hot(hot: &[u8]) -> Result<OwnerHotBlock, OwnerPostingsError> {
             return Err(invalid("document frequency"));
         }
         decoded_hot_transient_bound(key_count, member_count, anchor_count, df)?;
-        let flags = take_byte(&mut input)?;
-        if flags & !3 != 0 {
-            return Err(invalid("member flags"));
-        }
+        let flags = (controls[key_ordinal / 4] >> (2 * (key_ordinal % 4))) & 3;
         let ids = decode_document_ids(&mut input, df, document_count, flags & 1 != 0)?;
         let counts = decode_counts(&mut input, df, flags & 2 != 0)?;
         let member_start = members.len() as u64;
@@ -942,12 +942,6 @@ fn validate_unused_bits(bytes: &[u8], bits: usize) -> Result<(), OwnerPostingsEr
     Ok(())
 }
 
-fn take_byte(input: &mut &[u8]) -> Result<u8, OwnerPostingsError> {
-    let value = *input.first().ok_or_else(|| invalid("truncated hot data"))?;
-    *input = &input[1..];
-    Ok(value)
-}
-
 fn take_bytes<'a>(input: &mut &'a [u8], count: usize) -> Result<&'a [u8], OwnerPostingsError> {
     let bytes = input
         .get(..count)
@@ -1277,12 +1271,16 @@ mod tests {
         let encoded = encode_block(&fixture(), &widths, |_, value| Ok(value.position)).unwrap();
         assert!(find_key(&parse_hot(&encoded.hot).unwrap(), 8).is_none());
         let mut overlong = encoded.hot.clone();
-        overlong[HEADER_SIZE] |= 0x80;
-        overlong.insert(HEADER_SIZE + 1, 0);
+        let first_key = HEADER_SIZE + fixture().len().div_ceil(4);
+        overlong[first_key] |= 0x80;
+        overlong.insert(first_key + 1, 0);
         assert!(parse_hot(&overlong).is_err());
         let mut truncated = encoded.hot.clone();
         truncated.pop();
         assert!(parse_hot(&truncated).is_err());
+        let mut controls = encoded.hot.clone();
+        controls[HEADER_SIZE] |= 0x80;
+        assert!(parse_hot(&controls).is_err());
         let mut anchor = encoded.hot;
         *anchor.last_mut().unwrap() ^= 1;
         assert!(parse_hot(&anchor).is_err());
