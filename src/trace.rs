@@ -520,7 +520,7 @@ impl TraceEngine {
             .iter()
             .map(|candidate| candidate.id)
             .collect::<HashSet<_>>();
-        let mut region_hits = BTreeMap::<RegionKey, Vec<SeedHit>>::new();
+        let mut region_hits = BTreeMap::<RegionKey, RegionHits>::new();
         let mut packed_keys = Vec::new();
         packed_keys
             .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
@@ -1008,6 +1008,29 @@ struct SeedHit {
     diagonal: i128,
 }
 
+#[derive(Default)]
+enum RegionHits {
+    #[default]
+    Empty,
+    One(SeedHit),
+    Many(Vec<SeedHit>),
+}
+
+impl RegionHits {
+    fn push(&mut self, hit: SeedHit) {
+        match self {
+            Self::Empty => *self = Self::One(hit),
+            Self::One(first) => {
+                let first = *first;
+                let mut hits = Vec::new();
+                hits.extend([first, hit]);
+                *self = Self::Many(hits);
+            }
+            Self::Many(hits) => hits.push(hit),
+        }
+    }
+}
+
 struct RegionAccumulator {
     query_start: u64,
     query_end: u64,
@@ -1048,11 +1071,19 @@ impl RegionAccumulator {
 }
 
 fn form_regions(
-    hits_by_contig: BTreeMap<RegionKey, Vec<SeedHit>>,
+    hits_by_contig: BTreeMap<RegionKey, RegionHits>,
     max_diagonal_drift: u64,
 ) -> Vec<(RegionKey, RegionAccumulator)> {
     let mut output = Vec::new();
-    for (key, mut hits) in hits_by_contig {
+    for (key, hits) in hits_by_contig {
+        let mut hits = match hits {
+            RegionHits::Empty => continue,
+            RegionHits::One(hit) => {
+                output.push((key, RegionAccumulator::new(hit)));
+                continue;
+            }
+            RegionHits::Many(hits) => hits,
+        };
         hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
         let mut regions = Vec::<RegionAccumulator>::new();
         for hit in hits {
@@ -1104,13 +1135,12 @@ pub(crate) fn prepare_query(
     }
     let query_length =
         u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
-    let mut positions_by_key = BTreeMap::<u64, Vec<QuerySeed>>::new();
-    for seed in query_seeds(&query, k, rescue_k15, config.circular)? {
-        positions_by_key
-            .entry(seed.packed_key)
-            .or_default()
-            .push(seed);
-    }
+    let mut seeds = query_seeds(&query, k, rescue_k15, config.circular)?;
+    seeds.sort_by_key(|seed| seed.packed_key);
+    let positions_by_key = seeds
+        .chunk_by(|left, right| left.packed_key == right.packed_key)
+        .map(|group| (group[0].packed_key, group.to_vec()))
+        .collect();
     let mut lookup_identity = [0; 35];
     lookup_identity[..32].copy_from_slice(&sha256(&query));
     lookup_identity[32..].copy_from_slice(&[k, u8::from(rescue_k15), u8::from(config.circular)]);
@@ -1987,6 +2017,196 @@ mod tests {
     }
 
     #[test]
+    fn region_hits_inline_first_promotes_in_order() {
+        let first = SeedHit {
+            query: 1,
+            target: 2,
+            diagonal: 1,
+        };
+        let second = SeedHit {
+            query: 3,
+            target: 5,
+            diagonal: 2,
+        };
+        let third = SeedHit {
+            query: 8,
+            target: 13,
+            diagonal: 5,
+        };
+        let mut hits = RegionHits::default();
+        assert!(matches!(&hits, RegionHits::Empty));
+        hits.push(first);
+        assert!(matches!(&hits, RegionHits::One(hit) if *hit == first));
+        hits.push(second);
+        hits.push(third);
+        assert!(matches!(
+            &hits,
+            RegionHits::Many(values) if values == &[first, second, third]
+        ));
+    }
+
+    type RegionRow = (RegionKey, u64, u64, u64, u64, i128, i128, u32);
+
+    fn reference_form_regions(
+        hits_by_contig: BTreeMap<RegionKey, Vec<SeedHit>>,
+        max_diagonal_drift: u64,
+    ) -> Vec<(RegionKey, RegionAccumulator)> {
+        let mut output = Vec::new();
+        for (key, mut hits) in hits_by_contig {
+            hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
+            let mut regions = Vec::<RegionAccumulator>::new();
+            for hit in hits {
+                if let Some(region) = regions
+                    .iter_mut()
+                    .rev()
+                    .find(|region| region.accepts(hit, max_diagonal_drift))
+                {
+                    region.add(hit);
+                } else {
+                    regions.push(RegionAccumulator::new(hit));
+                }
+            }
+            output.extend(regions.into_iter().map(|region| (key, region)));
+        }
+        output
+    }
+
+    fn synthetic_region_events(
+        groups: u32,
+        hits_per_group: u32,
+        extra_groups: u32,
+    ) -> Vec<(RegionKey, SeedHit)> {
+        assert!(groups.is_power_of_two() && extra_groups <= groups);
+        let mut events = Vec::with_capacity((groups * hits_per_group + extra_groups) as usize);
+        for hit in 0..hits_per_group + u32::from(extra_groups != 0) {
+            for ordinal in 0..groups {
+                let id = ordinal.wrapping_mul(2_654_435_761) & (groups - 1);
+                if hit >= hits_per_group + u32::from(id < extra_groups) {
+                    continue;
+                }
+                let query = u64::from(hit) * 21;
+                let diagonal = i128::from(id % 97);
+                events.push((
+                    RegionKey {
+                        metagenome_id: id / 4_096,
+                        contig_id: id,
+                        strand: if id.is_multiple_of(2) {
+                            Strand::Forward
+                        } else {
+                            Strand::Reverse
+                        },
+                        k: if id.is_multiple_of(3) { 15 } else { 21 },
+                    },
+                    SeedHit {
+                        query,
+                        target: query + u64::try_from(diagonal).unwrap(),
+                        diagonal,
+                    },
+                ));
+            }
+        }
+        events
+    }
+
+    fn region_rows(regions: Vec<(RegionKey, RegionAccumulator)>) -> Vec<RegionRow> {
+        regions
+            .into_iter()
+            .map(|(key, region)| {
+                (
+                    key,
+                    region.query_start,
+                    region.query_end,
+                    region.target_start,
+                    region.target_end,
+                    region.diagonal_min,
+                    region.diagonal_max,
+                    region.hits,
+                )
+            })
+            .collect()
+    }
+
+    fn timed_region_pipeline(
+        events: &[(RegionKey, SeedHit)],
+        candidate: bool,
+    ) -> (u128, Vec<RegionRow>) {
+        let started = std::time::Instant::now();
+        let regions = if candidate {
+            let mut groups = BTreeMap::<RegionKey, RegionHits>::new();
+            for &(key, hit) in events {
+                groups.entry(key).or_default().push(hit);
+            }
+            form_regions(groups, 64)
+        } else {
+            let mut groups = BTreeMap::<RegionKey, Vec<SeedHit>>::new();
+            for &(key, hit) in events {
+                groups.entry(key).or_default().push(hit);
+            }
+            reference_form_regions(groups, 64)
+        };
+        std::hint::black_box(&regions);
+        let elapsed = started.elapsed().as_nanos();
+        (elapsed, region_rows(regions))
+    }
+
+    fn region_checksum(rows: &[RegionRow]) -> u64 {
+        rows.iter().fold(0xcbf29ce484222325u64, |mut state, row| {
+            let strand = match row.0.strand {
+                Strand::Forward => 0,
+                Strand::Reverse => 1,
+            };
+            for value in [
+                u64::from(row.0.metagenome_id),
+                u64::from(row.0.contig_id),
+                strand,
+                u64::from(row.0.k),
+                row.1,
+                row.2,
+                row.3,
+                row.4,
+                row.5 as u64,
+                (row.5 >> 64) as u64,
+                row.6 as u64,
+                (row.6 >> 64) as u64,
+                u64::from(row.7),
+            ] {
+                state = state.wrapping_mul(0x100000001b3) ^ value;
+            }
+            state
+        })
+    }
+
+    #[test]
+    #[ignore = "actual-source region storage diagnostic"]
+    fn region_hits_inline_actual_map_diagnostic() {
+        let cases = [
+            ("all_singleton", synthetic_region_events(65_536, 1, 0)),
+            (
+                "mostly_singleton",
+                synthetic_region_events(65_536, 1, 3_558),
+            ),
+            ("multihit", synthetic_region_events(8_192, 8, 0)),
+        ];
+        let candidate_first = std::env::var_os("JAM_REGION_HITS_CANDIDATE_FIRST").is_some();
+        for (name, events) in cases {
+            let (first_ns, first) = timed_region_pipeline(&events, candidate_first);
+            let (second_ns, second) = timed_region_pipeline(&events, !candidate_first);
+            let (reference_ns, reference, candidate_ns, candidate) = if candidate_first {
+                (second_ns, second, first_ns, first)
+            } else {
+                (first_ns, first, second_ns, second)
+            };
+            assert_eq!(candidate, reference);
+            println!(
+                "region_hit_inline_oracle_v1 case={name} events={} rows={} reference_ns={reference_ns} candidate_ns={candidate_ns} checksum={}",
+                events.len(),
+                reference.len(),
+                region_checksum(&reference)
+            );
+        }
+    }
+
+    #[test]
     fn groups_hits_across_diagonal_boundaries_and_small_indels() {
         let key = RegionKey {
             metagenome_id: 0,
@@ -1997,7 +2217,7 @@ mod tests {
         let grouped = form_regions(
             BTreeMap::from([(
                 key,
-                vec![
+                RegionHits::Many(vec![
                     SeedHit {
                         query: 0,
                         target: 63,
@@ -2008,7 +2228,7 @@ mod tests {
                         target: 85,
                         diagonal: 65,
                     },
-                ],
+                ]),
             )]),
             4,
         );
@@ -2028,7 +2248,7 @@ mod tests {
         let grouped = form_regions(
             BTreeMap::from([(
                 key,
-                vec![
+                RegionHits::Many(vec![
                     SeedHit {
                         query: 0,
                         target: 10,
@@ -2039,7 +2259,7 @@ mod tests {
                         target: 40,
                         diagonal: 20,
                     },
-                ],
+                ]),
             )]),
             4,
         );
