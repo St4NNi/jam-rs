@@ -119,29 +119,32 @@ pub enum Commands {
         #[arg(
             short,
             long,
-            required_unless_present = "collection",
-            conflicts_with = "collection"
+            required_unless_present_any = ["collection", "owner_index"],
+            conflicts_with_all = ["collection", "owner_index"]
         )]
         database: Option<PathBuf>,
         /// Query-independent JIDX file
         #[arg(
             short,
             long,
-            required_unless_present = "collection",
-            conflicts_with = "collection"
+            required_unless_present_any = ["collection", "owner_index"],
+            conflicts_with_all = ["collection", "owner_index"]
         )]
         index: Option<PathBuf>,
         /// Root manifest used to build the JIDX
         #[arg(
             short = 'M',
             long,
-            required_unless_present = "collection",
-            conflicts_with = "collection"
+            required_unless_present_any = ["collection", "owner_index"],
+            conflicts_with_all = ["collection", "owner_index"]
         )]
         manifest: Option<PathBuf>,
         /// JSON root binding disjoint JAM/JIDX shards
         #[arg(long)]
         collection: Option<PathBuf>,
+        /// JSON manifest for a complete key-owner index generation
+        #[arg(long, conflicts_with = "collection")]
+        owner_index: Option<PathBuf>,
         /// Atomic JSONL output
         #[arg(short, long)]
         output: PathBuf,

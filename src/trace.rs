@@ -4,13 +4,13 @@ use crate::alignment::{
 use crate::bgzf::{BgzfError, BgzfReader};
 use crate::jidx::{JidxError, RESCUE_K15_TAG, seed_length, sha256, sha256_reader};
 use crate::jidx_reader::{
-    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS, SeedDocument,
-    SeedEntry,
+    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS, SeedEntry,
 };
 use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
 use crate::reader::ReaderError;
+use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
 use needletail::Sequence;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -106,9 +106,9 @@ pub struct TraceContig {
 }
 
 pub struct TraceEngine {
-    jam_path: PathBuf,
-    screen: QueryEngine,
-    index: JidxReader,
+    jam_path: Option<PathBuf>,
+    screen: Option<QueryEngine>,
+    index: TraceIndex,
     sample_to_metagenome: Vec<MetagenomeId>,
     s3: Option<S3Config>,
 }
@@ -155,11 +155,17 @@ impl Drop for CacheReservation<'_> {
 pub(crate) struct CachedSeedLookups {
     header_sha256: [u8; 32],
     query_identity: [u8; 32],
-    file_identity: [u64; 7],
+    file_identity: TraceCacheIdentity,
     through: Option<u64>,
     frozen: bool,
     groups: Vec<CachedDocumentGroup>,
     documents: Vec<SeedDocument>,
+    _reservation: CacheReservation<'static>,
+}
+
+struct SharedSeedLookups {
+    identity: TraceCacheIdentity,
+    entries: Vec<(u64, Option<SeedEntry>)>,
     _reservation: CacheReservation<'static>,
 }
 
@@ -180,7 +186,7 @@ impl CachedSeedLookups {
     fn new(
         header_sha256: [u8; 32],
         query_identity: [u8; 32],
-        file_identity: [u64; 7],
+        file_identity: TraceCacheIdentity,
         bytes: usize,
         query_keys: usize,
         document_count: u32,
@@ -310,17 +316,32 @@ impl TraceEngine {
             return Err(TraceError::Invalid("JAM and JIDX names differ"));
         }
         Ok(Self {
-            jam_path: jam.to_path_buf(),
-            screen,
-            index,
+            jam_path: Some(jam.to_path_buf()),
+            screen: Some(screen),
+            index: TraceIndex::Shard(Box::new(index)),
             sample_to_metagenome,
             s3,
         })
     }
 
+    pub fn open_owner(root: impl AsRef<Path>, s3: Option<S3Config>) -> Result<Self, TraceError> {
+        let index = crate::owner_reader::OwnerReader::open(root)?;
+        if !index.is_complete() {
+            return Err(TraceError::Invalid("owner generation is incomplete"));
+        }
+        Ok(Self {
+            jam_path: None,
+            screen: None,
+            index: TraceIndex::Owner(index),
+            sample_to_metagenome: Vec::new(),
+            s3,
+        })
+    }
+
     pub fn verify_index(&self) -> Result<(), TraceError> {
-        if sha256_reader(BufReader::new(File::open(&self.jam_path)?))?
-            != self.index.header().jam_sha256
+        if let Some(jam_path) = &self.jam_path
+            && sha256_reader(BufReader::new(File::open(jam_path)?))?
+                != self.index.shard()?.header().jam_sha256
         {
             return Err(TraceError::Invalid(
                 "JIDX belongs to a different JAM database",
@@ -330,8 +351,8 @@ impl TraceEngine {
         Ok(())
     }
 
-    pub(crate) fn index(&self) -> &JidxReader {
-        &self.index
+    pub(crate) fn index(&self) -> Result<&JidxReader, TraceError> {
+        self.index.shard()
     }
 
     pub fn search(
@@ -344,11 +365,100 @@ impl TraceEngine {
             query_id,
             sequence,
             config,
-            self.index.header().k,
-            self.index.header().rescue_k15,
+            self.index.k(),
+            self.index.rescue_k15(),
         )?;
+        self.search_prepared(prepared, config, None)
+    }
+
+    pub(crate) fn search_batch(
+        &self,
+        queries: &[(String, Vec<u8>)],
+        config: TraceConfig,
+    ) -> Result<Vec<TraceResult>, TraceError> {
+        if queries.len() < 2 || matches!(self.index, TraceIndex::Shard(_)) {
+            return queries
+                .par_iter()
+                .map(|(id, sequence)| self.search(id.as_str(), sequence, config))
+                .collect();
+        }
+        let prepared = queries
+            .par_iter()
+            .map(|(id, sequence)| {
+                prepare_query(
+                    id.as_str(),
+                    sequence,
+                    config,
+                    self.index.k(),
+                    self.index.rescue_k15(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let shared = self.shared_seed_lookups(&prepared)?;
+        prepared
+            .into_par_iter()
+            .map(|prepared| self.search_prepared(prepared, config, shared.as_ref()))
+            .collect()
+    }
+
+    fn shared_seed_lookups(
+        &self,
+        prepared: &[PreparedQuery],
+    ) -> Result<Option<SharedSeedLookups>, TraceError> {
+        let key_count = prepared.iter().try_fold(0usize, |sum, query| {
+            sum.checked_add(query.positions_by_key.len())
+        });
+        let Some(bytes) = key_count.and_then(|keys| keys.checked_mul(96)?.checked_add(4096)) else {
+            return Ok(None);
+        };
+        if bytes > 32 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let Some(reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes) else {
+            return Ok(None);
+        };
+        let Some(identity) = self.index.cache_file_identity()? else {
+            return Ok(None);
+        };
+        let mut keys = Vec::new();
+        if keys.try_reserve_exact(key_count.unwrap_or(0)).is_err() {
+            return Ok(None);
+        }
+        for query in prepared {
+            keys.extend(query.positions_by_key.keys().copied());
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        let mut entries = Vec::new();
+        if entries.try_reserve_exact(keys.len()).is_err() {
+            return Ok(None);
+        }
+        for chunk in keys.chunks(SEED_LOOKUP_BATCH_KEYS) {
+            entries.extend(
+                chunk
+                    .iter()
+                    .copied()
+                    .zip(self.index.find_seeds_batch(chunk)?),
+            );
+        }
+        if self.index.cache_file_identity()? != Some(identity) {
+            return Err(TraceError::Invalid("shared seed lookup identity"));
+        }
+        Ok(Some(SharedSeedLookups {
+            identity,
+            entries,
+            _reservation: reservation,
+        }))
+    }
+
+    fn search_prepared(
+        &self,
+        prepared: PreparedQuery,
+        config: TraceConfig,
+        shared: Option<&SharedSeedLookups>,
+    ) -> Result<TraceResult, TraceError> {
         let cache_bytes = LOOKUP_CACHE_BYTES / rayon::current_num_threads().max(1);
-        let census = self.candidate_census(&prepared, config, cache_bytes)?;
+        let census = self.candidate_census_with_shared(&prepared, config, cache_bytes, shared)?;
         let completion = candidate_completion(census.candidates.len(), config.max_metagenomes)?;
         let mut candidates = census.candidates;
         candidates.truncate(config.max_metagenomes);
@@ -371,10 +481,10 @@ impl TraceEngine {
             query_id: prepared.query_id,
             query_length: prepared.query_length,
             index: TraceIndexIdentity {
-                manifest_sha256: digest_hex(self.index.header().manifest_sha256),
-                body_sha256: digest_hex(self.index.header().body_sha256),
-                seed_k: self.index.header().k,
-                rescue_k15: self.index.header().rescue_k15,
+                manifest_sha256: digest_hex(self.index.manifest_sha256()),
+                body_sha256: digest_hex(self.index.body_sha256()),
+                seed_k: self.index.k(),
+                rescue_k15: self.index.rescue_k15(),
             },
             completion,
             candidates_screened,
@@ -388,7 +498,22 @@ impl TraceEngine {
         config: TraceConfig,
         cache_bytes: usize,
     ) -> Result<TraceCensus, TraceError> {
+        self.candidate_census_with_shared(prepared, config, cache_bytes, None)
+    }
+
+    fn candidate_census_with_shared(
+        &self,
+        prepared: &PreparedQuery,
+        config: TraceConfig,
+        cache_bytes: usize,
+        shared: Option<&SharedSeedLookups>,
+    ) -> Result<TraceCensus, TraceError> {
         validate_config(config)?;
+        if let Some(shared) = shared
+            && self.index.cache_file_identity()? != Some(shared.identity)
+        {
+            return Err(TraceError::Invalid("shared seed lookup identity"));
+        }
         let sketch_candidates =
             self.screen_candidates(&prepared.query_id, &prepared.query, config)?;
         let mut candidates = BTreeMap::new();
@@ -398,7 +523,7 @@ impl TraceEngine {
         self.index
             .verify_query_filter_pages(prepared.positions_by_key.keys())?;
         let mut frequencies = Vec::new();
-        let header_sha256 = sha256(&self.index.header().encode()?);
+        let header_sha256 = self.index.header_sha256()?;
         let mut lookups =
             self.index
                 .cache_file_identity()
@@ -411,7 +536,7 @@ impl TraceEngine {
                         file_identity,
                         cache_bytes,
                         prepared.positions_by_key.len(),
-                        self.index.header().document_count,
+                        self.index.document_count(),
                     )
                 });
         let mut entries = prepared.positions_by_key.iter();
@@ -437,7 +562,20 @@ impl TraceEngine {
                 break;
             }
 
-            let index_seeds = self.index.find_seeds_batch(&packed_keys)?;
+            let index_seeds = if let Some(shared) = shared {
+                packed_keys
+                    .iter()
+                    .map(|key| {
+                        shared
+                            .entries
+                            .binary_search_by_key(key, |entry| entry.0)
+                            .map(|index| shared.entries[index].1)
+                            .map_err(|_| TraceError::Invalid("shared query seed"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                self.index.find_seeds_batch(&packed_keys)?
+            };
             self.index.advise_first_document_rows(&index_seeds);
             for ((packed_key, query_seeds), index_seed) in chunk.iter().copied().zip(index_seeds) {
                 let Some(index_seed) = index_seed else {
@@ -452,10 +590,10 @@ impl TraceEngine {
                 let documents = self.index.seed_documents(index_seed)?;
                 for &document in &documents {
                     let hits = document
-                        .occurrence_count
+                        .occurrence_count()
                         .checked_mul(query_positions)
                         .ok_or(TraceError::Invalid("exact seed hit count"))?;
-                    if let Some(candidate) = candidates.get_mut(&document.metagenome_id) {
+                    if let Some(candidate) = candidates.get_mut(&document.metagenome_id()) {
                         candidate.exact_seed_hits = candidate
                             .exact_seed_hits
                             .checked_add(hits)
@@ -464,13 +602,13 @@ impl TraceEngine {
                     }
                     let name = self
                         .index
-                        .metagenome_name(document.metagenome_id)?
+                        .metagenome_name(document.metagenome_id())?
                         .ok_or(TraceError::Invalid("JIDX metagenome ID"))?
                         .to_string();
                     candidates.insert(
-                        document.metagenome_id,
+                        document.metagenome_id(),
                         Candidate {
-                            id: document.metagenome_id,
+                            id: document.metagenome_id(),
                             name,
                             shared_hashes: 0,
                             containment: 0.0,
@@ -503,7 +641,7 @@ impl TraceEngine {
         validate_config(config)?;
         self.index.enable_selected_front_metadata();
         let lookups = if let Some(lookups) = lookups {
-            if lookups.header_sha256 != sha256(&self.index.header().encode()?)
+            if lookups.header_sha256 != self.index.header_sha256()?
                 || lookups.query_identity != prepared.lookup_identity
             {
                 return Err(TraceError::Invalid("cached seed lookup identity"));
@@ -570,11 +708,7 @@ impl TraceEngine {
                 let Some(index_seed) = index_seed else {
                     continue;
                 };
-                let seed_k = seed_length(
-                    self.index.header().k,
-                    self.index.header().rescue_k15,
-                    packed_key,
-                )?;
+                let seed_k = seed_length(self.index.k(), self.index.rescue_k15(), packed_key)?;
                 let decoded_documents;
                 let documents = if let Some(documents) = cached_documents {
                     documents
@@ -585,7 +719,7 @@ impl TraceEngine {
                 for document in documents
                     .iter()
                     .copied()
-                    .filter(|document| candidate_ids.contains(&document.metagenome_id))
+                    .filter(|document| candidate_ids.contains(&document.metagenome_id()))
                 {
                     let occurrences = self.index.seed_document_occurrences(index_seed, document)?;
                     for seed in query_seeds {
@@ -696,9 +830,11 @@ impl TraceEngine {
         if !config.use_sketch {
             return Ok(Vec::new());
         }
-        let sketch = QuerySketch::from_sequence(query_id, query, self.screen.reader())?;
-        let result = self
-            .screen
+        let Some(screen) = &self.screen else {
+            return Ok(Vec::new());
+        };
+        let sketch = QuerySketch::from_sequence(query_id, query, screen.reader())?;
+        let result = screen
             .query_sketch(&sketch)
             .into_iter()
             .next()
@@ -1315,6 +1451,8 @@ pub enum TraceError {
     Jidx(#[from] JidxReaderError),
     #[error(transparent)]
     JidxFormat(#[from] JidxError),
+    #[error("owner index failed: {0}")]
+    Owner(#[from] crate::owner_format::OwnerReaderError),
     #[error(transparent)]
     Bgzf(#[from] BgzfError),
     #[error(transparent)]
@@ -1486,8 +1624,8 @@ mod tests {
             scalar_frequencies.push((packed_key, seed.document_frequency));
             let query_positions = u64::try_from(query_seeds.len()).unwrap();
             for document in engine.index.seed_documents(seed).unwrap() {
-                *scalar_hits.entry(document.metagenome_id).or_default() +=
-                    document.occurrence_count * query_positions;
+                *scalar_hits.entry(document.metagenome_id()).or_default() +=
+                    document.occurrence_count() * query_positions;
             }
         }
 
@@ -1637,7 +1775,7 @@ mod tests {
                     .index
                     .seed_document_occurrences(seed, document)
                     .unwrap();
-                *explicit_hits.entry(document.metagenome_id).or_default() +=
+                *explicit_hits.entry(document.metagenome_id()).or_default() +=
                     u64::try_from(occurrences.len() * query_seeds.len()).unwrap();
             }
         }
@@ -1675,7 +1813,7 @@ mod tests {
         assert_eq!(rare_first_result, reverse_result);
         let cache_fixed = std::mem::size_of::<Option<CachedSeedLookups>>() + 4096;
         let cache_per_key = std::mem::size_of::<CachedDocumentGroup>()
-            + usize::try_from(engine.index.header().document_count).unwrap()
+            + usize::try_from(engine.index.document_count()).unwrap()
                 * std::mem::size_of::<SeedDocument>();
         let one_group_cache_bytes = cache_fixed + cache_per_key;
         let full_cache_bytes = cache_fixed + cache_per_key * prepared.positions_by_key.len();

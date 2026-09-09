@@ -77,7 +77,7 @@ impl CollectionTraceEngine {
             shard.index = parent.join(&shard.index);
             shard.manifest = parent.join(&shard.manifest);
             let engine = open_shard(shard, s3.clone())?;
-            let header = engine.index().header();
+            let header = engine.index()?.header();
             let contract = (
                 header.k,
                 header.rescue_k15,
@@ -90,7 +90,7 @@ impl CollectionTraceEngine {
             seed_contract = Some(contract);
             for id in 0..header.document_count {
                 let name = engine
-                    .index()
+                    .index()?
                     .metagenome_name(id)?
                     .ok_or(TraceError::Invalid("missing collection metagenome"))?;
                 if !names.insert(name.to_string()) {
@@ -325,7 +325,7 @@ fn sort_metagenomes(metagenomes: &mut [CollectionMetagenomeTrace]) {
 fn open_shard(shard: &CollectionShard, s3: Option<S3Config>) -> Result<TraceEngine, TraceError> {
     let engine = TraceEngine::open(&shard.database, &shard.index, &shard.manifest, s3)?;
     // Header decoding requires canonical reserved bytes, so re-encoding preserves its exact bytes.
-    if digest_hex(sha256(&engine.index().header().encode()?)) != shard.index_header_sha256 {
+    if digest_hex(sha256(&engine.index()?.header().encode()?)) != shard.index_header_sha256 {
         return Err(TraceError::Invalid("collection JIDX header checksum"));
     }
     Ok(engine)

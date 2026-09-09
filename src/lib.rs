@@ -14,12 +14,23 @@ pub mod jidx_reader;
 mod jidx_runs;
 pub mod jidx_writer;
 pub mod mosaic;
+#[cfg(test)]
+mod owner_export_tests;
+mod owner_file;
+mod owner_format;
+#[cfg(test)]
+mod owner_integrity_tests;
 pub mod owner_postings;
+mod owner_reader;
+#[cfg(test)]
+mod owner_tests;
+pub mod owner_writer;
 pub mod query;
 pub mod range_source;
 pub mod reader;
 pub mod sketch;
 pub mod trace;
+mod trace_index;
 pub mod writer;
 pub use cli::handlers::{
     handle_bias_create_command, handle_bias_stats_command, handle_distance_command,
@@ -148,6 +159,7 @@ pub fn run() -> Result<()> {
             index,
             manifest,
             collection,
+            owner_index,
             audit_index,
             output,
             query_id,
@@ -173,16 +185,19 @@ pub fn run() -> Result<()> {
             };
             handle_trace_command(TraceArgs {
                 query,
-                input: match (collection, database, index, manifest) {
-                    (Some(root), None, None, None) => TraceInput::Collection(root),
-                    (None, Some(database), Some(index), Some(manifest)) => TraceInput::Shard {
-                        database,
-                        index,
-                        manifest,
-                    },
+                input: match (owner_index, collection, database, index, manifest) {
+                    (Some(root), None, None, None, None) => TraceInput::Owner(root),
+                    (None, Some(root), None, None, None) => TraceInput::Collection(root),
+                    (None, None, Some(database), Some(index), Some(manifest)) => {
+                        TraceInput::Shard {
+                            database,
+                            index,
+                            manifest,
+                        }
+                    }
                     _ => {
                         return Err(anyhow::anyhow!(
-                            "Use --collection or --database, --index, and --manifest"
+                            "Use --owner-index, --collection, or --database, --index, and --manifest"
                         ));
                     }
                 },

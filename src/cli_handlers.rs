@@ -1,7 +1,6 @@
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use needletail::parse_fastx_file;
-use rayon::prelude::*;
 use std::fs::remove_file;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -63,6 +62,7 @@ pub(crate) enum TraceInput {
         manifest: PathBuf,
     },
     Collection(PathBuf),
+    Owner(PathBuf),
 }
 
 pub(crate) struct TraceArgs {
@@ -115,6 +115,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         TraceInput::Collection(root) => {
             Engine::Collection(Box::new(CollectionTraceEngine::open(root, args.s3)?))
         }
+        TraceInput::Owner(root) => Engine::Shard(Box::new(TraceEngine::open_owner(root, args.s3)?)),
     };
     if args.audit_index {
         match &engine {
@@ -162,10 +163,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             }
             match &engine {
                 Engine::Shard(engine) => {
-                    let results = queries
-                        .par_iter()
-                        .map(|(id, sequence)| engine.search(id.as_str(), sequence, args.config))
-                        .collect::<Result<Vec<_>, _>>()?;
+                    let results = engine.search_batch(&queries, args.config)?;
                     for result in results {
                         serde_json::to_writer(&mut output, &result)?;
                         output.write_all(b"\n")?;
