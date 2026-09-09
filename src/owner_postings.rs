@@ -332,6 +332,14 @@ pub fn locate_member(
         .anchors
         .get(after)
         .ok_or_else(|| invalid("anchor range"))?;
+    if first.member_ordinal > member_ordinal
+        || end.member_ordinal <= member_ordinal
+        || end.member_ordinal - first.member_ordinal > MEMBER_ANCHOR_STRIDE
+        || first.cold_bit_offset >= end.cold_bit_offset
+        || end.cold_bit_offset > hot.cold_bits
+    {
+        return Err(invalid("anchor range"));
+    }
     Ok(OwnerMemberWindow {
         first_member: first.member_ordinal,
         target_member: member_ordinal,
@@ -877,6 +885,202 @@ fn validate_anchor_ordinals(
     Ok(accept(members.len() as u64) && index == anchors.len())
 }
 
+fn push_anchor(
+    anchors: &mut Vec<OwnerAnchor>,
+    member_ordinal: u64,
+    cold_bit_offset: u64,
+) -> Result<(), OwnerPostingsError> {
+    if let Some(last) = anchors.last() {
+        if last.member_ordinal == member_ordinal {
+            return (last.cold_bit_offset == cold_bit_offset)
+                .then_some(())
+                .ok_or_else(|| invalid("anchor offset"));
+        }
+        if last.member_ordinal > member_ordinal || last.cold_bit_offset > cold_bit_offset {
+            return Err(invalid("anchor order"));
+        }
+    }
+    anchors.push(OwnerAnchor {
+        member_ordinal,
+        cold_bit_offset,
+    });
+    Ok(())
+}
+
+fn document_width(widths: &[u8], document: u32) -> Result<u8, OwnerPostingsError> {
+    widths
+        .get(document as usize)
+        .copied()
+        .filter(|width| *width <= 64)
+        .ok_or_else(|| invalid("document width"))
+}
+
+fn fits_width(value: u64, width: u8) -> bool {
+    width == 64 || value < (1u64 << width)
+}
+
+fn bit_width(value: u64) -> u8 {
+    (64 - value.leading_zeros()) as u8
+}
+
+fn varint_len(value: u64) -> usize {
+    usize::from(bit_width(value).max(1).div_ceil(7))
+}
+
+fn set_bit(bytes: &mut [u8], index: usize) {
+    bytes[index / 8] |= 1 << (index % 8);
+}
+
+fn get_bit(bytes: &[u8], index: usize) -> bool {
+    bytes[index / 8] & (1 << (index % 8)) != 0
+}
+
+fn validate_unused_bits(bytes: &[u8], bits: usize) -> Result<(), OwnerPostingsError> {
+    if bits % 8 != 0 && bytes.last().is_some_and(|last| last >> (bits % 8) != 0) {
+        return Err(invalid("bitmap padding"));
+    }
+    Ok(())
+}
+
+fn take_byte(input: &mut &[u8]) -> Result<u8, OwnerPostingsError> {
+    let value = *input.first().ok_or_else(|| invalid("truncated hot data"))?;
+    *input = &input[1..];
+    Ok(value)
+}
+
+fn take_bytes<'a>(input: &mut &'a [u8], count: usize) -> Result<&'a [u8], OwnerPostingsError> {
+    let bytes = input
+        .get(..count)
+        .ok_or_else(|| invalid("truncated hot data"))?;
+    *input = &input[count..];
+    Ok(bytes)
+}
+
+#[derive(Default)]
+struct BitWriter {
+    bytes: Vec<u8>,
+    bits: u64,
+}
+
+impl BitWriter {
+    fn len(&self) -> u64 {
+        self.bits
+    }
+
+    fn put(&mut self, value: u64, width: u8) -> Result<(), OwnerPostingsError> {
+        if width > 64 || !fits_width(value, width) {
+            return Err(invalid("bit width"));
+        }
+        let end = self
+            .bits
+            .checked_add(u64::from(width))
+            .ok_or_else(|| invalid("bit length"))?;
+        let byte_length = usize::try_from(end.div_ceil(8)).map_err(|_| invalid("bit length"))?;
+        if byte_length > self.bytes.len() {
+            self.bytes
+                .try_reserve(byte_length - self.bytes.len())
+                .map_err(|_| invalid("bit allocation"))?;
+            self.bytes.resize(byte_length, 0);
+        }
+        for bit in 0..width {
+            let position = self.bits + u64::from(bit);
+            if value >> bit & 1 != 0 {
+                self.bytes[position as usize / 8] |= 1 << (position % 8);
+            }
+        }
+        self.bits = end;
+        Ok(())
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
+struct BitReader<'a> {
+    bytes: &'a [u8],
+    position: u64,
+    end: u64,
+}
+
+impl<'a> BitReader<'a> {
+    fn window(bytes: &'a [u8], position: u64, end: u64) -> Result<Self, OwnerPostingsError> {
+        let available = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|length| length.checked_mul(8))
+            .ok_or_else(|| invalid("bit range"))?;
+        if position > end || end > available {
+            return Err(invalid("bit range"));
+        }
+        Ok(Self {
+            bytes,
+            position,
+            end,
+        })
+    }
+
+    fn position(&self) -> u64 {
+        self.position
+    }
+
+    fn take(&mut self, width: u8) -> Result<u64, OwnerPostingsError> {
+        let end = self
+            .position
+            .checked_add(u64::from(width))
+            .ok_or_else(|| invalid("truncated cold data"))?;
+        if width > 64 || end > self.end {
+            return Err(invalid("truncated cold data"));
+        }
+        let mut value = 0u64;
+        for bit in 0..width {
+            let position = self.position + u64::from(bit);
+            value |= u64::from((self.bytes[position as usize / 8] >> (position % 8)) & 1) << bit;
+        }
+        self.position = end;
+        Ok(value)
+    }
+
+    fn advance(&mut self, bits: u64) -> Result<(), OwnerPostingsError> {
+        self.position = self
+            .position
+            .checked_add(bits)
+            .filter(|end| *end <= self.end)
+            .ok_or_else(|| invalid("truncated cold data"))?;
+        Ok(())
+    }
+
+    fn bit_at(&self, position: u64) -> Result<bool, OwnerPostingsError> {
+        if position >= self.end {
+            return Err(invalid("orientation range"));
+        }
+        Ok((self.bytes[position as usize / 8] >> (position % 8)) & 1 != 0)
+    }
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes(bytes[offset..offset + 2].try_into().expect("owner u16"))
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("owner u32"))
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().expect("owner u64"))
+}
+
+fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
 fn delta_u64(
     previous: Option<u64>,
     value: u64,
@@ -959,108 +1163,195 @@ mod tests {
         vec![
             OwnerKey {
                 key: 7,
-                members: vec![OwnerMember {
-                    document_id: 3,
-                    occurrences: vec![OwnerOccurrence {
-                        local_contig: 4,
-                        position: u64::from(u32::MAX) + 9,
-                        canonical_orientation: true,
-                    }],
-                }],
-            },
-            OwnerKey {
-                key: u64::MAX,
                 members: vec![
                     OwnerMember {
                         document_id: 0,
-                        occurrences: vec![
-                            OwnerOccurrence {
-                                local_contig: 1,
-                                position: 5,
-                                canonical_orientation: false,
-                            },
-                            OwnerOccurrence {
-                                local_contig: 1,
-                                position: 5,
-                                canonical_orientation: true,
-                            },
-                            OwnerOccurrence {
-                                local_contig: u32::MAX,
-                                position: u64::MAX,
-                                canonical_orientation: false,
-                            },
-                        ],
+                        occurrences: vec![occurrence(5, false), occurrence(5, true)],
                     },
                     OwnerMember {
-                        document_id: u32::MAX,
-                        occurrences: vec![OwnerOccurrence {
-                            local_contig: 0,
-                            position: 0,
-                            canonical_orientation: false,
-                        }],
+                        document_id: 3,
+                        occurrences: vec![occurrence(9, true)],
                     },
                 ],
+            },
+            OwnerKey {
+                key: u64::MAX,
+                members: vec![OwnerMember {
+                    document_id: 1,
+                    occurrences: (0..258)
+                        .map(|position| occurrence(position, false))
+                        .collect(),
+                }],
             },
         ]
     }
 
-    #[test]
-    fn round_trip_preserves_wide_values_and_duplicate_positions() {
-        let expected = fixture();
-        let encoded = encode_block(&expected).unwrap();
-        assert_eq!(decode_block(&encoded.hot, &encoded.cold).unwrap(), expected);
+    fn occurrence(position: u64, canonical_orientation: bool) -> OwnerOccurrence {
+        OwnerOccurrence {
+            local_contig: 0,
+            position,
+            canonical_orientation,
+        }
     }
 
     #[test]
-    fn hot_lookup_does_not_require_valid_cold_varints() {
-        let encoded = encode_block(&fixture()).unwrap();
-        let hot = lookup_hot(&encoded.hot, u64::MAX).unwrap().unwrap();
-        assert_eq!(hot.document_frequency, 2);
-        assert_eq!(hot.members[0].occurrence_count, 3);
-        let mut broken = encoded.cold;
-        *broken.last_mut().unwrap() = 0x80;
-        assert!(lookup_hot(&encoded.hot, u64::MAX).unwrap().is_some());
-        assert!(decode_block(&encoded.hot, &broken).is_err());
+    fn flattened_round_trip_preserves_duplicates_strands_and_long_lists() {
+        let mut expected = fixture();
+        expected[0].members[1].occurrences[0].position = u64::MAX;
+        let widths = [64; 4];
+        let encoded = encode_block(&expected, &widths, |_, value| Ok(value.position)).unwrap();
+        let decoded = decode_block(
+            &encoded.hot,
+            &encoded.cold,
+            &widths,
+            1 << 20,
+            |_, locus, strand| Ok(occurrence(locus, strand)),
+        )
+        .unwrap();
+        assert_eq!(decoded, expected);
+        let hot = parse_hot(&encoded.hot).unwrap();
+        assert_eq!(find_key(&hot, 7).unwrap().document_frequency, 2);
+        assert!(hot.anchors.iter().any(|anchor| anchor.member_ordinal == 2));
     }
 
     #[test]
-    fn rejects_bad_order_noncanonical_varints_and_ranges() {
+    fn selective_window_decodes_only_bounded_predecessors() {
+        let widths = [16; 4];
+        let encoded = encode_block(&fixture(), &widths, |_, value| Ok(value.position)).unwrap();
+        let hot = parse_hot(&encoded.hot).unwrap();
+        let window = locate_member(&hot, 2).unwrap();
+        let start = window.start_bit / 8;
+        let end = window.end_bit.div_ceil(8);
+        let decoded = decode_member_window(
+            &encoded.cold[start as usize..end as usize],
+            start,
+            window,
+            &hot,
+            &widths,
+            1 << 20,
+        )
+        .unwrap();
+        assert_eq!(decoded.loci.len(), 258);
+        assert_eq!(decoded.skipped_members, 0);
+    }
+
+    #[test]
+    fn rejects_corrupt_hot_cold_and_decode_budget() {
+        let widths = [16; 4];
+        let encoded = encode_block(&fixture(), &widths, |_, value| Ok(value.position)).unwrap();
+        let mut hot = encoded.hot.clone();
+        hot[36] = 1;
+        assert!(parse_hot(&hot).is_err());
+        let mut cold = encoded.cold.clone();
+        *cold.last_mut().unwrap() |= 0x80;
+        assert!(
+            decode_block(&encoded.hot, &cold, &widths, 1 << 20, |_, locus, strand| {
+                Ok(occurrence(locus, strand))
+            })
+            .is_err()
+        );
+        assert!(
+            decode_block(
+                &encoded.hot,
+                &encoded.cold,
+                &widths,
+                1,
+                |_, locus, strand| { Ok(occurrence(locus, strand)) }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_order_noncanonical_varints_and_corrupt_anchors() {
+        let widths = [16; 4];
         let mut keys = fixture();
         keys.swap(0, 1);
-        assert!(encode_block(&keys).is_err());
-        let mut duplicate_document = fixture();
-        duplicate_document[1].members[1].document_id = 0;
-        assert!(encode_block(&duplicate_document).is_err());
-
-        let mut encoded = encode_block(&fixture()).unwrap();
-        encoded.hot[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(decode_block(&encoded.hot, &encoded.cold).is_err());
-
-        let mut encoded = encode_block(&fixture()).unwrap();
-        let directory_start = HEADER_SIZE;
-        encoded.hot[directory_start] = 0x87;
-        encoded.hot.insert(directory_start + 1, 0);
-        assert!(decode_block(&encoded.hot, &encoded.cold).is_err());
+        assert!(encode_block(&keys, &widths, |_, value| Ok(value.position)).is_err());
+        let mut keys = fixture();
+        keys[0].members[1].document_id = 0;
+        assert!(encode_block(&keys, &widths, |_, value| Ok(value.position)).is_err());
+        let mut keys = fixture();
+        keys[0].members[0].occurrences[0].position = 6;
+        assert!(encode_block(&keys, &widths, |_, value| Ok(value.position)).is_err());
+        let encoded = encode_block(&fixture(), &widths, |_, value| Ok(value.position)).unwrap();
+        assert!(find_key(&parse_hot(&encoded.hot).unwrap(), 8).is_none());
+        let mut overlong = encoded.hot.clone();
+        overlong[HEADER_SIZE] |= 0x80;
+        overlong.insert(HEADER_SIZE + 1, 0);
+        assert!(parse_hot(&overlong).is_err());
+        let mut truncated = encoded.hot.clone();
+        truncated.pop();
+        assert!(parse_hot(&truncated).is_err());
+        let mut anchor = encoded.hot;
+        *anchor.last_mut().unwrap() ^= 1;
+        assert!(parse_hot(&anchor).is_err());
     }
 
     #[test]
-    fn rejects_too_many_keys_and_descending_positions() {
-        let keys = (0..=MAX_KEYS_PER_BLOCK)
-            .map(|key| OwnerKey {
-                key: key as u64,
-                members: vec![OwnerMember {
+    fn tiny_members_cross_stride_and_widths_fail_closed() {
+        let keys = vec![OwnerKey {
+            key: 1,
+            members: (0..17)
+                .map(|document_id| OwnerMember {
+                    document_id,
+                    occurrences: vec![occurrence(u64::from(document_id), false)],
+                })
+                .collect(),
+        }];
+        let widths = vec![8; 17];
+        let encoded = encode_block(&keys, &widths, |_, value| Ok(value.position)).unwrap();
+        let hot = parse_hot(&encoded.hot).unwrap();
+        assert_eq!(
+            hot.anchors
+                .iter()
+                .map(|anchor| anchor.member_ordinal)
+                .collect::<Vec<_>>(),
+            [0, 16, 17]
+        );
+        let window = locate_member(&hot, 15).unwrap();
+        let start = window.start_bit / 8;
+        let end = window.end_bit.div_ceil(8);
+        let decoded = decode_member_window(
+            &encoded.cold[start as usize..end as usize],
+            start,
+            window,
+            &hot,
+            &widths,
+            4096,
+        )
+        .unwrap();
+        assert_eq!(
+            (decoded.skipped_members, decoded.skipped_occurrences),
+            (15, 15)
+        );
+        assert!(encode_block(&keys, &[65; 17], |_, value| Ok(value.position)).is_err());
+        assert!(encode_block(&keys, &widths, |_, _| Ok(256)).is_err());
+        let mut malformed = hot.clone();
+        malformed.anchors[1].cold_bit_offset = 0;
+        assert!(locate_member(&malformed, 0).is_err());
+    }
+
+    #[test]
+    fn public_window_rejects_unanchored_long_predecessor() {
+        let keys = vec![OwnerKey {
+            key: 1,
+            members: vec![
+                OwnerMember {
                     document_id: 0,
-                    occurrences: vec![OwnerOccurrence {
-                        local_contig: 0,
-                        position: 0,
-                        canonical_orientation: false,
-                    }],
-                }],
-            })
-            .collect::<Vec<_>>();
-        assert!(encode_block(&keys).is_err());
-        let mut descending = fixture();
-        descending[1].members[0].occurrences[1].position = 4;
-        assert!(encode_block(&descending).is_err());
+                    occurrences: (0..257).map(|value| occurrence(value, false)).collect(),
+                },
+                OwnerMember {
+                    document_id: 1,
+                    occurrences: vec![occurrence(3, true)],
+                },
+            ],
+        }];
+        let widths = [16; 2];
+        let encoded = encode_block(&keys, &widths, |_, value| Ok(value.position)).unwrap();
+        let mut hot = parse_hot(&encoded.hot).unwrap();
+        hot.anchors = vec![hot.anchors[0], *hot.anchors.last().unwrap()];
+        let window = locate_member(&hot, 1).unwrap();
+        assert!(decode_member_window(&encoded.cold, 0, window, &hot, &widths, 1 << 20,).is_err());
     }
 }
