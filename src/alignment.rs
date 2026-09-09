@@ -501,21 +501,34 @@ impl AlignmentWorkspace {
             self.cells.truncate(total_cells);
         }
 
+        let gap_open_score = gap_open(config);
         let mut best = BestCell::default();
         for query_index in 0..=query.len() {
-            let start = self.row_starts[query_index];
-            let width = self.row_widths[query_index];
-            for target_index in start..start + width {
+            let row_offset = self.row_offsets[query_index];
+            let row_start = self.row_starts[query_index];
+            let row_width = self.row_widths[query_index];
+            let previous_metadata = query_index.checked_sub(1).map(|previous_index| {
+                (
+                    self.row_offsets[previous_index],
+                    self.row_starts[previous_index],
+                    self.row_widths[previous_index],
+                )
+            });
+            let (completed_rows, current_and_following) = self.cells.split_at_mut(row_offset);
+            let current_row = &mut current_and_following[..row_width];
+            let previous_row = previous_metadata
+                .map(|(offset, start, width)| (start, &completed_rows[offset..offset + width]));
+            for local_index in 0..row_width {
+                let target_index = row_start + local_index;
                 if query_index == 0 && target_index == 0 {
                     continue;
                 }
                 let mut cell = Cell::default();
-                if query_index > 0
+                if let Some((previous_start, previous_cells)) = previous_row
                     && target_index > 0
-                    && let Some(previous) =
-                        self.cell_index_checked(query_index - 1, target_index - 1)
+                    && let Some(previous_index) = (target_index - 1).checked_sub(previous_start)
+                    && let Some(previous) = previous_cells.get(previous_index).copied()
                 {
-                    let previous = self.cells[previous];
                     let (score, state) = previous.best_score();
                     let substitution =
                         if query[query_index - 1].eq_ignore_ascii_case(&target[target_index - 1]) {
@@ -530,22 +543,16 @@ impl AlignmentWorkspace {
                             if score == substitution { START } else { state };
                     }
                 }
-                if target_index > 0
-                    && let Some(previous) = self.cell_index_checked(query_index, target_index - 1)
-                {
-                    let previous = self.cells[previous];
+                if local_index > 0 {
+                    let previous = current_row[local_index - 1];
                     let (score, state) = choose([
                         (
-                            previous.scores[INSERTION as usize]
-                                .saturating_add(config.gap_extend_score),
+                            previous.scores[INSERTION as usize] + config.gap_extend_score,
                             INSERTION,
                         ),
+                        (previous.scores[MATCH as usize] + gap_open_score, MATCH),
                         (
-                            previous.scores[MATCH as usize].saturating_add(gap_open(config)),
-                            MATCH,
-                        ),
-                        (
-                            previous.scores[DELETION as usize].saturating_add(gap_open(config)),
+                            previous.scores[DELETION as usize] + gap_open_score,
                             DELETION,
                         ),
                     ]);
@@ -554,22 +561,18 @@ impl AlignmentWorkspace {
                         cell.previous[INSERTION as usize] = state;
                     }
                 }
-                if query_index > 0
-                    && let Some(previous) = self.cell_index_checked(query_index - 1, target_index)
+                if let Some((previous_start, previous_cells)) = previous_row
+                    && let Some(previous_index) = target_index.checked_sub(previous_start)
+                    && let Some(previous) = previous_cells.get(previous_index).copied()
                 {
-                    let previous = self.cells[previous];
                     let (score, state) = choose([
                         (
-                            previous.scores[DELETION as usize]
-                                .saturating_add(config.gap_extend_score),
+                            previous.scores[DELETION as usize] + config.gap_extend_score,
                             DELETION,
                         ),
+                        (previous.scores[MATCH as usize] + gap_open_score, MATCH),
                         (
-                            previous.scores[MATCH as usize].saturating_add(gap_open(config)),
-                            MATCH,
-                        ),
-                        (
-                            previous.scores[INSERTION as usize].saturating_add(gap_open(config)),
+                            previous.scores[INSERTION as usize] + gap_open_score,
                             INSERTION,
                         ),
                     ]);
@@ -578,8 +581,7 @@ impl AlignmentWorkspace {
                         cell.previous[DELETION as usize] = state;
                     }
                 }
-                let index = self.cell_index(query_index, target_index);
-                self.cells[index] = cell;
+                current_row[local_index] = cell;
                 best.consider(query_index, target_index, cell);
             }
         }
@@ -635,10 +637,6 @@ impl AlignmentWorkspace {
                 .ok_or(AlignmentError::LengthOverflow)?;
         }
         Ok(())
-    }
-
-    fn cell_index(&self, query_index: usize, target_index: usize) -> usize {
-        self.row_offsets[query_index] + target_index - self.row_starts[query_index]
     }
 
     fn cell_index_checked(&self, query_index: usize, target_index: usize) -> Option<usize> {
