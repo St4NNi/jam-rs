@@ -4,7 +4,8 @@ use crate::alignment::{
 use crate::bgzf::{BgzfError, BgzfReader};
 use crate::jidx::{JidxError, RESCUE_K15_TAG, seed_length, sha256, sha256_reader};
 use crate::jidx_reader::{
-    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS, SeedEntry,
+    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS, SeedDocument,
+    SeedEntry,
 };
 use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
@@ -156,32 +157,63 @@ pub(crate) struct CachedSeedLookups {
     query_identity: [u8; 32],
     file_identity: [u64; 7],
     through: Option<u64>,
-    seeds: Vec<SeedEntry>,
+    frozen: bool,
+    groups: Vec<CachedDocumentGroup>,
+    documents: Vec<SeedDocument>,
     _reservation: CacheReservation<'static>,
 }
 
-impl CachedSeedLookups {
-    pub(crate) fn seed_limit(bytes: usize) -> usize {
-        bytes.saturating_sub(std::mem::size_of::<Option<Self>>() + 4096)
-            / std::mem::size_of::<SeedEntry>()
-    }
+#[derive(Clone, Copy)]
+struct CachedDocumentGroup {
+    seed: SeedEntry,
+    document_start: usize,
+    document_count: usize,
+}
 
+#[derive(Clone, Copy)]
+struct CachedSeedLookup<'a> {
+    seed: SeedEntry,
+    documents: &'a [SeedDocument],
+}
+
+impl CachedSeedLookups {
     fn new(
         header_sha256: [u8; 32],
         query_identity: [u8; 32],
         file_identity: [u64; 7],
-        limit: usize,
+        bytes: usize,
+        query_keys: usize,
+        document_count: u32,
     ) -> Option<Self> {
-        if limit == 0 {
+        let fixed = std::mem::size_of::<Option<Self>>().checked_add(4096)?;
+        let documents_per_group = usize::try_from(document_count).ok()?;
+        let bytes_per_group = std::mem::size_of::<CachedDocumentGroup>()
+            .checked_add(documents_per_group.checked_mul(std::mem::size_of::<SeedDocument>())?)?;
+        let group_limit = bytes
+            .checked_sub(fixed)?
+            .checked_div(bytes_per_group)?
+            .min(query_keys);
+        if group_limit == 0 {
             return None;
         }
-        let bytes = limit
-            .checked_mul(std::mem::size_of::<SeedEntry>())?
-            .checked_add(std::mem::size_of::<Option<Self>>() + 4096)?;
+        let document_limit = group_limit.checked_mul(documents_per_group)?;
         let reservation = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes)?;
-        let mut seeds = Vec::new();
-        seeds.try_reserve_exact(limit).ok()?;
-        if seeds.capacity() > limit {
+        let mut groups = Vec::new();
+        let mut documents = Vec::new();
+        groups.try_reserve_exact(group_limit).ok()?;
+        documents.try_reserve_exact(document_limit).ok()?;
+        let allocated = fixed
+            .checked_add(
+                groups
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<CachedDocumentGroup>())?,
+            )?
+            .checked_add(
+                documents
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<SeedDocument>())?,
+            )?;
+        if allocated > reservation.bytes {
             return None;
         }
         Some(Self {
@@ -189,18 +221,55 @@ impl CachedSeedLookups {
             query_identity,
             file_identity,
             through: None,
-            seeds,
+            frozen: false,
+            groups,
+            documents,
             _reservation: reservation,
         })
     }
 
-    fn get(&self, key: u64) -> Option<Option<SeedEntry>> {
+    fn get(&self, key: u64) -> Option<Option<CachedSeedLookup<'_>>> {
         self.through.is_some_and(|through| key <= through).then(|| {
-            self.seeds
-                .binary_search_by_key(&key, |seed| seed.packed_key)
+            self.groups
+                .binary_search_by_key(&key, |group| group.seed.packed_key)
                 .ok()
-                .map(|index| self.seeds[index])
+                .map(|index| {
+                    let group = self.groups[index];
+                    CachedSeedLookup {
+                        seed: group.seed,
+                        documents: &self.documents
+                            [group.document_start..group.document_start + group.document_count],
+                    }
+                })
         })
+    }
+
+    fn cache_negative(&mut self, key: u64) {
+        if !self.frozen {
+            self.through = Some(key);
+        }
+    }
+
+    fn cache_group(&mut self, key: u64, seed: SeedEntry, documents: &[SeedDocument]) {
+        if self.frozen {
+            return;
+        }
+        let Some(document_end) = self.documents.len().checked_add(documents.len()) else {
+            self.frozen = true;
+            return;
+        };
+        if self.groups.len() == self.groups.capacity() || document_end > self.documents.capacity() {
+            self.frozen = true;
+            return;
+        }
+        let document_start = self.documents.len();
+        self.documents.extend_from_slice(documents);
+        self.groups.push(CachedDocumentGroup {
+            seed,
+            document_start,
+            document_count: documents.len(),
+        });
+        self.through = Some(key);
     }
 }
 
@@ -278,9 +347,8 @@ impl TraceEngine {
             self.index.header().k,
             self.index.header().rescue_k15,
         )?;
-        let cache_limit =
-            CachedSeedLookups::seed_limit(LOOKUP_CACHE_BYTES / rayon::current_num_threads().max(1));
-        let census = self.candidate_census(&prepared, config, cache_limit)?;
+        let cache_bytes = LOOKUP_CACHE_BYTES / rayon::current_num_threads().max(1);
+        let census = self.candidate_census(&prepared, config, cache_bytes)?;
         let completion = candidate_completion(census.candidates.len(), config.max_metagenomes)?;
         let mut candidates = census.candidates;
         candidates.truncate(config.max_metagenomes);
@@ -318,7 +386,7 @@ impl TraceEngine {
         &self,
         prepared: &PreparedQuery,
         config: TraceConfig,
-        cache_limit: usize,
+        cache_bytes: usize,
     ) -> Result<TraceCensus, TraceError> {
         validate_config(config)?;
         let sketch_candidates =
@@ -330,7 +398,6 @@ impl TraceEngine {
         self.index
             .verify_query_filter_pages(prepared.positions_by_key.keys())?;
         let mut frequencies = Vec::new();
-        let cache_limit = cache_limit.min(prepared.positions_by_key.len());
         let header_sha256 = sha256(&self.index.header().encode()?);
         let mut lookups =
             self.index
@@ -342,7 +409,9 @@ impl TraceEngine {
                         header_sha256,
                         prepared.lookup_identity,
                         file_identity,
-                        cache_limit,
+                        cache_bytes,
+                        prepared.positions_by_key.len(),
+                        self.index.header().document_count,
                     )
                 });
         let mut entries = prepared.positions_by_key.iter();
@@ -371,21 +440,17 @@ impl TraceEngine {
             let index_seeds = self.index.find_seeds_batch(&packed_keys)?;
             self.index.advise_first_document_rows(&index_seeds);
             for ((packed_key, query_seeds), index_seed) in chunk.iter().copied().zip(index_seeds) {
-                if let Some(lookups) = &mut lookups
-                    && lookups.seeds.len() < cache_limit
-                {
-                    if let Some(seed) = index_seed {
-                        lookups.seeds.push(seed);
-                    }
-                    lookups.through = Some(packed_key);
-                }
                 let Some(index_seed) = index_seed else {
+                    if let Some(lookups) = &mut lookups {
+                        lookups.cache_negative(packed_key);
+                    }
                     continue;
                 };
                 frequencies.push((packed_key, index_seed.document_frequency));
                 let query_positions = u64::try_from(query_seeds.len())
                     .map_err(|_| TraceError::Invalid("query seed count"))?;
-                for document in self.index.seed_documents(index_seed)? {
+                let documents = self.index.seed_documents(index_seed)?;
+                for &document in &documents {
                     let hits = document
                         .occurrence_count
                         .checked_mul(query_positions)
@@ -412,6 +477,9 @@ impl TraceEngine {
                             exact_seed_hits: hits,
                         },
                     );
+                }
+                if let Some(lookups) = &mut lookups {
+                    lookups.cache_group(packed_key, index_seed, &documents);
                 }
             }
         }
@@ -478,20 +546,22 @@ impl TraceEngine {
             filter_keys.dedup();
             self.index.verify_query_filter_pages(filter_keys.iter())?;
             let uncached_seeds = self.index.find_seeds_batch(&filter_keys)?;
+            self.index.advise_first_document_rows(&uncached_seeds);
             let index_seeds = packed_keys
                 .iter()
-                .map(|&key| {
-                    lookups
-                        .and_then(|lookups| lookups.get(key))
-                        .unwrap_or_else(|| {
-                            uncached_seeds
-                                [filter_keys.binary_search(&key).expect("uncached query key")]
-                        })
+                .map(|&key| match lookups.and_then(|lookups| lookups.get(key)) {
+                    Some(Some(cached)) => (Some(cached.seed), Some(cached.documents)),
+                    Some(None) => (None, None),
+                    None => (
+                        uncached_seeds
+                            [filter_keys.binary_search(&key).expect("uncached query key")],
+                        None,
+                    ),
                 })
                 .collect::<Vec<_>>();
-            self.index.advise_first_document_rows(&index_seeds);
 
-            for (&packed_key, index_seed) in packed_keys.iter().zip(index_seeds) {
+            for (&packed_key, (index_seed, cached_documents)) in packed_keys.iter().zip(index_seeds)
+            {
                 let query_seeds = prepared
                     .positions_by_key
                     .get(&packed_key)
@@ -504,9 +574,16 @@ impl TraceEngine {
                     self.index.header().rescue_k15,
                     packed_key,
                 )?;
-                let documents = self.index.seed_documents(index_seed)?;
+                let decoded_documents;
+                let documents = if let Some(documents) = cached_documents {
+                    documents
+                } else {
+                    decoded_documents = self.index.seed_documents(index_seed)?;
+                    &decoded_documents
+                };
                 for document in documents
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|document| candidate_ids.contains(&document.metagenome_id))
                 {
                     let occurrences = self.index.seed_document_occurrences(index_seed, document)?;
@@ -1234,6 +1311,7 @@ mod tests {
         let available = AtomicUsize::new(10);
         let first = CacheReservation::acquire(&available, 6).unwrap();
         assert!(CacheReservation::acquire(&available, 5).is_none());
+        assert_eq!(available.load(Ordering::Relaxed), 4);
         let second = CacheReservation::acquire(&available, 4).unwrap();
         assert_eq!(available.load(Ordering::Relaxed), 0);
         drop(first);
@@ -1564,17 +1642,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rare_first_result, reverse_result);
-        for cache_limit in [0, 1, 3, usize::MAX] {
+        let cache_fixed = std::mem::size_of::<Option<CachedSeedLookups>>() + 4096;
+        let cache_per_key = std::mem::size_of::<CachedDocumentGroup>()
+            + usize::try_from(engine.index.header().document_count).unwrap()
+                * std::mem::size_of::<SeedDocument>();
+        let one_group_cache_bytes = cache_fixed + cache_per_key;
+        let full_cache_bytes = cache_fixed + cache_per_key * prepared.positions_by_key.len();
+        for cache_bytes in [0, cache_fixed, one_group_cache_bytes, full_cache_bytes] {
             let mut cached = engine
-                .candidate_census(&prepared, direct_config, cache_limit)
+                .candidate_census(&prepared, direct_config, cache_bytes)
                 .unwrap();
             if let Some(lookups) = &cached.lookups {
-                assert!(lookups.seeds.capacity() <= cache_limit);
+                let allocated = cache_fixed
+                    + lookups.groups.capacity() * std::mem::size_of::<CachedDocumentGroup>()
+                    + lookups.documents.capacity() * std::mem::size_of::<SeedDocument>();
+                assert!(allocated <= lookups._reservation.bytes);
                 assert_eq!(
-                    lookups.seeds.len(),
-                    cached.frequencies.len().min(cache_limit)
+                    lookups.documents.len(),
+                    lookups
+                        .groups
+                        .iter()
+                        .map(|group| group.document_count)
+                        .sum::<usize>()
                 );
-                if cache_limit == usize::MAX {
+                if cache_bytes == one_group_cache_bytes {
+                    assert_eq!(lookups.groups.len(), 1);
+                    assert!(lookups.frozen);
+                }
+                if cache_bytes == full_cache_bytes {
                     assert!(
                         prepared
                             .positions_by_key
@@ -1585,7 +1680,7 @@ mod tests {
                         prepared
                             .positions_by_key
                             .keys()
-                            .any(|&key| lookups.get(key) == Some(None))
+                            .any(|&key| matches!(lookups.get(key), Some(None)))
                     );
                 } else {
                     assert!(
@@ -1596,12 +1691,20 @@ mod tests {
                     );
                 }
                 for &key in prepared.positions_by_key.keys() {
-                    if let Some(seed) = lookups.get(key) {
-                        assert_eq!(seed, engine.index.find_seed(key).unwrap());
+                    match lookups.get(key) {
+                        Some(Some(cached)) => {
+                            assert_eq!(Some(cached.seed), engine.index.find_seed(key).unwrap());
+                            assert_eq!(
+                                cached.documents,
+                                engine.index.seed_documents(cached.seed).unwrap()
+                            );
+                        }
+                        Some(None) => assert_eq!(None, engine.index.find_seed(key).unwrap()),
+                        None => {}
                     }
                 }
             } else {
-                assert!(cache_limit == 0 || cfg!(not(unix)));
+                assert!(cache_bytes <= cache_fixed || cfg!(not(unix)));
             }
             let result = engine
                 .trace_selected(
@@ -1836,7 +1939,7 @@ mod tests {
         #[cfg(unix)]
         {
             let cached = engine
-                .candidate_census(&prepared, direct_config, 1)
+                .candidate_census(&prepared, direct_config, full_cache_bytes)
                 .unwrap();
             let times = std::fs::FileTimes::new().set_modified(
                 std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(42),

@@ -150,8 +150,7 @@ impl CollectionTraceEngine {
     ) -> Result<Vec<CollectionTraceResult>, TraceError> {
         let worker_limit = rayon::current_num_threads().max(1);
         let live_shards = worker_limit.div_ceil(prepared.len()).max(1);
-        let cache_limit =
-            CachedSeedLookups::seed_limit(LOOKUP_CACHE_BYTES / prepared.len() / self.shards.len());
+        let cache_bytes = LOOKUP_CACHE_BYTES / prepared.len() / self.shards.len();
         let mut lookups = (0..prepared.len())
             .map(|_| (0..self.shards.len()).map(|_| None).collect::<Vec<_>>())
             .collect::<Vec<_>>();
@@ -166,7 +165,7 @@ impl CollectionTraceEngine {
                     let engine = open_shard(shard, self.s3.clone())?;
                     prepared
                         .par_iter()
-                        .map(|query| engine.candidate_census(query, config, cache_limit))
+                        .map(|query| engine.candidate_census(query, config, cache_bytes))
                         .collect::<Result<Vec<_>, _>>()
                 })
                 .collect::<Result<Vec<_>, TraceError>>()?;
