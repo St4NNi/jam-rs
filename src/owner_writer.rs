@@ -72,6 +72,232 @@ pub struct OwnerWriteStats {
     pub file_sha256: [u8; 32],
 }
 
+#[derive(Serialize)]
+struct PublishedManifest<'a> {
+    version: u32,
+    complete: bool,
+    metadata_owner: u32,
+    owners: &'a [PublishedOwner],
+}
+
+#[derive(Serialize)]
+struct PublishedOwner {
+    path: PathBuf,
+    header_sha256: String,
+}
+
+pub fn publish_owner_manifest(
+    path: impl AsRef<Path>,
+    owners: &[PathBuf],
+    metadata_owner: u32,
+    complete: bool,
+) -> Result<[u8; 32], OwnerWriteError> {
+    let path = path.as_ref();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut entries = Vec::with_capacity(owners.len());
+    for owner in owners {
+        let final_path = if owner.is_absolute() {
+            owner.clone()
+        } else {
+            parent.join(owner)
+        };
+        let relative = final_path
+            .strip_prefix(parent)
+            .map_err(|_| OwnerWriteError::Invalid("owner manifest path"))?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(OwnerWriteError::Invalid("owner manifest path"));
+        }
+        let mut file = File::open(&final_path)?;
+        let mut header = [0; OWNER_HEADER_SIZE];
+        file.read_exact(&mut header)?;
+        OwnerHeader::decode(&header, file.metadata()?.len())?;
+        entries.push(PublishedOwner {
+            path: relative.to_path_buf(),
+            header_sha256: hex(&sha256(&header)),
+        });
+    }
+    let bytes = serde_json::to_vec(&PublishedManifest {
+        version: 1,
+        complete,
+        metadata_owner,
+        owners: &entries,
+    })?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".owner-manifest-")
+        .tempfile_in(parent)?;
+    temporary.write_all(&bytes)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    crate::owner_reader::OwnerReader::open(temporary.path())?.verify_checksum()?;
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
+    sync_directory(parent)?;
+    Ok(sha256(&bytes))
+}
+
+pub fn write_owner(
+    path: impl AsRef<Path>,
+    input: OwnerWriteInput<'_>,
+) -> Result<OwnerWriteStats, OwnerWriteError> {
+    validate_input(&input)?;
+    let mut strings = Vec::new();
+    let mut documents = Vec::new();
+    let mut contigs = Vec::new();
+    let mut gzi = Vec::new();
+    if let Some(metadata) = input.metadata {
+        encode_metadata(
+            metadata,
+            &mut strings,
+            &mut documents,
+            &mut contigs,
+            &mut gzi,
+        )?;
+    }
+    let mut directory = Vec::new();
+    let mut hot = Vec::new();
+    let mut cold = Vec::new();
+    let mut occurrence_count = 0u64;
+    for block in input.keys.chunks(MAX_KEYS_PER_BLOCK) {
+        let encoded = encode_block(block)?;
+        let first = block.first().expect("nonempty block").key;
+        let last = block.last().expect("nonempty block").key;
+        let mut record = [0; OWNER_BLOCK_SIZE as usize];
+        put_u64(&mut record, 0, first);
+        put_u64(&mut record, 8, last);
+        put_u64(&mut record, 16, hot.len() as u64);
+        put_u64(&mut record, 24, encoded.hot.len() as u64);
+        put_u64(&mut record, 32, cold.len() as u64);
+        put_u64(&mut record, 40, encoded.cold.len() as u64);
+        put_u32(&mut record, 48, block.len() as u32);
+        directory.extend_from_slice(&record);
+        let posting_bytes = hot
+            .len()
+            .checked_add(cold.len())
+            .and_then(|length| length.checked_add(encoded.hot.len()))
+            .and_then(|length| length.checked_add(encoded.cold.len()))
+            .ok_or(OwnerWriteError::Invalid("prototype posting bytes"))?;
+        validate_prototype_payload_bytes(&[
+            strings.len() as u64,
+            documents.len() as u64,
+            contigs.len() as u64,
+            gzi.len() as u64,
+            directory.len() as u64,
+            posting_bytes as u64,
+        ])?;
+        hot.extend_from_slice(&encoded.hot);
+        cold.extend_from_slice(&encoded.cold);
+        for key in block {
+            for member in &key.members {
+                occurrence_count = occurrence_count
+                    .checked_add(member.occurrences.len() as u64)
+                    .ok_or(OwnerWriteError::Invalid("occurrence count"))?;
+            }
+        }
+    }
+    let lengths = [
+        strings.len() as u64,
+        documents.len() as u64,
+        contigs.len() as u64,
+        gzi.len() as u64,
+        directory.len() as u64,
+        hot.len() as u64,
+        cold.len() as u64,
+        0,
+    ];
+    validate_prototype_payload_bytes(&lengths[..7])?;
+    let (sections, expected_file_bytes) = section_layout(lengths)?;
+    let path = path.as_ref();
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".owner-")
+        .tempfile_in(parent)?;
+    let checksum_input = temporary.reopen()?;
+    let mut output = BufWriter::with_capacity(1024 * 1024, temporary.as_file_mut());
+    output.write_all(&[0; OWNER_HEADER_SIZE])?;
+    for (section, payload) in sections[..7].iter().zip([
+        &strings, &documents, &contigs, &gzi, &directory, &hot, &cold,
+    ]) {
+        write_padding(&mut output, section.offset)?;
+        output.write_all(payload)?;
+    }
+    write_padding(&mut output, sections[7].offset)?;
+    output.flush()?;
+    let mut checksum_input = BufReader::new(checksum_input);
+    checksum_input.seek(SeekFrom::Start(OWNER_PAGE_SIZE))?;
+    let (checksum_tree, checksum_root_sha256) = build_checksum_tree(
+        &mut checksum_input,
+        sections[7].offset / OWNER_PAGE_SIZE - 1,
+    )?;
+    if checksum_tree.len() as u64 != sections[7].length {
+        return Err(OwnerWriteError::Invalid("checksum length"));
+    }
+    output.write_all(&checksum_tree)?;
+    if output.stream_position()? != expected_file_bytes {
+        return Err(OwnerWriteError::Invalid("written length"));
+    }
+    output.flush()?;
+    output.seek(SeekFrom::Start(OWNER_HEADER_SIZE as u64))?;
+    let body_sha256 = sha256_reader(&mut **output.get_mut())?;
+    let header = OwnerHeader {
+        flags: (if input.range.complete {
+            COMPLETE_RANGE
+        } else {
+            0
+        }) | (if input.metadata.is_some() {
+            HAS_METADATA
+        } else {
+            0
+        }),
+        k: input.k,
+        rescue_k15: input.rescue_k15,
+        minimizer_window: input.minimizer_window,
+        owner_ordinal: input.owner_ordinal,
+        owner_count: input.owner_count,
+        first_key: input.range.first,
+        last_key: input.range.last,
+        key_count: input.keys.len() as u64,
+        occurrence_count,
+        document_count: input.document_count,
+        contig_count: input.contig_count,
+        generation_id: input.generation_id,
+        body_sha256,
+        checksum_root_sha256,
+        sections,
+    };
+    let header_bytes = header.encode()?;
+    output.seek(SeekFrom::Start(0))?;
+    output.write_all(&header_bytes)?;
+    output.flush()?;
+    output.get_ref().sync_all()?;
+    output.seek(SeekFrom::Start(0))?;
+    let file_sha256 = sha256_reader(&mut **output.get_mut())?;
+    drop(output);
+    temporary
+        .persist_noclobber(path)
+        .map_err(|error| error.error)?;
+    sync_directory(parent)?;
+    Ok(OwnerWriteStats {
+        keys: input.keys.len() as u64,
+        occurrences: occurrence_count,
+        hot_bytes: hot.len() as u64,
+        cold_bytes: cold.len() as u64,
+        file_bytes: expected_file_bytes,
+        header_sha256: sha256(&header_bytes),
+        file_sha256,
+    })
+}
+
 fn validate_input(input: &OwnerWriteInput<'_>) -> Result<(), OwnerWriteError> {
     if input.owner_count == 0
         || input.owner_ordinal >= input.owner_count
