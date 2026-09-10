@@ -128,15 +128,15 @@ pub(crate) struct TraceCensus {
 }
 
 pub(crate) const LOOKUP_CACHE_BYTES: usize = 256 * 1024 * 1024;
-static LOOKUP_CACHE_AVAILABLE: AtomicUsize = AtomicUsize::new(LOOKUP_CACHE_BYTES);
+pub(crate) static LOOKUP_CACHE_AVAILABLE: AtomicUsize = AtomicUsize::new(LOOKUP_CACHE_BYTES);
 
-struct CacheReservation<'a> {
+pub(crate) struct CacheReservation<'a> {
     available: &'a AtomicUsize,
-    bytes: usize,
+    pub(crate) bytes: usize,
 }
 
 impl<'a> CacheReservation<'a> {
-    fn acquire(available: &'a AtomicUsize, bytes: usize) -> Option<Self> {
+    pub(crate) fn acquire(available: &'a AtomicUsize, bytes: usize) -> Option<Self> {
         available
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
                 remaining.checked_sub(bytes)

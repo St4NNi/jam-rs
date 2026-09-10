@@ -39,6 +39,7 @@ mod shared_tests;
 pub mod shared_writer;
 pub mod sketch;
 pub mod trace;
+mod trace_batch;
 mod trace_index;
 pub mod writer;
 pub use cli::handlers::{
