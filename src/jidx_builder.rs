@@ -251,7 +251,7 @@ fn validate_names(database: &JamReader, manifest: &Manifest) -> Result<(), JidxB
     Ok(())
 }
 
-fn select_seeds(
+pub(crate) fn select_seeds(
     sequence: &[u8],
     config: JidxBuildConfig,
 ) -> Result<Vec<SelectedSeed>, JidxBuildError> {

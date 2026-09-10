@@ -30,6 +30,7 @@ pub mod query;
 pub mod range_source;
 pub mod reader;
 pub mod sketch;
+pub mod shared_seed;
 pub mod trace;
 mod trace_index;
 pub mod writer;
