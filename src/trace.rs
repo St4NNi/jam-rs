@@ -20,6 +20,8 @@ use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,6 +113,36 @@ pub struct TraceEngine {
     index: TraceIndex,
     sample_to_metagenome: Vec<MetagenomeId>,
     s3: Option<S3Config>,
+    batch_stats: Mutex<TraceBatchStats>,
+    observed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct TraceBatchStats {
+    pub timings_observed: bool,
+    pub seed_generation_ns: u64,
+    pub key_lookup_ns: u64,
+    pub membership_access_ns: u64,
+    pub position_access_ns: u64,
+    pub candidate_routing_ns: u64,
+    pub region_formation_ns: u64,
+    pub sequence_read_ns: u64,
+    pub bgzf_decode_and_handling_ns: u64,
+    pub alignment_ns: u64,
+    pub traceback_and_cigar_ns: u64,
+    pub endpoint_completion_ns: u64,
+    pub search_critical_ns: u64,
+    pub batches: u64,
+    pub unique_keys: u64,
+    pub cached_groups: u64,
+    pub cached_positions: u64,
+    pub lookup_peak_bytes: usize,
+    pub bgzf_cache_hits: u64,
+    pub bgzf_blocks_decoded: u64,
+    pub bgzf_evictions: u64,
+    pub bgzf_peak_bytes: usize,
+    pub bgzf_io_limit: usize,
+    pub bgzf_io_peak: usize,
 }
 
 pub(crate) struct PreparedQuery {
@@ -321,6 +353,8 @@ impl TraceEngine {
             index: TraceIndex::Shard(Box::new(index)),
             sample_to_metagenome,
             s3,
+            batch_stats: Mutex::default(),
+            observed: false,
         })
     }
 
@@ -335,6 +369,33 @@ impl TraceEngine {
             index: TraceIndex::Owner(index),
             sample_to_metagenome: Vec::new(),
             s3,
+            batch_stats: Mutex::default(),
+            observed: false,
+        })
+    }
+
+    pub fn open_shared(path: impl AsRef<Path>, s3: Option<S3Config>) -> Result<Self, TraceError> {
+        Self::open_shared_observed(path, s3, false)
+    }
+
+    pub(crate) fn open_shared_observed(
+        path: impl AsRef<Path>,
+        s3: Option<S3Config>,
+        observed: bool,
+    ) -> Result<Self, TraceError> {
+        let index = if observed {
+            crate::shared_reader::SharedReader::open_observed(path)?
+        } else {
+            crate::shared_reader::SharedReader::open(path)?
+        };
+        Ok(Self {
+            jam_path: None,
+            screen: None,
+            index: TraceIndex::Shared(Box::new(index)),
+            sample_to_metagenome: Vec::new(),
+            s3,
+            batch_stats: Mutex::default(),
+            observed,
         })
     }
 
@@ -399,6 +460,37 @@ impl TraceEngine {
             .into_par_iter()
             .map(|prepared| self.search_prepared(prepared, config, shared.as_ref()))
             .collect()
+    }
+
+    pub fn batch_stats(&self) -> TraceBatchStats {
+        *self
+            .batch_stats
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub fn shared_read_stats(&self) -> Option<crate::shared_reader::SharedReadStats> {
+        match &self.index {
+            TraceIndex::Shared(index) => Some(index.stats()),
+            _ => None,
+        }
+    }
+
+    fn record_alignment_time(
+        &self,
+        started: Option<Instant>,
+        workspace: &crate::alignment::AlignmentWorkspace,
+        before: (u64, u64),
+    ) {
+        if let Some(started) = started {
+            let elapsed = started.elapsed().as_nanos() as u64;
+            let traceback = workspace.traceback_nanoseconds().saturating_sub(before.0);
+            let endpoint = workspace.endpoint_nanoseconds().saturating_sub(before.1);
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.alignment_ns += elapsed.saturating_sub(traceback).saturating_sub(endpoint);
+            stats.traceback_and_cigar_ns += traceback;
+            stats.endpoint_completion_ns += endpoint;
+        }
     }
 
     fn shared_seed_lookups(
