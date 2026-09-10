@@ -321,6 +321,12 @@ fn selected_access_does_not_replay_metadata_or_unbounded_member_prefixes() {
         let reader = OwnerReader::open_with_observer(manifest, observer).unwrap();
         for entry in &keys {
             let seed = reader.find_seeds_batch(&[entry.key, entry.key]).unwrap()[0].unwrap();
+            let before = reader.read_snapshot();
+            let repeated = reader.find_seeds_batch(&[entry.key; 64]).unwrap();
+            assert!(repeated.iter().all(|found| *found == Some(seed)));
+            let delta = reader.read_snapshot().checked_sub(&before).unwrap();
+            assert!(delta.totals[counters::FILE_IDENTITY_CHECKS] <= 4);
+            assert_eq!(delta.totals[counters::READ_CALLS], 0);
             let members = reader.seed_documents(seed).unwrap();
             for ordinal in [0, 1, 16, 32] {
                 for _ in 0..2 {

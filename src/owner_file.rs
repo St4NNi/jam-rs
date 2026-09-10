@@ -34,7 +34,7 @@ pub(crate) struct OwnerFile {
 
 #[derive(Default)]
 struct HotCache {
-    blocks: std::collections::BTreeMap<u64, Arc<OwnerHotBlock>>,
+    blocks: std::collections::BTreeMap<u64, (BlockRecord, Arc<OwnerHotBlock>)>,
 }
 
 impl OwnerFile {
@@ -80,6 +80,7 @@ impl OwnerFile {
         &self,
         keys: &[u64],
     ) -> Result<Vec<Option<OwnerSeed>>, OwnerReaderError> {
+        self.verify_unchanged()?;
         let mut out = vec![None; keys.len()];
         let mut grouped = std::collections::BTreeMap::<u64, Vec<(usize, u64)>>::new();
         for (position, &key) in keys.iter().enumerate() {
@@ -99,8 +100,7 @@ impl OwnerFile {
                 .push((position, key));
         }
         for (block_ordinal, requests) in grouped {
-            let record = self.validated_block_record(block_ordinal)?;
-            let decoded = self.hot_block(block_ordinal, record)?;
+            let (_, decoded) = self.occurrence_block(block_ordinal)?;
             for (position, key) in requests {
                 out[position] = find_key(&decoded, key).map(|entry| OwnerSeed {
                     packed_key: key,
@@ -112,6 +112,7 @@ impl OwnerFile {
                 }
             }
         }
+        self.verify_unchanged()?;
         Ok(out)
     }
 
@@ -119,8 +120,7 @@ impl OwnerFile {
         &self,
         seed: OwnerSeed,
     ) -> Result<Vec<OwnerDocument>, OwnerReaderError> {
-        let record = self.validated_block_record(seed.block_ordinal)?;
-        let decoded = self.hot_block(seed.block_ordinal, record)?;
+        let (_, decoded) = self.occurrence_block(seed.block_ordinal)?;
         let hot = find_key(&decoded, seed.packed_key)
             .ok_or(OwnerReaderError::Invalid("missing cached seed"))?;
         if hot.document_frequency != seed.document_frequency {
@@ -151,8 +151,7 @@ impl OwnerFile {
         {
             return Err(OwnerReaderError::Invalid("seed document"));
         }
-        let record = self.validated_block_record(document.block_ordinal)?;
-        let decoded = self.hot_block(document.block_ordinal, record)?;
+        let (record, decoded) = self.occurrence_block(document.block_ordinal)?;
         let hot = find_key(&decoded, document.seed_key)
             .ok_or(OwnerReaderError::Invalid("missing seed document"))?;
         let member: &OwnerHotMember = key_members(&decoded, hot)?
@@ -257,8 +256,31 @@ impl OwnerFile {
         BlockRecord::decode(bytes)
     }
 
+    // Directory probes share the enclosing lookup's file identity checks.
+    fn resident_block_record(&self, ordinal: u64) -> Result<BlockRecord, OwnerReaderError> {
+        if ordinal >= self.block_count()? {
+            return Err(OwnerReaderError::Invalid("block ordinal"));
+        }
+        let section = self.header.section(OwnerSection::BlockDirectory);
+        let start = section.offset + ordinal * u64::from(OWNER_BLOCK_SIZE);
+        let end = start + u64::from(OWNER_BLOCK_SIZE);
+        for page in start / OWNER_PAGE_SIZE..=(end - 1) / OWNER_PAGE_SIZE {
+            let index = page - 1;
+            let cached = self.file_identity.is_some()
+                && self.verified_pages[index as usize / 64].load(Ordering::Acquire)
+                    & (1u64 << (index % 64))
+                    != 0;
+            if !cached {
+                self.checked_bytes(page * OWNER_PAGE_SIZE, (page + 1) * OWNER_PAGE_SIZE)?;
+            }
+        }
+        self.observer
+            .record_directory(0, 1, u64::from(OWNER_BLOCK_SIZE));
+        BlockRecord::decode(&self.mmap[start as usize..end as usize])
+    }
+
     fn validated_block_record(&self, ordinal: u64) -> Result<BlockRecord, OwnerReaderError> {
-        let record = self.block_record(ordinal)?;
+        let record = self.resident_block_record(ordinal)?;
         let hot = self.header.section(OwnerSection::HotPostings);
         let cold = self.header.section(OwnerSection::ColdPostings);
         if record.first_key > record.last_key
@@ -277,11 +299,11 @@ impl OwnerFile {
         {
             return Err(OwnerReaderError::Invalid("block directory"));
         }
-        if ordinal > 0 && self.block_record(ordinal - 1)?.last_key >= record.first_key {
+        if ordinal > 0 && self.resident_block_record(ordinal - 1)?.last_key >= record.first_key {
             return Err(OwnerReaderError::Invalid("block directory"));
         }
         if ordinal + 1 < self.block_count()?
-            && record.last_key >= self.block_record(ordinal + 1)?.first_key
+            && record.last_key >= self.resident_block_record(ordinal + 1)?.first_key
         {
             return Err(OwnerReaderError::Invalid("block directory"));
         }
@@ -360,13 +382,35 @@ impl OwnerFile {
         Ok(parse_hot(hot)?)
     }
 
+    fn occurrence_block(
+        &self,
+        ordinal: u64,
+    ) -> Result<(BlockRecord, Arc<OwnerHotBlock>), OwnerReaderError> {
+        self.verify_unchanged()?;
+        let cached = self
+            .hot_cache
+            .lock()
+            .map_err(|_| OwnerReaderError::Invalid("hot cache"))?
+            .blocks
+            .get(&ordinal)
+            .cloned();
+        if let Some((record, decoded)) = cached {
+            self.observer
+                .record_hot_request(self.header.owner_ordinal, ordinal, 0, true);
+            return Ok((record, decoded));
+        }
+        let record = self.validated_block_record(ordinal)?;
+        let decoded = self.hot_block(ordinal, record)?;
+        Ok((record, decoded))
+    }
+
     pub(crate) fn hot_block(
         &self,
         ordinal: u64,
         record: BlockRecord,
     ) -> Result<Arc<OwnerHotBlock>, OwnerReaderError> {
         self.verify_unchanged()?;
-        if let Some(decoded) = self
+        if let Some((_, decoded)) = self
             .hot_cache
             .lock()
             .map_err(|_| OwnerReaderError::Invalid("hot cache"))?
@@ -385,7 +429,9 @@ impl OwnerFile {
             false,
         );
         let hot = self.block_bytes(record, true)?;
-        let charge = decoded_hot_bound(hot)?;
+        let charge = decoded_hot_bound(hot)?
+            .checked_add(std::mem::size_of::<BlockRecord>())
+            .ok_or(OwnerReaderError::Invalid("decoded hot postings"))?;
         let decoded = Arc::new(self.parse_hot_bounded(hot)?);
         self.observer
             .record_hot_decode(charge as u64, decoded.members.len() as u64);
@@ -402,7 +448,7 @@ impl OwnerFile {
             .hot_cache
             .lock()
             .map_err(|_| OwnerReaderError::Invalid("hot cache"))?;
-        if let Some(existing) = cache.blocks.get(&ordinal) {
+        if let Some((_, existing)) = cache.blocks.get(&ordinal) {
             return Ok(Arc::clone(existing));
         }
         if self.file_identity.is_some()
@@ -415,7 +461,7 @@ impl OwnerFile {
                 })
                 .is_ok()
         {
-            cache.blocks.insert(ordinal, Arc::clone(&decoded));
+            cache.blocks.insert(ordinal, (record, Arc::clone(&decoded)));
         }
         Ok(decoded)
     }

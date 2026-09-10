@@ -134,6 +134,7 @@ fn cached_owner_rejects_in_place_file_mutation() {
     let seed = reader.find_seeds_batch(&[key]).unwrap()[0].unwrap();
     let document = reader.seed_documents(seed).unwrap()[0];
     reader.seed_document_occurrences(seed, document).unwrap();
+    assert!(reader.find_seeds_batch(&[0]).unwrap()[0].is_none());
     let offset = read_header(&path).section(OwnerSection::Contigs).offset;
     let mut byte = [0];
     let mut input = File::open(owner_paths(&fixture.root)[0].clone()).unwrap();
@@ -145,6 +146,7 @@ fn cached_owner_rejects_in_place_file_mutation() {
     file.write_all(&byte).unwrap();
     file.sync_all().unwrap();
     assert!(reader.find_seeds_batch(&[key]).is_err());
+    assert!(reader.find_seeds_batch(&[0]).is_err());
     assert!(reader.seed_document_occurrences(seed, document).is_err());
 }
 
