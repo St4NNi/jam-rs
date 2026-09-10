@@ -5,13 +5,13 @@
 use super::{ReadAt, StorageError, checked_end};
 use foyer::{
     BlockEngineConfig, Code, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
-    HybridCacheEntry, PsyncIoEngineConfig, RecoverMode, Spawner,
+    HybridCacheEntry, HybridCachePolicy, PsyncIoEngineConfig, RecoverMode, Spawner,
 };
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
@@ -23,7 +23,11 @@ const FILL_BLOCKS: u64 = 16;
 /// blocks cannot make the cache index grow without bound.
 const MIN_CHARGE: usize = 256;
 
-/// The local disk level: a directory and the most bytes to keep there.
+/// The file in the disk level directory that one process locks while it uses the directory.
+const LOCK_FILE: &str = "lock";
+
+/// The local disk level: a directory and the most bytes to keep there. Its blocks stay there
+/// when the process ends and are found again by the next one.
 #[derive(Clone, Debug)]
 pub struct DiskConfig {
     /// The directory of the cache files.
@@ -59,11 +63,13 @@ impl CacheConfig {
 }
 
 /// A cache of fixed-size blocks shared by every wrapped source of one process. Wrap each source
-/// with [`BlockCache::wrap`].
+/// with [`BlockCache::wrap`]. A block is known by the SHA-256 digest of its file and its number,
+/// so the same file finds its blocks again in every shard and every run.
 pub struct BlockCache {
     blocks: HybridCache<BlockKey, Vec<u8>>,
     block_bytes: u64,
-    next_source: AtomicU64,
+    /// The lock of the disk level directory, held while the cache is open.
+    _lock: Option<File>,
     /// Places for hinted ranges fetched ahead.
     read_ahead: Arc<Semaphore>,
     runtime: Handle,
@@ -80,37 +86,51 @@ impl BlockCache {
             )));
         }
         let mut storage = HybridCacheBuilder::new()
+            .with_policy(HybridCachePolicy::WriteOnInsertion)
             .memory(config.ram_bytes as usize)
             .with_weighter(|_: &BlockKey, block: &Vec<u8>| block.len().max(MIN_CHARGE))
             .storage()
             .with_spawner(Spawner::from(runtime.clone()));
+        let mut lock = None;
         if let Some(disk) = &config.disk {
+            lock = Some(lock_directory(disk)?);
             let device = FsDeviceBuilder::new(&disk.directory)
                 .with_capacity(disk.bytes as usize)
                 .build()?;
-            // The disk level starts empty and dies with the process.
             storage = storage
                 .with_io_engine_config(PsyncIoEngineConfig::new())
                 .with_engine_config(BlockEngineConfig::new(device))
-                .with_recover_mode(RecoverMode::None);
+                .with_recover_mode(RecoverMode::Quiet);
         }
         let blocks = runtime.block_on(storage.build())?;
         Ok(Arc::new(Self {
             blocks,
             block_bytes,
-            next_source: AtomicU64::new(0),
+            _lock: lock,
             read_ahead: Arc::new(Semaphore::new(config.read_ahead)),
             runtime,
         }))
     }
 
-    /// Wraps a source; each wrapped source gets its own key space in the cache.
-    pub fn wrap(self: &Arc<Self>, inner: Arc<dyn ReadAt>) -> CachedSource {
-        CachedSource {
+    /// Wraps a source whose bytes have the SHA-256 digest `digest` (lower case hex).
+    pub fn wrap(
+        self: &Arc<Self>,
+        inner: Arc<dyn ReadAt>,
+        digest: &str,
+    ) -> Result<CachedSource, StorageError> {
+        let mut file = [0u8; 32];
+        hex::decode_to_slice(digest, &mut file)
+            .map_err(|_| StorageError::Config(format!("{digest:?} is not a SHA-256 digest")))?;
+        Ok(CachedSource {
             inner,
-            source: self.next_source.fetch_add(1, Ordering::Relaxed),
+            file,
             cache: Arc::clone(self),
-        }
+        })
+    }
+
+    /// Writes the blocks still on their way to the disk level, so the next run finds them.
+    pub fn close(&self) -> Result<(), StorageError> {
+        Ok(self.runtime.block_on(self.blocks.close())?)
     }
 
     /// Calls `consume(first, batch)` for the `blocks` of a source, at most
@@ -118,14 +138,14 @@ impl BlockCache {
     fn fill_batches(
         &self,
         inner: &dyn ReadAt,
-        source: u64,
+        file: [u8; 32],
         blocks: RangeInclusive<u64>,
         mut consume: impl FnMut(u64, &[Block]),
     ) -> io::Result<()> {
         let last = *blocks.end();
         for start in blocks.step_by(FILL_BLOCKS as usize) {
             let end = last.min(start + FILL_BLOCKS - 1);
-            consume(start, &self.fill(inner, source, start, end)?);
+            consume(start, &self.fill(inner, file, start, end)?);
         }
         Ok(())
     }
@@ -134,12 +154,12 @@ impl BlockCache {
     fn fill(
         &self,
         inner: &dyn ReadAt,
-        source: u64,
+        file: [u8; 32],
         first: u64,
         last: u64,
     ) -> io::Result<Vec<Block>> {
         let mut found: Vec<Option<Block>> = (first..=last)
-            .map(|block| self.find(BlockKey { source, block }))
+            .map(|block| self.find(self.key(file, block)))
             .collect();
         let mut index = 0;
         while index < found.len() {
@@ -151,10 +171,18 @@ impl BlockCache {
                 .find(|at| found[*at].is_some())
                 .unwrap_or(found.len());
             let run_first = first + index as u64;
-            self.fetch_run(inner, source, run_first, &mut found[index..run_end])?;
+            self.fetch_run(inner, file, run_first, &mut found[index..run_end])?;
             index = run_end;
         }
         Ok(found.into_iter().flatten().collect())
+    }
+
+    fn key(&self, file: [u8; 32], block: u64) -> BlockKey {
+        BlockKey {
+            file,
+            block_bytes: self.block_bytes,
+            block,
+        }
     }
 
     /// A block held in RAM, or else on the disk level. A failed disk read counts as a miss: the
@@ -171,7 +199,7 @@ impl BlockCache {
     fn fetch_run(
         &self,
         inner: &dyn ReadAt,
-        source: u64,
+        file: [u8; 32],
         first: u64,
         run: &mut [Option<Block>],
     ) -> io::Result<()> {
@@ -180,10 +208,7 @@ impl BlockCache {
         let mut bytes = vec![0; (stop - start) as usize];
         inner.read_exact_at(start, &mut bytes)?;
         for (at, chunk) in bytes.chunks(self.block_bytes as usize).enumerate() {
-            let key = BlockKey {
-                source,
-                block: first + at as u64,
-            };
+            let key = self.key(file, first + at as u64);
             run[at] = Some(self.blocks.insert(key, chunk.to_vec()));
         }
         Ok(())
@@ -193,7 +218,8 @@ impl BlockCache {
 /// A source read through a [`BlockCache`].
 pub struct CachedSource {
     inner: Arc<dyn ReadAt>,
-    source: u64,
+    /// The SHA-256 digest of the source's bytes.
+    file: [u8; 32],
     cache: Arc<BlockCache>,
 }
 
@@ -208,7 +234,7 @@ impl ReadAt for CachedSource {
         let mut written = 0;
         let inner = self.inner.as_ref();
         self.cache
-            .fill_batches(inner, self.source, blocks, |first, batch| {
+            .fill_batches(inner, self.file, blocks, |first, batch| {
                 for (at, block) in batch.iter().enumerate() {
                     let block_start = (first + at as u64) * block_bytes;
                     let from = (offset.max(block_start) - block_start) as usize;
@@ -236,28 +262,43 @@ impl ReadAt for CachedSource {
             return;
         };
         let blocks = offset / cache.block_bytes..=(end - 1) / cache.block_bytes;
-        let (inner, source, cache) = (Arc::clone(&self.inner), self.source, Arc::clone(cache));
+        let (inner, file, cache) = (Arc::clone(&self.inner), self.file, Arc::clone(cache));
         cache.runtime.clone().spawn_blocking(move || {
             let _permit = permit;
             // A failed hint only means the read fetches the blocks later and reports its error.
-            let _ = cache.fill_batches(inner.as_ref(), source, blocks, |_, _| {});
+            let _ = cache.fill_batches(inner.as_ref(), file, blocks, |_, _| {});
         });
     }
 }
 
-/// A block of one wrapped source.
+/// Locks the disk level directory for this process, creating it if needed.
+fn lock_directory(disk: &DiskConfig) -> Result<File, StorageError> {
+    let failed = |source| StorageError::File {
+        path: disk.directory.clone(),
+        source,
+    };
+    std::fs::create_dir_all(&disk.directory).map_err(failed)?;
+    let lock = File::create(disk.directory.join(LOCK_FILE)).map_err(failed)?;
+    lock.try_lock()
+        .map_err(|_| StorageError::Busy(disk.directory.clone()))?;
+    Ok(lock)
+}
+
+/// A block of a file, known by the file's SHA-256 digest, the block size and its number.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct BlockKey {
-    /// The number of the wrapped source.
-    source: u64,
-    /// The number of the block in that source.
+    file: [u8; 32],
+    block_bytes: u64,
     block: u64,
 }
 
 impl Code for BlockKey {
     fn encode(&self, writer: &mut impl Write) -> foyer::Result<()> {
         writer
-            .write_all(&self.source.to_le_bytes())
+            .write_all(&self.file)
+            .map_err(foyer::Error::io_error)?;
+        writer
+            .write_all(&self.block_bytes.to_le_bytes())
             .map_err(foyer::Error::io_error)?;
         writer
             .write_all(&self.block.to_le_bytes())
@@ -265,6 +306,10 @@ impl Code for BlockKey {
     }
 
     fn decode(reader: &mut impl Read) -> foyer::Result<Self> {
+        let mut file = [0u8; 32];
+        reader
+            .read_exact(&mut file)
+            .map_err(foyer::Error::io_error)?;
         let mut number = || -> foyer::Result<u64> {
             let mut bytes = [0u8; 8];
             reader
@@ -273,13 +318,14 @@ impl Code for BlockKey {
             Ok(u64::from_le_bytes(bytes))
         };
         Ok(Self {
-            source: number()?,
+            file,
+            block_bytes: number()?,
             block: number()?,
         })
     }
 
     fn estimated_size(&self) -> usize {
-        16
+        48
     }
 }
 

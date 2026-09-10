@@ -18,6 +18,9 @@ pub enum StorageError {
         #[source]
         source: io::Error,
     },
+    /// Another process uses the disk level directory of the block cache.
+    #[error("the cache directory {} is in use by another process", .0.display())]
+    Busy(PathBuf),
     /// The location is not `s3://bucket/key`, or the bucket or key is empty.
     #[error("not a usable S3 location: {0}")]
     Location(String),

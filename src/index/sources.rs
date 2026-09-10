@@ -126,7 +126,7 @@ impl ShardFiles {
 
     /// The source of a shard file, through the cache if there is one.
     pub(crate) fn open(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        Ok(self.cached(self.location.open(record)?))
+        self.cached(self.location.open(record)?, record)
     }
 
     /// The sketch file in memory: mapped when it is local, else read whole through the cache.
@@ -159,7 +159,7 @@ impl ShardFiles {
         if let Some(source) = slot.get() {
             return Ok(Arc::clone(source));
         }
-        let source = self.cached(self.packed.open(record)?);
+        let source = self.cached(self.packed.open(record)?, record)?;
         // Two threads may open the same entry at once; both get the source that was kept.
         Ok(Arc::clone(slot.get_or_init(|| source)))
     }
@@ -172,10 +172,15 @@ impl ShardFiles {
         self.packed.open(record)
     }
 
-    fn cached(&self, source: Arc<dyn ReadAt>) -> Arc<dyn ReadAt> {
-        match &self.cache {
-            Some(cache) => Arc::new(cache.wrap(source)),
+    /// `source` read through the cache, if there is one, under the digest of its record.
+    fn cached(
+        &self,
+        source: Arc<dyn ReadAt>,
+        record: &FileRecord,
+    ) -> Result<Arc<dyn ReadAt>, IndexError> {
+        Ok(match &self.cache {
+            Some(cache) => Arc::new(cache.wrap(source, &record.sha256)?),
             None => source,
-        }
+        })
     }
 }

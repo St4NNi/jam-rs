@@ -8,6 +8,9 @@ use crate::test_support::{Reply, Server, runtime, serve};
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// The digest the test object is cached under.
+const DIGEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
 /// Limits that wait only milliseconds between tries.
 fn quick() -> S3Limits {
     S3Limits {
@@ -62,7 +65,7 @@ fn cache_merges_runs() {
     let location = "s3://bucket/entry.packed";
     let object = S3Object::open(&config(&server, quick()), location, 50_000).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
-    let cached = cache.wrap(Arc::new(object));
+    let cached = cache.wrap(Arc::new(object), DIGEST).unwrap();
     let mut buffer = vec![0; 3000];
     for _ in 0..2 {
         cached.read_exact_at(20_000, &mut buffer).unwrap();
