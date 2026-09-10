@@ -2,7 +2,8 @@ use crate::alignment::{
     AlignmentConfig, AlignmentError, Interval, Strand, TraceAlignmentWorkspace,
 };
 use crate::bgzf::{BgzfError, BgzfReader};
-use crate::jidx::{JidxError, RESCUE_K15_TAG, seed_length, sha256, sha256_reader};
+use crate::bgzf_cache::{BgzfBlockCache, DEFAULT_BATCH_BGZF_CACHE_BYTES};
+use crate::jidx::{JidxError, RESCUE_K15_TAG, sha256, sha256_reader};
 use crate::jidx_reader::{
     ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS, SeedEntry,
 };
@@ -10,6 +11,7 @@ use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
 use crate::reader::ReaderError;
+use crate::trace_batch::{SharedSeedLookups, TraceBatch, lookup_budget, prepare_lookup};
 use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
 use needletail::Sequence;
 use rayon::prelude::*;
@@ -192,12 +194,6 @@ pub(crate) struct CachedSeedLookups {
     frozen: bool,
     groups: Vec<CachedDocumentGroup>,
     documents: Vec<SeedDocument>,
-    _reservation: CacheReservation<'static>,
-}
-
-struct SharedSeedLookups {
-    identity: TraceCacheIdentity,
-    entries: Vec<(u64, Option<SeedEntry>)>,
     _reservation: CacheReservation<'static>,
 }
 
@@ -422,14 +418,80 @@ impl TraceEngine {
         sequence: &[u8],
         config: TraceConfig,
     ) -> Result<TraceResult, TraceError> {
-        let prepared = prepare_query(
+        let prepared = self.prepare(query_id, sequence, config)?;
+        if self.index.is_shared() {
+            let batch = self.prepare_batch(std::slice::from_ref(&prepared))?;
+            let result = self.search_prepared(prepared, config, Some(&batch));
+            self.record_batch(&batch);
+            result
+        } else {
+            self.search_prepared(prepared, config, None)
+        }
+    }
+
+    fn prepare(
+        &self,
+        query_id: impl Into<String>,
+        sequence: &[u8],
+        config: TraceConfig,
+    ) -> Result<PreparedQuery, TraceError> {
+        let started = self.observed.then(Instant::now);
+        let mut prepared = prepare_query(
             query_id,
             sequence,
             config,
             self.index.k(),
             self.index.rescue_k15(),
         )?;
-        self.search_prepared(prepared, config, None)
+        if self.index.is_shared() {
+            let mut nested = Vec::new();
+            for seeds in prepared.positions_by_key.values() {
+                for seed in seeds {
+                    let context = crate::shared_seed::context_seed(
+                        &prepared.query,
+                        seed.position as usize,
+                        seed.packed_key as u32,
+                        seed.canonical_orientation,
+                        config.circular,
+                    )
+                    .ok_or(TraceError::Invalid("query core context"))?;
+                    for length in [21, 31] {
+                        if let Some(key) = context.key(length) {
+                            let flank = u64::from((length - 15) / 2);
+                            let position = if config.circular {
+                                (seed.position + prepared.query_length - flank)
+                                    % prepared.query_length
+                            } else {
+                                seed.position
+                                    .checked_sub(flank)
+                                    .ok_or(TraceError::Invalid("query context start"))?
+                            };
+                            nested.push(QuerySeed {
+                                packed_key: key
+                                    .packed()
+                                    .ok_or(TraceError::Invalid("query context key"))?,
+                                position,
+                                canonical_orientation: seed.canonical_orientation,
+                            });
+                        }
+                    }
+                }
+            }
+            for seed in nested {
+                prepared
+                    .positions_by_key
+                    .entry(seed.packed_key)
+                    .or_default()
+                    .push(seed);
+            }
+            prepared.lookup_identity =
+                sha256(&[prepared.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
+        }
+        if let Some(started) = started {
+            self.batch_stats.lock().unwrap().seed_generation_ns +=
+                started.elapsed().as_nanos() as u64;
+        }
+        Ok(prepared)
     }
 
     pub(crate) fn search_batch(
@@ -437,7 +499,8 @@ impl TraceEngine {
         queries: &[(String, Vec<u8>)],
         config: TraceConfig,
     ) -> Result<Vec<TraceResult>, TraceError> {
-        if queries.len() < 2 || matches!(self.index, TraceIndex::Shard(_)) {
+        let started = self.observed.then(Instant::now);
+        if queries.len() < 2 && !self.index.is_shared() {
             return queries
                 .par_iter()
                 .map(|(id, sequence)| self.search(id.as_str(), sequence, config))
@@ -445,21 +508,86 @@ impl TraceEngine {
         }
         let prepared = queries
             .par_iter()
-            .map(|(id, sequence)| {
-                prepare_query(
-                    id.as_str(),
-                    sequence,
-                    config,
-                    self.index.k(),
-                    self.index.rescue_k15(),
-                )
-            })
+            .map(|(id, sequence)| self.prepare(id.as_str(), sequence, config))
             .collect::<Result<Vec<_>, _>>()?;
-        let shared = self.shared_seed_lookups(&prepared)?;
-        prepared
+        let batch = self.prepare_batch(&prepared)?;
+        let results = prepared
             .into_par_iter()
-            .map(|prepared| self.search_prepared(prepared, config, shared.as_ref()))
-            .collect()
+            .map(|prepared| self.search_prepared(prepared, config, Some(&batch)))
+            .collect();
+        self.record_batch(&batch);
+        if let Some(started) = started {
+            self.batch_stats.lock().unwrap().search_critical_ns +=
+                started.elapsed().as_nanos() as u64;
+        }
+        results
+    }
+
+    fn prepare_batch(&self, prepared: &[PreparedQuery]) -> Result<TraceBatch, TraceError> {
+        let started = self.observed.then(Instant::now);
+        let count = prepared
+            .iter()
+            .try_fold(0usize, |sum, query| {
+                sum.checked_add(query.positions_by_key.len())
+            })
+            .ok_or(TraceError::Invalid("batch query key count"))?;
+        let mut keys = Vec::new();
+        let lookups = if count
+            <= (lookup_budget(&self.index) - 4096)
+                / (std::mem::size_of::<u64>() + std::mem::size_of::<(u64, Option<SeedEntry>)>())
+        {
+            keys.try_reserve_exact(count)
+                .map_err(|_| TraceError::Invalid("batch query key allocation"))?;
+            for query in prepared {
+                keys.extend(query.positions_by_key.keys().copied());
+            }
+            let setup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+            let mut lookups = prepare_lookup(&self.index, keys, self.observed)?;
+            if let Some(lookups) = &mut lookups {
+                lookups.lookup_ns += setup_ns;
+            }
+            lookups
+        } else {
+            None
+        };
+        Ok(TraceBatch {
+            lookups,
+            sequence: Arc::new(
+                BgzfBlockCache::new(DEFAULT_BATCH_BGZF_CACHE_BYTES)
+                    .ok_or(TraceError::Invalid("batch sequence cache budget"))?,
+            ),
+        })
+    }
+
+    fn record_batch(&self, batch: &TraceBatch) {
+        let cache = batch.sequence.stats();
+        let mut stats = self
+            .batch_stats
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        stats.batches += 1;
+        stats.timings_observed = self.observed;
+        stats.bgzf_cache_hits += cache.hits;
+        stats.bgzf_blocks_decoded += cache.blocks_decoded;
+        stats.bgzf_evictions += cache.evictions;
+        stats.bgzf_peak_bytes = stats.bgzf_peak_bytes.max(cache.peak_accounted_bytes);
+        stats.bgzf_io_limit = cache.max_loading_blocks;
+        stats.bgzf_io_peak = stats.bgzf_io_peak.max(cache.peak_loading_blocks);
+        if let Some(lookups) = &batch.lookups {
+            stats.unique_keys += lookups.entries.len() as u64;
+            stats.cached_groups += lookups.postings.len() as u64;
+            stats.cached_positions += lookups
+                .postings
+                .values()
+                .filter_map(|p| p.occurrences.as_ref())
+                .flatten()
+                .map(|positions| positions.len() as u64)
+                .sum::<u64>();
+            stats.lookup_peak_bytes = stats.lookup_peak_bytes.max(lookups.capacity_bytes);
+            stats.key_lookup_ns += lookups.lookup_ns;
+            stats.membership_access_ns += lookups.membership_ns;
+            stats.position_access_ns += lookups.position_ns;
+        }
     }
 
     pub fn batch_stats(&self) -> TraceBatchStats {
@@ -493,81 +621,39 @@ impl TraceEngine {
         }
     }
 
-    fn shared_seed_lookups(
-        &self,
-        prepared: &[PreparedQuery],
-    ) -> Result<Option<SharedSeedLookups>, TraceError> {
-        let key_count = prepared.iter().try_fold(0usize, |sum, query| {
-            sum.checked_add(query.positions_by_key.len())
-        });
-        let Some(bytes) = key_count.and_then(|keys| keys.checked_mul(96)?.checked_add(4096)) else {
-            return Ok(None);
-        };
-        if bytes > 32 * 1024 * 1024 {
-            return Ok(None);
-        }
-        let Some(reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes) else {
-            return Ok(None);
-        };
-        let Some(identity) = self.index.cache_file_identity()? else {
-            return Ok(None);
-        };
-        let mut keys = Vec::new();
-        if keys.try_reserve_exact(key_count.unwrap_or(0)).is_err() {
-            return Ok(None);
-        }
-        for query in prepared {
-            keys.extend(query.positions_by_key.keys().copied());
-        }
-        keys.sort_unstable();
-        keys.dedup();
-        let mut entries = Vec::new();
-        if entries.try_reserve_exact(keys.len()).is_err() {
-            return Ok(None);
-        }
-        for chunk in keys.chunks(SEED_LOOKUP_BATCH_KEYS) {
-            entries.extend(
-                chunk
-                    .iter()
-                    .copied()
-                    .zip(self.index.find_seeds_batch(chunk)?),
-            );
-        }
-        if self.index.cache_file_identity()? != Some(identity) {
-            return Err(TraceError::Invalid("shared seed lookup identity"));
-        }
-        Ok(Some(SharedSeedLookups {
-            identity,
-            entries,
-            _reservation: reservation,
-        }))
-    }
-
     fn search_prepared(
         &self,
         prepared: PreparedQuery,
         config: TraceConfig,
-        shared: Option<&SharedSeedLookups>,
+        batch: Option<&TraceBatch>,
     ) -> Result<TraceResult, TraceError> {
+        let shared = batch.and_then(|batch| batch.lookups.as_ref());
         let cache_bytes = LOOKUP_CACHE_BYTES / rayon::current_num_threads().max(1);
         let census = self.candidate_census_with_shared(&prepared, config, cache_bytes, shared)?;
         let completion = candidate_completion(census.candidates.len(), config.max_metagenomes)?;
         let mut candidates = census.candidates;
         candidates.truncate(config.max_metagenomes);
         let mut frequencies = census.frequencies;
-        frequencies.sort_unstable_by_key(|&(key, frequency)| (frequency, key));
+        if self.index.is_shared() {
+            frequencies.sort_unstable_by_key(|&(key, frequency)| {
+                (std::cmp::Reverse(key >> 62), frequency, key)
+            });
+        } else {
+            frequencies.sort_unstable_by_key(|&(key, frequency)| (0, frequency, key));
+        }
         let key_order = frequencies
             .into_iter()
             .map(|(key, _)| key)
             .collect::<Vec<_>>();
         let candidates_screened =
             u32::try_from(candidates.len()).map_err(|_| TraceError::Invalid("candidate count"))?;
-        let metagenomes = self.trace_selected(
+        let metagenomes = self.trace_selected_with_batch(
             &prepared,
             candidates,
             &key_order,
             census.lookups.as_ref(),
             config,
+            batch,
         )?;
         Ok(TraceResult {
             query_id: prepared.query_id,
@@ -600,6 +686,7 @@ impl TraceEngine {
         cache_bytes: usize,
         shared: Option<&SharedSeedLookups>,
     ) -> Result<TraceCensus, TraceError> {
+        let started = self.observed.then(Instant::now);
         validate_config(config)?;
         if let Some(shared) = shared
             && self.index.cache_file_identity()? != Some(shared.identity)
@@ -616,7 +703,9 @@ impl TraceEngine {
             .verify_query_filter_pages(prepared.positions_by_key.keys())?;
         let mut frequencies = Vec::new();
         let header_sha256 = self.index.header_sha256()?;
-        let mut lookups =
+        let mut lookups = if shared.is_some_and(|shared| shared.postings_complete) {
+            None
+        } else {
             self.index
                 .cache_file_identity()
                 .ok()
@@ -630,7 +719,8 @@ impl TraceEngine {
                         prepared.positions_by_key.len(),
                         self.index.document_count(),
                     )
-                });
+                })
+        };
         let mut entries = prepared.positions_by_key.iter();
         let mut chunk = Vec::new();
         chunk
@@ -679,8 +769,15 @@ impl TraceEngine {
                 frequencies.push((packed_key, index_seed.document_frequency));
                 let query_positions = u64::try_from(query_seeds.len())
                     .map_err(|_| TraceError::Invalid("query seed count"))?;
-                let documents = self.index.seed_documents(index_seed)?;
-                for &document in &documents {
+                let decoded_documents;
+                let documents =
+                    if let Some(posting) = shared.and_then(|s| s.postings.get(&packed_key)) {
+                        &posting.documents
+                    } else {
+                        decoded_documents = self.index.seed_documents(index_seed)?;
+                        &decoded_documents
+                    };
+                for &document in documents {
                     let hits = document
                         .occurrence_count()
                         .checked_mul(query_positions)
@@ -715,6 +812,10 @@ impl TraceEngine {
         }
         let mut candidates = candidates.into_values().collect::<Vec<_>>();
         candidates.sort_by(compare_candidates);
+        if let Some(started) = started {
+            self.batch_stats.lock().unwrap().candidate_routing_ns +=
+                started.elapsed().as_nanos() as u64;
+        }
         Ok(TraceCensus {
             candidates,
             frequencies,
@@ -730,6 +831,19 @@ impl TraceEngine {
         lookups: Option<&CachedSeedLookups>,
         config: TraceConfig,
     ) -> Result<Vec<MetagenomeTrace>, TraceError> {
+        self.trace_selected_with_batch(prepared, candidates, key_order, lookups, config, None)
+    }
+
+    fn trace_selected_with_batch(
+        &self,
+        prepared: &PreparedQuery,
+        candidates: Vec<Candidate>,
+        key_order: &[u64],
+        lookups: Option<&CachedSeedLookups>,
+        config: TraceConfig,
+        batch: Option<&TraceBatch>,
+    ) -> Result<Vec<MetagenomeTrace>, TraceError> {
+        let started = self.observed.then(Instant::now);
         validate_config(config)?;
         self.index.enable_selected_front_metadata();
         let lookups = if let Some(lookups) = lookups {
@@ -751,6 +865,13 @@ impl TraceEngine {
             .map(|candidate| candidate.id)
             .collect::<HashSet<_>>();
         let mut region_hits = BTreeMap::<RegionKey, RegionHits>::new();
+        let mut routing_reserved_bytes = 4096usize;
+        let batch_lookups = batch.and_then(|batch| batch.lookups.as_ref());
+        if let Some(shared) = batch_lookups
+            && self.index.cache_file_identity()? != Some(shared.identity)
+        {
+            return Err(TraceError::Invalid("batch lookup identity"));
+        }
         let mut packed_keys = Vec::new();
         packed_keys
             .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
@@ -771,25 +892,40 @@ impl TraceEngine {
             }
             filter_keys.clear();
             filter_keys.extend(packed_keys.iter().copied().filter(|&key| {
-                lookups.is_none_or(|lookups| lookups.through.is_none_or(|through| key > through))
+                batch_lookups.is_none()
+                    && lookups
+                        .is_none_or(|lookups| lookups.through.is_none_or(|through| key > through))
             }));
             filter_keys.sort_unstable();
             filter_keys.dedup();
             self.index.verify_query_filter_pages(filter_keys.iter())?;
-            let uncached_seeds = self.index.find_seeds_batch(&filter_keys)?;
+            let uncached_seeds = if filter_keys.is_empty() {
+                Vec::new()
+            } else {
+                self.index.find_seeds_batch(&filter_keys)?
+            };
             self.index.advise_first_document_rows(&uncached_seeds);
             let index_seeds = packed_keys
                 .iter()
-                .map(|&key| match lookups.and_then(|lookups| lookups.get(key)) {
-                    Some(Some(cached)) => (Some(cached.seed), Some(cached.documents)),
-                    Some(None) => (None, None),
-                    None => (
-                        uncached_seeds
-                            [filter_keys.binary_search(&key).expect("uncached query key")],
-                        None,
-                    ),
+                .map(|&key| {
+                    if let Some(shared) = batch_lookups {
+                        let ordinal = shared
+                            .entries
+                            .binary_search_by_key(&key, |entry| entry.0)
+                            .map_err(|_| TraceError::Invalid("batch query key"))?;
+                        return Ok((shared.entries[ordinal].1, None));
+                    }
+                    Ok(match lookups.and_then(|lookups| lookups.get(key)) {
+                        Some(Some(cached)) => (Some(cached.seed), Some(cached.documents)),
+                        Some(None) => (None, None),
+                        None => (
+                            uncached_seeds
+                                [filter_keys.binary_search(&key).expect("uncached query key")],
+                            None,
+                        ),
+                    })
                 })
-                .collect::<Vec<_>>();
+                .collect::<Result<Vec<_>, TraceError>>()?;
 
             for (&packed_key, (index_seed, cached_documents)) in packed_keys.iter().zip(index_seeds)
             {
@@ -800,9 +936,14 @@ impl TraceEngine {
                 let Some(index_seed) = index_seed else {
                     continue;
                 };
-                let seed_k = seed_length(self.index.k(), self.index.rescue_k15(), packed_key)?;
+                let seed_k = self.index.seed_length(packed_key)?;
                 let decoded_documents;
-                let documents = if let Some(documents) = cached_documents {
+                let posting = batch
+                    .and_then(|batch| batch.lookups.as_ref())
+                    .and_then(|s| s.postings.get(&packed_key));
+                let documents = if let Some(posting) = posting {
+                    &posting.documents
+                } else if let Some(documents) = cached_documents {
                     documents
                 } else {
                     decoded_documents = self.index.seed_documents(index_seed)?;
@@ -813,47 +954,74 @@ impl TraceEngine {
                     .copied()
                     .filter(|document| candidate_ids.contains(&document.metagenome_id()))
                 {
-                    let occurrences = self.index.seed_document_occurrences(index_seed, document)?;
-                    for seed in query_seeds {
-                        for occurrence in &occurrences {
-                            let contig = self
-                                .index
-                                .contig(occurrence.contig_id)?
-                                .ok_or(TraceError::Invalid("missing occurrence contig"))?;
-                            let strand =
-                                if seed.canonical_orientation == occurrence.canonical_orientation {
+                    let mut visit = |occurrences: &[crate::jidx_reader::SeedOccurrence]| {
+                        for seed in query_seeds {
+                            let (query_position, region_k) = if self.index.is_shared() {
+                                (
+                                    (seed.position + u64::from((seed_k - 15) / 2))
+                                        % prepared.query_length,
+                                    15,
+                                )
+                            } else {
+                                (seed.position, seed_k)
+                            };
+                            for occurrence in occurrences {
+                                let contig = self
+                                    .index
+                                    .contig(occurrence.contig_id)?
+                                    .ok_or(TraceError::Invalid("missing occurrence contig"))?;
+                                let strand = if seed.canonical_orientation
+                                    == occurrence.canonical_orientation
+                                {
                                     Strand::Forward
                                 } else {
                                     Strand::Reverse
                                 };
-                            let oriented_position = match strand {
-                                Strand::Forward => occurrence.position,
-                                Strand::Reverse => contig
-                                    .length
-                                    .checked_sub(
-                                        occurrence
-                                            .position
-                                            .checked_add(u64::from(seed_k))
-                                            .ok_or(TraceError::Invalid("occurrence position"))?,
-                                    )
-                                    .ok_or(TraceError::Invalid("occurrence position"))?,
-                            };
-                            let diagonal =
-                                i128::from(oriented_position) - i128::from(seed.position);
-                            region_hits
-                                .entry(RegionKey {
-                                    metagenome_id: contig.metagenome_id,
-                                    contig_id: contig.id,
-                                    strand,
-                                    k: seed_k,
-                                })
-                                .or_default()
-                                .push(SeedHit {
-                                    query: seed.position,
+                                let oriented_position = match strand {
+                                    Strand::Forward => occurrence.position,
+                                    Strand::Reverse => contig
+                                        .length
+                                        .checked_sub(
+                                            occurrence
+                                                .position
+                                                .checked_add(u64::from(region_k))
+                                                .ok_or(TraceError::Invalid(
+                                                    "occurrence position",
+                                                ))?,
+                                        )
+                                        .ok_or(TraceError::Invalid("occurrence position"))?,
+                                };
+                                let diagonal =
+                                    i128::from(oriented_position) - i128::from(query_position);
+                                let region = region_hits
+                                    .entry(RegionKey {
+                                        metagenome_id: contig.metagenome_id,
+                                        contig_id: contig.id,
+                                        strand,
+                                        k: region_k,
+                                    })
+                                    .or_default();
+                                let hit = SeedHit {
+                                    query: query_position,
                                     target: oriented_position,
                                     diagonal,
-                                });
+                                };
+                                if self.index.is_shared() {
+                                    region.push_unique(hit, &mut routing_reserved_bytes)?;
+                                } else {
+                                    region.push(hit);
+                                }
+                            }
                         }
+                        Ok(())
+                    };
+                    if let Some(positions) = posting.and_then(|p| p.occurrences.as_ref()) {
+                        let ordinal = documents
+                            .binary_search_by_key(&document.metagenome_id(), |d| d.metagenome_id())
+                            .map_err(|_| TraceError::Invalid("batch member"))?;
+                        visit(&positions[ordinal])?;
+                    } else {
+                        self.index.visit_occurrences(index_seed, document, visit)?;
                     }
                 }
             }
@@ -861,7 +1029,15 @@ impl TraceEngine {
         let regions = form_regions(region_hits, config.diagonal_bin_bases);
 
         let tasks = self.tasks(regions, prepared.query_length, config)?;
-        let (loaded, reads) = self.load_ranges(&tasks, config.verify_resources)?;
+        if let Some(started) = started {
+            self.batch_stats.lock().unwrap().region_formation_ns +=
+                started.elapsed().as_nanos() as u64;
+        }
+        let (loaded, reads) = self.load_ranges(
+            &tasks,
+            config.verify_resources,
+            batch.map(|batch| &batch.sequence),
+        )?;
         let fragments = self.align_tasks(&prepared.query, &tasks, &loaded, config)?;
         let mut by_metagenome = BTreeMap::<MetagenomeId, Vec<Fragment>>::new();
         for (metagenome_id, fragment) in fragments {
@@ -964,7 +1140,12 @@ impl TraceEngine {
     ) -> Result<Vec<AlignmentTask>, TraceError> {
         let mut tasks = Vec::new();
         for (key, region) in regions {
-            if region.hits < minimum_region_hits(key.k, config.min_seed_hits) {
+            let minimum = if self.index.is_shared() {
+                config.min_seed_hits
+            } else {
+                minimum_region_hits(key.k, config.min_seed_hits)
+            };
+            if region.hits < minimum {
                 continue;
             }
             let contig = self
@@ -1018,6 +1199,7 @@ impl TraceEngine {
         &self,
         tasks: &[AlignmentTask],
         verify: bool,
+        cache: Option<&Arc<BgzfBlockCache>>,
     ) -> Result<LoadedRanges, TraceError> {
         let mut spans = BTreeMap::<(MetagenomeId, ContigId), Vec<(u64, u64)>>::new();
         for task in tasks {
@@ -1040,7 +1222,14 @@ impl TraceEngine {
                 .index
                 .metagenome(metagenome_id)?
                 .ok_or(TraceError::Invalid("missing source metagenome"))?;
-            let mut reader = BgzfReader::open(source, self.s3.as_ref(), verify)?;
+            let mut reader = if let Some(cache) = cache {
+                BgzfReader::open_with_cache(source, self.s3.as_ref(), verify, Arc::clone(cache))?
+            } else {
+                BgzfReader::open(source, self.s3.as_ref(), verify)?
+            };
+            if self.observed {
+                reader.enable_timing();
+            }
             for (&(_, contig_id), contig_spans) in
                 spans.range((metagenome_id, 0)..=(metagenome_id, u32::MAX))
             {
@@ -1058,6 +1247,12 @@ impl TraceEngine {
                         sequence: reader.read_contig_range(contig, start, end)?,
                     });
                 }
+            }
+            if self.observed {
+                let mut stats = self.batch_stats.lock().unwrap();
+                stats.sequence_read_ns += reader.range_stats().read_nanoseconds.unwrap_or(0);
+                stats.bgzf_decode_and_handling_ns +=
+                    reader.decompression_nanoseconds().unwrap_or(0);
             }
             reads.insert(
                 metagenome_id,
@@ -1365,6 +1560,7 @@ enum RegionHits {
     Empty,
     One(SeedHit),
     Many(Vec<SeedHit>),
+    Unique(BTreeSet<(u64, u64)>),
 }
 
 impl RegionHits {
@@ -1378,7 +1574,38 @@ impl RegionHits {
                 *self = Self::Many(hits);
             }
             Self::Many(hits) => hits.push(hit),
+            Self::Unique(_) => unreachable!("shared anchors require bounded admission"),
         }
+    }
+
+    fn push_unique(&mut self, hit: SeedHit, reserved: &mut usize) -> Result<(), TraceError> {
+        let pair = (hit.query, hit.target);
+        if match self {
+            Self::One(first) => (first.query, first.target) == pair,
+            Self::Unique(pairs) => pairs.contains(&pair),
+            _ => false,
+        } {
+            return Ok(());
+        }
+        // Covers sparse BTree nodes, the outer region node and later SeedHit Vec growth.
+        let next = reserved
+            .checked_add(512)
+            .filter(|&bytes| bytes <= 64 * 1024 * 1024)
+            .ok_or(TraceError::Invalid(
+                "shared anchor workspace exceeds byte budget",
+            ))?;
+        match self {
+            Self::Empty => *self = Self::One(hit),
+            Self::One(first) => {
+                *self = Self::Unique(BTreeSet::from([(first.query, first.target), pair]))
+            }
+            Self::Unique(pairs) => {
+                pairs.insert(pair);
+            }
+            Self::Many(_) => return Err(TraceError::Invalid("mixed shared anchor storage")),
+        }
+        *reserved = next;
+        Ok(())
     }
 }
 
@@ -1434,6 +1661,14 @@ fn form_regions(
                 continue;
             }
             RegionHits::Many(hits) => hits,
+            RegionHits::Unique(pairs) => pairs
+                .into_iter()
+                .map(|(query, target)| SeedHit {
+                    query,
+                    target,
+                    diagonal: i128::from(target) - i128::from(query),
+                })
+                .collect(),
         };
         hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
         let mut regions = Vec::<RegionAccumulator>::new();
