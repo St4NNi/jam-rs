@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct FileReadStats {
+    pub observed: bool,
     pub requested_bytes: u64,
     pub requested_pages: u64,
     pub authenticated_pages: u64,
@@ -18,6 +19,7 @@ pub struct FileReadStats {
 }
 
 pub(crate) struct SharedFile {
+    observed: bool,
     file: File,
     mmap: Mmap,
     identity: Option<[u64; 7]>,
@@ -31,7 +33,7 @@ pub(crate) struct SharedFile {
 }
 
 impl SharedFile {
-    pub(crate) fn open(path: impl AsRef<Path>) -> Result<Self, SharedError> {
+    pub(crate) fn open(path: impl AsRef<Path>, observed: bool) -> Result<Self, SharedError> {
         let file = File::open(path)?;
         let identity = file_identity(&file)?;
         let file_bytes = file.metadata()?.len();
@@ -50,6 +52,7 @@ impl SharedFile {
             return Err(SharedError::ResourceLimit);
         }
         let reader = Self {
+            observed,
             file,
             mmap,
             identity,
@@ -95,12 +98,16 @@ impl SharedFile {
             .ok_or(SharedError::Invalid("section request"))?;
         let start = section.offset + offset;
         let end = section.offset + end;
-        self.requested_bytes.fetch_add(length, Ordering::Relaxed);
+        if self.observed {
+            self.requested_bytes.fetch_add(length, Ordering::Relaxed);
+        }
         if length != 0 {
             let first = start / PAGE_BYTES;
             let last = (end - 1) / PAGE_BYTES;
-            self.requested_pages
-                .fetch_add(last - first + 1, Ordering::Relaxed);
+            if self.observed {
+                self.requested_pages
+                    .fetch_add(last - first + 1, Ordering::Relaxed);
+            }
             for page in first..=last {
                 self.authenticate(page)?;
             }
@@ -195,6 +202,7 @@ impl SharedFile {
     pub(crate) fn stats(&self) -> FileReadStats {
         let pages = self.authenticated_pages.load(Ordering::Relaxed);
         FileReadStats {
+            observed: self.observed,
             requested_bytes: self.requested_bytes.load(Ordering::Relaxed),
             requested_pages: self.requested_pages.load(Ordering::Relaxed),
             authenticated_pages: pages,
