@@ -177,6 +177,9 @@ impl Alignment {
 
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
+    observed: bool,
+    traceback_nanoseconds: u64,
+    endpoint_nanoseconds: u64,
     cells: Vec<Cell>,
     #[cfg(target_arch = "x86_64")]
     compact_cells: Vec<u16>,
@@ -392,6 +395,17 @@ fn checked_sum(values: &[usize]) -> Result<usize, AlignmentAdmissionError> {
 }
 
 impl AlignmentWorkspace {
+    pub(crate) fn enable_timing(&mut self) {
+        self.observed = true;
+    }
+
+    pub(crate) fn traceback_nanoseconds(&self) -> u64 {
+        self.traceback_nanoseconds
+    }
+
+    pub(crate) fn endpoint_nanoseconds(&self) -> u64 {
+        self.endpoint_nanoseconds
+    }
     pub fn capacity_cells(&self) -> usize {
         #[cfg(target_arch = "x86_64")]
         {
@@ -410,7 +424,12 @@ impl AlignmentWorkspace {
         config: AlignmentConfig,
     ) -> Result<Alignment, AlignmentError> {
         let raw = self.align_raw(query, target, config)?;
-        finish(raw, Strand::Forward, 0, target.len())
+        let started = self.observed.then(std::time::Instant::now);
+        let result = finish(raw, Strand::Forward, 0, target.len());
+        if let Some(started) = started {
+            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+        }
+        result
     }
 
     pub fn align_oriented(
@@ -433,7 +452,12 @@ impl AlignmentWorkspace {
                 result?
             }
         };
-        finish(raw, strand, target_offset, target.len())
+        let started = self.observed.then(std::time::Instant::now);
+        let result = finish(raw, strand, target_offset, target.len());
+        if let Some(started) = started {
+            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+        }
+        result
     }
 
     pub fn complete_endpoints(
@@ -445,8 +469,9 @@ impl AlignmentWorkspace {
         max_extension: usize,
         config: AlignmentConfig,
     ) -> Result<EndpointCompletion, AlignmentError> {
+        let started = self.observed.then(std::time::Instant::now);
         config.validate()?;
-        match core.strand {
+        let result = match core.strand {
             Strand::Forward => complete_endpoints(
                 &mut self.endpoint_cells,
                 core,
@@ -473,7 +498,11 @@ impl AlignmentWorkspace {
                 self.reverse = reverse;
                 result
             }
+        };
+        if let Some(started) = started {
+            self.endpoint_nanoseconds += started.elapsed().as_nanos() as u64;
         }
+        result
     }
 
     fn align_raw(
@@ -872,6 +901,7 @@ impl AlignmentWorkspace {
         target: &[u8],
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
+        let started = self.observed.then(std::time::Instant::now);
         let mut query_index = best.query_index;
         let mut target_index = best.target_index;
         let mut state = best.state;
@@ -913,6 +943,9 @@ impl AlignmentWorkspace {
             state = previous;
         }
         self.operations.reverse();
+        if let Some(started) = started {
+            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+        }
         Ok((query_index, target_index))
     }
 
@@ -923,6 +956,7 @@ impl AlignmentWorkspace {
         target: &[u8],
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
+        let started = self.observed.then(std::time::Instant::now);
         let mut query_index = best.query_index;
         let mut target_index = best.target_index;
         let mut state = best.state;
@@ -964,6 +998,9 @@ impl AlignmentWorkspace {
             state = previous;
         }
         self.operations.reverse();
+        if let Some(started) = started {
+            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+        }
         Ok((query_index, target_index))
     }
 }

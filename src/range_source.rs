@@ -74,6 +74,7 @@ pub struct RangeStats {
     pub metadata_requests: u64,
     pub read_requests: u64,
     pub bytes_read: u64,
+    pub read_nanoseconds: Option<u64>,
 }
 
 impl RangeSource {
@@ -178,6 +179,12 @@ impl RangeSource {
         }
     }
 
+    pub(crate) fn enable_timing(&mut self) {
+        if let Self::Local(source) = self {
+            source.stats.read_nanoseconds = Some(0);
+        }
+    }
+
     pub fn verify_sha256(&mut self, expected: [u8; 32]) -> io::Result<bool> {
         let position = self.stream_position()?;
         self.seek(SeekFrom::Start(0))?;
@@ -193,6 +200,10 @@ impl Read for RangeSource {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         match self {
             Self::Local(source) => {
+                let started = source
+                    .stats
+                    .read_nanoseconds
+                    .map(|_| std::time::Instant::now());
                 let position = source.file.stream_position()?;
                 if position >= source.length {
                     return Ok(0);
@@ -200,6 +211,11 @@ impl Read for RangeSource {
                 let remaining = usize::try_from(source.length - position).unwrap_or(usize::MAX);
                 let count = buffer.len().min(remaining);
                 let read = source.file.read(&mut buffer[..count])?;
+                if let (Some(started), Some(elapsed)) =
+                    (started, &mut source.stats.read_nanoseconds)
+                {
+                    *elapsed = elapsed.saturating_add(started.elapsed().as_nanos() as u64);
+                }
                 if read != 0 {
                     source.stats.read_requests = source.stats.read_requests.saturating_add(1);
                     source.stats.bytes_read = source.stats.bytes_read.saturating_add(read as u64);

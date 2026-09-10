@@ -19,6 +19,7 @@ pub struct BgzfReader {
     cache_source: CacheSource,
     local_path: Option<PathBuf>,
     blocks_decoded: u64,
+    decode_nanoseconds: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -99,6 +100,7 @@ impl BgzfReader {
             },
             local_path,
             blocks_decoded: 0,
+            decode_nanoseconds: None,
         })
     }
 
@@ -108,6 +110,18 @@ impl BgzfReader {
 
     pub fn blocks_decoded(&self) -> u64 {
         self.blocks_decoded
+    }
+
+    pub(crate) fn enable_timing(&mut self) {
+        self.decode_nanoseconds = Some(0);
+        self.reader.get_mut().enable_timing();
+    }
+
+    pub(crate) fn decompression_nanoseconds(&self) -> Option<u64> {
+        Some(
+            self.decode_nanoseconds?
+                .saturating_sub(self.range_stats().read_nanoseconds?),
+        )
     }
 
     pub fn read_contig_range(
@@ -282,6 +296,7 @@ impl BgzfReader {
     }
 
     fn decode_block(&mut self, compressed_offset: u64) -> Result<Vec<u8>, BgzfError> {
+        let started = self.decode_nanoseconds.map(|_| std::time::Instant::now());
         let virtual_position = bgzf::VirtualPosition::try_from((compressed_offset, 0))
             .map_err(|_| BgzfError::InvalidGzi)?;
         self.reader.seek(virtual_position)?;
@@ -289,7 +304,11 @@ impl BgzfReader {
         if data.is_empty() || data.len() > MAX_UNCOMPRESSED_BLOCK_BYTES {
             return Err(BgzfError::InvalidGzi);
         }
-        Ok(data.to_vec())
+        let result = data.to_vec();
+        if let (Some(started), Some(elapsed)) = (started, &mut self.decode_nanoseconds) {
+            *elapsed = elapsed.saturating_add(started.elapsed().as_nanos() as u64);
+        }
+        Ok(result)
     }
 
     fn local_file_changed(&self) -> Result<bool, BgzfError> {
