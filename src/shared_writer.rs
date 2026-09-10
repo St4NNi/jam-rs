@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const BUILD_BYTES: usize = 512 * 1024 * 1024;
+const BUILD_BYTES: usize = 1024 * 1024 * 1024;
 const SOURCE_CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
