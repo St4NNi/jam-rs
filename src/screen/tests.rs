@@ -382,7 +382,7 @@ fn sliver_not_aligned() {
 fn distant_relative_skipped() {
     let directory = tempfile::tempdir().unwrap();
     let plasmid = random_bases(&mut rng(11), 6_000);
-    let relative = with_substitutions(&mut rng(12), &plasmid, 0.9375);
+    let relative = with_substitutions(&mut rng(12), &plasmid, 0.96);
     let shard = plasmids(
         directory.path(),
         &[("plasmid", &plasmid), ("relative", &relative)],

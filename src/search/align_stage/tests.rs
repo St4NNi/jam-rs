@@ -119,6 +119,7 @@ pub(super) fn located(shard: &Shard, entry: u32, query: &[u8], flank: u64) -> Lo
 pub(super) fn rule(coverage: &str) -> DecisionRule {
     DecisionRule {
         min_query_coverage: coverage.parse::<QueryCoverage>().unwrap(),
+        min_identity: 0.8,
         ..DecisionRule::default()
     }
 }
