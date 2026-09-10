@@ -15,8 +15,8 @@ use crate::decide::Fragment;
 use crate::seeds::base_code;
 use std::cmp::Reverse;
 
-/// Aligns the walks of `window`: every long walk is an ungapped fragment, and walks with changes
-/// are also aligned with gaps (kept once per copy). Short walks are joined later, by
+/// Aligns the walks of `window`: every long walk is an ungapped fragment, and long walks with
+/// changes are also aligned with gaps (kept once per copy). Short walks are joined later, by
 /// `join_short_walks`.
 pub(super) fn align_walks(
     job: &ContigJob<'_>,
@@ -44,19 +44,20 @@ fn walk_fragments(
     let mut gapped = Vec::new();
     for (index, walk) in window.walks.iter().enumerate() {
         job.control.check()?;
-        // A walk shorter than a chain only starts a gapped alignment or a join.
-        let short = !long_enough(walk, &query.table);
+        // A walk shorter than a chain is only joined. A gapped alignment around it would fill
+        // a box of millions of cells, mostly to find a few dozen matching bases.
+        if !long_enough(walk, &query.table) {
+            continue;
+        }
         if output
             .paths
             .covers_walk(walk, query.length(), query.circular())
         {
-            output.work.redundant_chains += u64::from(!short);
+            output.work.redundant_chains += 1;
             continue;
         }
-        if !short {
-            output.work.chains += 1;
-            output.work.alignments += 1;
-        }
+        output.work.chains += 1;
+        output.work.alignments += 1;
         let oriented = window.oriented(walk);
         let alignment = walk_alignment(walk, oriented, window.start, &query.table, config.band)?;
         let walked = WalkAlignment {
@@ -68,9 +69,6 @@ fn walk_fragments(
             gapped_alignment(job, window, output, workspace, walked, &mut results)?
         {
             gapped.push((joined, index));
-        }
-        if short {
-            continue;
         }
         let room = walk_room(walk, job);
         if output.keep_or_widen(job, window, alignment, room)? {
