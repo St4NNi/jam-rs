@@ -34,6 +34,8 @@ mod shared_file;
 pub mod shared_format;
 pub mod shared_reader;
 pub mod shared_seed;
+#[cfg(test)]
+mod shared_tests;
 pub mod shared_writer;
 pub mod sketch;
 pub mod trace;
