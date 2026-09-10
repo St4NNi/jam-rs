@@ -1768,9 +1768,8 @@ fn fragment_envelope(
             config.circular,
         )
     };
-    let full_target = (0, contig_length);
     let full_query = (contig_length <= SHORT_CONTIG_ENVELOPE_BYTES)
-        .then(|| projection(full_target))
+        .then(|| projection(bounded_target))
         .transpose()?;
     let (oriented_start, oriented_end, query_start, query_span) =
         if let Some((query_start, query_span)) = full_query
@@ -2851,6 +2850,16 @@ mod tests {
                 assert!(envelope.query_start + envelope.query_span >= 1_200);
             }
         }
+        for (offset, hits) in [(512, 14), (640, 7)] {
+            let region = envelope_region(400 + offset, offset, hits);
+            for strand in [Strand::Forward, Strand::Reverse] {
+                let envelope =
+                    fragment_envelope(&region, envelope_key(strand), 2_000, 800, config).unwrap();
+                assert_eq!((envelope.target_start, envelope.target_end), (0, 800));
+                assert!(envelope.query_start <= 400);
+                assert!(envelope.query_start + envelope.query_span >= 1_200);
+            }
+        }
     }
 
     #[test]
@@ -2968,7 +2977,7 @@ mod tests {
             config,
         )
         .unwrap();
-        assert!(envelope.target_start > 0 && envelope.target_end < 60_000);
+        assert_eq!((envelope.target_start, envelope.target_end), (0, 60_000));
         assert!(
             envelope_fits_workspace(
                 envelope.query_span,
@@ -2993,6 +3002,174 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn exact_alignment_pairs(
+        alignment: &Alignment,
+        query: &[u8],
+        target: &[u8],
+    ) -> std::collections::BTreeSet<(u64, u64)> {
+        alignment.validate_cigar().unwrap();
+        let mut query_position = alignment.query_interval.start as usize;
+        let physical_start = alignment.target_interval.start as usize;
+        let physical_end = alignment.target_interval.end as usize;
+        let mut target_sequence = target[physical_start..physical_end].to_vec();
+        if alignment.strand == Strand::Reverse {
+            target_sequence = window_reverse_complement(&target_sequence);
+        }
+        let mut target_position = 0usize;
+        let mut pairs = std::collections::BTreeSet::new();
+        for run in &alignment.edit_script {
+            for _ in 0..run.length {
+                match run.operation {
+                    crate::alignment::EditOperation::Equal => {
+                        assert_eq!(query[query_position], target_sequence[target_position]);
+                        let physical = match alignment.strand {
+                            Strand::Forward => physical_start + target_position,
+                            Strand::Reverse => physical_end - 1 - target_position,
+                        };
+                        pairs.insert((query_position as u64, physical as u64));
+                        query_position += 1;
+                        target_position += 1;
+                    }
+                    crate::alignment::EditOperation::Substitution => {
+                        assert_ne!(query[query_position], target_sequence[target_position]);
+                        query_position += 1;
+                        target_position += 1;
+                    }
+                    crate::alignment::EditOperation::Insertion => target_position += 1,
+                    crate::alignment::EditOperation::Deletion => query_position += 1,
+                }
+            }
+        }
+        assert_eq!(query_position as u64, alignment.query_interval.end);
+        assert_eq!(target_position, target_sequence.len());
+        pairs
+    }
+
+    #[test]
+    fn short_contig_query_projection_separates_neighboring_band_optima() {
+        let first = window_dna(101, 400);
+        let second = window_dna(103, 400);
+        let mut query = window_dna(107, 2_400);
+        query[300..700].copy_from_slice(&first);
+        query[1_500..1_900].copy_from_slice(&second);
+        for diagonal_distance in [64u64, 65] {
+            let second_target_start = 1_700 + diagonal_distance as usize;
+            let mut oriented_target = window_dna(109, 4_802);
+            oriented_target[500..900].copy_from_slice(&first);
+            oriented_target[second_target_start..second_target_start + 400]
+                .copy_from_slice(&second);
+            let region = envelope_region(315, 515, 18);
+            for strand in [Strand::Forward, Strand::Reverse] {
+                let target = if strand == Strand::Forward {
+                    oriented_target.clone()
+                } else {
+                    window_reverse_complement(&oriented_target)
+                };
+                let config = TraceConfig {
+                    circular: false,
+                    endpoint_bases: 0,
+                    ..TraceConfig::default()
+                };
+                let envelope = fragment_envelope(
+                    &region,
+                    envelope_key(strand),
+                    query.len() as u64,
+                    target.len() as u64,
+                    config,
+                )
+                .unwrap();
+                assert_eq!((envelope.target_start, envelope.target_end), (0, 4_802));
+                assert!(envelope.query_span < query.len() as u64);
+                let query_window =
+                    linearize_query(&query, envelope.query_start, envelope.query_span, false)
+                        .unwrap();
+                let query_relative = 315 - envelope.query_start;
+                let mut bounded_config = config.alignment;
+                bounded_config.diagonal_offset = 515 - query_relative as i64;
+                let bounded = AlignmentWorkspace::default()
+                    .align_oriented(&query_window, &target, 0, strand, bounded_config)
+                    .unwrap();
+                let (first_start, first_end) = match strand {
+                    Strand::Forward => (500, 900),
+                    Strand::Reverse => (3_902, 4_302),
+                };
+                assert!(
+                    bounded.target_interval.start <= first_start
+                        && bounded.target_interval.end >= first_end
+                );
+                let support = exact_alignment_pairs(&bounded, &query_window, &target);
+                let expected = (0..400u64)
+                    .map(|offset| {
+                        let query_position = 300 + offset - envelope.query_start;
+                        let target_position = match strand {
+                            Strand::Forward => 500 + offset,
+                            Strand::Reverse => 4_301 - offset,
+                        };
+                        (query_position, target_position)
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert!(expected.is_subset(&support));
+
+                let full = AlignmentWorkspace::default()
+                    .align_oriented(
+                        &query,
+                        &target,
+                        0,
+                        strand,
+                        AlignmentConfig {
+                            diagonal_offset: 200,
+                            ..config.alignment
+                        },
+                    )
+                    .unwrap();
+                let (second_start, second_end) = match strand {
+                    Strand::Forward => {
+                        (second_target_start as u64, second_target_start as u64 + 400)
+                    }
+                    Strand::Reverse => (
+                        4_802 - second_target_start as u64 - 400,
+                        4_802 - second_target_start as u64,
+                    ),
+                };
+                assert!(
+                    full.target_interval.start <= second_start
+                        && full.target_interval.end >= second_end
+                );
+            }
+
+            let key = envelope_key(Strand::Forward);
+            let grouped = form_regions(
+                BTreeMap::from([(
+                    key,
+                    RegionHits::Many(vec![
+                        SeedHit {
+                            query: 315,
+                            target: 515,
+                            diagonal: 200,
+                        },
+                        SeedHit {
+                            query: 335,
+                            target: 535,
+                            diagonal: 200,
+                        },
+                        SeedHit {
+                            query: 1_515,
+                            target: 1_715 + diagonal_distance,
+                            diagonal: i128::from(200 + diagonal_distance),
+                        },
+                        SeedHit {
+                            query: 1_535,
+                            target: 1_735 + diagonal_distance,
+                            diagonal: i128::from(200 + diagonal_distance),
+                        },
+                    ]),
+                )]),
+                64,
+            );
+            assert_eq!(grouped.len(), usize::from(diagonal_distance > 64) + 1);
+        }
     }
 
     #[test]
