@@ -1,7 +1,9 @@
+use serde::Serialize;
 use std::sync::{Condvar, Mutex};
 
 pub const MAX_BGZF_BLOCK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_BATCH_BGZF_CACHE_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_CONCURRENT_BGZF_DECODES: usize = 4;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct BgzfBlockIdentity {
@@ -13,15 +15,19 @@ pub struct BgzfBlockIdentity {
     pub uncompressed_offset: u64,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct BgzfCacheStats {
     pub capacity_bytes: usize,
     pub accounted_bytes: usize,
+    pub peak_accounted_bytes: usize,
+    pub fixed_bytes: usize,
     pub payload_bytes: usize,
     pub reserved_bytes: usize,
     pub retained_entry_bytes: usize,
     pub resident_blocks: usize,
     pub loading_blocks: usize,
+    pub max_loading_blocks: usize,
+    pub peak_loading_blocks: usize,
     pub hits: u64,
     pub blocks_decoded: u64,
     pub evictions: u64,
@@ -44,6 +50,9 @@ struct CacheInner {
     blocks_decoded: u64,
     evictions: u64,
     waits: u64,
+    loading_blocks: usize,
+    peak_loading_blocks: usize,
+    peak_accounted_bytes: usize,
 }
 
 struct CacheEntry {
@@ -58,19 +67,22 @@ enum EntryState {
 
 impl BgzfBlockCache {
     pub fn new(capacity_bytes: usize) -> Option<Self> {
-        let entry_capacity = capacity_bytes / (MAX_BGZF_BLOCK_BYTES + size_of::<CacheEntry>());
+        let available = capacity_bytes.checked_sub(size_of::<Self>())?;
+        let entry_capacity = available / (MAX_BGZF_BLOCK_BYTES + size_of::<CacheEntry>());
         if entry_capacity == 0 {
             return None;
         }
         let entries = Vec::with_capacity(entry_capacity);
-        if entries.capacity() * size_of::<CacheEntry>() + MAX_BGZF_BLOCK_BYTES > capacity_bytes {
+        if entries.capacity() * size_of::<CacheEntry>() + MAX_BGZF_BLOCK_BYTES > available {
             return None;
         }
+        let peak_accounted_bytes = size_of::<Self>() + entries.capacity() * size_of::<CacheEntry>();
         Some(Self {
             capacity_bytes,
             changed: Condvar::new(),
             inner: Mutex::new(CacheInner {
                 entries,
+                peak_accounted_bytes,
                 ..CacheInner::default()
             }),
         })
@@ -81,7 +93,9 @@ impl BgzfBlockCache {
         let retained_entry_bytes = inner.entries.capacity() * size_of::<CacheEntry>();
         BgzfCacheStats {
             capacity_bytes: self.capacity_bytes,
-            accounted_bytes: inner.payload_bytes + inner.reserved_bytes + retained_entry_bytes,
+            accounted_bytes: accounted_bytes(&inner),
+            peak_accounted_bytes: inner.peak_accounted_bytes,
+            fixed_bytes: size_of::<Self>(),
             payload_bytes: inner.payload_bytes,
             reserved_bytes: inner.reserved_bytes,
             retained_entry_bytes,
@@ -90,11 +104,9 @@ impl BgzfBlockCache {
                 .iter()
                 .filter(|entry| matches!(entry.state, EntryState::Ready { .. }))
                 .count(),
-            loading_blocks: inner
-                .entries
-                .iter()
-                .filter(|entry| matches!(entry.state, EntryState::Loading))
-                .count(),
+            loading_blocks: inner.loading_blocks,
+            max_loading_blocks: MAX_CONCURRENT_BGZF_DECODES,
+            peak_loading_blocks: inner.peak_loading_blocks,
             hits: inner.hits,
             blocks_decoded: inner.blocks_decoded,
             evictions: inner.evictions,
@@ -135,6 +147,15 @@ impl BgzfBlockCache {
                 return consume(data);
             }
 
+            if inner.loading_blocks >= MAX_CONCURRENT_BGZF_DECODES {
+                inner.waits = inner.waits.saturating_add(1);
+                inner = self
+                    .changed
+                    .wait(inner)
+                    .unwrap_or_else(|error| error.into_inner());
+                drop(inner);
+                continue 'lookup;
+            }
             while inner.entries.len() == inner.entries.capacity()
                 || accounted_bytes(&inner)
                     .checked_add(MAX_BGZF_BLOCK_BYTES)
@@ -151,10 +172,14 @@ impl BgzfBlockCache {
                 }
             }
             inner.reserved_bytes += MAX_BGZF_BLOCK_BYTES;
+            inner.loading_blocks += 1;
+            inner.peak_loading_blocks = inner.peak_loading_blocks.max(inner.loading_blocks);
             inner.entries.push(CacheEntry {
                 identity,
                 state: EntryState::Loading,
             });
+            let accounted = accounted_bytes(&inner);
+            inner.peak_accounted_bytes = inner.peak_accounted_bytes.max(accounted);
             drop(inner);
 
             let decoded = decode.take().expect("BGZF decoder called once")();
@@ -165,6 +190,7 @@ impl BgzfBlockCache {
                 .position(|entry| entry.identity == identity)
                 .expect("loading BGZF block remains present");
             inner.reserved_bytes -= MAX_BGZF_BLOCK_BYTES;
+            inner.loading_blocks -= 1;
             match decoded {
                 Ok(data) => {
                     assert!(data.len() <= MAX_BGZF_BLOCK_BYTES);
@@ -176,6 +202,8 @@ impl BgzfBlockCache {
                         data: data.into_boxed_slice(),
                         last_used: clock,
                     };
+                    let accounted = accounted_bytes(&inner);
+                    inner.peak_accounted_bytes = inner.peak_accounted_bytes.max(accounted);
                     self.changed.notify_all();
                     let EntryState::Ready { data, .. } = &inner.entries[index].state else {
                         unreachable!();
@@ -193,7 +221,10 @@ impl BgzfBlockCache {
 }
 
 fn accounted_bytes(inner: &CacheInner) -> usize {
-    inner.payload_bytes + inner.reserved_bytes + inner.entries.capacity() * size_of::<CacheEntry>()
+    size_of::<BgzfBlockCache>()
+        + inner.payload_bytes
+        + inner.reserved_bytes
+        + inner.entries.capacity() * size_of::<CacheEntry>()
 }
 
 fn evict_oldest(inner: &mut CacheInner) -> bool {
@@ -222,7 +253,7 @@ fn evict_oldest(inner: &mut CacheInner) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, Condvar, Mutex, mpsc};
     use std::thread;
 
     fn identity(block: u64) -> BgzfBlockIdentity {
@@ -313,6 +344,8 @@ mod tests {
                 .unwrap();
             let stats = cache.stats();
             assert!(stats.accounted_bytes <= stats.capacity_bytes);
+            assert!(stats.peak_accounted_bytes >= stats.accounted_bytes);
+            assert!(stats.peak_accounted_bytes <= stats.capacity_bytes);
             assert_eq!(stats.reserved_bytes, 0);
             assert_eq!(stats.resident_blocks, 1);
         }
@@ -320,6 +353,70 @@ mod tests {
         assert_eq!(stats.blocks_decoded, 3);
         assert_eq!(stats.evictions, 2);
         assert!(stats.retained_entry_bytes >= size_of::<CacheEntry>());
+    }
+
+    #[test]
+    fn independent_block_decodes_never_exceed_io_limit() {
+        let cache = Arc::new(
+            BgzfBlockCache::new(DEFAULT_BATCH_BGZF_CACHE_BYTES).expect("batch cache capacity"),
+        );
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let threads = (0..8)
+            .map(|block| {
+                let cache = Arc::clone(&cache);
+                let gate = Arc::clone(&gate);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                thread::spawn(move || {
+                    cache
+                        .with_block(
+                            identity(block),
+                            || {
+                                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                                peak.fetch_max(now, Ordering::SeqCst);
+                                let (open, changed) = &*gate;
+                                let mut open = open.lock().unwrap();
+                                while !*open {
+                                    open = changed.wait(open).unwrap();
+                                }
+                                active.fetch_sub(1, Ordering::SeqCst);
+                                Ok::<_, ()>(vec![block as u8])
+                            },
+                            |data| Ok::<_, ()>(data[0]),
+                        )
+                        .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        for _ in 0..100_000 {
+            let stats = cache.stats();
+            if stats.loading_blocks == MAX_CONCURRENT_BGZF_DECODES && stats.waits >= 4 {
+                break;
+            }
+            thread::yield_now();
+        }
+        let blocked = cache.stats();
+        assert_eq!(blocked.loading_blocks, MAX_CONCURRENT_BGZF_DECODES);
+        assert!(blocked.waits >= 4);
+        assert_eq!(blocked.peak_loading_blocks, MAX_CONCURRENT_BGZF_DECODES);
+        assert!(blocked.accounted_bytes <= blocked.capacity_bytes);
+        assert!(blocked.peak_accounted_bytes >= blocked.accounted_bytes);
+        assert!(blocked.peak_accounted_bytes <= blocked.capacity_bytes);
+
+        let (open, changed) = &*gate;
+        *open.lock().unwrap() = true;
+        changed.notify_all();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let stats = cache.stats();
+        assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_BGZF_DECODES);
+        assert_eq!(stats.max_loading_blocks, MAX_CONCURRENT_BGZF_DECODES);
+        assert_eq!(stats.peak_loading_blocks, MAX_CONCURRENT_BGZF_DECODES);
+        assert_eq!(stats.loading_blocks, 0);
+        assert_eq!(stats.blocks_decoded, 8);
     }
 
     #[test]
