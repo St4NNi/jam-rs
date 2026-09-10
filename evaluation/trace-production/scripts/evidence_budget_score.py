@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from lexicmap_circular import load_transform, project_records
+
 
 def digest(path: Path) -> str:
     with path.open("rb") as stream:
@@ -76,6 +78,25 @@ def normalize_results(args, output: Path) -> Path:
         for row in rows.values():
             stream.write(json.dumps(row, sort_keys=True) + "\n")
     return output
+
+
+def project_circular_results(args, results: Path, output: Path) -> tuple[Path, dict | None]:
+    if args.lexicmap_transform_manifest is None:
+        return results, None
+    transform = load_transform(
+        args.lexicmap_transform_manifest,
+        args.expected_lexicmap_transform_manifest_sha256,
+        args.queries,
+        args.lexicmap_transformed_query,
+    )
+    rows = load_jsonl(results, "query_id")
+    totals = project_records(
+        rows, transform, args.expected_lexicmap_transform_manifest_sha256)
+    totals.update(transform["offline_native_validation"])
+    with output.open("x", encoding="utf-8") as stream:
+        for row in rows.values():
+            stream.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    return output, totals
 
 
 def scoring_truth(args) -> tuple[Path, str]:
@@ -311,6 +332,9 @@ def main() -> None:
     parser.add_argument("--probe-results", type=Path)
     parser.add_argument("--probe-index", type=Path)
     parser.add_argument("--expected-probe-index-sha256")
+    parser.add_argument("--lexicmap-transform-manifest", type=Path)
+    parser.add_argument("--lexicmap-transformed-query", type=Path)
+    parser.add_argument("--expected-lexicmap-transform-manifest-sha256")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if (args.output.exists() or digest(args.base_scorer) != args.expected_base_scorer_sha256
@@ -324,11 +348,19 @@ def main() -> None:
     if (bool(args.probe_results) != bool(args.probe_index)
             or bool(args.probe_index) != bool(args.expected_probe_index_sha256)):
         raise SystemExit("probe results, index path, and index identity must be supplied together")
+    transform_bindings = (args.lexicmap_transform_manifest, args.lexicmap_transformed_query,
+                          args.expected_lexicmap_transform_manifest_sha256)
+    if (any(value is not None for value in transform_bindings)
+            != all(value is not None for value in transform_bindings)
+            or args.lexicmap_transform_manifest is not None and args.method != "lexicmap"):
+        raise SystemExit("LexicMap transform manifest and identity must be supplied together")
     if args.probe_index and (not args.probe_index.is_file() or args.probe_index.is_symlink()
                              or digest(args.probe_index) != args.expected_probe_index_sha256):
         raise SystemExit("probe index identity differs")
     args.output.mkdir(mode=0o700)
     normalized_results = normalize_results(args, args.output / "normalized-results.jsonl")
+    normalized_results, projection_totals = project_circular_results(
+        args, normalized_results, args.output / "projected-results.jsonl")
     bound_truth, base_split = scoring_truth(args)
     base_output = args.output / "score.json"
     command = score_command(args, normalized_results, bound_truth, base_split, base_output)
@@ -369,6 +401,12 @@ def main() -> None:
                       "metrics": base, "component_ledger": components,
                       "first_loss_components": first_losses,
                       "first_loss_attribution_status": "available" if probes else "probe_unavailable"}
+    assessment.update({
+        "lexicmap_transform_manifest_sha256": (
+            digest(args.lexicmap_transform_manifest)
+            if args.lexicmap_transform_manifest else None),
+        "lexicmap_projection_totals": projection_totals,
+    })
     (args.output / "assessment.json").write_text(
         json.dumps(assessment, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
