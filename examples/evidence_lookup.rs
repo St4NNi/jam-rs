@@ -108,7 +108,11 @@ fn prefix(root: &Path) -> Result<()> {
         )?;
         for id in 0..=unrelated {
             writer.begin_metagenome(MetagenomeInput {
-                name: format!("member-{id:04}"),
+                name: if id == unrelated {
+                    "target".into()
+                } else {
+                    format!("prefix-{id:04}")
+                },
                 bgzf_uri: "unused.bgz".into(),
                 bgzf_bytes: 100,
                 bgzf_sha256: [3; 32],
@@ -133,6 +137,7 @@ fn prefix(root: &Path) -> Result<()> {
         let stats = writer.finish()?;
         let reader = JidxReader::open(path)?;
         reader.verify_checksum()?;
+        ensure!(reader.metagenome(unrelated)?.context("target")?.name == "target");
         let mut absent_ns = Vec::new();
         let mut count_ns = Vec::new();
         let mut late_ns = Vec::new();
@@ -156,6 +161,7 @@ fn prefix(root: &Path) -> Result<()> {
         }
         rows.push(json!({
             "unrelated_prefix_members": unrelated, "file_bytes": stats.file_bytes,
+            "requested_member": "target", "requested_contig": "contig",
             "returned_positions": [17], "members_decoded_for_late_answer": unrelated + 1,
             "absent_nanoseconds": absent_ns, "document_count_nanoseconds": count_ns,
             "late_member_nanoseconds": late_ns,
