@@ -1242,6 +1242,7 @@ struct AlignmentTask {
 
 const SHORT_CONTIG_ENVELOPE_BYTES: u64 = 64 * 1024;
 const LONG_CONTIG_ENVELOPE_FLANK_LIMIT: u64 = 16 * 1024;
+const ALIGNMENT_CELL_RESERVE_DIVISOR: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FragmentEnvelope {
@@ -1294,26 +1295,39 @@ fn fragment_envelope(
         )
         .min(LONG_CONTIG_ENVELOPE_FLANK_LIMIT);
 
-    let (oriented_start, oriented_end) = if contig_length <= SHORT_CONTIG_ENVELOPE_BYTES {
-        (0, contig_length)
-    } else {
-        (
-            region.target_start.saturating_sub(extension),
-            target_seed_end.saturating_add(extension).min(contig_length),
+    let bounded_target = (
+        region.target_start.saturating_sub(extension),
+        target_seed_end.saturating_add(extension).min(contig_length),
+    );
+    let projection = |(start, end)| {
+        projected_query_window(
+            i128::from(start) - region.diagonal_max - i128::from(identity_allowance),
+            i128::from(end) - region.diagonal_min + i128::from(identity_allowance),
+            region.query_start,
+            query_seed_end.saturating_sub(region.query_start),
+            query_length,
+            config.circular,
         )
     };
-    let query_low =
-        i128::from(oriented_start) - region.diagonal_max - i128::from(identity_allowance);
-    let query_high =
-        i128::from(oriented_end) - region.diagonal_min + i128::from(identity_allowance);
-    let (query_start, query_span) = projected_query_window(
-        query_low,
-        query_high,
-        region.query_start,
-        query_seed_end.saturating_sub(region.query_start),
-        query_length,
-        config.circular,
-    )?;
+    let full_target = (0, contig_length);
+    let full_query = (contig_length <= SHORT_CONTIG_ENVELOPE_BYTES)
+        .then(|| projection(full_target))
+        .transpose()?;
+    let (oriented_start, oriented_end, query_start, query_span) =
+        if let Some((query_start, query_span)) = full_query
+            && envelope_fits_workspace(query_span, contig_length, config)?
+        {
+            (0, contig_length, query_start, query_span)
+        } else {
+            let (query_start, query_span) = projection(bounded_target)?;
+            let target_span = bounded_target.1 - bounded_target.0;
+            if !envelope_fits_workspace(query_span, target_span, config)? {
+                return Err(TraceError::Invalid(
+                    "fragment envelope exceeds alignment workspace",
+                ));
+            }
+            (bounded_target.0, bounded_target.1, query_start, query_span)
+        };
     let (target_start, target_end) = match key.strand {
         Strand::Forward => (oriented_start, oriented_end),
         Strand::Reverse => (contig_length - oriented_end, contig_length - oriented_start),
@@ -1324,6 +1338,37 @@ fn fragment_envelope(
         target_start,
         target_end,
     })
+}
+
+fn envelope_fits_workspace(
+    query_span: u64,
+    target_span: u64,
+    config: TraceConfig,
+) -> Result<bool, TraceError> {
+    let query = usize::try_from(query_span).map_err(|_| TraceError::Invalid("query window"))?;
+    let target = usize::try_from(target_span).map_err(|_| TraceError::Invalid("target window"))?;
+    let band = usize::try_from(config.alignment.band_width)
+        .map_err(|_| TraceError::Invalid("alignment band"))?;
+    let band_columns = band
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(1))
+        .ok_or(TraceError::Invalid("alignment band"))?;
+    let local_cells = query
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(target.saturating_add(1).min(band_columns)))
+        .ok_or(TraceError::Invalid("fragment envelope workspace"))?;
+    let reserve = (config.alignment.max_cells / ALIGNMENT_CELL_RESERVE_DIVISOR).max(1);
+    let usable = config
+        .alignment
+        .max_cells
+        .checked_sub(reserve)
+        .ok_or(TraceError::Invalid("alignment workspace reserve"))?;
+    let endpoint_cells = query
+        .min(config.endpoint_bases)
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(target.min(config.endpoint_bases).saturating_add(1)))
+        .ok_or(TraceError::Invalid("endpoint workspace"))?;
+    Ok(local_cells <= usable && endpoint_cells <= config.alignment.max_cells)
 }
 
 fn projected_query_window(
@@ -1581,7 +1626,7 @@ pub enum TraceError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::alignment::AlignmentWorkspace;
+    use crate::alignment::{Alignment, AlignmentWorkspace};
     use crate::cli::handlers::{TraceArgs, TraceInput, handle_trace_command};
     use crate::jidx_builder::{JidxBuildConfig, build_local_jidx};
     use crate::writer::{BuildConfig, build};
@@ -2432,6 +2477,53 @@ mod tests {
     }
 
     #[test]
+    fn envelope_respects_custom_band_and_workspace_reserve() {
+        let region = envelope_region(50_000, 30_000, 1);
+        let config = TraceConfig {
+            circular: false,
+            alignment: AlignmentConfig {
+                band_width: 64,
+                max_cells: 300_000,
+                ..AlignmentConfig::default()
+            },
+            ..TraceConfig::default()
+        };
+        let envelope = fragment_envelope(
+            &region,
+            envelope_key(Strand::Forward),
+            100_000,
+            60_000,
+            config,
+        )
+        .unwrap();
+        assert!(envelope.target_start > 0 && envelope.target_end < 60_000);
+        assert!(
+            envelope_fits_workspace(
+                envelope.query_span,
+                envelope.target_end - envelope.target_start,
+                config,
+            )
+            .unwrap()
+        );
+        assert!(
+            fragment_envelope(
+                &region,
+                envelope_key(Strand::Forward),
+                100_000,
+                60_000,
+                TraceConfig {
+                    alignment: AlignmentConfig {
+                        max_cells: 250_000,
+                        ..config.alignment
+                    },
+                    ..config
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn circular_seed_crossing_origin_matches_full_window_oracle() {
         let mut state = 0x9e3779b97f4a7c15u64;
         let query = (0..800)
@@ -2734,5 +2826,347 @@ mod tests {
         );
         assert_eq!(minimum_region_hits(15, 2), 3);
         assert_eq!(minimum_region_hits(21, 2), 2);
+    }
+
+    fn window_dna(mut state: u64, length: usize) -> Vec<u8> {
+        (0..length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect()
+    }
+
+    fn window_reverse_complement(sequence: &[u8]) -> Vec<u8> {
+        sequence
+            .iter()
+            .rev()
+            .map(|base| match base {
+                b'A' => b'T',
+                b'C' => b'G',
+                b'G' => b'C',
+                b'T' => b'A',
+                _ => b'N',
+            })
+            .collect()
+    }
+
+    fn complete_window_alignment(
+        query: &[u8],
+        target: &[u8],
+        query_start: u64,
+        query_span: u64,
+        target_start: u64,
+        target_end: u64,
+        strand: Strand,
+        diagonal_offset: i64,
+        config: TraceConfig,
+    ) -> Alignment {
+        let query_window =
+            linearize_query(query, query_start, query_span, config.circular).unwrap();
+        let target_window = &target[target_start as usize..target_end as usize];
+        let mut alignment_config = config.alignment;
+        alignment_config.diagonal_offset = diagonal_offset;
+        let mut workspace = AlignmentWorkspace::default();
+        let core = workspace
+            .align_oriented(
+                &query_window,
+                target_window,
+                target_start,
+                strand,
+                alignment_config,
+            )
+            .unwrap();
+        let completed = workspace
+            .complete_endpoints(
+                core.clone(),
+                &query_window,
+                target_window,
+                target_start,
+                config.endpoint_bases,
+                alignment_config,
+            )
+            .unwrap()
+            .alignment;
+        if completed.identity() >= config.min_identity {
+            completed
+        } else {
+            core
+        }
+    }
+
+    fn compare_envelope_to_full_window(
+        query: &[u8],
+        target: &[u8],
+        query_anchor: u64,
+        oriented_target_anchor: u64,
+        strand: Strand,
+        config: TraceConfig,
+    ) {
+        let region = envelope_region(query_anchor, oriented_target_anchor, 1);
+        let envelope = fragment_envelope(
+            &region,
+            envelope_key(strand),
+            query.len() as u64,
+            target.len() as u64,
+            config,
+        )
+        .unwrap();
+        let query_relative = if query_anchor >= envelope.query_start {
+            query_anchor - envelope.query_start
+        } else {
+            query_anchor + query.len() as u64 - envelope.query_start
+        };
+        let oriented_start = match strand {
+            Strand::Forward => envelope.target_start,
+            Strand::Reverse => target.len() as u64 - envelope.target_end,
+        };
+        let bounded = complete_window_alignment(
+            query,
+            target,
+            envelope.query_start,
+            envelope.query_span,
+            envelope.target_start,
+            envelope.target_end,
+            strand,
+            i64::try_from(
+                i128::from(oriented_target_anchor - oriented_start) - i128::from(query_relative),
+            )
+            .unwrap(),
+            config,
+        );
+        let oracle = complete_window_alignment(
+            query,
+            target,
+            0,
+            query.len() as u64,
+            0,
+            target.len() as u64,
+            strand,
+            i64::try_from(i128::from(oriented_target_anchor) - i128::from(query_anchor)).unwrap(),
+            TraceConfig {
+                endpoint_bases: config.endpoint_bases,
+                alignment: AlignmentConfig {
+                    band_width: 256,
+                    max_cells: 2_000_000,
+                    ..config.alignment
+                },
+                ..config
+            },
+        );
+        assert_eq!(bounded.score, oracle.score);
+        assert_eq!(bounded.strand, oracle.strand);
+        assert_eq!(bounded.target_interval, oracle.target_interval);
+        assert_eq!(bounded.matches, oracle.matches);
+        assert_eq!(bounded.substitutions, oracle.substitutions);
+        assert_eq!(bounded.insertions, oracle.insertions);
+        assert_eq!(bounded.deletions, oracle.deletions);
+        assert_eq!(bounded.cigar, oracle.cigar);
+        assert_eq!(bounded.edit_script, oracle.edit_script);
+        assert_eq!(
+            query_segments(
+                envelope.query_start,
+                bounded.query_interval,
+                query.len() as u64,
+                config.circular,
+            )
+            .unwrap(),
+            query_segments(
+                0,
+                oracle.query_interval,
+                query.len() as u64,
+                config.circular
+            )
+            .unwrap(),
+        );
+    }
+
+    #[test]
+    fn fragment_envelopes_match_full_windows_across_bounded_error_cases() {
+        let component = window_dna(0x123456789abcdef0, 800);
+        let config = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        for anchor in [384, 700, 780] {
+            let mut query = window_dna(0x5555555555555555, 1_400);
+            query[300..1_100].copy_from_slice(&component);
+            for strand in [Strand::Forward, Strand::Reverse] {
+                let mut oriented_target = window_dna(0xaaaaaaaaaaaaaaaa, 1_800);
+                oriented_target[500..1_300].copy_from_slice(&component);
+                let target = if strand == Strand::Forward {
+                    oriented_target
+                } else {
+                    window_reverse_complement(&oriented_target)
+                };
+                compare_envelope_to_full_window(
+                    &query,
+                    &target,
+                    300 + anchor,
+                    500 + anchor,
+                    strand,
+                    config,
+                );
+            }
+        }
+
+        for (name, query_component, target_component, anchor) in [
+            (
+                "insertion",
+                component.clone(),
+                {
+                    let mut value = component.clone();
+                    value.splice(400..400, window_dna(31, 30));
+                    value
+                },
+                700,
+            ),
+            (
+                "deletion",
+                component.clone(),
+                {
+                    let mut value = component.clone();
+                    value.drain(385..415);
+                    value
+                },
+                700,
+            ),
+            (
+                "ambiguity",
+                {
+                    let mut value = component.clone();
+                    value[360..392].fill(b'N');
+                    value
+                },
+                {
+                    let mut value = component.clone();
+                    value[360..392].fill(b'N');
+                    value
+                },
+                700,
+            ),
+            (
+                "absent_left",
+                component.clone(),
+                component[200..].to_vec(),
+                700,
+            ),
+            (
+                "absent_right",
+                component.clone(),
+                component[..600].to_vec(),
+                384,
+            ),
+        ] {
+            let mut query = window_dna(0x5555555555555555, 1_400);
+            query[300..1_100].copy_from_slice(&query_component);
+            let mut target = window_dna(0xaaaaaaaaaaaaaaaa, 1_800);
+            target[500..500 + target_component.len()].copy_from_slice(&target_component);
+            let target_anchor = match name {
+                "insertion" if anchor >= 400 => 500 + anchor + 30,
+                "deletion" if anchor >= 415 => 500 + anchor - 30,
+                "absent_left" => 500 + anchor - 200,
+                _ => 500 + anchor,
+            };
+            compare_envelope_to_full_window(
+                &query,
+                &target,
+                300 + anchor,
+                target_anchor,
+                Strand::Forward,
+                config,
+            );
+        }
+
+        for target_start in [0, 1_000] {
+            let mut query = window_dna(0x5555555555555555, 1_400);
+            query[300..1_100].copy_from_slice(&component);
+            let mut target = window_dna(0xaaaaaaaaaaaaaaaa, 1_800);
+            target[target_start..target_start + 800].copy_from_slice(&component);
+            compare_envelope_to_full_window(
+                &query,
+                &target,
+                1_000,
+                (target_start + 700) as u64,
+                Strand::Forward,
+                config,
+            );
+        }
+    }
+
+    #[test]
+    fn long_contig_displaced_anchor_matches_larger_bounded_reference() {
+        let component = window_dna(0x123456789abcdef0, 800);
+        let mut query = window_dna(0x5555555555555555, 1_400);
+        query[300..1_100].copy_from_slice(&component);
+        let mut target = window_dna(0xaaaaaaaaaaaaaaaa, 66_000);
+        target[50_000..50_800].copy_from_slice(&component);
+        let query_anchor = 1_000;
+        let target_anchor = 50_700;
+        let config = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let region = envelope_region(query_anchor, target_anchor, 1);
+        let envelope = fragment_envelope(
+            &region,
+            envelope_key(Strand::Forward),
+            query.len() as u64,
+            target.len() as u64,
+            config,
+        )
+        .unwrap();
+        assert!(envelope.target_start > 0 && envelope.target_end < target.len() as u64);
+        let bounded = complete_window_alignment(
+            &query,
+            &target,
+            envelope.query_start,
+            envelope.query_span,
+            envelope.target_start,
+            envelope.target_end,
+            Strand::Forward,
+            i64::try_from(
+                i128::from(target_anchor - envelope.target_start)
+                    - i128::from(query_anchor - envelope.query_start),
+            )
+            .unwrap(),
+            config,
+        );
+        let reference_start = 49_000;
+        let reference_end = 52_000;
+        let reference = complete_window_alignment(
+            &query,
+            &target,
+            0,
+            query.len() as u64,
+            reference_start,
+            reference_end,
+            Strand::Forward,
+            i64::try_from(i128::from(target_anchor - reference_start) - i128::from(query_anchor))
+                .unwrap(),
+            TraceConfig {
+                alignment: AlignmentConfig {
+                    band_width: 256,
+                    max_cells: 2_000_000,
+                    ..config.alignment
+                },
+                ..config
+            },
+        );
+        assert_eq!(bounded.score, reference.score);
+        assert_eq!(bounded.target_interval, reference.target_interval);
+        assert_eq!(bounded.cigar, reference.cigar);
+        assert_eq!(
+            query_segments(
+                envelope.query_start,
+                bounded.query_interval,
+                query.len() as u64,
+                false,
+            )
+            .unwrap(),
+            query_segments(0, reference.query_interval, query.len() as u64, false).unwrap(),
+        );
     }
 }
