@@ -1,7 +1,15 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use jam_rs::alignment::{AlignmentConfig, AlignmentWorkspace};
+use jam_rs::jidx::sha256;
+use jam_rs::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use jam_rs::owner_postings;
+use jam_rs::shared_reader::SharedReader;
+use jam_rs::shared_seed::{HAS_CONTEXT_21, HAS_CONTEXT_31, SharedKey, select_shared_seeds};
+use jam_rs::shared_writer::build_shared_index;
+use noodles_bgzf::{self as bgzf, gzi};
+use std::fs::File;
 use std::hint::black_box;
+use std::io::Write;
 use std::time::Duration;
 
 fn sequence(length: usize) -> Vec<u8> {
@@ -176,5 +184,174 @@ fn owner_postings(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, affine_alignment, owner_postings);
+fn synthetic_gzi(bytes: &[u8]) -> gzi::Index {
+    let mut entries = Vec::new();
+    let mut compressed = 0usize;
+    let mut uncompressed = 0u64;
+    while compressed < bytes.len() {
+        let header = &bytes[compressed..compressed + 18];
+        let block_bytes = usize::from(u16::from_le_bytes([header[16], header[17]])) + 1;
+        let end = compressed + block_bytes;
+        let uncompressed_bytes = u32::from_le_bytes(bytes[end - 4..end].try_into().unwrap());
+        if compressed != 0 && uncompressed_bytes != 0 {
+            entries.push((compressed as u64, uncompressed));
+        }
+        uncompressed += u64::from(uncompressed_bytes);
+        compressed = end;
+    }
+    gzi::Index::from(entries)
+}
+
+fn shared_lookup_fixture() -> (
+    tempfile::TempDir,
+    SharedReader,
+    Vec<(&'static str, Vec<SharedKey>)>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let mut dna = sequence(80_000);
+    let repeated = sequence(127);
+    while dna.len() < 100_000 {
+        dna.extend_from_slice(&repeated);
+    }
+    dna.truncate(100_000);
+    let bgzf_path = directory.path().join("target.bgz");
+    let mut fasta = b">target\n".to_vec();
+    for line in dna.chunks(80) {
+        fasta.extend_from_slice(line);
+        fasta.push(b'\n');
+    }
+    let mut writer = bgzf::io::Writer::new(File::create(&bgzf_path).unwrap());
+    writer.write_all(&fasta).unwrap();
+    writer.finish().unwrap();
+    let bgzf_path = std::fs::canonicalize(bgzf_path).unwrap();
+    let bgzf_bytes = std::fs::read(&bgzf_path).unwrap();
+    let gzi_path = directory.path().join("target.gzi");
+    gzi::fs::write(&gzi_path, &synthetic_gzi(&bgzf_bytes)).unwrap();
+
+    let metadata_path = directory.path().join("target.jidx");
+    let mut metadata = JidxWriter::new(
+        &metadata_path,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [1; 32],
+            manifest_sha256: [2; 32],
+        },
+    )
+    .unwrap();
+    metadata
+        .begin_metagenome(MetagenomeInput {
+            name: "target".to_owned(),
+            bgzf_uri: bgzf_path.to_str().unwrap().to_owned(),
+            bgzf_bytes: bgzf_bytes.len() as u64,
+            bgzf_sha256: sha256(&bgzf_bytes),
+            gzi: std::fs::read(gzi_path).unwrap(),
+        })
+        .unwrap();
+    metadata
+        .begin_contig(ContigInput {
+            name: "target".to_owned(),
+            length: dna.len() as u64,
+            fasta_offset: 8,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+    metadata.finish().unwrap();
+    let shared_path = directory.path().join("target.shared");
+    build_shared_index(&metadata_path, &shared_path, 64).unwrap();
+    let reader = SharedReader::open(&shared_path).unwrap();
+
+    let seeds = select_shared_seeds(&dna, 64).unwrap();
+    let mut nested = seeds
+        .iter()
+        .filter(|seed| seed.flags & (HAS_CONTEXT_21 | HAS_CONTEXT_31) == 6)
+        .take(128)
+        .flat_map(|seed| {
+            [
+                seed.key(15).unwrap(),
+                seed.key(21).unwrap(),
+                seed.key(31).unwrap(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    nested.sort_unstable();
+    nested.dedup();
+    let mut independent = seeds
+        .iter()
+        .map(|seed| SharedKey::core(seed.core))
+        .collect::<Vec<_>>();
+    independent.sort_unstable();
+    independent.dedup();
+    independent.truncate(512);
+    let common = seeds
+        .iter()
+        .filter(|seed| seed.position >= 80_000 && seed.flags & 6 == 6)
+        .max_by_key(|seed| {
+            reader
+                .find(SharedKey::core(seed.core))
+                .unwrap()
+                .unwrap()
+                .occurrence_count()
+        })
+        .unwrap();
+    let common = [
+        common.key(15).unwrap(),
+        common.key(21).unwrap(),
+        common.key(31).unwrap(),
+    ];
+    let high_multiplicity = common.into_iter().cycle().take(1_536).collect();
+    let mut absent = Vec::new();
+    for ordinal in 0u32.. {
+        let core = ordinal.wrapping_mul(506_952_113) & ((1 << 30) - 1);
+        if reader.find(SharedKey::core(core)).unwrap().is_none() {
+            absent.push(SharedKey::core(core));
+            if absent.len() == 512 {
+                break;
+            }
+        }
+    }
+    (
+        directory,
+        reader,
+        vec![
+            ("positive_nested", nested),
+            ("absent_heavy_spread", absent),
+            ("low_reuse", independent),
+            ("high_multiplicity", high_multiplicity),
+        ],
+    )
+}
+
+fn shared_lookup(criterion: &mut Criterion) {
+    let (_directory, reader, workloads) = shared_lookup_fixture();
+    let mut group = criterion.benchmark_group("shared_lookup");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, keys) in workloads {
+        let scalar = keys
+            .iter()
+            .map(|&key| reader.find(key).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(reader.find_many(&keys).unwrap(), scalar);
+        group.throughput(Throughput::Elements(keys.len() as u64));
+        group.bench_function(format!("{name}/scalar_calls"), |bencher| {
+            bencher.iter(|| {
+                black_box(&keys)
+                    .iter()
+                    .map(|&key| reader.find(key).unwrap())
+                    .collect::<Vec<_>>()
+            })
+        });
+        group.bench_function(format!("{name}/grouped_call"), |bencher| {
+            bencher.iter(|| reader.find_many(black_box(&keys)).unwrap())
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, affine_alignment, owner_postings, shared_lookup);
 criterion_main!(benches);

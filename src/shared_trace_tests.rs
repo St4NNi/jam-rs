@@ -1,4 +1,4 @@
-use crate::alignment::{Alignment, EditOperation, Strand};
+use crate::alignment::{Alignment, AlignmentConfig, AlignmentWorkspace, EditOperation, Strand};
 use crate::cli::handlers::{TraceArgs, TraceInput, handle_trace_command};
 use crate::jidx::sha256;
 use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
@@ -18,6 +18,17 @@ fn dna(mut state: u64, length: usize) -> Vec<u8> {
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1);
             b"ACGT"[(state >> 62) as usize]
+        })
+        .collect()
+}
+
+fn xorshift_dna(mut state: u64, length: usize) -> Vec<u8> {
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            b"ACGT"[(state & 3) as usize]
         })
         .collect()
 }
@@ -116,6 +127,41 @@ fn without_json_read_accounting(mut result: serde_json::Value) -> serde_json::Va
         }
     }
     result
+}
+
+#[test]
+fn default_band_retains_known_gap256_bounded_counterexample() {
+    let query = xorshift_dna(0x9e37_79b9_7f4a_7c15 ^ 1_000, 1_000);
+    let mut homolog = query.clone();
+    homolog.splice(500..500, xorshift_dna(0xabcd_dcba ^ 256, 256));
+    let mut target = xorshift_dna(0x1234_5678_9abc_def0 ^ 4_096, 4_096);
+    target[1_420..2_676].copy_from_slice(&homolog);
+    let align = |band_width| {
+        AlignmentWorkspace::default()
+            .align(
+                &query,
+                &target,
+                AlignmentConfig {
+                    diagonal_offset: 1_420,
+                    band_width,
+                    max_cells: 20_000_000,
+                    ..AlignmentConfig::default()
+                },
+            )
+            .unwrap()
+    };
+    let default_band = align(128);
+    assert_eq!(default_band.score, 1_000);
+    assert_eq!(default_band.query_interval.end, 500);
+    assert_eq!(default_band.target_interval.end, 1_920);
+    assert_eq!(default_band.cigar, "500=");
+
+    let wider_bounded = align(512);
+    assert_eq!(wider_bounded.score, 1_739);
+    assert_eq!(wider_bounded.query_interval.end, 1_000);
+    assert_eq!(wider_bounded.target_interval.end, 2_676);
+    assert_eq!(wider_bounded.cigar, "500=256I500=");
+    assert!(default_band.score < wider_bounded.score);
 }
 
 fn matching_anchors(query: &[u8], seeds: &[SharedSeed]) -> (usize, usize) {
@@ -417,7 +463,7 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     .into_iter()
     .map(without_read_accounting)
     .collect::<Vec<_>>();
-    for threads in [1, 4] {
+    for threads in [1, 4, 8] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()

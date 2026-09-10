@@ -646,3 +646,45 @@ fn authenticated_context_and_reference_corruption_is_rejected() {
         Err(SharedError::Invalid("occurrence reference"))
     ));
 }
+
+#[test]
+fn resealed_malformed_rows_fail_scalar_and_grouped_lookup() {
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let path = directory.path().join("fixture.shared");
+    mutate_and_resign(&path, |bytes, header| {
+        let core = header.section(Section::Cores).offset as usize;
+        bytes[core + 4..core + 8].fill(0);
+    });
+    let key = SharedKey::core(TARGET_CORE);
+    let reader = SharedReader::open(&path).unwrap();
+    assert!(matches!(
+        reader.find(key),
+        Err(SharedError::Invalid("repeated core"))
+    ));
+    assert!(matches!(
+        reader.find_many(&[key, key]),
+        Err(SharedError::Invalid("repeated core"))
+    ));
+
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let path = directory.path().join("fixture.shared");
+    mutate_and_resign(&path, |bytes, header| {
+        let groups = header.section(Section::Groups);
+        let start = groups.offset as usize;
+        let end = (groups.offset + groups.length) as usize;
+        for group in (start..end).step_by(32) {
+            bytes[group + 28..group + 32].copy_from_slice(&1u32.to_le_bytes());
+        }
+    });
+    let reader = SharedReader::open(&path).unwrap();
+    assert!(matches!(
+        reader.find(key),
+        Err(SharedError::Invalid("group row"))
+    ));
+    assert!(matches!(
+        reader.find_many(&[key, key]),
+        Err(SharedError::Invalid("group row"))
+    ));
+}
