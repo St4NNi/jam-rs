@@ -447,8 +447,8 @@ fn grouped_lookup_matches_scalar_with_contexts_absence_and_chunking() {
                 assert_eq!(stats.core_resolutions_present, 1);
                 assert_eq!(stats.core_resolutions_absent, 1);
                 assert_eq!(
-                    stats.directory_comparison_probes,
-                    distinct.directory_comparison_probes
+                    stats.core_descriptor_inspections,
+                    distinct.core_descriptor_inspections
                 );
                 assert_eq!(
                     stats.group_descriptor_inspections,

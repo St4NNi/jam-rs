@@ -514,55 +514,158 @@ impl SharedReader {
         order: Option<&[usize]>,
         groups: &mut [Option<SharedGroup>],
     ) -> Result<(), SharedError> {
-        let mut start = 0;
-        while start < keys.len() {
-            let index = ordered_index(order, start);
-            let core = keys[index].core;
-            let mut end = start + 1;
-            while end < keys.len() && keys[ordered_index(order, end)].core == core {
-                end += 1;
-            }
-            if let Some((core_ordinal, row)) = self.resolve_core_unchecked(core)? {
-                match row.kind {
-                    CoreKind::Singleton { .. } => {
-                        let mut request = start;
-                        while request < end {
-                            let request_index = ordered_index(order, request);
-                            let key = keys[request_index];
-                            let group = self.group_from_core(core_ordinal, row, key)?;
-                            let code = key.context_code().unwrap();
-                            let mut next = request + 1;
-                            while next < end
-                                && keys[ordered_index(order, next)].context_code().unwrap() == code
-                            {
-                                next += 1;
-                            }
-                            for position in request..next {
-                                groups[ordered_index(order, position)] = group;
-                            }
-                            request = next;
-                        }
-                    }
-                    CoreKind::Repeated {
-                        first_group,
-                        group_count,
-                        occurrence_count,
-                    } => self.find_repeated_many(
-                        keys,
-                        order,
-                        groups,
-                        core_ordinal,
-                        first_group,
-                        u64::from(group_count),
-                        occurrence_count,
-                        start,
-                        end,
-                    )?,
+        self.find_cores_many(
+            keys,
+            order,
+            groups,
+            0,
+            self.file.header.core_count,
+            0,
+            keys.len(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_cores_many(
+        &self,
+        keys: &[SharedKey],
+        order: Option<&[usize]>,
+        groups: &mut [Option<SharedGroup>],
+        first_core: u64,
+        core_count: u64,
+        request_start: usize,
+        request_end: usize,
+    ) -> Result<(), SharedError> {
+        if request_start == request_end {
+            return Ok(());
+        }
+        if core_count == 0 {
+            let mut absent = 0;
+            let mut previous = None;
+            for position in request_start..request_end {
+                let core = keys[ordered_index(order, position)].core;
+                if previous != Some(core) {
+                    absent += 1;
+                    previous = Some(core);
                 }
             }
-            start = end;
+            self.observe(&self.core_resolutions_absent, absent);
+            return Ok(());
         }
-        Ok(())
+        let middle = core_count / 2;
+        let core_ordinal = first_core
+            .checked_add(middle)
+            .ok_or(SharedError::Invalid("core ordinal"))?;
+        let row = self.core_row(core_ordinal)?;
+        let lower =
+            self.request_core_partition(keys, order, request_start, request_end, row.core, false);
+        let upper = self.request_core_partition(keys, order, lower, request_end, row.core, true);
+        if lower < upper {
+            self.observe(&self.core_resolutions_present, 1);
+            self.find_contexts_many(keys, order, groups, core_ordinal, row, lower, upper)?;
+        }
+        self.find_cores_many(
+            keys,
+            order,
+            groups,
+            first_core,
+            middle,
+            request_start,
+            lower,
+        )?;
+        self.find_cores_many(
+            keys,
+            order,
+            groups,
+            core_ordinal + 1,
+            core_count - middle - 1,
+            upper,
+            request_end,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_contexts_many(
+        &self,
+        keys: &[SharedKey],
+        order: Option<&[usize]>,
+        groups: &mut [Option<SharedGroup>],
+        core_ordinal: u64,
+        row: CoreRow,
+        start: usize,
+        end: usize,
+    ) -> Result<(), SharedError> {
+        match row.kind {
+            CoreKind::Singleton { .. } => {
+                let mut request = start;
+                while request < end {
+                    let request_index = ordered_index(order, request);
+                    let key = keys[request_index];
+                    let group = self.group_from_core(core_ordinal, row, key)?;
+                    let code = key.context_code().unwrap();
+                    let mut next = request + 1;
+                    while next < end
+                        && keys[ordered_index(order, next)].context_code().unwrap() == code
+                    {
+                        next += 1;
+                    }
+                    for position in request..next {
+                        groups[ordered_index(order, position)] = group;
+                    }
+                    request = next;
+                }
+                Ok(())
+            }
+            CoreKind::Repeated {
+                first_group,
+                group_count,
+                occurrence_count,
+            } => self.find_repeated_many(
+                keys,
+                order,
+                groups,
+                core_ordinal,
+                first_group,
+                u64::from(group_count),
+                occurrence_count,
+                start,
+                end,
+            ),
+        }
+    }
+
+    fn request_core_partition(
+        &self,
+        keys: &[SharedKey],
+        order: Option<&[usize]>,
+        mut low: usize,
+        mut high: usize,
+        wanted: u32,
+        inclusive: bool,
+    ) -> usize {
+        if low < high {
+            let first = keys[ordered_index(order, low)].core;
+            let last = keys[ordered_index(order, high - 1)].core;
+            if first == last {
+                self.observe(&self.directory_comparison_probes, 1);
+                return match first.cmp(&wanted) {
+                    std::cmp::Ordering::Less => high,
+                    std::cmp::Ordering::Equal if inclusive => high,
+                    _ => low,
+                };
+            }
+        }
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let core = keys[ordered_index(order, middle)].core;
+            self.observe(&self.directory_comparison_probes, 1);
+            if core < wanted || inclusive && core == wanted {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
     }
 
     #[allow(clippy::too_many_arguments)]
