@@ -323,6 +323,7 @@ fn grouped_lookup_fixture(preceding: u32) -> (tempfile::TempDir, std::path::Path
     (directory, shared)
 }
 
+#[allow(clippy::type_complexity)]
 fn group_evidence(
     reader: &SharedReader,
     group: Option<SharedGroup>,
