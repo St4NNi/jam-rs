@@ -76,11 +76,12 @@ def validate_plan(path: Path, expected: str, timeout: int) -> dict:
     for row in plan["runs"]:
         if any(field not in row for field in required):
             raise ValueError("incomplete measurement row")
-        if (row["topology"] not in ("linear", "circular", "native")
+        if (row["topology"] not in ("linear", "circular", "mixed", "native")
                 or row["output_kind"] not in ("jam_jsonl", "opaque_native")
                 or not re.fullmatch(r"\.[a-z0-9.]+", row["output_suffix"])
-                or row["command"].count("{output}") != 1):
-            raise ValueError("each command needs one output placeholder and explicit topology")
+                or row["command"].count("{output}") != 1
+                or row["command"].count("{workdir}") > 1):
+            raise ValueError("each command needs one output and at most one workdir placeholder")
         binary = Path(row["binary"])
         if not binary.is_file() or binary.is_symlink() or digest(binary) != row["binary_sha256"]:
             raise ValueError(f"binary identity differs: {row['label']}")
@@ -117,9 +118,7 @@ def merge_outputs(output: Path, plan: dict, records: list[dict]) -> list[dict]:
         if (len(rows) not in (1, 2) or len(identity) != 1
                 or len({row["output_kind"] for row in rows}) != 1
                 or len({row.get("require_worker_memory_goal", True) for row in rows}) != 1
-                or (len(rows) == 2 and {row["topology"] for row in rows} != {"linear", "circular"})
-                or (len(rows) == 1 and rows[0]["output_kind"] == "jam_jsonl"
-                    and rows[0]["expected_query_records"] != 1)):
+                or (len(rows) == 2 and {row["topology"] for row in rows} != {"linear", "circular"})):
             raise ValueError(f"measurement topology grouping differs: {measurement}")
         seen = set()
         merged = None
@@ -208,7 +207,8 @@ def main() -> None:
         run_dir = detail / row["label"]
         run_dir.mkdir()
         result_path = run_dir / f"results{row['output_suffix']}"
-        command = [str(result_path) if value == "{output}" else value for value in row["command"]]
+        substitutions = {"{output}": str(result_path), "{workdir}": str(run_dir / "lex-work")}
+        command = [substitutions.get(value, value) for value in row["command"]]
         time_path, stdout_path, stderr_path = run_dir / "time.txt", run_dir / "stdout", run_dir / "stderr"
         timed = [str(args.timeout_command), "--signal=TERM", "--kill-after=5",
                  f"{effective_timeout}s", str(args.gnu_time), "--verbose", "--output",
