@@ -146,7 +146,7 @@ def merge_outputs(output: Path, plan: dict, records: list[dict]) -> list[dict]:
                           "process_memory_headroom_bytes": plan["process_memory_limit_bytes"]
                           - 1024 * max(item["resources"]["max_rss_kib"] for item in observed),
                           "native_outputs": [item["output"] for item in observed],
-                          "merged_results": str(merged) if merged else None,
+                          "merged_results": str(merged.relative_to(output)) if merged else None,
                           "merged_results_sha256": digest(merged) if merged else None})
         if summaries[-1]["complete_batch_wall_seconds"] >= 300:
             raise ValueError(f"small complete measurement exceeded five minutes: {measurement}")
@@ -222,7 +222,8 @@ def main() -> None:
         record.update({"command": command, "wall_seconds": wall,
                        "effective_timeout_seconds": effective_timeout,
                        "gnu_elapsed_seconds": resources["gnu_elapsed_seconds"], "resources": resources,
-                       "output": str(result_path), "output_bytes": result_path.stat().st_size,
+                       "output": str(result_path.relative_to(args.output)),
+                       "output_bytes": result_path.stat().st_size,
                        "results_sha256": digest(result_path),
                        "result_records": (sum(1 for line in result_path.read_bytes().splitlines() if line)
                                           if row["output_kind"] == "jam_jsonl" else None)})
