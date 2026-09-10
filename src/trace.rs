@@ -12,8 +12,7 @@ use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
 use crate::reader::ReaderError;
 use crate::trace_batch::{
-    QUERY_LOOKUP_ROW_BYTES, SharedSeedLookups, TraceBatch, lookup_budget, lookup_workspace,
-    prepare_lookup,
+    SharedSeedLookups, TraceBatch, lookup_budget, lookup_bytes, prepare_lookup,
 };
 use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
 use needletail::Sequence;
@@ -149,6 +148,12 @@ pub struct TraceBatchStats {
     pub restored_query_context_requests: u64,
     pub context_reuse_histogram_log2: [u64; 16],
     pub context_occurrence_histogram_log2: [u64; 16],
+    pub lookup_tasks: u64,
+    pub lookup_dispatch_ns: u64,
+    pub lookup_parallel_ns: u64,
+    pub lookup_compute_ns: u64,
+    pub lookup_reduce_ns: u64,
+    pub lookup_dispatch_to_start_ns: u64,
     pub cached_groups: u64,
     pub cached_positions: u64,
     pub lookup_peak_bytes: usize,
@@ -579,12 +584,8 @@ impl TraceEngine {
             })
             .ok_or(TraceError::Invalid("batch query key count"))?;
         let mut keys = Vec::new();
-        let lookups = if count
-            <= (lookup_budget(&self.index)
-                - lookup_workspace(&self.index)
-                - 4096
-                - prepared.len() * std::mem::size_of::<std::ops::Range<usize>>())
-                / QUERY_LOOKUP_ROW_BYTES
+        let lookups = if lookup_bytes(&self.index, count, prepared.len())
+            .is_some_and(|bytes| bytes <= lookup_budget(&self.index))
         {
             keys.try_reserve_exact(count)
                 .map_err(|_| TraceError::Invalid("batch query key allocation"))?;
@@ -628,6 +629,12 @@ impl TraceEngine {
             stats.distinct_cores += lookups.distinct_cores;
             stats.split_core_resolutions += lookups.split_core_resolutions;
             stats.restored_query_context_requests += lookups.query_keys.len() as u64;
+            stats.lookup_tasks += lookups.lookup_tasks as u64;
+            stats.lookup_dispatch_ns += lookups.lookup_dispatch_ns;
+            stats.lookup_parallel_ns += lookups.lookup_parallel_ns;
+            stats.lookup_compute_ns += lookups.lookup_compute_ns;
+            stats.lookup_reduce_ns += lookups.lookup_reduce_ns;
+            stats.lookup_dispatch_to_start_ns += lookups.lookup_dispatch_to_start_ns;
             for bucket in 0..16 {
                 stats.context_reuse_histogram_log2[bucket] +=
                     lookups.context_reuse_histogram_log2[bucket];

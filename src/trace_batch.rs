@@ -2,6 +2,7 @@ use crate::bgzf_cache::BgzfBlockCache;
 use crate::jidx_reader::{SEED_LOOKUP_BATCH_KEYS, SeedEntry};
 use crate::trace::{CacheReservation, LOOKUP_CACHE_AVAILABLE, TraceError};
 use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -22,6 +23,12 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) split_core_resolutions: u64,
     pub(crate) context_reuse_histogram_log2: [u64; 16],
     pub(crate) context_occurrence_histogram_log2: [u64; 16],
+    pub(crate) lookup_tasks: usize,
+    pub(crate) lookup_dispatch_ns: u64,
+    pub(crate) lookup_parallel_ns: u64,
+    pub(crate) lookup_compute_ns: u64,
+    pub(crate) lookup_reduce_ns: u64,
+    pub(crate) lookup_dispatch_to_start_ns: u64,
     pub(crate) _reservation: CacheReservation<'static>,
 }
 
@@ -43,19 +50,43 @@ pub(crate) fn lookup_budget(index: &TraceIndex) -> usize {
     }
 }
 
-pub(crate) const QUERY_LOOKUP_ROW_BYTES: usize = std::mem::size_of::<(u64, usize)>()
+const QUERY_LOOKUP_ROW_BYTES: usize = std::mem::size_of::<(u64, usize)>()
     + std::mem::size_of::<u64>()
     + std::mem::size_of::<(u64, Option<SeedEntry>)>();
 
-pub(crate) fn lookup_workspace(index: &TraceIndex) -> usize {
+fn lookup_chunk_keys() -> usize {
+    (SEED_LOOKUP_BATCH_KEYS / rayon::current_num_threads()).max(1)
+}
+
+fn lookup_workspace(index: &TraceIndex, requests: usize) -> Option<usize> {
     if index.is_shared() {
-        SEED_LOOKUP_BATCH_KEYS
-            * (std::mem::size_of::<crate::shared_seed::SharedKey>()
-                + std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
-                + std::mem::size_of::<Option<SeedEntry>>())
+        let tasks = requests
+            .div_ceil(lookup_chunk_keys())
+            .checked_mul(2)?
+            .checked_add(1)?;
+        let workers = rayon::current_num_threads().min(tasks);
+        workers
+            .checked_mul(lookup_chunk_keys())?
+            .checked_mul(
+                std::mem::size_of::<crate::shared_seed::SharedKey>()
+                    + std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
+                    + std::mem::size_of::<Option<SeedEntry>>(),
+            )?
+            .checked_add(tasks.checked_mul(
+                std::mem::size_of::<(u64, &[u64], &mut [(u64, Option<SeedEntry>)])>()
+                    + std::mem::size_of::<Result<[u64; 3], TraceError>>(),
+            )?)
     } else {
-        0
+        Some(0)
     }
+}
+
+pub(crate) fn lookup_bytes(index: &TraceIndex, requests: usize, queries: usize) -> Option<usize> {
+    requests
+        .checked_mul(QUERY_LOOKUP_ROW_BYTES)?
+        .checked_add(lookup_workspace(index, requests)?)?
+        .checked_add(4096)?
+        .checked_add(queries.checked_mul(std::mem::size_of::<Range<usize>>())?)
 }
 
 pub(crate) fn prepare_lookup(
@@ -66,19 +97,13 @@ pub(crate) fn prepare_lookup(
 ) -> Result<Option<SharedSeedLookups>, TraceError> {
     let started = observed.then(Instant::now);
     let budget = lookup_budget(index);
-    let workspace = lookup_workspace(index);
-    let Some(bytes) = requests
-        .len()
-        .checked_mul(QUERY_LOOKUP_ROW_BYTES)
-        .and_then(|bytes| {
-            bytes.checked_add(workspace + 4096 + query_count * std::mem::size_of::<Range<usize>>())
-        })
-    else {
+    let Some(bytes) = lookup_bytes(index, requests.len(), query_count) else {
         return Ok(None);
     };
     if bytes > budget {
         return Ok(None);
     }
+    let workspace = lookup_workspace(index, requests.len()).unwrap();
     let Some(reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, budget) else {
         return Ok(None);
     };
@@ -86,7 +111,7 @@ pub(crate) fn prepare_lookup(
         return Ok(None);
     };
     if index.is_shared() {
-        requests.sort_unstable_by_key(|&(key, _)| {
+        requests.par_sort_unstable_by_key(|&(key, _)| {
             let context = crate::shared_seed::SharedKey::unpack(key).unwrap();
             (context.core, context.context_code().unwrap())
         });
@@ -118,22 +143,81 @@ pub(crate) fn prepare_lookup(
         0
     };
     let mut split_core_resolutions = 0;
-    let mut start = 0;
-    while start < keys.len() {
-        let mut end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
-        if index.is_shared() && end < keys.len() && core(keys[end - 1]) == core(keys[end]) {
-            let boundary = end;
-            while end > start && core(keys[end - 1]) == core(keys[boundary]) {
-                end -= 1;
+    let mut lookup_tasks = 0;
+    let mut lookup_dispatch_ns = 0;
+    let mut lookup_parallel_ns = 0;
+    let mut lookup_compute_ns = 0;
+    let mut lookup_reduce_ns = 0;
+    let mut lookup_dispatch_to_start_ns = 0;
+    if let TraceIndex::Shared(reader) = index {
+        let dispatch = observed.then(Instant::now);
+        let limit = lookup_chunk_keys();
+        entries.extend(keys.iter().map(|&key| (key, None)));
+        let mut remaining = entries.as_mut_slice();
+        let mut tasks = Vec::new();
+        tasks
+            .try_reserve_exact(keys.len().div_ceil(limit) * 2 + 1)
+            .map_err(|_| TraceError::Invalid("lookup task allocation"))?;
+        let mut start = 0;
+        while start < keys.len() {
+            let mut end = (start + limit).min(keys.len());
+            if end < keys.len() && core(keys[end - 1]) == core(keys[end]) {
+                let boundary = end;
+                while end > start && core(keys[end - 1]) == core(keys[boundary]) {
+                    end -= 1;
+                }
+                if end == start {
+                    end = boundary;
+                    split_core_resolutions += 1;
+                }
             }
-            if end == start {
-                end = boundary;
-                split_core_resolutions += 1;
-            }
+            let chunk = &keys[start..end];
+            let cores = 1 + chunk
+                .windows(2)
+                .filter(|pair| core(pair[0]) != core(pair[1]))
+                .count();
+            let weight = cores as u64 * u64::from(reader.core_count().max(1).ilog2() + 1)
+                + chunk.len() as u64;
+            let (slots, tail) = remaining.split_at_mut(chunk.len());
+            remaining = tail;
+            tasks.push((weight, chunk, slots));
+            start = end;
         }
-        let chunk = &keys[start..end];
-        entries.extend(chunk.iter().copied().zip(index.find_seeds_batch(chunk)?));
-        start = end;
+        tasks.sort_unstable_by_key(|task| std::cmp::Reverse(task.0));
+        lookup_tasks = tasks.len();
+        lookup_dispatch_ns = dispatch.map_or(0, |start| start.elapsed().as_nanos() as u64);
+        let dispatch = observed.then(Instant::now);
+        let timings = tasks
+            .into_par_iter()
+            .map(|(_, keys, slots)| {
+                let start = observed.then(Instant::now);
+                let queued = start.zip(dispatch).map_or(0, |(start, dispatch)| {
+                    start.duration_since(dispatch).as_nanos() as u64
+                });
+                let seeds = index.find_seeds_batch(keys)?;
+                let compute = start.map_or(0, |start| start.elapsed().as_nanos() as u64);
+                let start = observed.then(Instant::now);
+                for (slot, seed) in slots.iter_mut().zip(seeds) {
+                    slot.1 = seed;
+                }
+                Ok::<_, TraceError>([
+                    queued,
+                    compute,
+                    start.map_or(0, |start| start.elapsed().as_nanos() as u64),
+                ])
+            })
+            .collect::<Vec<_>>();
+        lookup_parallel_ns = dispatch.map_or(0, |start| start.elapsed().as_nanos() as u64);
+        for timing in timings {
+            let [queued, compute, reduce] = timing?;
+            lookup_dispatch_to_start_ns += queued;
+            lookup_compute_ns += compute;
+            lookup_reduce_ns += reduce;
+        }
+    } else {
+        for chunk in keys.chunks(SEED_LOOKUP_BATCH_KEYS) {
+            entries.extend(chunk.iter().copied().zip(index.find_seeds_batch(chunk)?));
+        }
     }
     let mut entry = 0;
     requests.retain(|&(key, _)| {
@@ -156,7 +240,7 @@ pub(crate) fn prepare_lookup(
     }
     let request_bytes = requests.capacity() * std::mem::size_of::<(u64, usize)>();
     drop(requests);
-    let lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+    let mut lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
     let mut membership_ns = 0;
     let mut position_ns = 0;
     let mut capacity_bytes = 4096
@@ -172,6 +256,13 @@ pub(crate) fn prepare_lookup(
         let Some(seed) = seed else {
             continue;
         };
+        let document_bytes = 128usize.saturating_add(
+            (seed.document_frequency as usize).saturating_mul(std::mem::size_of::<SeedDocument>()),
+        );
+        if capacity_bytes.saturating_add(document_bytes) > reservation.bytes {
+            postings_complete = false;
+            continue;
+        }
         let started = observed.then(Instant::now);
         let documents = index.seed_documents(seed)?;
         if observed {
@@ -236,7 +327,13 @@ pub(crate) fn prepare_lookup(
             },
         );
     }
-    entries.sort_unstable_by_key(|entry| entry.0);
+    let ordering = observed.then(Instant::now);
+    if index.is_shared() {
+        entries.par_sort_unstable_by_key(|entry| entry.0);
+    } else {
+        entries.sort_unstable_by_key(|entry| entry.0);
+    }
+    lookup_ns += ordering.map_or(0, |start| start.elapsed().as_nanos() as u64);
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("shared seed lookup identity"));
     }
@@ -255,6 +352,12 @@ pub(crate) fn prepare_lookup(
         split_core_resolutions,
         context_reuse_histogram_log2,
         context_occurrence_histogram_log2,
+        lookup_tasks,
+        lookup_dispatch_ns,
+        lookup_parallel_ns,
+        lookup_compute_ns,
+        lookup_reduce_ns,
+        lookup_dispatch_to_start_ns,
         _reservation: reservation,
     }))
 }

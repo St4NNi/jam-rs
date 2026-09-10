@@ -329,6 +329,11 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     assert_eq!(weak_strong, 0);
 
     let engine = TraceEngine::open_shared(&shared, None).unwrap();
+    let index = crate::trace_index::TraceIndex::Shared(Box::new(
+        crate::shared_reader::SharedReader::open(&shared).unwrap(),
+    ));
+    assert!(crate::trace_batch::lookup_bytes(&index, usize::MAX, 1).is_none());
+    assert!(crate::trace_batch::lookup_bytes(&index, 1, usize::MAX).is_none());
     engine.verify_index().unwrap();
     let linear = TraceConfig {
         use_sketch: false,
