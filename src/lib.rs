@@ -1,5 +1,6 @@
 pub mod alignment;
 pub mod bgzf;
+pub mod bgzf_cache;
 pub mod bias;
 pub mod cli;
 pub mod collection;
