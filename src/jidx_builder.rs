@@ -566,16 +566,18 @@ mod tests {
         sequence[70] = b'N';
         sequence[91] = b'N';
         sequence[115..170].fill(b'A');
-        let config = JidxBuildConfig {
-            k: 21,
-            minimizer_window: 16,
-            rescue_k15: true,
-        };
-        for sequence in [sequence.clone(), sequence.reverse_complement()] {
-            assert_eq!(
-                collect_chunked_seeds(&sequence, config, 23),
-                select_index_seeds(&sequence, config).unwrap()
-            );
+        for minimizer_window in [16, 32, 64] {
+            let config = JidxBuildConfig {
+                k: 21,
+                minimizer_window,
+                rescue_k15: true,
+            };
+            for sequence in [sequence.clone(), sequence.reverse_complement()] {
+                assert_eq!(
+                    collect_chunked_seeds(&sequence, config, 23),
+                    select_index_seeds(&sequence, config).unwrap()
+                );
+            }
         }
     }
 
