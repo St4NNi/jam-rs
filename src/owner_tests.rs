@@ -239,6 +239,124 @@ fn sparse_metadata_preserves_high_original_contig_ids_and_extent_boundaries() {
     assert_eq!(decoded[0].contig_id, 4_000_000_000);
     assert_eq!(decoded[0].position, occurrence.position);
 }
+#[test]
+fn selected_access_does_not_replay_metadata_or_unbounded_member_prefixes() {
+    use crate::owner_observer::{self as counters, OwnerReadObserver};
+    use std::sync::Arc;
+
+    let fixture = build_fixture_at(None);
+    let source = JidxReader::open(&fixture.jidx).unwrap();
+    let template = owner_metadata(&source).metagenomes[0].clone();
+    let key = owner_keys(&source)[0].key;
+    for count in [8u32, 128, 4096] {
+        let mut document = template.clone();
+        document.original_contig_start = 0;
+        document.original_contig_count = count;
+        document.locus_bits = 32;
+        document.contigs = (0..count)
+            .map(|id| OwnerContigInput {
+                local_contig: id,
+                name: format!("contig-{id}"),
+                length: 1024,
+                fasta_offset: u64::from(id) * 2048 + 32,
+                line_bases: 64,
+                line_width: 65,
+            })
+            .collect();
+        let metadata = OwnerMetadata {
+            metagenomes: (0..33)
+                .map(|id| {
+                    let mut copy = document.clone();
+                    copy.name = format!("document-{id}");
+                    copy.original_contig_start = id * count;
+                    copy
+                })
+                .collect(),
+        };
+        let keys = [0, count / 2, count - 1]
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, contig)| OwnerKey {
+                key: key + ordinal as u64,
+                members: (0..33)
+                    .map(|id| OwnerMember {
+                        document_id: id,
+                        occurrences: (0..if id == 1 { 257 } else { 2 })
+                            .map(|position| OwnerOccurrence {
+                                local_contig: contig,
+                                position,
+                                canonical_orientation: position % 2 == 0,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        let path = fixture.root.join(format!("access-{count}.jowner"));
+        write_owner(
+            &path,
+            OwnerWriteInput {
+                owner_ordinal: 0,
+                owner_count: 1,
+                range: OwnerKeyRange {
+                    first: 0,
+                    last: u64::MAX,
+                    complete: true,
+                },
+                k: source.header().k,
+                rescue_k15: source.header().rescue_k15,
+                minimizer_window: source.header().minimizer_window,
+                generation_id: [29; 32],
+                document_count: 33,
+                contig_count: 33 * count,
+                keys: &keys,
+                loci: &metadata,
+                metadata: Some(&metadata),
+            },
+        )
+        .unwrap();
+        let manifest = fixture.root.join(format!("access-{count}.json"));
+        publish_owner_manifest(&manifest, &[path], 0, true).unwrap();
+        let observer = Arc::new(OwnerReadObserver::enabled(4096).unwrap());
+        let reader = OwnerReader::open_with_observer(manifest, observer).unwrap();
+        for entry in &keys {
+            let seed = reader.find_seeds_batch(&[entry.key, entry.key]).unwrap()[0].unwrap();
+            let members = reader.seed_documents(seed).unwrap();
+            for ordinal in [0, 1, 16, 32] {
+                for _ in 0..2 {
+                    let before = reader.read_snapshot();
+                    let actual = reader
+                        .seed_document_occurrences(seed, members[ordinal])
+                        .unwrap();
+                    let delta = reader.read_snapshot().checked_sub(&before).unwrap();
+                    let expected = &entry.members[ordinal].occurrences;
+                    assert_eq!(actual.len(), expected.len());
+                    for (actual, expected) in actual.iter().zip(expected) {
+                        assert_eq!(
+                            actual.contig_id,
+                            ordinal as u32 * count + expected.local_contig
+                        );
+                        assert_eq!(actual.position, expected.position);
+                        assert_eq!(actual.canonical_orientation, expected.canonical_orientation);
+                    }
+                    assert_eq!(delta.totals[counters::DOCUMENT_RECORD_REQUESTS], 1);
+                    assert!(
+                        delta.totals[counters::CONTIG_RECORD_REQUESTS]
+                            <= u64::from(count.ilog2()) + 4
+                    );
+                    assert!(delta.totals[counters::SKIPPED_MEMBERS] < 16);
+                    assert!(delta.totals[counters::SKIPPED_POSITIONS] <= 15 * 256);
+                    assert_eq!(
+                        delta.totals[counters::EMITTED_POSITIONS],
+                        actual.len() as u64
+                    );
+                    assert!(delta.totals[counters::FILE_IDENTITY_CHECKS] < 20);
+                }
+            }
+        }
+    }
+}
+
 fn build_fixture() -> Fixture {
     build_fixture_at(None)
 }

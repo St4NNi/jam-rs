@@ -256,17 +256,7 @@ impl OwnerReader {
             .document_occurrences(document, &self.document_widths)?;
         let k = seed_length(self.k(), self.rescue_k15(), seed.packed_key)
             .map_err(|_| OwnerReaderError::Invalid("seed key"))?;
-        local
-            .into_iter()
-            .map(|(locus, orientation)| {
-                self.files[self.metadata_owner].locus_occurrence(
-                    document.metagenome_id,
-                    locus,
-                    orientation,
-                    k,
-                )
-            })
-            .collect()
+        self.files[self.metadata_owner].locus_occurrences(document.metagenome_id, &local, k)
     }
 
     pub(crate) fn metagenome_name(&self, id: u32) -> Result<Option<&str>, OwnerReaderError> {

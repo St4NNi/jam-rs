@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
-pub const OWNER_COUNTER_COUNT: usize = 32;
+pub const OWNER_COUNTER_COUNT: usize = 36;
 
 pub const MANIFEST_BYTES: usize = 0;
 pub const OWNERS_OPENED: usize = 1;
@@ -36,6 +36,11 @@ pub const STRING_REQUESTED_BYTES: usize = 29;
 pub const GZI_REQUESTED_BYTES: usize = 30;
 pub const RETRIEVAL_BLOCK_REUSES: usize = 31;
 
+pub const SKIPPED_MEMBERS: usize = 32;
+pub const SKIPPED_POSITIONS: usize = 33;
+pub const EMITTED_POSITIONS: usize = 34;
+pub const LOCUS_PAGE_FETCHES: usize = 35;
+
 const MAX_RETRIEVAL_IDS: usize = 4096;
 
 pub struct OwnerReadObserver {
@@ -48,7 +53,7 @@ pub struct OwnerReadObserver {
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct OwnerReadSnapshot {
-    pub totals: [u64; OWNER_COUNTER_COUNT],
+    pub totals: Vec<u64>,
     pub distinct_retrieval_blocks: usize,
     pub retrieval_ids_capped: bool,
     pub observer_bytes: usize,
@@ -199,9 +204,11 @@ impl OwnerReadObserver {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         OwnerReadSnapshot {
-            totals: std::array::from_fn(|index| {
-                self.counters[index].load(std::sync::atomic::Ordering::Relaxed)
-            }),
+            totals: self
+                .counters
+                .iter()
+                .map(|counter| counter.load(std::sync::atomic::Ordering::Relaxed))
+                .collect(),
             distinct_retrieval_blocks: retrievals.len(),
             retrieval_ids_capped: self.capped.load(std::sync::atomic::Ordering::Relaxed),
             observer_bytes: std::mem::size_of::<Self>()
@@ -236,7 +243,7 @@ impl Default for OwnerReadObserver {
 
 impl OwnerReadSnapshot {
     pub fn checked_sub(&self, before: &Self) -> Option<Self> {
-        let mut totals = [0; OWNER_COUNTER_COUNT];
+        let mut totals = vec![0; OWNER_COUNTER_COUNT];
         for (index, value) in totals.iter_mut().enumerate() {
             *value = self.totals[index].checked_sub(before.totals[index])?;
         }

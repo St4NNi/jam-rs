@@ -206,6 +206,16 @@ impl OwnerFile {
             end - start,
             occurrences.loci.len() as u64 + occurrences.skipped_occurrences,
         );
+        self.observer
+            .add(owner_observer::SKIPPED_MEMBERS, occurrences.skipped_members);
+        self.observer.add(
+            owner_observer::SKIPPED_POSITIONS,
+            occurrences.skipped_occurrences,
+        );
+        self.observer.add(
+            owner_observer::EMITTED_POSITIONS,
+            occurrences.loci.len() as u64,
+        );
         self.verify_unchanged()?;
         Ok(occurrences.loci)
     }
@@ -589,60 +599,118 @@ impl OwnerFile {
         })
     }
 
-    pub(crate) fn locus_occurrence(
+    pub(crate) fn locus_occurrences(
         &self,
         document: u32,
-        locus: u64,
-        orientation: bool,
+        loci: &[(u64, bool)],
         k: u8,
-    ) -> Result<crate::jidx_reader::SeedOccurrence, OwnerReaderError> {
+    ) -> Result<Vec<crate::jidx_reader::SeedOccurrence>, OwnerReaderError> {
         let record = self.document_record(document)?;
-        let mut low = record.contig_start;
-        let mut high = low
+        let end = record
+            .contig_start
             .checked_add(record.contig_count)
             .ok_or(OwnerReaderError::Invalid("contig range"))?;
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if read_u64(self.contig_bytes(middle)?, 24) <= locus {
-                low = middle + 1;
-            } else {
-                high = middle;
+        let section = self.header.section(OwnerSection::Contigs);
+        if u64::from(end) * u64::from(OWNER_CONTIG_SIZE) > section.length {
+            return Err(OwnerReaderError::Invalid("contig range"));
+        }
+        let mut probes = 0u64;
+        let mut fetches = 0u64;
+        let mut bytes_fetched = 0u64;
+        let mut row_bytes = |row: u32| -> Result<&[u8], OwnerReaderError> {
+            probes += 1;
+            let start = section.offset + u64::from(row) * u64::from(OWNER_CONTIG_SIZE);
+            let stop = start + u64::from(OWNER_CONTIG_SIZE);
+            for page in start / OWNER_PAGE_SIZE..=(stop - 1) / OWNER_PAGE_SIZE {
+                let index = page - 1;
+                let cached = self.file_identity.is_some()
+                    && self.verified_pages[index as usize / 64].load(Ordering::Acquire)
+                        & (1u64 << (index % 64))
+                        != 0;
+                if !cached {
+                    self.verify_page(page)?;
+                    fetches += 1;
+                    bytes_fetched += OWNER_PAGE_SIZE;
+                }
             }
+            Ok(&self.mmap[start as usize..stop as usize])
+        };
+        let mut out = Vec::with_capacity(loci.len());
+        let mut cached = None::<(&[u8], u64)>;
+        let mut lower = record.contig_start;
+        let mut previous = None;
+        for &(locus, orientation) in loci {
+            if previous.is_some_and(|value| locus < value) {
+                return Err(OwnerReaderError::Invalid("locus order"));
+            }
+            previous = Some(locus);
+            let bytes = if let Some((bytes, next)) = cached
+                && locus < next
+            {
+                bytes
+            } else {
+                let mut low = lower;
+                let mut high = end;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    if read_u64(row_bytes(middle)?, 24) <= locus {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                if low == record.contig_start {
+                    return Err(OwnerReaderError::Invalid("locus contig"));
+                }
+                lower = low - 1;
+                let bytes = row_bytes(lower)?;
+                let next = if low < end {
+                    read_u64(row_bytes(low)?, 24)
+                } else {
+                    u64::MAX
+                };
+                cached = Some((bytes, next));
+                bytes
+            };
+            let contig_id = read_u32(bytes, 12);
+            let offset = locus
+                .checked_sub(read_u64(bytes, 24))
+                .ok_or(OwnerReaderError::Invalid("locus position"))?;
+            let line_bases = u64::from(read_u32(bytes, 32));
+            let line_width = u64::from(read_u32(bytes, 36));
+            if read_u32(bytes, 0) != document
+                || line_bases == 0
+                || line_width < line_bases
+                || offset % line_width >= line_bases
+                || contig_id < record.original_contig_start
+                || contig_id - record.original_contig_start >= record.original_contig_count
+            {
+                return Err(OwnerReaderError::Invalid("locus metadata"));
+            }
+            let position = (offset / line_width)
+                .checked_mul(line_bases)
+                .and_then(|position| position.checked_add(offset % line_width))
+                .ok_or(OwnerReaderError::Invalid("locus position"))?;
+            if position
+                .checked_add(u64::from(k))
+                .is_none_or(|end| end > read_u64(bytes, 16))
+            {
+                return Err(OwnerReaderError::Invalid("occurrence position"));
+            }
+            out.push(crate::jidx_reader::SeedOccurrence {
+                contig_id,
+                position,
+                canonical_orientation: orientation,
+            });
         }
-        if low == record.contig_start {
-            return Err(OwnerReaderError::Invalid("locus contig"));
-        }
-        let bytes = self.contig_bytes(low - 1)?;
-        let contig_id = read_u32(bytes, 12);
-        let offset = locus
-            .checked_sub(read_u64(bytes, 24))
-            .ok_or(OwnerReaderError::Invalid("locus position"))?;
-        let line_bases = u64::from(read_u32(bytes, 32));
-        let line_width = u64::from(read_u32(bytes, 36));
-        if read_u32(bytes, 0) != document
-            || line_bases == 0
-            || line_width < line_bases
-            || offset % line_width >= line_bases
-            || contig_id < record.original_contig_start
-            || contig_id - record.original_contig_start >= record.original_contig_count
-        {
-            return Err(OwnerReaderError::Invalid("locus metadata"));
-        }
-        let position = (offset / line_width)
-            .checked_mul(line_bases)
-            .and_then(|position| position.checked_add(offset % line_width))
-            .ok_or(OwnerReaderError::Invalid("locus position"))?;
-        if position
-            .checked_add(u64::from(k))
-            .is_none_or(|end| end > read_u64(bytes, 16))
-        {
-            return Err(OwnerReaderError::Invalid("occurrence position"));
-        }
-        Ok(crate::jidx_reader::SeedOccurrence {
-            contig_id,
-            position,
-            canonical_orientation: orientation,
-        })
+        self.verify_unchanged()?;
+        self.observer.record_metadata(0, probes, 0, 0);
+        self.observer.add(owner_observer::READ_CALLS, fetches);
+        self.observer
+            .add(owner_observer::REQUESTED_BYTES, bytes_fetched);
+        self.observer
+            .add(owner_observer::LOCUS_PAGE_FETCHES, fetches);
+        Ok(out)
     }
 
     fn string(&self, offset: u32, length: u32) -> Result<&str, OwnerReaderError> {
