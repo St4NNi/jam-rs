@@ -21,6 +21,10 @@ pub struct SharedReader {
     core_inspections: AtomicU64,
     group_inspections: AtomicU64,
     member_inspections: AtomicU64,
+    core_resolutions_present: AtomicU64,
+    core_resolutions_absent: AtomicU64,
+    directory_comparison_probes: AtomicU64,
+    context_comparisons: AtomicU64,
     references_decoded: AtomicU64,
     positions_decoded: AtomicU64,
 }
@@ -32,6 +36,10 @@ pub struct SharedReadStats {
     pub core_descriptor_inspections: u64,
     pub group_descriptor_inspections: u64,
     pub member_descriptor_inspections: u64,
+    pub core_resolutions_present: u64,
+    pub core_resolutions_absent: u64,
+    pub directory_comparison_probes: u64,
+    pub context_comparisons: u64,
     pub references_decoded: u64,
     pub physical_positions_decoded: u64,
 }
@@ -134,6 +142,10 @@ impl SharedReader {
             core_inspections: AtomicU64::new(0),
             group_inspections: AtomicU64::new(0),
             member_inspections: AtomicU64::new(0),
+            core_resolutions_present: AtomicU64::new(0),
+            core_resolutions_absent: AtomicU64::new(0),
+            directory_comparison_probes: AtomicU64::new(0),
+            context_comparisons: AtomicU64::new(0),
             references_decoded: AtomicU64::new(0),
             positions_decoded: AtomicU64::new(0),
         })
@@ -195,6 +207,10 @@ impl SharedReader {
             core_descriptor_inspections: self.core_inspections.load(Ordering::Relaxed),
             group_descriptor_inspections: self.group_inspections.load(Ordering::Relaxed),
             member_descriptor_inspections: self.member_inspections.load(Ordering::Relaxed),
+            core_resolutions_present: self.core_resolutions_present.load(Ordering::Relaxed),
+            core_resolutions_absent: self.core_resolutions_absent.load(Ordering::Relaxed),
+            directory_comparison_probes: self.directory_comparison_probes.load(Ordering::Relaxed),
+            context_comparisons: self.context_comparisons.load(Ordering::Relaxed),
             references_decoded: self.references_decoded.load(Ordering::Relaxed),
             physical_positions_decoded: self.positions_decoded.load(Ordering::Relaxed),
         }
@@ -210,13 +226,36 @@ impl SharedReader {
     pub fn find_many(&self, keys: &[SharedKey]) -> Result<Vec<Option<SharedGroup>>, SharedError> {
         self.begin_operation()?;
         admit_result(keys.len(), size_of::<Option<SharedGroup>>())?;
+        let mut previous = None;
+        let mut ordered = true;
+        for &key in keys {
+            let code = key
+                .context_code()
+                .ok_or(SharedError::Invalid("shared key"))?;
+            let current = (key.core, code);
+            ordered &= previous.is_none_or(|previous| previous <= current);
+            previous = Some(current);
+        }
         let mut groups = Vec::new();
         groups
             .try_reserve_exact(keys.len())
             .map_err(|_| SharedError::ResourceLimit)?;
         admit_result(groups.capacity(), size_of::<Option<SharedGroup>>())?;
-        for &key in keys {
-            groups.push(self.find_unchecked(key)?);
+        groups.resize(keys.len(), None);
+        if ordered {
+            self.find_many_ordered(keys, None, &mut groups)?;
+        } else {
+            admit_result(keys.len(), size_of::<usize>())?;
+            let mut order = Vec::new();
+            order
+                .try_reserve_exact(keys.len())
+                .map_err(|_| SharedError::ResourceLimit)?;
+            admit_result(order.capacity(), size_of::<usize>())?;
+            order.extend(0..keys.len());
+            order.sort_unstable_by_key(|&index| {
+                (keys[index].core, keys[index].context_code().unwrap())
+            });
+            self.find_many_ordered(keys, Some(&order), &mut groups)?;
         }
         self.file.verify_unchanged()?;
         Ok(groups)
@@ -443,18 +482,182 @@ impl SharedReader {
     fn find_unchecked(&self, key: SharedKey) -> Result<Option<SharedGroup>, SharedError> {
         key.context_code()
             .ok_or(SharedError::Invalid("shared key"))?;
+        let Some((ordinal, row)) = self.resolve_core_unchecked(key.core)? else {
+            return Ok(None);
+        };
+        self.group_from_core(ordinal, row, key)
+    }
+
+    fn resolve_core_unchecked(&self, core: u32) -> Result<Option<(u64, CoreRow)>, SharedError> {
         let mut low = 0;
         let mut high = self.file.header.core_count;
         while low < high {
             let middle = low + (high - low) / 2;
             let row = self.core_row(middle)?;
-            match row.core.cmp(&key.core) {
+            self.observe(&self.directory_comparison_probes, 1);
+            match row.core.cmp(&core) {
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
-                std::cmp::Ordering::Equal => return self.group_from_core(middle, row, key),
+                std::cmp::Ordering::Equal => {
+                    self.observe(&self.core_resolutions_present, 1);
+                    return Ok(Some((middle, row)));
+                }
             }
         }
+        self.observe(&self.core_resolutions_absent, 1);
         Ok(None)
+    }
+
+    fn find_many_ordered(
+        &self,
+        keys: &[SharedKey],
+        order: Option<&[usize]>,
+        groups: &mut [Option<SharedGroup>],
+    ) -> Result<(), SharedError> {
+        let mut start = 0;
+        while start < keys.len() {
+            let index = ordered_index(order, start);
+            let core = keys[index].core;
+            let mut end = start + 1;
+            while end < keys.len() && keys[ordered_index(order, end)].core == core {
+                end += 1;
+            }
+            if let Some((core_ordinal, row)) = self.resolve_core_unchecked(core)? {
+                match row.kind {
+                    CoreKind::Singleton { .. } => {
+                        let mut request = start;
+                        while request < end {
+                            let request_index = ordered_index(order, request);
+                            let key = keys[request_index];
+                            let group = self.group_from_core(core_ordinal, row, key)?;
+                            let code = key.context_code().unwrap();
+                            let mut next = request + 1;
+                            while next < end
+                                && keys[ordered_index(order, next)].context_code().unwrap() == code
+                            {
+                                next += 1;
+                            }
+                            for position in request..next {
+                                groups[ordered_index(order, position)] = group;
+                            }
+                            request = next;
+                        }
+                    }
+                    CoreKind::Repeated {
+                        first_group,
+                        group_count,
+                        occurrence_count,
+                    } => self.find_repeated_many(
+                        keys,
+                        order,
+                        groups,
+                        core_ordinal,
+                        first_group,
+                        u64::from(group_count),
+                        occurrence_count,
+                        start,
+                        end,
+                    )?,
+                }
+            }
+            start = end;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn find_repeated_many(
+        &self,
+        keys: &[SharedKey],
+        order: Option<&[usize]>,
+        groups: &mut [Option<SharedGroup>],
+        core_ordinal: u64,
+        first_group: u64,
+        group_count: u64,
+        occurrence_count: u64,
+        request_start: usize,
+        request_end: usize,
+    ) -> Result<(), SharedError> {
+        if group_count == 0 || request_start == request_end {
+            return Ok(());
+        }
+        let middle = group_count / 2;
+        let ordinal = first_group
+            .checked_add(middle)
+            .ok_or(SharedError::Invalid("group ordinal"))?;
+        let row = self.group_row(ordinal)?;
+        let lower = self.request_partition(
+            keys,
+            order,
+            request_start,
+            request_end,
+            row.context_code,
+            false,
+        );
+        let upper = self.request_partition(keys, order, lower, request_end, row.context_code, true);
+        if lower < upper {
+            if row.context_code == 0 && row.occurrence_count != occurrence_count {
+                return Err(SharedError::Invalid("core occurrence count"));
+            }
+            for position in lower..upper {
+                let index = ordered_index(order, position);
+                groups[index] = Some(SharedGroup {
+                    identity: self.handle_identity(),
+                    key: keys[index],
+                    core_ordinal,
+                    location: GroupLocation::Repeated {
+                        group_ordinal: ordinal,
+                        first_member: row.first_member,
+                    },
+                    member_count: row.member_count,
+                    occurrence_count: row.occurrence_count,
+                });
+            }
+        }
+        self.find_repeated_many(
+            keys,
+            order,
+            groups,
+            core_ordinal,
+            first_group,
+            middle,
+            occurrence_count,
+            request_start,
+            lower,
+        )?;
+        self.find_repeated_many(
+            keys,
+            order,
+            groups,
+            core_ordinal,
+            ordinal + 1,
+            group_count - middle - 1,
+            occurrence_count,
+            upper,
+            request_end,
+        )
+    }
+
+    fn request_partition(
+        &self,
+        keys: &[SharedKey],
+        order: Option<&[usize]>,
+        mut low: usize,
+        mut high: usize,
+        wanted: u64,
+        inclusive: bool,
+    ) -> usize {
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let code = keys[ordered_index(order, middle)].context_code().unwrap();
+            self.observe(&self.context_comparisons, 1);
+            if code < wanted || inclusive && code == wanted {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
     }
 
     fn core_row(&self, ordinal: u64) -> Result<CoreRow, SharedError> {
@@ -689,6 +892,7 @@ impl SharedReader {
         key: SharedKey,
     ) -> Result<Option<SharedGroup>, SharedError> {
         if let CoreKind::Singleton { context, flags, .. } = row.kind {
+            self.observe(&self.context_comparisons, 1);
             let matches = match key.length {
                 15 => true,
                 21 => flags & 2 != 0 && key.context == context >> 20,
@@ -721,6 +925,7 @@ impl SharedReader {
                 .checked_add(middle)
                 .ok_or(SharedError::Invalid("group ordinal"))?;
             let group = self.group_row(ordinal)?;
+            self.observe(&self.context_comparisons, 1);
             match group.context_code.cmp(&wanted) {
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
@@ -864,6 +1069,10 @@ fn valid_context_code(code: u64) -> bool {
         2 => code & ((1 << 62) - 1) <= u64::from(u32::MAX),
         _ => false,
     }
+}
+
+fn ordered_index(order: Option<&[usize]>, position: usize) -> usize {
+    order.map_or(position, |order| order[position])
 }
 
 fn admit_result(count: usize, row_bytes: usize) -> Result<(), SharedError> {

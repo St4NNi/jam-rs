@@ -3,7 +3,7 @@ use crate::jidx_reader::JidxReader;
 use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use crate::owner_format::checksum_layout;
 use crate::shared_format::{HEADER_BYTES, PAGE_BYTES, Section, SharedError, SharedHeader};
-use crate::shared_reader::{SharedReadStats, SharedReader};
+use crate::shared_reader::{SharedGroup, SharedReadStats, SharedReader};
 use crate::shared_seed::{SharedKey, SharedSeed};
 use crate::shared_writer::{IndexedSeed, SharedBuildStats, write_shared_index};
 const TARGET_CORE: u32 = 1_000_000;
@@ -236,6 +236,230 @@ fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
     }
 }
 
+fn grouped_lookup_fixture(preceding: u32) -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let jidx = directory.path().join("grouped-metadata.jidx");
+    let mut writer = JidxWriter::new(
+        &jidx,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [21; 32],
+            manifest_sha256: [22; 32],
+        },
+    )
+    .unwrap();
+    for id in 0..3 {
+        writer
+            .begin_metagenome(MetagenomeInput {
+                name: format!("grouped-{id}"),
+                bgzf_uri: format!("grouped-{id}.bgz"),
+                bgzf_bytes: 100,
+                bgzf_sha256: [id as u8 + 23; 32],
+                gzi: vec![0; 8],
+            })
+            .unwrap();
+        writer
+            .begin_contig(ContigInput {
+                name: format!("grouped-{id}-contig"),
+                length: 100_000,
+                fasta_offset: 4,
+                line_bases: 80,
+                line_width: 81,
+            })
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    let reference = JidxReader::open(&jidx).unwrap();
+    let mut seeds = (0..preceding)
+        .map(|core| IndexedSeed {
+            member: 0,
+            contig: 0,
+            seed: SharedSeed {
+                core,
+                context: 0,
+                flags: 0,
+                position: u64::from(core % 90_000),
+            },
+        })
+        .collect::<Vec<_>>();
+    seeds.extend([
+        indexed_target(0, 0, 100, false),
+        indexed_target(0, 0, 200, true),
+        IndexedSeed {
+            member: 2,
+            contig: 2,
+            seed: SharedSeed {
+                core: TARGET_CORE,
+                context: TARGET_CONTEXT ^ 1,
+                flags: 6,
+                position: 300,
+            },
+        },
+        IndexedSeed {
+            member: 1,
+            contig: 1,
+            seed: SharedSeed {
+                core: TARGET_CORE,
+                context: TARGET_CONTEXT & !((1 << 20) - 1),
+                flags: 2,
+                position: 400,
+            },
+        },
+        IndexedSeed {
+            member: 2,
+            contig: 2,
+            seed: SharedSeed {
+                core: TARGET_CORE,
+                context: 0,
+                flags: 0,
+                position: 5,
+            },
+        },
+    ]);
+    let shared = directory.path().join("grouped.shared");
+    write_shared_index(&reference, &shared, 64, &mut seeds).unwrap();
+    (directory, shared)
+}
+
+fn group_evidence(
+    reader: &SharedReader,
+    group: Option<SharedGroup>,
+) -> Option<(u32, u64, Vec<(u32, Vec<(u32, u64, bool)>)>)> {
+    let group = group?;
+    let members = reader
+        .members(group)
+        .unwrap()
+        .into_iter()
+        .map(|member| {
+            let occurrences = reader
+                .member_occurrences(group, member)
+                .unwrap()
+                .into_iter()
+                .map(|occurrence| {
+                    (
+                        occurrence.contig_id,
+                        occurrence.position,
+                        occurrence.canonical_orientation,
+                    )
+                })
+                .collect();
+            (member.metagenome_id, occurrences)
+        })
+        .collect();
+    Some((group.member_count(), group.occurrence_count(), members))
+}
+
+#[test]
+fn grouped_lookup_matches_scalar_with_contexts_absence_and_chunking() {
+    for preceding in [0, 4096] {
+        let (_directory, path) = grouped_lookup_fixture(preceding);
+        let core = SharedKey::core(TARGET_CORE);
+        let context_21 = SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        };
+        let context_31 = SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        };
+        let different_outer = SharedKey {
+            context: TARGET_CONTEXT ^ 1,
+            ..context_31
+        };
+        let absent_long = SharedKey {
+            context: TARGET_CONTEXT ^ 2,
+            ..context_31
+        };
+        let absent_core = SharedKey::core(CORE_LIMIT - 1);
+        let requests = [
+            different_outer,
+            core,
+            absent_core,
+            context_21,
+            context_31,
+            absent_long,
+            core,
+            context_31,
+            different_outer,
+            absent_core,
+            context_21,
+            core,
+            absent_long,
+            context_31,
+            core,
+            different_outer,
+            context_21,
+        ];
+        let scalar = SharedReader::open(&path).unwrap();
+        let expected = requests
+            .iter()
+            .map(|&key| {
+                let group = scalar.find(key).unwrap();
+                group_evidence(&scalar, group)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expected[1].as_ref().unwrap().1, 5);
+        assert_eq!(expected[3].as_ref().unwrap().1, 4);
+        assert_eq!(expected[4].as_ref().unwrap().1, 2);
+        assert_eq!(expected[0].as_ref().unwrap().1, 1);
+        assert!(expected[2].is_none());
+        assert!(expected[5].is_none());
+
+        for chunk_size in [1, 3, 17] {
+            let reader = SharedReader::open_observed(&path).unwrap();
+            let mut groups = Vec::new();
+            for chunk in requests.chunks(chunk_size) {
+                groups.extend(reader.find_many(chunk).unwrap());
+            }
+            let stats = reader.stats();
+            let expected_present = requests
+                .chunks(chunk_size)
+                .filter(|chunk| chunk.iter().any(|key| key.core == TARGET_CORE))
+                .count() as u64;
+            let expected_absent = requests
+                .chunks(chunk_size)
+                .filter(|chunk| chunk.iter().any(|key| key.core == CORE_LIMIT - 1))
+                .count() as u64;
+            assert_eq!(stats.core_resolutions_present, expected_present);
+            assert_eq!(stats.core_resolutions_absent, expected_absent);
+            let actual = groups
+                .into_iter()
+                .map(|group| group_evidence(&reader, group))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "chunk size {chunk_size}");
+
+            if chunk_size == requests.len() {
+                let unique = [
+                    core,
+                    context_21,
+                    context_31,
+                    different_outer,
+                    absent_long,
+                    absent_core,
+                ];
+                let distinct_reader = SharedReader::open_observed(&path).unwrap();
+                distinct_reader.find_many(&unique).unwrap();
+                let distinct = distinct_reader.stats();
+                assert_eq!(stats.core_resolutions_present, 1);
+                assert_eq!(stats.core_resolutions_absent, 1);
+                assert_eq!(
+                    stats.directory_comparison_probes,
+                    distinct.directory_comparison_probes
+                );
+                assert_eq!(
+                    stats.group_descriptor_inspections,
+                    distinct.group_descriptor_inspections
+                );
+                assert!(stats.context_comparisons >= distinct.context_comparisons);
+            }
+        }
+    }
+}
+
 const CORE_LIMIT: u32 = 1 << 30;
 
 fn member_prefix_fixture(preceding: u32) -> (tempfile::TempDir, SharedReader, u32, u64) {
@@ -395,7 +619,9 @@ fn authenticated_context_and_reference_corruption_is_rejected() {
         context: TARGET_CONTEXT >> 20,
         length: 21,
     };
-    let group = reader.find(key).unwrap().unwrap();
+    let groups = reader.find_many(&[key, key]).unwrap();
+    assert_eq!(groups[0], groups[1]);
+    let group = groups[0].unwrap();
     let member = reader.member(group, 1).unwrap().unwrap();
     assert!(matches!(
         reader.member_occurrences(group, member),
@@ -410,7 +636,10 @@ fn authenticated_context_and_reference_corruption_is_rejected() {
         bytes[reference..reference + 8].copy_from_slice(&u64::MAX.to_le_bytes());
     });
     let reader = SharedReader::open_observed(path).unwrap();
-    let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let key = SharedKey::core(TARGET_CORE);
+    let groups = reader.find_many(&[key, key]).unwrap();
+    assert_eq!(groups[0], groups[1]);
+    let group = groups[0].unwrap();
     let member = reader.member(group, 1).unwrap().unwrap();
     assert!(matches!(
         reader.member_occurrences(group, member),
