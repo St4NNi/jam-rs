@@ -136,6 +136,13 @@ pub struct TraceBatchStats {
     pub search_critical_ns: u64,
     pub batches: u64,
     pub unique_keys: u64,
+    pub distinct_cores: u64,
+    pub split_core_resolutions: u64,
+    pub query_core_occurrences: u64,
+    pub query_context_associations: u64,
+    pub query_distinct_context_requests: u64,
+    pub query_distinct_cores: u64,
+    pub emitted_anchor_associations: u64,
     pub cached_groups: u64,
     pub cached_positions: u64,
     pub lookup_peak_bytes: usize,
@@ -488,8 +495,16 @@ impl TraceEngine {
                 sha256(&[prepared.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
         }
         if let Some(started) = started {
-            self.batch_stats.lock().unwrap().seed_generation_ns +=
-                started.elapsed().as_nanos() as u64;
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.seed_generation_ns += started.elapsed().as_nanos() as u64;
+            stats.query_distinct_context_requests += prepared.positions_by_key.len() as u64;
+            for (&key, positions) in &prepared.positions_by_key {
+                stats.query_context_associations += positions.len() as u64;
+                if self.index.is_shared() && key >> 62 == 0 {
+                    stats.query_core_occurrences += positions.len() as u64;
+                    stats.query_distinct_cores += 1;
+                }
+            }
         }
         Ok(prepared)
     }
@@ -499,21 +514,42 @@ impl TraceEngine {
         queries: &[(String, Vec<u8>)],
         config: TraceConfig,
     ) -> Result<Vec<TraceResult>, TraceError> {
+        self.search_batch_topologies(queries, config, &vec![config.circular; queries.len()])
+    }
+
+    pub(crate) fn search_batch_topologies(
+        &self,
+        queries: &[(String, Vec<u8>)],
+        config: TraceConfig,
+        circular: &[bool],
+    ) -> Result<Vec<TraceResult>, TraceError> {
+        if queries.len() != circular.len() {
+            return Err(TraceError::Invalid("query topology count"));
+        }
         let started = self.observed.then(Instant::now);
         if queries.len() < 2 && !self.index.is_shared() {
             return queries
                 .par_iter()
-                .map(|(id, sequence)| self.search(id.as_str(), sequence, config))
+                .zip(circular)
+                .map(|((id, sequence), &circular)| {
+                    self.search(id.as_str(), sequence, TraceConfig { circular, ..config })
+                })
                 .collect();
         }
         let prepared = queries
             .par_iter()
-            .map(|(id, sequence)| self.prepare(id.as_str(), sequence, config))
+            .zip(circular)
+            .map(|((id, sequence), &circular)| {
+                self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let batch = self.prepare_batch(&prepared)?;
         let results = prepared
             .into_par_iter()
-            .map(|prepared| self.search_prepared(prepared, config, Some(&batch)))
+            .zip(circular)
+            .map(|(prepared, &circular)| {
+                self.search_prepared(prepared, TraceConfig { circular, ..config }, Some(&batch))
+            })
             .collect();
         self.record_batch(&batch);
         if let Some(started) = started {
@@ -575,6 +611,8 @@ impl TraceEngine {
         stats.bgzf_io_peak = stats.bgzf_io_peak.max(cache.peak_loading_blocks);
         if let Some(lookups) = &batch.lookups {
             stats.unique_keys += lookups.entries.len() as u64;
+            stats.distinct_cores += lookups.distinct_cores;
+            stats.split_core_resolutions += lookups.split_core_resolutions;
             stats.cached_groups += lookups.postings.len() as u64;
             stats.cached_positions += lookups
                 .postings
@@ -880,6 +918,7 @@ impl TraceEngine {
         filter_keys
             .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
             .map_err(|_| TraceError::Invalid("query seed batch"))?;
+        let mut emitted_anchor_associations = 0u64;
         for key_chunk in key_order.chunks(SEED_LOOKUP_BATCH_KEYS) {
             packed_keys.clear();
             for &packed_key in key_chunk {
@@ -955,6 +994,10 @@ impl TraceEngine {
                     .filter(|document| candidate_ids.contains(&document.metagenome_id()))
                 {
                     let mut visit = |occurrences: &[crate::jidx_reader::SeedOccurrence]| {
+                        if self.observed {
+                            emitted_anchor_associations +=
+                                (query_seeds.len() as u64) * (occurrences.len() as u64);
+                        }
                         for seed in query_seeds {
                             let (query_position, region_k) = if self.index.is_shared() {
                                 (
@@ -1030,8 +1073,9 @@ impl TraceEngine {
 
         let tasks = self.tasks(regions, prepared.query_length, config)?;
         if let Some(started) = started {
-            self.batch_stats.lock().unwrap().region_formation_ns +=
-                started.elapsed().as_nanos() as u64;
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.region_formation_ns += started.elapsed().as_nanos() as u64;
+            stats.emitted_anchor_associations += emitted_anchor_associations;
         }
         let (loaded, reads) = self.load_ranges(
             &tasks,

@@ -15,6 +15,8 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) lookup_ns: u64,
     pub(crate) membership_ns: u64,
     pub(crate) position_ns: u64,
+    pub(crate) distinct_cores: u64,
+    pub(crate) split_core_resolutions: u64,
     pub(crate) _reservation: CacheReservation<'static>,
 }
 
@@ -58,17 +60,45 @@ pub(crate) fn prepare_lookup(
     let Some(identity) = index.cache_file_identity()? else {
         return Ok(None);
     };
-    keys.sort_unstable();
-    keys.dedup();
     if index.is_shared() {
-        keys.sort_unstable_by_key(|key| (std::cmp::Reverse(key >> 62), *key));
+        keys.sort_unstable_by_key(|key| {
+            let context = crate::shared_seed::SharedKey::unpack(*key).unwrap();
+            (context.core, context.context_code().unwrap())
+        });
+    } else {
+        keys.sort_unstable();
     }
+    keys.dedup();
     let mut entries = Vec::new();
     if entries.try_reserve_exact(keys.len()).is_err() {
         return Ok(None);
     }
-    for chunk in keys.chunks(SEED_LOOKUP_BATCH_KEYS) {
+    let core = |key| crate::shared_seed::SharedKey::unpack(key).map(|key| key.core);
+    let distinct_cores = if index.is_shared() {
+        keys.iter()
+            .enumerate()
+            .filter(|&(i, key)| i == 0 || core(*key) != core(keys[i - 1]))
+            .count() as u64
+    } else {
+        0
+    };
+    let mut split_core_resolutions = 0;
+    let mut start = 0;
+    while start < keys.len() {
+        let mut end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+        if index.is_shared() && end < keys.len() && core(keys[end - 1]) == core(keys[end]) {
+            let boundary = end;
+            while end > start && core(keys[end - 1]) == core(keys[boundary]) {
+                end -= 1;
+            }
+            if end == start {
+                end = boundary;
+                split_core_resolutions += 1;
+            }
+        }
+        let chunk = &keys[start..end];
         entries.extend(chunk.iter().copied().zip(index.find_seeds_batch(chunk)?));
+        start = end;
     }
     let lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
     let mut membership_ns = 0;
@@ -152,6 +182,8 @@ pub(crate) fn prepare_lookup(
         lookup_ns,
         membership_ns,
         position_ns,
+        distinct_cores,
+        split_core_resolutions,
         _reservation: reservation,
     }))
 }

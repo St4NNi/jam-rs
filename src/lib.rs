@@ -187,6 +187,7 @@ pub fn run() -> Result<()> {
             owner_index,
             shared_index,
             read_stats,
+            query_topology_header,
             audit_index,
             output,
             query_id,
@@ -220,9 +221,11 @@ pub fn run() -> Result<()> {
                     index,
                     manifest,
                 ) {
-                    (Some(path), None, None, None, None, None) => {
-                        TraceInput::Shared { path, read_stats }
-                    }
+                    (Some(path), None, None, None, None, None) => TraceInput::Shared {
+                        path,
+                        read_stats,
+                        query_topology_header,
+                    },
                     (None, Some(root), None, None, None, None) => TraceInput::Owner(root),
                     (None, None, Some(root), None, None, None) => TraceInput::Collection(root),
                     (None, None, None, Some(database), Some(index), Some(manifest)) => {

@@ -66,6 +66,7 @@ pub(crate) enum TraceInput {
     Shared {
         path: PathBuf,
         read_stats: Option<PathBuf>,
+        query_topology_header: bool,
     },
 }
 
@@ -81,7 +82,15 @@ pub(crate) struct TraceArgs {
 }
 
 pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
+    let invocation_started = std::time::Instant::now();
     let shared_input = matches!(&args.input, TraceInput::Shared { .. });
+    let query_topology_header = matches!(
+        &args.input,
+        TraceInput::Shared {
+            query_topology_header: true,
+            ..
+        }
+    );
     let read_stats = match &args.input {
         TraceInput::Shared { read_stats, .. } => read_stats.clone(),
         _ => None,
@@ -132,9 +141,13 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             Engine::Collection(Box::new(CollectionTraceEngine::open(root, args.s3)?))
         }
         TraceInput::Owner(root) => Engine::Shard(Box::new(TraceEngine::open_owner(root, args.s3)?)),
-        TraceInput::Shared { path, read_stats } => Engine::Shard(Box::new(
-            TraceEngine::open_shared_observed(path, args.s3, read_stats.is_some())?,
-        )),
+        TraceInput::Shared {
+            path, read_stats, ..
+        } => Engine::Shard(Box::new(TraceEngine::open_shared_observed(
+            path,
+            args.s3,
+            read_stats.is_some(),
+        )?)),
     };
     if args.audit_index {
         match &engine {
@@ -147,25 +160,30 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         Engine::Shard(_) => rayon::current_num_threads(),
         Engine::Collection(_) => rayon::current_num_threads().clamp(1, 4),
     };
-    let parsing_started = read_stats.as_ref().map(|_| std::time::Instant::now());
+    let startup_ended = std::time::Instant::now();
+    let startup_ns = startup_ended.duration_since(invocation_started).as_nanos() as u64;
+    let parsing_started = read_stats.as_ref().map(|_| startup_ended);
     let mut input = parse_fastx_file(&args.query)?;
     let mut parsing_ns = parsing_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
     let mut output_ns = 0u64;
+    let mut search_ns = 0u64;
     let mut temporary = tempfile::Builder::new()
         .prefix(".jam-trace-")
         .tempfile_in(parent)?;
     let mut count = 0usize;
-    let mut pending: Option<(String, Vec<u8>)> = None;
+    let mut pending: Option<(String, Vec<u8>, bool)> = None;
     {
         let mut output = BufWriter::new(temporary.as_file_mut());
         loop {
             let parsing_started = read_stats.as_ref().map(|_| std::time::Instant::now());
             let mut queries = Vec::with_capacity(batch_size);
+            let mut topologies = Vec::with_capacity(batch_size);
             let mut batch_bases = 0usize;
             for _ in 0..batch_size {
-                if let Some((id, sequence)) = pending.take() {
+                if let Some((id, sequence, circular)) = pending.take() {
                     batch_bases += sequence.len();
                     queries.push((id, sequence));
+                    topologies.push(circular);
                     continue;
                 }
                 let Some(record) = input.next() else { break };
@@ -187,16 +205,39 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                     .to_string(),
                 };
                 let sequence = record.seq().into_owned();
+                let circular = if query_topology_header {
+                    let mut tokens = record
+                        .id()
+                        .split(|byte| byte.is_ascii_whitespace())
+                        .skip(1)
+                        .filter(|token| token.starts_with(b"topology="));
+                    let circular = match tokens.next() {
+                        Some(b"topology=linear") => false,
+                        Some(b"topology=circular") => true,
+                        _ => {
+                            return Err(anyhow::anyhow!(
+                                "Each query header requires topology=linear or topology=circular"
+                            ));
+                        }
+                    };
+                    if tokens.next().is_some() {
+                        return Err(anyhow::anyhow!("Duplicate query topology token"));
+                    }
+                    circular
+                } else {
+                    args.config.circular
+                };
                 count += 1;
                 if shared_input
                     && !queries.is_empty()
                     && batch_bases.saturating_add(sequence.len()) > 700_000
                 {
-                    pending = Some((id, sequence));
+                    pending = Some((id, sequence, circular));
                     break;
                 }
                 batch_bases += sequence.len();
                 queries.push((id, sequence));
+                topologies.push(circular);
             }
             parsing_ns += parsing_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
             if queries.is_empty() {
@@ -204,7 +245,14 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             }
             match &engine {
                 Engine::Shard(engine) => {
-                    let results = engine.search_batch(&queries, args.config)?;
+                    let search_started = read_stats.as_ref().map(|_| std::time::Instant::now());
+                    let results = if query_topology_header {
+                        engine.search_batch_topologies(&queries, args.config, &topologies)?
+                    } else {
+                        engine.search_batch(&queries, args.config)?
+                    };
+                    search_ns +=
+                        search_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
                     let output_started = read_stats.as_ref().map(|_| std::time::Instant::now());
                     for result in results {
                         serde_json::to_writer(&mut output, &result)?;
@@ -227,6 +275,17 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         return Err(anyhow::anyhow!("Query file contains no sequence records"));
     }
     temporary.as_file().sync_all()?;
+    if args.force {
+        temporary
+            .persist(&args.output)
+            .map_err(|error| error.error)?;
+    } else {
+        temporary
+            .persist_noclobber(&args.output)
+            .map_err(|error| error.error)?;
+    }
+    sync_directory(parent)?;
+    let publication_ns = invocation_started.elapsed().as_nanos() as u64;
     if let Some(path) = read_stats {
         let Engine::Shard(engine) = &engine else {
             unreachable!()
@@ -243,8 +302,9 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             &serde_json::json!({
                 "format": "jam-shared-read-stats-v1", "index": engine.shared_read_stats(), "batch": engine.batch_stats(),
                 "parsing_ns": parsing_ns, "output_ns": output_ns,
+                "top_level_ns": { "setup": startup_ns, "parsing": parsing_ns, "search": search_ns, "result_serialization": output_ns, "finalization_and_other": publication_ns.saturating_sub(startup_ns + parsing_ns + search_ns + output_ns), "through_result_publication": publication_ns },
                 "batch_limits": { "queries": 64, "query_bases": 700000, "lookup_bytes": 134217728, "global_lookup_bytes": 268435456, "decoded_bgzf_bytes": 33554432, "concurrent_bgzf_reads": 4 },
-                "semantics": "application work and logical bytes, not physical I/O; phase elapsed times may overlap across workers and must not be summed as invocation wall or CPU; endpoint time includes endpoint traceback"
+                "semantics": "top_level_ns intervals do not overlap and cover handler entry through result publication, excluding stats publication and CLI startup; batch timings are nested worker spans and may overlap; logical bytes are not physical I/O; endpoint time includes endpoint traceback"
             }),
         )?;
         stats.as_file().sync_all()?;
@@ -253,16 +313,6 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             .map_err(|error| error.error)?;
         sync_directory(parent)?;
     }
-    if args.force {
-        temporary
-            .persist(&args.output)
-            .map_err(|error| error.error)?;
-    } else {
-        temporary
-            .persist_noclobber(&args.output)
-            .map_err(|error| error.error)?;
-    }
-    sync_directory(parent)?;
     Ok(())
 }
 

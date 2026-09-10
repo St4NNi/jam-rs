@@ -163,6 +163,9 @@ pub enum Commands {
         /// Write observed shared-index and batch work counters outside the result JSONL
         #[arg(long, requires = "shared_index")]
         read_stats: Option<PathBuf>,
+        /// Read one topology=linear or topology=circular token from each query header
+        #[arg(long, requires = "shared_index")]
+        query_topology_header: bool,
         /// Atomic JSONL output
         #[arg(short, long)]
         output: PathBuf,

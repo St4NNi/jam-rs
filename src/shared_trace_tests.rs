@@ -1,4 +1,5 @@
 use crate::alignment::{Alignment, EditOperation, Strand};
+use crate::cli::handlers::{TraceArgs, TraceInput, handle_trace_command};
 use crate::jidx::sha256;
 use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use crate::mosaic::Fragment;
@@ -68,6 +69,53 @@ fn write_bgzf(directory: &std::path::Path, name: &str, sequence: &[u8]) -> Metag
         bgzf_sha256: sha256(&bytes),
         gzi: std::fs::read(gzi_path).unwrap(),
     }
+}
+
+fn write_queries(path: &std::path::Path, rows: &[(&str, &[u8])]) {
+    let mut writer = File::create(path).unwrap();
+    for (header, sequence) in rows {
+        writeln!(writer, ">{header}").unwrap();
+        writer.write_all(sequence).unwrap();
+        writer.write_all(b"\n").unwrap();
+    }
+}
+
+fn run_topology_cli(
+    shared: &std::path::Path,
+    query: &std::path::Path,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    handle_trace_command(TraceArgs {
+        query: query.to_owned(),
+        input: TraceInput::Shared {
+            path: shared.to_owned(),
+            read_stats: None,
+            query_topology_header: true,
+        },
+        audit_index: false,
+        output: output.to_owned(),
+        query_id: None,
+        config: TraceConfig {
+            use_sketch: false,
+            circular: true,
+            ..TraceConfig::default()
+        },
+        s3: None,
+        force: false,
+    })
+}
+
+fn without_json_read_accounting(mut result: serde_json::Value) -> serde_json::Value {
+    for metagenome in result["metagenomes"].as_array_mut().unwrap() {
+        for field in [
+            "compressed_bytes_read",
+            "range_requests",
+            "bgzf_blocks_decoded",
+        ] {
+            metagenome[field] = serde_json::json!(0);
+        }
+    }
+    result
 }
 
 fn matching_anchors(query: &[u8], seeds: &[SharedSeed]) -> (usize, usize) {
@@ -345,6 +393,87 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     );
     assert_eq!(absent.alignment.query_interval.len(), 720);
     validate_score(&absent.alignment);
+
+    let topology_queries = [
+        ("topology-linear".to_owned(), exact_query.clone()),
+        ("topology-circular".to_owned(), circular_query.clone()),
+    ];
+    let topology_flags = [false, true];
+    let expected_topologies = vec![
+        engine
+            .search("topology-linear", &exact_query, linear)
+            .unwrap(),
+        engine
+            .search(
+                "topology-circular",
+                &circular_query,
+                TraceConfig {
+                    circular: true,
+                    ..linear
+                },
+            )
+            .unwrap(),
+    ]
+    .into_iter()
+    .map(without_read_accounting)
+    .collect::<Vec<_>>();
+    for threads in [1, 4] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let actual = pool
+            .install(|| {
+                TraceEngine::open_shared(&shared, None)
+                    .unwrap()
+                    .search_batch_topologies(&topology_queries, linear, &topology_flags)
+                    .unwrap()
+            })
+            .into_iter()
+            .map(without_read_accounting)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected_topologies, "thread count {threads}");
+    }
+
+    let cli_query = directory.path().join("mixed-topologies.fa");
+    let cli_output = directory.path().join("mixed-topologies.jsonl");
+    write_queries(
+        &cli_query,
+        &[
+            ("topology-linear topology=linear", &exact_query),
+            ("topology-circular topology=circular", &circular_query),
+        ],
+    );
+    run_topology_cli(&shared, &cli_query, &cli_output).unwrap();
+    let actual = std::fs::read_to_string(&cli_output)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            without_json_read_accounting(serde_json::from_str::<serde_json::Value>(line).unwrap())
+        })
+        .collect::<Vec<_>>();
+    let expected = expected_topologies
+        .iter()
+        .map(|result| without_json_read_accounting(serde_json::to_value(result).unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+
+    for (case, header, message) in [
+        ("missing", "missing", "requires topology"),
+        ("invalid", "invalid topology=unknown", "requires topology"),
+        (
+            "duplicate",
+            "duplicate topology=linear topology=circular",
+            "Duplicate query topology",
+        ),
+    ] {
+        let query = directory.path().join(format!("{case}-topology.fa"));
+        let output = directory.path().join(format!("{case}-topology.jsonl"));
+        write_queries(&query, &[(header, &exact_query)]);
+        let error = run_topology_cli(&shared, &query, &output).unwrap_err();
+        assert!(error.to_string().contains(message));
+        assert!(!output.exists());
+    }
 
     let queries = [
         ("reuse-a".to_owned(), exact_query.clone()),
