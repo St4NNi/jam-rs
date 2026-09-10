@@ -78,19 +78,12 @@ def normalize_results(args, output: Path) -> Path:
     return output
 
 
-def scoring_truth(args, output: Path) -> tuple[Path, str]:
+def scoring_truth(args) -> tuple[Path, str]:
     rows = load_jsonl(args.truth, "query_id")
-    classes = {}
-    for row in rows.values():
-        classes[row["case"]] = classes.get(row["case"], 0) + 1
-    if len(rows) == 42 and len(classes) == 21 and set(classes.values()) == {2}:
-        return args.truth, "development"
-    with output.open("x", encoding="utf-8") as stream:
-        for row in rows.values():
-            copied = dict(row)
-            copied["split"] = "profile"
-            stream.write(json.dumps(copied, sort_keys=True) + "\n")
-    return output, "profile"
+    splits = {row.get("split") for row in rows.values()}
+    if len(splits) != 1 or not splits <= {"development", "profile"}:
+        raise ValueError("truth must retain one development or profile split")
+    return args.truth, splits.pop()
 
 
 def score_command(args, results: Path, truth: Path, split: str, output: Path) -> list[str]:
@@ -336,7 +329,7 @@ def main() -> None:
         raise SystemExit("probe index identity differs")
     args.output.mkdir(mode=0o700)
     normalized_results = normalize_results(args, args.output / "normalized-results.jsonl")
-    bound_truth, base_split = scoring_truth(args, args.output / "scoring-truth.jsonl")
+    bound_truth, base_split = scoring_truth(args)
     base_output = args.output / "score.json"
     command = score_command(args, normalized_results, bound_truth, base_split, base_output)
     run = subprocess.run(command, check=False, capture_output=True, text=True)
