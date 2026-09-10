@@ -109,6 +109,18 @@ pub enum Commands {
         rescue_k15: bool,
     },
 
+    /// Build one shared k15 anchor population with centered k21/k31 contexts
+    #[command(arg_required_else_help = true)]
+    SharedIndex {
+        /// Existing JIDX supplying query-independent BGZF and contig metadata
+        #[arg(long)]
+        reference_index: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        #[arg(long, default_value = "64")]
+        minimizer_window: u16,
+    },
+
     /// Trace query sequences through a shard or collection
     #[command(arg_required_else_help = true)]
     Trace {

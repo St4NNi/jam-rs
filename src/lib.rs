@@ -32,6 +32,7 @@ pub mod range_source;
 pub mod reader;
 pub mod shared_format;
 pub mod shared_seed;
+pub mod shared_writer;
 pub mod sketch;
 pub mod trace;
 mod trace_index;
@@ -156,6 +157,19 @@ pub fn run() -> Result<()> {
             },
             cli.force,
         ),
+
+        Commands::SharedIndex {
+            reference_index,
+            output,
+            minimizer_window,
+        } => {
+            let stats =
+                shared_writer::build_shared_index(reference_index, output, minimizer_window)?;
+            if !cli.silent {
+                println!("{}", serde_json::to_string(&stats)?);
+            }
+            Ok(())
+        }
 
         Commands::Trace {
             query,
