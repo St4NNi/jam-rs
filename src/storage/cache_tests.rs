@@ -158,7 +158,7 @@ fn disk_serves_evicted() {
 }
 
 #[test]
-fn disk_lasts_across_opens() {
+fn disk_outlives_process() {
     let data = random_bytes(&mut rng(6), 40_960);
     let directory = tempfile::tempdir().unwrap();
     // RAM holds every block, so only writing on insertion puts them on disk.
