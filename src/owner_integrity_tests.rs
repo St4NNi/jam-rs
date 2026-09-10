@@ -10,7 +10,7 @@ use crate::owner_writer::{
     MAX_PROTOTYPE_ENCODED_BYTES, OwnerKeyRange, OwnerWriteInput, publish_owner_manifest,
     validate_prototype_payload_bytes, write_owner,
 };
-use crate::trace::{TraceConfig, TraceEngine};
+use crate::trace::{TraceConfig, TraceEngine, TraceResult};
 use serde_json::Value;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -332,6 +332,29 @@ fn prototype_encoded_byte_budget_checks_boundaries_without_allocation() {
 
 #[test]
 fn owner_shared_batch_matches_sequential_low_reuse_and_repeated_queries() {
+    fn io(results: &[TraceResult]) -> (u64, u64, u64) {
+        results
+            .iter()
+            .flat_map(|result| &result.metagenomes)
+            .fold((0, 0, 0), |totals, trace| {
+                (
+                    totals.0 + trace.compressed_bytes_read,
+                    totals.1 + trace.range_requests,
+                    totals.2 + trace.bgzf_blocks_decoded,
+                )
+            })
+    }
+    fn normalize_io(results: &mut [TraceResult]) {
+        for trace in results
+            .iter_mut()
+            .flat_map(|result| &mut result.metagenomes)
+        {
+            trace.compressed_bytes_read = 0;
+            trace.range_requests = 0;
+            trace.bgzf_blocks_decoded = 0;
+        }
+    }
+
     let fixture = build_fixture_at(None);
     let engine = TraceEngine::open_owner(&fixture.owner_manifest, None).unwrap();
     let queries = vec![
@@ -351,11 +374,24 @@ fn owner_shared_batch_matches_sequential_low_reuse_and_repeated_queries() {
         circular: false,
         ..TraceConfig::default()
     };
-    let expected = queries
+    let mut expected = queries
         .iter()
         .map(|(id, sequence)| engine.search(id, sequence, config).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(engine.search_batch(&queries, config).unwrap(), expected);
+    let mut actual = engine.search_batch(&queries, config).unwrap();
+    let expected_total_io = io(&expected);
+    let actual_total_io = io(&actual);
+    assert!(actual_total_io.0 <= expected_total_io.0);
+    assert!(actual_total_io.1 <= expected_total_io.1);
+    assert!(actual_total_io.2 <= expected_total_io.2);
+    let expected_io = io(&expected[..2]);
+    let actual_io = io(&actual[..2]);
+    assert!(actual_io.0 < expected_io.0);
+    assert!(actual_io.1 < expected_io.1);
+    assert!(actual_io.2 < expected_io.2);
+    normalize_io(&mut expected);
+    normalize_io(&mut actual);
+    assert_eq!(actual, expected);
 }
 
 fn hex(bytes: &[u8]) -> String {

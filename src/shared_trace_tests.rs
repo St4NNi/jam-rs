@@ -216,6 +216,11 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     assert_eq!(stats.source_bases, 6_320);
     std::fs::remove_file(&reference).unwrap();
     assert!(!reference.exists());
+    for name in ["absent", "embedded", "exact", "mixed", "reverse", "weak"] {
+        let gzi = directory.path().join(format!("{name}.gzi"));
+        std::fs::remove_file(&gzi).unwrap();
+        assert!(!gzi.exists());
+    }
 
     let exact_query = exact_target.clone();
     let reverse_query = reverse_complement(&exact_target);
