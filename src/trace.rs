@@ -1102,6 +1102,14 @@ impl TraceEngine {
                     .as_mut()
                     .map_err(|error| TraceError::AlignmentAdmission(error.to_string()))?
                     .workspace_mut();
+                if self.observed {
+                    workspace.enable_timing();
+                }
+                let started = self.observed.then(Instant::now);
+                let before = (
+                    workspace.traceback_nanoseconds(),
+                    workspace.endpoint_nanoseconds(),
+                );
                 let query_window =
                     linearize_query(query, task.query_start, task.query_span, config.circular)?;
                 let loaded = loaded
@@ -1122,43 +1130,71 @@ impl TraceEngine {
                     .ok_or(TraceError::Invalid("loaded range"))?;
                 let mut alignment_config = config.alignment;
                 alignment_config.diagonal_offset = task.diagonal_offset;
-                let core = match workspace.align_oriented(
+                let Some(initial) = align_task_window(
+                    workspace,
                     &query_window,
                     target,
                     task.target_start,
                     task.strand,
                     alignment_config,
-                ) {
-                    Ok(alignment) => alignment,
-                    Err(AlignmentError::NoAlignment) => return Ok(None),
-                    Err(error) => return Err(error.into()),
+                    config,
+                )?
+                else {
+                    self.record_alignment_time(started, workspace, before);
+                    return Ok(None);
                 };
-                let completed = workspace
-                    .complete_endpoints(
-                        core.clone(),
-                        &query_window,
+                let mut alignment = initial.selected;
+                let initial_accepted = alignment_accepted(&alignment, config);
+                let mut query_start = task.query_start;
+                let retry = if config.circular && task.query_span == query.len() as u64 {
+                    let retry = circular_retry(
+                        &initial.core,
+                        task,
+                        u64::try_from(query.len())
+                            .map_err(|_| TraceError::Invalid("query length"))?,
+                    )?;
+                    if retry.is_some() {
+                        retry
+                    } else {
+                        circular_retry(
+                            &alignment,
+                            task,
+                            u64::try_from(query.len())
+                                .map_err(|_| TraceError::Invalid("query length"))?,
+                        )?
+                    }
+                } else {
+                    None
+                };
+                if let Some((retry_start, retry_diagonal)) = retry {
+                    let retry_query = linearize_query(query, retry_start, task.query_span, true)?;
+                    alignment_config.diagonal_offset = retry_diagonal;
+                    if let Some(retry) = align_task_window(
+                        workspace,
+                        &retry_query,
                         target,
                         task.target_start,
-                        config.endpoint_bases,
+                        task.strand,
                         alignment_config,
-                    )?
-                    .alignment;
-                let alignment = if completed.identity() >= config.min_identity {
-                    completed
-                } else {
-                    core
-                };
-                if alignment.identity() < config.min_identity
-                    || alignment.query_interval.len() < config.min_aligned_bases
-                {
+                        config,
+                    )? && alignment_accepted(&retry.selected, config)
+                        && retry_improves(&alignment, &retry.selected, initial_accepted)
+                    {
+                        alignment = retry.selected;
+                        query_start = retry_start;
+                    }
+                }
+                if !alignment_accepted(&alignment, config) {
+                    self.record_alignment_time(started, workspace, before);
                     return Ok(None);
                 }
                 let query_segments = query_segments(
-                    task.query_start,
+                    query_start,
                     alignment.query_interval,
                     u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?,
                     config.circular,
                 )?;
+                self.record_alignment_time(started, workspace, before);
                 Ok(Some((
                     task.metagenome_id,
                     Fragment {
@@ -1175,6 +1211,102 @@ impl TraceEngine {
             })
             .collect()
     }
+}
+
+struct WindowAlignment {
+    core: crate::alignment::Alignment,
+    selected: crate::alignment::Alignment,
+}
+
+fn alignment_accepted(alignment: &crate::alignment::Alignment, config: TraceConfig) -> bool {
+    alignment.identity() >= config.min_identity
+        && alignment.query_interval.len() >= config.min_aligned_bases
+}
+
+fn retry_improves(
+    initial: &crate::alignment::Alignment,
+    retry: &crate::alignment::Alignment,
+    initial_accepted: bool,
+) -> bool {
+    !initial_accepted
+        || (retry.query_interval.len() >= initial.query_interval.len()
+            && retry.score >= initial.score
+            && (retry.query_interval.len() > initial.query_interval.len()
+                || retry.score > initial.score))
+}
+
+fn align_task_window(
+    workspace: &mut crate::alignment::AlignmentWorkspace,
+    query: &[u8],
+    target: &[u8],
+    target_start: u64,
+    strand: Strand,
+    alignment_config: AlignmentConfig,
+    config: TraceConfig,
+) -> Result<Option<WindowAlignment>, TraceError> {
+    let core = match workspace.align_oriented(query, target, target_start, strand, alignment_config)
+    {
+        Ok(alignment) => alignment,
+        Err(AlignmentError::NoAlignment) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let completed = workspace
+        .complete_endpoints(
+            core.clone(),
+            query,
+            target,
+            target_start,
+            config.endpoint_bases,
+            alignment_config,
+        )?
+        .alignment;
+    let selected = if completed.identity() >= config.min_identity {
+        completed
+    } else {
+        core.clone()
+    };
+    Ok(Some(WindowAlignment { core, selected }))
+}
+
+fn circular_retry(
+    alignment: &crate::alignment::Alignment,
+    task: &AlignmentTask,
+    query_length: u64,
+) -> Result<Option<(u64, i64)>, TraceError> {
+    let suffix = alignment.query_interval.end == query_length && alignment.query_interval.start > 0;
+    let prefix = alignment.query_interval.start == 0 && alignment.query_interval.end < query_length;
+    let continuation = match (suffix, prefix, task.strand) {
+        (true, false, Strand::Forward) => alignment.target_interval.end < task.target_end,
+        (true, false, Strand::Reverse) => alignment.target_interval.start > task.target_start,
+        (false, true, Strand::Forward) => alignment.target_interval.start > task.target_start,
+        (false, true, Strand::Reverse) => alignment.target_interval.end < task.target_end,
+        _ => false,
+    };
+    if !continuation {
+        return Ok(None);
+    }
+    let boundary = if suffix {
+        alignment.query_interval.start
+    } else {
+        alignment.query_interval.end
+    };
+    let retry_start = (u128::from(task.query_start) + u128::from(boundary))
+        .checked_rem(u128::from(query_length))
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(TraceError::Invalid("circular retry position"))?;
+    let retry_query_offset = if suffix { 0 } else { query_length - boundary };
+    let oriented_target_start = match task.strand {
+        Strand::Forward => alignment
+            .target_interval
+            .start
+            .checked_sub(task.target_start),
+        Strand::Reverse => task.target_end.checked_sub(alignment.target_interval.end),
+    }
+    .ok_or(TraceError::Invalid("circular retry target"))?;
+    let diagonal =
+        i64::try_from(i128::from(oriented_target_start) - i128::from(retry_query_offset))
+            .map_err(|_| TraceError::Invalid("circular retry diagonal"))?;
+    Ok(Some((retry_start, diagonal)))
 }
 
 type LoadedRanges = (
@@ -3262,5 +3394,74 @@ mod tests {
             .unwrap(),
             query_segments(0, reference.query_interval, query.len() as u64, false).unwrap(),
         );
+    }
+
+    #[test]
+    fn circular_retry_can_join_two_subthreshold_fragment_halves() {
+        let target = window_dna(71, 40);
+        let query = [
+            target[20..].to_vec(),
+            b"N".repeat(40),
+            target[..20].to_vec(),
+        ]
+        .concat();
+        let config = TraceConfig {
+            circular: true,
+            min_aligned_bases: 40,
+            ..TraceConfig::default()
+        };
+        let task = AlignmentTask {
+            metagenome_id: 0,
+            contig_id: 0,
+            strand: Strand::Forward,
+            query_start: 0,
+            query_span: query.len() as u64,
+            target_start: 0,
+            target_end: target.len() as u64,
+            diagonal_offset: 20,
+        };
+        let mut initial_config = config.alignment;
+        initial_config.diagonal_offset = task.diagonal_offset;
+        let mut workspace = AlignmentWorkspace::default();
+        let initial = align_task_window(
+            &mut workspace,
+            &query,
+            &target,
+            0,
+            Strand::Forward,
+            initial_config,
+            config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(initial.core.query_interval.len(), 20);
+        assert_eq!(initial.selected.query_interval.len(), 20);
+        assert!(!alignment_accepted(&initial.selected, config));
+
+        let (retry_start, retry_diagonal) =
+            circular_retry(&initial.core, &task, query.len() as u64)
+                .unwrap()
+                .unwrap();
+        assert_eq!(retry_start, 20);
+        let retry_query = linearize_query(&query, retry_start, query.len() as u64, true).unwrap();
+        initial_config.diagonal_offset = retry_diagonal;
+        let retry = align_task_window(
+            &mut workspace,
+            &retry_query,
+            &target,
+            0,
+            Strand::Forward,
+            initial_config,
+            config,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(retry.selected.query_interval.len(), 40);
+        assert_eq!(
+            retry.selected.target_interval,
+            Interval::new(0, 40).unwrap()
+        );
+        assert!(alignment_accepted(&retry.selected, config));
+        assert!(retry_improves(&initial.selected, &retry.selected, false));
     }
 }
