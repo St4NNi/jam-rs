@@ -63,6 +63,10 @@ pub(crate) enum TraceInput {
     },
     Collection(PathBuf),
     Owner(PathBuf),
+    Shared {
+        path: PathBuf,
+        read_stats: Option<PathBuf>,
+    },
 }
 
 pub(crate) struct TraceArgs {
@@ -77,6 +81,18 @@ pub(crate) struct TraceArgs {
 }
 
 pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
+    let shared_input = matches!(&args.input, TraceInput::Shared { .. });
+    let read_stats = match &args.input {
+        TraceInput::Shared { read_stats, .. } => read_stats.clone(),
+        _ => None,
+    };
+    if let Some(path) = &read_stats
+        && (path == &args.output || path.try_exists()?)
+    {
+        return Err(anyhow::anyhow!(
+            "Read-statistics output must be a new distinct file"
+        ));
+    }
     if args.output.try_exists()? {
         if !args.output.is_file() {
             return Err(anyhow::anyhow!(
@@ -116,6 +132,9 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             Engine::Collection(Box::new(CollectionTraceEngine::open(root, args.s3)?))
         }
         TraceInput::Owner(root) => Engine::Shard(Box::new(TraceEngine::open_owner(root, args.s3)?)),
+        TraceInput::Shared { path, read_stats } => Engine::Shard(Box::new(
+            TraceEngine::open_shared_observed(path, args.s3, read_stats.is_some())?,
+        )),
     };
     if args.audit_index {
         match &engine {
@@ -124,19 +143,31 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         }
     }
     let batch_size = match &engine {
+        Engine::Shard(_) if shared_input => 64,
         Engine::Shard(_) => rayon::current_num_threads(),
         Engine::Collection(_) => rayon::current_num_threads().clamp(1, 4),
     };
+    let parsing_started = read_stats.as_ref().map(|_| std::time::Instant::now());
     let mut input = parse_fastx_file(&args.query)?;
+    let mut parsing_ns = parsing_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+    let mut output_ns = 0u64;
     let mut temporary = tempfile::Builder::new()
         .prefix(".jam-trace-")
         .tempfile_in(parent)?;
     let mut count = 0usize;
+    let mut pending: Option<(String, Vec<u8>)> = None;
     {
         let mut output = BufWriter::new(temporary.as_file_mut());
         loop {
+            let parsing_started = read_stats.as_ref().map(|_| std::time::Instant::now());
             let mut queries = Vec::with_capacity(batch_size);
+            let mut batch_bases = 0usize;
             for _ in 0..batch_size {
+                if let Some((id, sequence)) = pending.take() {
+                    batch_bases += sequence.len();
+                    queries.push((id, sequence));
+                    continue;
+                }
                 let Some(record) = input.next() else { break };
                 let record = record?;
                 if count != 0 && args.query_id.is_some() {
@@ -155,19 +186,32 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                     )?
                     .to_string(),
                 };
-                queries.push((id, record.seq().into_owned()));
+                let sequence = record.seq().into_owned();
                 count += 1;
+                if shared_input
+                    && !queries.is_empty()
+                    && batch_bases.saturating_add(sequence.len()) > 700_000
+                {
+                    pending = Some((id, sequence));
+                    break;
+                }
+                batch_bases += sequence.len();
+                queries.push((id, sequence));
             }
+            parsing_ns += parsing_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
             if queries.is_empty() {
                 break;
             }
             match &engine {
                 Engine::Shard(engine) => {
                     let results = engine.search_batch(&queries, args.config)?;
+                    let output_started = read_stats.as_ref().map(|_| std::time::Instant::now());
                     for result in results {
                         serde_json::to_writer(&mut output, &result)?;
                         output.write_all(b"\n")?;
                     }
+                    output_ns +=
+                        output_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
                 }
                 Engine::Collection(engine) => {
                     for result in engine.search_batch(&queries, args.config)? {
@@ -183,6 +227,32 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         return Err(anyhow::anyhow!("Query file contains no sequence records"));
     }
     temporary.as_file().sync_all()?;
+    if let Some(path) = read_stats {
+        let Engine::Shard(engine) = &engine else {
+            unreachable!()
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let mut stats = tempfile::Builder::new()
+            .prefix(".jam-read-stats-")
+            .tempfile_in(parent)?;
+        serde_json::to_writer_pretty(
+            stats.as_file_mut(),
+            &serde_json::json!({
+                "format": "jam-shared-read-stats-v1", "index": engine.shared_read_stats(), "batch": engine.batch_stats(),
+                "parsing_ns": parsing_ns, "output_ns": output_ns,
+                "batch_limits": { "queries": 64, "query_bases": 700000, "lookup_bytes": 134217728, "global_lookup_bytes": 268435456, "decoded_bgzf_bytes": 33554432, "concurrent_bgzf_reads": 4 },
+                "semantics": "application work and logical bytes, not physical I/O; phase elapsed times may overlap across workers and must not be summed as invocation wall or CPU; endpoint time includes endpoint traceback"
+            }),
+        )?;
+        stats.as_file().sync_all()?;
+        stats
+            .persist_noclobber(&path)
+            .map_err(|error| error.error)?;
+        sync_directory(parent)?;
+    }
     if args.force {
         temporary
             .persist(&args.output)

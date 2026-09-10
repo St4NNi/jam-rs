@@ -36,6 +36,8 @@ pub mod shared_reader;
 pub mod shared_seed;
 #[cfg(test)]
 mod shared_tests;
+#[cfg(test)]
+mod shared_trace_tests;
 pub mod shared_writer;
 pub mod sketch;
 pub mod trace;
@@ -183,6 +185,8 @@ pub fn run() -> Result<()> {
             manifest,
             collection,
             owner_index,
+            shared_index,
+            read_stats,
             audit_index,
             output,
             query_id,
@@ -208,10 +212,20 @@ pub fn run() -> Result<()> {
             };
             handle_trace_command(TraceArgs {
                 query,
-                input: match (owner_index, collection, database, index, manifest) {
-                    (Some(root), None, None, None, None) => TraceInput::Owner(root),
-                    (None, Some(root), None, None, None) => TraceInput::Collection(root),
-                    (None, None, Some(database), Some(index), Some(manifest)) => {
+                input: match (
+                    shared_index,
+                    owner_index,
+                    collection,
+                    database,
+                    index,
+                    manifest,
+                ) {
+                    (Some(path), None, None, None, None, None) => {
+                        TraceInput::Shared { path, read_stats }
+                    }
+                    (None, Some(root), None, None, None, None) => TraceInput::Owner(root),
+                    (None, None, Some(root), None, None, None) => TraceInput::Collection(root),
+                    (None, None, None, Some(database), Some(index), Some(manifest)) => {
                         TraceInput::Shard {
                             database,
                             index,

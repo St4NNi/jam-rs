@@ -131,24 +131,24 @@ pub enum Commands {
         #[arg(
             short,
             long,
-            required_unless_present_any = ["collection", "owner_index"],
-            conflicts_with_all = ["collection", "owner_index"]
+            required_unless_present_any = ["collection", "owner_index", "shared_index"],
+            conflicts_with_all = ["collection", "owner_index", "shared_index"]
         )]
         database: Option<PathBuf>,
         /// Query-independent JIDX file
         #[arg(
             short,
             long,
-            required_unless_present_any = ["collection", "owner_index"],
-            conflicts_with_all = ["collection", "owner_index"]
+            required_unless_present_any = ["collection", "owner_index", "shared_index"],
+            conflicts_with_all = ["collection", "owner_index", "shared_index"]
         )]
         index: Option<PathBuf>,
         /// Root manifest used to build the JIDX
         #[arg(
             short = 'M',
             long,
-            required_unless_present_any = ["collection", "owner_index"],
-            conflicts_with_all = ["collection", "owner_index"]
+            required_unless_present_any = ["collection", "owner_index", "shared_index"],
+            conflicts_with_all = ["collection", "owner_index", "shared_index"]
         )]
         manifest: Option<PathBuf>,
         /// JSON root binding disjoint JAM/JIDX shards
@@ -157,6 +157,12 @@ pub enum Commands {
         /// JSON manifest for a complete key-owner index generation
         #[arg(long, conflicts_with = "collection")]
         owner_index: Option<PathBuf>,
+        /// Self-contained shared-anchor index with BGZF source metadata
+        #[arg(long, conflicts_with_all = ["collection", "owner_index"])]
+        shared_index: Option<PathBuf>,
+        /// Write observed shared-index and batch work counters outside the result JSONL
+        #[arg(long, requires = "shared_index")]
+        read_stats: Option<PathBuf>,
         /// Atomic JSONL output
         #[arg(short, long)]
         output: PathBuf,
