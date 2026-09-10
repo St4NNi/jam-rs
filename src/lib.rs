@@ -30,6 +30,7 @@ pub mod owner_writer;
 pub mod query;
 pub mod range_source;
 pub mod reader;
+mod shared_file;
 pub mod shared_format;
 pub mod shared_seed;
 pub mod shared_writer;
