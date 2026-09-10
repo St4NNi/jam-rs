@@ -3,12 +3,15 @@ use crate::jidx_reader::{SEED_LOOKUP_BATCH_KEYS, SeedEntry};
 use crate::trace::{CacheReservation, LOOKUP_CACHE_AVAILABLE, TraceError};
 use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
 pub(crate) struct SharedSeedLookups {
     pub(crate) identity: TraceCacheIdentity,
     pub(crate) entries: Vec<(u64, Option<SeedEntry>)>,
+    pub(crate) query_keys: Vec<u64>,
+    pub(crate) query_ranges: Vec<Range<usize>>,
     pub(crate) postings: BTreeMap<u64, BatchPosting>,
     pub(crate) postings_complete: bool,
     pub(crate) capacity_bytes: usize,
@@ -17,6 +20,8 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) position_ns: u64,
     pub(crate) distinct_cores: u64,
     pub(crate) split_core_resolutions: u64,
+    pub(crate) context_reuse_histogram_log2: [u64; 16],
+    pub(crate) context_occurrence_histogram_log2: [u64; 16],
     pub(crate) _reservation: CacheReservation<'static>,
 }
 
@@ -38,16 +43,36 @@ pub(crate) fn lookup_budget(index: &TraceIndex) -> usize {
     }
 }
 
+pub(crate) const QUERY_LOOKUP_ROW_BYTES: usize = std::mem::size_of::<(u64, usize)>()
+    + std::mem::size_of::<u64>()
+    + std::mem::size_of::<(u64, Option<SeedEntry>)>();
+
+pub(crate) fn lookup_workspace(index: &TraceIndex) -> usize {
+    if index.is_shared() {
+        SEED_LOOKUP_BATCH_KEYS
+            * (std::mem::size_of::<crate::shared_seed::SharedKey>()
+                + std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
+                + std::mem::size_of::<Option<SeedEntry>>())
+    } else {
+        0
+    }
+}
+
 pub(crate) fn prepare_lookup(
     index: &TraceIndex,
-    mut keys: Vec<u64>,
+    mut requests: Vec<(u64, usize)>,
+    query_count: usize,
     observed: bool,
 ) -> Result<Option<SharedSeedLookups>, TraceError> {
     let started = observed.then(Instant::now);
     let budget = lookup_budget(index);
-    let key_count = Some(keys.len());
-    let row_bytes = std::mem::size_of::<u64>() + std::mem::size_of::<(u64, Option<SeedEntry>)>();
-    let Some(bytes) = key_count.and_then(|keys| keys.checked_mul(row_bytes)?.checked_add(4096))
+    let workspace = lookup_workspace(index);
+    let Some(bytes) = requests
+        .len()
+        .checked_mul(QUERY_LOOKUP_ROW_BYTES)
+        .and_then(|bytes| {
+            bytes.checked_add(workspace + 4096 + query_count * std::mem::size_of::<Range<usize>>())
+        })
     else {
         return Ok(None);
     };
@@ -61,13 +86,23 @@ pub(crate) fn prepare_lookup(
         return Ok(None);
     };
     if index.is_shared() {
-        keys.sort_unstable_by_key(|key| {
-            let context = crate::shared_seed::SharedKey::unpack(*key).unwrap();
+        requests.sort_unstable_by_key(|&(key, _)| {
+            let context = crate::shared_seed::SharedKey::unpack(key).unwrap();
             (context.core, context.context_code().unwrap())
         });
     } else {
-        keys.sort_unstable();
+        requests.sort_unstable_by_key(|request| request.0);
     }
+    let mut context_reuse_histogram_log2 = [0; 16];
+    if observed {
+        for same_key in requests.chunk_by(|left, right| left.0 == right.0) {
+            context_reuse_histogram_log2[same_key.len().ilog2().min(15) as usize] += 1;
+        }
+    }
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(requests.len())
+        .map_err(|_| TraceError::Invalid("batch query key allocation"))?;
+    keys.extend(requests.iter().map(|request| request.0));
     keys.dedup();
     let mut entries = Vec::new();
     if entries.try_reserve_exact(keys.len()).is_err() {
@@ -100,20 +135,52 @@ pub(crate) fn prepare_lookup(
         entries.extend(chunk.iter().copied().zip(index.find_seeds_batch(chunk)?));
         start = end;
     }
+    let mut entry = 0;
+    requests.retain(|&(key, _)| {
+        while entries[entry].0 != key {
+            entry += 1;
+        }
+        entries[entry].1.is_some()
+    });
+    requests.sort_unstable_by_key(|&(key, query)| (query, key));
+    keys.clear();
+    let mut query_ranges = Vec::with_capacity(query_count);
+    let mut request = 0;
+    for query in 0..query_count {
+        let start = request;
+        while request < requests.len() && requests[request].1 == query {
+            keys.push(requests[request].0);
+            request += 1;
+        }
+        query_ranges.push(start..request);
+    }
+    let request_bytes = requests.capacity() * std::mem::size_of::<(u64, usize)>();
+    drop(requests);
     let lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
     let mut membership_ns = 0;
     let mut position_ns = 0;
     let mut capacity_bytes = 4096
+        + workspace
+        + request_bytes
+        + query_ranges.capacity() * std::mem::size_of::<Range<usize>>()
         + keys.capacity() * std::mem::size_of::<u64>()
         + entries.capacity() * std::mem::size_of::<(u64, Option<SeedEntry>)>();
     let mut postings = BTreeMap::new();
     let mut postings_complete = true;
+    let mut context_occurrence_histogram_log2 = [0; 16];
     for &(key, seed) in &entries {
         let Some(seed) = seed else {
             continue;
         };
         let started = observed.then(Instant::now);
         let documents = index.seed_documents(seed)?;
+        if observed {
+            let occurrences = documents
+                .iter()
+                .map(|document| document.occurrence_count())
+                .sum::<u64>();
+            context_occurrence_histogram_log2[occurrences.ilog2().min(15) as usize] += 1;
+        }
         membership_ns += started.map_or(0, |started| started.elapsed().as_nanos() as u64);
         let bytes = 128 + documents.capacity() * std::mem::size_of::<SeedDocument>();
         if capacity_bytes.saturating_add(bytes) > reservation.bytes {
@@ -176,6 +243,8 @@ pub(crate) fn prepare_lookup(
     Ok(Some(SharedSeedLookups {
         identity,
         entries,
+        query_keys: keys,
+        query_ranges,
         postings,
         postings_complete,
         capacity_bytes,
@@ -184,6 +253,8 @@ pub(crate) fn prepare_lookup(
         position_ns,
         distinct_cores,
         split_core_resolutions,
+        context_reuse_histogram_log2,
+        context_occurrence_histogram_log2,
         _reservation: reservation,
     }))
 }

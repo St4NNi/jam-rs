@@ -11,7 +11,10 @@ use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
 use crate::reader::ReaderError;
-use crate::trace_batch::{SharedSeedLookups, TraceBatch, lookup_budget, prepare_lookup};
+use crate::trace_batch::{
+    QUERY_LOOKUP_ROW_BYTES, SharedSeedLookups, TraceBatch, lookup_budget, lookup_workspace,
+    prepare_lookup,
+};
 use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
 use needletail::Sequence;
 use rayon::prelude::*;
@@ -143,6 +146,9 @@ pub struct TraceBatchStats {
     pub query_distinct_context_requests: u64,
     pub query_distinct_cores: u64,
     pub emitted_anchor_associations: u64,
+    pub restored_query_context_requests: u64,
+    pub context_reuse_histogram_log2: [u64; 16],
+    pub context_occurrence_histogram_log2: [u64; 16],
     pub cached_groups: u64,
     pub cached_positions: u64,
     pub lookup_peak_bytes: usize,
@@ -160,6 +166,7 @@ pub(crate) struct PreparedQuery {
     query: Vec<u8>,
     positions_by_key: BTreeMap<u64, Vec<QuerySeed>>,
     lookup_identity: [u8; 32],
+    batch_ordinal: usize,
 }
 
 pub(crate) struct TraceCensus {
@@ -539,8 +546,12 @@ impl TraceEngine {
         let prepared = queries
             .par_iter()
             .zip(circular)
-            .map(|((id, sequence), &circular)| {
-                self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })
+            .enumerate()
+            .map(|(ordinal, ((id, sequence), &circular))| {
+                let mut prepared =
+                    self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })?;
+                prepared.batch_ordinal = ordinal;
+                Ok::<_, TraceError>(prepared)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let batch = self.prepare_batch(&prepared)?;
@@ -569,16 +580,19 @@ impl TraceEngine {
             .ok_or(TraceError::Invalid("batch query key count"))?;
         let mut keys = Vec::new();
         let lookups = if count
-            <= (lookup_budget(&self.index) - 4096)
-                / (std::mem::size_of::<u64>() + std::mem::size_of::<(u64, Option<SeedEntry>)>())
+            <= (lookup_budget(&self.index)
+                - lookup_workspace(&self.index)
+                - 4096
+                - prepared.len() * std::mem::size_of::<std::ops::Range<usize>>())
+                / QUERY_LOOKUP_ROW_BYTES
         {
             keys.try_reserve_exact(count)
                 .map_err(|_| TraceError::Invalid("batch query key allocation"))?;
-            for query in prepared {
-                keys.extend(query.positions_by_key.keys().copied());
+            for (ordinal, query) in prepared.iter().enumerate() {
+                keys.extend(query.positions_by_key.keys().map(|&key| (key, ordinal)));
             }
             let setup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
-            let mut lookups = prepare_lookup(&self.index, keys, self.observed)?;
+            let mut lookups = prepare_lookup(&self.index, keys, prepared.len(), self.observed)?;
             if let Some(lookups) = &mut lookups {
                 lookups.lookup_ns += setup_ns;
             }
@@ -613,6 +627,13 @@ impl TraceEngine {
             stats.unique_keys += lookups.entries.len() as u64;
             stats.distinct_cores += lookups.distinct_cores;
             stats.split_core_resolutions += lookups.split_core_resolutions;
+            stats.restored_query_context_requests += lookups.query_keys.len() as u64;
+            for bucket in 0..16 {
+                stats.context_reuse_histogram_log2[bucket] +=
+                    lookups.context_reuse_histogram_log2[bucket];
+                stats.context_occurrence_histogram_log2[bucket] +=
+                    lookups.context_occurrence_histogram_log2[bucket];
+            }
             stats.cached_groups += lookups.postings.len() as u64;
             stats.cached_positions += lookups
                 .postings
@@ -760,6 +781,9 @@ impl TraceEngine {
                 })
         };
         let mut entries = prepared.positions_by_key.iter();
+        let mut matching_keys = shared.map(|shared| {
+            shared.query_keys[shared.query_ranges[prepared.batch_ordinal].clone()].iter()
+        });
         let mut chunk = Vec::new();
         chunk
             .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
@@ -772,7 +796,14 @@ impl TraceEngine {
             chunk.clear();
             packed_keys.clear();
             for _ in 0..SEED_LOOKUP_BATCH_KEYS {
-                let Some((&packed_key, query_seeds)) = entries.next() else {
+                let next = if let Some(matching_keys) = &mut matching_keys {
+                    matching_keys
+                        .next()
+                        .map(|key| (key, &prepared.positions_by_key[key]))
+                } else {
+                    entries.next()
+                };
+                let Some((&packed_key, query_seeds)) = next else {
                     break;
                 };
                 chunk.push((packed_key, query_seeds));
@@ -1941,6 +1972,7 @@ pub(crate) fn prepare_query(
     lookup_identity[..32].copy_from_slice(&sha256(&query));
     lookup_identity[32..].copy_from_slice(&[k, u8::from(rescue_k15), u8::from(config.circular)]);
     Ok(PreparedQuery {
+        batch_ordinal: 0,
         query_id,
         query_length,
         query,

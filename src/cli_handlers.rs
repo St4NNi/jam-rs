@@ -304,6 +304,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                 "parsing_ns": parsing_ns, "output_ns": output_ns,
                 "top_level_ns": { "setup": startup_ns, "parsing": parsing_ns, "search": search_ns, "result_serialization": output_ns, "finalization_and_other": publication_ns.saturating_sub(startup_ns + parsing_ns + search_ns + output_ns), "through_result_publication": publication_ns },
                 "batch_limits": { "queries": 64, "query_bases": 700000, "lookup_bytes": 134217728, "global_lookup_bytes": 268435456, "decoded_bgzf_bytes": 33554432, "concurrent_bgzf_reads": 4 },
+                "histogram_semantics": "16 base-2 bins starting at one, last bin at least 32768; reuse counts per-query distinct requests for an exact context; occurrence fanout counts positions per positive context; totals are per lookup batch",
                 "semantics": "top_level_ns intervals do not overlap and cover handler entry through result publication, excluding stats publication and CLI startup; batch timings are nested worker spans and may overlap; logical bytes are not physical I/O; endpoint time includes endpoint traceback"
             }),
         )?;

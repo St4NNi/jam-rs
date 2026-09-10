@@ -522,8 +522,8 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     }
 
     let queries = [
-        ("reuse-a".to_owned(), exact_query.clone()),
-        ("reuse-b".to_owned(), exact_query),
+        ("reuse".to_owned(), exact_query.clone()),
+        ("reuse".to_owned(), exact_query),
     ];
     let batch_engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
     let batch_results = batch_engine.search_batch(&queries, linear).unwrap();
