@@ -602,15 +602,22 @@ fn stop_between_windows() {
         deadline: None,
         stop: &stop,
     };
-    let result = align_packed_entry(
-        &packed,
-        &query,
-        &located,
-        &config,
-        &rule("0.5"),
-        &AlignStageWorkspace::default(),
-        control,
-    );
+    // The two windows lie on two contigs, aligned on several threads; one thread keeps their order.
+    let one_thread = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let result = one_thread.install(|| {
+        align_packed_entry(
+            &packed,
+            &query,
+            &located,
+            &config,
+            &rule("0.5"),
+            &AlignStageWorkspace::default(),
+            control,
+        )
+    });
     assert!(matches!(
         result,
         Err(AlignStageError::Stopped(Stopped::Asked))
