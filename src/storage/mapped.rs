@@ -1,8 +1,9 @@
-//! A local file mapped into memory and read by offset.
+//! A local file mapped into memory, or a copy of a source in anonymous memory, read by offset.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
 use super::{ReadAt, StorageError, read_slice};
+use rayon::prelude::*;
 use std::io;
 use std::path::Path;
 
@@ -10,8 +11,11 @@ use std::path::Path;
 /// in large requests instead of one page fault after another.
 const LARGE_READ: usize = 256 << 10;
 
-/// A local file mapped into memory and read by offset. It suits files that are read whole or
-/// often, such as the sketch.
+/// Bytes per read when a source is copied into memory; the reads run on all threads.
+const COPY_CHUNK: usize = 8 << 20;
+
+/// A local file mapped into memory, or a copy of a source in anonymous memory, read by offset.
+/// It suits files that are read whole or often, such as the sketch.
 pub struct MappedFile {
     map: Option<memmap2::Mmap>,
 }
@@ -34,6 +38,23 @@ impl MappedFile {
         // SAFETY: the files are written once and never changed while a shard is open.
         let map = unsafe { options.map(&file).map_err(failed)? };
         Ok(Self { map: Some(map) })
+    }
+
+    /// Copies all bytes of `source` into anonymous memory, in large reads on all threads.
+    pub fn read_from(source: &dyn ReadAt) -> io::Result<Self> {
+        let size = usize::try_from(source.size()).map_err(io::Error::other)?;
+        if size == 0 {
+            return Ok(Self { map: None });
+        }
+        let mut map = memmap2::MmapMut::map_anon(size)?;
+        map.par_chunks_mut(COPY_CHUNK)
+            .enumerate()
+            .try_for_each(|(index, chunk)| {
+                source.read_exact_at((index * COPY_CHUNK) as u64, chunk)
+            })?;
+        Ok(Self {
+            map: Some(map.make_read_only()?),
+        })
     }
 
     /// Reads every page of the file into RAM now, so later reads never wait for storage.
@@ -95,5 +116,13 @@ mod tests {
         file.read_exact_at(3_000, &mut buffer).unwrap();
         assert_eq!(buffer, data[3_000..LARGE_READ + 4_000]);
         assert!(file.read_exact_at(5_000, &mut buffer).is_err());
+        let copy = MappedFile::read_from(&data).unwrap();
+        assert_eq!(copy.bytes(), data);
+        assert!(
+            MappedFile::read_from(&Vec::new())
+                .unwrap()
+                .bytes()
+                .is_empty()
+        );
     }
 }

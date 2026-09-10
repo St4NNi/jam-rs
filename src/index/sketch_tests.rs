@@ -64,7 +64,7 @@ fn sketch_round_trip() {
     for bucket_bits in [8, 10, 12] {
         let path = directory.path().join(format!("sketch-{bucket_bits}"));
         let (seeds, sets) = write_random(&path, bucket_bits);
-        let sketch = Sketch::open(&path).unwrap();
+        let sketch = Sketch::open(MappedFile::open(&path, false).unwrap()).unwrap();
         sketch.verify_checksums().unwrap();
         assert_eq!(sketch.seed_count(), seeds.len() as u64);
         assert_eq!(sketch.entry_count(), 5000);
@@ -133,7 +133,7 @@ fn damage_is_detected() {
         bytes[at] ^= 0x10;
         std::fs::remove_file(&damaged).ok();
         std::fs::write(&damaged, &bytes).unwrap();
-        match Sketch::open(&damaged) {
+        match Sketch::open(MappedFile::open(&damaged, false).unwrap()) {
             Ok(sketch) => {
                 assert!(expect_open, "byte {at}");
                 assert!(sketch.verify_checksums().is_err(), "byte {at}");
@@ -142,5 +142,5 @@ fn damage_is_detected() {
         }
     }
     std::fs::write(&damaged, &original[..original.len() - 1]).unwrap();
-    assert!(Sketch::open(&damaged).is_err());
+    assert!(Sketch::open(MappedFile::open(&damaged, false).unwrap()).is_err());
 }

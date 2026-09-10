@@ -29,7 +29,7 @@ pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
-pub use sources::{PackedLocation, PackedOptions};
+pub use sources::{Location, ShardOptions};
 
 /// Errors of the index module.
 #[derive(Debug, Error)]

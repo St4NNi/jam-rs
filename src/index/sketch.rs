@@ -42,10 +42,9 @@ impl Sketch {
         self.file.load().map_err(IndexError::from)
     }
 
-    /// Maps the sketch at `path` and checks its header and size. Pages are read when a lookup
-    /// first needs them; `load` reads them all at once.
-    pub fn open(path: &Path) -> Result<Self, IndexError> {
-        let file = MappedFile::open(path, false)?;
+    /// Opens the sketch in `file` and checks its header and size. Pages of a mapped file are
+    /// read when a lookup first needs them; `load` reads them all at once.
+    pub fn open(file: MappedFile) -> Result<Self, IndexError> {
         let bytes = file.bytes();
         let header = bytes
             .get(..HEADER_BYTES)

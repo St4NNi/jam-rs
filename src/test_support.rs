@@ -215,6 +215,18 @@ impl Reply {
     }
 }
 
+/// A store whose bucket `bucket` holds the files under `root`, keyed by their relative paths.
+pub fn serve_directory(root: &Path) -> Server {
+    let root = root.to_path_buf();
+    serve(move |_, request| {
+        let key = request.path.strip_prefix("/bucket/").unwrap_or_default();
+        match std::fs::read(root.join(key)) {
+            Ok(data) => Reply::object(&data, request),
+            Err(_) => Reply::status(404),
+        }
+    })
+}
+
 /// A server that answers each request with `handler(index, request)`, where `index` counts
 /// requests from 0. It stops when dropped.
 pub struct Server {

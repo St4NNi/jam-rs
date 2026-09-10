@@ -62,7 +62,7 @@ fn cache_merges_runs() {
     let location = "s3://bucket/entry.packed";
     let object = S3Object::open(&config(&server, quick()), location, 50_000).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
-    let cached = cache.wrap(object);
+    let cached = cache.wrap(Arc::new(object));
     let mut buffer = vec![0; 3000];
     for _ in 0..2 {
         cached.read_exact_at(20_000, &mut buffer).unwrap();

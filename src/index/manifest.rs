@@ -105,8 +105,12 @@ impl Manifest {
     /// Reads and checks the manifest of the shard in `directory`.
     pub fn read(directory: &Path) -> Result<Self, IndexError> {
         let path = directory.join(MANIFEST_FILE);
-        let bytes = std::fs::read(&path).at(&path)?;
-        let manifest: Self = serde_json::from_slice(&bytes)
+        Self::parse(&std::fs::read(&path).at(&path)?)
+    }
+
+    /// Parses and checks the bytes of a manifest file.
+    pub fn parse(bytes: &[u8]) -> Result<Self, IndexError> {
+        let manifest: Self = serde_json::from_slice(bytes)
             .map_err(|error| IndexError::format(format!("manifest: {error}")))?;
         if manifest.format_version != FORMAT_VERSION {
             return Err(IndexError::format(format!(
@@ -204,18 +208,6 @@ pub(crate) fn sha256_file(path: &Path) -> Result<FileDigest, IndexError> {
     Ok(FileDigest { bytes, sha256 })
 }
 
-/// Checks a file against its record.
-pub(crate) fn verify_file(path: &Path, record: &FileRecord) -> Result<(), IndexError> {
-    let digest = sha256_file(path)?;
-    if digest.bytes != record.bytes || digest.sha256 != record.sha256 {
-        return Err(IndexError::Checksum(format!(
-            "{} differs from its manifest record",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
 /// Checks a file read from `source` against its record, for files that may not be local.
 pub(crate) fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
     let mut digest = Sha256::new();
@@ -279,11 +271,8 @@ mod tests {
             manifest.sketch.sha256,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        let path = directory.path().join("abc");
-        std::fs::write(&path, b"abc").unwrap();
-        verify_file(&path, &manifest.sketch).unwrap();
-        std::fs::write(&path, b"abd").unwrap();
-        assert!(verify_file(&path, &manifest.sketch).is_err());
+        verify_source(&b"abc".to_vec(), &manifest.sketch).unwrap();
+        assert!(verify_source(&b"abd".to_vec(), &manifest.sketch).is_err());
     }
 
     #[test]

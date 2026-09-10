@@ -105,9 +105,9 @@ impl BlockCache {
     }
 
     /// Wraps a source; each wrapped source gets its own key space in the cache.
-    pub fn wrap(self: &Arc<Self>, inner: impl ReadAt + 'static) -> CachedSource {
+    pub fn wrap(self: &Arc<Self>, inner: Arc<dyn ReadAt>) -> CachedSource {
         CachedSource {
-            inner: Arc::new(inner),
+            inner,
             source: self.next_source.fetch_add(1, Ordering::Relaxed),
             cache: Arc::clone(self),
         }

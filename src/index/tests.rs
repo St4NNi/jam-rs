@@ -330,12 +330,12 @@ fn packed_elsewhere_cached() {
     let elsewhere = directory.path().join("elsewhere");
     std::fs::rename(output.join("packed"), &elsewhere).unwrap();
     assert!(Shard::open(&output).unwrap().packed(0).is_err());
-    let location = PackedLocation::Directory(elsewhere.clone());
-    let options = PackedOptions {
-        location,
+    let options = ShardOptions {
+        packed: Some(Location::Directory(elsewhere.clone())),
         cache: None,
     };
-    let shard = Shard::open_with(&output, &options).unwrap();
+    let local = Location::Directory(output.clone());
+    let shard = Shard::open_with(&local, &options).unwrap();
     shard.verify().unwrap();
     check_every_seed(&shard, &entries);
     assert_eq!(
@@ -343,46 +343,45 @@ fn packed_elsewhere_cached() {
         elsewhere.join("entry1.packed")
     );
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
-    let options = PackedOptions {
+    let options = ShardOptions {
         cache: Some(Arc::clone(&cache)),
         ..options
     };
-    let shard = Shard::open_with(&output, &options).unwrap();
+    let shard = Shard::open_with(&local, &options).unwrap();
     check_every_seed(&shard, &entries);
     check_every_seed(&shard, &entries);
 }
 
 #[test]
-fn packed_on_s3() {
-    use crate::storage::{S3Config, S3Limits};
+fn shard_on_s3() {
+    use crate::storage::{BlockCache, CacheConfig, S3Config, S3Limits};
+    use crate::test_support::serve_directory;
     let directory = tempfile::tempdir().unwrap();
-    let inputs = write_entries(directory.path(), &generated_entries(1));
-    let output = directory.path().join("shard");
-    build_shard(&inputs, &output, &options(directory.path(), 1)).unwrap();
-    let limits = S3Limits {
-        tries: 1,
-        ..S3Limits::default()
-    };
-    // Port 9 (discard) is closed on test machines, so the store cannot be reached.
-    let endpoint = Some("http://127.0.0.1:9");
+    let entries = generated_entries(3);
+    test_shard(directory.path(), &entries);
+    let server = serve_directory(directory.path());
+    let endpoint = Some(server.address.as_str());
+    let limits = S3Limits::default();
     let config = S3Config::new("local", endpoint, true, limits, runtime()).unwrap();
     let config = config.unsigned();
-    let open = |prefix: &str| {
-        let location = PackedLocation::S3 {
-            prefix: prefix.into(),
-            config: Box::new(config.clone()),
-        };
-        let options = PackedOptions {
-            location,
-            cache: None,
-        };
-        Shard::open_with(&output, &options)
-    };
-    assert!(open("s3:///packed/").is_err());
-    assert!(open("/local/packed/").is_err());
-    let shard = open("s3://bucket/packed").unwrap();
+    assert!(Location::s3("s3:///shard", &config).is_err());
+    assert!(Location::s3("/local/shard", &config).is_err());
+    let location = Location::s3("s3://bucket/shard", &config).unwrap();
+    let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
+    let shard = Shard::open_with(&location, &ShardOptions::default()).unwrap();
     assert!(shard.packed_path(0).is_err());
-    assert!(shard.packed(0).is_err());
+    shard.verify().unwrap();
+    let local = Shard::open(&directory.path().join("shard")).unwrap();
+    assert_eq!(shard.digest(), local.digest());
+    // Each seed lookup is a small read, so the check reads through the cache.
+    let options = ShardOptions {
+        packed: None,
+        cache: Some(cache),
+    };
+    let shard = Shard::open_with(&location, &options).unwrap();
+    check_every_seed(&shard, &entries);
+    let missing = Location::s3("s3://bucket/missing", &config).unwrap();
+    assert!(Shard::open_with(&missing, &ShardOptions::default()).is_err());
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its

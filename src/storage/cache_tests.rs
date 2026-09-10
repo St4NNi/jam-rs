@@ -47,7 +47,7 @@ fn batches_stay_bounded() {
     let data = random_bytes(&mut rng(7), 2 << 20);
     let source = Watched::new(data.clone());
     let largest = Arc::clone(&source.largest);
-    let cached = cache(4096, 4096).wrap(source);
+    let cached = cache(4096, 4096).wrap(Arc::new(source));
     let mut out = vec![0; data.len()];
     cached.read_exact_at(0, &mut out).unwrap();
     assert_eq!(out, data);
@@ -60,7 +60,7 @@ fn reads_match_source() {
     let cache = cache(1 << 20, 4096);
     let source = Watched::new(data.clone());
     let reads = Arc::clone(&source.reads);
-    let cached = cache.wrap(source);
+    let cached = cache.wrap(Arc::new(source));
     let mut buffer = vec![0; 9000];
     cached.read_exact_at(5000, &mut buffer).unwrap();
     assert_eq!(buffer, data[5000..14_000]);
@@ -80,7 +80,7 @@ fn reads_match_source() {
     assert!(cached.read_exact_at(99_999, &mut [0; 2]).is_err());
     assert_eq!(cached.size(), 100_000);
     let other_data = random_bytes(&mut rng(2), 100_000);
-    let other = cache.wrap(other_data.clone());
+    let other = cache.wrap(Arc::new(other_data.clone()));
     let mut out = vec![0; 10];
     other.read_exact_at(0, &mut out).unwrap();
     assert_eq!(out, other_data[..10]);
@@ -90,7 +90,7 @@ fn reads_match_source() {
 fn repeated_read_hits() {
     let source = Watched::new(random_bytes(&mut rng(3), 50_000));
     let reads = Arc::clone(&source.reads);
-    let cached = cache(1 << 20, 4096).wrap(source);
+    let cached = cache(1 << 20, 4096).wrap(Arc::new(source));
     let mut out = vec![0; 3000];
     for _ in 0..2 {
         cached.read_exact_at(20_000, &mut out).unwrap();
@@ -109,7 +109,7 @@ fn read_ahead_fills() {
     let source = Watched::new(data.clone());
     let reads = Arc::clone(&source.reads);
     let cache = BlockCache::open(&config, runtime()).unwrap();
-    let cached = cache.wrap(source);
+    let cached = cache.wrap(Arc::new(source));
     cached.will_need(100_000, 50_000);
     // The read-ahead task holds its place until its blocks are in the cache.
     let places = runtime()
@@ -138,7 +138,7 @@ fn disk_serves_evicted() {
     let cache = BlockCache::open(&config, runtime()).unwrap();
     let source = Watched::new(data.clone());
     let reads = Arc::clone(&source.reads);
-    let cached = cache.wrap(source);
+    let cached = cache.wrap(Arc::new(source));
     let mut out = vec![0; 4096];
     for block in 0..6u64 {
         cached.read_exact_at(block * 4096, &mut out).unwrap();
@@ -153,7 +153,7 @@ fn disk_serves_evicted() {
 #[test]
 fn parallel_readers_agree() {
     let data = random_bytes(&mut rng(5), 1 << 20);
-    let cached = cache(256 << 10, 4096).wrap(data.clone());
+    let cached = cache(256 << 10, 4096).wrap(Arc::new(data.clone()));
     std::thread::scope(|scope| {
         for thread in 0..8u64 {
             let (cached, data) = (&cached, &data);
