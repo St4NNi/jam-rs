@@ -2638,14 +2638,25 @@ mod tests {
             force: false,
         })
         .unwrap();
-        let batch = std::fs::read_to_string(batch_output)
+        let mut batch = std::fs::read_to_string(batch_output)
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        let singles = ["second", "first"].map(|id| {
+        let mut singles = ["second", "first"].map(|id| {
             serde_json::to_value(engine.search(id, sequence.as_bytes(), config).unwrap()).unwrap()
         });
+        for result in batch.iter_mut().chain(singles.iter_mut()) {
+            for trace in result["metagenomes"].as_array_mut().unwrap() {
+                for field in [
+                    "compressed_bytes_read",
+                    "range_requests",
+                    "bgzf_blocks_decoded",
+                ] {
+                    trace[field] = serde_json::json!(0);
+                }
+            }
+        }
         assert_eq!(batch, singles);
 
         let direct = engine
