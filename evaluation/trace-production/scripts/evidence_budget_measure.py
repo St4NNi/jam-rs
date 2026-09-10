@@ -88,6 +88,8 @@ def validate_plan(path: Path, expected: str, timeout: int) -> dict:
             raise ValueError(f"command does not invoke its bound binary: {row['label']}")
         if row["phase"] not in ("first-observed", "warmup", "measured"):
             raise ValueError("invalid phase or expected query count")
+        if not isinstance(row.get("require_worker_memory_goal", True), bool):
+            raise ValueError("worker memory requirement flag must be boolean")
         expected_queries = row["expected_query_records"]
         if ((row["output_kind"] == "jam_jsonl"
              and (not isinstance(expected_queries, int) or expected_queries < 1))
@@ -114,6 +116,7 @@ def merge_outputs(output: Path, plan: dict, records: list[dict]) -> list[dict]:
         identity = {(row["method"], row["variant"], row["phase"], row["repetition"]) for row in rows}
         if (len(rows) not in (1, 2) or len(identity) != 1
                 or len({row["output_kind"] for row in rows}) != 1
+                or len({row.get("require_worker_memory_goal", True) for row in rows}) != 1
                 or (len(rows) == 2 and {row["topology"] for row in rows} != {"linear", "circular"})
                 or (len(rows) == 1 and rows[0]["output_kind"] == "jam_jsonl"
                     and rows[0]["expected_query_records"] != 1)):
@@ -132,6 +135,8 @@ def merge_outputs(output: Path, plan: dict, records: list[dict]) -> list[dict]:
                         seen.add(item["query_id"])
                         stream.write(json.dumps(item, sort_keys=True) + "\n")
         observed = [by_label[row["label"]] for row in rows]
+        worker_goal = plan["process_memory_limit_bytes"]
+        process_rss = max(item["resources"]["max_rss_kib"] for item in observed)
         summaries.append({"measurement": measurement, "method": rows[0]["method"],
                           "variant": rows[0]["variant"], "phase": rows[0]["phase"],
                           "repetition": rows[0]["repetition"], "output_kind": rows[0]["output_kind"],
@@ -142,9 +147,13 @@ def merge_outputs(output: Path, plan: dict, records: list[dict]) -> list[dict]:
                           "user_seconds": sum(item["resources"]["user_seconds"] for item in observed),
                           "system_seconds": sum(item["resources"]["system_seconds"] for item in observed),
                           "major_faults": sum(item["resources"]["major_faults"] for item in observed),
-                          "process_rss_max_kib": max(item["resources"]["max_rss_kib"] for item in observed),
-                          "process_memory_headroom_bytes": plan["process_memory_limit_bytes"]
-                          - 1024 * max(item["resources"]["max_rss_kib"] for item in observed),
+                          "process_rss_max_kib": process_rss,
+                          "worker_memory_goal_bytes": worker_goal,
+                          "worker_memory_goal_required": rows[0].get(
+                              "require_worker_memory_goal", True),
+                          "worker_memory_goal_check": "post_run_peak_rss",
+                          "worker_memory_goal_exceeded": 1024 * process_rss >= worker_goal,
+                          "process_memory_headroom_bytes": worker_goal - 1024 * process_rss,
                           "native_outputs": [item["output"] for item in observed],
                           "merged_results": str(merged.relative_to(output)) if merged else None,
                           "merged_results_sha256": digest(merged) if merged else None})
@@ -232,8 +241,9 @@ def main() -> None:
         if (row["output_kind"] == "jam_jsonl"
                 and record["result_records"] != row["expected_query_records"]):
             raise ValueError(f"result query count differs: {row['label']}")
-        if resources["max_rss_kib"] * 1024 >= process_limit:
-            raise ValueError(f"process memory limit crossed: {row['label']}")
+        if (row.get("require_worker_memory_goal", True)
+                and resources["max_rss_kib"] * 1024 >= process_limit):
+            raise ValueError(f"worker memory goal failed after run: {row['label']}")
         save(run_dir / "record.json", record)
         records.append(record)
     summaries = merge_outputs(args.output, plan, records)
