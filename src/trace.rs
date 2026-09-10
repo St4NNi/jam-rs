@@ -1612,6 +1612,8 @@ pub enum TraceError {
     #[error("owner index failed: {0}")]
     Owner(#[from] crate::owner_format::OwnerReaderError),
     #[error(transparent)]
+    Shared(#[from] crate::shared_format::SharedError),
+    #[error(transparent)]
     Bgzf(#[from] BgzfError),
     #[error(transparent)]
     Alignment(#[from] AlignmentError),

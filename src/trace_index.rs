@@ -2,23 +2,31 @@ use crate::jidx::{seed_length, sha256};
 use crate::jidx_reader::{Contig, JidxReader, Metagenome, SeedDocument, SeedEntry, SeedOccurrence};
 use crate::owner_format::{OwnerDocument, OwnerSeed};
 use crate::owner_reader::OwnerReader;
+use crate::shared_reader::SharedReader;
+use crate::shared_seed::SharedKey;
 use crate::trace::TraceError;
 
 pub(crate) enum TraceIndex {
     Shard(Box<JidxReader>),
     Owner(OwnerReader),
+    Shared(Box<SharedReader>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TraceCacheIdentity {
     Shard([u64; 7]),
     Owner([u8; 32]),
+    Shared([u64; 7]),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TraceDocument {
     Shard(SeedDocument),
     Owner(OwnerDocument),
+    Shared {
+        metagenome_id: u32,
+        occurrence_count: u64,
+    },
 }
 
 impl TraceDocument {
@@ -26,6 +34,7 @@ impl TraceDocument {
         match self {
             Self::Shard(document) => document.metagenome_id,
             Self::Owner(document) => document.metagenome_id,
+            Self::Shared { metagenome_id, .. } => metagenome_id,
         }
     }
 
@@ -33,6 +42,9 @@ impl TraceDocument {
         match self {
             Self::Shard(document) => document.occurrence_count,
             Self::Owner(document) => document.occurrence_count,
+            Self::Shared {
+                occurrence_count, ..
+            } => occurrence_count,
         }
     }
 }
@@ -41,7 +53,9 @@ impl TraceIndex {
     pub(crate) fn shard(&self) -> Result<&JidxReader, TraceError> {
         match self {
             Self::Shard(index) => Ok(index),
-            Self::Owner(_) => Err(TraceError::Invalid("expected a metagenome shard")),
+            Self::Owner(_) | Self::Shared(_) => {
+                Err(TraceError::Invalid("expected a metagenome shard"))
+            }
         }
     }
 
@@ -49,6 +63,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => index.header().k,
             Self::Owner(index) => index.k(),
+            Self::Shared(_) => 15,
         }
     }
 
@@ -56,6 +71,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => index.header().rescue_k15,
             Self::Owner(index) => index.rescue_k15(),
+            Self::Shared(_) => false,
         }
     }
 
@@ -63,6 +79,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => index.header().document_count,
             Self::Owner(index) => index.document_count(),
+            Self::Shared(index) => index.document_count(),
         }
     }
 
@@ -70,6 +87,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => Ok(sha256(&index.header().encode()?)),
             Self::Owner(index) => Ok(index.header_sha256()),
+            Self::Shared(index) => Ok(index.header_sha256()?),
         }
     }
 
@@ -77,6 +95,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => index.header().manifest_sha256,
             Self::Owner(index) => index.manifest_sha256(),
+            Self::Shared(index) => index.manifest_sha256(),
         }
     }
 
@@ -84,6 +103,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => index.header().body_sha256,
             Self::Owner(index) => index.body_sha256(),
+            Self::Shared(index) => index.body_sha256(),
         }
     }
 
@@ -91,6 +111,10 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => Ok(index.cache_file_identity()?.map(TraceCacheIdentity::Shard)),
             Self::Owner(index) => Ok(index.cache_identity()?.map(TraceCacheIdentity::Owner)),
+            Self::Shared(index) => Ok(index
+                .cache_identity()
+                .map_err(std::io::Error::other)?
+                .map(TraceCacheIdentity::Shared)),
         }
     }
 
@@ -98,6 +122,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => Ok(index.verify_checksum()?),
             Self::Owner(index) => Ok(index.verify_checksum()?),
+            Self::Shared(index) => Ok(index.verify_checksum()?),
         }
     }
 
@@ -113,6 +138,12 @@ impl TraceIndex {
                 }
                 Ok(())
             }
+            Self::Shared(_) => {
+                for &key in keys {
+                    shared_key(key)?;
+                }
+                Ok(())
+            }
         }
     }
 
@@ -122,6 +153,24 @@ impl TraceIndex {
     ) -> Result<Vec<Option<SeedEntry>>, TraceError> {
         match self {
             Self::Shard(index) => Ok(index.find_seeds_batch(keys)?),
+            Self::Shared(index) => {
+                let contexts = keys
+                    .iter()
+                    .map(|&key| shared_key(key))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(index
+                    .find_many(&contexts)?
+                    .into_iter()
+                    .zip(keys)
+                    .map(|(group, &key)| {
+                        group.map(|group| SeedEntry {
+                            packed_key: key,
+                            document_frequency: group.member_count(),
+                            document_offset: group.core_ordinal(),
+                        })
+                    })
+                    .collect())
+            }
             Self::Owner(index) => index
                 .find_seeds_batch(keys)?
                 .into_iter()
@@ -158,6 +207,22 @@ impl TraceIndex {
                 .into_iter()
                 .map(TraceDocument::Owner)
                 .collect()),
+            Self::Shared(index) => {
+                let group = index
+                    .group_at(seed.document_offset, shared_key(seed.packed_key)?)?
+                    .ok_or(TraceError::Invalid("shared seed group"))?;
+                if group.member_count() != seed.document_frequency {
+                    return Err(TraceError::Invalid("shared seed frequency"));
+                }
+                Ok(index
+                    .members(group)?
+                    .into_iter()
+                    .map(|member| TraceDocument::Shared {
+                        metagenome_id: member.metagenome_id,
+                        occurrence_count: member.occurrence_count(),
+                    })
+                    .collect())
+            }
         }
     }
 
@@ -173,6 +238,24 @@ impl TraceIndex {
             (Self::Owner(index), TraceDocument::Owner(document)) => {
                 Ok(index.seed_document_occurrences(owner_seed(seed), document)?)
             }
+            (
+                Self::Shared(index),
+                TraceDocument::Shared {
+                    metagenome_id,
+                    occurrence_count,
+                },
+            ) => {
+                let group = index
+                    .group_at(seed.document_offset, shared_key(seed.packed_key)?)?
+                    .ok_or(TraceError::Invalid("shared seed group"))?;
+                let member = index
+                    .member(group, metagenome_id)?
+                    .ok_or(TraceError::Invalid("shared member"))?;
+                if member.occurrence_count() != occurrence_count {
+                    return Err(TraceError::Invalid("shared occurrence count"));
+                }
+                Ok(index.member_occurrences(group, member)?)
+            }
             _ => Err(TraceError::Invalid("seed document index")),
         }
     }
@@ -181,6 +264,45 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => Ok(index.metagenome_name(id)?),
             Self::Owner(index) => Ok(index.metagenome_name(id)?),
+            Self::Shared(index) => Ok(index.metagenome(id)?.map(|source| source.name)),
+        }
+    }
+
+    pub(crate) fn visit_occurrences(
+        &self,
+        seed: SeedEntry,
+        document: TraceDocument,
+        mut visit: impl FnMut(&[SeedOccurrence]) -> Result<(), TraceError>,
+    ) -> Result<(), TraceError> {
+        if let (
+            Self::Shared(index),
+            TraceDocument::Shared {
+                metagenome_id,
+                occurrence_count,
+            },
+        ) = (self, document)
+        {
+            let group = index
+                .group_at(seed.document_offset, shared_key(seed.packed_key)?)?
+                .ok_or(TraceError::Invalid("shared seed group"))?;
+            let member = index
+                .member(group, metagenome_id)?
+                .ok_or(TraceError::Invalid("shared member"))?;
+            if member.occurrence_count() != occurrence_count {
+                return Err(TraceError::Invalid("shared occurrence count"));
+            }
+            let mut start = 0;
+            while start < occurrence_count {
+                let block = index.occurrence_block(group, member, start, 4096)?;
+                if block.is_empty() {
+                    return Err(TraceError::Invalid("shared occurrence progress"));
+                }
+                visit(&block)?;
+                start += block.len() as u64;
+            }
+            Ok(())
+        } else {
+            visit(&self.seed_document_occurrences(seed, document)?)
         }
     }
 
@@ -188,6 +310,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => Ok(index.metagenome(id)?),
             Self::Owner(index) => Ok(index.metagenome(id)?),
+            Self::Shared(index) => Ok(index.metagenome(id)?),
         }
     }
 
@@ -195,6 +318,7 @@ impl TraceIndex {
         match self {
             Self::Shard(index) => Ok(index.contig(id)?),
             Self::Owner(index) => Ok(index.contig(id)?),
+            Self::Shared(index) => Ok(index.contig(id)?),
         }
     }
 
@@ -209,6 +333,22 @@ impl TraceIndex {
             index.enable_selected_front_metadata();
         }
     }
+
+    pub(crate) fn is_shared(&self) -> bool {
+        matches!(self, Self::Shared(_))
+    }
+
+    pub(crate) fn seed_length(&self, key: u64) -> Result<u8, TraceError> {
+        if self.is_shared() {
+            Ok(shared_key(key)?.length)
+        } else {
+            Ok(seed_length(self.k(), self.rescue_k15(), key)?)
+        }
+    }
+}
+
+fn shared_key(key: u64) -> Result<SharedKey, TraceError> {
+    SharedKey::unpack(key).ok_or(TraceError::Invalid("shared context key"))
 }
 
 fn owner_seed(seed: SeedEntry) -> OwnerSeed {

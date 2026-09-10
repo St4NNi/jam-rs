@@ -32,6 +32,36 @@ impl SharedKey {
             _ => None,
         }
     }
+
+    pub fn packed(self) -> Option<u64> {
+        self.context_code()?;
+        Some(match self.length {
+            15 => u64::from(self.core),
+            21 => (1 << 62) | (u64::from(self.core) << 12) | u64::from(self.context),
+            31 => (2 << 62) | (u64::from(self.core) << 32) | u64::from(self.context),
+            _ => return None,
+        })
+    }
+
+    pub fn unpack(packed: u64) -> Option<Self> {
+        let payload = packed & ((1 << 62) - 1);
+        let key = match packed >> 62 {
+            0 if payload < 1 << 30 => Self::core(payload as u32),
+            1 if payload < 1 << 42 => Self {
+                core: (payload >> 12) as u32,
+                context: (payload & 0xfff) as u32,
+                length: 21,
+            },
+            2 => Self {
+                core: (payload >> 32) as u32,
+                context: payload as u32,
+                length: 31,
+            },
+            _ => return None,
+        };
+        key.context_code()?;
+        Some(key)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,6 +286,13 @@ mod tests {
         let (position, key, reverse) = sequence.bit_kmers(15, true).next().unwrap();
         let seed = context_seed(sequence, position, key.0 as u32, reverse, true).unwrap();
         assert!(seed.key(31).is_some());
+        for length in [15, 21, 31] {
+            let key = seed.key(length).unwrap();
+            assert_eq!(SharedKey::unpack(key.packed().unwrap()), Some(key));
+        }
+        assert!(SharedKey::unpack(u64::MAX).is_none());
+        assert!(SharedKey::unpack(1 << 30).is_none());
+        assert!(SharedKey::unpack((1 << 62) | (1 << 42)).is_none());
         let mut linear = sequence[sequence.len() - 8..].to_vec();
         linear.extend_from_slice(sequence);
         assert_eq!(
