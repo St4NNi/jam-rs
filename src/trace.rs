@@ -875,36 +875,27 @@ impl TraceEngine {
             if region.hits < minimum_region_hits(key.k, config.min_seed_hits) {
                 continue;
             }
-            let k = u64::from(key.k);
             let contig = self
                 .index
                 .contig(key.contig_id)?
                 .ok_or(TraceError::Invalid("missing region contig"))?;
-            let query_start = region.query_start.saturating_sub(config.flank_bases);
-            let query_end = region
-                .query_end
-                .saturating_add(k)
-                .saturating_add(config.flank_bases);
-            let query_span = if config.circular {
-                query_end.saturating_sub(query_start).min(query_length)
-            } else {
-                query_end.min(query_length).saturating_sub(query_start)
-            };
-            if query_span == 0 {
-                continue;
-            }
-            let oriented_start = region.target_start.saturating_sub(config.flank_bases);
-            let oriented_end = region
-                .target_end
-                .saturating_add(k)
-                .saturating_add(config.flank_bases)
-                .min(contig.length);
-            let (target_start, target_end) = match key.strand {
-                Strand::Forward => (oriented_start, oriented_end),
-                Strand::Reverse => (contig.length - oriented_end, contig.length - oriented_start),
+            let envelope = fragment_envelope(&region, key, query_length, contig.length, config)?;
+            let oriented_start = match key.strand {
+                Strand::Forward => envelope.target_start,
+                Strand::Reverse => contig.length - envelope.target_end,
             };
             let target_relative = region.target_start - oriented_start;
-            let query_relative = region.query_start - query_start;
+            let query_relative = if region.query_start >= envelope.query_start {
+                region.query_start - envelope.query_start
+            } else if config.circular {
+                region
+                    .query_start
+                    .checked_add(query_length)
+                    .and_then(|position| position.checked_sub(envelope.query_start))
+                    .ok_or(TraceError::Invalid("task query position"))?
+            } else {
+                return Err(TraceError::Invalid("task query position"));
+            };
             let diagonal_offset =
                 i64::try_from(i128::from(target_relative) - i128::from(query_relative))
                     .map_err(|_| TraceError::Invalid("task diagonal"))?;
@@ -912,10 +903,10 @@ impl TraceEngine {
                 metagenome_id: key.metagenome_id,
                 contig_id: key.contig_id,
                 strand: key.strand,
-                query_start,
-                query_span,
-                target_start,
-                target_end,
+                query_start: envelope.query_start,
+                query_span: envelope.query_span,
+                target_start: envelope.target_start,
+                target_end: envelope.target_end,
                 diagonal_offset,
             });
         }
@@ -1247,6 +1238,128 @@ struct AlignmentTask {
     target_start: u64,
     target_end: u64,
     diagonal_offset: i64,
+}
+
+const SHORT_CONTIG_ENVELOPE_BYTES: u64 = 64 * 1024;
+const LONG_CONTIG_ENVELOPE_FLANK_LIMIT: u64 = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FragmentEnvelope {
+    query_start: u64,
+    query_span: u64,
+    target_start: u64,
+    target_end: u64,
+}
+
+fn fragment_envelope(
+    region: &RegionAccumulator,
+    key: RegionKey,
+    query_length: u64,
+    contig_length: u64,
+    config: TraceConfig,
+) -> Result<FragmentEnvelope, TraceError> {
+    let k = u64::from(key.k);
+    let query_seed_end = region
+        .query_end
+        .checked_add(k)
+        .ok_or(TraceError::Invalid("query seed interval"))?;
+    let target_seed_end = region
+        .target_end
+        .checked_add(k)
+        .ok_or(TraceError::Invalid("target seed interval"))?;
+    if region.query_start >= query_length
+        || (!config.circular && query_seed_end > query_length)
+        || target_seed_end > contig_length
+    {
+        return Err(TraceError::Invalid("seed interval outside sequence"));
+    }
+
+    let chain_span = query_seed_end
+        .saturating_sub(region.query_start)
+        .max(target_seed_end.saturating_sub(region.target_start));
+    let diagonal_spread = u64::try_from(region.diagonal_max - region.diagonal_min)
+        .map_err(|_| TraceError::Invalid("region diagonal range"))?;
+    let identity_allowance = if config.min_identity == 0.0 {
+        chain_span
+    } else {
+        ((chain_span as f64 * (1.0 - config.min_identity) / config.min_identity).ceil() as u64)
+            .min(LONG_CONTIG_ENVELOPE_FLANK_LIMIT)
+    };
+    let minimum_extension = config.flank_bases.saturating_mul(4);
+    let extension = minimum_extension
+        .max(
+            chain_span
+                .saturating_add(diagonal_spread)
+                .saturating_add(identity_allowance),
+        )
+        .min(LONG_CONTIG_ENVELOPE_FLANK_LIMIT);
+
+    let (oriented_start, oriented_end) = if contig_length <= SHORT_CONTIG_ENVELOPE_BYTES {
+        (0, contig_length)
+    } else {
+        (
+            region.target_start.saturating_sub(extension),
+            target_seed_end.saturating_add(extension).min(contig_length),
+        )
+    };
+    let query_low =
+        i128::from(oriented_start) - region.diagonal_max - i128::from(identity_allowance);
+    let query_high =
+        i128::from(oriented_end) - region.diagonal_min + i128::from(identity_allowance);
+    let (query_start, query_span) = projected_query_window(
+        query_low,
+        query_high,
+        region.query_start,
+        query_seed_end.saturating_sub(region.query_start),
+        query_length,
+        config.circular,
+    )?;
+    let (target_start, target_end) = match key.strand {
+        Strand::Forward => (oriented_start, oriented_end),
+        Strand::Reverse => (contig_length - oriented_end, contig_length - oriented_start),
+    };
+    Ok(FragmentEnvelope {
+        query_start,
+        query_span,
+        target_start,
+        target_end,
+    })
+}
+
+fn projected_query_window(
+    low: i128,
+    high: i128,
+    anchor: u64,
+    chain_span: u64,
+    query_length: u64,
+    circular: bool,
+) -> Result<(u64, u64), TraceError> {
+    if query_length == 0 || low >= high {
+        return Err(TraceError::Invalid("projected query interval"));
+    }
+    if !circular {
+        let start = low.clamp(0, i128::from(query_length));
+        let end = high.clamp(0, i128::from(query_length));
+        if start >= end || i128::from(anchor) < start || i128::from(anchor) >= end {
+            return Err(TraceError::Invalid("projected query interval"));
+        }
+        return Ok((start as u64, (end - start) as u64));
+    }
+    let width = u64::try_from(high - low).unwrap_or(u64::MAX);
+    if width >= query_length {
+        let flank = (query_length - chain_span.min(query_length)) / 2;
+        let start =
+            (i128::from(anchor) - i128::from(flank)).rem_euclid(i128::from(query_length)) as u64;
+        return Ok((start, query_length));
+    }
+    let length = i128::from(query_length);
+    let start = u64::try_from(low.rem_euclid(length))
+        .map_err(|_| TraceError::Invalid("projected query interval"))?;
+    let anchor_offset = (i128::from(anchor) - i128::from(start)).rem_euclid(length);
+    if anchor_offset >= i128::from(width) {
+        return Err(TraceError::Invalid("projected query interval"));
+    }
+    Ok((start, width))
 }
 
 pub(crate) fn prepare_query(
@@ -2181,6 +2294,196 @@ mod tests {
             &hits,
             RegionHits::Many(values) if values == &[first, second, third]
         ));
+    }
+
+    fn envelope_region(query: u64, target: u64, hits: u32) -> RegionAccumulator {
+        RegionAccumulator {
+            query_start: query,
+            query_end: query + u64::from(hits.saturating_sub(1)) * 20,
+            target_start: target,
+            target_end: target + u64::from(hits.saturating_sub(1)) * 20,
+            diagonal_min: i128::from(target) - i128::from(query),
+            diagonal_max: i128::from(target) - i128::from(query),
+            hits,
+        }
+    }
+
+    fn envelope_key(strand: Strand) -> RegionKey {
+        RegionKey {
+            metagenome_id: 0,
+            contig_id: 0,
+            strand,
+            k: 15,
+        }
+    }
+
+    #[test]
+    fn short_contig_projection_keeps_prefix_before_late_anchor() {
+        let config = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        for offset in [384, 700, 780] {
+            let query = 400 + offset;
+            let region = envelope_region(query, offset, 1);
+            for strand in [Strand::Forward, Strand::Reverse] {
+                let envelope =
+                    fragment_envelope(&region, envelope_key(strand), 2_000, 800, config).unwrap();
+                assert_eq!((envelope.target_start, envelope.target_end), (0, 800));
+                assert!(envelope.query_start <= 400);
+                assert!(envelope.query_start + envelope.query_span >= 1_200);
+            }
+        }
+    }
+
+    #[test]
+    fn long_contig_envelope_is_bounded_and_keeps_displaced_fragment() {
+        let config = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        for offset in [384, 700, 780] {
+            let query = 400 + offset;
+            let target = 50_000 + offset;
+            let region = envelope_region(query, target, 1);
+            let forward = fragment_envelope(
+                &region,
+                envelope_key(Strand::Forward),
+                2_000,
+                100_000,
+                config,
+            )
+            .unwrap();
+            assert!(forward.target_end - forward.target_start <= 2 * 1_024 + 15);
+            assert!(forward.query_start <= 400);
+            assert!(forward.query_start + forward.query_span >= 1_200);
+
+            let oriented_target = 100_000 - target - 15;
+            let reverse_region = envelope_region(query, oriented_target, 1);
+            let reverse = fragment_envelope(
+                &reverse_region,
+                envelope_key(Strand::Reverse),
+                2_000,
+                100_000,
+                config,
+            )
+            .unwrap();
+            assert!(reverse.target_start <= target);
+            assert!(reverse.target_end >= target + 15);
+            assert!(reverse.target_end - reverse.target_start <= 2 * 1_024 + 15);
+        }
+    }
+
+    #[test]
+    fn envelope_clips_real_ends_and_wraps_only_circular_queries() {
+        assert_eq!(
+            projected_query_window(-400, 2_400, 0, 2_000, 2_000, true).unwrap(),
+            (0, 2_000)
+        );
+        let linear = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let at_start = envelope_region(5, 5, 3);
+        let start = fragment_envelope(
+            &at_start,
+            envelope_key(Strand::Forward),
+            2_000,
+            100_000,
+            linear,
+        )
+        .unwrap();
+        assert_eq!((start.query_start, start.target_start), (0, 0));
+
+        let crossing = envelope_region(1_950, 150, 1);
+        let circular = fragment_envelope(
+            &crossing,
+            envelope_key(Strand::Forward),
+            2_000,
+            400,
+            TraceConfig::default(),
+        )
+        .unwrap();
+        assert!(circular.query_start > 1_700);
+        assert!(circular.query_start + circular.query_span > 2_000);
+
+        let absent_target_end = envelope_region(100, 390, 1);
+        assert!(
+            fragment_envelope(
+                &absent_target_end,
+                envelope_key(Strand::Forward),
+                2_000,
+                400,
+                linear,
+            )
+            .is_err()
+        );
+        let absent_query_end = envelope_region(1_990, 100, 1);
+        assert!(
+            fragment_envelope(
+                &absent_query_end,
+                envelope_key(Strand::Forward),
+                2_000,
+                400,
+                linear,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn circular_seed_crossing_origin_matches_full_window_oracle() {
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let query = (0..800)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                b"ACGT"[(state & 3) as usize]
+            })
+            .collect::<Vec<_>>();
+        let mut target = b"N".repeat(1_200);
+        target[400..600].copy_from_slice(&query[600..800]);
+        target[600..800].copy_from_slice(&query[..200]);
+
+        let region = envelope_region(795, 595, 1);
+        let config = TraceConfig::default();
+        let envelope = fragment_envelope(
+            &region,
+            envelope_key(Strand::Forward),
+            query.len() as u64,
+            target.len() as u64,
+            config,
+        )
+        .unwrap();
+        assert_eq!(envelope.query_span, query.len() as u64);
+        assert_eq!((envelope.target_start, envelope.target_end), (0, 1_200));
+        let query_window =
+            linearize_query(&query, envelope.query_start, envelope.query_span, true).unwrap();
+        let query_relative = (795 + query.len() as u64 - envelope.query_start) % query.len() as u64;
+        let diagonal_offset = i64::try_from(i128::from(595) - i128::from(query_relative)).unwrap();
+        let mut bounded_config = config.alignment;
+        bounded_config.diagonal_offset = diagonal_offset;
+        let bounded = AlignmentWorkspace::default()
+            .align_oriented(&query_window, &target, 0, Strand::Forward, bounded_config)
+            .unwrap();
+        let oracle = AlignmentWorkspace::default()
+            .align_oriented(
+                &query_window,
+                &target,
+                0,
+                Strand::Forward,
+                AlignmentConfig {
+                    band_width: 2_048,
+                    max_cells: 2_000_000,
+                    ..config.alignment
+                },
+            )
+            .unwrap();
+        assert_eq!(bounded, oracle);
+        assert_eq!(bounded.matches, 400);
+        assert_eq!(bounded.query_interval.len(), 400);
+        assert_eq!(bounded.target_interval, Interval::new(400, 800).unwrap());
     }
 
     type RegionRow = (RegionKey, u64, u64, u64, u64, i128, i128, u32);
