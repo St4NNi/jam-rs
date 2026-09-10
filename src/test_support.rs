@@ -158,11 +158,11 @@ pub struct Request {
 }
 
 impl Request {
-    /// The first and last byte of the requested range.
-    pub fn range(&self) -> (usize, usize) {
-        let value = self.headers["range"].strip_prefix("bytes=").unwrap();
+    /// The first and last byte of the requested range, or `None` for the whole object.
+    pub fn range(&self) -> Option<(usize, usize)> {
+        let value = self.headers.get("range")?.strip_prefix("bytes=").unwrap();
         let (start, last) = value.split_once('-').unwrap();
-        (start.parse().unwrap(), last.parse().unwrap())
+        Some((start.parse().unwrap(), last.parse().unwrap()))
     }
 }
 
@@ -175,6 +175,7 @@ pub struct Reply {
 }
 
 impl Reply {
+    /// An answer with `status` and no body.
     pub fn status(status: u16) -> Self {
         let headers = Vec::new();
         let body = Vec::new();
@@ -186,24 +187,28 @@ impl Reply {
         }
     }
 
-    /// The answer to a range request for `data` with `etag`, which honours `If-Match`.
-    pub fn range_of(data: &[u8], etag: &str, request: &Request) -> Self {
-        if request
-            .headers
-            .get("if-match")
-            .is_some_and(|wanted| wanted != etag)
-        {
-            return Self::status(412);
+    /// The answer of a store that holds `data`: the requested range, or all of it. HEAD is
+    /// refused with 403, as some stores do.
+    pub fn object(data: &[u8], request: &Request) -> Self {
+        if request.method != "GET" {
+            return Self::status(403);
         }
-        let (start, last) = request.range();
+        let Some((start, last)) = request.range() else {
+            let body = data.to_vec();
+            let headers = vec![("ETag".into(), "\"fixture\"".into())];
+            let declared = body.len();
+            return Self {
+                status: 200,
+                headers,
+                declared,
+                body,
+            };
+        };
         let body = data[start..=last].to_vec();
         let range = format!("bytes {start}-{last}/{}", data.len());
         Self {
             status: 206,
-            headers: vec![
-                ("Content-Range".into(), range),
-                ("ETag".into(), etag.into()),
-            ],
+            headers: vec![("Content-Range".into(), range)],
             declared: body.len(),
             body,
         }

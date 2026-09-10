@@ -141,6 +141,6 @@ fn open_s3(prefix: &str, config: &S3Config, file: &FileRecord) -> Result<S3Objec
     Ok(S3Object::open(
         config,
         &format!("{prefix}{}", file.path),
-        Some(file.bytes),
+        file.bytes,
     )?)
 }

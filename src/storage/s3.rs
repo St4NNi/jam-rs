@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 use super::{ReadAt, StorageError, checked_end, lock};
+use opendal::Operator;
 use opendal::layers::{ConcurrentLimitLayer, RetryLayer, TimeoutLayer};
 use opendal::services::S3;
-use opendal::{ErrorKind, Operator};
 use std::collections::HashMap;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -93,6 +93,21 @@ impl S3Config {
         })
     }
 
+    /// The config of the standard AWS variables: `AWS_REGION` (default `us-east-1`) and
+    /// `AWS_ENDPOINT_URL`, a store that is not AWS and takes the bucket in the path.
+    pub fn from_environment(limits: S3Limits, runtime: Handle) -> Result<Self, StorageError> {
+        let variable = |name| std::env::var(name).ok().filter(|value| !value.is_empty());
+        let region = variable("AWS_REGION").unwrap_or_else(|| "us-east-1".into());
+        let endpoint = variable("AWS_ENDPOINT_URL");
+        Self::new(
+            &region,
+            endpoint.as_deref(),
+            endpoint.is_some(),
+            limits,
+            runtime,
+        )
+    }
+
     /// The same config, sending requests without signatures.
     #[cfg(test)]
     pub(crate) fn unsigned(mut self) -> Self {
@@ -141,63 +156,49 @@ impl S3Config {
     }
 }
 
-/// An object `s3://bucket/key` with the size and ETag it had when it was opened. Every read is
-/// one ranged GET with `If-Match`, so a changed object fails instead of returning other bytes.
+/// An object `s3://bucket/key` of a known size. Every read is one ranged GET; opening sends no
+/// request, as the size comes from the manifest and some stores refuse HEAD.
 pub struct S3Object {
     operator: Operator,
     runtime: Handle,
     key: String,
     size: u64,
-    etag: String,
 }
 
 impl S3Object {
-    /// Opens `s3://bucket/key`; if `expected_size` is given, the object must have that size.
-    /// The size and ETag come from a GET of the first byte: some stores refuse HEAD requests.
-    pub fn open(
-        config: &S3Config,
-        location: &str,
-        expected_size: Option<u64>,
-    ) -> Result<Self, StorageError> {
-        let (bucket, key) = location
-            .strip_prefix("s3://")
-            .and_then(|rest| rest.split_once('/'))
-            .filter(|(bucket, key)| !bucket.is_empty() && !key.is_empty())
-            .ok_or_else(|| StorageError::Location(location.to_string()))?;
-        let operator = config.operator(bucket)?;
-        let unusable = |source: io::Error| StorageError::Object {
-            location: location.to_string(),
-            source,
-        };
-        let metadata = config
-            .runtime
-            .block_on(async {
-                let reader = operator.reader_with(key).await?;
-                reader.read(0..1).await?;
-                Ok::<_, opendal::Error>(reader.metadata().cloned())
-            })
-            .map_err(|error| unusable(error.into()))?
-            .ok_or_else(|| unusable(invalid("the answer holds no size")))?;
-        let size = metadata.content_length();
-        let etag = metadata
-            .etag()
-            .filter(|etag| !etag.trim().is_empty() && !etag.trim_start().starts_with("W/"))
-            .ok_or_else(|| unusable(invalid("the answer holds no strong ETag")))?;
-        if let Some(expected) = expected_size
-            && expected != size
-        {
-            return Err(unusable(invalid(&format!(
-                "it has {size} bytes, not {expected}"
-            ))));
-        }
+    /// Opens `s3://bucket/key`, an object of `size` bytes.
+    pub fn open(config: &S3Config, location: &str, size: u64) -> Result<Self, StorageError> {
+        let (bucket, key) = split_location(location)?;
         Ok(Self {
-            etag: etag.to_string(),
-            operator,
+            operator: config.operator(bucket)?,
             runtime: config.runtime.clone(),
             key: key.to_string(),
             size,
         })
     }
+
+    /// All bytes of the small object `s3://bucket/key`, read with one GET.
+    pub fn read_whole(config: &S3Config, location: &str) -> Result<Vec<u8>, StorageError> {
+        let (bucket, key) = split_location(location)?;
+        let operator = config.operator(bucket)?;
+        let bytes = config
+            .runtime
+            .block_on(operator.read(key))
+            .map_err(|error| StorageError::Object {
+                location: location.to_string(),
+                source: error.into(),
+            })?;
+        Ok(bytes.to_vec())
+    }
+}
+
+/// The bucket and key of `s3://bucket/key`.
+fn split_location(location: &str) -> Result<(&str, &str), StorageError> {
+    location
+        .strip_prefix("s3://")
+        .and_then(|rest| rest.split_once('/'))
+        .filter(|(bucket, key)| !bucket.is_empty() && !key.is_empty())
+        .ok_or_else(|| StorageError::Location(location.to_string()))
 }
 
 impl ReadAt for S3Object {
@@ -207,18 +208,8 @@ impl ReadAt for S3Object {
             return Ok(());
         }
         // A range with an end needs no HEAD request for the object size.
-        let read = self
-            .operator
-            .read_with(&self.key)
-            .range(offset..end)
-            .if_match(&self.etag);
-        let bytes = self.runtime.block_on(read.into_future()).map_err(|error| {
-            if error.kind() == ErrorKind::ConditionNotMatch {
-                invalid("the S3 object changed since it was opened")
-            } else {
-                error.into()
-            }
-        })?;
+        let read = self.operator.read_with(&self.key).range(offset..end);
+        let bytes = self.runtime.block_on(read.into_future())?;
         if bytes.len() != buffer.len() {
             return Err(invalid(&format!(
                 "S3 returned {} bytes for a range of {}",

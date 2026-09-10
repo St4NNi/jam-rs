@@ -22,17 +22,12 @@ fn config(server: &Server, limits: S3Limits) -> S3Config {
     config.unsigned()
 }
 
-/// A store with one object `bucket/entry.packed`; after `changed` requests its ETag changes.
-fn store(data: Vec<u8>, changed: usize) -> Server {
-    serve(move |index, request| {
+/// A store with one object `bucket/entry.packed`, which refuses HEAD.
+fn store(data: Vec<u8>) -> Server {
+    serve(move |_, request| {
         assert_eq!(request.method, "GET", "the size must not come from a HEAD");
         assert_eq!(request.path, "/bucket/entry.packed");
-        let etag = if index >= changed {
-            "\"other\""
-        } else {
-            "\"fixture\""
-        };
-        Reply::range_of(&data, etag, request)
+        Reply::object(&data, request)
     })
 }
 
@@ -43,9 +38,9 @@ fn pattern(length: u32) -> Vec<u8> {
 #[test]
 fn exact_ranges_read() {
     let data = pattern(50_000);
-    let server = store(data.clone(), usize::MAX);
+    let server = store(data.clone());
     let location = "s3://bucket/entry.packed";
-    let object = S3Object::open(&config(&server, quick()), location, Some(50_000)).unwrap();
+    let object = S3Object::open(&config(&server, quick()), location, 50_000).unwrap();
     assert_eq!(object.size(), 50_000);
     for (offset, length) in [(0usize, 10usize), (49_990, 10), (12_345, 1000)] {
         let mut buffer = vec![0; length];
@@ -54,16 +49,18 @@ fn exact_ranges_read() {
     }
     assert!(object.read_exact_at(49_999, &mut [0; 2]).is_err());
     object.read_exact_at(0, &mut []).unwrap();
-    // The opening request and three reads.
-    assert_eq!(server.requests.load(Ordering::SeqCst), 4);
+    // Opening sends nothing; each read is one request.
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+    let whole = S3Object::read_whole(&config(&server, quick()), location).unwrap();
+    assert_eq!(whole, data);
 }
 
 #[test]
 fn cache_merges_runs() {
     let data = pattern(50_000);
-    let server = store(data.clone(), usize::MAX);
+    let server = store(data.clone());
     let location = "s3://bucket/entry.packed";
-    let object = S3Object::open(&config(&server, quick()), location, None).unwrap();
+    let object = S3Object::open(&config(&server, quick()), location, 50_000).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let cached = cache.wrap(object);
     let mut buffer = vec![0; 3000];
@@ -72,19 +69,14 @@ fn cache_merges_runs() {
         assert_eq!(buffer, data[20_000..23_000]);
         cached.read_exact_at(40_000, &mut buffer[..100]).unwrap();
     }
-    // The opening request and one fetch per missing run.
-    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+    // One fetch per missing run.
+    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
 }
 
 #[test]
-fn changed_object_fails() {
-    let server = store(vec![7u8; 1000], 1);
+fn bad_locations_refused() {
+    let server = store(Vec::new());
     let config = config(&server, quick());
-    let object = S3Object::open(&config, "s3://bucket/entry.packed", Some(1000)).unwrap();
-    let error = object.read_exact_at(0, &mut [0; 10]).unwrap_err();
-    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-    let wrong_size = S3Object::open(&config, "s3://bucket/entry.packed", Some(999));
-    assert!(matches!(wrong_size, Err(StorageError::Object { .. })));
     for location in [
         "s3:/bucket",
         "s3://bucket",
@@ -92,29 +84,32 @@ fn changed_object_fails() {
         "s3:///key",
         "b/key",
     ] {
-        let opened = S3Object::open(&config, location, None);
+        let opened = S3Object::open(&config, location, 1);
         assert!(
             matches!(opened, Err(StorageError::Location(_))),
             "{location}"
         );
+        let read = S3Object::read_whole(&config, location);
+        assert!(matches!(read, Err(StorageError::Location(_))), "{location}");
     }
 }
 
 #[test]
-fn weak_objects_refused() {
-    let weak = serve(|_, request| Reply::range_of(&[0; 10], "W/\"weak\"", request));
-    assert!(S3Object::open(&config(&weak, quick()), "s3://bucket/key", None).is_err());
+fn forbidden_not_repeated() {
     let forbidden = serve(|_, _| Reply::status(403));
-    assert!(S3Object::open(&config(&forbidden, quick()), "s3://bucket/key", None).is_err());
+    let config = config(&forbidden, quick());
+    let object = S3Object::open(&config, "s3://bucket/key", 10).unwrap();
+    assert!(object.read_exact_at(0, &mut [0; 4]).is_err());
+    assert!(S3Object::read_whole(&config, "s3://bucket/key").is_err());
     // A final answer is not repeated.
-    assert_eq!(forbidden.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(forbidden.requests.load(Ordering::SeqCst), 2);
 }
 
 #[test]
 fn short_body_fails() {
     let data = pattern(1000);
     let server = serve(move |index, request| {
-        let mut reply = Reply::range_of(&data, "\"fixture\"", request);
+        let mut reply = Reply::object(&data, request);
         if index > 0 {
             reply.body.truncate(5);
             reply.declared = 5;
@@ -125,7 +120,8 @@ fn short_body_fails() {
         tries: 1,
         ..quick()
     };
-    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", None).unwrap();
+    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", 1000).unwrap();
+    object.read_exact_at(0, &mut [0; 10]).unwrap();
     assert!(object.read_exact_at(0, &mut [0; 10]).is_err());
 }
 
@@ -137,14 +133,12 @@ fn in_flight_limited() {
     let together = Arc::new(Barrier::new(3));
     let server = serve({
         let (data, active, peak) = (data.clone(), Arc::clone(&active), Arc::clone(&peak));
-        move |index, request| {
+        move |_, request| {
             let now = active.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
-            if index > 0 {
-                together.wait();
-            }
+            together.wait();
             active.fetch_sub(1, Ordering::SeqCst);
-            Reply::range_of(&data, "\"fixture\"", request)
+            Reply::object(&data, request)
         }
     });
     let limits = S3Limits {
@@ -152,7 +146,7 @@ fn in_flight_limited() {
         ..quick()
     };
     let location = "s3://bucket/entry.packed";
-    let object = S3Object::open(&config(&server, limits), location, None).unwrap();
+    let object = S3Object::open(&config(&server, limits), location, 100_000).unwrap();
     std::thread::scope(|scope| {
         for thread in 0..12usize {
             let (object, data) = (&object, &data);
