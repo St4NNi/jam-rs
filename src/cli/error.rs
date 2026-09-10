@@ -8,6 +8,7 @@ use crate::report::ReportError;
 use crate::screen::ScreenError;
 use crate::search::SearchError;
 use crate::service::ServiceError;
+use crate::storage::StorageError;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -65,6 +66,12 @@ pub enum CliError {
     /// Assemblies could not be screened; each has a failed record.
     #[error("{0} assemblies could not be screened")]
     FailedAssemblies(usize),
+    /// The S3 store or the block cache cannot be set up.
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    /// The runtime that waits for S3 reads cannot start.
+    #[error("cannot start the runtime for S3 reads: {0}")]
+    Runtime(std::io::Error),
     /// Serving or a remote search failed.
     #[error(transparent)]
     Service(#[from] ServiceError),

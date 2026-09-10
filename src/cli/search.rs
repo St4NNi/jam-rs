@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::rule::RuleArgs;
+use super::storage::ShardStorage;
 use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
@@ -35,8 +36,9 @@ enum Format {
 /// The options of `jam search`.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// One or more shard directories, then a FASTA file with the query records; each record is
-    /// searched on its own, in every shard. With --server only the query file
+    /// One or more shards (directories or s3://bucket/prefix), then a FASTA file with the query
+    /// records; each record is searched on its own, in every shard. With --server only the query
+    /// file
     #[arg(required = true, num_args = 1.., value_name = "SHARD... QUERY")]
     paths: Vec<PathBuf>,
     /// Search on the server at NODE_ID@ADDRESS, as `jam serve` prints it, instead of local shards
@@ -100,7 +102,10 @@ struct NamedShard {
     shard: Shard,
 }
 
-fn open_shards(directories: &[PathBuf]) -> Result<Vec<NamedShard>, CliError> {
+fn open_shards(
+    directories: &[PathBuf],
+    storage: &ShardStorage,
+) -> Result<Vec<NamedShard>, CliError> {
     let mut shards: Vec<NamedShard> = Vec::new();
     for directory in directories {
         let name = directory.file_name().map_or_else(
@@ -112,10 +117,7 @@ fn open_shards(directories: &[PathBuf]) -> Result<Vec<NamedShard>, CliError> {
                 "two shards are named {name}; records could not tell them apart"
             )));
         }
-        let shard = Shard::open(directory).map_err(|source| CliError::Shard {
-            path: directory.clone(),
-            source,
-        })?;
+        let shard = storage.open(directory)?;
         shards.push(NamedShard { name, shard });
     }
     Ok(shards)
@@ -133,7 +135,8 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     };
     let config = settings_of(args)?.apply(&base)?;
     let inputs = args.inputs()?;
-    let shards = open_shards(&inputs.shards)?;
+    let storage = ShardStorage::new()?;
+    let shards = open_shards(&inputs.shards, &storage)?;
     let parameters = shards[0].shard.manifest().parameters;
     if shards.iter().any(|open| {
         let other = open.shard.manifest().parameters;

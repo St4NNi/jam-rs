@@ -9,6 +9,7 @@ mod screen;
 mod search;
 mod serve;
 mod stats;
+mod storage;
 
 use clap::{Parser, Subcommand};
 pub use error::CliError;
