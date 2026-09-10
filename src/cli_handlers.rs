@@ -81,6 +81,8 @@ pub(crate) struct TraceArgs {
     pub force: bool,
 }
 
+pub(crate) const SHARED_BATCH_QUERY_BASES: usize = 640_000;
+
 pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     let invocation_started = std::time::Instant::now();
     let shared_input = matches!(&args.input, TraceInput::Shared { .. });
@@ -230,7 +232,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                 count += 1;
                 if shared_input
                     && !queries.is_empty()
-                    && batch_bases.saturating_add(sequence.len()) > 700_000
+                    && batch_bases.saturating_add(sequence.len()) > SHARED_BATCH_QUERY_BASES
                 {
                     pending = Some((id, sequence, circular));
                     break;
@@ -303,7 +305,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                 "format": "jam-shared-read-stats-v1", "index": engine.shared_read_stats(), "batch": engine.batch_stats(),
                 "parsing_ns": parsing_ns, "output_ns": output_ns,
                 "top_level_ns": { "setup": startup_ns, "parsing": parsing_ns, "search": search_ns, "result_serialization": output_ns, "finalization_and_other": publication_ns.saturating_sub(startup_ns + parsing_ns + search_ns + output_ns), "through_result_publication": publication_ns },
-                "batch_limits": { "queries": 64, "query_bases": 700000, "lookup_bytes": 134217728, "global_lookup_bytes": 268435456, "decoded_bgzf_bytes": 33554432, "concurrent_bgzf_reads": 4 },
+                "batch_limits": { "queries": 64, "query_bases": SHARED_BATCH_QUERY_BASES, "lookup_bytes": 134217728, "global_lookup_bytes": 268435456, "decoded_bgzf_bytes": 33554432, "concurrent_bgzf_reads": 4 },
                 "histogram_semantics": "16 base-2 bins starting at one, last bin at least 32768; reuse counts per-query distinct requests for an exact context; occurrence fanout counts positions per admitted positive context; totals are per lookup batch",
                 "lookup_task_semantics": "core-aligned tasks weighted by estimated directory comparisons plus requested contexts; dispatch is task construction and ordering; parallel is pool elapsed; compute and reduce sum worker spans; dispatch_to_start sums task queue delay, not worker idle time; key_lookup includes final entry ordering",
                 "semantics": "top_level_ns intervals do not overlap and cover handler entry through result publication, excluding stats publication and CLI startup; batch timings are nested worker spans and may overlap; logical bytes are not physical I/O; endpoint time includes endpoint traceback"

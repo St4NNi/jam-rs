@@ -475,6 +475,15 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
             .unwrap();
         let actual = pool
             .install(|| {
+                assert!(
+                    crate::trace_batch::lookup_bytes(
+                        &index,
+                        3 * crate::cli::handlers::SHARED_BATCH_QUERY_BASES,
+                        64,
+                    )
+                    .unwrap()
+                        <= crate::trace_batch::lookup_budget(&index)
+                );
                 TraceEngine::open_shared(&shared, None)
                     .unwrap()
                     .search_batch_topologies(&topology_queries, linear, &topology_flags)
