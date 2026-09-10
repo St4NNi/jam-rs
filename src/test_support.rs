@@ -1,4 +1,5 @@
-//! Test data shared by all tests: seeded random bases and bytes, mutated copies, test shards.
+//! Test data shared by all tests: seeded random bases and bytes, mutated copies, test shards, and
+//! a small HTTP server on a local port that plays an S3 store.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -8,9 +9,12 @@ use crate::search::SearchControl;
 use crate::seeds::SeedScheme;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::Path;
-use std::sync::OnceLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::{Handle, Runtime};
 
 /// A random generator that gives the same values for the same seed on every run.
@@ -144,6 +148,146 @@ pub fn no_stop() -> SearchControl<'static> {
         deadline: None,
         stop: &NEVER,
     }
+}
+
+/// A request as the server saw it.
+pub struct Request {
+    pub method: String,
+    pub path: String,
+    pub headers: HashMap<String, String>,
+}
+
+impl Request {
+    /// The first and last byte of the requested range.
+    pub fn range(&self) -> (usize, usize) {
+        let value = self.headers["range"].strip_prefix("bytes=").unwrap();
+        let (start, last) = value.split_once('-').unwrap();
+        (start.parse().unwrap(), last.parse().unwrap())
+    }
+}
+
+/// An answer: status, headers, the length it declares and the body.
+pub struct Reply {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub declared: usize,
+    pub body: Vec<u8>,
+}
+
+impl Reply {
+    pub fn status(status: u16) -> Self {
+        let headers = Vec::new();
+        let body = Vec::new();
+        Self {
+            status,
+            headers,
+            declared: 0,
+            body,
+        }
+    }
+
+    /// The answer to a range request for `data` with `etag`, which honours `If-Match`.
+    pub fn range_of(data: &[u8], etag: &str, request: &Request) -> Self {
+        if request
+            .headers
+            .get("if-match")
+            .is_some_and(|wanted| wanted != etag)
+        {
+            return Self::status(412);
+        }
+        let (start, last) = request.range();
+        let body = data[start..=last].to_vec();
+        let range = format!("bytes {start}-{last}/{}", data.len());
+        Self {
+            status: 206,
+            headers: vec![
+                ("Content-Range".into(), range),
+                ("ETag".into(), etag.into()),
+            ],
+            declared: body.len(),
+            body,
+        }
+    }
+}
+
+/// A server that answers each request with `handler(index, request)`, where `index` counts
+/// requests from 0. It stops when dropped.
+pub struct Server {
+    pub address: String,
+    pub requests: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // One more connection wakes the accepting thread, which then sees the stop flag.
+        let _ = std::net::TcpStream::connect(self.address.trim_start_matches("http://"));
+    }
+}
+
+/// Starts a server on a free local port.
+pub fn serve(handler: impl Fn(usize, &Request) -> Reply + Send + Sync + 'static) -> Server {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = Server {
+        address: format!("http://{}", listener.local_addr().unwrap()),
+        requests: Arc::new(AtomicUsize::new(0)),
+        stop: Arc::new(AtomicBool::new(false)),
+    };
+    let (requests, stop) = (Arc::clone(&server.requests), Arc::clone(&server.stop));
+    let handler = Arc::new(handler);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(stream) = stream else {
+                continue;
+            };
+            let index = requests.fetch_add(1, Ordering::SeqCst);
+            let handler = Arc::clone(&handler);
+            std::thread::spawn(move || answer(stream, index, &*handler));
+        }
+    });
+    server
+}
+
+fn answer(
+    mut stream: std::net::TcpStream,
+    index: usize,
+    handler: &dyn Fn(usize, &Request) -> Reply,
+) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    let mut parts = first.split_whitespace();
+    let method = parts.next().unwrap().to_string();
+    let path = parts.next().unwrap().to_string();
+    let mut headers = HashMap::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let Some((name, value)) = line.trim_end().split_once(':') else {
+            break;
+        };
+        headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
+    }
+    let request = Request {
+        method,
+        path,
+        headers,
+    };
+    let reply = handler(index, &request);
+    let mut head = format!(
+        "HTTP/1.1 {} reply\r\nContent-Length: {}\r\nConnection: close\r\n",
+        reply.status, reply.declared
+    );
+    for (name, value) in &reply.headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    // The client may give up and close the connection, so write errors are fine.
+    let _ = stream.write_all(format!("{head}\r\n").as_bytes());
+    let _ = stream.write_all(&reply.body);
 }
 
 #[cfg(test)]
