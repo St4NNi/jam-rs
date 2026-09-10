@@ -28,23 +28,31 @@ pub(crate) struct TraceBatch {
     pub(crate) sequence: Arc<BgzfBlockCache>,
 }
 
+pub(crate) fn lookup_budget(index: &TraceIndex) -> usize {
+    if index.is_shared() {
+        128 * 1024 * 1024
+    } else {
+        32 * 1024 * 1024
+    }
+}
+
 pub(crate) fn prepare_lookup(
     index: &TraceIndex,
     mut keys: Vec<u64>,
     observed: bool,
 ) -> Result<Option<SharedSeedLookups>, TraceError> {
     let started = observed.then(Instant::now);
+    let budget = lookup_budget(index);
     let key_count = Some(keys.len());
     let row_bytes = std::mem::size_of::<u64>() + std::mem::size_of::<(u64, Option<SeedEntry>)>();
     let Some(bytes) = key_count.and_then(|keys| keys.checked_mul(row_bytes)?.checked_add(4096))
     else {
         return Ok(None);
     };
-    if bytes > 32 * 1024 * 1024 {
+    if bytes > budget {
         return Ok(None);
     }
-    let Some(reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, 32 * 1024 * 1024)
-    else {
+    let Some(reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, budget) else {
         return Ok(None);
     };
     let Some(identity) = index.cache_file_identity()? else {
