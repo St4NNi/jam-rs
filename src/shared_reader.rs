@@ -14,9 +14,11 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_DECODED_RESULT_BYTES: usize = 64 * 1024 * 1024;
+static NEXT_READER_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 pub struct SharedReader {
     file: SharedFile,
+    reader_token: u64,
     observed: bool,
     core_inspections: AtomicU64,
     group_inspections: AtomicU64,
@@ -50,7 +52,7 @@ pub struct SharedReadStats {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SharedGroup {
-    identity: HandleIdentity,
+    reader_token: u64,
     key: SharedKey,
     core_ordinal: u64,
     location: GroupLocation,
@@ -78,7 +80,7 @@ impl SharedGroup {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct SharedOccurrenceStorage {
-    body_sha256: [u8; 32],
+    reader_token: u64,
     kind: u8,
     first: u64,
     count: u64,
@@ -86,7 +88,7 @@ pub struct SharedOccurrenceStorage {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SharedMember {
-    identity: HandleIdentity,
+    reader_token: u64,
     group: GroupLocation,
     pub metagenome_id: u32,
     first_reference: u64,
@@ -111,18 +113,12 @@ impl SharedMember {
             }
         };
         SharedOccurrenceStorage {
-            body_sha256: self.identity.body_sha256,
+            reader_token: self.reader_token,
             kind,
             first,
             count: self.occurrence_count,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct HandleIdentity {
-    file: Option<[u64; 7]>,
-    body_sha256: [u8; 32],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,8 +147,14 @@ impl SharedReader {
 
     fn open_inner(path: impl AsRef<Path>, observed: bool) -> Result<Self, SharedError> {
         let file = SharedFile::open(path, observed)?;
+        let reader_token = NEXT_READER_TOKEN
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
+                token.checked_add(1)
+            })
+            .map_err(|_| SharedError::ResourceLimit)?;
         Ok(Self {
             file,
+            reader_token,
             observed,
             core_inspections: AtomicU64::new(0),
             group_inspections: AtomicU64::new(0),
@@ -217,6 +219,10 @@ impl SharedReader {
         self.file.identity()
     }
 
+    pub(crate) fn reader_token(&self) -> u64 {
+        self.reader_token
+    }
+
     pub fn stats(&self) -> SharedReadStats {
         SharedReadStats {
             observed: self.observed,
@@ -277,6 +283,73 @@ impl SharedReader {
                 (keys[index].core, keys[index].context_code().unwrap())
             });
             self.find_many_ordered(keys, Some(&order), &mut groups)?;
+        }
+        self.file.verify_unchanged()?;
+        Ok(groups)
+    }
+
+    pub fn find_in_core(
+        &self,
+        core_group: SharedGroup,
+        keys: &[SharedKey],
+    ) -> Result<Vec<Option<SharedGroup>>, SharedError> {
+        self.validate_group(core_group)?;
+        if core_group.key.length != 15 || core_group.key.context != 0 {
+            return Err(SharedError::Invalid("core group"));
+        }
+        admit_result(keys.len(), size_of::<Option<SharedGroup>>())?;
+        let mut previous = None;
+        let mut ordered = true;
+        for &key in keys {
+            let code = key
+                .context_code()
+                .ok_or(SharedError::Invalid("shared key"))?;
+            if key.core != core_group.key.core {
+                return Err(SharedError::Invalid("core group key"));
+            }
+            ordered &= previous.is_none_or(|previous| previous <= code);
+            previous = Some(code);
+        }
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(keys.len())
+            .map_err(|_| SharedError::ResourceLimit)?;
+        admit_result(groups.capacity(), size_of::<Option<SharedGroup>>())?;
+        groups.resize(keys.len(), None);
+        if !keys.is_empty() {
+            let row = self.core_row(core_group.core_ordinal)?;
+            if row.core != core_group.key.core {
+                return Err(SharedError::Invalid("core group"));
+            }
+            if ordered {
+                self.find_contexts_many(
+                    keys,
+                    None,
+                    &mut groups,
+                    core_group.core_ordinal,
+                    row,
+                    0,
+                    keys.len(),
+                )?;
+            } else {
+                admit_result(keys.len(), size_of::<usize>())?;
+                let mut order = Vec::new();
+                order
+                    .try_reserve_exact(keys.len())
+                    .map_err(|_| SharedError::ResourceLimit)?;
+                admit_result(order.capacity(), size_of::<usize>())?;
+                order.extend(0..keys.len());
+                order.sort_unstable_by_key(|&index| keys[index].context_code().unwrap());
+                self.find_contexts_many(
+                    keys,
+                    Some(&order),
+                    &mut groups,
+                    core_group.core_ordinal,
+                    row,
+                    0,
+                    keys.len(),
+                )?;
+            }
         }
         self.file.verify_unchanged()?;
         Ok(groups)
@@ -482,16 +555,9 @@ impl SharedReader {
         self.file.verify_unchanged()
     }
 
-    fn handle_identity(&self) -> HandleIdentity {
-        HandleIdentity {
-            file: self.file.identity(),
-            body_sha256: self.file.header.body_sha256,
-        }
-    }
-
     fn validate_group(&self, group: SharedGroup) -> Result<(), SharedError> {
         self.begin_operation()?;
-        if group.identity != self.handle_identity() {
+        if group.reader_token != self.reader_token {
             return Err(SharedError::Invalid("group handle"));
         }
         Ok(())
@@ -499,7 +565,7 @@ impl SharedReader {
 
     fn validate_member(&self, group: SharedGroup, member: SharedMember) -> Result<(), SharedError> {
         self.validate_group(group)?;
-        if member.identity != group.identity || member.group != group.location {
+        if member.reader_token != group.reader_token || member.group != group.location {
             return Err(SharedError::Invalid("member handle"));
         }
         Ok(())
@@ -742,7 +808,7 @@ impl SharedReader {
             for position in lower..upper {
                 let index = ordered_index(order, position);
                 groups[index] = Some(SharedGroup {
-                    identity: self.handle_identity(),
+                    reader_token: self.reader_token,
                     key: keys[index],
                     core_ordinal,
                     location: group_location(ordinal, &row),
@@ -818,7 +884,7 @@ impl SharedReader {
         };
         let metagenome_id = self.contig_record(contig_id)?.document_id;
         Ok(SharedMember {
-            identity: group.identity,
+            reader_token: group.reader_token,
             group: group.location,
             metagenome_id,
             first_reference: core_ordinal,
@@ -836,7 +902,7 @@ impl SharedReader {
         let direct = group.occurrence_count == 1;
         self.validate_occurrence_source(first_reference, group.occurrence_count, direct)?;
         Ok(SharedMember {
-            identity: group.identity,
+            reader_token: group.reader_token,
             group: group.location,
             metagenome_id,
             first_reference,
@@ -888,7 +954,7 @@ impl SharedReader {
         }
         self.validate_occurrence_source(first_reference, occurrence_count, direct)?;
         Ok(SharedMember {
-            identity: group.identity,
+            reader_token: group.reader_token,
             group: group.location,
             metagenome_id,
             first_reference,
@@ -1121,7 +1187,7 @@ impl SharedReader {
                 _ => false,
             };
             return Ok(matches.then(|| SharedGroup {
-                identity: self.handle_identity(),
+                reader_token: self.reader_token,
                 key,
                 core_ordinal,
                 location: GroupLocation::Singleton { core_ordinal },
@@ -1155,7 +1221,7 @@ impl SharedReader {
                         return Err(SharedError::Invalid("core occurrence count"));
                     }
                     return Ok(Some(SharedGroup {
-                        identity: self.handle_identity(),
+                        reader_token: self.reader_token,
                         key,
                         core_ordinal,
                         location: group_location(ordinal, &group),

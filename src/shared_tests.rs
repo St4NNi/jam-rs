@@ -331,6 +331,148 @@ fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
     }
 }
 
+#[test]
+fn compact_handles_are_reader_bound_and_keep_resolved_locations() {
+    use std::mem::size_of;
+
+    assert_eq!(size_of::<SharedGroup>(), 64);
+    assert!(size_of::<Option<SharedGroup>>() <= 64);
+    assert_eq!(size_of::<crate::shared_reader::SharedMember>(), 56);
+    assert!(size_of::<Option<crate::shared_reader::SharedMember>>() <= 56);
+    assert_eq!(
+        size_of::<crate::shared_reader::SharedOccurrenceStorage>(),
+        32
+    );
+    println!(
+        "shared_group_bytes={} optional_group_bytes={} shared_member_bytes={} optional_member_bytes={} occurrence_storage_bytes={}",
+        size_of::<SharedGroup>(),
+        size_of::<Option<SharedGroup>>(),
+        size_of::<crate::shared_reader::SharedMember>(),
+        size_of::<Option<crate::shared_reader::SharedMember>>(),
+        size_of::<crate::shared_reader::SharedOccurrenceStorage>(),
+    );
+
+    let (directory, reader, _) = fixture(16);
+    let path = directory.path().join("fixture.shared");
+    let other = SharedReader::open_observed(&path).unwrap();
+    assert_ne!(reader.reader_token(), other.reader_token());
+    let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let member = reader.member(group, 2).unwrap().unwrap();
+    assert!(matches!(
+        other.members(group),
+        Err(SharedError::Invalid("group handle"))
+    ));
+    assert!(matches!(
+        other.member_occurrences(group, member),
+        Err(SharedError::Invalid("group handle"))
+    ));
+
+    let singleton = reader
+        .find(SharedKey::core(TARGET_CORE + 1))
+        .unwrap()
+        .unwrap();
+    let singleton_member = reader.member(singleton, 0).unwrap().unwrap();
+    assert!(matches!(
+        reader.member_occurrences(group, singleton_member),
+        Err(SharedError::Invalid("member handle"))
+    ));
+
+    let before = reader.stats();
+    let occurrences = reader.member_occurrences(group, member).unwrap();
+    assert_eq!(
+        occurrences
+            .iter()
+            .map(|occurrence| (occurrence.contig_id, occurrence.position))
+            .collect::<Vec<_>>(),
+        [(2, 300)]
+    );
+    assert_eq!(delta(reader.stats(), before), [0, 0, 0, 1, 1]);
+
+    let (inline_directory, source) = grouped_lookup_fixture(0);
+    let packed = inline_directory.path().join("inline.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    let inline_reader = SharedReader::open_observed(&packed).unwrap();
+    let inline_group = inline_reader
+        .find(SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT ^ 1,
+            length: 31,
+        })
+        .unwrap()
+        .unwrap();
+    let inline_member = inline_reader.members(inline_group).unwrap().remove(0);
+    let before = inline_reader.stats();
+    let occurrences = inline_reader
+        .member_occurrences(inline_group, inline_member)
+        .unwrap();
+    assert_eq!(
+        occurrences
+            .iter()
+            .map(|occurrence| (occurrence.contig_id, occurrence.position))
+            .collect::<Vec<_>>(),
+        [(2, 300)]
+    );
+    assert_eq!(delta(inline_reader.stats(), before), [0, 0, 0, 0, 1]);
+}
+
+#[test]
+fn retained_core_resolves_contexts_without_another_core_search() {
+    let (_directory, path) = grouped_lookup_fixture(4096);
+    let reader = SharedReader::open_observed(&path).unwrap();
+    let core = SharedKey::core(TARGET_CORE);
+    let core_group = reader.find(core).unwrap().unwrap();
+    let requests = [
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        },
+        core,
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT ^ 2,
+            length: 31,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        },
+    ];
+    let before = reader.stats();
+    let groups = reader.find_in_core(core_group, &requests).unwrap();
+    let after = reader.stats();
+    assert_eq!(
+        after.core_resolutions_present,
+        before.core_resolutions_present
+    );
+    assert_eq!(
+        after.core_resolutions_absent,
+        before.core_resolutions_absent
+    );
+    assert_eq!(after.grouped_core_rows, before.grouped_core_rows);
+    assert_eq!(
+        after.core_descriptor_inspections,
+        before.core_descriptor_inspections + 1
+    );
+
+    let scalar = SharedReader::open(&path).unwrap();
+    let expected = requests
+        .iter()
+        .map(|&key| group_evidence(&scalar, scalar.find(key).unwrap()))
+        .collect::<Vec<_>>();
+    let actual = groups
+        .into_iter()
+        .map(|group| group_evidence(&reader, group))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    assert!(
+        reader
+            .find_in_core(core_group, &[SharedKey::core(TARGET_CORE + 1)])
+            .is_err()
+    );
+}
+
 fn grouped_lookup_fixture(preceding: u32) -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let jidx = directory.path().join("grouped-metadata.jidx");
