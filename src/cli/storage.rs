@@ -32,17 +32,28 @@ impl ShardStorage {
         })
     }
 
+    /// The location of the shard at `path`, a local directory or `s3://bucket/prefix`.
+    pub(super) fn location(&self, path: &Path) -> Result<Location, CliError> {
+        let text = path.to_string_lossy();
+        if !text.starts_with("s3://") {
+            return Ok(Location::Directory(path.to_path_buf()));
+        }
+        Location::s3(&text, self.s3()?).map_err(|source| CliError::Shard {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
     /// Opens the shard at `path`, a local directory or `s3://bucket/prefix`.
     pub(super) fn open(&self, path: &Path) -> Result<Shard, CliError> {
         let failed = |source| CliError::Shard {
             path: path.to_path_buf(),
             source,
         };
-        let text = path.to_string_lossy();
-        if !text.starts_with("s3://") {
-            return Shard::open(path).map_err(failed);
+        let location = self.location(path)?;
+        if let Location::Directory(directory) = &location {
+            return Shard::open(directory).map_err(failed);
         }
-        let location = Location::s3(&text, self.s3()?).map_err(failed)?;
         let options = ShardOptions {
             cache: Some(self.cache()?),
             ..ShardOptions::default()

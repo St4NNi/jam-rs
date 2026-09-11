@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{FileRecord, PACKED_DIRECTORY};
+use super::manifest::{FileRecord, MANIFEST_FILE, Manifest, PACKED_DIRECTORY, sha256_hex};
 use super::plan::{Pin, Place, Plan};
 use super::{AtPath, IndexError};
 use crate::storage::{BlockCache, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config, S3Object};
@@ -76,13 +76,18 @@ impl Location {
         }
     }
 
-    /// Opens the file of `record`. On S3 its size comes from the record, so nothing is sent.
-    pub(crate) fn open(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
+    /// The manifest of the shard at this location and the SHA-256 digest of its file.
+    pub fn manifest(&self) -> Result<(Manifest, String), IndexError> {
+        let bytes = self.read_whole(MANIFEST_FILE)?;
+        Ok((Manifest::parse(&bytes)?, sha256_hex(&[&bytes])))
+    }
+
+    /// Opens the file `name` of `bytes` bytes. On S3 nothing is sent, as the size is known.
+    pub(crate) fn open(&self, name: &str, bytes: u64) -> Result<Arc<dyn ReadAt>, IndexError> {
         Ok(match self {
-            Self::Directory(path) => Arc::new(LocalFile::open(path.join(&record.path))?),
+            Self::Directory(path) => Arc::new(LocalFile::open(path.join(name))?),
             Self::S3 { prefix, config } => {
-                let location = format!("{prefix}{}", record.path);
-                Arc::new(S3Object::open(config, &location, record.bytes)?)
+                Arc::new(S3Object::open(config, &format!("{prefix}{name}"), bytes)?)
             }
         })
     }
@@ -177,7 +182,7 @@ impl ShardFiles {
         record: &FileRecord,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
         let Some((pin, path)) = self.pins.get(name) else {
-            return self.cached(location.open(record)?, record);
+            return self.cached(location.open(&record.path, record.bytes)?, record);
         };
         let file = LocalFile::open(path)?;
         if file.size() != pin.bytes() || pin.end > record.bytes {
@@ -193,13 +198,13 @@ impl ShardFiles {
         if pin.bytes() == record.bytes {
             return Ok(local);
         }
-        let rest = self.cached(location.open(record)?, record)?;
+        let rest = self.cached(location.open(&record.path, record.bytes)?, record)?;
         Ok(Arc::new(PinnedSource::new(local, pin.start..pin.end, rest)))
     }
 
     /// The source of a shard file without the cache, for example to verify it.
     pub(crate) fn open_uncached(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.location.open(record)
+        self.location.open(&record.path, record.bytes)
     }
 
     /// The local path of a packed sequence file, or `None` when it lies on S3.
@@ -230,7 +235,7 @@ impl ShardFiles {
         &self,
         record: &FileRecord,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.packed.open(record)
+        self.packed.open(&record.path, record.bytes)
     }
 
     /// `source` read through the cache, if there is one, under the digest of its record.

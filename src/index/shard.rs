@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::IndexError;
-use super::manifest::{EntryRecord, MANIFEST_FILE, Manifest, sha256_hex, verify_source};
+use super::manifest::{EntryRecord, Manifest, verify_source};
 use super::packed::PackedSequence;
 use super::positions::Positions;
 use super::sketch::Sketch;
@@ -69,9 +69,7 @@ impl Shard {
     /// `verify` reads everything.
     pub fn open_with(location: &Location, options: &ShardOptions) -> Result<Self, IndexError> {
         let started = Instant::now();
-        let manifest_bytes = location.read_whole(MANIFEST_FILE)?;
-        let manifest = Manifest::parse(&manifest_bytes)?;
-        let digest = sha256_hex(&[&manifest_bytes]);
+        let (manifest, digest) = location.manifest()?;
         let files = ShardFiles::new(location, options, manifest.entries.len(), &digest)?;
         let sketch_file = files.open_sketch(&manifest.sketch)?;
         let sketch_bytes = sketch_file.bytes().len() as u64;

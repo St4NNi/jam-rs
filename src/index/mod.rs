@@ -15,6 +15,7 @@ mod reshard;
 mod shard;
 mod sketch;
 mod sources;
+mod warm;
 
 use crate::seeds::SeedError;
 use crate::storage::StorageError;
@@ -32,6 +33,7 @@ pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 pub use sources::{Location, ShardOptions};
+pub use warm::warm;
 
 /// Errors of the index module.
 #[derive(Debug, Error)]

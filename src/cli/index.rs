@@ -1,14 +1,19 @@
-//! `jam index`: build a shard from FASTA files, or reshard shards (merge and split them).
+//! `jam index`: build a shard from FASTA files, reshard shards (merge and split them), or warm
+//! a cache directory with pinned parts of a shard.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::storage::ShardStorage;
 use super::{CliError, read_list};
 use crate::index::{
-    BuildOptions, EntryInput, Manifest, PackedOutput, Parameters, ReshardOptions, Split,
-    build_shard, reshard,
+    BuildOptions, EntryInput, Manifest, PackedOutput, Parameters, Part, Place, Plan,
+    ReshardOptions, Split, build_shard, reshard, warm,
 };
+use bytesize::ByteSize;
 use clap::{Args, Subcommand};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// The options of `jam index`.
 #[derive(Debug, Args)]
@@ -23,6 +28,8 @@ enum IndexCommand {
     Build(BuildArgs),
     /// Merge and split shards into an index directory of new shards
     Reshard(ReshardArgs),
+    /// Pin parts of a shard in a local cache directory, within RAM and disk budgets
+    Warm(WarmArgs),
 }
 
 /// The options of `jam index build`.
@@ -72,7 +79,27 @@ struct ReshardArgs {
     common: CommonArgs,
 }
 
-/// Options of both subcommands.
+/// The options of `jam index warm`.
+#[derive(Debug, Args)]
+struct WarmArgs {
+    /// The shard: a directory or s3://bucket/prefix
+    shard: PathBuf,
+    /// The cache directory to fill; search and serve read the pins from there
+    #[arg(long)]
+    cache: PathBuf,
+    /// RAM for pins and the block cache, for example 16GiB
+    #[arg(long)]
+    memory: ByteSize,
+    /// Disk for pins and the block cache, for example 200GiB
+    #[arg(long)]
+    disk: ByteSize,
+    /// A part to pin instead of the default plan: sketch, locators, packed, or
+    /// packed=NAME,NAME for some entries. Repeat for more parts
+    #[arg(long, value_parser = parse_part)]
+    pin: Vec<Part>,
+}
+
+/// Options of the build and reshard subcommands.
 #[derive(Debug, Args)]
 struct CommonArgs {
     /// Threads to use [default: all cores]
@@ -101,6 +128,70 @@ pub fn run(args: &IndexArgs) -> Result<(), CliError> {
     match &args.command {
         IndexCommand::Build(args) => run_build(args),
         IndexCommand::Reshard(args) => run_reshard(args),
+        IndexCommand::Warm(args) => run_warm(args),
+    }
+}
+
+fn run_warm(args: &WarmArgs) -> Result<(), CliError> {
+    let started = Instant::now();
+    let storage = ShardStorage::new()?;
+    let location = storage.location(&args.shard)?;
+    let failed = |source| CliError::Shard {
+        path: args.shard.clone(),
+        source,
+    };
+    let (manifest, digest) = location.manifest().map_err(failed)?;
+    let (memory, disk) = (args.memory.as_u64(), args.disk.as_u64());
+    let plan = Plan::choose(&manifest, &digest, memory, disk, &args.pin)?;
+    for line in plan_lines(&plan) {
+        println!("{line}");
+    }
+    warm(&location, &manifest, &plan, &args.cache).map_err(failed)?;
+    let seconds = started.elapsed().as_secs_f64();
+    println!("warmed {} in {seconds:.1} s", args.cache.display());
+    Ok(())
+}
+
+/// What the plan pins where, one line per file kind, and what is left for the block cache.
+fn plan_lines(plan: &Plan) -> Vec<String> {
+    let mut lines = vec![format!("shard {}", plan.shard)];
+    for place in [Place::Ram, Place::Ssd] {
+        let mut sizes: BTreeMap<&str, (usize, u64)> = BTreeMap::new();
+        for pin in plan.pins.iter().filter(|pin| pin.place == place) {
+            let size = sizes.entry(&pin.part).or_default();
+            *size = (size.0 + 1, size.1 + pin.bytes());
+        }
+        for (part, (files, bytes)) in sizes {
+            let place = if place == Place::Ram {
+                "in RAM"
+            } else {
+                "on disk"
+            };
+            let bytes = ByteSize(bytes).display().iec();
+            lines.push(format!("pinned {part} {place}: {bytes} in {files} files"));
+        }
+    }
+    let (ram, disk) = plan.cache_budget();
+    let (ram, disk) = (
+        ByteSize(ram).display().iec(),
+        ByteSize(disk).display().iec(),
+    );
+    lines.push(format!("block cache: {ram} RAM, {disk} disk"));
+    lines
+}
+
+/// A part of `--pin`: `sketch`, `locators`, `packed` or `packed=NAME,NAME`.
+fn parse_part(text: &str) -> Result<Part, String> {
+    match text.split_once('=') {
+        None if text == "sketch" => Ok(Part::Sketch),
+        None if text == "locators" => Ok(Part::Locators),
+        None if text == "packed" => Ok(Part::Packed(None)),
+        Some(("packed", names)) if !names.is_empty() => Ok(Part::Packed(Some(
+            names.split(',').map(str::to_string).collect(),
+        ))),
+        _ => Err(format!(
+            "{text:?} is not sketch, locators, packed or packed=NAME,NAME"
+        )),
     }
 }
 
@@ -183,4 +274,21 @@ fn summary_line(output: &Path, manifest: &Manifest) -> String {
         output.display(),
         manifest.entries.len()
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pin_parts_parsed() {
+        assert_eq!(parse_part("sketch"), Ok(Part::Sketch));
+        assert_eq!(parse_part("locators"), Ok(Part::Locators));
+        assert_eq!(parse_part("packed"), Ok(Part::Packed(None)));
+        let named = Part::Packed(Some(vec!["a".into(), "b".into()]));
+        assert_eq!(parse_part("packed=a,b"), Ok(named));
+        for bad in ["packed=", "seeds", "sketch=a"] {
+            assert!(parse_part(bad).is_err(), "{bad}");
+        }
+    }
 }

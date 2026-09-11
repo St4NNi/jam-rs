@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The file name of the plan in the directory of a shard in the cache directory.
-const PLAN_FILE: &str = "plan.json";
+pub(crate) const PLAN_FILE: &str = "plan.json";
 
 /// A part of a shard that can be pinned.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +45,8 @@ pub enum Place {
 /// A byte range of one shard file, held locally.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pin {
+    /// The part it belongs to: `sketch`, `locators` or `packed`.
+    pub part: String,
     /// The file, relative to the shard: `sketch`, `positions` or `packed/NAME.packed`.
     pub file: String,
     /// The first byte of the range.
@@ -175,6 +177,7 @@ impl Plan {
 /// names to files.
 pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<Pin>, IndexError> {
     let whole = |file: String, record: &super::FileRecord| Pin {
+        part: part.to_string(),
         file,
         start: 0,
         end: record.bytes,
