@@ -108,6 +108,90 @@ fn delta(after: SharedReadStats, before: SharedReadStats) -> [u64; 5] {
 }
 
 #[test]
+fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
+    use crate::trace_index::{TraceDocument, TraceIndex};
+    use std::mem::size_of;
+
+    let (_directory, reader, _) = fixture(16);
+    let index = TraceIndex::Shared(Box::new(reader));
+    let present = [
+        SharedKey::core(TARGET_CORE),
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        },
+    ];
+    let mut requests = (2_000_000..2_032_768)
+        .map(|key| (key, 0))
+        .collect::<Vec<_>>();
+    requests.extend(
+        present
+            .iter()
+            .flat_map(|key| [0, 1].map(|query| (key.packed().unwrap(), query))),
+    );
+    let requests_capacity = requests.capacity();
+    let lookup = crate::trace_batch::prepare_lookup(&index, requests, 2, true)
+        .unwrap()
+        .unwrap();
+    let mut expected = present.map(|key| key.packed().unwrap());
+    expected.sort_unstable();
+    for range in &lookup.query_ranges {
+        assert_eq!(&lookup.query_keys[range.clone()], &expected);
+    }
+    assert_eq!(
+        lookup
+            .entries
+            .iter()
+            .filter(|entry| entry.1.is_some())
+            .count(),
+        3
+    );
+    assert_eq!(lookup.postings.len(), 3);
+    assert!(lookup.postings_complete);
+    assert!(lookup.capacity_bytes <= lookup._reservation.bytes);
+    for posting in lookup.postings.values() {
+        assert_eq!(posting.documents.len(), 2);
+        assert_eq!(
+            posting
+                .documents
+                .iter()
+                .map(|doc| doc.occurrence_count())
+                .sum::<u64>(),
+            3
+        );
+        assert_eq!(
+            posting
+                .occurrences
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(Vec::len)
+                .sum::<usize>(),
+            3
+        );
+    }
+    println!(
+        "requests_capacity={requests_capacity} entries_length={} entries_capacity={} associations_capacity={} retained_bytes={} reserved_bytes={} raw_document_bytes={} trace_document_bytes={} shared_group_bytes={} optional_group_bytes={} shared_member_bytes={}",
+        lookup.entries.len(),
+        lookup.entries.capacity(),
+        lookup.query_keys.capacity(),
+        lookup.capacity_bytes,
+        lookup._reservation.bytes,
+        size_of::<crate::jidx_reader::SeedDocument>(),
+        size_of::<TraceDocument>(),
+        size_of::<SharedGroup>(),
+        size_of::<Option<SharedGroup>>(),
+        size_of::<crate::shared_reader::SharedMember>(),
+    );
+}
+
+#[test]
 fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
     for preceding in [16u32, 4096, 16_384] {
         let (_directory, reader, build) = fixture(preceding);
