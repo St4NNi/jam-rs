@@ -12,7 +12,8 @@ use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
 use crate::reader::ReaderError;
 use crate::trace_batch::{
-    SharedSeedLookups, TraceBatch, lookup_budget, lookup_bytes, prepare_lookup,
+    SharedCoreLookups, SharedSeedLookups, TraceBatch, lookup_budget, lookup_bytes, prepare_cores,
+    prepare_lookup_with_cores,
 };
 use crate::trace_index::{
     TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex, TraceSeed,
@@ -146,6 +147,12 @@ pub struct TraceBatchStats {
     pub query_context_associations: u64,
     pub query_distinct_context_requests: u64,
     pub query_distinct_cores: u64,
+    pub query_executed_context_associations: u64,
+    pub nested_context_calls: u64,
+    pub core_lookup_tasks: u64,
+    pub core_lookup_ns: u64,
+    pub core_lookup_peak_bytes: usize,
+    pub core_lookup_retained_bytes: usize,
     pub query_sequence_capacity_bytes: u64,
     pub query_core_capacity_bytes: u64,
     pub query_nested_capacity_bytes: u64,
@@ -180,6 +187,21 @@ pub(crate) struct PreparedQuery {
     positions_by_key: QueryPositions,
     lookup_identity: [u8; 32],
     batch_ordinal: usize,
+    shared_cores: Option<Arc<SharedCoreLookups>>,
+}
+
+impl PreparedQuery {
+    fn find_seeds(
+        &self,
+        index: &TraceIndex,
+        keys: &[u64],
+    ) -> Result<Vec<Option<TraceSeed>>, TraceError> {
+        if let Some(cores) = &self.shared_cores {
+            index.find_seeds_in_cores(keys, cores)
+        } else {
+            index.find_seeds_batch(keys)
+        }
+    }
 }
 
 pub(crate) struct TraceCensus {
@@ -498,23 +520,109 @@ impl TraceEngine {
             self.index.rescue_k15(),
         )?;
         if self.index.is_shared() {
-            let mut nested = Vec::new();
-            for seeds in prepared.positions_by_key.values() {
-                for seed in seeds {
+            self.prepare_shared_queries(std::slice::from_mut(&mut prepared), &[config.circular])?;
+        } else {
+            self.record_prepared(&prepared, config.circular, 0);
+        }
+        if let Some(started) = started {
+            self.batch_stats.lock().unwrap().seed_generation_ns +=
+                started.elapsed().as_nanos() as u64;
+        }
+        Ok(prepared)
+    }
+
+    fn prepare_shared_queries(
+        &self,
+        prepared: &mut [PreparedQuery],
+        circular: &[bool],
+    ) -> Result<(), TraceError> {
+        let count = prepared
+            .iter()
+            .try_fold(0usize, |sum, query| {
+                sum.checked_add(query.positions_by_key.len())
+            })
+            .ok_or(TraceError::Invalid("core request count"))?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(count)
+            .map_err(|_| TraceError::Invalid("core request allocation"))?;
+        for query in prepared.iter() {
+            keys.extend(query.positions_by_key.keys().map(|&key| key as u32));
+        }
+        let cores = prepare_cores(&self.index, keys, self.observed)?;
+        if self.observed
+            && let Some(cores) = &cores
+        {
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.core_lookup_tasks += cores.tasks as u64;
+            stats.core_lookup_ns += cores.lookup_ns;
+            stats.core_lookup_peak_bytes =
+                stats.core_lookup_peak_bytes.max(cores.peak_capacity_bound);
+            stats.core_lookup_retained_bytes =
+                stats.core_lookup_retained_bytes.max(cores.capacity_bytes());
+        }
+        prepared
+            .par_iter_mut()
+            .zip(circular)
+            .try_for_each(|(query, &circular)| {
+                let original_cores = query.positions_by_key.len();
+                query.shared_cores = cores.clone();
+                if let Some(cores) = &cores {
+                    query.positions_by_key.directory.retain(|entry| {
+                        cores
+                            .groups
+                            .binary_search_by_key(&(entry.key as u32), |group| group.key().core)
+                            .is_ok()
+                    });
+                }
+                let count: usize = query
+                    .positions_by_key
+                    .directory
+                    .iter()
+                    .map(|entry| entry.count)
+                    .sum();
+                let scratch = count
+                    .checked_mul(std::mem::size_of::<usize>())
+                    .and_then(|bytes| CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes));
+                let mut positions = Vec::new();
+                if scratch.is_some() {
+                    positions
+                        .try_reserve_exact(count)
+                        .map_err(|_| TraceError::Invalid("surviving core positions"))?;
+                    for entry in &query.positions_by_key.directory {
+                        positions.extend(entry.first..entry.first + entry.count);
+                    }
+                    positions.sort_unstable_by_key(|&ordinal| {
+                        query.positions_by_key.core[ordinal].position
+                    });
+                }
+                let mut nested = Vec::new();
+                let mut ordered = positions.iter().copied();
+                let mut fallback = query
+                    .positions_by_key
+                    .directory
+                    .iter()
+                    .flat_map(|entry| entry.first..entry.first + entry.count);
+                for ordinal in std::iter::from_fn(|| {
+                    if scratch.is_some() {
+                        ordered.next()
+                    } else {
+                        fallback.next()
+                    }
+                }) {
+                    let seed = query.positions_by_key.core[ordinal];
                     let context = crate::shared_seed::context_seed(
-                        &prepared.query,
+                        &query.query,
                         seed.position as usize,
                         seed.packed_key as u32,
                         seed.canonical_orientation,
-                        config.circular,
+                        circular,
                     )
                     .ok_or(TraceError::Invalid("query core context"))?;
                     for length in [21, 31] {
                         if let Some(key) = context.key(length) {
                             let flank = u64::from((length - 15) / 2);
-                            let position = if config.circular {
-                                (seed.position + prepared.query_length - flank)
-                                    % prepared.query_length
+                            let position = if circular {
+                                (seed.position + query.query_length - flank) % query.query_length
                             } else {
                                 seed.position
                                     .checked_sub(flank)
@@ -530,36 +638,56 @@ impl TraceEngine {
                         }
                     }
                 }
-            }
-            prepared
+                drop(positions);
+                drop(scratch);
+                query
+                    .positions_by_key
+                    .add_nested(nested, query.query_length);
+                query.positions_by_key.directory.shrink_to_fit();
+                query.lookup_identity =
+                    sha256(&[query.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
+                self.record_prepared(query, circular, original_cores);
+                Ok(())
+            })
+    }
+
+    fn record_prepared(&self, prepared: &PreparedQuery, circular: bool, original_cores: usize) {
+        if !self.observed {
+            return;
+        }
+        let executed = prepared
+            .positions_by_key
+            .values()
+            .map(|positions| positions.len() as u64)
+            .sum::<u64>();
+        let associations = if self.index.is_shared() {
+            prepared.positions_by_key.core.len() as u64
+                + possible_context_associations(&prepared.query, circular)
+        } else {
+            executed
+        };
+        let mut stats = self.batch_stats.lock().unwrap();
+        stats.query_context_associations += associations;
+        stats.query_executed_context_associations += executed;
+        stats.query_distinct_context_requests += prepared.positions_by_key.len() as u64;
+        stats.query_sequence_capacity_bytes += prepared.query.capacity() as u64;
+        stats.query_core_capacity_bytes +=
+            (prepared.positions_by_key.core.capacity() * std::mem::size_of::<QuerySeed>()) as u64;
+        stats.query_nested_capacity_bytes +=
+            (prepared.positions_by_key.nested.capacity() * std::mem::size_of::<QuerySeed>()) as u64;
+        stats.query_directory_capacity_bytes += (prepared.positions_by_key.directory.capacity()
+            * std::mem::size_of::<QueryKeyRange>())
+            as u64;
+        if self.index.is_shared() {
+            stats.query_core_occurrences += prepared.positions_by_key.core.len() as u64;
+            stats.query_distinct_cores += original_cores as u64;
+            stats.nested_context_calls += prepared
                 .positions_by_key
-                .add_nested(nested, prepared.query_length);
-            prepared.lookup_identity =
-                sha256(&[prepared.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
+                .iter()
+                .filter(|(key, _)| **key >> 62 == 0)
+                .map(|(_, positions)| positions.len() as u64)
+                .sum::<u64>();
         }
-        if let Some(started) = started {
-            let mut stats = self.batch_stats.lock().unwrap();
-            stats.seed_generation_ns += started.elapsed().as_nanos() as u64;
-            stats.query_distinct_context_requests += prepared.positions_by_key.len() as u64;
-            stats.query_sequence_capacity_bytes += prepared.query.capacity() as u64;
-            stats.query_core_capacity_bytes += (prepared.positions_by_key.core.capacity()
-                * std::mem::size_of::<QuerySeed>())
-                as u64;
-            stats.query_nested_capacity_bytes += (prepared.positions_by_key.nested.capacity()
-                * std::mem::size_of::<QuerySeed>())
-                as u64;
-            stats.query_directory_capacity_bytes += (prepared.positions_by_key.directory.capacity()
-                * std::mem::size_of::<QueryKeyRange>())
-                as u64;
-            for (&key, positions) in prepared.positions_by_key.iter() {
-                stats.query_context_associations += positions.len() as u64;
-                if self.index.is_shared() && key >> 62 == 0 {
-                    stats.query_core_occurrences += positions.len() as u64;
-                    stats.query_distinct_cores += 1;
-                }
-            }
-        }
-        Ok(prepared)
     }
 
     pub(crate) fn search_batch(
@@ -589,17 +717,33 @@ impl TraceEngine {
                 })
                 .collect();
         }
-        let prepared = queries
+        let mut prepared = queries
             .par_iter()
             .zip(circular)
             .enumerate()
             .map(|(ordinal, ((id, sequence), &circular))| {
-                let mut prepared =
-                    self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })?;
+                let mut prepared = if self.index.is_shared() {
+                    prepare_query(
+                        id.as_str(),
+                        sequence,
+                        TraceConfig { circular, ..config },
+                        15,
+                        false,
+                    )?
+                } else {
+                    self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })?
+                };
                 prepared.batch_ordinal = ordinal;
                 Ok::<_, TraceError>(prepared)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if self.index.is_shared() {
+            self.prepare_shared_queries(&mut prepared, circular)?;
+            if let Some(started) = started {
+                self.batch_stats.lock().unwrap().seed_generation_ns +=
+                    started.elapsed().as_nanos() as u64;
+            }
+        }
         let batch = self.prepare_batch(&prepared)?;
         let results = prepared
             .into_par_iter()
@@ -634,7 +778,11 @@ impl TraceEngine {
                 keys.extend(query.positions_by_key.keys().map(|&key| (key, ordinal)));
             }
             let setup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
-            let mut lookups = prepare_lookup(&self.index, keys, prepared.len(), self.observed)?;
+            let cores = prepared
+                .first()
+                .and_then(|query| query.shared_cores.as_deref());
+            let mut lookups =
+                prepare_lookup_with_cores(&self.index, keys, prepared.len(), self.observed, cores)?;
             if let Some(lookups) = &mut lookups {
                 lookups.lookup_ns += setup_ns;
             }
@@ -886,7 +1034,7 @@ impl TraceEngine {
             }
 
             if shared.is_none() {
-                resolved_seeds = self.index.find_seeds_batch(&packed_keys)?;
+                resolved_seeds = prepared.find_seeds(&self.index, &packed_keys)?;
             }
             let index_seeds = &resolved_seeds;
             for ((packed_key, query_seeds), &index_seed) in chunk.iter().copied().zip(index_seeds) {
@@ -1035,7 +1183,7 @@ impl TraceEngine {
             let uncached_seeds = if filter_keys.is_empty() {
                 Vec::new()
             } else {
-                self.index.find_seeds_batch(&filter_keys)?
+                prepared.find_seeds(&self.index, &filter_keys)?
             };
             let index_seeds = packed_keys
                 .iter()
@@ -2140,6 +2288,7 @@ pub(crate) fn prepare_query(
     lookup_identity[32..].copy_from_slice(&[k, u8::from(rescue_k15), u8::from(config.circular)]);
     Ok(PreparedQuery {
         batch_ordinal: 0,
+        shared_cores: None,
         query_id,
         query_length,
         query,
@@ -2163,6 +2312,32 @@ fn query_seeds(
         seeds.extend(rescue);
     }
     Ok(seeds)
+}
+
+fn possible_context_associations(query: &[u8], circular: bool) -> u64 {
+    let mut run = 0usize;
+    let mut prefix = 0usize;
+    let mut count = 0u64;
+    for (position, base) in query.iter().enumerate() {
+        if matches!(base, b'A' | b'C' | b'G' | b'T') {
+            run += 1;
+            if run == position + 1 {
+                prefix = run;
+            }
+            count += u64::from(run >= 21) + u64::from(run >= 31);
+        } else {
+            run = 0;
+        }
+    }
+    if circular {
+        for length in [21, 31] {
+            if query.len() >= length {
+                count += (prefix.min(length - 1) + run.min(length - 1)).saturating_sub(length - 1)
+                    as u64;
+            }
+        }
+    }
+    count
 }
 
 fn extract_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QuerySeed>, TraceError> {
@@ -2434,6 +2609,10 @@ mod tests {
                             }
                         }
                     }
+                    assert_eq!(
+                        possible_context_associations(&prepared.query, circular),
+                        nested.len() as u64
+                    );
                     prepared
                         .positions_by_key
                         .add_nested(nested, prepared.query_length);

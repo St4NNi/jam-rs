@@ -515,6 +515,95 @@ fn retained_core_resolves_contexts_without_another_core_search() {
 }
 
 #[test]
+fn core_first_absence_preserves_complete_linear_and_circular_accounting() {
+    use crate::trace::{SearchCompletion, TraceConfig, TraceEngine};
+
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let shared = directory.path().join("fixture.shared");
+    let query = vec![b'A'; 2000];
+    let config = TraceConfig {
+        use_sketch: false,
+        ..TraceConfig::default()
+    };
+    for (circular, associations, cores) in [(false, 5936, 1986), (true, 6000, 2000)] {
+        let engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
+        let result = engine
+            .search(
+                if circular { "circular" } else { "linear" },
+                &query,
+                TraceConfig { circular, ..config },
+            )
+            .unwrap();
+        assert_eq!(result.completion, SearchCompletion::Complete);
+        assert!(result.metagenomes.is_empty());
+        let stats = engine.batch_stats();
+        assert_eq!(stats.query_context_associations, associations);
+        assert_eq!(stats.query_core_occurrences, cores);
+        assert_eq!(stats.query_executed_context_associations, 0);
+        assert_eq!(stats.nested_context_calls, 0);
+        assert_eq!(stats.query_distinct_cores, 1);
+        assert_eq!(stats.core_lookup_tasks, 1);
+        let reads = engine.shared_read_stats().unwrap();
+        assert_eq!(reads.core_resolutions_present, 0);
+        assert_eq!(reads.core_resolutions_absent, 1);
+        assert_eq!(reads.group_descriptor_inspections, 0);
+        assert_eq!(reads.member_descriptor_inspections, 0);
+        assert_eq!(reads.physical_positions_decoded, 0);
+    }
+}
+
+#[test]
+fn absent_core_batch_work_is_stable_across_worker_counts() {
+    use crate::trace::{TraceConfig, TraceEngine};
+
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let shared = directory.path().join("fixture.shared");
+    let queries = (0..4)
+        .map(|ordinal| (format!("absent-{ordinal}"), vec![b'A'; 2000]))
+        .collect::<Vec<_>>();
+    let config = TraceConfig {
+        use_sketch: false,
+        ..TraceConfig::default()
+    };
+    let mut expected = None;
+    for threads in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let (results, work) = pool.install(|| {
+            let engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
+            let results = engine.search_batch(&queries, config).unwrap();
+            let stats = engine.batch_stats();
+            let reads = engine.shared_read_stats().unwrap();
+            (
+                results,
+                (
+                    stats.core_lookup_tasks,
+                    stats.query_distinct_cores,
+                    stats.query_core_occurrences,
+                    stats.query_context_associations,
+                    stats.query_executed_context_associations,
+                    stats.nested_context_calls,
+                    reads.core_resolutions_present,
+                    reads.core_resolutions_absent,
+                    reads.grouped_core_rows,
+                ),
+            )
+        });
+        assert!(results.iter().all(|result| result.metagenomes.is_empty()));
+        if let Some((expected_results, expected_work)) = &expected {
+            assert_eq!(&results, expected_results, "thread count {threads}");
+            assert_eq!(&work, expected_work, "thread count {threads}");
+        } else {
+            expected = Some((results, work));
+        }
+    }
+}
+
+#[test]
 fn resolved_core_scope_and_short_evidence_are_checked() {
     use crate::trace_batch::prepare_cores;
     use crate::trace_index::{TraceIndex, TraceSeed};
