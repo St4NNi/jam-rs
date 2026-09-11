@@ -23,6 +23,8 @@ pub struct SharedReader {
     member_inspections: AtomicU64,
     core_resolutions_present: AtomicU64,
     core_resolutions_absent: AtomicU64,
+    grouped_core_rows: AtomicU64,
+    grouped_core_rows_without_match: AtomicU64,
     directory_comparison_probes: AtomicU64,
     context_comparisons: AtomicU64,
     references_decoded: AtomicU64,
@@ -38,6 +40,8 @@ pub struct SharedReadStats {
     pub member_descriptor_inspections: u64,
     pub core_resolutions_present: u64,
     pub core_resolutions_absent: u64,
+    pub grouped_core_rows: u64,
+    pub grouped_core_rows_without_match: u64,
     pub directory_comparison_probes: u64,
     pub context_comparisons: u64,
     pub references_decoded: u64,
@@ -144,6 +148,8 @@ impl SharedReader {
             member_inspections: AtomicU64::new(0),
             core_resolutions_present: AtomicU64::new(0),
             core_resolutions_absent: AtomicU64::new(0),
+            grouped_core_rows: AtomicU64::new(0),
+            grouped_core_rows_without_match: AtomicU64::new(0),
             directory_comparison_probes: AtomicU64::new(0),
             context_comparisons: AtomicU64::new(0),
             references_decoded: AtomicU64::new(0),
@@ -209,6 +215,10 @@ impl SharedReader {
             member_descriptor_inspections: self.member_inspections.load(Ordering::Relaxed),
             core_resolutions_present: self.core_resolutions_present.load(Ordering::Relaxed),
             core_resolutions_absent: self.core_resolutions_absent.load(Ordering::Relaxed),
+            grouped_core_rows: self.grouped_core_rows.load(Ordering::Relaxed),
+            grouped_core_rows_without_match: self
+                .grouped_core_rows_without_match
+                .load(Ordering::Relaxed),
             directory_comparison_probes: self.directory_comparison_probes.load(Ordering::Relaxed),
             context_comparisons: self.context_comparisons.load(Ordering::Relaxed),
             references_decoded: self.references_decoded.load(Ordering::Relaxed),
@@ -557,12 +567,15 @@ impl SharedReader {
             .checked_add(middle)
             .ok_or(SharedError::Invalid("core ordinal"))?;
         let row = self.core_row(core_ordinal)?;
+        self.observe(&self.grouped_core_rows, 1);
         let lower =
             self.request_core_partition(keys, order, request_start, request_end, row.core, false);
         let upper = self.request_core_partition(keys, order, lower, request_end, row.core, true);
         if lower < upper {
             self.observe(&self.core_resolutions_present, 1);
             self.find_contexts_many(keys, order, groups, core_ordinal, row, lower, upper)?;
+        } else {
+            self.observe(&self.grouped_core_rows_without_match, 1);
         }
         self.find_cores_many(
             keys,
