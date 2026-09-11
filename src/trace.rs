@@ -146,6 +146,10 @@ pub struct TraceBatchStats {
     pub query_context_associations: u64,
     pub query_distinct_context_requests: u64,
     pub query_distinct_cores: u64,
+    pub query_sequence_capacity_bytes: u64,
+    pub query_core_capacity_bytes: u64,
+    pub query_nested_capacity_bytes: u64,
+    pub query_directory_capacity_bytes: u64,
     pub emitted_anchor_associations: u64,
     pub restored_query_context_requests: u64,
     pub context_reuse_histogram_log2: [u64; 16],
@@ -173,7 +177,7 @@ pub(crate) struct PreparedQuery {
     pub(crate) query_id: String,
     pub(crate) query_length: u64,
     query: Vec<u8>,
-    positions_by_key: BTreeMap<u64, Vec<QuerySeed>>,
+    positions_by_key: QueryPositions,
     lookup_identity: [u8; 32],
     batch_ordinal: usize,
 }
@@ -470,6 +474,15 @@ impl TraceEngine {
         self.search_prepared(prepared, config, None)
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub fn benchmark_prepare(
+        &self,
+        sequence: &[u8],
+        config: TraceConfig,
+    ) -> Result<impl Sized, TraceError> {
+        self.prepare("benchmark", sequence, config)
+    }
+
     fn prepare(
         &self,
         query_id: impl Into<String>,
@@ -518,13 +531,9 @@ impl TraceEngine {
                     }
                 }
             }
-            for seed in nested {
-                prepared
-                    .positions_by_key
-                    .entry(seed.packed_key)
-                    .or_default()
-                    .push(seed);
-            }
+            prepared
+                .positions_by_key
+                .add_nested(nested, prepared.query_length);
             prepared.lookup_identity =
                 sha256(&[prepared.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
         }
@@ -532,7 +541,17 @@ impl TraceEngine {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.seed_generation_ns += started.elapsed().as_nanos() as u64;
             stats.query_distinct_context_requests += prepared.positions_by_key.len() as u64;
-            for (&key, positions) in &prepared.positions_by_key {
+            stats.query_sequence_capacity_bytes += prepared.query.capacity() as u64;
+            stats.query_core_capacity_bytes += (prepared.positions_by_key.core.capacity()
+                * std::mem::size_of::<QuerySeed>())
+                as u64;
+            stats.query_nested_capacity_bytes += (prepared.positions_by_key.nested.capacity()
+                * std::mem::size_of::<QuerySeed>())
+                as u64;
+            stats.query_directory_capacity_bytes += (prepared.positions_by_key.directory.capacity()
+                * std::mem::size_of::<QueryKeyRange>())
+                as u64;
+            for (&key, positions) in prepared.positions_by_key.iter() {
                 stats.query_context_associations += positions.len() as u64;
                 if self.index.is_shared() && key >> 62 == 0 {
                     stats.query_core_occurrences += positions.len() as u64;
@@ -1647,11 +1666,123 @@ pub(crate) fn compare_candidates(left: &Candidate, right: &Candidate) -> std::cm
         .then_with(|| left.name.cmp(&right.name))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct QuerySeed {
     packed_key: u64,
     position: u64,
     canonical_orientation: bool,
+}
+
+struct QueryKeyRange {
+    key: u64,
+    first: usize,
+    count: usize,
+}
+
+struct QueryPositions {
+    core: Vec<QuerySeed>,
+    nested: Vec<QuerySeed>,
+    directory: Vec<QueryKeyRange>,
+}
+
+impl QueryPositions {
+    fn new(mut core: Vec<QuerySeed>) -> Self {
+        core.sort_unstable_by_key(|seed| {
+            (seed.packed_key, seed.position, seed.canonical_orientation)
+        });
+        let mut first = 0;
+        let directory = core
+            .chunk_by(|left, right| left.packed_key == right.packed_key)
+            .map(|group| {
+                let entry = QueryKeyRange {
+                    key: group[0].packed_key,
+                    first,
+                    count: group.len(),
+                };
+                first += group.len();
+                entry
+            })
+            .collect();
+        Self {
+            core,
+            nested: Vec::new(),
+            directory,
+        }
+    }
+
+    fn add_nested(&mut self, mut nested: Vec<QuerySeed>, query_length: u64) {
+        nested.sort_unstable_by_key(|seed| {
+            let flank = if seed.packed_key >> 62 == 1 { 3 } else { 8 };
+            let position = seed.position + flank;
+            let core_position = if position >= query_length {
+                position - query_length
+            } else {
+                position
+            };
+            (seed.packed_key, core_position, seed.canonical_orientation)
+        });
+        let mut first = self.core.len();
+        self.directory.extend(
+            nested
+                .chunk_by(|left, right| left.packed_key == right.packed_key)
+                .map(|group| {
+                    let entry = QueryKeyRange {
+                        key: group[0].packed_key,
+                        first,
+                        count: group.len(),
+                    };
+                    first += group.len();
+                    entry
+                }),
+        );
+        self.nested = nested;
+    }
+
+    fn positions(&self, range: &QueryKeyRange) -> &[QuerySeed] {
+        if range.first < self.core.len() {
+            &self.core[range.first..range.first + range.count]
+        } else {
+            let first = range.first - self.core.len();
+            &self.nested[first..first + range.count]
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.directory.len()
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &u64> {
+        self.directory.iter().map(|entry| &entry.key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &[QuerySeed]> {
+        self.directory.iter().map(|entry| self.positions(entry))
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&u64, &[QuerySeed])> {
+        self.directory
+            .iter()
+            .map(|entry| (&entry.key, self.positions(entry)))
+    }
+
+    fn get(&self, key: &u64) -> Option<&[QuerySeed]> {
+        self.directory
+            .binary_search_by_key(key, |entry| entry.key)
+            .ok()
+            .map(|ordinal| self.positions(&self.directory[ordinal]))
+    }
+
+    fn contains_key(&self, key: &u64) -> bool {
+        self.get(key).is_some()
+    }
+}
+
+impl std::ops::Index<&u64> for QueryPositions {
+    type Output = [QuerySeed];
+
+    fn index(&self, key: &u64) -> &Self::Output {
+        self.get(key).expect("query key")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2002,12 +2133,8 @@ pub(crate) fn prepare_query(
     }
     let query_length =
         u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
-    let mut seeds = query_seeds(&query, k, rescue_k15, config.circular)?;
-    seeds.sort_by_key(|seed| seed.packed_key);
-    let positions_by_key = seeds
-        .chunk_by(|left, right| left.packed_key == right.packed_key)
-        .map(|group| (group[0].packed_key, group.to_vec()))
-        .collect();
+    let positions_by_key =
+        QueryPositions::new(query_seeds(&query, k, rescue_k15, config.circular)?);
     let mut lookup_identity = [0; 35];
     lookup_identity[..32].copy_from_slice(&sha256(&query));
     lookup_identity[32..].copy_from_slice(&[k, u8::from(rescue_k15), u8::from(config.circular)]);
@@ -2042,15 +2169,8 @@ fn extract_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QueryS
     if query.len() < usize::from(k) {
         return Ok(Vec::new());
     }
-    let mut sequence = query.to_vec();
-    if circular {
-        sequence.extend_from_slice(&query[..usize::from(k) - 1]);
-    }
     let mut seeds = Vec::new();
-    for (position, kmer, orientation) in sequence.bit_kmers(k, true) {
-        if position >= query.len() {
-            break;
-        }
+    for (position, kmer, orientation) in query.bit_kmers(k, true) {
         let seed = QuerySeed {
             packed_key: kmer.0,
             position: u64::try_from(position)
@@ -2058,6 +2178,20 @@ fn extract_query_seeds(query: &[u8], k: u8, circular: bool) -> Result<Vec<QueryS
             canonical_orientation: orientation,
         };
         seeds.push(seed);
+    }
+    if circular {
+        let flank = usize::from(k) - 1;
+        let start = query.len() - flank;
+        let mut boundary = Vec::with_capacity(2 * flank);
+        boundary.extend_from_slice(&query[start..]);
+        boundary.extend_from_slice(&query[..flank]);
+        for (position, kmer, orientation) in boundary.bit_kmers(k, true) {
+            seeds.push(QuerySeed {
+                packed_key: kmer.0,
+                position: (start + position) as u64,
+                canonical_orientation: orientation,
+            });
+        }
     }
     Ok(seeds)
 }
@@ -2227,6 +2361,106 @@ mod tests {
         assert_eq!(available.load(Ordering::Relaxed), 10);
     }
 
+    #[test]
+    fn flat_query_associations_match_vector_groups_and_circular_extension() {
+        for length in [2_000, 64_000, 250_000] {
+            for variant in 0..3 {
+                let mut state = 7u64;
+                let input = (0..length)
+                    .map(|position| {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        match variant {
+                            0 => b"ACGTTGCA"[position % 8],
+                            1 => b"ACGT"[(state & 3) as usize],
+                            _ if position % 97 < 20 => b'N',
+                            _ => b"acgt"[(state & 3) as usize],
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for circular in [false, true] {
+                    let config = TraceConfig {
+                        circular,
+                        ..TraceConfig::default()
+                    };
+                    let mut prepared = prepare_query("flat", &input, config, 15, false).unwrap();
+                    let mut extended = prepared.query.clone();
+                    if circular {
+                        extended.extend_from_slice(&prepared.query[..14]);
+                    }
+                    let mut seeds = extended
+                        .bit_kmers(15, true)
+                        .take_while(|(position, _, _)| *position < input.len())
+                        .map(|(position, key, reverse)| QuerySeed {
+                            packed_key: key.0,
+                            position: position as u64,
+                            canonical_orientation: reverse,
+                        })
+                        .collect::<Vec<_>>();
+                    seeds.sort_by_key(|seed| seed.packed_key);
+                    let mut reference = seeds
+                        .chunk_by(|left, right| left.packed_key == right.packed_key)
+                        .map(|group| (group[0].packed_key, group.to_vec()))
+                        .collect::<BTreeMap<_, _>>();
+                    let mut nested = Vec::new();
+                    for seed in &seeds {
+                        let context = crate::shared_seed::context_seed(
+                            &prepared.query,
+                            seed.position as usize,
+                            seed.packed_key as u32,
+                            seed.canonical_orientation,
+                            circular,
+                        )
+                        .unwrap();
+                        for length in [21, 31] {
+                            if let Some(key) = context.key(length) {
+                                let flank = u64::from((length - 15) / 2);
+                                let association = QuerySeed {
+                                    packed_key: key.packed().unwrap(),
+                                    position: if circular {
+                                        (seed.position + prepared.query_length - flank)
+                                            % prepared.query_length
+                                    } else {
+                                        seed.position - flank
+                                    },
+                                    canonical_orientation: seed.canonical_orientation,
+                                };
+                                reference
+                                    .entry(association.packed_key)
+                                    .or_default()
+                                    .push(association);
+                                nested.push(association);
+                            }
+                        }
+                    }
+                    prepared
+                        .positions_by_key
+                        .add_nested(nested, prepared.query_length);
+                    assert_eq!(prepared.positions_by_key.len(), reference.len());
+                    for ((actual_key, actual), (expected_key, expected)) in
+                        prepared.positions_by_key.iter().zip(&reference)
+                    {
+                        assert_eq!(actual_key, expected_key);
+                        assert_eq!(actual.len(), expected.len());
+                        assert!(
+                            actual == expected,
+                            "length={length} variant={variant} circular={circular} first_difference={:?}",
+                            actual.iter().zip(expected).position(|(a, b)| a != b)
+                        );
+                    }
+                    println!(
+                        "flat length={length} variant={variant} circular={circular} query_capacity={} core_capacity={} nested_capacity={} directory_capacity={}",
+                        prepared.query.capacity(),
+                        prepared.positions_by_key.core.capacity(),
+                        prepared.positions_by_key.nested.capacity(),
+                        prepared.positions_by_key.directory.capacity()
+                    );
+                }
+            }
+        }
+    }
+
     fn sequence() -> String {
         let mut state = 7u64;
         (0..128)
@@ -2355,7 +2589,7 @@ mod tests {
 
         let mut scalar_frequencies = Vec::new();
         let mut scalar_hits = BTreeMap::<MetagenomeId, u64>::new();
-        for (&packed_key, query_seeds) in &prepared.positions_by_key {
+        for (&packed_key, query_seeds) in prepared.positions_by_key.iter() {
             let Some(seed) = engine.index.find_seed(packed_key).unwrap() else {
                 continue;
             };
@@ -2504,7 +2738,7 @@ mod tests {
             .candidate_census(&prepared, direct_config, 0)
             .unwrap();
         let mut explicit_hits = HashMap::<MetagenomeId, u64>::new();
-        for (&packed_key, query_seeds) in &prepared.positions_by_key {
+        for (&packed_key, query_seeds) in prepared.positions_by_key.iter() {
             let Some(seed) = engine.index.find_seed(packed_key).unwrap() else {
                 continue;
             };

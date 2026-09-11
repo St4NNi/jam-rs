@@ -30,6 +30,9 @@ harness = false
 name = "jam_rs"
 path = "src/lib.rs"
 
+[features]
+bench-internals = []
+
 [dependencies]
 anyhow = "1.0.102"
 dashmap = "6.1.0"
