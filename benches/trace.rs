@@ -6,6 +6,8 @@ use jam_rs::owner_postings;
 use jam_rs::shared_reader::SharedReader;
 use jam_rs::shared_seed::{HAS_CONTEXT_21, HAS_CONTEXT_31, SharedKey, select_shared_seeds};
 use jam_rs::shared_writer::build_shared_index;
+#[cfg(feature = "bench-internals")]
+use jam_rs::trace::{TraceConfig, TraceEngine};
 use noodles_bgzf::{self as bgzf, gzi};
 use std::fs::File;
 use std::hint::black_box;
@@ -13,7 +15,10 @@ use std::io::Write;
 use std::time::Duration;
 
 fn sequence(length: usize) -> Vec<u8> {
-    let mut state = 7u64;
+    sequence_from_state(length, 7)
+}
+
+fn sequence_from_state(length: usize, mut state: u64) -> Vec<u8> {
     (0..length)
         .map(|_| {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -528,6 +533,53 @@ fn shared_core_absent(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "bench-internals")]
+fn shared_prepare(criterion: &mut Criterion) {
+    let (directory, _reader, _) = shared_lookup_fixture();
+    let engine = TraceEngine::open_shared(directory.path().join("target.shared"), None).unwrap();
+    let present_2k = sequence(2_000);
+    let absent_2k = sequence_from_state(2_000, 101);
+    let present_64k = sequence(64_000);
+    let mut mixed_64k = sequence(32_000);
+    mixed_64k.extend(sequence_from_state(32_000, 103));
+    let absent_250k = sequence_from_state(250_000, 107);
+    let mut mixed_250k = sequence(64_000);
+    mixed_250k.extend(sequence_from_state(186_000, 109));
+    let workloads = [
+        ("2kb/present/linear", present_2k, false),
+        ("2kb/absent/linear", absent_2k, false),
+        ("64kb/mixed/linear", mixed_64k, false),
+        ("64kb/present/circular", present_64k, true),
+        ("250kb/absent/linear", absent_250k, false),
+        ("250kb/mixed/circular", mixed_250k, true),
+    ];
+    let mut group = criterion.benchmark_group("shared_prepare");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, query, circular) in workloads {
+        let config = TraceConfig {
+            circular,
+            use_sketch: false,
+            ..TraceConfig::default()
+        };
+        engine.benchmark_prepare(&query, config).unwrap();
+        group.throughput(Throughput::Bytes(query.len() as u64));
+        group.bench_function(name, |bencher| {
+            bencher.iter(|| {
+                engine
+                    .benchmark_prepare(black_box(&query), black_box(config))
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_prepare(_: &mut Criterion) {}
+
 fn shared_packed(criterion: &mut Criterion) {
     let (directory, reference, workloads) = shared_lookup_fixture();
     let path = directory.path().join("packed.shared");
@@ -592,6 +644,7 @@ criterion_group!(
     owner_postings,
     shared_lookup,
     shared_core_absent,
+    shared_prepare,
     shared_packed
 );
 criterion_main!(benches);
