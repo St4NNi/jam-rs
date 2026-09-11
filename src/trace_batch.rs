@@ -204,6 +204,7 @@ pub(crate) fn lookup_bytes(index: &TraceIndex, requests: usize, queries: usize) 
         .checked_add(queries.checked_mul(std::mem::size_of::<Range<usize>>())?)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_lookup(
     index: &TraceIndex,
     requests: Vec<(u64, usize)>,
