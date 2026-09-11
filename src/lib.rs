@@ -32,6 +32,7 @@ pub mod range_source;
 pub mod reader;
 mod shared_file;
 pub mod shared_format;
+pub mod shared_pack;
 pub mod shared_reader;
 pub mod shared_seed;
 #[cfg(test)]
@@ -172,6 +173,14 @@ pub fn run() -> Result<()> {
         } => {
             let stats =
                 shared_writer::build_shared_index(reference_index, output, minimizer_window)?;
+            if !cli.silent {
+                println!("{}", serde_json::to_string(&stats)?);
+            }
+            Ok(())
+        }
+
+        Commands::SharedRepack { input, output } => {
+            let stats = shared_pack::repack_shared_index(input, output)?;
             if !cli.silent {
                 println!("{}", serde_json::to_string(&stats)?);
             }

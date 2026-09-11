@@ -689,3 +689,250 @@ fn resealed_malformed_rows_fail_scalar_and_grouped_lookup() {
         Err(SharedError::Invalid("group row"))
     ));
 }
+
+#[test]
+fn packed_groups_preserve_contexts_counts_and_late_direct_access() {
+    for preceding in [0, 16_384] {
+        let (directory, reference, _) = fixture(preceding);
+        let source = directory.path().join("fixture.shared");
+        let packed = directory.path().join("packed.shared");
+        let stats = crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+        assert!(stats.build.index_bytes <= std::fs::metadata(&source).unwrap().len());
+        assert_eq!(stats.logical_references, u64::from(preceding) * 2 + 9);
+        let reader = SharedReader::open_observed(&packed).unwrap();
+        reader.verify_checksum().unwrap();
+        for key in [
+            SharedKey::core(TARGET_CORE),
+            SharedKey {
+                core: TARGET_CORE,
+                context: TARGET_CONTEXT >> 20,
+                length: 21,
+            },
+            SharedKey {
+                core: TARGET_CORE,
+                context: TARGET_CONTEXT,
+                length: 31,
+            },
+            SharedKey::core(TARGET_CORE + 1),
+            SharedKey::core(CORE_LIMIT - 1),
+        ] {
+            assert_eq!(
+                group_evidence(&reader, reader.find(key).unwrap()),
+                group_evidence(&reference, reference.find(key).unwrap())
+            );
+        }
+        let before = reader.stats();
+        let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+        assert_eq!(
+            reader.stats().physical_positions_decoded,
+            before.physical_positions_decoded
+        );
+        let member = reader.member(group, 2).unwrap().unwrap();
+        let before = reader.stats();
+        let last = reader.occurrence_block(group, member, 0, 1).unwrap();
+        assert_eq!((last[0].contig_id, last[0].position), (2, 300));
+        assert_eq!(reader.stats().references_decoded, before.references_decoded);
+        assert_eq!(
+            reader.stats().physical_positions_decoded - before.physical_positions_decoded,
+            1
+        );
+        assert!(crate::shared_pack::repack_shared_index(&source, &packed).is_err());
+        assert!(
+            crate::shared_pack::repack_shared_index(&packed, directory.path().join("again"))
+                .is_err()
+        );
+    }
+    let (directory, source) = grouped_lookup_fixture(4096);
+    let packed = directory.path().join("packed.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    let reference = SharedReader::open(&source).unwrap();
+    let reader = SharedReader::open(&packed).unwrap();
+    let keys = [
+        SharedKey::core(TARGET_CORE),
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT ^ 1,
+            length: 31,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT ^ 2,
+            length: 31,
+        },
+        SharedKey::core(CORE_LIMIT - 1),
+    ];
+    for chunk in [1, 3, 6] {
+        for keys in keys.chunks(chunk) {
+            let actual = reader.find_many(keys).unwrap();
+            for (&key, group) in keys.iter().zip(actual) {
+                assert_eq!(
+                    group_evidence(&reader, group),
+                    group_evidence(&reference, reference.find(key).unwrap())
+                );
+            }
+        }
+    }
+    let retained = reader.find(keys[0]).unwrap().unwrap();
+    mutate_and_resign(&packed, |bytes, header| {
+        let at = header.section(Section::Occurrences).offset as usize;
+        bytes[at + 16] ^= 1;
+    });
+    assert!(matches!(
+        reader.members(retained),
+        Err(SharedError::SourceChanged)
+    ));
+}
+
+#[test]
+fn packed_noninitial_groups_and_payloads_reject_corruption() {
+    for group_corruption in [false, true] {
+        let (directory, source, _) = fixture(16_384);
+        drop(source);
+        let original = directory.path().join("fixture.shared");
+        let packed = directory.path().join("packed.shared");
+        crate::shared_pack::repack_shared_index(&original, &packed).unwrap();
+        mutate_and_resign(&packed, |bytes, header| {
+            if group_corruption {
+                let groups = header.section(Section::Groups);
+                let at =
+                    (groups.offset + groups.length - header.row_bytes(Section::Groups)) as usize;
+                assert!(at > groups.offset as usize + 4096);
+                bytes[at + 4] = 0xff;
+            } else {
+                let occurrences = header.section(Section::Occurrences);
+                let at = (occurrences.offset + occurrences.length - 24) as usize;
+                assert!(at > occurrences.offset as usize + 4096);
+                bytes[at + 12] = 1;
+            }
+        });
+        let reader = SharedReader::open(&packed).unwrap();
+        let key = SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        };
+        if group_corruption {
+            assert!(reader.find_many(&[key]).is_err());
+        } else {
+            let group = reader.find_many(&[key]).unwrap()[0].unwrap();
+            let member = reader.member(group, 2).unwrap().unwrap();
+            assert!(reader.member_occurrences(group, member).is_err());
+        }
+    }
+}
+
+#[test]
+fn packed_pilot_shaped_lists_preserve_every_synthetic_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let metadata = directory.path().join("metadata.jidx");
+    let mut writer = JidxWriter::new(
+        &metadata,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [41; 32],
+            manifest_sha256: [42; 32],
+        },
+    )
+    .unwrap();
+    for id in 0..12 {
+        writer
+            .begin_metagenome(MetagenomeInput {
+                name: format!("sample-{id:02}"),
+                bgzf_uri: format!("sample-{id:02}.bgz"),
+                bgzf_bytes: 100,
+                bgzf_sha256: [43; 32],
+                gzi: vec![0; 8],
+            })
+            .unwrap();
+        writer
+            .begin_contig(ContigInput {
+                name: format!("contig-{id}"),
+                length: 100_000,
+                fasta_offset: 4,
+                line_bases: 80,
+                line_width: 81,
+            })
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    let reference = JidxReader::open(&metadata).unwrap();
+    let mut seeds = Vec::new();
+    let mut keys = Vec::new();
+    // 21.7% repeated cores; pilot common bins, with its rare 3282-placement tail oversampled.
+    for core in 0..5000u32 {
+        let count = if core >= 1085 {
+            1
+        } else if core == 0 {
+            3282
+        } else {
+            match core % 1000 {
+                0..=699 => 2,
+                700..=894 => 3,
+                895..=991 => 4,
+                _ => 8,
+            }
+        };
+        for ordinal in 0..count {
+            let member = (core + ordinal % 3) % 12;
+            let mut seed = SharedSeed {
+                core,
+                context: (((core * 17 + ordinal * 101) & 4095) << 20)
+                    | ((core * 31 + ordinal * 7) & 0xfffff),
+                flags: 6 | (ordinal & 1) as u8,
+                position: 100 + u64::from(ordinal),
+            };
+            if (core + ordinal) % 250 == 0 {
+                seed.context = 0;
+                seed.flags &= 1;
+            } else if (core + ordinal) % 100 == 0 {
+                seed.context &= !0xfffff;
+                seed.flags &= 3;
+            }
+            for length in [15, 21, 31] {
+                if let Some(key) = seed.key(length) {
+                    keys.push(key);
+                }
+            }
+            seeds.push(IndexedSeed {
+                member,
+                contig: member,
+                seed,
+            });
+        }
+    }
+    let source = directory.path().join("source.shared");
+    let packed = directory.path().join("packed.shared");
+    let original = write_shared_index(&reference, &source, 64, &mut seeds).unwrap();
+    let stats = crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    assert_eq!(original.singleton_cores, 3915);
+    assert_eq!(stats.build.core_count, 5000);
+    assert_eq!(original.occurrence_references, stats.logical_references);
+    assert_eq!(original.member_descriptors, stats.logical_memberships);
+    assert!(stats.inline_member_groups > 0 && stats.direct_placement_members > 0);
+    assert!(stats.build.index_bytes < original.index_bytes);
+    keys.sort_unstable_by_key(|key| (key.core, key.length, key.context));
+    keys.dedup();
+    let baseline = SharedReader::open(&source).unwrap();
+    let reader = SharedReader::open(&packed).unwrap();
+    for chunk in keys.chunks(127) {
+        let groups = reader.find_many(chunk).unwrap();
+        for (&key, actual) in chunk.iter().zip(groups) {
+            assert_eq!(
+                group_evidence(&reader, actual),
+                group_evidence(&baseline, baseline.find(key).unwrap())
+            );
+        }
+    }
+}

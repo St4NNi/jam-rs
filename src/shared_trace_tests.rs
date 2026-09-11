@@ -262,6 +262,11 @@ fn without_read_accounting(mut result: crate::trace::TraceResult) -> crate::trac
 
 #[test]
 fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
+    shared_trace_fixture(false);
+    shared_trace_fixture(true);
+}
+
+fn shared_trace_fixture(packed: bool) {
     let directory = tempfile::tempdir().unwrap();
     let exact_target = dna(11, 800);
     let mixed_target = dna(29, 800);
@@ -307,6 +312,13 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     writer.finish().unwrap();
     let shared = directory.path().join("targets.shared");
     let stats = build_shared_index(&reference, &shared, 64).unwrap();
+    let shared = if packed {
+        let output = directory.path().join("targets.packed.shared");
+        crate::shared_pack::repack_shared_index(&shared, &output).unwrap();
+        output
+    } else {
+        shared
+    };
     assert_eq!(stats.source_bases, 6_320);
     std::fs::remove_file(&reference).unwrap();
     assert!(!reference.exists());

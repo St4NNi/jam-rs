@@ -121,6 +121,15 @@ pub enum Commands {
         minimizer_window: u16,
     },
 
+    /// Pack an existing shared-anchor index without changing its anchor population
+    #[command(arg_required_else_help = true)]
+    SharedRepack {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
     /// Trace query sequences through a shard or collection
     #[command(arg_required_else_help = true)]
     Trace {
