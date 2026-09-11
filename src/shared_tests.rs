@@ -203,6 +203,136 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
 }
 
 #[test]
+fn full_lookup_work_is_stable_across_worker_counts() {
+    use crate::trace_index::TraceIndex;
+
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let path = directory.path().join("fixture.shared");
+    let present = [
+        SharedKey::core(TARGET_CORE),
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        },
+    ];
+    let mut requests = (0..=65_536)
+        .map(|context| {
+            (
+                SharedKey {
+                    core: TARGET_CORE,
+                    context,
+                    length: 31,
+                }
+                .packed()
+                .unwrap(),
+                0,
+            )
+        })
+        .collect::<Vec<_>>();
+    requests.extend(
+        present
+            .iter()
+            .flat_map(|key| [0, 1].map(|query| (key.packed().unwrap(), query))),
+    );
+    let mut expected = None;
+    for threads in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let actual = pool.install(|| {
+            let index = TraceIndex::Shared(Box::new(SharedReader::open_observed(&path).unwrap()));
+            let lookup = crate::trace_batch::prepare_lookup(&index, requests.clone(), 2, true)
+                .unwrap()
+                .unwrap();
+            let entries = lookup
+                .entries
+                .iter()
+                .map(|(key, seed)| (*key, seed.unwrap().document_frequency()))
+                .collect::<Vec<_>>();
+            let associations = lookup
+                .query_ranges
+                .iter()
+                .map(|range| {
+                    lookup.query_entries[range.clone()]
+                        .iter()
+                        .map(|&ordinal| lookup.entries[ordinal as usize].0)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let postings = lookup
+                .postings
+                .iter()
+                .map(|(&key, posting)| {
+                    let documents = posting
+                        .documents
+                        .iter()
+                        .map(|document| (document.metagenome_id(), document.occurrence_count()))
+                        .collect::<Vec<_>>();
+                    let occurrences = posting
+                        .occurrences
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .map(|value| {
+                                    (value.contig_id, value.position, value.canonical_orientation)
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>();
+                    (key, documents, occurrences)
+                })
+                .collect::<Vec<_>>();
+            let reads = match &index {
+                TraceIndex::Shared(reader) => reader.stats(),
+                _ => unreachable!(),
+            };
+            (
+                lookup.lookup_tasks,
+                lookup.lookup_plan_hash,
+                lookup.split_core_resolutions,
+                lookup.attempted_keys,
+                entries,
+                associations,
+                postings,
+                (
+                    reads.core_key_inspections,
+                    reads.core_descriptor_inspections,
+                    reads.group_descriptor_inspections,
+                    reads.member_descriptor_inspections,
+                    reads.core_resolutions_present,
+                    reads.core_resolutions_absent,
+                    reads.grouped_core_rows,
+                    reads.references_decoded,
+                    reads.physical_positions_decoded,
+                ),
+            )
+        });
+        assert_eq!(actual.0, 3);
+        assert_ne!(actual.1, 0);
+        assert_eq!(actual.2, 2);
+        assert_eq!(actual.3, 65_540);
+        assert_eq!(actual.4.len(), 3);
+        assert_eq!(actual.5.iter().map(Vec::len).collect::<Vec<_>>(), [3, 3]);
+        if let Some(expected) = &expected {
+            assert_eq!(&actual, expected, "thread count {threads}");
+        } else {
+            expected = Some(actual);
+        }
+    }
+}
+
+#[test]
 fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
     for preceding in [16u32, 4096, 16_384] {
         let (_directory, reader, build) = fixture(preceding);

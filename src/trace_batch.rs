@@ -28,6 +28,7 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) context_reuse_histogram_log2: [u64; 16],
     pub(crate) context_occurrence_histogram_log2: [u64; 16],
     pub(crate) lookup_tasks: usize,
+    pub(crate) lookup_plan_hash: u64,
     pub(crate) lookup_dispatch_ns: u64,
     pub(crate) lookup_parallel_ns: u64,
     pub(crate) lookup_compute_ns: u64,
@@ -169,7 +170,32 @@ const QUERY_LOOKUP_ROW_BYTES: usize = std::mem::size_of::<(u64, usize)>()
     + std::mem::size_of::<(u64, Option<TraceSeed>)>();
 
 fn lookup_chunk_keys() -> usize {
-    (SEED_LOOKUP_BATCH_KEYS / rayon::current_num_threads()).max(1)
+    SEED_LOOKUP_BATCH_KEYS
+}
+
+fn lookup_ranges(keys: &[u64]) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
+    let mut start = 0;
+    let core = |key| crate::shared_seed::SharedKey::unpack(key).map(|key| key.core);
+    std::iter::from_fn(move || {
+        if start == keys.len() {
+            return None;
+        }
+        let mut end = (start + lookup_chunk_keys()).min(keys.len());
+        let mut split = false;
+        if end < keys.len() && core(keys[end - 1]) == core(keys[end]) {
+            let boundary = end;
+            while end > start && core(keys[end - 1]) == core(keys[boundary]) {
+                end -= 1;
+            }
+            if end == start {
+                end = boundary;
+                split = true;
+            }
+        }
+        let range = start..end;
+        start = end;
+        Some((range, split))
+    })
 }
 
 fn lookup_workspace(index: &TraceIndex, requests: usize) -> Option<usize> {
@@ -281,6 +307,7 @@ pub(crate) fn prepare_lookup_with_cores(
     };
     let mut split_core_resolutions = 0;
     let mut lookup_tasks = 0;
+    let mut lookup_plan_hash = 0xcbf2_9ce4_8422_2325u64;
     let mut lookup_dispatch_ns = 0;
     let mut lookup_parallel_ns = 0;
     let mut lookup_compute_ns = 0;
@@ -295,20 +322,17 @@ pub(crate) fn prepare_lookup_with_cores(
         tasks
             .try_reserve_exact(keys.len().div_ceil(limit) * 2 + 1)
             .map_err(|_| TraceError::Invalid("lookup task allocation"))?;
-        let mut start = 0;
-        while start < keys.len() {
-            let mut end = (start + limit).min(keys.len());
-            if end < keys.len() && core(keys[end - 1]) == core(keys[end]) {
-                let boundary = end;
-                while end > start && core(keys[end - 1]) == core(keys[boundary]) {
-                    end -= 1;
-                }
-                if end == start {
-                    end = boundary;
-                    split_core_resolutions += 1;
+        for (range, split) in lookup_ranges(&keys) {
+            split_core_resolutions += u64::from(split);
+            let chunk = &keys[range];
+            if observed {
+                for word in [chunk.len() as u64, u64::from(split)]
+                    .into_iter()
+                    .chain(chunk.iter().copied())
+                {
+                    lookup_plan_hash = (lookup_plan_hash ^ word).wrapping_mul(0x100_0000_01b3);
                 }
             }
-            let chunk = &keys[start..end];
             let cores = 1 + chunk
                 .windows(2)
                 .filter(|pair| core(pair[0]) != core(pair[1]))
@@ -318,7 +342,6 @@ pub(crate) fn prepare_lookup_with_cores(
             let (slots, tail) = remaining.split_at_mut(chunk.len());
             remaining = tail;
             tasks.push((weight, chunk, slots));
-            start = end;
         }
         tasks.sort_unstable_by_key(|task| std::cmp::Reverse(task.0));
         lookup_tasks = tasks.len();
@@ -514,6 +537,7 @@ pub(crate) fn prepare_lookup_with_cores(
         context_reuse_histogram_log2,
         context_occurrence_histogram_log2,
         lookup_tasks,
+        lookup_plan_hash: if observed { lookup_plan_hash } else { 0 },
         lookup_dispatch_ns,
         lookup_parallel_ns,
         lookup_compute_ns,
@@ -521,4 +545,49 @@ pub(crate) fn prepare_lookup_with_cores(
         lookup_dispatch_to_start_ns,
         _reservation: reservation,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lookup_task_ranges_are_identical_across_workers_and_bound_heavy_cores() {
+        let keys = [(1, 20_000), (2, 40_000), (3, 20_000)]
+            .into_iter()
+            .flat_map(|(core, count)| {
+                (0..count).map(move |context| {
+                    crate::shared_seed::SharedKey {
+                        core,
+                        context,
+                        length: 31,
+                    }
+                    .packed()
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected = vec![
+            (0..20_000, false),
+            (20_000..52_768, true),
+            (52_768..80_000, false),
+        ];
+        for workers in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let actual = pool.install(|| lookup_ranges(&keys).collect::<Vec<_>>());
+            assert_eq!(actual, expected);
+            assert_eq!(
+                actual.iter().map(|(range, _)| range.len()).sum::<usize>(),
+                keys.len()
+            );
+            assert!(
+                actual
+                    .iter()
+                    .all(|(range, _)| range.len() <= SEED_LOOKUP_BATCH_KEYS)
+            );
+        }
+    }
 }

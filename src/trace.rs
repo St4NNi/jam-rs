@@ -166,6 +166,7 @@ pub struct TraceBatchStats {
     pub context_reuse_histogram_log2: [u64; 16],
     pub context_occurrence_histogram_log2: [u64; 16],
     pub lookup_tasks: u64,
+    pub lookup_plan_hash: u64,
     pub lookup_dispatch_ns: u64,
     pub lookup_parallel_ns: u64,
     pub lookup_compute_ns: u64,
@@ -509,6 +510,24 @@ impl TraceEngine {
         self.prepare("benchmark", sequence, config)
     }
 
+    #[cfg(feature = "bench-internals")]
+    pub fn benchmark_lookup(
+        &self,
+        keys: &[u64],
+        observed: bool,
+    ) -> Result<(impl Sized, [u64; 3]), TraceError> {
+        let requests = keys.iter().map(|&key| (key, 0)).collect();
+        let lookups = prepare_lookup_with_cores(&self.index, requests, 1, observed, None)?;
+        let stats = lookups.as_ref().map_or([0; 3], |lookup| {
+            [
+                lookup.lookup_tasks as u64,
+                lookup.lookup_plan_hash,
+                lookup.entries.len() as u64,
+            ]
+        });
+        Ok((lookups, stats))
+    }
+
     fn prepare(
         &self,
         query_id: impl Into<String>,
@@ -823,6 +842,8 @@ impl TraceEngine {
             stats.split_core_resolutions += lookups.split_core_resolutions;
             stats.restored_query_context_requests += lookups.query_entries.len() as u64;
             stats.lookup_tasks += lookups.lookup_tasks as u64;
+            stats.lookup_plan_hash =
+                stats.lookup_plan_hash.wrapping_mul(0x100_0000_01b3) ^ lookups.lookup_plan_hash;
             stats.lookup_dispatch_ns += lookups.lookup_dispatch_ns;
             stats.lookup_parallel_ns += lookups.lookup_parallel_ns;
             stats.lookup_compute_ns += lookups.lookup_compute_ns;
