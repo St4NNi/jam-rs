@@ -6,8 +6,7 @@ use jam_rs::owner_postings;
 use jam_rs::shared_reader::SharedReader;
 use jam_rs::shared_seed::{HAS_CONTEXT_21, HAS_CONTEXT_31, SharedKey, select_shared_seeds};
 use jam_rs::shared_writer::build_shared_index;
-#[cfg(feature = "bench-internals")]
-use jam_rs::trace::{TraceConfig, TraceEngine};
+use jam_rs::trace::{SearchCompletion, TraceConfig, TraceEngine};
 use noodles_bgzf::{self as bgzf, gzi};
 use std::fs::File;
 use std::hint::black_box;
@@ -666,6 +665,58 @@ fn shared_resolved_handle(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn shared_geometry(criterion: &mut Criterion) {
+    let (directory, _reader, _) = shared_lookup_fixture();
+    let v1_path = directory.path().join("target.shared");
+    let v2_path = directory.path().join("geometry-packed.shared");
+    jam_rs::shared_pack::repack_shared_index(&v1_path, &v2_path).unwrap();
+    let engines = [
+        ("v1", TraceEngine::open_shared(v1_path, None).unwrap()),
+        ("v2", TraceEngine::open_shared(v2_path, None).unwrap()),
+    ];
+    let repeated = sequence(127);
+    let exact = repeated[..64].to_vec();
+    let mut mixed = exact.clone();
+    mixed.extend(sequence_from_state(32, 113));
+    let workloads = [
+        ("64bp/repeated/linear", exact.clone(), false),
+        ("64bp/repeated/circular", exact, true),
+        ("96bp/mixed_repeated/linear", mixed, false),
+    ];
+    let mut group = criterion.benchmark_group("shared_geometry");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (format, engine) in &engines {
+        for (name, query, circular) in &workloads {
+            let config = TraceConfig {
+                circular: *circular,
+                use_sketch: false,
+                ..TraceConfig::default()
+            };
+            let expected = engine.search("geometry", query, config).unwrap();
+            assert_eq!(expected.completion, SearchCompletion::Complete);
+            assert_eq!(expected.query_length, query.len() as u64);
+            assert!(
+                expected
+                    .metagenomes
+                    .iter()
+                    .any(|metagenome| !metagenome.mosaic.primary.is_empty())
+            );
+            group.throughput(Throughput::Bytes(query.len() as u64));
+            group.bench_function(format!("{format}/{name}"), |bencher| {
+                bencher.iter(|| {
+                    engine
+                        .search("geometry", black_box(query), black_box(config))
+                        .unwrap()
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
 fn shared_packed(criterion: &mut Criterion) {
     let (directory, reference, workloads) = shared_lookup_fixture();
     let path = directory.path().join("packed.shared");
@@ -732,6 +783,7 @@ criterion_group!(
     shared_core_absent,
     shared_prepare,
     shared_resolved_handle,
+    shared_geometry,
     shared_packed
 );
 criterion_main!(benches);

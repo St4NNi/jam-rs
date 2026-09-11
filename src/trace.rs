@@ -154,6 +154,9 @@ pub struct TraceBatchStats {
     pub core_lookup_peak_bytes: usize,
     pub core_lookup_retained_bytes: usize,
     pub numeric_metadata_capacity_bound: usize,
+    pub physical_geometry_capacity_bound: usize,
+    pub geometry_phase_reserved_bytes: usize,
+    pub executed_anchor_associations: u64,
     pub query_sequence_capacity_bytes: u64,
     pub query_core_capacity_bytes: u64,
     pub query_nested_capacity_bytes: u64,
@@ -1149,6 +1152,23 @@ impl TraceEngine {
             .as_ref()
             .map_or(0, |reservation| (reservation.bytes - 4096) / 256);
         let mut numeric_contigs = BTreeMap::new();
+        type SharedGeometry = (
+            crate::shared_reader::SharedOccurrenceStorage,
+            u64,
+            u64,
+            u64,
+            bool,
+        );
+        let geometry_reservation = self
+            .index
+            .is_shared()
+            .then(|| CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, 1024 * 1024))
+            .flatten();
+        let geometry_row_bytes = 4 * std::mem::size_of::<SharedGeometry>();
+        let geometry_limit = geometry_reservation.as_ref().map_or(0, |reservation| {
+            (reservation.bytes - 4096) / geometry_row_bytes
+        });
+        let mut geometries = BTreeSet::<SharedGeometry>::new();
         let mut routing_reserved_bytes = 4096usize;
         let batch_lookups = batch.and_then(|batch| batch.lookups.as_ref());
         if let Some(shared) = batch_lookups
@@ -1165,6 +1185,7 @@ impl TraceEngine {
             .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
             .map_err(|_| TraceError::Invalid("query seed batch"))?;
         let mut emitted_anchor_associations = 0u64;
+        let mut executed_anchor_associations = 0u64;
         for key_chunk in key_order.chunks(SEED_LOOKUP_BATCH_KEYS) {
             packed_keys.clear();
             for &packed_key in key_chunk {
@@ -1237,7 +1258,14 @@ impl TraceEngine {
                     .copied()
                     .filter(|document| candidate_ids.contains(&document.metagenome_id()))
                 {
+                    let storage = match document {
+                        SeedDocument::Shared(member) => Some(member.occurrence_storage_identity()),
+                        _ => None,
+                    };
+                    let mut occurrence_start = 0u64;
                     let mut visit = |occurrences: &[crate::jidx_reader::SeedOccurrence]| {
+                        let start = occurrence_start;
+                        occurrence_start += occurrences.len() as u64;
                         if self.observed {
                             emitted_anchor_associations +=
                                 (query_seeds.len() as u64) * (occurrences.len() as u64);
@@ -1264,6 +1292,25 @@ impl TraceEngine {
                             } else {
                                 (seed.position, seed_k)
                             };
+                            if let Some(storage) = storage {
+                                let geometry = (
+                                    storage,
+                                    start,
+                                    occurrences.len() as u64,
+                                    query_position,
+                                    seed.canonical_orientation,
+                                );
+                                if geometries.len() < geometry_limit {
+                                    if !geometries.insert(geometry) {
+                                        continue;
+                                    }
+                                } else if geometries.contains(&geometry) {
+                                    continue;
+                                }
+                            }
+                            if self.observed {
+                                executed_anchor_associations += occurrences.len() as u64;
+                            }
                             for occurrence in occurrences {
                                 let contig = if let Some(contig) =
                                     numeric_contigs.get(&occurrence.contig_id)
@@ -1337,12 +1384,26 @@ impl TraceEngine {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.region_formation_ns += started.elapsed().as_nanos() as u64;
             stats.emitted_anchor_associations += emitted_anchor_associations;
+            stats.executed_anchor_associations += executed_anchor_associations;
+            stats.physical_geometry_capacity_bound = stats
+                .physical_geometry_capacity_bound
+                .max(4096 + geometries.len() * geometry_row_bytes);
+            stats.geometry_phase_reserved_bytes = stats.geometry_phase_reserved_bytes.max(
+                metadata_reservation
+                    .as_ref()
+                    .map_or(0, |reservation| reservation.bytes)
+                    + geometry_reservation
+                        .as_ref()
+                        .map_or(0, |reservation| reservation.bytes),
+            );
             stats.numeric_metadata_capacity_bound = stats
                 .numeric_metadata_capacity_bound
                 .max(4096 + numeric_contigs.len() * 256);
         }
         drop(numeric_contigs);
         drop(metadata_reservation);
+        drop(geometries);
+        drop(geometry_reservation);
         let (loaded, reads) = self.load_ranges(
             &tasks,
             config.verify_resources,
@@ -2002,6 +2063,17 @@ impl RegionHits {
 
     fn push_unique(&mut self, hit: SeedHit, reserved: &mut usize) -> Result<(), TraceError> {
         let pair = (hit.query, hit.target);
+        let next = reserved
+            .checked_add(512)
+            .filter(|&bytes| bytes <= 64 * 1024 * 1024);
+        if let Self::Unique(pairs) = self
+            && let Some(next) = next
+        {
+            if pairs.insert(pair) {
+                *reserved = next;
+            }
+            return Ok(());
+        }
         if match self {
             Self::One(first) => (first.query, first.target) == pair,
             Self::Unique(pairs) => pairs.contains(&pair),
@@ -2010,12 +2082,9 @@ impl RegionHits {
             return Ok(());
         }
         // Covers sparse BTree nodes, the outer region node and later SeedHit Vec growth.
-        let next = reserved
-            .checked_add(512)
-            .filter(|&bytes| bytes <= 64 * 1024 * 1024)
-            .ok_or(TraceError::Invalid(
-                "shared anchor workspace exceeds byte budget",
-            ))?;
+        let next = next.ok_or(TraceError::Invalid(
+            "shared anchor workspace exceeds byte budget",
+        ))?;
         match self {
             Self::Empty => *self = Self::One(hit),
             Self::One(first) => {
@@ -2076,6 +2145,7 @@ fn form_regions(
 ) -> Vec<(RegionKey, RegionAccumulator)> {
     let mut output = Vec::new();
     for (key, hits) in hits_by_contig {
+        let ordered = matches!(hits, RegionHits::Unique(_));
         let mut hits = match hits {
             RegionHits::Empty => continue,
             RegionHits::One(hit) => {
@@ -2092,7 +2162,9 @@ fn form_regions(
                 })
                 .collect(),
         };
-        hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
+        if !ordered {
+            hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
+        }
         let mut regions = Vec::<RegionAccumulator>::new();
         for hit in hits {
             if let Some(region) = regions
@@ -2562,6 +2634,27 @@ mod tests {
         assert_eq!(available.load(Ordering::Relaxed), 6);
         drop(second);
         assert_eq!(available.load(Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn unique_anchor_admission_keeps_duplicates_at_the_byte_cap() {
+        let mut hits = RegionHits::Unique(BTreeSet::from([(1, 2), (2, 3)]));
+        let mut reserved = 64 * 1024 * 1024 - 512;
+        let hit = |query| SeedHit {
+            query,
+            target: query + 1,
+            diagonal: 1,
+        };
+        hits.push_unique(hit(1), &mut reserved).unwrap();
+        assert_eq!(reserved, 64 * 1024 * 1024 - 512);
+        hits.push_unique(hit(3), &mut reserved).unwrap();
+        assert_eq!(reserved, 64 * 1024 * 1024);
+        hits.push_unique(hit(1), &mut reserved).unwrap();
+        assert!(hits.push_unique(hit(4), &mut reserved).is_err());
+        let RegionHits::Unique(pairs) = hits else {
+            panic!("unique anchors");
+        };
+        assert_eq!(pairs, BTreeSet::from([(1, 2), (2, 3), (3, 4)]));
     }
 
     #[test]

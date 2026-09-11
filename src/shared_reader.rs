@@ -89,7 +89,7 @@ impl SharedGroup {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SharedOccurrenceStorage {
     reader_token: u64,
     kind: u8,

@@ -373,6 +373,20 @@ fn shared_trace_fixture(packed: bool) {
         .numeric_contig_resolutions;
     assert!(numeric_reads > 0 && numeric_reads <= 6);
     assert!(numeric_reads < observed.batch_stats().emitted_anchor_associations);
+    let geometry_stats = observed.batch_stats();
+    assert!(
+        geometry_stats.executed_anchor_associations <= geometry_stats.emitted_anchor_associations
+    );
+    if packed {
+        assert!(
+            geometry_stats.executed_anchor_associations
+                < geometry_stats.emitted_anchor_associations
+        );
+    }
+    println!(
+        "geometry packed={packed} logical={} executed={} numeric_reads={numeric_reads}",
+        geometry_stats.emitted_anchor_associations, geometry_stats.executed_anchor_associations
+    );
     let exact = alignment(&batch[0], "exact");
     assert_eq!(
         exact.target_interval,
