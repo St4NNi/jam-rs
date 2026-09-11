@@ -212,9 +212,11 @@ fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
         let before = reader.stats();
         let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
         assert_eq!((group.member_count(), group.occurrence_count()), (2, 3));
-        let work = delta(reader.stats(), before);
+        let after = reader.stats();
+        let work = delta(after, before);
         let logarithmic_bound = u64::from(u32::BITS - (preceding + 1).leading_zeros()) + 1;
-        assert!(work[0] <= logarithmic_bound);
+        assert_eq!(work[0], 1);
+        assert!(after.core_key_inspections - before.core_key_inspections <= logarithmic_bound);
         assert!(work[1] <= 3);
         assert_eq!(&work[2..], &[0, 0, 0]);
 
@@ -225,8 +227,11 @@ fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
                 .unwrap()
                 .is_none()
         );
-        let work = delta(reader.stats(), before);
-        assert!(work[0] <= logarithmic_bound);
+        let after = reader.stats();
+        let work = delta(after, before);
+        assert_eq!(work[0], 0);
+        assert!(after.core_key_inspections > before.core_key_inspections);
+        assert!(after.core_key_inspections - before.core_key_inspections <= logarithmic_bound);
         assert_eq!(&work[1..], &[0, 0, 0, 0]);
 
         let before = reader.stats();
@@ -237,8 +242,10 @@ fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
         };
         let group = reader.find(context).unwrap().unwrap();
         assert_eq!((group.member_count(), group.occurrence_count()), (2, 3));
-        let work = delta(reader.stats(), before);
-        assert!(work[0] <= logarithmic_bound);
+        let after = reader.stats();
+        let work = delta(after, before);
+        assert_eq!(work[0], 1);
+        assert!(after.core_key_inspections - before.core_key_inspections <= logarithmic_bound);
         assert!(work[1] <= 3);
         assert_eq!(&work[2..], &[0, 0, 0]);
 
@@ -329,6 +336,63 @@ fn exact_counts_and_absence_do_not_decode_payloads_as_prefix_grows() {
             assert_eq!(&work[2..], &[0, 0, 0]);
         }
     }
+}
+
+#[test]
+fn key_only_probe_handles_empty_singleton_and_dictionary_edges() {
+    let (directory, reader, _) = fixture(16);
+    let metadata = directory.path().join("metadata.jidx");
+    let reference = JidxReader::open(&metadata).unwrap();
+
+    let empty = directory.path().join("empty.shared");
+    write_shared_index(&reference, &empty, 64, &mut []).unwrap();
+    let empty = SharedReader::open_observed(&empty).unwrap();
+    assert_eq!(empty.core_count(), 0);
+    assert!(empty.find(SharedKey::core(0)).unwrap().is_none());
+    let stats = empty.stats();
+    assert_eq!(stats.core_key_inspections, 0);
+    assert_eq!(stats.core_descriptor_inspections, 0);
+
+    let singleton = directory.path().join("singleton.shared");
+    write_shared_index(
+        &reference,
+        &singleton,
+        64,
+        &mut [IndexedSeed {
+            member: 0,
+            contig: 0,
+            seed: SharedSeed {
+                core: 7,
+                context: 0,
+                flags: 0,
+                position: 500,
+            },
+        }],
+    )
+    .unwrap();
+    let singleton = SharedReader::open_observed(&singleton).unwrap();
+    assert!(singleton.find(SharedKey::core(6)).unwrap().is_none());
+    assert!(singleton.find(SharedKey::core(7)).unwrap().is_some());
+    assert!(singleton.find(SharedKey::core(8)).unwrap().is_none());
+    let stats = singleton.stats();
+    assert_eq!(stats.core_key_inspections, 3);
+    assert_eq!(stats.core_descriptor_inspections, 1);
+
+    let before = reader.stats();
+    let groups = reader
+        .find_many(&[SharedKey::core(0), SharedKey::core(TARGET_CORE + 1)])
+        .unwrap();
+    assert!(groups.iter().all(Option::is_some));
+    let after = reader.stats();
+    assert_eq!(
+        after.core_resolutions_present - before.core_resolutions_present,
+        2
+    );
+    assert_eq!(
+        after.core_descriptor_inspections - before.core_descriptor_inspections,
+        2
+    );
+    assert!(after.core_key_inspections > before.core_key_inspections);
 }
 
 #[test]
@@ -547,6 +611,8 @@ fn core_first_absence_preserves_complete_linear_and_circular_accounting() {
         let reads = engine.shared_read_stats().unwrap();
         assert_eq!(reads.core_resolutions_present, 0);
         assert_eq!(reads.core_resolutions_absent, 1);
+        assert!(reads.core_key_inspections > 0);
+        assert_eq!(reads.core_descriptor_inspections, 0);
         assert_eq!(reads.group_descriptor_inspections, 0);
         assert_eq!(reads.member_descriptor_inspections, 0);
         assert_eq!(reads.physical_positions_decoded, 0);
@@ -1075,6 +1141,27 @@ fn authenticated_context_and_reference_corruption_is_rejected() {
 
 #[test]
 fn resealed_malformed_rows_fail_scalar_and_grouped_lookup() {
+    let (directory, reader, _) = fixture(0);
+    let key = SharedKey::core(TARGET_CORE);
+    let core_ordinal = reader.find(key).unwrap().unwrap().core_ordinal();
+    drop(reader);
+    let path = directory.path().join("fixture.shared");
+    mutate_and_resign(&path, |bytes, header| {
+        let core = header.section(Section::Cores).offset as usize
+            + core_ordinal as usize * header.row_bytes(Section::Cores) as usize;
+        let tagged = crate::jidx::read_u32(bytes, core) | (1 << 30);
+        bytes[core..core + 4].copy_from_slice(&tagged.to_le_bytes());
+    });
+    let reader = SharedReader::open(&path).unwrap();
+    assert!(matches!(
+        reader.find(key),
+        Err(SharedError::Invalid("core row"))
+    ));
+    assert!(matches!(
+        reader.find_many(&[key, key]),
+        Err(SharedError::Invalid("core row"))
+    ));
+
     let (directory, reader, _) = fixture(0);
     drop(reader);
     let path = directory.path().join("fixture.shared");

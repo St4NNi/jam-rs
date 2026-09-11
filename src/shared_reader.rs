@@ -20,6 +20,7 @@ pub struct SharedReader {
     file: SharedFile,
     reader_token: u64,
     observed: bool,
+    core_key_inspections: AtomicU64,
     core_inspections: AtomicU64,
     group_inspections: AtomicU64,
     member_inspections: AtomicU64,
@@ -37,6 +38,7 @@ pub struct SharedReader {
 pub struct SharedReadStats {
     pub observed: bool,
     pub file: FileReadStats,
+    pub core_key_inspections: u64,
     pub core_descriptor_inspections: u64,
     pub group_descriptor_inspections: u64,
     pub member_descriptor_inspections: u64,
@@ -156,6 +158,7 @@ impl SharedReader {
             file,
             reader_token,
             observed,
+            core_key_inspections: AtomicU64::new(0),
             core_inspections: AtomicU64::new(0),
             group_inspections: AtomicU64::new(0),
             member_inspections: AtomicU64::new(0),
@@ -227,6 +230,7 @@ impl SharedReader {
         SharedReadStats {
             observed: self.observed,
             file: self.file.stats(),
+            core_key_inspections: self.core_key_inspections.load(Ordering::Relaxed),
             core_descriptor_inspections: self.core_inspections.load(Ordering::Relaxed),
             group_descriptor_inspections: self.group_inspections.load(Ordering::Relaxed),
             member_descriptor_inspections: self.member_inspections.load(Ordering::Relaxed),
@@ -585,12 +589,16 @@ impl SharedReader {
         let mut high = self.file.header.core_count;
         while low < high {
             let middle = low + (high - low) / 2;
-            let row = self.core_row(middle)?;
+            let found = self.core_key(middle)?;
             self.observe(&self.directory_comparison_probes, 1);
-            match row.core.cmp(&core) {
+            match found.cmp(&core) {
                 std::cmp::Ordering::Less => low = middle + 1,
                 std::cmp::Ordering::Greater => high = middle,
                 std::cmp::Ordering::Equal => {
+                    let row = self.core_row(middle)?;
+                    if row.core != found {
+                        return Err(SharedError::Invalid("core row"));
+                    }
                     self.observe(&self.core_resolutions_present, 1);
                     return Ok(Some((middle, row)));
                 }
@@ -648,20 +656,24 @@ impl SharedReader {
         let core_ordinal = first_core
             .checked_add(middle)
             .ok_or(SharedError::Invalid("core ordinal"))?;
-        let row = self.core_row(core_ordinal)?;
+        let core = self.core_key(core_ordinal)?;
         self.observe(&self.grouped_core_rows, 1);
         let lower =
-            self.request_core_partition(keys, order, request_start, request_end, row.core, false);
+            self.request_core_partition(keys, order, request_start, request_end, core, false);
         let matches = lower < request_end && {
             self.observe(&self.directory_comparison_probes, 1);
-            keys[ordered_index(order, lower)].core == row.core
+            keys[ordered_index(order, lower)].core == core
         };
         let upper = if matches {
-            self.request_core_partition(keys, order, lower, request_end, row.core, true)
+            self.request_core_partition(keys, order, lower, request_end, core, true)
         } else {
             lower
         };
         if matches {
+            let row = self.core_row(core_ordinal)?;
+            if row.core != core {
+                return Err(SharedError::Invalid("core row"));
+            }
             self.observe(&self.core_resolutions_present, 1);
             self.find_contexts_many(keys, order, groups, core_ordinal, row, lower, upper)?;
         } else {
@@ -872,6 +884,15 @@ impl SharedReader {
             self.file.header.section(Section::Groups).length
                 / self.file.header.row_bytes(Section::Groups),
         )
+    }
+
+    fn core_key(&self, ordinal: u64) -> Result<u32, SharedError> {
+        let offset = ordinal
+            .checked_mul(CORE_ROW_BYTES)
+            .ok_or(SharedError::Invalid("core ordinal"))?;
+        let bytes = self.file.section(Section::Cores, offset, 4)?;
+        self.observe(&self.core_key_inspections, 1);
+        CoreRow::decode_key(bytes)
     }
 
     fn singleton_member(&self, group: SharedGroup) -> Result<SharedMember, SharedError> {
@@ -1335,12 +1356,17 @@ enum CoreKind {
 }
 
 impl CoreRow {
-    fn decode(bytes: &[u8], contig_count: u32, total_groups: u64) -> Result<Self, SharedError> {
+    fn decode_key(bytes: &[u8]) -> Result<u32, SharedError> {
         let word = read_u32(bytes, 0);
         if word & !(MULTIPLE_CORE | CORE_MASK) != 0 {
             return Err(SharedError::Invalid("core row"));
         }
-        let core = word & CORE_MASK;
+        Ok(word & CORE_MASK)
+    }
+
+    fn decode(bytes: &[u8], contig_count: u32, total_groups: u64) -> Result<Self, SharedError> {
+        let word = read_u32(bytes, 0);
+        let core = Self::decode_key(bytes)?;
         let kind = if word & MULTIPLE_CORE == 0 {
             let context = read_u32(bytes, 4);
             let flags = read_u32(bytes, 12);
