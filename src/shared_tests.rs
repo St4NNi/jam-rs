@@ -992,7 +992,20 @@ fn resolved_core_scope_and_short_evidence_are_checked() {
     let path = directory.path().join("fixture.shared");
     let first = TraceIndex::Shared(Box::new(SharedReader::open_observed(&path).unwrap()));
     let second = TraceIndex::Shared(Box::new(SharedReader::open_observed(&path).unwrap()));
-    let cores = prepare_cores(&first, vec![TARGET_CORE], true)
+    let unadmitted = std::iter::once(TARGET_CORE).inspect(|_| {
+        panic!("unadmitted core requests were consumed");
+    });
+    assert!(
+        prepare_cores(
+            &first,
+            unadmitted,
+            crate::trace::LOOKUP_CACHE_BYTES / std::mem::size_of::<u32>() + 1,
+            true,
+        )
+        .unwrap()
+        .is_none()
+    );
+    let cores = prepare_cores(&first, [TARGET_CORE], 1, true)
         .unwrap()
         .unwrap();
     let core = SharedKey::core(TARGET_CORE).packed().unwrap();

@@ -565,13 +565,10 @@ impl TraceEngine {
                 sum.checked_add(query.positions_by_key.len())
             })
             .ok_or(TraceError::Invalid("core request count"))?;
-        let mut keys = Vec::new();
-        keys.try_reserve_exact(count)
-            .map_err(|_| TraceError::Invalid("core request allocation"))?;
-        for query in prepared.iter() {
-            keys.extend(query.positions_by_key.keys().map(|&key| key as u32));
-        }
-        let cores = prepare_cores(&self.index, keys, self.observed)?;
+        let keys = prepared
+            .iter()
+            .flat_map(|query| query.positions_by_key.keys().map(|&key| key as u32));
+        let cores = prepare_cores(&self.index, keys, count, self.observed)?;
         if self.observed
             && let Some(cores) = &cores
         {

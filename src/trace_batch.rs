@@ -64,7 +64,8 @@ impl SharedCoreLookups {
 
 pub(crate) fn prepare_cores(
     index: &TraceIndex,
-    mut keys: Vec<u32>,
+    requests: impl IntoIterator<Item = u32>,
+    request_count: usize,
     observed: bool,
 ) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
     let TraceIndex::Shared(reader) = index else {
@@ -74,14 +75,35 @@ pub(crate) fn prepare_cores(
     let Some(identity) = index.cache_file_identity()? else {
         return Ok(None);
     };
+    let Some(key_bytes) = request_count.checked_mul(std::mem::size_of::<u32>()) else {
+        return Ok(None);
+    };
+    let Some(key_reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, key_bytes)
+    else {
+        return Ok(None);
+    };
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(request_count)
+        .map_err(|_| TraceError::Invalid("core request allocation"))?;
+    if keys.capacity() > request_count {
+        return Ok(None);
+    }
+    for key in requests {
+        if keys.len() == request_count {
+            return Err(TraceError::Invalid("core request count"));
+        }
+        keys.push(key);
+    }
+    if keys.len() != request_count {
+        return Err(TraceError::Invalid("core request count"));
+    }
     keys.par_sort_unstable();
     keys.dedup();
-    let ranges = reader
-        .has_core_prefixes()
-        .then(|| core_prefix_ranges(&keys));
-    let tasks = ranges
-        .as_ref()
-        .map_or_else(|| keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS), Vec::len);
+    let tasks = if reader.has_core_prefixes() {
+        core_prefix_ranges(&keys).count()
+    } else {
+        keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS)
+    };
     let Some(bytes) = keys
         .capacity()
         .checked_mul(std::mem::size_of::<u32>())
@@ -106,16 +128,29 @@ pub(crate) fn prepare_cores(
         })
         .and_then(|bytes| bytes.checked_add(4096 + std::mem::size_of::<SharedCoreLookups>()))
         .and_then(|bytes| {
-            bytes.checked_add(ranges.as_ref().map_or(0, |ranges| {
-                ranges.capacity() * std::mem::size_of::<Range<usize>>()
-            }))
+            bytes.checked_add(tasks.checked_mul(std::mem::size_of::<Range<usize>>())?)
         })
         .filter(|&bytes| bytes <= lookup_budget(index))
     else {
         return Ok(None);
     };
-    let Some(mut reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes) else {
+    let Some(mut reservation) =
+        CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes - key_reservation.bytes)
+    else {
         return Ok(None);
+    };
+    let ranges = if reader.has_core_prefixes() {
+        let mut ranges = Vec::new();
+        ranges
+            .try_reserve_exact(tasks)
+            .map_err(|_| TraceError::Invalid("core task allocation"))?;
+        if ranges.capacity() > tasks {
+            return Ok(None);
+        }
+        ranges.extend(core_prefix_ranges(&keys));
+        Some(ranges)
+    } else {
+        None
     };
     let lookup = |chunk: &[u32]| {
         let contexts = chunk
@@ -157,6 +192,7 @@ pub(crate) fn prepare_cores(
         groups.extend(chunk?.into_iter().flatten());
     }
     drop(keys);
+    drop(key_reservation);
     drop(ranges);
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("resolved core identity"));
@@ -191,10 +227,12 @@ fn lookup_chunk_keys() -> usize {
     SEED_LOOKUP_BATCH_KEYS
 }
 
-fn core_prefix_ranges(keys: &[u32]) -> Vec<Range<usize>> {
-    let mut ranges = Vec::new();
+fn core_prefix_ranges(keys: &[u32]) -> impl Iterator<Item = Range<usize>> + '_ {
     let mut start = 0;
-    while start < keys.len() {
+    std::iter::from_fn(move || {
+        if start == keys.len() {
+            return None;
+        }
         let mut end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
         if end < keys.len() {
             let prefix = keys[end] >> 14;
@@ -205,10 +243,10 @@ fn core_prefix_ranges(keys: &[u32]) -> Vec<Range<usize>> {
                 end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
             }
         }
-        ranges.push(start..end);
+        let range = start..end;
         start = end;
-    }
-    ranges
+        Some(range)
+    })
 }
 
 fn lookup_ranges(keys: &[u64], prefixes: bool) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
@@ -657,7 +695,7 @@ mod tests {
                 .build()
                 .unwrap();
             pool.install(|| {
-                assert_eq!(core_prefix_ranges(&cores), expected);
+                assert_eq!(core_prefix_ranges(&cores).collect::<Vec<_>>(), expected);
                 assert_eq!(
                     lookup_ranges(&keys, true)
                         .map(|(range, split)| {
