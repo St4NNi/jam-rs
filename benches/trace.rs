@@ -3,6 +3,7 @@ use jam_rs::alignment::{AlignmentConfig, AlignmentWorkspace};
 use jam_rs::jidx::sha256;
 use jam_rs::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use jam_rs::owner_postings;
+use jam_rs::shared_pack::{repack_shared_cores, repack_shared_index};
 use jam_rs::shared_reader::SharedReader;
 use jam_rs::shared_seed::{HAS_CONTEXT_21, HAS_CONTEXT_31, SharedKey, select_shared_seeds};
 use jam_rs::shared_writer::build_shared_index;
@@ -11,6 +12,7 @@ use noodles_bgzf::{self as bgzf, gzi};
 use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Duration;
 
 fn sequence(length: usize) -> Vec<u8> {
@@ -410,11 +412,15 @@ fn prefix_core_workload(present: &[u32], prefix: u32) -> Vec<SharedKey> {
     cores.into_iter().map(SharedKey::core).collect()
 }
 
-fn shared_core_absent_fixture() -> (
-    tempfile::TempDir,
-    SharedReader,
-    Vec<(&'static str, Vec<SharedKey>)>,
-) {
+type SharedCoreReader = (&'static str, PathBuf, SharedReader);
+
+struct SharedCoreFixture {
+    directory: tempfile::TempDir,
+    readers: Vec<SharedCoreReader>,
+    workloads: Vec<(&'static str, Vec<SharedKey>)>,
+}
+
+fn shared_core_absent_fixture() -> SharedCoreFixture {
     let directory = tempfile::tempdir().unwrap();
     let dna = sequence(1_050_000);
     let bgzf_path = directory.path().join("large-target.bgz");
@@ -462,9 +468,23 @@ fn shared_core_absent_fixture() -> (
         })
         .unwrap();
     metadata.finish().unwrap();
-    let shared_path = directory.path().join("large-target.shared");
-    let build = build_shared_index(&metadata_path, &shared_path, 1).unwrap();
+    let v1_path = directory.path().join("large-target-v1.shared");
+    let build = build_shared_index(&metadata_path, &v1_path, 1).unwrap();
     assert!(build.core_count >= 1_000_000, "{} cores", build.core_count);
+    let v2_path = directory.path().join("large-target-v2.shared");
+    let v3_path = directory.path().join("large-target-v3.shared");
+    let converted = std::time::Instant::now();
+    let v2 = repack_shared_index(&v1_path, &v2_path).unwrap();
+    let v3 = repack_shared_cores(&v2_path, &v3_path).unwrap();
+    eprintln!(
+        "shared_core_absent kernel setup: conversion {:.3}s, v2 {} bytes, v3 {} bytes, hot {}, cold {}, prefixes {} bytes",
+        converted.elapsed().as_secs_f64(),
+        v2.build.index_bytes,
+        v3.build.index_bytes,
+        v3.hot_core_bytes,
+        v3.cold_core_bytes,
+        v3.core_prefix_bytes,
+    );
 
     let mut present = select_shared_seeds(&dna, 1)
         .unwrap()
@@ -491,43 +511,62 @@ fn shared_core_absent_fixture() -> (
             prefix_core_workload(&present, skew_prefix),
         ),
     ];
-    (
+    SharedCoreFixture {
         directory,
-        SharedReader::open(shared_path).unwrap(),
+        readers: vec![
+            ("v2", v2_path.clone(), SharedReader::open(v2_path).unwrap()),
+            ("v3", v3_path.clone(), SharedReader::open(v3_path).unwrap()),
+        ],
         workloads,
-    )
+    }
 }
 
 fn shared_core_absent(criterion: &mut Criterion) {
     let fixture_started = std::time::Instant::now();
-    let (_directory, reader, workloads) = shared_core_absent_fixture();
+    let SharedCoreFixture {
+        directory: _directory,
+        readers,
+        workloads,
+    } = shared_core_absent_fixture();
     eprintln!(
-        "shared_core_absent fixture setup: {:.3}s",
+        "shared_core_absent total kernel-only fixture setup: {:.3}s (excluded from lookup timing)",
         fixture_started.elapsed().as_secs_f64()
     );
+    for (name, keys) in &workloads {
+        let mut expected = None;
+        for (version, path, _) in &readers {
+            let observed = SharedReader::open_observed(path).unwrap();
+            let actual = observed
+                .find_many(keys)
+                .unwrap()
+                .into_iter()
+                .map(|group| {
+                    group.map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                *expected.get_or_insert(actual.clone()),
+                actual,
+                "{version}/{name}"
+            );
+            eprintln!(
+                "shared_core_absent {version}/{name} observed: {:?}",
+                observed.stats()
+            );
+        }
+    }
     let mut group = criterion.benchmark_group("shared_core_absent");
     group.sample_size(20);
     group.nresamples(1_000);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_secs(1));
-    for (name, keys) in workloads {
-        let expected = keys
-            .iter()
-            .filter(|&&key| reader.find(key).unwrap().is_some())
-            .count();
-        assert_eq!(
-            reader
-                .find_many(&keys)
-                .unwrap()
-                .into_iter()
-                .flatten()
-                .count(),
-            expected
-        );
-        group.throughput(Throughput::Elements(keys.len() as u64));
-        group.bench_function(name, |bencher| {
-            bencher.iter(|| reader.find_many(black_box(&keys)).unwrap())
-        });
+    for (version, _, reader) in &readers {
+        for (name, keys) in &workloads {
+            group.throughput(Throughput::Elements(keys.len() as u64));
+            group.bench_function(format!("{version}/{name}"), |bencher| {
+                bencher.iter(|| reader.find_many(black_box(keys)).unwrap())
+            });
+        }
     }
     group.finish();
 }
@@ -719,9 +758,9 @@ fn shared_geometry(criterion: &mut Criterion) {
 
 #[cfg(feature = "bench-internals")]
 fn shared_threads(criterion: &mut Criterion) {
-    let (directory, _reader, _) = shared_core_absent_fixture();
+    let SharedCoreFixture { directory, .. } = shared_core_absent_fixture();
     let engine =
-        TraceEngine::open_shared(directory.path().join("large-target.shared"), None).unwrap();
+        TraceEngine::open_shared(directory.path().join("large-target-v3.shared"), None).unwrap();
     let keys = (0..98_304u32)
         .map(|ordinal| {
             SharedKey::core(ordinal.wrapping_mul(506_952_113) & ((1 << 30) - 1))
