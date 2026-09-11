@@ -187,6 +187,14 @@ pub fn run() -> Result<()> {
             Ok(())
         }
 
+        Commands::SharedCoreRepack { input, output } => {
+            let stats = shared_pack::repack_shared_cores(input, output)?;
+            if !cli.silent {
+                println!("{}", serde_json::to_string(&stats)?);
+            }
+            Ok(())
+        }
+
         Commands::Trace {
             query,
             database,

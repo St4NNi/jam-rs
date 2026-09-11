@@ -130,6 +130,15 @@ pub enum Commands {
         output: PathBuf,
     },
 
+    /// Split and narrow the core dictionary of an existing packed shared index
+    #[command(arg_required_else_help = true)]
+    SharedCoreRepack {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
     /// Trace query sequences through a shard or collection
     #[command(arg_required_else_help = true)]
     Trace {
