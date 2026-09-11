@@ -76,7 +76,12 @@ pub(crate) fn prepare_cores(
     };
     keys.par_sort_unstable();
     keys.dedup();
-    let tasks = keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS);
+    let ranges = reader
+        .has_core_prefixes()
+        .then(|| core_prefix_ranges(&keys));
+    let tasks = ranges
+        .as_ref()
+        .map_or_else(|| keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS), Vec::len);
     let Some(bytes) = keys
         .capacity()
         .checked_mul(std::mem::size_of::<u32>())
@@ -100,6 +105,11 @@ pub(crate) fn prepare_cores(
             )
         })
         .and_then(|bytes| bytes.checked_add(4096 + std::mem::size_of::<SharedCoreLookups>()))
+        .and_then(|bytes| {
+            bytes.checked_add(ranges.as_ref().map_or(0, |ranges| {
+                ranges.capacity() * std::mem::size_of::<Range<usize>>()
+            }))
+        })
         .filter(|&bytes| bytes <= lookup_budget(index))
     else {
         return Ok(None);
@@ -107,17 +117,24 @@ pub(crate) fn prepare_cores(
     let Some(mut reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes) else {
         return Ok(None);
     };
-    let chunks = keys
-        .par_chunks(SEED_LOOKUP_BATCH_KEYS)
-        .map(|chunk| {
-            let contexts = chunk
-                .iter()
-                .copied()
-                .map(crate::shared_seed::SharedKey::core)
-                .collect::<Vec<_>>();
-            reader.find_many(&contexts).map_err(TraceError::from)
-        })
-        .collect::<Vec<_>>();
+    let lookup = |chunk: &[u32]| {
+        let contexts = chunk
+            .iter()
+            .copied()
+            .map(crate::shared_seed::SharedKey::core)
+            .collect::<Vec<_>>();
+        reader.find_many(&contexts).map_err(TraceError::from)
+    };
+    let chunks = if let Some(ranges) = &ranges {
+        ranges
+            .par_iter()
+            .map(|range| lookup(&keys[range.clone()]))
+            .collect::<Vec<_>>()
+    } else {
+        keys.par_chunks(SEED_LOOKUP_BATCH_KEYS)
+            .map(lookup)
+            .collect::<Vec<_>>()
+    };
     let count = chunks.iter().try_fold(0usize, |sum, chunk| {
         chunk
             .as_ref()
@@ -140,6 +157,7 @@ pub(crate) fn prepare_cores(
         groups.extend(chunk?.into_iter().flatten());
     }
     drop(keys);
+    drop(ranges);
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("resolved core identity"));
     }
@@ -173,7 +191,27 @@ fn lookup_chunk_keys() -> usize {
     SEED_LOOKUP_BATCH_KEYS
 }
 
-fn lookup_ranges(keys: &[u64]) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
+fn core_prefix_ranges(keys: &[u32]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < keys.len() {
+        let mut end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+        if end < keys.len() {
+            let prefix = keys[end] >> 14;
+            while end > start && keys[end - 1] >> 14 == prefix {
+                end -= 1;
+            }
+            if end == start {
+                end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+            }
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+fn lookup_ranges(keys: &[u64], prefixes: bool) -> impl Iterator<Item = (Range<usize>, bool)> + '_ {
     let mut start = 0;
     let core = |key| crate::shared_seed::SharedKey::unpack(key).map(|key| key.core);
     std::iter::from_fn(move || {
@@ -182,14 +220,23 @@ fn lookup_ranges(keys: &[u64]) -> impl Iterator<Item = (Range<usize>, bool)> + '
         }
         let mut end = (start + lookup_chunk_keys()).min(keys.len());
         let mut split = false;
-        if end < keys.len() && core(keys[end - 1]) == core(keys[end]) {
+        let group = |key| core(key).map(|core| if prefixes { core >> 14 } else { core });
+        if end < keys.len() && group(keys[end - 1]) == group(keys[end]) {
             let boundary = end;
-            while end > start && core(keys[end - 1]) == core(keys[boundary]) {
+            while end > start && group(keys[end - 1]) == group(keys[boundary]) {
                 end -= 1;
             }
             if end == start {
                 end = boundary;
-                split = true;
+                if prefixes {
+                    while end > start && core(keys[end - 1]) == core(keys[boundary]) {
+                        end -= 1;
+                    }
+                }
+                if !prefixes || end == start {
+                    end = boundary;
+                    split = true;
+                }
             }
         }
         let range = start..end;
@@ -322,7 +369,7 @@ pub(crate) fn prepare_lookup_with_cores(
         tasks
             .try_reserve_exact(keys.len().div_ceil(limit) * 2 + 1)
             .map_err(|_| TraceError::Invalid("lookup task allocation"))?;
-        for (range, split) in lookup_ranges(&keys) {
+        for (range, split) in lookup_ranges(&keys, reader.has_core_prefixes()) {
             split_core_resolutions += u64::from(split);
             let chunk = &keys[range];
             if observed {
@@ -577,17 +624,50 @@ mod tests {
                 .num_threads(workers)
                 .build()
                 .unwrap();
-            let actual = pool.install(|| lookup_ranges(&keys).collect::<Vec<_>>());
-            assert_eq!(actual, expected);
-            assert_eq!(
-                actual.iter().map(|(range, _)| range.len()).sum::<usize>(),
-                keys.len()
-            );
-            assert!(
-                actual
-                    .iter()
-                    .all(|(range, _)| range.len() <= SEED_LOOKUP_BATCH_KEYS)
-            );
+            for prefixes in [false, true] {
+                let actual = pool.install(|| lookup_ranges(&keys, prefixes).collect::<Vec<_>>());
+                assert_eq!(actual, expected);
+                assert_eq!(
+                    actual.iter().map(|(range, _)| range.len()).sum::<usize>(),
+                    keys.len()
+                );
+                assert!(
+                    actual
+                        .iter()
+                        .all(|(range, _)| range.len() <= SEED_LOOKUP_BATCH_KEYS)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_tasks_keep_requested_prefixes_together_across_workers() {
+        let cores = [(0, 16_000), (1, 12_000), (2, 14_000), (3, 13_000)]
+            .into_iter()
+            .flat_map(|(prefix, count)| (0..count).map(move |low| (prefix << 14) | low))
+            .collect::<Vec<_>>();
+        let keys = cores
+            .iter()
+            .map(|&core| u64::from(core))
+            .collect::<Vec<_>>();
+        let expected = vec![0..28_000, 28_000..55_000];
+        for workers in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                assert_eq!(core_prefix_ranges(&cores), expected);
+                assert_eq!(
+                    lookup_ranges(&keys, true)
+                        .map(|(range, split)| {
+                            assert!(!split);
+                            range
+                        })
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            });
         }
     }
 }
