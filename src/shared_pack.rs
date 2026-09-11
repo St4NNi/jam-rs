@@ -58,7 +58,7 @@ pub fn repack_shared_index(
     let mut logical_references = 0u64;
     let mut expected_member = 0u64;
     let mut expected_reference = 0u64;
-    for group in groups.chunks_exact(32) {
+    for group in groups.as_chunks::<32>().0 {
         let code = read_u64(group, 0);
         let first = read_u64(group, 8);
         let count = read_u64(group, 16);
@@ -87,7 +87,10 @@ pub fn repack_shared_index(
         let mut value = member_count;
         let mut previous = None;
         let mut total = 0u64;
-        for member in members[first as usize * 24..end as usize * 24].chunks_exact(24) {
+        for member in members[first as usize * 24..end as usize * 24]
+            .as_chunks::<24>()
+            .0
+        {
             let id = read_u32(member, 0);
             let first = read_u64(member, 8);
             let count = read_u64(member, 16);
@@ -105,7 +108,10 @@ pub fn repack_shared_index(
                 .ok_or(SharedError::Invalid("packing reference extent"))?;
             let stored_count = narrow(count)?;
             let mut stored_first = narrow(sections[Section::References as usize].len() as u64 / 4)?;
-            for raw in references[first as usize * 8..end as usize * 8].chunks_exact(8) {
+            for raw in references[first as usize * 8..end as usize * 8]
+                .as_chunks::<8>()
+                .0
+            {
                 let ordinal = read_u64(raw, 0);
                 if ordinal >= occurrence_rows {
                     return Err(SharedError::Invalid("packing occurrence reference"));
@@ -157,8 +163,10 @@ pub fn repack_shared_index(
         return Err(SharedError::Invalid("packing unreferenced payload"));
     }
     let singletons = sections[Section::Cores as usize]
-        .chunks_exact(24)
-        .filter(|row| read_u32(row, 0) & MULTIPLE_CORE == 0)
+        .as_chunks::<24>()
+        .0
+        .iter()
+        .filter(|row| read_u32(*row, 0) & MULTIPLE_CORE == 0)
         .count() as u64;
     let metadata = SharedReader::open(input)?;
     let mut seen = BTreeSet::new();
