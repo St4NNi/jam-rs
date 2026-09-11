@@ -102,7 +102,7 @@ pub(crate) fn write_shared_index(
     window: u16,
     seeds: &mut [IndexedSeed],
 ) -> Result<SharedBuildStats, SharedError> {
-    let mut sections: [Vec<u8>; 10] = std::array::from_fn(|_| Vec::new());
+    let mut sections: [Vec<u8>; 12] = std::array::from_fn(|_| Vec::new());
     let (source_bases, bgzf_bytes_once) = metadata(reference, &mut sections)?;
     seeds.sort_unstable_by_key(|row| (row.seed.core, row.member, row.contig, row.seed.position));
     for rows in seeds.windows(2) {
@@ -223,6 +223,7 @@ pub(crate) fn write_shared_index(
     publish(
         SharedHeader {
             version: 1,
+            core_payload_bytes: 0,
             window,
             core_count: sections[Section::Cores as usize].len() as u64 / 24,
             occurrence_count: seeds.len() as u64,
@@ -232,7 +233,7 @@ pub(crate) fn write_shared_index(
             manifest_sha256: reference.header().manifest_sha256,
             body_sha256: [0; 32],
             checksum_root_sha256: [0; 32],
-            sections: [SectionRange::default(); 10],
+            sections: [SectionRange::default(); 12],
         },
         output,
         sections,
@@ -243,7 +244,7 @@ pub(crate) fn write_shared_index(
 
 fn metadata(
     reference: &JidxReader,
-    sections: &mut [Vec<u8>; 10],
+    sections: &mut [Vec<u8>; 12],
 ) -> Result<(u64, u64), SharedError> {
     let mut bases = 0u64;
     let mut objects = BTreeSet::new();
@@ -302,13 +303,13 @@ fn string(strings: &mut Vec<u8>, value: &str) -> Result<StringRef, SharedError> 
 pub(crate) fn publish(
     mut header: SharedHeader,
     output: &Path,
-    sections: [Vec<u8>; 10],
+    sections: [Vec<u8>; 12],
     bgzf_bytes_once: u64,
     singletons: u64,
 ) -> Result<SharedBuildStats, SharedError> {
     let mut offset = HEADER_BYTES as u64;
-    let mut ranges = [SectionRange::default(); 10];
-    for kind in Section::ALL {
+    let mut ranges = [SectionRange::default(); 12];
+    for &kind in header.section_order() {
         offset = offset
             .checked_next_multiple_of(PAGE_BYTES)
             .ok_or(SharedError::ResourceLimit)?;
@@ -337,7 +338,7 @@ pub(crate) fn publish(
         .tempfile_in(parent)?;
     let file = temporary.as_file_mut();
     file.set_len(file_bytes)?;
-    for kind in Section::ALL {
+    for &kind in header.section_order() {
         file.seek(SeekFrom::Start(ranges[kind as usize].offset))?;
         file.write_all(&sections[kind as usize])?;
     }
@@ -393,8 +394,10 @@ pub(crate) fn publish(
         complete_query_ready_bytes: file_bytes
             .checked_add(bgzf_bytes_once)
             .ok_or(SharedError::ResourceLimit)?,
-        section_bytes: Section::ALL
-            .into_iter()
+        section_bytes: header
+            .section_order()
+            .iter()
+            .copied()
             .map(|kind| (format!("{kind:?}"), ranges[kind as usize].length))
             .collect(),
     })

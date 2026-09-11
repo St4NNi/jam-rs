@@ -29,7 +29,7 @@ pub fn repack_shared_index(
     let mut header = source.header.clone();
     header.version = 2;
     let width = header.id_bytes();
-    let mut sections: [Vec<u8>; 10] = std::array::from_fn(|_| Vec::new());
+    let mut sections: [Vec<u8>; 12] = std::array::from_fn(|_| Vec::new());
     for kind in [
         Section::Strings,
         Section::Documents,

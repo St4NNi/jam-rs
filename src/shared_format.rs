@@ -12,6 +12,7 @@ pub(crate) const MEMBER_ROW_BYTES: u64 = 24;
 pub(crate) const OCCURRENCE_ROW_BYTES: u64 = 24;
 pub(crate) const MULTIPLE_CORE: u32 = 1 << 31;
 pub(crate) const CORE_MASK: u32 = (1 << 30) - 1;
+pub(crate) const CORE_PREFIX_BOUNDARIES: usize = 65_537;
 const HEADER_HASH_OFFSET: usize = 304;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +28,8 @@ pub(crate) enum Section {
     References,
     Occurrences,
     Checksums,
+    CorePayloads,
+    CorePrefixes,
 }
 
 impl Section {
@@ -36,6 +39,21 @@ impl Section {
         Self::Contigs,
         Self::Gzi,
         Self::Cores,
+        Self::Groups,
+        Self::Members,
+        Self::References,
+        Self::Occurrences,
+        Self::Checksums,
+    ];
+
+    const SPLIT: [Self; 12] = [
+        Self::Strings,
+        Self::Documents,
+        Self::Contigs,
+        Self::Gzi,
+        Self::CorePrefixes,
+        Self::Cores,
+        Self::CorePayloads,
         Self::Groups,
         Self::Members,
         Self::References,
@@ -53,6 +71,7 @@ impl Section {
             Self::References => 8,
             Self::Occurrences => OCCURRENCE_ROW_BYTES,
             Self::Checksums => 32,
+            Self::CorePrefixes => 4,
             _ => 1,
         }
     }
@@ -67,6 +86,7 @@ pub(crate) struct SectionRange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SharedHeader {
     pub(crate) version: u16,
+    pub(crate) core_payload_bytes: u8,
     pub(crate) window: u16,
     pub(crate) core_count: u64,
     pub(crate) occurrence_count: u64,
@@ -76,10 +96,22 @@ pub(crate) struct SharedHeader {
     pub(crate) manifest_sha256: [u8; 32],
     pub(crate) body_sha256: [u8; 32],
     pub(crate) checksum_root_sha256: [u8; 32],
-    pub(crate) sections: [SectionRange; 10],
+    pub(crate) sections: [SectionRange; 12],
 }
 
 impl SharedHeader {
+    pub(crate) fn section_order(&self) -> &'static [Section] {
+        if self.version == 3 {
+            &Section::SPLIT
+        } else {
+            &Section::ALL
+        }
+    }
+
+    fn hash_offset(&self) -> usize {
+        HEADER_HASH_OFFSET + if self.version == 3 { 32 } else { 0 }
+    }
+
     pub(crate) fn id_bytes(&self) -> usize {
         if self.document_count <= u32::from(u8::MAX) {
             1
@@ -91,7 +123,14 @@ impl SharedHeader {
     }
 
     pub(crate) fn row_bytes(&self, section: Section) -> u64 {
-        if self.version == 2 {
+        if self.version == 3 {
+            match section {
+                Section::Cores => return 4,
+                Section::CorePayloads => return u64::from(self.core_payload_bytes),
+                _ => {}
+            }
+        }
+        if matches!(self.version, 2 | 3) {
             match section {
                 Section::Groups => return 13 + self.id_bytes() as u64,
                 Section::Members => return 8 + self.id_bytes() as u64,
@@ -118,6 +157,7 @@ impl SharedHeader {
         put_u16(&mut out, 8, self.version);
         put_u16(&mut out, 10, HEADER_BYTES as u16);
         put_u16(&mut out, 12, self.window);
+        out[14] = self.core_payload_bytes;
         put_u64(&mut out, 16, self.core_count);
         put_u64(&mut out, 24, self.occurrence_count);
         put_u32(&mut out, 32, self.document_count);
@@ -126,35 +166,42 @@ impl SharedHeader {
         out[48..80].copy_from_slice(&self.manifest_sha256);
         out[80..112].copy_from_slice(&self.body_sha256);
         out[112..144].copy_from_slice(&self.checksum_root_sha256);
-        for (index, section) in self.sections.iter().enumerate() {
+        for (index, section) in self
+            .sections
+            .iter()
+            .take(self.section_order().len())
+            .enumerate()
+        {
             put_u64(&mut out, 144 + 16 * index, section.offset);
             put_u64(&mut out, 152 + 16 * index, section.length);
         }
         let digest = sha256(&out);
-        out[HEADER_HASH_OFFSET..HEADER_HASH_OFFSET + 32].copy_from_slice(&digest);
+        out[self.hash_offset()..self.hash_offset() + 32].copy_from_slice(&digest);
         Ok(out)
     }
 
     pub(crate) fn decode(bytes: &[u8], file_bytes: u64) -> Result<Self, SharedError> {
+        let split = bytes.get(8) == Some(&3);
+        let hash_offset = HEADER_HASH_OFFSET + if split { 32 } else { 0 };
         if bytes.len() != HEADER_BYTES
             || &bytes[..8] != b"JSHARED\0"
-            || !matches!(bytes[8], 1 | 2)
+            || !matches!(bytes[8], 1 | 2 | 3)
             || bytes[9..12] != [0, 0, 16]
-            || bytes[14..16] != [0, 0]
-            || bytes[HEADER_HASH_OFFSET + 32..]
-                .iter()
-                .any(|&byte| byte != 0)
+            || bytes[15] != 0
+            || (!split && bytes[14] != 0)
+            || bytes[hash_offset + 32..].iter().any(|&byte| byte != 0)
         {
             return Err(SharedError::Invalid("header"));
         }
         let mut checked = [0; HEADER_BYTES];
         checked.copy_from_slice(bytes);
-        checked[HEADER_HASH_OFFSET..HEADER_HASH_OFFSET + 32].fill(0);
-        if sha256(&checked) != bytes[HEADER_HASH_OFFSET..HEADER_HASH_OFFSET + 32] {
+        checked[hash_offset..hash_offset + 32].fill(0);
+        if sha256(&checked) != bytes[hash_offset..hash_offset + 32] {
             return Err(SharedError::ChecksumMismatch);
         }
         let header = Self {
             version: u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
+            core_payload_bytes: bytes[14],
             window: u16::from_le_bytes(bytes[12..14].try_into().unwrap()),
             core_count: read_u64(bytes, 16),
             occurrence_count: read_u64(bytes, 24),
@@ -164,9 +211,14 @@ impl SharedHeader {
             manifest_sha256: bytes[48..80].try_into().unwrap(),
             body_sha256: bytes[80..112].try_into().unwrap(),
             checksum_root_sha256: bytes[112..144].try_into().unwrap(),
-            sections: std::array::from_fn(|index| SectionRange {
-                offset: read_u64(bytes, 144 + 16 * index),
-                length: read_u64(bytes, 152 + 16 * index),
+            sections: std::array::from_fn(|index| {
+                if !split && index >= Section::ALL.len() {
+                    return SectionRange::default();
+                }
+                SectionRange {
+                    offset: read_u64(bytes, 144 + 16 * index),
+                    length: read_u64(bytes, 152 + 16 * index),
+                }
             }),
         };
         header.validate(file_bytes)?;
@@ -174,16 +226,20 @@ impl SharedHeader {
     }
 
     fn validate(&self, file_bytes: u64) -> Result<(), SharedError> {
-        if !matches!(self.version, 1 | 2)
-            || self.window == 0
+        if !matches!(
+            (self.version, self.core_payload_bytes),
+            (1 | 2, 0) | (3, 13 | 21)
+        ) || self.window == 0
             || self.document_count == 0
             || self.contig_count == 0
             || self.core_count > self.occurrence_count
+            || self.version == 3 && self.core_count > u64::from(u32::MAX)
         {
             return Err(SharedError::Invalid("header counts"));
         }
         let mut previous = HEADER_BYTES as u64;
-        for (kind, section) in Section::ALL.into_iter().zip(self.sections) {
+        for &kind in self.section_order() {
+            let section = self.section(kind);
             let expected = previous
                 .checked_next_multiple_of(PAGE_BYTES)
                 .ok_or(SharedError::Invalid("section padding"))?;
@@ -199,8 +255,15 @@ impl SharedHeader {
         if previous != file_bytes
             || self.section(Section::Documents).length != u64::from(self.document_count) * 80
             || self.section(Section::Contigs).length != u64::from(self.contig_count) * 40
-            || self.core_count.checked_mul(CORE_ROW_BYTES)
+            || self.core_count.checked_mul(self.row_bytes(Section::Cores))
                 != Some(self.section(Section::Cores).length)
+            || self.version == 3
+                && (self
+                    .core_count
+                    .checked_mul(u64::from(self.core_payload_bytes))
+                    != Some(self.section(Section::CorePayloads).length)
+                    || self.section(Section::CorePrefixes).length
+                        != CORE_PREFIX_BOUNDARIES as u64 * 4)
         {
             return Err(SharedError::Invalid("section counts"));
         }
@@ -247,6 +310,9 @@ mod tests {
         let lengths = [5, 80, 40, 8, 24, 0, 0, 0, 0, 4096];
         let mut offset = HEADER_BYTES as u64;
         let sections = std::array::from_fn(|index| {
+            if index >= lengths.len() {
+                return SectionRange::default();
+            }
             offset = offset.next_multiple_of(PAGE_BYTES);
             let section = SectionRange {
                 offset,
@@ -257,6 +323,7 @@ mod tests {
         });
         SharedHeader {
             version: 1,
+            core_payload_bytes: 0,
             window: 64,
             core_count: 1,
             occurrence_count: 1,
@@ -320,6 +387,54 @@ mod tests {
             assert_eq!(header.row_bytes(Section::Groups), 13 + width as u64);
             assert_eq!(header.row_bytes(Section::Members), 8 + width as u64);
             assert_eq!(header.row_bytes(Section::References), 4);
+        }
+    }
+
+    #[test]
+    fn split_core_header_binds_width_sections_and_prefix_count() {
+        for width in [13, 21] {
+            let mut header = fixture();
+            header.version = 3;
+            header.core_payload_bytes = width;
+            header.sections[Section::Cores as usize].length = 4;
+            header.sections[Section::CorePayloads as usize].length = u64::from(width);
+            header.sections[Section::CorePrefixes as usize].length =
+                CORE_PREFIX_BOUNDARIES as u64 * 4;
+            let mut offset = HEADER_BYTES as u64;
+            for &kind in header.section_order() {
+                offset = offset.next_multiple_of(PAGE_BYTES);
+                header.sections[kind as usize].offset = offset;
+                offset += header.section(kind).length;
+            }
+            let checksums = header.section(Section::Checksums);
+            let levels = checksum_layout(checksums.offset / PAGE_BYTES - 1).unwrap();
+            let top = levels.last().unwrap();
+            header.sections[Section::Checksums as usize].length =
+                top.offset + top.page_count * PAGE_BYTES;
+            let end = header.section(Section::Checksums);
+            let encoded = header.encode().unwrap();
+            assert_eq!(
+                SharedHeader::decode(&encoded, end.offset + end.length).unwrap(),
+                header
+            );
+            assert_eq!(header.row_bytes(Section::Cores), 4);
+            assert_eq!(header.row_bytes(Section::CorePayloads), u64::from(width));
+            assert_eq!(header.row_bytes(Section::Groups), 14);
+            assert_eq!(header.row_bytes(Section::Members), 9);
+            for invalid in [0, 12, 17, 24] {
+                let mut bad = header.clone();
+                bad.core_payload_bytes = invalid;
+                assert!(bad.encode().is_err());
+            }
+            let mut bad = header.clone();
+            bad.sections[Section::CorePrefixes as usize].length -= 4;
+            assert!(bad.encode().is_err());
+            let mut bad = header.clone();
+            bad.sections[Section::CorePayloads as usize].length += 1;
+            assert!(bad.encode().is_err());
+            let mut bad = encoded;
+            bad[8] = 4;
+            assert!(SharedHeader::decode(&bad, end.offset + end.length).is_err());
         }
     }
 }

@@ -5,8 +5,8 @@ use crate::jidx_reader::{Contig, Metagenome, SeedOccurrence};
 pub use crate::shared_file::FileReadStats;
 use crate::shared_file::SharedFile;
 use crate::shared_format::{
-    CORE_MASK, CORE_ROW_BYTES, MULTIPLE_CORE, OCCURRENCE_ROW_BYTES, Section, SharedError, read_u32,
-    read_u64,
+    CORE_MASK, CORE_PREFIX_BOUNDARIES, CORE_ROW_BYTES, MULTIPLE_CORE, OCCURRENCE_ROW_BYTES,
+    Section, SharedError, read_u32, read_u64,
 };
 use crate::shared_seed::{SharedKey, SharedSeed};
 use serde::Serialize;
@@ -158,6 +158,9 @@ impl SharedReader {
 
     fn open_inner(path: impl AsRef<Path>, observed: bool) -> Result<Self, SharedError> {
         let file = SharedFile::open(path, observed)?;
+        if file.header.version == 3 {
+            validate_core_prefixes(&file)?;
+        }
         let reader_token = NEXT_READER_TOKEN
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
                 token.checked_add(1)
@@ -189,6 +192,10 @@ impl SharedReader {
 
     pub fn core_count(&self) -> u64 {
         self.file.header.core_count
+    }
+
+    pub(crate) fn has_core_prefixes(&self) -> bool {
+        self.file.header.version == 3
     }
 
     pub fn occurrence_count(&self) -> u64 {
@@ -225,7 +232,11 @@ impl SharedReader {
     }
 
     pub fn verify_checksum(&self) -> Result<(), SharedError> {
-        self.file.verify_checksum()
+        self.file.verify_checksum()?;
+        if self.file.header.version == 3 {
+            self.audit_compact_cores()?;
+        }
+        self.file.verify_unchanged()
     }
 
     pub fn identity(&self) -> Option<[u64; 7]> {
@@ -615,8 +626,7 @@ impl SharedReader {
     }
 
     fn resolve_core_unchecked(&self, core: u32) -> Result<Option<(u64, CoreRow)>, SharedError> {
-        let mut low = 0;
-        let mut high = self.file.header.core_count;
+        let (mut low, mut high) = self.core_search_range(core)?;
         while low < high {
             let middle = low + (high - low) / 2;
             let found = self.core_key(middle)?;
@@ -644,15 +654,37 @@ impl SharedReader {
         order: Option<&[usize]>,
         groups: &mut [Option<SharedGroup>],
     ) -> Result<(), SharedError> {
-        self.find_cores_many(
-            keys,
-            order,
-            groups,
-            0,
-            self.file.header.core_count,
-            0,
-            keys.len(),
-        )
+        if self.file.header.version != 3 {
+            return self.find_cores_many(
+                keys,
+                order,
+                groups,
+                0,
+                self.file.header.core_count,
+                0,
+                keys.len(),
+            );
+        }
+        let mut start = 0;
+        while start < keys.len() {
+            let prefix = keys[ordered_index(order, start)].core >> 14;
+            let mut end = start + 1;
+            while end < keys.len() && keys[ordered_index(order, end)].core >> 14 == prefix {
+                end += 1;
+            }
+            let (first_core, last_core) = self.core_prefix_range(prefix)?;
+            self.find_cores_many(
+                keys,
+                order,
+                groups,
+                first_core,
+                last_core - first_core,
+                start,
+                end,
+            )?;
+            start = end;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -905,20 +937,85 @@ impl SharedReader {
         low
     }
 
+    fn core_search_range(&self, core: u32) -> Result<(u64, u64), SharedError> {
+        if self.file.header.version == 3 {
+            self.core_prefix_range(core >> 14)
+        } else {
+            Ok((0, self.file.header.core_count))
+        }
+    }
+
+    fn core_prefix_range(&self, prefix: u32) -> Result<(u64, u64), SharedError> {
+        if prefix as usize >= CORE_PREFIX_BOUNDARIES - 1 {
+            return Err(SharedError::Invalid("core prefix"));
+        }
+        let offset = u64::from(prefix) * 4;
+        let bounds = self.file.section(Section::CorePrefixes, offset, 8)?;
+        let low = u64::from(read_u32(bounds, 0));
+        let high = u64::from(read_u32(bounds, 4));
+        if low > high || high > self.file.header.core_count {
+            return Err(SharedError::Invalid("core prefix directory"));
+        }
+        if low < high {
+            if self.core_key(low)? >> 14 != prefix || self.core_key(high - 1)? >> 14 != prefix {
+                return Err(SharedError::Invalid("core prefix membership"));
+            }
+        }
+        if low > 0 && self.core_key(low - 1)? >> 14 >= prefix {
+            return Err(SharedError::Invalid("core prefix membership"));
+        }
+        if high < self.file.header.core_count && self.core_key(high)? >> 14 <= prefix {
+            return Err(SharedError::Invalid("core prefix membership"));
+        }
+        Ok((low, high))
+    }
+
+    fn audit_compact_cores(&self) -> Result<(), SharedError> {
+        let prefixes =
+            self.file
+                .section(Section::CorePrefixes, 0, CORE_PREFIX_BOUNDARIES as u64 * 4)?;
+        let mut previous = None;
+        for ordinal in 0..self.file.header.core_count {
+            let core = self.core_key(ordinal)?;
+            if previous.is_some_and(|before| before >= core) {
+                return Err(SharedError::Invalid("core order"));
+            }
+            let prefix = core >> 14;
+            let offset = prefix as usize * 4;
+            let low = u64::from(read_u32(prefixes, offset));
+            let high = u64::from(read_u32(prefixes, offset + 4));
+            if ordinal < low || ordinal >= high {
+                return Err(SharedError::Invalid("core prefix membership"));
+            }
+            let row = self.core_row(ordinal)?;
+            if row.core != core {
+                return Err(SharedError::Invalid("core row"));
+            }
+            previous = Some(core);
+        }
+        Ok(())
+    }
+
     fn core_row(&self, ordinal: u64) -> Result<CoreRow, SharedError> {
-        let bytes = self.file.record(Section::Cores, ordinal, CORE_ROW_BYTES)?;
-        self.observe(&self.core_inspections, 1);
-        CoreRow::decode(
-            bytes,
-            self.file.header.contig_count,
-            self.file.header.section(Section::Groups).length
-                / self.file.header.row_bytes(Section::Groups),
-        )
+        let groups = self.file.header.section(Section::Groups).length
+            / self.file.header.row_bytes(Section::Groups);
+        if self.file.header.version == 3 {
+            let hot = self.file.record(Section::Cores, ordinal, 4)?;
+            let width = u64::from(self.file.header.core_payload_bytes);
+            let payload = self.file.record(Section::CorePayloads, ordinal, width)?;
+            self.observe(&self.core_inspections, 1);
+            CoreRow::decode_compact(hot, payload, self.file.header.contig_count, groups)
+        } else {
+            let width = self.file.header.row_bytes(Section::Cores);
+            let bytes = self.file.record(Section::Cores, ordinal, width)?;
+            self.observe(&self.core_inspections, 1);
+            CoreRow::decode(bytes, self.file.header.contig_count, groups)
+        }
     }
 
     fn core_key(&self, ordinal: u64) -> Result<u32, SharedError> {
         let offset = ordinal
-            .checked_mul(CORE_ROW_BYTES)
+            .checked_mul(self.file.header.row_bytes(Section::Cores))
             .ok_or(SharedError::Invalid("core ordinal"))?;
         let bytes = self.file.section(Section::Cores, offset, 4)?;
         self.observe(&self.core_key_inspections, 1);
@@ -1338,7 +1435,7 @@ impl SharedReader {
             / self.file.header.row_bytes(Section::Members);
         if !valid_context_code(context_code)
             || member_count == 0
-            || self.file.header.version == 2 && inline_member.is_none() && member_count < 2
+            || self.file.header.version != 1 && inline_member.is_none() && member_count < 2
             || occurrence_count == 0
             || occurrence_count > self.file.header.occurrence_count
             || self.file.header.version == 1 && read_u32(bytes, 28) != 0
@@ -1364,14 +1461,33 @@ impl SharedReader {
     }
 }
 
-#[derive(Clone, Copy)]
-struct CoreRow {
-    core: u32,
-    kind: CoreKind,
+fn validate_core_prefixes(file: &SharedFile) -> Result<(), SharedError> {
+    let bytes = file.section(Section::CorePrefixes, 0, CORE_PREFIX_BOUNDARIES as u64 * 4)?;
+    let mut previous = 0u32;
+    for (index, raw) in bytes.chunks_exact(4).enumerate() {
+        let boundary = read_u32(raw, 0);
+        if index == 0 && boundary != 0
+            || boundary < previous
+            || u64::from(boundary) > file.header.core_count
+        {
+            return Err(SharedError::Invalid("core prefix directory"));
+        }
+        previous = boundary;
+    }
+    if u64::from(previous) != file.header.core_count {
+        return Err(SharedError::Invalid("core prefix directory"));
+    }
+    file.verify_unchanged()
 }
 
 #[derive(Clone, Copy)]
-enum CoreKind {
+pub(crate) struct CoreRow {
+    pub(crate) core: u32,
+    pub(crate) kind: CoreKind,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CoreKind {
     Singleton {
         context: u32,
         contig_id: u32,
@@ -1394,7 +1510,14 @@ impl CoreRow {
         Ok(word & CORE_MASK)
     }
 
-    fn decode(bytes: &[u8], contig_count: u32, total_groups: u64) -> Result<Self, SharedError> {
+    pub(crate) fn decode(
+        bytes: &[u8],
+        contig_count: u32,
+        total_groups: u64,
+    ) -> Result<Self, SharedError> {
+        if bytes.len() != CORE_ROW_BYTES as usize {
+            return Err(SharedError::Invalid("core row"));
+        }
         let word = read_u32(bytes, 0);
         let core = Self::decode_key(bytes)?;
         let kind = if word & MULTIPLE_CORE == 0 {
@@ -1420,6 +1543,76 @@ impl CoreRow {
             let group_count = read_u32(bytes, 4);
             let first_group = read_u64(bytes, 16);
             if group_count == 0
+                || occurrence_count < 2
+                || first_group
+                    .checked_add(u64::from(group_count))
+                    .is_none_or(|end| end > total_groups)
+            {
+                return Err(SharedError::Invalid("repeated core"));
+            }
+            CoreKind::Repeated {
+                first_group,
+                group_count,
+                occurrence_count,
+            }
+        };
+        Ok(Self { core, kind })
+    }
+
+    pub(crate) fn decode_compact(
+        hot: &[u8],
+        payload: &[u8],
+        contig_count: u32,
+        total_groups: u64,
+    ) -> Result<Self, SharedError> {
+        if hot.len() != 4 || !matches!(payload.len(), 13 | 21) {
+            return Err(SharedError::Invalid("core row"));
+        }
+        let word = read_u32(hot, 0);
+        let core = Self::decode_key(hot)?;
+        let kind = if word & MULTIPLE_CORE == 0 {
+            let context = read_u32(payload, 0);
+            let contig_id = read_u32(payload, 4);
+            let (position, flags) = if payload.len() == 13 {
+                (u64::from(read_u32(payload, 8)), u32::from(payload[12]))
+            } else {
+                if read_u32(payload, 16) != 0 {
+                    return Err(SharedError::Invalid("singleton core"));
+                }
+                (read_u64(payload, 8), u32::from(payload[20]))
+            };
+            if flags & !7 != 0
+                || flags & 4 != 0 && flags & 2 == 0
+                || flags & 2 == 0 && context != 0
+                || flags & 4 == 0 && context & ((1 << 20) - 1) != 0
+                || contig_id >= contig_count
+            {
+                return Err(SharedError::Invalid("singleton core"));
+            }
+            CoreKind::Singleton {
+                context,
+                contig_id,
+                flags,
+                position,
+            }
+        } else {
+            let (first_group, group_count, occurrence_count, reserved) = if payload.len() == 13 {
+                (
+                    u64::from(read_u32(payload, 0)),
+                    read_u32(payload, 4),
+                    u64::from(read_u32(payload, 8)),
+                    payload[12],
+                )
+            } else {
+                (
+                    read_u64(payload, 0),
+                    read_u32(payload, 8),
+                    read_u64(payload, 12),
+                    payload[20],
+                )
+            };
+            if reserved != 0
+                || group_count == 0
                 || occurrence_count < 2
                 || first_group
                     .checked_add(u64::from(group_count))
