@@ -353,6 +353,181 @@ fn shared_lookup(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn absent_cores(present: &[u32], count: usize, prefix: Option<u32>) -> Vec<u32> {
+    let mut absent = Vec::with_capacity(count);
+    let mut ordinal = 0u32;
+    while absent.len() < count {
+        let core = match prefix {
+            Some(prefix) => (prefix << 14) | (ordinal & ((1 << 14) - 1)),
+            None => ordinal.wrapping_mul(506_952_113) & ((1 << 30) - 1),
+        };
+        if present.binary_search(&core).is_err() {
+            absent.push(core);
+        }
+        ordinal = ordinal.wrapping_add(1);
+    }
+    absent
+}
+
+fn sampled_present_cores(present: &[u32], count: usize) -> Vec<u32> {
+    if count == 0 {
+        return Vec::new();
+    }
+    (0..count)
+        .map(|ordinal| present[ordinal * (present.len() - 1) / count.saturating_sub(1).max(1)])
+        .collect()
+}
+
+fn mixed_core_workload(
+    present: &[u32],
+    present_count: usize,
+    prefix: Option<u32>,
+) -> Vec<SharedKey> {
+    const REQUESTS: usize = 4096;
+    let mut cores = sampled_present_cores(present, present_count);
+    cores.extend(absent_cores(present, REQUESTS - present_count, prefix));
+    cores.sort_unstable();
+    cores.dedup();
+    assert_eq!(cores.len(), REQUESTS);
+    cores.into_iter().map(SharedKey::core).collect()
+}
+
+fn prefix_core_workload(present: &[u32], prefix: u32) -> Vec<SharedKey> {
+    const REQUESTS: usize = 4096;
+    let mut cores = present
+        .iter()
+        .copied()
+        .filter(|core| core >> 14 == prefix)
+        .collect::<Vec<_>>();
+    assert!(!cores.is_empty() && cores.len() < REQUESTS);
+    cores.extend(absent_cores(present, REQUESTS - cores.len(), Some(prefix)));
+    cores.sort_unstable();
+    assert_eq!(cores.len(), REQUESTS);
+    cores.into_iter().map(SharedKey::core).collect()
+}
+
+fn shared_core_absent_fixture() -> (
+    tempfile::TempDir,
+    SharedReader,
+    Vec<(&'static str, Vec<SharedKey>)>,
+) {
+    let directory = tempfile::tempdir().unwrap();
+    let dna = sequence(1_050_000);
+    let bgzf_path = directory.path().join("large-target.bgz");
+    let mut fasta = b">target\n".to_vec();
+    for line in dna.chunks(80) {
+        fasta.extend_from_slice(line);
+        fasta.push(b'\n');
+    }
+    let mut writer = bgzf::io::Writer::new(File::create(&bgzf_path).unwrap());
+    writer.write_all(&fasta).unwrap();
+    writer.finish().unwrap();
+    let bgzf_path = std::fs::canonicalize(bgzf_path).unwrap();
+    let bgzf_bytes = std::fs::read(&bgzf_path).unwrap();
+    let gzi_path = directory.path().join("large-target.gzi");
+    gzi::fs::write(&gzi_path, &synthetic_gzi(&bgzf_bytes)).unwrap();
+
+    let metadata_path = directory.path().join("large-target.jidx");
+    let mut metadata = JidxWriter::new(
+        &metadata_path,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 1,
+            jam_sha256: [3; 32],
+            manifest_sha256: [4; 32],
+        },
+    )
+    .unwrap();
+    metadata
+        .begin_metagenome(MetagenomeInput {
+            name: "large-target".to_owned(),
+            bgzf_uri: bgzf_path.to_str().unwrap().to_owned(),
+            bgzf_bytes: bgzf_bytes.len() as u64,
+            bgzf_sha256: sha256(&bgzf_bytes),
+            gzi: std::fs::read(gzi_path).unwrap(),
+        })
+        .unwrap();
+    metadata
+        .begin_contig(ContigInput {
+            name: "large-target".to_owned(),
+            length: dna.len() as u64,
+            fasta_offset: 8,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+    metadata.finish().unwrap();
+    let shared_path = directory.path().join("large-target.shared");
+    let build = build_shared_index(&metadata_path, &shared_path, 1).unwrap();
+    assert!(build.core_count >= 1_000_000, "{} cores", build.core_count);
+
+    let mut present = select_shared_seeds(&dna, 1)
+        .unwrap()
+        .into_iter()
+        .map(|seed| seed.core)
+        .collect::<Vec<_>>();
+    present.sort_unstable();
+    present.dedup();
+    assert_eq!(present.len() as u64, build.core_count);
+    let skew_prefix = present[present.len() / 2] >> 14;
+    let workloads = vec![
+        ("spread/absent", mixed_core_workload(&present, 0, None)),
+        (
+            "spread/10pct_present",
+            mixed_core_workload(&present, 410, None),
+        ),
+        (
+            "spread/50pct_present",
+            mixed_core_workload(&present, 2048, None),
+        ),
+        ("spread/present", mixed_core_workload(&present, 4096, None)),
+        (
+            "one_prefix/available_present",
+            prefix_core_workload(&present, skew_prefix),
+        ),
+    ];
+    (
+        directory,
+        SharedReader::open(shared_path).unwrap(),
+        workloads,
+    )
+}
+
+fn shared_core_absent(criterion: &mut Criterion) {
+    let fixture_started = std::time::Instant::now();
+    let (_directory, reader, workloads) = shared_core_absent_fixture();
+    eprintln!(
+        "shared_core_absent fixture setup: {:.3}s",
+        fixture_started.elapsed().as_secs_f64()
+    );
+    let mut group = criterion.benchmark_group("shared_core_absent");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, keys) in workloads {
+        let expected = keys
+            .iter()
+            .filter(|&&key| reader.find(key).unwrap().is_some())
+            .count();
+        assert_eq!(
+            reader
+                .find_many(&keys)
+                .unwrap()
+                .into_iter()
+                .flatten()
+                .count(),
+            expected
+        );
+        group.throughput(Throughput::Elements(keys.len() as u64));
+        group.bench_function(name, |bencher| {
+            bencher.iter(|| reader.find_many(black_box(&keys)).unwrap())
+        });
+    }
+    group.finish();
+}
+
 fn shared_packed(criterion: &mut Criterion) {
     let (directory, reference, workloads) = shared_lookup_fixture();
     let path = directory.path().join("packed.shared");
@@ -416,6 +591,7 @@ criterion_group!(
     affine_alignment,
     owner_postings,
     shared_lookup,
+    shared_core_absent,
     shared_packed
 );
 criterion_main!(benches);
