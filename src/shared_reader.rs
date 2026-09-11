@@ -586,8 +586,16 @@ impl SharedReader {
         self.observe(&self.grouped_core_rows, 1);
         let lower =
             self.request_core_partition(keys, order, request_start, request_end, row.core, false);
-        let upper = self.request_core_partition(keys, order, lower, request_end, row.core, true);
-        if lower < upper {
+        let matches = lower < request_end && {
+            self.observe(&self.directory_comparison_probes, 1);
+            keys[ordered_index(order, lower)].core == row.core
+        };
+        let upper = if matches {
+            self.request_core_partition(keys, order, lower, request_end, row.core, true)
+        } else {
+            lower
+        };
+        if matches {
             self.observe(&self.core_resolutions_present, 1);
             self.find_contexts_many(keys, order, groups, core_ordinal, row, lower, upper)?;
         } else {

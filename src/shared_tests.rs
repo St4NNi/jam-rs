@@ -417,6 +417,10 @@ fn grouped_lookup_matches_scalar_with_contexts_absence_and_chunking() {
                 groups.extend(reader.find_many(chunk).unwrap());
             }
             let stats = reader.stats();
+            assert_eq!(
+                stats.grouped_core_rows,
+                stats.core_resolutions_present + stats.grouped_core_rows_without_match
+            );
             let expected_present = requests
                 .chunks(chunk_size)
                 .filter(|chunk| chunk.iter().any(|key| key.core == TARGET_CORE))
@@ -933,6 +937,53 @@ fn packed_pilot_shaped_lists_preserve_every_synthetic_context() {
                 group_evidence(&reader, actual),
                 group_evidence(&baseline, baseline.find(key).unwrap())
             );
+        }
+    }
+}
+
+#[test]
+fn packed_direct_locators_are_bounded_by_physical_placements() {
+    for inline in [false, true] {
+        let (directory, source) = grouped_lookup_fixture(0);
+        let packed = directory.path().join("packed.shared");
+        crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+        mutate_and_resign(&packed, |bytes, header| {
+            let width = header.id_bytes();
+            let physical = header.section(Section::Occurrences).length / 24;
+            assert!(header.section(Section::References).length / 4 > physical);
+            let section = if inline {
+                Section::Groups
+            } else {
+                Section::Members
+            };
+            let range = header.section(section);
+            let mut changed = 0;
+            for row in bytes[range.offset as usize..(range.offset + range.length) as usize]
+                .chunks_exact_mut(header.row_bytes(section) as usize)
+            {
+                let (first, count) = if inline {
+                    (5 + width, 9 + width)
+                } else {
+                    (width, width + 4)
+                };
+                if (!inline || row[4] & 4 != 0) && crate::jidx::read_u32(row, count) == 1 {
+                    row[first..first + 4].copy_from_slice(&(physical as u32).to_le_bytes());
+                    changed += 1;
+                }
+            }
+            assert!(changed > 0);
+        });
+        let reader = SharedReader::open(&packed).unwrap();
+        if inline {
+            let key = SharedKey {
+                core: TARGET_CORE,
+                context: TARGET_CONTEXT ^ 1,
+                length: 31,
+            };
+            assert!(reader.find(key).is_err());
+        } else {
+            let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+            assert!(reader.members(group).is_err());
         }
     }
 }
