@@ -353,5 +353,69 @@ fn shared_lookup(criterion: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, affine_alignment, owner_postings, shared_lookup);
+fn shared_packed(criterion: &mut Criterion) {
+    let (directory, reference, workloads) = shared_lookup_fixture();
+    let path = directory.path().join("packed.shared");
+    jam_rs::shared_pack::repack_shared_index(directory.path().join("target.shared"), &path)
+        .unwrap();
+    let packed = SharedReader::open(path).unwrap();
+    let mut group = criterion.benchmark_group("shared_packed");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, keys) in &workloads {
+        let counts = |reader: &SharedReader| {
+            reader
+                .find_many(keys)
+                .unwrap()
+                .into_iter()
+                .map(|group| {
+                    group.map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(counts(&reference), counts(&packed));
+        for (format, reader) in [("v1", &reference), ("packed", &packed)] {
+            group.bench_function(format!("{name}/{format}"), |bencher| {
+                bencher.iter(|| reader.find_many(black_box(keys)).unwrap())
+            });
+        }
+    }
+    let common = workloads
+        .iter()
+        .find(|(name, _)| *name == "high_multiplicity")
+        .unwrap()
+        .1[0];
+    let left = reference.find(common).unwrap().unwrap();
+    let right = packed.find(common).unwrap().unwrap();
+    let member = reference.members(left).unwrap()[0];
+    let other = packed.members(right).unwrap()[0];
+    let start = member.occurrence_count().saturating_sub(16);
+    assert_eq!(
+        reference.occurrence_block(left, member, start, 16).unwrap(),
+        packed.occurrence_block(right, other, start, 16).unwrap()
+    );
+    for (format, reader, selected, member) in [
+        ("v1", &reference, left, member),
+        ("packed", &packed, right, other),
+    ] {
+        group.bench_function(format!("late_placement_block/{format}"), |bencher| {
+            bencher.iter(|| {
+                reader
+                    .occurrence_block(selected, member, black_box(start), 16)
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    affine_alignment,
+    owner_postings,
+    shared_lookup,
+    shared_packed
+);
 criterion_main!(benches);
