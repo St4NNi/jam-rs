@@ -4,8 +4,10 @@
 // SPDX-License-Identifier: MIT
 
 use super::manifest::{FileRecord, PACKED_DIRECTORY};
+use super::plan::{Pin, Place, Plan};
 use super::{AtPath, IndexError};
-use crate::storage::{BlockCache, LocalFile, MappedFile, ReadAt, S3Config, S3Object};
+use crate::storage::{BlockCache, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config, S3Object};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -95,6 +97,9 @@ pub struct ShardOptions {
     /// A block cache that every file except the sketch is read through. With it, each entry's
     /// packed sequence stays open after its first read, so its blocks are found again.
     pub cache: Option<Arc<BlockCache>>,
+    /// A cache directory warmed by `jam index warm`; the ranges its plan pins are read from
+    /// there. Without a plan for the shard nothing is pinned.
+    pub pins: Option<PathBuf>,
 }
 
 /// The file sources of one open shard.
@@ -102,13 +107,30 @@ pub(crate) struct ShardFiles {
     location: Location,
     packed: Location,
     cache: Option<Arc<BlockCache>>,
+    /// The pins of the plan with their local files, by file name relative to the shard.
+    pins: HashMap<String, (Pin, PathBuf)>,
     /// Packed sequences kept open per entry when they are cached or remote; empty otherwise.
     opened: Vec<OnceLock<Arc<dyn ReadAt>>>,
 }
 
 impl ShardFiles {
-    /// The files of the shard at `location` with `entries` entries, opened as `options` say.
-    pub(crate) fn new(location: &Location, options: &ShardOptions, entries: usize) -> Self {
+    /// The files of the shard at `location` with `entries` entries and manifest digest `digest`,
+    /// opened as `options` say.
+    pub(crate) fn new(
+        location: &Location,
+        options: &ShardOptions,
+        entries: usize,
+        digest: &str,
+    ) -> Result<Self, IndexError> {
+        let mut pins = HashMap::new();
+        if let Some(cache) = &options.pins
+            && let Some(plan) = Plan::read(cache, digest)?
+        {
+            for pin in &plan.pins {
+                let path = plan.pin_path(cache, pin);
+                pins.insert(pin.file.clone(), (pin.clone(), path));
+            }
+        }
         let packed = (options.packed.clone()).unwrap_or_else(|| location.join(PACKED_DIRECTORY));
         let keep = options.cache.is_some() || matches!(packed, Location::S3 { .. });
         let opened = if keep {
@@ -116,25 +138,63 @@ impl ShardFiles {
         } else {
             Vec::new()
         };
-        Self {
+        Ok(Self {
             location: location.clone(),
             packed,
             cache: options.cache.clone(),
+            pins,
             opened,
-        }
+        })
     }
 
-    /// The source of a shard file, through the cache if there is one.
+    /// The source of a shard file: its pinned range locally, the rest through the cache if
+    /// there is one.
     pub(crate) fn open(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.cached(self.location.open(record)?, record)
+        self.open_at(&self.location, &record.path, record)
     }
 
-    /// The sketch file in memory: mapped when it is local, else read whole through the cache.
+    /// The sketch file in memory: mapped when it is local or pinned whole on disk, else read
+    /// whole into RAM.
     pub(crate) fn open_sketch(&self, record: &FileRecord) -> Result<MappedFile, IndexError> {
-        if let Some(path) = self.location.local_path(&record.path) {
-            return Ok(MappedFile::open(&path, false)?);
+        let path = match self.pins.get(&record.path) {
+            Some((pin, path)) if pin.place == Place::Ssd && pin.bytes() == record.bytes => {
+                Some(path.clone())
+            }
+            Some(_) => None,
+            None => self.location.local_path(&record.path),
+        };
+        match path {
+            Some(path) => Ok(MappedFile::open(&path, false)?),
+            None => Ok(MappedFile::read_from(self.open(record)?.as_ref())?),
         }
-        Ok(MappedFile::read_from(self.open(record)?.as_ref())?)
+    }
+
+    /// The file `name` (relative to the shard) of `record` at `location`, with its pin.
+    fn open_at(
+        &self,
+        location: &Location,
+        name: &str,
+        record: &FileRecord,
+    ) -> Result<Arc<dyn ReadAt>, IndexError> {
+        let Some((pin, path)) = self.pins.get(name) else {
+            return self.cached(location.open(record)?, record);
+        };
+        let file = LocalFile::open(path)?;
+        if file.size() != pin.bytes() || pin.end > record.bytes {
+            return Err(IndexError::format(format!(
+                "the pinned file {} differs from its plan",
+                path.display()
+            )));
+        }
+        let local: Arc<dyn ReadAt> = match pin.place {
+            Place::Ram => Arc::new(MappedFile::read_from(&file)?),
+            Place::Ssd => Arc::new(file),
+        };
+        if pin.bytes() == record.bytes {
+            return Ok(local);
+        }
+        let rest = self.cached(location.open(record)?, record)?;
+        Ok(Arc::new(PinnedSource::new(local, pin.start..pin.end, rest)))
     }
 
     /// The source of a shard file without the cache, for example to verify it.
@@ -153,13 +213,14 @@ impl ShardFiles {
         entry: usize,
         record: &FileRecord,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
+        let name = format!("{PACKED_DIRECTORY}/{}", record.path);
         let Some(slot) = self.opened.get(entry) else {
-            return self.packed.open(record);
+            return self.open_at(&self.packed, &name, record);
         };
         if let Some(source) = slot.get() {
             return Ok(Arc::clone(source));
         }
-        let source = self.cached(self.packed.open(record)?, record)?;
+        let source = self.open_at(&self.packed, &name, record)?;
         // Two threads may open the same entry at once; both get the source that was kept.
         Ok(Arc::clone(slot.get_or_init(|| source)))
     }

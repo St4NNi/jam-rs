@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::{Handle, Runtime};
 
 /// A random generator that gives the same values for the same seed on every run.
@@ -215,16 +215,21 @@ impl Reply {
     }
 }
 
-/// A store whose bucket `bucket` holds the files under `root`, keyed by their relative paths.
-pub fn serve_directory(root: &Path) -> Server {
+/// A store whose bucket `bucket` holds the files under `root`, keyed by their relative paths,
+/// and the list of the keys it was asked for.
+pub fn serve_directory(root: &Path) -> (Server, Arc<Mutex<Vec<String>>>) {
     let root = root.to_path_buf();
-    serve(move |_, request| {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&asked);
+    let server = serve(move |_, request| {
         let key = request.path.strip_prefix("/bucket/").unwrap_or_default();
+        log.lock().unwrap().push(key.to_string());
         match std::fs::read(root.join(key)) {
             Ok(data) => Reply::object(&data, request),
             Err(_) => Reply::status(404),
         }
-    })
+    });
+    (server, asked)
 }
 
 /// A server that answers each request with `handler(index, request)`, where `index` counts

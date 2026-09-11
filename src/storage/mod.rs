@@ -1,4 +1,4 @@
-//! Reading bytes by offset from local files, S3 byte ranges and the block cache.
+//! Reading bytes by offset from local files, S3 byte ranges, pinned ranges and the block cache.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -6,6 +6,7 @@ mod cache;
 mod error;
 mod local;
 mod mapped;
+mod pinned;
 mod readahead;
 mod s3;
 
@@ -13,6 +14,7 @@ pub use cache::{BlockCache, CacheConfig, CachedSource, DiskConfig};
 pub use error::StorageError;
 pub use local::LocalFile;
 pub use mapped::MappedFile;
+pub use pinned::PinnedSource;
 pub use s3::{S3Config, S3Limits, S3Object};
 
 use std::io;

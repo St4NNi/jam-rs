@@ -2,6 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::plan::{Part, Place, Plan, part_pins};
 use super::*;
 use crate::seeds::Seeder;
 use crate::test_support::{
@@ -332,7 +333,7 @@ fn packed_elsewhere_cached() {
     assert!(Shard::open(&output).unwrap().packed(0).is_err());
     let options = ShardOptions {
         packed: Some(Location::Directory(elsewhere.clone())),
-        cache: None,
+        ..ShardOptions::default()
     };
     let local = Location::Directory(output.clone());
     let shard = Shard::open_with(&local, &options).unwrap();
@@ -359,7 +360,7 @@ fn shard_on_s3() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(3);
     test_shard(directory.path(), &entries);
-    let server = serve_directory(directory.path());
+    let (server, _) = serve_directory(directory.path());
     let endpoint = Some(server.address.as_str());
     let limits = S3Limits::default();
     let config = S3Config::new("local", endpoint, true, limits, runtime()).unwrap();
@@ -375,13 +376,58 @@ fn shard_on_s3() {
     assert_eq!(shard.digest(), local.digest());
     // Each seed lookup is a small read, so the check reads through the cache.
     let options = ShardOptions {
-        packed: None,
         cache: Some(cache),
+        ..ShardOptions::default()
     };
     let shard = Shard::open_with(&location, &options).unwrap();
     check_every_seed(&shard, &entries);
     let missing = Location::s3("s3://bucket/missing", &config).unwrap();
     assert!(Shard::open_with(&missing, &ShardOptions::default()).is_err());
+}
+
+#[test]
+fn pins_read_locally() {
+    use crate::storage::{S3Config, S3Limits};
+    use crate::test_support::serve_directory;
+    let directory = tempfile::tempdir().unwrap();
+    let entries = generated_entries(3);
+    let local = test_shard(directory.path(), &entries);
+    let (server, asked) = serve_directory(directory.path());
+    let endpoint = Some(server.address.as_str());
+    let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+    let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+    let manifest = local.manifest();
+    let mut pins = part_pins(manifest, &Part::Sketch, Place::Ram).unwrap();
+    pins.extend(part_pins(manifest, &Part::Locators, Place::Ssd).unwrap());
+    let named = Part::Packed(Some(vec!["entry1".into()]));
+    pins.extend(part_pins(manifest, &named, Place::Ram).unwrap());
+    let plan = Plan {
+        shard: local.digest().to_string(),
+        memory: 0,
+        disk: 0,
+        pins,
+    };
+    let cache = directory.path().join("cache");
+    plan.write(&cache).unwrap();
+    for pin in &plan.pins {
+        let path = plan.pin_path(&cache, pin);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::copy(directory.path().join("shard").join(&pin.file), path).unwrap();
+    }
+    let options = ShardOptions {
+        pins: Some(cache),
+        ..ShardOptions::default()
+    };
+    let shard = Shard::open_with(&location, &options).unwrap();
+    check_every_seed(&shard, &entries);
+    let asked = asked.lock().unwrap().clone();
+    assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
+    let pinned = [
+        "shard/sketch",
+        "shard/positions",
+        "shard/packed/entry1.packed",
+    ];
+    assert!(asked.iter().all(|key| !pinned.contains(&key.as_str())));
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its

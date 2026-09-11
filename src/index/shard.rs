@@ -71,7 +71,8 @@ impl Shard {
         let started = Instant::now();
         let manifest_bytes = location.read_whole(MANIFEST_FILE)?;
         let manifest = Manifest::parse(&manifest_bytes)?;
-        let files = ShardFiles::new(location, options, manifest.entries.len());
+        let digest = sha256_hex(&[&manifest_bytes]);
+        let files = ShardFiles::new(location, options, manifest.entries.len(), &digest)?;
         let sketch_file = files.open_sketch(&manifest.sketch)?;
         let sketch_bytes = sketch_file.bytes().len() as u64;
         let sketch = Sketch::open(sketch_file)?;
@@ -102,7 +103,7 @@ impl Shard {
         Ok(Self {
             files,
             manifest,
-            digest: sha256_hex(&[&manifest_bytes]),
+            digest,
             sketch,
             positions,
             open_seconds: started.elapsed().as_secs_f64(),

@@ -44,8 +44,8 @@ impl ShardStorage {
         }
         let location = Location::s3(&text, self.s3()?).map_err(failed)?;
         let options = ShardOptions {
-            packed: None,
             cache: Some(self.cache()?),
+            ..ShardOptions::default()
         };
         Shard::open_with(&location, &options).map_err(failed)
     }
