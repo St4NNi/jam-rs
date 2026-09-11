@@ -580,6 +580,92 @@ fn shared_prepare(criterion: &mut Criterion) {
 #[cfg(not(feature = "bench-internals"))]
 fn shared_prepare(_: &mut Criterion) {}
 
+fn shared_resolved_handle(criterion: &mut Criterion) {
+    let (directory, reference, workloads) = shared_lookup_fixture();
+    let packed_path = directory.path().join("resolved-packed.shared");
+    jam_rs::shared_pack::repack_shared_index(directory.path().join("target.shared"), &packed_path)
+        .unwrap();
+    let packed = SharedReader::open(packed_path).unwrap();
+    let repeated_key = workloads
+        .iter()
+        .find(|(name, _)| *name == "high_multiplicity")
+        .unwrap()
+        .1[0];
+    let singleton_key = workloads
+        .iter()
+        .find(|(name, _)| *name == "low_reuse")
+        .unwrap()
+        .1
+        .iter()
+        .copied()
+        .find(|&key| {
+            reference
+                .find(key)
+                .unwrap()
+                .is_some_and(|group| group.occurrence_count() == 1)
+        })
+        .unwrap();
+    let expected = reference
+        .find(repeated_key)
+        .unwrap()
+        .and_then(|group| reference.members(group).unwrap().into_iter().next())
+        .map(|member| {
+            let group = reference.find(repeated_key).unwrap().unwrap();
+            reference.member_occurrences(group, member).unwrap()
+        })
+        .unwrap();
+    let mut group = criterion.benchmark_group("shared_resolved_handle");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (format, reader) in [("v1", &reference), ("packed", &packed)] {
+        let repeated = reader.find(repeated_key).unwrap().unwrap();
+        let members = reader.members(repeated).unwrap();
+        assert_eq!(members.len(), 1);
+        let member = members[0];
+        assert_eq!(
+            reader.member_occurrences(repeated, member).unwrap(),
+            expected
+        );
+        assert!(member.occurrence_count() >= 32);
+        group.throughput(Throughput::Elements(repeated.member_count() as u64));
+        group.bench_function(format!("members/{format}"), |bencher| {
+            bencher.iter(|| reader.members(black_box(repeated)).unwrap())
+        });
+        for (location, start) in [
+            ("first", 0),
+            ("middle", member.occurrence_count() / 2),
+            ("last", member.occurrence_count() - 16),
+        ] {
+            group.throughput(Throughput::Elements(16));
+            group.bench_function(format!("positions/{format}/{location}"), |bencher| {
+                bencher.iter(|| {
+                    reader
+                        .occurrence_block(
+                            black_box(repeated),
+                            black_box(member),
+                            black_box(start),
+                            16,
+                        )
+                        .unwrap()
+                })
+            });
+        }
+        let singleton = reader.find(singleton_key).unwrap().unwrap();
+        let singleton_member = reader.members(singleton).unwrap()[0];
+        group.throughput(Throughput::Elements(1));
+        group.bench_function(format!("positions/{format}/singleton"), |bencher| {
+            bencher.iter(|| {
+                reader
+                    .occurrence_block(black_box(singleton), black_box(singleton_member), 0, 1)
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn shared_packed(criterion: &mut Criterion) {
     let (directory, reference, workloads) = shared_lookup_fixture();
     let path = directory.path().join("packed.shared");
@@ -645,6 +731,7 @@ criterion_group!(
     shared_lookup,
     shared_core_absent,
     shared_prepare,
+    shared_resolved_handle,
     shared_packed
 );
 criterion_main!(benches);
