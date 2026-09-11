@@ -157,6 +157,8 @@ pub struct TraceBatchStats {
     pub cached_groups: u64,
     pub cached_positions: u64,
     pub lookup_peak_bytes: usize,
+    pub lookup_retained_bytes: usize,
+    pub lookup_reserved_bytes: usize,
     pub bgzf_cache_hits: u64,
     pub bgzf_blocks_decoded: u64,
     pub bgzf_evictions: u64,
@@ -196,6 +198,13 @@ impl<'a> CacheReservation<'a> {
             })
             .ok()
             .map(|_| Self { available, bytes })
+    }
+
+    pub(crate) fn retain(&mut self, bytes: usize) {
+        assert!(bytes <= self.bytes);
+        self.available
+            .fetch_add(self.bytes - bytes, Ordering::Relaxed);
+        self.bytes = bytes;
     }
 }
 
@@ -649,7 +658,10 @@ impl TraceEngine {
                 .flatten()
                 .map(|positions| positions.len() as u64)
                 .sum::<u64>();
-            stats.lookup_peak_bytes = stats.lookup_peak_bytes.max(lookups.capacity_bytes);
+            stats.lookup_peak_bytes = stats.lookup_peak_bytes.max(lookups.peak_capacity_bound);
+            stats.lookup_retained_bytes = stats.lookup_retained_bytes.max(lookups.capacity_bytes);
+            stats.lookup_reserved_bytes =
+                stats.lookup_reserved_bytes.max(lookups._reservation.bytes);
             stats.key_lookup_ns += lookups.lookup_ns;
             stats.membership_access_ns += lookups.membership_ns;
             stats.position_access_ns += lookups.position_ns;
@@ -2179,11 +2191,15 @@ mod tests {
     #[test]
     fn lookup_cache_reservations_share_and_release_the_byte_limit() {
         let available = AtomicUsize::new(10);
-        let first = CacheReservation::acquire(&available, 6).unwrap();
+        let mut first = CacheReservation::acquire(&available, 6).unwrap();
         assert!(CacheReservation::acquire(&available, 5).is_none());
         assert_eq!(available.load(Ordering::Relaxed), 4);
         let second = CacheReservation::acquire(&available, 4).unwrap();
         assert_eq!(available.load(Ordering::Relaxed), 0);
+        first.retain(2);
+        assert_eq!(available.load(Ordering::Relaxed), 4);
+        assert_eq!(first.bytes, 2);
+        assert!(CacheReservation::acquire(&available, 5).is_none());
         drop(first);
         assert_eq!(available.load(Ordering::Relaxed), 6);
         drop(second);

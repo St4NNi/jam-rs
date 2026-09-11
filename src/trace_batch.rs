@@ -16,6 +16,7 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) postings: BTreeMap<u64, BatchPosting>,
     pub(crate) postings_complete: bool,
     pub(crate) capacity_bytes: usize,
+    pub(crate) peak_capacity_bound: usize,
     pub(crate) lookup_ns: u64,
     pub(crate) membership_ns: u64,
     pub(crate) position_ns: u64,
@@ -97,14 +98,14 @@ pub(crate) fn prepare_lookup(
 ) -> Result<Option<SharedSeedLookups>, TraceError> {
     let started = observed.then(Instant::now);
     let budget = lookup_budget(index);
-    let Some(bytes) = lookup_bytes(index, requests.len(), query_count) else {
+    let Some(bytes) = lookup_bytes(index, requests.capacity(), query_count) else {
         return Ok(None);
     };
     if bytes > budget {
         return Ok(None);
     }
     let workspace = lookup_workspace(index, requests.len()).unwrap();
-    let Some(reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, budget) else {
+    let Some(mut reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, budget) else {
         return Ok(None);
     };
     let Some(identity) = index.cache_file_identity()? else {
@@ -131,6 +132,16 @@ pub(crate) fn prepare_lookup(
     keys.dedup();
     let mut entries = Vec::new();
     if entries.try_reserve_exact(keys.len()).is_err() {
+        return Ok(None);
+    }
+    let mut peak_capacity_bound = 4096
+        + std::mem::size_of::<SharedSeedLookups>()
+        + requests.capacity() * std::mem::size_of::<(u64, usize)>()
+        + keys.capacity() * std::mem::size_of::<u64>()
+        + entries.capacity() * std::mem::size_of::<(u64, Option<SeedEntry>)>()
+        + query_count * std::mem::size_of::<Range<usize>>()
+        + workspace;
+    if peak_capacity_bound > reservation.bytes {
         return Ok(None);
     }
     let core = |key| crate::shared_seed::SharedKey::unpack(key).map(|key| key.core);
@@ -238,14 +249,12 @@ pub(crate) fn prepare_lookup(
         }
         query_ranges.push(start..request);
     }
-    let request_bytes = requests.capacity() * std::mem::size_of::<(u64, usize)>();
     drop(requests);
     let mut lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
     let mut membership_ns = 0;
     let mut position_ns = 0;
     let mut capacity_bytes = 4096
-        + workspace
-        + request_bytes
+        + std::mem::size_of::<SharedSeedLookups>()
         + query_ranges.capacity() * std::mem::size_of::<Range<usize>>()
         + keys.capacity() * std::mem::size_of::<u64>()
         + entries.capacity() * std::mem::size_of::<(u64, Option<SeedEntry>)>();
@@ -274,6 +283,7 @@ pub(crate) fn prepare_lookup(
         }
         membership_ns += started.map_or(0, |started| started.elapsed().as_nanos() as u64);
         let bytes = 128 + documents.capacity() * std::mem::size_of::<SeedDocument>();
+        peak_capacity_bound = peak_capacity_bound.max(capacity_bytes.saturating_add(bytes));
         if capacity_bytes.saturating_add(bytes) > reservation.bytes {
             postings_complete = false;
             continue;
@@ -310,6 +320,7 @@ pub(crate) fn prepare_lookup(
                         v.capacity() * std::mem::size_of::<crate::jidx_reader::SeedOccurrence>()
                     })
                     .sum::<usize>();
+            peak_capacity_bound = peak_capacity_bound.max(capacity_bytes.saturating_add(charge));
             if capacity_bytes.saturating_add(charge) <= reservation.bytes {
                 capacity_bytes += charge;
                 Some(values)
@@ -337,6 +348,7 @@ pub(crate) fn prepare_lookup(
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("shared seed lookup identity"));
     }
+    reservation.retain(capacity_bytes);
     Ok(Some(SharedSeedLookups {
         identity,
         entries,
@@ -345,6 +357,7 @@ pub(crate) fn prepare_lookup(
         postings,
         postings_complete,
         capacity_bytes,
+        peak_capacity_bound,
         lookup_ns,
         membership_ns,
         position_ns,

@@ -154,7 +154,9 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
     );
     assert_eq!(lookup.postings.len(), 3);
     assert!(lookup.postings_complete);
-    assert!(lookup.capacity_bytes <= lookup._reservation.bytes);
+    assert_eq!(lookup.capacity_bytes, lookup._reservation.bytes);
+    assert!(lookup.peak_capacity_bound > lookup.capacity_bytes);
+    assert!(lookup.capacity_bytes < 2_000_000);
     for posting in lookup.postings.values() {
         assert_eq!(posting.documents.len(), 2);
         assert_eq!(
