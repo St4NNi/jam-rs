@@ -66,6 +66,7 @@ pub(crate) struct SectionRange {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SharedHeader {
+    pub(crate) version: u16,
     pub(crate) window: u16,
     pub(crate) core_count: u64,
     pub(crate) occurrence_count: u64,
@@ -79,6 +80,28 @@ pub(crate) struct SharedHeader {
 }
 
 impl SharedHeader {
+    pub(crate) fn id_bytes(&self) -> usize {
+        if self.document_count <= u32::from(u8::MAX) {
+            1
+        } else if self.document_count <= u32::from(u16::MAX) {
+            2
+        } else {
+            4
+        }
+    }
+
+    pub(crate) fn row_bytes(&self, section: Section) -> u64 {
+        if self.version == 2 {
+            match section {
+                Section::Groups => return 13 + self.id_bytes() as u64,
+                Section::Members => return 8 + self.id_bytes() as u64,
+                Section::References => return 4,
+                _ => {}
+            }
+        }
+        section.row_bytes()
+    }
+
     pub(crate) fn section(&self, section: Section) -> SectionRange {
         self.sections[section as usize]
     }
@@ -92,7 +115,7 @@ impl SharedHeader {
         )?;
         let mut out = [0; HEADER_BYTES];
         out[..8].copy_from_slice(b"JSHARED\0");
-        put_u16(&mut out, 8, 1);
+        put_u16(&mut out, 8, self.version);
         put_u16(&mut out, 10, HEADER_BYTES as u16);
         put_u16(&mut out, 12, self.window);
         put_u64(&mut out, 16, self.core_count);
@@ -115,7 +138,8 @@ impl SharedHeader {
     pub(crate) fn decode(bytes: &[u8], file_bytes: u64) -> Result<Self, SharedError> {
         if bytes.len() != HEADER_BYTES
             || &bytes[..8] != b"JSHARED\0"
-            || bytes[8..12] != [1, 0, 0, 16]
+            || !matches!(bytes[8], 1 | 2)
+            || bytes[9..12] != [0, 0, 16]
             || bytes[14..16] != [0, 0]
             || bytes[HEADER_HASH_OFFSET + 32..]
                 .iter()
@@ -130,6 +154,7 @@ impl SharedHeader {
             return Err(SharedError::ChecksumMismatch);
         }
         let header = Self {
+            version: u16::from_le_bytes(bytes[8..10].try_into().unwrap()),
             window: u16::from_le_bytes(bytes[12..14].try_into().unwrap()),
             core_count: read_u64(bytes, 16),
             occurrence_count: read_u64(bytes, 24),
@@ -149,7 +174,8 @@ impl SharedHeader {
     }
 
     fn validate(&self, file_bytes: u64) -> Result<(), SharedError> {
-        if self.window == 0
+        if !matches!(self.version, 1 | 2)
+            || self.window == 0
             || self.document_count == 0
             || self.contig_count == 0
             || self.core_count > self.occurrence_count
@@ -161,7 +187,7 @@ impl SharedHeader {
             let expected = previous
                 .checked_next_multiple_of(PAGE_BYTES)
                 .ok_or(SharedError::Invalid("section padding"))?;
-            if section.offset != expected || !section.length.is_multiple_of(kind.row_bytes()) {
+            if section.offset != expected || !section.length.is_multiple_of(self.row_bytes(kind)) {
                 return Err(SharedError::Invalid("section layout"));
             }
             previous = section
@@ -230,6 +256,7 @@ mod tests {
             section
         });
         SharedHeader {
+            version: 1,
             window: 64,
             core_count: 1,
             occurrence_count: 1,
@@ -276,5 +303,23 @@ mod tests {
         let mut encoded = header.encode().unwrap();
         encoded[HEADER_BYTES - 1] = 1;
         assert!(SharedHeader::decode(&encoded, end.offset + end.length).is_err());
+    }
+
+    #[test]
+    fn packed_rows_use_checked_document_widths() {
+        let mut header = fixture();
+        header.version = 2;
+        let end = header.section(Section::Checksums);
+        assert_eq!(
+            SharedHeader::decode(&header.encode().unwrap(), end.offset + end.length).unwrap(),
+            header
+        );
+        for (documents, width) in [(255, 1), (256, 2), (65535, 2), (65536, 4), (u32::MAX, 4)] {
+            header.document_count = documents;
+            assert_eq!(header.id_bytes(), width);
+            assert_eq!(header.row_bytes(Section::Groups), 13 + width as u64);
+            assert_eq!(header.row_bytes(Section::Members), 8 + width as u64);
+            assert_eq!(header.row_bytes(Section::References), 4);
+        }
     }
 }

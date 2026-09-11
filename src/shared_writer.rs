@@ -221,13 +221,22 @@ pub(crate) fn write_shared_index(
         }
     }
     publish(
-        reference,
+        SharedHeader {
+            version: 1,
+            window,
+            core_count: sections[Section::Cores as usize].len() as u64 / 24,
+            occurrence_count: seeds.len() as u64,
+            document_count: reference.header().document_count,
+            contig_count: reference.header().contig_count,
+            source_bases,
+            manifest_sha256: reference.header().manifest_sha256,
+            body_sha256: [0; 32],
+            checksum_root_sha256: [0; 32],
+            sections: [SectionRange::default(); 10],
+        },
         output,
-        window,
         sections,
-        source_bases,
         bgzf_bytes_once,
-        seeds.len() as u64,
         singletons,
     )
 }
@@ -290,14 +299,11 @@ fn string(strings: &mut Vec<u8>, value: &str) -> Result<StringRef, SharedError> 
     Ok(record)
 }
 
-fn publish(
-    reference: &JidxReader,
+pub(crate) fn publish(
+    mut header: SharedHeader,
     output: &Path,
-    window: u16,
     sections: [Vec<u8>; 10],
-    source_bases: u64,
     bgzf_bytes_once: u64,
-    occurrences: u64,
     singletons: u64,
 ) -> Result<SharedBuildStats, SharedError> {
     let mut offset = HEADER_BYTES as u64;
@@ -360,18 +366,9 @@ fn publish(
         .ok_or(SharedError::Invalid("empty checksum root"))?;
     file.seek(SeekFrom::Start(HEADER_BYTES as u64))?;
     let body_sha256 = sha256_reader(&mut *file)?;
-    let header = SharedHeader {
-        window,
-        core_count: ranges[Section::Cores as usize].length / 24,
-        occurrence_count: occurrences,
-        document_count: reference.header().document_count,
-        contig_count: reference.header().contig_count,
-        source_bases,
-        manifest_sha256: reference.header().manifest_sha256,
-        body_sha256,
-        checksum_root_sha256: root,
-        sections: ranges,
-    };
+    header.body_sha256 = body_sha256;
+    header.checksum_root_sha256 = root;
+    header.sections = ranges;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header.encode()?)?;
     file.sync_all()?;
@@ -380,14 +377,16 @@ fn publish(
         .map_err(|error| SharedError::Io(error.error))?;
     std::fs::File::open(parent)?.sync_all()?;
     Ok(SharedBuildStats {
-        window,
-        source_bases,
+        window: header.window,
+        source_bases: header.source_bases,
         core_count: header.core_count,
-        occurrence_count: occurrences,
+        occurrence_count: header.occurrence_count,
         singleton_cores: singletons,
-        context_groups: ranges[Section::Groups as usize].length / 32,
-        member_descriptors: ranges[Section::Members as usize].length / 24,
-        occurrence_references: ranges[Section::References as usize].length / 8,
+        context_groups: ranges[Section::Groups as usize].length / header.row_bytes(Section::Groups),
+        member_descriptors: ranges[Section::Members as usize].length
+            / header.row_bytes(Section::Members),
+        occurrence_references: ranges[Section::References as usize].length
+            / header.row_bytes(Section::References),
         repeated_core_positions: ranges[Section::Occurrences as usize].length / 24,
         index_bytes: file_bytes,
         bgzf_bytes_once,

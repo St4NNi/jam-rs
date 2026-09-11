@@ -123,7 +123,7 @@ impl SharedFile {
         ordinal: u64,
         size: u64,
     ) -> Result<&[u8], SharedError> {
-        if size != kind.row_bytes() {
+        if size != self.header.row_bytes(kind) {
             return Err(SharedError::Invalid("record size"));
         }
         self.section(

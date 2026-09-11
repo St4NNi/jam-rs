@@ -5,8 +5,8 @@ use crate::jidx_reader::{Contig, Metagenome, SeedOccurrence};
 pub use crate::shared_file::FileReadStats;
 use crate::shared_file::SharedFile;
 use crate::shared_format::{
-    CORE_MASK, CORE_ROW_BYTES, GROUP_ROW_BYTES, MEMBER_ROW_BYTES, MULTIPLE_CORE,
-    OCCURRENCE_ROW_BYTES, Section, SharedError, read_u32, read_u64,
+    CORE_MASK, CORE_ROW_BYTES, MULTIPLE_CORE, OCCURRENCE_ROW_BYTES, Section, SharedError, read_u32,
+    read_u64,
 };
 use crate::shared_seed::{SharedKey, SharedSeed};
 use serde::Serialize;
@@ -91,6 +91,7 @@ pub struct SharedMember {
     pub metagenome_id: u32,
     first_reference: u64,
     occurrence_count: u64,
+    direct: bool,
 }
 
 impl SharedMember {
@@ -99,9 +100,15 @@ impl SharedMember {
     }
 
     pub fn occurrence_storage_identity(self) -> SharedOccurrenceStorage {
-        let (kind, first) = match self.group {
-            GroupLocation::Singleton { core_ordinal } => (2, core_ordinal),
-            GroupLocation::Repeated { .. } => (3, self.first_reference),
+        let (kind, first) = if self.direct {
+            (4, self.first_reference)
+        } else {
+            match self.group {
+                GroupLocation::Singleton { core_ordinal } => (2, core_ordinal),
+                GroupLocation::Repeated { .. } | GroupLocation::Inline { .. } => {
+                    (3, self.first_reference)
+                }
+            }
         };
         SharedOccurrenceStorage {
             body_sha256: self.identity.body_sha256,
@@ -126,6 +133,10 @@ enum GroupLocation {
     Repeated {
         group_ordinal: u64,
         first_member: u64,
+    },
+    Inline {
+        group_ordinal: u64,
+        member: u64,
     },
 }
 
@@ -305,6 +316,7 @@ impl SharedReader {
         admit_result(group.member_count as usize, size_of::<SharedMember>())?;
         let members = match group.location {
             GroupLocation::Singleton { .. } => vec![self.singleton_member(group)?],
+            GroupLocation::Inline { .. } => vec![self.inline_member(group)?],
             GroupLocation::Repeated { first_member, .. } => {
                 let mut members = Vec::new();
                 members
@@ -344,7 +356,11 @@ impl SharedReader {
             return Ok(None);
         }
         let GroupLocation::Repeated { first_member, .. } = group.location else {
-            let member = self.singleton_member(group)?;
+            let member = match group.location {
+                GroupLocation::Singleton { .. } => self.singleton_member(group)?,
+                GroupLocation::Inline { .. } => self.inline_member(group)?,
+                GroupLocation::Repeated { .. } => unreachable!(),
+            };
             let result = (member.metagenome_id == metagenome_id).then_some(member);
             self.file.verify_unchanged()?;
             return Ok(result);
@@ -721,10 +737,7 @@ impl SharedReader {
                     identity: self.handle_identity(),
                     key: keys[index],
                     core_ordinal,
-                    location: GroupLocation::Repeated {
-                        group_ordinal: ordinal,
-                        first_member: row.first_member,
-                    },
+                    location: group_location(ordinal, &row),
                     member_count: row.member_count,
                     occurrence_count: row.occurrence_count,
                 });
@@ -782,7 +795,8 @@ impl SharedReader {
         CoreRow::decode(
             bytes,
             self.file.header.contig_count,
-            self.file.header.section(Section::Groups).length / GROUP_ROW_BYTES,
+            self.file.header.section(Section::Groups).length
+                / self.file.header.row_bytes(Section::Groups),
         )
     }
 
@@ -801,6 +815,25 @@ impl SharedReader {
             metagenome_id,
             first_reference: core_ordinal,
             occurrence_count: 1,
+            direct: false,
+        })
+    }
+
+    fn inline_member(&self, group: SharedGroup) -> Result<SharedMember, SharedError> {
+        let GroupLocation::Inline { member, .. } = group.location else {
+            return Err(SharedError::Invalid("inline group"));
+        };
+        let metagenome_id = (member >> 32) as u32;
+        let first_reference = u64::from(member as u32);
+        let direct = group.occurrence_count == 1;
+        self.validate_occurrence_source(first_reference, group.occurrence_count, direct)?;
+        Ok(SharedMember {
+            identity: group.identity,
+            group: group.location,
+            metagenome_id,
+            first_reference,
+            occurrence_count: group.occurrence_count,
+            direct,
         })
     }
 
@@ -818,30 +851,41 @@ impl SharedReader {
         if ordinal < first_member || ordinal >= member_end {
             return Err(SharedError::Invalid("member ordinal"));
         }
-        let bytes = self
-            .file
-            .record(Section::Members, ordinal, MEMBER_ROW_BYTES)?;
+        let row_bytes = self.file.header.row_bytes(Section::Members);
+        let bytes = self.file.record(Section::Members, ordinal, row_bytes)?;
         self.observe(&self.member_inspections, 1);
-        let metagenome_id = read_u32(bytes, 0);
-        let first_reference = read_u64(bytes, 8);
-        let occurrence_count = read_u64(bytes, 16);
-        let reference_count = self.file.header.section(Section::References).length / 8;
+        let (metagenome_id, first_reference, occurrence_count, direct) =
+            if self.file.header.version == 1 {
+                (
+                    read_u32(bytes, 0),
+                    read_u64(bytes, 8),
+                    read_u64(bytes, 16),
+                    false,
+                )
+            } else {
+                let width = self.file.header.id_bytes();
+                (
+                    read_id(bytes, 0, width),
+                    u64::from(read_u32(bytes, width)),
+                    u64::from(read_u32(bytes, width + 4)),
+                    read_u32(bytes, width + 4) == 1,
+                )
+            };
         if metagenome_id >= self.file.header.document_count
-            || read_u32(bytes, 4) != 0
+            || self.file.header.version == 1 && read_u32(bytes, 4) != 0
             || occurrence_count == 0
             || occurrence_count > group.occurrence_count
-            || first_reference
-                .checked_add(occurrence_count)
-                .is_none_or(|end| end > reference_count)
         {
             return Err(SharedError::Invalid("member row"));
         }
+        self.validate_occurrence_source(first_reference, occurrence_count, direct)?;
         Ok(SharedMember {
             identity: group.identity,
             group: group.location,
             metagenome_id,
             first_reference,
             occurrence_count,
+            direct,
         })
     }
 
@@ -890,62 +934,115 @@ impl SharedReader {
             });
             return Ok(output);
         }
+        if member.direct {
+            if start != 0 || member.occurrence_count != 1 {
+                return Err(SharedError::Invalid("direct occurrence"));
+            }
+            output.push(self.decode_occurrence(
+                group,
+                member.metagenome_id,
+                member.first_reference,
+                flank,
+            )?);
+            return Ok(output);
+        }
         let first = member
             .first_reference
             .checked_add(start)
             .ok_or(SharedError::Invalid("reference range"))?;
+        let reference_bytes = self.file.header.row_bytes(Section::References);
         let references = self.file.section(
             Section::References,
             first
-                .checked_mul(8)
+                .checked_mul(reference_bytes)
                 .ok_or(SharedError::Invalid("reference range"))?,
-            count as u64 * 8,
+            count as u64 * reference_bytes,
         )?;
         self.observe(&self.references_decoded, count as u64);
-        let occurrence_rows =
-            self.file.header.section(Section::Occurrences).length / OCCURRENCE_ROW_BYTES;
-        let (references, remainder) = references.as_chunks::<8>();
-        if !remainder.is_empty() {
-            return Err(SharedError::Invalid("reference records"));
-        }
-        for &raw in references {
-            let ordinal = u64::from_le_bytes(raw);
-            if ordinal >= occurrence_rows {
-                return Err(SharedError::Invalid("occurrence reference"));
-            }
-            let bytes = self
-                .file
-                .record(Section::Occurrences, ordinal, OCCURRENCE_ROW_BYTES)?;
-            let context = read_u32(bytes, 0);
-            let contig_id = read_u32(bytes, 4);
-            let flags = read_u32(bytes, 8);
-            let position = read_u64(bytes, 16);
-            if flags & !7 != 0
-                || flags & 4 != 0 && flags & 2 == 0
-                || flags & 2 == 0 && context != 0
-                || flags & 4 == 0 && context & ((1 << 20) - 1) != 0
-                || read_u32(bytes, 12) != 0
-            {
-                return Err(SharedError::Invalid("occurrence row"));
-            }
-            let seed = SharedSeed {
-                core: group.key.core,
-                context,
-                flags: flags as u8,
-                position,
+        for raw in references.chunks_exact(reference_bytes as usize) {
+            let ordinal = if self.file.header.version == 1 {
+                read_u64(raw, 0)
+            } else {
+                u64::from(read_u32(raw, 0))
             };
-            if seed.key(group.key.length) != Some(group.key) {
-                return Err(SharedError::Invalid("occurrence context"));
-            }
-            self.validate_position(member.metagenome_id, contig_id, position, flank)?;
-            self.observe(&self.positions_decoded, 1);
-            output.push(SeedOccurrence {
-                contig_id,
-                position,
-                canonical_orientation: flags & 1 != 0,
-            });
+            output.push(self.decode_occurrence(group, member.metagenome_id, ordinal, flank)?);
         }
         Ok(output)
+    }
+
+    fn validate_occurrence_source(
+        &self,
+        first: u64,
+        count: u64,
+        direct: bool,
+    ) -> Result<(), SharedError> {
+        let (section, rows) = if direct {
+            let section = Section::Occurrences;
+            (
+                section,
+                self.file.header.section(section).length / self.file.header.row_bytes(section),
+            )
+        } else {
+            let section = Section::References;
+            (
+                section,
+                self.file.header.section(section).length / self.file.header.row_bytes(section),
+            )
+        };
+        let used = if direct { 1 } else { count };
+        if first.checked_add(used).is_none_or(|end| end > rows) {
+            return Err(SharedError::Invalid(match section {
+                Section::Occurrences => "occurrence reference",
+                _ => "reference range",
+            }));
+        }
+        Ok(())
+    }
+
+    fn decode_occurrence(
+        &self,
+        group: SharedGroup,
+        metagenome_id: u32,
+        ordinal: u64,
+        flank: u64,
+    ) -> Result<SeedOccurrence, SharedError> {
+        if ordinal
+            >= self.file.header.section(Section::Occurrences).length
+                / self.file.header.row_bytes(Section::Occurrences)
+        {
+            return Err(SharedError::Invalid("occurrence reference"));
+        }
+        let bytes = self
+            .file
+            .record(Section::Occurrences, ordinal, OCCURRENCE_ROW_BYTES)?;
+        let context = read_u32(bytes, 0);
+        let contig_id = read_u32(bytes, 4);
+        let flags = read_u32(bytes, 8);
+        let position = read_u64(bytes, 16);
+        if flags & !7 != 0
+            || flags & 4 != 0 && flags & 2 == 0
+            || flags & 2 == 0 && context != 0
+            || flags & 4 == 0 && context & ((1 << 20) - 1) != 0
+            || read_u32(bytes, 12) != 0
+        {
+            return Err(SharedError::Invalid("occurrence row"));
+        }
+        let seed = SharedSeed {
+            core: group.key.core,
+            context,
+            flags: flags as u8,
+            position,
+        };
+        if seed.key(group.key.length) != Some(group.key) {
+            return Err(SharedError::Invalid("occurrence context"));
+        }
+        self.validate_position(metagenome_id, contig_id, position, flank)?;
+        self.observe(&self.positions_decoded, 1);
+        Ok(SeedOccurrence {
+            contig_id,
+            position,
+            canonical_orientation: flags & 1 != 0,
+        })
     }
 
     fn validate_position(
@@ -1053,10 +1150,7 @@ impl SharedReader {
                         identity: self.handle_identity(),
                         key,
                         core_ordinal,
-                        location: GroupLocation::Repeated {
-                            group_ordinal: ordinal,
-                            first_member: group.first_member,
-                        },
+                        location: group_location(ordinal, &group),
                         member_count: group.member_count,
                         occurrence_count: group.occurrence_count,
                     }));
@@ -1067,24 +1161,65 @@ impl SharedReader {
     }
 
     fn group_row(&self, ordinal: u64) -> Result<GroupRow, SharedError> {
-        let bytes = self
-            .file
-            .record(Section::Groups, ordinal, GROUP_ROW_BYTES)?;
+        let row_bytes = self.file.header.row_bytes(Section::Groups);
+        let bytes = self.file.record(Section::Groups, ordinal, row_bytes)?;
         self.observe(&self.group_inspections, 1);
-        let context_code = read_u64(bytes, 0);
-        let first_member = read_u64(bytes, 8);
-        let occurrence_count = read_u64(bytes, 16);
-        let member_count = read_u32(bytes, 24);
+        let (context_code, first_member, occurrence_count, member_count, inline_member) = if self
+            .file
+            .header
+            .version
+            == 1
+        {
+            (
+                read_u64(bytes, 0),
+                read_u64(bytes, 8),
+                read_u64(bytes, 16),
+                read_u32(bytes, 24),
+                None,
+            )
+        } else {
+            let width = self.file.header.id_bytes();
+            let tag = bytes[4];
+            let context = read_u32(bytes, 0);
+            let context_code = match tag & 3 {
+                0 if context == 0 => 0,
+                1 if context < 1 << 12 => (1 << 62) | u64::from(context),
+                2 => (2 << 62) | u64::from(context),
+                _ => return Err(SharedError::Invalid("group row")),
+            };
+            if tag & !7 != 0 {
+                return Err(SharedError::Invalid("group row"));
+            }
+            let value = read_id(bytes, 5, width);
+            let first = u64::from(read_u32(bytes, 5 + width));
+            let occurrence_count = u64::from(read_u32(bytes, 9 + width));
+            if tag & 4 != 0 {
+                if value >= self.file.header.document_count {
+                    return Err(SharedError::Invalid("group row"));
+                }
+                self.validate_occurrence_source(first, occurrence_count, occurrence_count == 1)?;
+                (
+                    context_code,
+                    0,
+                    occurrence_count,
+                    1,
+                    Some((u64::from(value) << 32) | first),
+                )
+            } else {
+                (context_code, first, occurrence_count, value, None)
+            }
+        };
+        let member_rows = self.file.header.section(Section::Members).length
+            / self.file.header.row_bytes(Section::Members);
         if !valid_context_code(context_code)
             || member_count == 0
+            || self.file.header.version == 2 && inline_member.is_none() && member_count < 2
             || occurrence_count == 0
             || occurrence_count > self.file.header.occurrence_count
-            || read_u32(bytes, 28) != 0
+            || self.file.header.version == 1 && read_u32(bytes, 28) != 0
             || first_member
                 .checked_add(u64::from(member_count))
-                .is_none_or(|end| {
-                    end > self.file.header.section(Section::Members).length / MEMBER_ROW_BYTES
-                })
+                .is_none_or(|end| inline_member.is_none() && end > member_rows)
         {
             return Err(SharedError::Invalid("group row"));
         }
@@ -1093,6 +1228,7 @@ impl SharedReader {
             first_member,
             occurrence_count,
             member_count,
+            inline_member,
         })
     }
 
@@ -1176,6 +1312,31 @@ struct GroupRow {
     first_member: u64,
     occurrence_count: u64,
     member_count: u32,
+    inline_member: Option<u64>,
+}
+
+fn group_location(ordinal: u64, row: &GroupRow) -> GroupLocation {
+    match row.inline_member {
+        Some(member) => GroupLocation::Inline {
+            group_ordinal: ordinal,
+            member,
+        },
+        None => GroupLocation::Repeated {
+            group_ordinal: ordinal,
+            first_member: row.first_member,
+        },
+    }
+}
+
+fn read_id(bytes: &[u8], offset: usize, width: usize) -> u32 {
+    match width {
+        1 => u32::from(bytes[offset]),
+        2 => u32::from(u16::from_le_bytes(
+            bytes[offset..offset + 2].try_into().unwrap(),
+        )),
+        4 => read_u32(bytes, offset),
+        _ => unreachable!(),
+    }
 }
 
 fn valid_context_code(code: u64) -> bool {
