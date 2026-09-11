@@ -185,7 +185,7 @@ impl SharedHeader {
         let hash_offset = HEADER_HASH_OFFSET + if split { 32 } else { 0 };
         if bytes.len() != HEADER_BYTES
             || &bytes[..8] != b"JSHARED\0"
-            || !matches!(bytes[8], 1 | 2 | 3)
+            || !matches!(bytes[8], 1..=3)
             || bytes[9..12] != [0, 0, 16]
             || bytes[15] != 0
             || (!split && bytes[14] != 0)

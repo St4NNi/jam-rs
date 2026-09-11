@@ -956,10 +956,10 @@ impl SharedReader {
         if low > high || high > self.file.header.core_count {
             return Err(SharedError::Invalid("core prefix directory"));
         }
-        if low < high {
-            if self.core_key(low)? >> 14 != prefix || self.core_key(high - 1)? >> 14 != prefix {
-                return Err(SharedError::Invalid("core prefix membership"));
-            }
+        if low < high
+            && (self.core_key(low)? >> 14 != prefix || self.core_key(high - 1)? >> 14 != prefix)
+        {
+            return Err(SharedError::Invalid("core prefix membership"));
         }
         if low > 0 && self.core_key(low - 1)? >> 14 >= prefix {
             return Err(SharedError::Invalid("core prefix membership"));
@@ -1464,7 +1464,7 @@ impl SharedReader {
 fn validate_core_prefixes(file: &SharedFile) -> Result<(), SharedError> {
     let bytes = file.section(Section::CorePrefixes, 0, CORE_PREFIX_BOUNDARIES as u64 * 4)?;
     let mut previous = 0u32;
-    for (index, raw) in bytes.chunks_exact(4).enumerate() {
+    for (index, raw) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let boundary = read_u32(raw, 0);
         if index == 0 && boundary != 0
             || boundary < previous

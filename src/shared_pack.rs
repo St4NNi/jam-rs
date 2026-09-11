@@ -212,7 +212,7 @@ pub fn repack_shared_cores(
     let mut previous = None;
     let mut wide = false;
     let mut singletons = 0u64;
-    for bytes in cores.chunks_exact(CORE_ROW_BYTES as usize) {
+    for bytes in cores.as_chunks::<{ CORE_ROW_BYTES as usize }>().0 {
         let row = CoreRow::decode(bytes, header.contig_count, group_count)?;
         if previous.is_some_and(|core| core >= row.core) {
             return Err(SharedError::Invalid("core packing order"));
@@ -266,7 +266,12 @@ pub fn repack_shared_cores(
     check_capacity(&sections)?;
     let count = u32::try_from(header.core_count).map_err(|_| SharedError::ResourceLimit)?;
     let mut next_prefix = 0usize;
-    for (ordinal, bytes) in cores.chunks_exact(CORE_ROW_BYTES as usize).enumerate() {
+    for (ordinal, bytes) in cores
+        .as_chunks::<{ CORE_ROW_BYTES as usize }>()
+        .0
+        .iter()
+        .enumerate()
+    {
         let row = CoreRow::decode(bytes, header.contig_count, group_count)?;
         let prefix = (row.core >> 14) as usize;
         append_prefix_boundaries(
