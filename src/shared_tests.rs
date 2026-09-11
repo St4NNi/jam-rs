@@ -3,7 +3,7 @@ use crate::jidx_reader::JidxReader;
 use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use crate::owner_format::checksum_layout;
 use crate::shared_format::{HEADER_BYTES, PAGE_BYTES, Section, SharedError, SharedHeader};
-use crate::shared_reader::{SharedGroup, SharedReadStats, SharedReader};
+use crate::shared_reader::{CoreKind, CoreRow, SharedGroup, SharedReadStats, SharedReader};
 use crate::shared_seed::{SharedKey, SharedSeed};
 use crate::shared_writer::{IndexedSeed, SharedBuildStats, write_shared_index};
 const TARGET_CORE: u32 = 1_000_000;
@@ -483,6 +483,24 @@ fn key_only_probe_handles_empty_singleton_and_dictionary_edges() {
     assert_eq!(stats.core_key_inspections, 0);
     assert_eq!(stats.core_descriptor_inspections, 0);
 
+    let empty_packed = directory.path().join("empty-packed.shared");
+    let empty_compact = directory.path().join("empty-compact.shared");
+    crate::shared_pack::repack_shared_index(directory.path().join("empty.shared"), &empty_packed)
+        .unwrap();
+    crate::shared_pack::repack_shared_cores(&empty_packed, &empty_compact).unwrap();
+    let empty = SharedReader::open_observed(&empty_compact).unwrap();
+    assert!(empty.has_core_prefixes());
+    assert!(empty.find(SharedKey::core(0)).unwrap().is_none());
+    assert!(
+        empty
+            .find(SharedKey::core(CORE_LIMIT - 1))
+            .unwrap()
+            .is_none()
+    );
+    let stats = empty.stats();
+    assert_eq!(stats.core_key_inspections, 0);
+    assert_eq!(stats.core_descriptor_inspections, 0);
+
     let singleton = directory.path().join("singleton.shared");
     write_shared_index(
         &reference,
@@ -523,6 +541,70 @@ fn key_only_probe_handles_empty_singleton_and_dictionary_edges() {
         2
     );
     assert!(after.core_key_inspections > before.core_key_inspections);
+}
+
+#[test]
+fn compact_core_rows_decode_narrow_and_wide_values_exactly() {
+    let hot = 7u32.to_le_bytes();
+    let mut narrow = [0u8; 13];
+    narrow[..4].copy_from_slice(&0xabc0_0000u32.to_le_bytes());
+    narrow[4..8].copy_from_slice(&3u32.to_le_bytes());
+    narrow[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+    narrow[12] = 3;
+    let row = CoreRow::decode_compact(&hot, &narrow, 4, 0).unwrap();
+    assert_eq!(row.core, 7);
+    assert!(matches!(
+        row.kind,
+        CoreKind::Singleton {
+            context: 0xabc0_0000,
+            contig_id: 3,
+            flags: 3,
+            position,
+        } if position == u64::from(u32::MAX)
+    ));
+
+    let mut wide = [0u8; 21];
+    wide[..4].copy_from_slice(&0xabc0_0123u32.to_le_bytes());
+    wide[4..8].copy_from_slice(&3u32.to_le_bytes());
+    wide[8..16].copy_from_slice(&(u64::from(u32::MAX) + 1).to_le_bytes());
+    wide[20] = 7;
+    let row = CoreRow::decode_compact(&hot, &wide, 4, 0).unwrap();
+    assert!(matches!(
+        row.kind,
+        CoreKind::Singleton {
+            context: 0xabc0_0123,
+            contig_id: 3,
+            flags: 7,
+            position,
+        } if position == u64::from(u32::MAX) + 1
+    ));
+    wide[16] = 1;
+    assert!(matches!(
+        CoreRow::decode_compact(&hot, &wide, 4, 0),
+        Err(SharedError::Invalid("singleton core"))
+    ));
+
+    let hot = (9u32 | (1 << 31)).to_le_bytes();
+    let mut repeated = [0u8; 21];
+    let first_group = u64::from(u32::MAX) + 1;
+    let occurrence_count = u64::from(u32::MAX) + 2;
+    repeated[..8].copy_from_slice(&first_group.to_le_bytes());
+    repeated[8..12].copy_from_slice(&2u32.to_le_bytes());
+    repeated[12..20].copy_from_slice(&occurrence_count.to_le_bytes());
+    let row = CoreRow::decode_compact(&hot, &repeated, 4, first_group + 2).unwrap();
+    assert!(matches!(
+        row.kind,
+        CoreKind::Repeated {
+            first_group: first,
+            group_count: 2,
+            occurrence_count: count,
+        } if first == first_group && count == occurrence_count
+    ));
+    repeated[20] = 1;
+    assert!(matches!(
+        CoreRow::decode_compact(&hot, &repeated, 4, first_group + 2),
+        Err(SharedError::Invalid("repeated core"))
+    ));
 }
 
 #[test]
@@ -825,50 +907,77 @@ fn core_first_absence_preserves_complete_linear_and_circular_accounting() {
 
 #[test]
 fn absent_core_batch_work_is_stable_across_worker_counts() {
-    use crate::trace::{TraceConfig, TraceEngine};
+    use crate::trace::{SearchCompletion, TraceConfig, TraceEngine};
 
-    let (directory, reader, _) = fixture(0);
-    drop(reader);
-    let shared = directory.path().join("fixture.shared");
-    let queries = (0..4)
-        .map(|ordinal| (format!("absent-{ordinal}"), vec![b'A'; 2000]))
-        .collect::<Vec<_>>();
-    let config = TraceConfig {
-        use_sketch: false,
-        ..TraceConfig::default()
-    };
-    let mut expected = None;
-    for threads in [1, 4, 8, 16] {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
+    const ISOLATED: &str = "JAM_SHARED_THREAD_WORK_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "shared_tests::absent_core_batch_work_is_stable_across_worker_counts",
+            ])
+            .env(ISOLATED, "1")
+            .status()
             .unwrap();
-        let (results, work) = pool.install(|| {
-            let engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
-            let results = engine.search_batch(&queries, config).unwrap();
-            let stats = engine.batch_stats();
-            let reads = engine.shared_read_stats().unwrap();
-            (
-                results,
-                (
-                    stats.core_lookup_tasks,
-                    stats.query_distinct_cores,
-                    stats.query_core_occurrences,
-                    stats.query_context_associations,
-                    stats.query_executed_context_associations,
-                    stats.nested_context_calls,
-                    reads.core_resolutions_present,
-                    reads.core_resolutions_absent,
-                    reads.grouped_core_rows,
-                ),
-            )
-        });
-        assert!(results.iter().all(|result| result.metagenomes.is_empty()));
-        if let Some((expected_results, expected_work)) = &expected {
-            assert_eq!(&results, expected_results, "thread count {threads}");
-            assert_eq!(&work, expected_work, "thread count {threads}");
+        assert!(status.success());
+        return;
+    }
+
+    for compact in [false, true] {
+        let (directory, reader, _) = fixture(0);
+        drop(reader);
+        let source = directory.path().join("fixture.shared");
+        let shared = if compact {
+            let packed = directory.path().join("packed.shared");
+            let compact = directory.path().join("compact.shared");
+            crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+            crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+            compact
         } else {
-            expected = Some((results, work));
+            source
+        };
+        let queries = (0..4)
+            .map(|ordinal| (format!("absent-{ordinal}"), vec![b'A'; 2000]))
+            .collect::<Vec<_>>();
+        let config = TraceConfig {
+            use_sketch: false,
+            ..TraceConfig::default()
+        };
+        let mut expected = None;
+        for threads in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (results, work) = pool.install(|| {
+                let engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
+                let results = engine.search_batch(&queries, config).unwrap();
+                let stats = engine.batch_stats();
+                let reads = engine.shared_read_stats().unwrap();
+                (
+                    results,
+                    (
+                        stats.core_lookup_tasks,
+                        stats.query_distinct_cores,
+                        stats.query_core_occurrences,
+                        stats.query_context_associations,
+                        stats.query_executed_context_associations,
+                        stats.nested_context_calls,
+                        reads.core_resolutions_present,
+                        reads.core_resolutions_absent,
+                        reads.grouped_core_rows,
+                    ),
+                )
+            });
+            assert!(results.iter().all(|result| {
+                result.completion == SearchCompletion::Complete && result.metagenomes.is_empty()
+            }));
+            if let Some((expected_results, expected_work)) = &expected {
+                assert_eq!(&results, expected_results, "thread count {threads}");
+                assert_eq!(&work, expected_work, "thread count {threads}");
+            } else {
+                expected = Some((results, work));
+            }
         }
     }
 }
@@ -1507,6 +1616,146 @@ fn packed_groups_preserve_contexts_counts_and_late_direct_access() {
         reader.members(retained),
         Err(SharedError::SourceChanged)
     ));
+}
+
+#[test]
+fn compact_cores_preserve_evidence_and_bound_prefix_search() {
+    let (directory, baseline, _) = fixture(16);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    let stats = crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    assert_eq!(stats.core_payload_bytes, 13);
+    assert_eq!(stats.hot_core_bytes, stats.build.core_count * 4);
+    assert_eq!(stats.cold_core_bytes, stats.build.core_count * 13);
+    assert_eq!(
+        stats.core_prefix_bytes,
+        crate::shared_format::CORE_PREFIX_BOUNDARIES as u64 * 4
+    );
+
+    let reader = SharedReader::open_observed(&compact).unwrap();
+    let keys = [
+        SharedKey::core(0),
+        SharedKey::core(TARGET_CORE),
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        },
+        SharedKey::core(TARGET_CORE + 1),
+        SharedKey::core(CORE_LIMIT - 1),
+    ];
+    let expected = keys
+        .iter()
+        .map(|&key| group_evidence(&baseline, baseline.find(key).unwrap()))
+        .collect::<Vec<_>>();
+    let before = reader.stats();
+    let actual = reader
+        .find_many(&keys)
+        .unwrap()
+        .into_iter()
+        .map(|group| group_evidence(&reader, group))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    let after = reader.stats();
+    assert_eq!(
+        after.core_resolutions_absent - before.core_resolutions_absent,
+        1
+    );
+    assert!(
+        after.core_descriptor_inspections - before.core_descriptor_inspections < keys.len() as u64
+    );
+    reader.verify_checksum().unwrap();
+}
+
+#[test]
+fn compact_prefix_endpoints_and_cold_payloads_fail_closed() {
+    let (directory, reader, _) = fixture(16);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    let malformed_directory = directory.path().join("malformed-directory.shared");
+    crate::shared_pack::repack_shared_cores(&packed, &malformed_directory).unwrap();
+    mutate_and_resign(&malformed_directory, |bytes, header| {
+        let prefix = usize::try_from(TARGET_CORE >> 14).unwrap();
+        let directory = header.section(Section::CorePrefixes).offset as usize;
+        let high = crate::jidx::read_u32(bytes, directory + (prefix + 1) * 4);
+        bytes[directory + prefix * 4..directory + prefix * 4 + 4]
+            .copy_from_slice(&high.to_le_bytes());
+    });
+    let reader = SharedReader::open(&malformed_directory).unwrap();
+    assert!(matches!(
+        reader.find(SharedKey::core(TARGET_CORE)),
+        Err(SharedError::Invalid("core prefix membership"))
+    ));
+
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    mutate_and_resign(&compact, |bytes, header| {
+        let prefix = usize::try_from(TARGET_CORE >> 14).unwrap();
+        let directory = header.section(Section::CorePrefixes).offset as usize;
+        bytes[directory + prefix * 4..directory + prefix * 4 + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+    });
+    assert!(matches!(
+        SharedReader::open(&compact),
+        Err(SharedError::Invalid("core prefix directory"))
+    ));
+
+    let malformed_cold = directory.path().join("malformed-cold.shared");
+    crate::shared_pack::repack_shared_cores(&packed, &malformed_cold).unwrap();
+    let core_ordinal = SharedReader::open(&malformed_cold)
+        .unwrap()
+        .find(SharedKey::core(TARGET_CORE))
+        .unwrap()
+        .unwrap()
+        .core_ordinal();
+    mutate_and_resign(&malformed_cold, |bytes, header| {
+        let cold = header.section(Section::CorePayloads).offset as usize
+            + core_ordinal as usize * usize::from(header.core_payload_bytes);
+        bytes[cold + 12] = 1;
+    });
+    let reader = SharedReader::open(&malformed_cold).unwrap();
+    assert!(
+        reader
+            .find(SharedKey::core(CORE_LIMIT - 1))
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        reader.find(SharedKey::core(TARGET_CORE)),
+        Err(SharedError::Invalid("repeated core"))
+    ));
+    assert!(matches!(
+        reader.verify_checksum(),
+        Err(SharedError::Invalid("repeated core"))
+    ));
+}
+
+#[test]
+fn compact_cold_row_crossing_a_page_preserves_the_selected_core() {
+    let (directory, baseline, _) = fixture(316);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let reader = SharedReader::open(&compact).unwrap();
+    let key = SharedKey::core(315);
+    let group = reader.find(key).unwrap().unwrap();
+    assert_eq!(group.core_ordinal(), 315);
+    assert_eq!(315 * 13 % PAGE_BYTES as usize, PAGE_BYTES as usize - 1);
+    assert_eq!(
+        group_evidence(&reader, Some(group)),
+        group_evidence(&baseline, baseline.find(key).unwrap())
+    );
 }
 
 #[test]

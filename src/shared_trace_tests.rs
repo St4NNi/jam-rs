@@ -262,11 +262,12 @@ fn without_read_accounting(mut result: crate::trace::TraceResult) -> crate::trac
 
 #[test]
 fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
-    shared_trace_fixture(false);
-    shared_trace_fixture(true);
+    shared_trace_fixture(false, false);
+    shared_trace_fixture(true, false);
+    shared_trace_fixture(true, true);
 }
 
-fn shared_trace_fixture(packed: bool) {
+fn shared_trace_fixture(packed: bool, split: bool) {
     let directory = tempfile::tempdir().unwrap();
     let exact_target = dna(11, 800);
     let mixed_target = dna(29, 800);
@@ -315,6 +316,13 @@ fn shared_trace_fixture(packed: bool) {
     let shared = if packed {
         let output = directory.path().join("targets.packed.shared");
         crate::shared_pack::repack_shared_index(&shared, &output).unwrap();
+        output
+    } else {
+        shared
+    };
+    let shared = if split {
+        let output = directory.path().join("targets.split.shared");
+        crate::shared_pack::repack_shared_cores(&shared, &output).unwrap();
         output
     } else {
         shared
