@@ -514,6 +514,60 @@ fn retained_core_resolves_contexts_without_another_core_search() {
     );
 }
 
+#[test]
+fn resolved_core_scope_and_short_evidence_are_checked() {
+    use crate::trace_batch::prepare_cores;
+    use crate::trace_index::{TraceIndex, TraceSeed};
+
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let path = directory.path().join("fixture.shared");
+    let first = TraceIndex::Shared(Box::new(SharedReader::open_observed(&path).unwrap()));
+    let second = TraceIndex::Shared(Box::new(SharedReader::open_observed(&path).unwrap()));
+    let cores = prepare_cores(&first, vec![TARGET_CORE], true)
+        .unwrap()
+        .unwrap();
+    let core = SharedKey::core(TARGET_CORE).packed().unwrap();
+    let absent_long = SharedKey {
+        core: TARGET_CORE,
+        context: TARGET_CONTEXT ^ 2,
+        length: 31,
+    }
+    .packed()
+    .unwrap();
+    assert!(
+        second
+            .find_seeds_in_cores(&[core, absent_long], &cores)
+            .is_err()
+    );
+
+    let before = match &first {
+        TraceIndex::Shared(reader) => reader.stats(),
+        _ => unreachable!(),
+    };
+    let seeds = first
+        .find_seeds_in_cores(&[absent_long, core], &cores)
+        .unwrap();
+    assert!(seeds[0].is_none());
+    assert!(matches!(seeds[1], Some(TraceSeed::Shared(_))));
+    let after = match &first {
+        TraceIndex::Shared(reader) => reader.stats(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        after.core_resolutions_present,
+        before.core_resolutions_present
+    );
+    assert_eq!(
+        after.core_resolutions_absent,
+        before.core_resolutions_absent
+    );
+    assert_eq!(
+        after.core_descriptor_inspections,
+        before.core_descriptor_inspections + 1
+    );
+}
+
 fn grouped_lookup_fixture(preceding: u32) -> (tempfile::TempDir, std::path::PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let jidx = directory.path().join("grouped-metadata.jidx");

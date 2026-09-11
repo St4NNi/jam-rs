@@ -212,6 +212,61 @@ impl TraceIndex {
             .map(|mut seeds| seeds.remove(0))
     }
 
+    pub(crate) fn find_seeds_in_cores(
+        &self,
+        keys: &[u64],
+        cores: &crate::trace_batch::SharedCoreLookups,
+    ) -> Result<Vec<Option<TraceSeed>>, TraceError> {
+        let Self::Shared(reader) = self else {
+            return Err(TraceError::Invalid("resolved core index"));
+        };
+        if self.cache_file_identity()? != Some(cores.identity) {
+            return Err(TraceError::Invalid("resolved core identity"));
+        }
+        let mut requests = Vec::with_capacity(keys.len());
+        for (ordinal, &key) in keys.iter().enumerate() {
+            requests.push((ordinal, shared_key(key)?));
+        }
+        let order =
+            |&(ordinal, key): &(usize, SharedKey)| (key.core, key.context_code().unwrap(), ordinal);
+        if !requests
+            .windows(2)
+            .all(|pair| order(&pair[0]) <= order(&pair[1]))
+        {
+            requests.sort_unstable_by_key(order);
+        }
+        let mut result = vec![None; keys.len()];
+        let mut contexts = Vec::with_capacity(keys.len());
+        for same_core in requests.chunk_by(|left, right| left.1.core == right.1.core) {
+            let Ok(ordinal) = cores
+                .groups
+                .binary_search_by_key(&same_core[0].1.core, |group| group.key().core)
+            else {
+                continue;
+            };
+            let core = cores.groups[ordinal];
+            contexts.clear();
+            for &(ordinal, key) in same_core {
+                if key.length == 15 {
+                    result[ordinal] = Some(TraceSeed::Shared(core));
+                } else {
+                    contexts.push(key);
+                }
+            }
+            if !contexts.is_empty() {
+                let groups = reader.find_in_core(core, &contexts)?;
+                for ((ordinal, _), group) in same_core
+                    .iter()
+                    .filter(|(_, key)| key.length != 15)
+                    .zip(groups)
+                {
+                    result[*ordinal] = group.map(TraceSeed::Shared);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     pub(crate) fn seed_documents(&self, seed: TraceSeed) -> Result<Vec<TraceDocument>, TraceError> {
         match (self, seed) {
             (Self::Shard(index), TraceSeed::Ordinary(seed)) => Ok(index

@@ -46,6 +46,116 @@ pub(crate) struct TraceBatch {
     pub(crate) sequence: Arc<BgzfBlockCache>,
 }
 
+pub(crate) struct SharedCoreLookups {
+    pub(crate) identity: TraceCacheIdentity,
+    pub(crate) groups: Vec<crate::shared_reader::SharedGroup>,
+    pub(crate) peak_capacity_bound: usize,
+    pub(crate) tasks: usize,
+    pub(crate) lookup_ns: u64,
+    _reservation: CacheReservation<'static>,
+}
+
+impl SharedCoreLookups {
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        self._reservation.bytes
+    }
+}
+
+pub(crate) fn prepare_cores(
+    index: &TraceIndex,
+    mut keys: Vec<u32>,
+    observed: bool,
+) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
+    let TraceIndex::Shared(reader) = index else {
+        return Ok(None);
+    };
+    let started = observed.then(Instant::now);
+    let Some(identity) = index.cache_file_identity()? else {
+        return Ok(None);
+    };
+    keys.par_sort_unstable();
+    keys.dedup();
+    let tasks = keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS);
+    let Some(bytes) = keys
+        .capacity()
+        .checked_mul(std::mem::size_of::<u32>())
+        .and_then(|bytes| {
+            bytes.checked_add(keys.len().checked_mul(
+                std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
+                    + std::mem::size_of::<crate::shared_reader::SharedGroup>(),
+            )?)
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(tasks.checked_mul(std::mem::size_of::<
+                Result<Vec<Option<crate::shared_reader::SharedGroup>>, TraceError>,
+            >())?)
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(
+                rayon::current_num_threads()
+                    .min(tasks)
+                    .checked_mul(SEED_LOOKUP_BATCH_KEYS)?
+                    .checked_mul(std::mem::size_of::<crate::shared_seed::SharedKey>())?,
+            )
+        })
+        .and_then(|bytes| bytes.checked_add(4096 + std::mem::size_of::<SharedCoreLookups>()))
+        .filter(|&bytes| bytes <= lookup_budget(index))
+    else {
+        return Ok(None);
+    };
+    let Some(mut reservation) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes) else {
+        return Ok(None);
+    };
+    let chunks = keys
+        .par_chunks(SEED_LOOKUP_BATCH_KEYS)
+        .map(|chunk| {
+            let contexts = chunk
+                .iter()
+                .copied()
+                .map(crate::shared_seed::SharedKey::core)
+                .collect::<Vec<_>>();
+            reader.find_many(&contexts).map_err(TraceError::from)
+        })
+        .collect::<Vec<_>>();
+    let count = chunks.iter().try_fold(0usize, |sum, chunk| {
+        chunk
+            .as_ref()
+            .map(|chunk| sum + chunk.iter().filter(|group| group.is_some()).count())
+    });
+    let count = match count {
+        Ok(count) => count,
+        Err(_) => {
+            for chunk in chunks {
+                chunk?;
+            }
+            unreachable!()
+        }
+    };
+    let mut groups = Vec::new();
+    groups
+        .try_reserve_exact(count)
+        .map_err(|_| TraceError::Invalid("resolved core allocation"))?;
+    for chunk in chunks {
+        groups.extend(chunk?.into_iter().flatten());
+    }
+    drop(keys);
+    if index.cache_file_identity()? != Some(identity) {
+        return Err(TraceError::Invalid("resolved core identity"));
+    }
+    reservation.retain(
+        4096 + std::mem::size_of::<SharedCoreLookups>()
+            + groups.capacity() * std::mem::size_of::<crate::shared_reader::SharedGroup>(),
+    );
+    Ok(Some(Arc::new(SharedCoreLookups {
+        identity,
+        groups,
+        peak_capacity_bound: bytes,
+        tasks,
+        lookup_ns: started.map_or(0, |started| started.elapsed().as_nanos() as u64),
+        _reservation: reservation,
+    })))
+}
+
 pub(crate) fn lookup_budget(index: &TraceIndex) -> usize {
     if index.is_shared() {
         128 * 1024 * 1024
@@ -72,7 +182,8 @@ fn lookup_workspace(index: &TraceIndex, requests: usize) -> Option<usize> {
         workers
             .checked_mul(lookup_chunk_keys())?
             .checked_mul(
-                std::mem::size_of::<crate::shared_seed::SharedKey>()
+                std::mem::size_of::<(usize, crate::shared_seed::SharedKey)>()
+                    + std::mem::size_of::<crate::shared_seed::SharedKey>()
                     + std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
                     + std::mem::size_of::<Option<TraceSeed>>(),
             )?
@@ -95,9 +206,19 @@ pub(crate) fn lookup_bytes(index: &TraceIndex, requests: usize, queries: usize) 
 
 pub(crate) fn prepare_lookup(
     index: &TraceIndex,
+    requests: Vec<(u64, usize)>,
+    query_count: usize,
+    observed: bool,
+) -> Result<Option<SharedSeedLookups>, TraceError> {
+    prepare_lookup_with_cores(index, requests, query_count, observed, None)
+}
+
+pub(crate) fn prepare_lookup_with_cores(
+    index: &TraceIndex,
     mut requests: Vec<(u64, usize)>,
     query_count: usize,
     observed: bool,
+    cores: Option<&SharedCoreLookups>,
 ) -> Result<Option<SharedSeedLookups>, TraceError> {
     let started = observed.then(Instant::now);
     let budget = lookup_budget(index);
@@ -209,7 +330,11 @@ pub(crate) fn prepare_lookup(
                 let queued = start.zip(dispatch).map_or(0, |(start, dispatch)| {
                     start.duration_since(dispatch).as_nanos() as u64
                 });
-                let seeds = index.find_seeds_batch(keys)?;
+                let seeds = if let Some(cores) = cores {
+                    index.find_seeds_in_cores(keys, cores)?
+                } else {
+                    index.find_seeds_batch(keys)?
+                };
                 let compute = start.map_or(0, |start| start.elapsed().as_nanos() as u64);
                 let start = observed.then(Instant::now);
                 for (slot, seed) in slots.iter_mut().zip(seeds) {
