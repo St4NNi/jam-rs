@@ -158,32 +158,61 @@ fn shell(
     position: usize,
     reverse: bool,
     circular: bool,
-    outer: i128,
-    inner: i128,
+    outer: usize,
+    inner: usize,
 ) -> Option<u32> {
-    if sequence.len() < (15 + 2 * outer) as usize {
+    if sequence.len() < 15 + 2 * outer {
         return None;
     }
-    let mut packed = 0u32;
-    for offset in (-outer..-inner).chain((15 + inner)..(15 + outer)) {
-        let offset = if reverse { 14 - offset } else { offset };
-        let absolute = position as i128 + offset;
-        let at = if circular {
-            absolute.rem_euclid(sequence.len() as i128) as usize
-        } else {
-            usize::try_from(absolute).ok()?
-        };
-        let mut base = match sequence.get(at)?.to_ascii_uppercase() {
+    let pack = |packed: u32, &base: &u8| {
+        let base = match base.to_ascii_uppercase() {
             b'A' => 0,
             b'C' => 1,
             b'G' => 2,
             b'T' => 3,
             _ => return None,
         };
-        if reverse {
-            base ^= 3;
-        }
-        packed = (packed << 2) | base;
+        Some((packed << 2) | if reverse { base ^ 3 } else { base })
+    };
+    if let Some(start) = position.checked_sub(outer)
+        && let Some(end) = position
+            .checked_add(15 + outer)
+            .filter(|&end| end <= sequence.len())
+    {
+        let left = sequence.get(start..position - inner)?;
+        let right = sequence.get(position + 15 + inner..end)?;
+        return if reverse {
+            right
+                .iter()
+                .rev()
+                .chain(left.iter().rev())
+                .try_fold(0, pack)
+        } else {
+            left.iter().chain(right).try_fold(0, pack)
+        };
+    }
+    if !circular {
+        return None;
+    }
+    let mut packed = 0u32;
+    let outer = outer as isize;
+    let inner = inner as isize;
+    for offset in (-outer..-inner).chain((15 + inner)..(15 + outer)) {
+        let offset = if reverse { 14 - offset } else { offset };
+        let at = if offset < 0 {
+            let before = offset.unsigned_abs();
+            position
+                .checked_sub(before)
+                .unwrap_or_else(|| sequence.len() - (before - position))
+        } else {
+            let at = position.checked_add(offset as usize)?;
+            if at >= sequence.len() {
+                at - sequence.len()
+            } else {
+                at
+            }
+        };
+        packed = pack(packed, sequence.get(at)?)?;
     }
     Some(packed)
 }
@@ -192,6 +221,69 @@ fn shell(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn interior_and_boundary_shells_match_checked_remainder_reference() {
+        let reference = |sequence: &[u8],
+                         position: usize,
+                         reverse: bool,
+                         circular: bool,
+                         outer: usize,
+                         inner: usize| {
+            if sequence.len() < 15 + 2 * outer {
+                return None;
+            }
+            let mut packed = 0u32;
+            let outer = outer as i128;
+            let inner = inner as i128;
+            for offset in (-outer..-inner).chain((15 + inner)..(15 + outer)) {
+                let absolute = position as i128 + if reverse { 14 - offset } else { offset };
+                let at = if circular {
+                    absolute.rem_euclid(sequence.len() as i128) as usize
+                } else {
+                    usize::try_from(absolute).ok()?
+                };
+                let mut base = match sequence.get(at)?.to_ascii_uppercase() {
+                    b'A' => 0,
+                    b'C' => 1,
+                    b'G' => 2,
+                    b'T' => 3,
+                    _ => return None,
+                };
+                if reverse {
+                    base ^= 3;
+                }
+                packed = (packed << 2) | base;
+            }
+            Some(packed)
+        };
+        for length in 1..80 {
+            for ambiguous in [false, true] {
+                let sequence = (0..length)
+                    .map(|position| {
+                        if ambiguous && position % 23 == 7 {
+                            b'N'
+                        } else {
+                            b"aCgT"[(position * 7 + position / 3) % 4]
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for position in 0..length {
+                    for reverse in [false, true] {
+                        for circular in [false, true] {
+                            for (outer, inner) in [(3, 0), (8, 3)] {
+                                assert_eq!(
+                                    shell(&sequence, position, reverse, circular, outer, inner),
+                                    reference(&sequence, position, reverse, circular, outer, inner),
+                                    "length={length} position={position} reverse={reverse} circular={circular}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn centered_contexts_follow_the_canonical_core_on_both_strands() {
