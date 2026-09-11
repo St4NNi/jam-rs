@@ -22,6 +22,16 @@ pub enum Part {
     Packed(Option<Vec<String>>),
 }
 
+impl std::fmt::Display for Part {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Sketch => "sketch",
+            Self::Locators => "locators",
+            Self::Packed(_) => "packed",
+        })
+    }
+}
+
 /// Where a pinned range is read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -100,6 +110,61 @@ impl Plan {
         std::fs::rename(&partial, &path).at(&path)
     }
 
+    /// The plan for the shard of `manifest` (manifest digest `shard`) within `memory` and `disk`
+    /// bytes: `parts`, or else the sketch and the locators while the budgets last, each in RAM if
+    /// it fits, else on disk. Packed sequences go on disk; a pin in RAM also takes disk bytes.
+    pub fn choose(
+        manifest: &Manifest,
+        shard: &str,
+        memory: u64,
+        disk: u64,
+        parts: &[Part],
+    ) -> Result<Self, IndexError> {
+        let mut plan = Self {
+            shard: shard.to_string(),
+            memory,
+            disk,
+            pins: Vec::new(),
+        };
+        let chosen = if parts.is_empty() {
+            &[Part::Sketch, Part::Locators][..]
+        } else {
+            parts
+        };
+        for part in chosen {
+            let pins = part_pins(manifest, part, Place::Ssd)?;
+            let bytes: u64 = pins.iter().map(Pin::bytes).sum();
+            let (memory_left, disk_left) = plan.cache_budget();
+            let place = match part {
+                _ if bytes > disk_left && parts.is_empty() => continue,
+                _ if bytes > disk_left => {
+                    return Err(IndexError::Input(format!(
+                        "pinning {part} needs {bytes} bytes of disk, {disk_left} are left"
+                    )));
+                }
+                Part::Packed(_) => Place::Ssd,
+                _ if bytes <= memory_left => Place::Ram,
+                _ => Place::Ssd,
+            };
+            plan.pins
+                .extend(pins.into_iter().map(|pin| Pin { place, ..pin }));
+        }
+        Ok(plan)
+    }
+
+    /// The RAM and disk bytes that the pins leave of the budgets, for the block cache.
+    pub fn cache_budget(&self) -> (u64, u64) {
+        let ram: u64 = (self.pins.iter())
+            .filter(|pin| pin.place == Place::Ram)
+            .map(Pin::bytes)
+            .sum();
+        let disk: u64 = self.pins.iter().map(Pin::bytes).sum();
+        (
+            self.memory.saturating_sub(ram),
+            self.disk.saturating_sub(disk),
+        )
+    }
+
     /// The local file of a pin in `cache`.
     pub fn pin_path(&self, cache: &Path, pin: &Pin) -> PathBuf {
         cache.join(&self.shard).join(&pin.file)
@@ -140,6 +205,41 @@ pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<P
 mod tests {
     use super::*;
     use crate::test_support::test_shard;
+
+    #[test]
+    fn budgets_place_parts() {
+        let directory = tempfile::tempdir().unwrap();
+        let entries = vec![vec![vec![b'A'; 2_000]], vec![vec![b'C'; 3_000]]];
+        let shard = test_shard(directory.path(), &entries);
+        let manifest = shard.manifest();
+        let (sketch, locators) = (manifest.sketch.bytes, manifest.positions.bytes);
+        let places = |memory, disk, parts: &[Part]| {
+            let plan = Plan::choose(manifest, "d", memory, disk, parts).unwrap();
+            let places: Vec<(String, Place)> = (plan.pins.iter())
+                .map(|pin| (pin.file.clone(), pin.place))
+                .collect();
+            (places, plan.cache_budget())
+        };
+        let total = sketch + locators;
+        let (pinned, budget) = places(total, total + 100, &[]);
+        let both = vec![
+            ("sketch".to_string(), Place::Ram),
+            ("positions".to_string(), Place::Ram),
+        ];
+        assert_eq!((pinned, budget), (both, (0, 100)));
+        let (pinned, budget) = places(sketch, total, &[]);
+        assert_eq!(pinned[1], ("positions".to_string(), Place::Ssd));
+        assert_eq!(budget, (0, 0));
+        let (pinned, budget) = places(10, sketch, &[]);
+        assert_eq!(pinned, vec![("sketch".to_string(), Place::Ssd)]);
+        assert_eq!(budget, (10, 0));
+        assert!(places(0, 0, &[]).0.is_empty());
+        let (pinned, _) = places(1 << 30, 1 << 30, &[Part::Packed(None)]);
+        assert!(pinned.iter().all(|(_, place)| *place == Place::Ssd));
+        assert_eq!(pinned.len(), 2);
+        let error = Plan::choose(manifest, "d", 1 << 30, 10, &[Part::Sketch]).unwrap_err();
+        assert!(error.to_string().starts_with("pinning sketch needs"));
+    }
 
     #[test]
     fn plan_round_trip() {
