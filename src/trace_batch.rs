@@ -11,7 +11,8 @@ use std::time::Instant;
 pub(crate) struct SharedSeedLookups {
     pub(crate) identity: TraceCacheIdentity,
     pub(crate) entries: Vec<(u64, Option<SeedEntry>)>,
-    pub(crate) query_keys: Vec<u64>,
+    pub(crate) query_entries: Vec<u64>,
+    pub(crate) attempted_keys: usize,
     pub(crate) query_ranges: Vec<Range<usize>>,
     pub(crate) postings: BTreeMap<u64, BatchPosting>,
     pub(crate) postings_complete: bool,
@@ -130,6 +131,7 @@ pub(crate) fn prepare_lookup(
         .map_err(|_| TraceError::Invalid("batch query key allocation"))?;
     keys.extend(requests.iter().map(|request| request.0));
     keys.dedup();
+    let attempted_keys = keys.len();
     let mut entries = Vec::new();
     if entries.try_reserve_exact(keys.len()).is_err() {
         return Ok(None);
@@ -237,6 +239,14 @@ pub(crate) fn prepare_lookup(
         }
         entries[entry].1.is_some()
     });
+    entries.retain(|entry| entry.1.is_some());
+    entries.sort_unstable_by_key(|entry| entry.0);
+    for request in &mut requests {
+        request.0 = entries
+            .binary_search_by_key(&request.0, |entry| entry.0)
+            .map_err(|_| TraceError::Invalid("successful query association"))?
+            as u64;
+    }
     requests.sort_unstable_by_key(|&(key, query)| (query, key));
     keys.clear();
     let mut query_ranges = Vec::with_capacity(query_count);
@@ -250,7 +260,9 @@ pub(crate) fn prepare_lookup(
         query_ranges.push(start..request);
     }
     drop(requests);
-    let mut lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+    keys.shrink_to_fit();
+    entries.shrink_to_fit();
+    let lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
     let mut membership_ns = 0;
     let mut position_ns = 0;
     let mut capacity_bytes = 4096
@@ -338,13 +350,6 @@ pub(crate) fn prepare_lookup(
             },
         );
     }
-    let ordering = observed.then(Instant::now);
-    if index.is_shared() {
-        entries.par_sort_unstable_by_key(|entry| entry.0);
-    } else {
-        entries.sort_unstable_by_key(|entry| entry.0);
-    }
-    lookup_ns += ordering.map_or(0, |start| start.elapsed().as_nanos() as u64);
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("shared seed lookup identity"));
     }
@@ -352,7 +357,8 @@ pub(crate) fn prepare_lookup(
     Ok(Some(SharedSeedLookups {
         identity,
         entries,
-        query_keys: keys,
+        query_entries: keys,
+        attempted_keys,
         query_ranges,
         postings,
         postings_complete,

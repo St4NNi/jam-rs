@@ -634,10 +634,10 @@ impl TraceEngine {
         stats.bgzf_io_limit = cache.max_loading_blocks;
         stats.bgzf_io_peak = stats.bgzf_io_peak.max(cache.peak_loading_blocks);
         if let Some(lookups) = &batch.lookups {
-            stats.unique_keys += lookups.entries.len() as u64;
+            stats.unique_keys += lookups.attempted_keys as u64;
             stats.distinct_cores += lookups.distinct_cores;
             stats.split_core_resolutions += lookups.split_core_resolutions;
-            stats.restored_query_context_requests += lookups.query_keys.len() as u64;
+            stats.restored_query_context_requests += lookups.query_entries.len() as u64;
             stats.lookup_tasks += lookups.lookup_tasks as u64;
             stats.lookup_dispatch_ns += lookups.lookup_dispatch_ns;
             stats.lookup_parallel_ns += lookups.lookup_parallel_ns;
@@ -711,18 +711,32 @@ impl TraceEngine {
         let completion = candidate_completion(census.candidates.len(), config.max_metagenomes)?;
         let mut candidates = census.candidates;
         candidates.truncate(config.max_metagenomes);
-        let mut frequencies = census.frequencies;
-        if self.index.is_shared() {
-            frequencies.sort_unstable_by_key(|&(key, frequency)| {
-                (std::cmp::Reverse(key >> 62), frequency, key)
+        let key_order = if let Some(shared) = shared {
+            let mut ordinals =
+                shared.query_entries[shared.query_ranges[prepared.batch_ordinal].clone()].to_vec();
+            ordinals.sort_unstable_by_key(|&ordinal| {
+                let (key, seed) = shared.entries[ordinal as usize];
+                (
+                    std::cmp::Reverse(if self.index.is_shared() { key >> 62 } else { 0 }),
+                    seed.unwrap().document_frequency,
+                    key,
+                )
             });
+            ordinals
         } else {
-            frequencies.sort_unstable_by_key(|&(key, frequency)| (0, frequency, key));
-        }
-        let key_order = frequencies
-            .into_iter()
-            .map(|(key, _)| key)
-            .collect::<Vec<_>>();
+            let mut frequencies = census.frequencies;
+            frequencies.sort_unstable_by_key(|&(key, frequency)| {
+                (
+                    std::cmp::Reverse(if self.index.is_shared() { key >> 62 } else { 0 }),
+                    frequency,
+                    key,
+                )
+            });
+            frequencies
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>()
+        };
         let candidates_screened =
             u32::try_from(candidates.len()).map_err(|_| TraceError::Invalid("candidate count"))?;
         let metagenomes = self.trace_selected_with_batch(
@@ -799,10 +813,14 @@ impl TraceEngine {
                     )
                 })
         };
-        let mut entries = prepared.positions_by_key.iter();
+        let mut entries = prepared
+            .positions_by_key
+            .iter()
+            .map(|(&key, seeds)| (key, seeds));
         let mut matching_keys = shared.map(|shared| {
-            shared.query_keys[shared.query_ranges[prepared.batch_ordinal].clone()].iter()
+            shared.query_entries[shared.query_ranges[prepared.batch_ordinal].clone()].iter()
         });
+        let mut resolved_seeds = Vec::new();
         let mut chunk = Vec::new();
         chunk
             .try_reserve_exact(SEED_LOOKUP_BATCH_KEYS)
@@ -814,15 +832,18 @@ impl TraceEngine {
         loop {
             chunk.clear();
             packed_keys.clear();
+            resolved_seeds.clear();
             for _ in 0..SEED_LOOKUP_BATCH_KEYS {
                 let next = if let Some(matching_keys) = &mut matching_keys {
-                    matching_keys
-                        .next()
-                        .map(|key| (key, &prepared.positions_by_key[key]))
+                    matching_keys.next().map(|&ordinal| {
+                        let (key, seed) = shared.unwrap().entries[ordinal as usize];
+                        resolved_seeds.push(seed);
+                        (key, &prepared.positions_by_key[&key])
+                    })
                 } else {
                     entries.next()
                 };
-                let Some((&packed_key, query_seeds)) = next else {
+                let Some((packed_key, query_seeds)) = next else {
                     break;
                 };
                 chunk.push((packed_key, query_seeds));
@@ -832,22 +853,12 @@ impl TraceEngine {
                 break;
             }
 
-            let index_seeds = if let Some(shared) = shared {
-                packed_keys
-                    .iter()
-                    .map(|key| {
-                        shared
-                            .entries
-                            .binary_search_by_key(key, |entry| entry.0)
-                            .map(|index| shared.entries[index].1)
-                            .map_err(|_| TraceError::Invalid("shared query seed"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            } else {
-                self.index.find_seeds_batch(&packed_keys)?
-            };
+            if shared.is_none() {
+                resolved_seeds = self.index.find_seeds_batch(&packed_keys)?;
+            }
+            let index_seeds = &resolved_seeds;
             self.index.advise_first_document_rows(&index_seeds);
-            for ((packed_key, query_seeds), index_seed) in chunk.iter().copied().zip(index_seeds) {
+            for ((packed_key, query_seeds), &index_seed) in chunk.iter().copied().zip(index_seeds) {
                 let Some(index_seed) = index_seed else {
                     if let Some(lookups) = &mut lookups {
                         lookups.cache_negative(packed_key);
@@ -972,7 +983,9 @@ impl TraceEngine {
         for key_chunk in key_order.chunks(SEED_LOOKUP_BATCH_KEYS) {
             packed_keys.clear();
             for &packed_key in key_chunk {
-                if prepared.positions_by_key.contains_key(&packed_key) {
+                if let Some(shared) = batch_lookups {
+                    packed_keys.push(shared.entries[packed_key as usize].0);
+                } else if prepared.positions_by_key.contains_key(&packed_key) {
                     packed_keys.push(packed_key);
                 }
             }
@@ -996,13 +1009,10 @@ impl TraceEngine {
             self.index.advise_first_document_rows(&uncached_seeds);
             let index_seeds = packed_keys
                 .iter()
-                .map(|&key| {
+                .enumerate()
+                .map(|(ordinal, &key)| {
                     if let Some(shared) = batch_lookups {
-                        let ordinal = shared
-                            .entries
-                            .binary_search_by_key(&key, |entry| entry.0)
-                            .map_err(|_| TraceError::Invalid("batch query key"))?;
-                        return Ok((shared.entries[ordinal].1, None));
+                        return Ok((shared.entries[key_chunk[ordinal] as usize].1, None));
                     }
                     Ok(match lookups.and_then(|lookups| lookups.get(key)) {
                         Some(Some(cached)) => (Some(cached.seed), Some(cached.documents)),

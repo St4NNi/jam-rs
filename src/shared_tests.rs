@@ -142,7 +142,13 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
     let mut expected = present.map(|key| key.packed().unwrap());
     expected.sort_unstable();
     for range in &lookup.query_ranges {
-        assert_eq!(&lookup.query_keys[range.clone()], &expected);
+        assert_eq!(
+            lookup.query_entries[range.clone()]
+                .iter()
+                .map(|&ordinal| lookup.entries[ordinal as usize].0)
+                .collect::<Vec<_>>(),
+            expected
+        );
     }
     assert_eq!(
         lookup
@@ -157,6 +163,9 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
     assert_eq!(lookup.capacity_bytes, lookup._reservation.bytes);
     assert!(lookup.peak_capacity_bound > lookup.capacity_bytes);
     assert!(lookup.capacity_bytes < 2_000_000);
+    assert_eq!(lookup.entries.len(), 3);
+    assert_eq!(lookup.entries.capacity(), 3);
+    assert_eq!(lookup.query_entries.capacity(), 6);
     for posting in lookup.postings.values() {
         assert_eq!(posting.documents.len(), 2);
         assert_eq!(
@@ -182,7 +191,7 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
         "requests_capacity={requests_capacity} entries_length={} entries_capacity={} associations_capacity={} retained_bytes={} reserved_bytes={} raw_document_bytes={} trace_document_bytes={} shared_group_bytes={} optional_group_bytes={} shared_member_bytes={}",
         lookup.entries.len(),
         lookup.entries.capacity(),
-        lookup.query_keys.capacity(),
+        lookup.query_entries.capacity(),
         lookup.capacity_bytes,
         lookup._reservation.bytes,
         size_of::<crate::jidx_reader::SeedDocument>(),
