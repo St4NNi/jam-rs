@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use super::storage::ShardStorage;
+use super::storage::{CacheArgs, ShardStorage};
 use crate::loss::MissModel;
 use crate::search::SearchConfig;
 use crate::service::{ServedShard, Server, ServerLimits, ServiceError, bind, parse_address};
@@ -40,6 +40,8 @@ pub struct ServeArgs {
     /// Threads of each search [default: all cores]
     #[arg(short, long)]
     threads: Option<usize>,
+    #[command(flatten)]
+    cache: CacheArgs,
 }
 
 /// Opens the shard, prints `NODE_ID@ADDRESS` for each bound socket on one line, and serves
@@ -51,8 +53,11 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         ));
     }
     let key = secret_key(&args.key)?;
-    let storage = ShardStorage::new()?;
-    let shard = storage.open(&args.shard)?;
+    let mut storage = ShardStorage::new()?;
+    let mut shards = storage.open_all(std::slice::from_ref(&args.shard), &args.cache)?;
+    let shard = shards
+        .pop()
+        .ok_or_else(|| CliError::Usage("no shard".into()))?;
     let parameters = shard.manifest().parameters;
     let model = MissModel::new(parameters.scheme)?;
     let name = args.shard.file_name().map_or_else(

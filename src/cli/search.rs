@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::rule::RuleArgs;
-use super::storage::ShardStorage;
+use super::storage::{CacheArgs, ShardStorage};
 use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
@@ -49,6 +49,8 @@ pub struct SearchArgs {
     circular: bool,
     #[command(flatten)]
     rule: RuleArgs,
+    #[command(flatten)]
+    cache: CacheArgs,
     /// Largest chance of missing a qualifying entry
     #[arg(long, default_value_t = LossBudget::default().chance())]
     loss_budget: f64,
@@ -104,23 +106,27 @@ struct NamedShard {
 
 fn open_shards(
     directories: &[PathBuf],
-    storage: &ShardStorage,
+    storage: &mut ShardStorage,
+    cache: &CacheArgs,
 ) -> Result<Vec<NamedShard>, CliError> {
-    let mut shards: Vec<NamedShard> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     for directory in directories {
         let name = directory.file_name().map_or_else(
             || directory.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
         );
-        if shards.iter().any(|open| open.name == name) {
+        if names.contains(&name) {
             return Err(CliError::Usage(format!(
                 "two shards are named {name}; records could not tell them apart"
             )));
         }
-        let shard = storage.open(directory)?;
-        shards.push(NamedShard { name, shard });
+        names.push(name);
     }
-    Ok(shards)
+    let shards = storage.open_all(directories, cache)?;
+    let named = names.into_iter().zip(shards);
+    Ok(named
+        .map(|(name, shard)| NamedShard { name, shard })
+        .collect())
 }
 
 /// Searches every query record in every shard and writes the records. Fails when a search did
@@ -135,8 +141,8 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     };
     let config = settings_of(args)?.apply(&base)?;
     let inputs = args.inputs()?;
-    let storage = ShardStorage::new()?;
-    let shards = open_shards(&inputs.shards, &storage)?;
+    let mut storage = ShardStorage::new()?;
+    let shards = open_shards(&inputs.shards, &mut storage, &args.cache)?;
     let parameters = shards[0].shard.manifest().parameters;
     if shards.iter().any(|open| {
         let other = open.shard.manifest().parameters;
