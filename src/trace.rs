@@ -153,6 +153,7 @@ pub struct TraceBatchStats {
     pub core_lookup_ns: u64,
     pub core_lookup_peak_bytes: usize,
     pub core_lookup_retained_bytes: usize,
+    pub numeric_metadata_capacity_bound: usize,
     pub query_sequence_capacity_bytes: u64,
     pub query_core_capacity_bytes: u64,
     pub query_nested_capacity_bytes: u64,
@@ -1143,6 +1144,11 @@ impl TraceEngine {
             .map(|candidate| candidate.id)
             .collect::<HashSet<_>>();
         let mut region_hits = BTreeMap::<RegionKey, RegionHits>::new();
+        let metadata_reservation = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, 1024 * 1024);
+        let metadata_limit = metadata_reservation
+            .as_ref()
+            .map_or(0, |reservation| (reservation.bytes - 4096) / 256);
+        let mut numeric_contigs = BTreeMap::new();
         let mut routing_reserved_bytes = 4096usize;
         let batch_lookups = batch.and_then(|batch| batch.lookups.as_ref());
         if let Some(shared) = batch_lookups
@@ -1236,6 +1242,18 @@ impl TraceEngine {
                             emitted_anchor_associations +=
                                 (query_seeds.len() as u64) * (occurrences.len() as u64);
                         }
+                        for occurrence in occurrences {
+                            if numeric_contigs.len() < metadata_limit
+                                && let std::collections::btree_map::Entry::Vacant(slot) =
+                                    numeric_contigs.entry(occurrence.contig_id)
+                            {
+                                let contig = self
+                                    .index
+                                    .numeric_contig(occurrence.contig_id)?
+                                    .ok_or(TraceError::Invalid("missing occurrence contig"))?;
+                                slot.insert(contig);
+                            }
+                        }
                         for seed in query_seeds {
                             let (query_position, region_k) = if self.index.is_shared() {
                                 (
@@ -1247,10 +1265,15 @@ impl TraceEngine {
                                 (seed.position, seed_k)
                             };
                             for occurrence in occurrences {
-                                let contig = self
-                                    .index
-                                    .contig(occurrence.contig_id)?
-                                    .ok_or(TraceError::Invalid("missing occurrence contig"))?;
+                                let contig = if let Some(contig) =
+                                    numeric_contigs.get(&occurrence.contig_id)
+                                {
+                                    *contig
+                                } else {
+                                    self.index
+                                        .numeric_contig(occurrence.contig_id)?
+                                        .ok_or(TraceError::Invalid("missing occurrence contig"))?
+                                };
                                 let strand = if seed.canonical_orientation
                                     == occurrence.canonical_orientation
                                 {
@@ -1314,7 +1337,12 @@ impl TraceEngine {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.region_formation_ns += started.elapsed().as_nanos() as u64;
             stats.emitted_anchor_associations += emitted_anchor_associations;
+            stats.numeric_metadata_capacity_bound = stats
+                .numeric_metadata_capacity_bound
+                .max(4096 + numeric_contigs.len() * 256);
         }
+        drop(numeric_contigs);
+        drop(metadata_reservation);
         let (loaded, reads) = self.load_ranges(
             &tasks,
             config.verify_resources,

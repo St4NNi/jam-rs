@@ -361,6 +361,18 @@ fn shared_trace_fixture(packed: bool) {
             linear,
         )
         .unwrap();
+    let observed = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
+    let numeric_result = observed.search("exact", &exact_query, linear).unwrap();
+    assert_eq!(
+        without_read_accounting(numeric_result),
+        without_read_accounting(batch[0].clone())
+    );
+    let numeric_reads = observed
+        .shared_read_stats()
+        .unwrap()
+        .numeric_contig_resolutions;
+    assert!(numeric_reads > 0 && numeric_reads <= 6);
+    assert!(numeric_reads < observed.batch_stats().emitted_anchor_associations);
     let exact = alignment(&batch[0], "exact");
     assert_eq!(
         exact.target_interval,

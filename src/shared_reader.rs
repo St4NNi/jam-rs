@@ -32,6 +32,7 @@ pub struct SharedReader {
     context_comparisons: AtomicU64,
     references_decoded: AtomicU64,
     positions_decoded: AtomicU64,
+    numeric_contig_resolutions: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -50,6 +51,14 @@ pub struct SharedReadStats {
     pub context_comparisons: u64,
     pub references_decoded: u64,
     pub physical_positions_decoded: u64,
+    pub numeric_contig_resolutions: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NumericContig {
+    pub id: u32,
+    pub metagenome_id: u32,
+    pub length: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,6 +179,7 @@ impl SharedReader {
             context_comparisons: AtomicU64::new(0),
             references_decoded: AtomicU64::new(0),
             positions_decoded: AtomicU64::new(0),
+            numeric_contig_resolutions: AtomicU64::new(0),
         })
     }
 
@@ -244,6 +254,7 @@ impl SharedReader {
             context_comparisons: self.context_comparisons.load(Ordering::Relaxed),
             references_decoded: self.references_decoded.load(Ordering::Relaxed),
             physical_positions_decoded: self.positions_decoded.load(Ordering::Relaxed),
+            numeric_contig_resolutions: self.numeric_contig_resolutions.load(Ordering::Relaxed),
         }
     }
 
@@ -550,6 +561,25 @@ impl SharedReader {
             fasta_offset: record.fasta_offset,
             line_bases: record.line_bases,
             line_width: record.line_width,
+        };
+        self.file.verify_unchanged()?;
+        Ok(Some(result))
+    }
+
+    pub fn numeric_contig(&self, id: u32) -> Result<Option<NumericContig>, SharedError> {
+        self.begin_operation()?;
+        if id >= self.file.header.contig_count {
+            return Ok(None);
+        }
+        let record = self.contig_record(id)?;
+        if record.document_id >= self.file.header.document_count || record.length == 0 {
+            return Err(SharedError::Invalid("contig metadata"));
+        }
+        self.observe(&self.numeric_contig_resolutions, 1);
+        let result = NumericContig {
+            id,
+            metagenome_id: record.document_id,
+            length: record.length,
         };
         self.file.verify_unchanged()?;
         Ok(Some(result))

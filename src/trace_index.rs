@@ -356,6 +356,22 @@ impl TraceIndex {
         }
     }
 
+    pub(crate) fn numeric_contig(
+        &self,
+        id: u32,
+    ) -> Result<Option<crate::shared_reader::NumericContig>, TraceError> {
+        if let Self::Shared(index) = self {
+            return Ok(index.numeric_contig(id)?);
+        }
+        Ok(self
+            .contig(id)?
+            .map(|contig| crate::shared_reader::NumericContig {
+                id: contig.id,
+                metagenome_id: contig.metagenome_id,
+                length: contig.length,
+            }))
+    }
+
     pub(crate) fn enable_selected_front_metadata(&self) {
         if let Self::Shard(index) = self {
             index.enable_selected_front_metadata();

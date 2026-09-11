@@ -480,6 +480,80 @@ fn compact_handles_are_reader_bound_and_keep_resolved_locations() {
 }
 
 #[test]
+fn numeric_contig_reads_only_checked_numeric_metadata() {
+    let (_directory, reader, _) = fixture(0);
+    let before = reader.stats();
+    let numeric = reader.numeric_contig(2).unwrap().unwrap();
+    let after = reader.stats();
+    assert_eq!(
+        (numeric.id, numeric.metagenome_id, numeric.length),
+        (2, 2, 100_000)
+    );
+    assert_eq!(
+        after.numeric_contig_resolutions - before.numeric_contig_resolutions,
+        1
+    );
+    assert_eq!(
+        after.file.requested_bytes - before.file.requested_bytes,
+        u64::from(crate::jidx::CONTIG_RECORD_SIZE)
+    );
+    assert_eq!(after.file.requested_pages - before.file.requested_pages, 1);
+    let full = reader.contig(2).unwrap().unwrap();
+    assert_eq!(
+        (numeric.id, numeric.metagenome_id, numeric.length),
+        (full.id, full.metagenome_id, full.length)
+    );
+
+    let before = reader.stats();
+    assert!(
+        reader
+            .numeric_contig(reader.contig_count())
+            .unwrap()
+            .is_none()
+    );
+    let after = reader.stats();
+    assert_eq!(
+        after.numeric_contig_resolutions,
+        before.numeric_contig_resolutions
+    );
+    assert_eq!(after.file.requested_bytes, before.file.requested_bytes);
+}
+
+#[test]
+fn numeric_contig_ignores_names_and_rejects_invalid_numeric_fields() {
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let path = directory.path().join("fixture.shared");
+    mutate_and_resign(&path, |bytes, header| {
+        let contig = header.section(Section::Contigs).offset as usize;
+        bytes[contig + 4..contig + 8].copy_from_slice(&u32::MAX.to_le_bytes());
+    });
+    let reader = SharedReader::open_observed(&path).unwrap();
+    assert_eq!(reader.numeric_contig(0).unwrap().unwrap().length, 100_000);
+    assert!(reader.contig(0).is_err());
+
+    for invalid_document in [false, true] {
+        let (directory, reader, _) = fixture(0);
+        drop(reader);
+        let path = directory.path().join("fixture.shared");
+        mutate_and_resign(&path, |bytes, header| {
+            let contig = header.section(Section::Contigs).offset as usize;
+            if invalid_document {
+                bytes[contig..contig + 4].copy_from_slice(&header.document_count.to_le_bytes());
+            } else {
+                bytes[contig + 16..contig + 24].copy_from_slice(&0u64.to_le_bytes());
+            }
+        });
+        let reader = SharedReader::open_observed(&path).unwrap();
+        assert!(matches!(
+            reader.numeric_contig(0),
+            Err(SharedError::Invalid("contig metadata"))
+        ));
+        assert_eq!(reader.stats().numeric_contig_resolutions, 0);
+    }
+}
+
+#[test]
 fn trace_adapter_reuses_resolved_group_and_member_handles() {
     use crate::trace_index::TraceIndex;
 
