@@ -717,6 +717,69 @@ fn shared_geometry(criterion: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(feature = "bench-internals")]
+fn shared_threads(criterion: &mut Criterion) {
+    let (directory, _reader, _) = shared_core_absent_fixture();
+    let engine =
+        TraceEngine::open_shared(directory.path().join("large-target.shared"), None).unwrap();
+    let keys = (0..98_304u32)
+        .map(|ordinal| {
+            SharedKey::core(ordinal.wrapping_mul(506_952_113) & ((1 << 30) - 1))
+                .packed()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let pools = [1, 4, 8, 16].map(|threads| {
+        (
+            threads,
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap(),
+        )
+    });
+    let mut expected = None;
+    for (threads, pool) in &pools {
+        let stats = pool.install(|| {
+            let (retained, stats) = engine.benchmark_lookup(&keys, true).unwrap();
+            black_box(&retained);
+            drop(retained);
+            stats
+        });
+        assert!(
+            stats[0] >= 3,
+            "{threads} threads produced {} tasks",
+            stats[0]
+        );
+        assert_eq!(*expected.get_or_insert(stats), stats, "{threads} threads");
+    }
+    println!("shared_threads observed [tasks, plan_hash, successes]: {expected:?}");
+
+    let mut group = criterion.benchmark_group("shared_threads");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.throughput(Throughput::Elements(keys.len() as u64));
+    for (threads, pool) in &pools {
+        group.bench_function(format!("{threads}_threads"), |bencher| {
+            bencher.iter(|| {
+                pool.install(|| {
+                    let (retained, stats) =
+                        engine.benchmark_lookup(black_box(&keys), false).unwrap();
+                    black_box(&retained);
+                    drop(retained);
+                    stats
+                })
+            })
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_threads(_: &mut Criterion) {}
+
 fn shared_packed(criterion: &mut Criterion) {
     let (directory, reference, workloads) = shared_lookup_fixture();
     let path = directory.path().join("packed.shared");
@@ -784,6 +847,7 @@ criterion_group!(
     shared_prepare,
     shared_resolved_handle,
     shared_geometry,
+    shared_threads,
     shared_packed
 );
 criterion_main!(benches);
