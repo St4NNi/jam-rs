@@ -5,7 +5,7 @@ use crate::bgzf::{BgzfError, BgzfReader};
 use crate::bgzf_cache::{BgzfBlockCache, DEFAULT_BATCH_BGZF_CACHE_BYTES};
 use crate::jidx::{JidxError, RESCUE_K15_TAG, sha256, sha256_reader};
 use crate::jidx_reader::{
-    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS, SeedEntry,
+    ContigId, JidxReader, JidxReaderError, MetagenomeId, SEED_LOOKUP_BATCH_KEYS,
 };
 use crate::mosaic::{Fragment, Mosaic, MosaicError, build_mosaic};
 use crate::query::{QueryEngine, QueryError, QuerySketch};
@@ -14,7 +14,9 @@ use crate::reader::ReaderError;
 use crate::trace_batch::{
     SharedSeedLookups, TraceBatch, lookup_budget, lookup_bytes, prepare_lookup,
 };
-use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
+use crate::trace_index::{
+    TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex, TraceSeed,
+};
 use needletail::Sequence;
 use rayon::prelude::*;
 use serde::Serialize;
@@ -227,14 +229,14 @@ pub(crate) struct CachedSeedLookups {
 
 #[derive(Clone, Copy)]
 struct CachedDocumentGroup {
-    seed: SeedEntry,
+    seed: TraceSeed,
     document_start: usize,
     document_count: usize,
 }
 
 #[derive(Clone, Copy)]
 struct CachedSeedLookup<'a> {
-    seed: SeedEntry,
+    seed: TraceSeed,
     documents: &'a [SeedDocument],
 }
 
@@ -293,7 +295,7 @@ impl CachedSeedLookups {
     fn get(&self, key: u64) -> Option<Option<CachedSeedLookup<'_>>> {
         self.through.is_some_and(|through| key <= through).then(|| {
             self.groups
-                .binary_search_by_key(&key, |group| group.seed.packed_key)
+                .binary_search_by_key(&key, |group| group.seed.packed_key())
                 .ok()
                 .map(|index| {
                     let group = self.groups[index];
@@ -312,7 +314,7 @@ impl CachedSeedLookups {
         }
     }
 
-    fn cache_group(&mut self, key: u64, seed: SeedEntry, documents: &[SeedDocument]) {
+    fn cache_group(&mut self, key: u64, seed: TraceSeed, documents: &[SeedDocument]) {
         if self.frozen {
             return;
         }
@@ -455,6 +457,17 @@ impl TraceEngine {
         } else {
             self.search_prepared(prepared, config, None)
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn search_without_batch(
+        &self,
+        query_id: &str,
+        sequence: &[u8],
+        config: TraceConfig,
+    ) -> Result<TraceResult, TraceError> {
+        let prepared = self.prepare(query_id, sequence, config)?;
+        self.search_prepared(prepared, config, None)
     }
 
     fn prepare(
@@ -718,7 +731,7 @@ impl TraceEngine {
                 let (key, seed) = shared.entries[ordinal as usize];
                 (
                     std::cmp::Reverse(if self.index.is_shared() { key >> 62 } else { 0 }),
-                    seed.unwrap().document_frequency,
+                    seed.unwrap().document_frequency(),
                     key,
                 )
             });
@@ -857,7 +870,6 @@ impl TraceEngine {
                 resolved_seeds = self.index.find_seeds_batch(&packed_keys)?;
             }
             let index_seeds = &resolved_seeds;
-            self.index.advise_first_document_rows(&index_seeds);
             for ((packed_key, query_seeds), &index_seed) in chunk.iter().copied().zip(index_seeds) {
                 let Some(index_seed) = index_seed else {
                     if let Some(lookups) = &mut lookups {
@@ -865,7 +877,7 @@ impl TraceEngine {
                     }
                     continue;
                 };
-                frequencies.push((packed_key, index_seed.document_frequency));
+                frequencies.push((packed_key, index_seed.document_frequency()));
                 let query_positions = u64::try_from(query_seeds.len())
                     .map_err(|_| TraceError::Invalid("query seed count"))?;
                 let decoded_documents;
@@ -1006,7 +1018,6 @@ impl TraceEngine {
             } else {
                 self.index.find_seeds_batch(&filter_keys)?
             };
-            self.index.advise_first_document_rows(&uncached_seeds);
             let index_seeds = packed_keys
                 .iter()
                 .enumerate()
@@ -2348,7 +2359,7 @@ mod tests {
             let Some(seed) = engine.index.find_seed(packed_key).unwrap() else {
                 continue;
             };
-            scalar_frequencies.push((packed_key, seed.document_frequency));
+            scalar_frequencies.push((packed_key, seed.document_frequency()));
             let query_positions = u64::try_from(query_seeds.len()).unwrap();
             for document in engine.index.seed_documents(seed).unwrap() {
                 *scalar_hits.entry(document.metagenome_id()).or_default() +=

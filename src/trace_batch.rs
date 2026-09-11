@@ -1,7 +1,9 @@
 use crate::bgzf_cache::BgzfBlockCache;
-use crate::jidx_reader::{SEED_LOOKUP_BATCH_KEYS, SeedEntry};
+use crate::jidx_reader::SEED_LOOKUP_BATCH_KEYS;
 use crate::trace::{CacheReservation, LOOKUP_CACHE_AVAILABLE, TraceError};
-use crate::trace_index::{TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex};
+use crate::trace_index::{
+    TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex, TraceSeed,
+};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -10,7 +12,7 @@ use std::time::Instant;
 
 pub(crate) struct SharedSeedLookups {
     pub(crate) identity: TraceCacheIdentity,
-    pub(crate) entries: Vec<(u64, Option<SeedEntry>)>,
+    pub(crate) entries: Vec<(u64, Option<TraceSeed>)>,
     pub(crate) query_entries: Vec<u64>,
     pub(crate) attempted_keys: usize,
     pub(crate) query_ranges: Vec<Range<usize>>,
@@ -54,7 +56,7 @@ pub(crate) fn lookup_budget(index: &TraceIndex) -> usize {
 
 const QUERY_LOOKUP_ROW_BYTES: usize = std::mem::size_of::<(u64, usize)>()
     + std::mem::size_of::<u64>()
-    + std::mem::size_of::<(u64, Option<SeedEntry>)>();
+    + std::mem::size_of::<(u64, Option<TraceSeed>)>();
 
 fn lookup_chunk_keys() -> usize {
     (SEED_LOOKUP_BATCH_KEYS / rayon::current_num_threads()).max(1)
@@ -72,10 +74,10 @@ fn lookup_workspace(index: &TraceIndex, requests: usize) -> Option<usize> {
             .checked_mul(
                 std::mem::size_of::<crate::shared_seed::SharedKey>()
                     + std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
-                    + std::mem::size_of::<Option<SeedEntry>>(),
+                    + std::mem::size_of::<Option<TraceSeed>>(),
             )?
             .checked_add(tasks.checked_mul(
-                std::mem::size_of::<(u64, &[u64], &mut [(u64, Option<SeedEntry>)])>()
+                std::mem::size_of::<(u64, &[u64], &mut [(u64, Option<TraceSeed>)])>()
                     + std::mem::size_of::<Result<[u64; 3], TraceError>>(),
             )?)
     } else {
@@ -140,7 +142,7 @@ pub(crate) fn prepare_lookup(
         + std::mem::size_of::<SharedSeedLookups>()
         + requests.capacity() * std::mem::size_of::<(u64, usize)>()
         + keys.capacity() * std::mem::size_of::<u64>()
-        + entries.capacity() * std::mem::size_of::<(u64, Option<SeedEntry>)>()
+        + entries.capacity() * std::mem::size_of::<(u64, Option<TraceSeed>)>()
         + query_count * std::mem::size_of::<Range<usize>>()
         + workspace;
     if peak_capacity_bound > reservation.bytes {
@@ -269,7 +271,7 @@ pub(crate) fn prepare_lookup(
         + std::mem::size_of::<SharedSeedLookups>()
         + query_ranges.capacity() * std::mem::size_of::<Range<usize>>()
         + keys.capacity() * std::mem::size_of::<u64>()
-        + entries.capacity() * std::mem::size_of::<(u64, Option<SeedEntry>)>();
+        + entries.capacity() * std::mem::size_of::<(u64, Option<TraceSeed>)>();
     let mut postings = BTreeMap::new();
     let mut postings_complete = true;
     let mut context_occurrence_histogram_log2 = [0; 16];
@@ -278,9 +280,19 @@ pub(crate) fn prepare_lookup(
             continue;
         };
         let document_bytes = 128usize.saturating_add(
-            (seed.document_frequency as usize).saturating_mul(std::mem::size_of::<SeedDocument>()),
+            (seed.document_frequency() as usize)
+                .saturating_mul(std::mem::size_of::<SeedDocument>()),
         );
-        if capacity_bytes.saturating_add(document_bytes) > reservation.bytes {
+        let document_workspace = (seed.document_frequency() as usize).saturating_mul(match index {
+            TraceIndex::Shared(_) => std::mem::size_of::<crate::shared_reader::SharedMember>(),
+            TraceIndex::Shard(_) => std::mem::size_of::<crate::jidx_reader::SeedDocument>(),
+            TraceIndex::Owner(_) => std::mem::size_of::<crate::owner_format::OwnerDocument>(),
+        });
+        if capacity_bytes
+            .saturating_add(document_bytes)
+            .saturating_add(document_workspace)
+            > reservation.bytes
+        {
             postings_complete = false;
             continue;
         }
@@ -295,7 +307,11 @@ pub(crate) fn prepare_lookup(
         }
         membership_ns += started.map_or(0, |started| started.elapsed().as_nanos() as u64);
         let bytes = 128 + documents.capacity() * std::mem::size_of::<SeedDocument>();
-        peak_capacity_bound = peak_capacity_bound.max(capacity_bytes.saturating_add(bytes));
+        peak_capacity_bound = peak_capacity_bound.max(
+            capacity_bytes
+                .saturating_add(bytes)
+                .saturating_add(document_workspace),
+        );
         if capacity_bytes.saturating_add(bytes) > reservation.bytes {
             postings_complete = false;
             continue;

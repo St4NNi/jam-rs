@@ -494,7 +494,14 @@ fn shared_trace_fixture(packed: bool) {
                         64,
                     )
                     .unwrap()
-                        <= crate::trace_batch::lookup_budget(&index)
+                        > crate::trace_batch::lookup_budget(&index)
+                );
+                let oversized =
+                    Vec::with_capacity(3 * crate::cli::handlers::SHARED_BATCH_QUERY_BASES);
+                assert!(
+                    crate::trace_batch::prepare_lookup(&index, oversized, 64, false)
+                        .unwrap()
+                        .is_none()
                 );
                 TraceEngine::open_shared(&shared, None)
                     .unwrap()
@@ -505,6 +512,16 @@ fn shared_trace_fixture(packed: bool) {
             .map(without_read_accounting)
             .collect::<Vec<_>>();
         assert_eq!(actual, expected_topologies, "thread count {threads}");
+    }
+    for (((id, sequence), &circular), expected) in topology_queries
+        .iter()
+        .zip(&topology_flags)
+        .zip(&expected_topologies)
+    {
+        let actual = engine
+            .search_without_batch(id, sequence, TraceConfig { circular, ..linear })
+            .unwrap();
+        assert_eq!(&without_read_accounting(actual), expected);
     }
 
     let cli_query = directory.path().join("mixed-topologies.fa");

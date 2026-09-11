@@ -416,6 +416,47 @@ fn compact_handles_are_reader_bound_and_keep_resolved_locations() {
 }
 
 #[test]
+fn trace_adapter_reuses_resolved_group_and_member_handles() {
+    use crate::trace_index::TraceIndex;
+
+    let (_directory, reader, _) = fixture(4096);
+    let index = TraceIndex::Shared(Box::new(reader));
+    let seed = index
+        .find_seed(SharedKey::core(TARGET_CORE).packed().unwrap())
+        .unwrap()
+        .unwrap();
+    let documents = index.seed_documents(seed).unwrap();
+    let document = documents
+        .into_iter()
+        .find(|document| document.metagenome_id() == 2)
+        .unwrap();
+    let before = match &index {
+        TraceIndex::Shared(reader) => reader.stats(),
+        _ => unreachable!(),
+    };
+    let occurrences = index.seed_document_occurrences(seed, document).unwrap();
+    let after = match &index {
+        TraceIndex::Shared(reader) => reader.stats(),
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        occurrences
+            .iter()
+            .map(|occurrence| (occurrence.contig_id, occurrence.position))
+            .collect::<Vec<_>>(),
+        [(2, 300)]
+    );
+    assert_eq!(
+        after.group_descriptor_inspections,
+        before.group_descriptor_inspections
+    );
+    assert_eq!(
+        after.member_descriptor_inspections,
+        before.member_descriptor_inspections
+    );
+}
+
+#[test]
 fn retained_core_resolves_contexts_without_another_core_search() {
     let (_directory, path) = grouped_lookup_fixture(4096);
     let reader = SharedReader::open_observed(&path).unwrap();
