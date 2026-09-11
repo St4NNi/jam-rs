@@ -1237,7 +1237,7 @@ impl SharedReader {
                 31 => flags & 4 != 0 && key.context == context,
                 _ => false,
             };
-            return Ok(matches.then(|| SharedGroup {
+            return Ok(matches.then_some(SharedGroup {
                 reader_token: self.reader_token,
                 key,
                 core_ordinal,
