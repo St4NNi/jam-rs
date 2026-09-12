@@ -15,6 +15,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
+#[cfg(feature = "bench-internals")]
+use xorf::{BinaryFuse8Ref, Filter, FilterRef};
 
 fn sequence(length: usize) -> Vec<u8> {
     sequence_from_state(length, 7)
@@ -638,6 +640,78 @@ fn shared_core_search(criterion: &mut Criterion) {
 fn shared_core_search(_: &mut Criterion) {}
 
 #[cfg(feature = "bench-internals")]
+fn shared_core_filter(criterion: &mut Criterion) {
+    let fixture = shared_core_absent_fixture();
+    let (_, _, reader) = fixture
+        .readers
+        .iter()
+        .find(|(version, _, _)| *version == "v3")
+        .unwrap();
+    let (filter_bytes, filter_keys, end_prefix) = reader.benchmark_core_filter(usize::MAX).unwrap();
+    assert_eq!(end_prefix, 65_536);
+    let filter = BinaryFuse8Ref::from_dma(&filter_bytes[..20], &filter_bytes[20..]);
+    eprintln!(
+        "shared_core_filter: {filter_keys} keys, {} serialized bytes",
+        filter_bytes.len()
+    );
+
+    let mut group = criterion.benchmark_group("shared_core_filter");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, keys) in &fixture.workloads {
+        let cores = keys.iter().map(|key| key.core).collect::<Vec<_>>();
+        let mut filtered = cores.clone();
+        filtered.sort_unstable();
+        filtered.dedup();
+        filtered.retain(|core| filter.contains(&u64::from(*core)));
+        let control = reader.benchmark_resolve_sorted_cores(&cores).unwrap();
+        let filtered_results = reader.benchmark_resolve_sorted_cores(&filtered).unwrap();
+        assert_eq!(
+            filtered_results
+                .iter()
+                .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+                .collect::<Vec<_>>(),
+            control
+                .iter()
+                .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+                .collect::<Vec<_>>(),
+            "{name}"
+        );
+        eprintln!(
+            "shared_core_filter {name}: {} requested, {} survived, {} exact hits",
+            cores.len(),
+            filtered.len(),
+            filtered_results.len()
+        );
+
+        group.throughput(Throughput::Elements(cores.len() as u64));
+        group.bench_function(format!("{name}/exact"), |bencher| {
+            bencher.iter(|| {
+                let mut sorted = black_box(&cores).clone();
+                sorted.sort_unstable();
+                sorted.dedup();
+                reader.benchmark_resolve_sorted_cores(&sorted).unwrap()
+            })
+        });
+        group.bench_function(format!("{name}/filter_exact"), |bencher| {
+            bencher.iter(|| {
+                let mut filtered = black_box(&cores).clone();
+                filtered.sort_unstable();
+                filtered.dedup();
+                filtered.retain(|core| filter.contains(&u64::from(*core)));
+                reader.benchmark_resolve_sorted_cores(&filtered).unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_core_filter(_: &mut Criterion) {}
+
+#[cfg(feature = "bench-internals")]
 fn shared_posting_preparation(criterion: &mut Criterion) {
     let fixture = shared_core_absent_fixture();
     let (_, path, _) = fixture
@@ -1049,6 +1123,7 @@ criterion_group!(
     shared_lookup,
     shared_core_absent,
     shared_core_search,
+    shared_core_filter,
     shared_posting_preparation,
     shared_prepare,
     shared_resolved_handle,
