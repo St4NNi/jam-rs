@@ -1534,6 +1534,125 @@ fn compact_member_prefix_fixture(preceding: u32) -> (tempfile::TempDir, SharedRe
     )
 }
 
+fn singleton_posting_fixture(count: u32) -> (tempfile::TempDir, std::path::PathBuf, Vec<u32>) {
+    let directory = tempfile::tempdir().unwrap();
+    let metadata = directory.path().join("singletons.jidx");
+    let mut writer = JidxWriter::new(
+        &metadata,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [51; 32],
+            manifest_sha256: [52; 32],
+        },
+    )
+    .unwrap();
+    writer
+        .begin_metagenome(MetagenomeInput {
+            name: "singletons".into(),
+            bgzf_uri: "singletons.bgz".into(),
+            bgzf_bytes: 100,
+            bgzf_sha256: [53; 32],
+            gzi: vec![0; 8],
+        })
+        .unwrap();
+    writer
+        .begin_contig(ContigInput {
+            name: "singletons".into(),
+            length: u64::from(count) + 100,
+            fasta_offset: 4,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+    writer.finish().unwrap();
+    let reference = JidxReader::open(&metadata).unwrap();
+    let cores = (0..count).collect::<Vec<_>>();
+    let mut seeds = cores
+        .iter()
+        .map(|&core| IndexedSeed {
+            member: 0,
+            contig: 0,
+            seed: SharedSeed {
+                core,
+                context: 0,
+                flags: 0,
+                position: u64::from(core) + 32,
+            },
+        })
+        .collect::<Vec<_>>();
+    let source = directory.path().join("singletons.shared");
+    let packed = directory.path().join("singletons-packed.shared");
+    let compact = directory.path().join("singletons-compact.shared");
+    write_shared_index(&reference, &source, 64, &mut seeds).unwrap();
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    (directory, compact, cores)
+}
+
+#[allow(clippy::type_complexity)]
+fn serial_posting_evidence(
+    reader: &SharedReader,
+    entries: &[(u64, Option<crate::trace_index::TraceSeed>)],
+) -> Vec<(u64, Vec<(u32, Vec<(u32, u64, bool)>)>)> {
+    entries
+        .iter()
+        .filter_map(|&(key, seed)| {
+            let crate::trace_index::TraceSeed::Shared(group) = seed? else {
+                unreachable!()
+            };
+            let members = reader
+                .members(group)
+                .unwrap()
+                .into_iter()
+                .map(|member| {
+                    let occurrences = reader
+                        .member_occurrences(group, member)
+                        .unwrap()
+                        .into_iter()
+                        .map(|value| (value.contig_id, value.position, value.canonical_orientation))
+                        .collect();
+                    (member.metagenome_id, occurrences)
+                })
+                .collect();
+            Some((key, members))
+        })
+        .collect()
+}
+
+#[allow(clippy::type_complexity)]
+fn retained_posting_evidence(
+    entries: &[(u64, Option<crate::trace_index::TraceSeed>)],
+    postings: &[Option<crate::trace_batch::BatchPosting>],
+) -> Vec<(u64, Vec<(u32, Vec<(u32, u64, bool)>)>)> {
+    entries
+        .iter()
+        .zip(postings)
+        .filter_map(|(&(key, _), posting)| {
+            let posting = posting.as_ref()?;
+            let occurrences = posting.occurrences.as_ref().unwrap();
+            Some((
+                key,
+                posting
+                    .documents
+                    .iter()
+                    .zip(occurrences)
+                    .map(|(document, values)| {
+                        let values = values
+                            .iter()
+                            .map(|value| {
+                                (value.contig_id, value.position, value.canonical_orientation)
+                            })
+                            .collect();
+                        (document.metagenome_id(), values)
+                    })
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
 #[test]
 fn posting_operation_fills_admitted_member_and_occurrence_storage() {
     let (_directory, reader, core, last_position) = compact_member_prefix_fixture(16);
@@ -1667,6 +1786,311 @@ fn posting_operation_keeps_only_valid_member_prefix_on_corruption() {
         );
         operation.finish().unwrap();
     }
+}
+
+#[test]
+fn bounded_posting_executor_is_stable_and_parallel_for_many_singletons() {
+    let (_directory, path, cores) = singleton_posting_fixture(2048);
+    let mut expected_plan = None;
+    for threads in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        let (actual, plan) = pool.install(|| {
+            let reader = SharedReader::open_observed(&path).unwrap();
+            let keys = cores
+                .iter()
+                .copied()
+                .map(SharedKey::core)
+                .collect::<Vec<_>>();
+            let entries = keys
+                .iter()
+                .zip(reader.find_many(&keys).unwrap())
+                .map(|(key, group)| {
+                    (
+                        key.packed().unwrap(),
+                        group.map(crate::trace_index::TraceSeed::Shared),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected = serial_posting_evidence(&reader, &entries);
+            let mut postings = (0..entries.len()).map(|_| None).collect::<Vec<_>>();
+            let execution = crate::trace_postings::prepare_shared_postings(
+                &reader,
+                &entries,
+                &mut postings,
+                128 * 1024 * 1024,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(execution.complete);
+            assert_eq!(execution.admitted_member_rows, 2048);
+            assert_eq!(execution.admitted_position_rows, 2048);
+            assert_eq!(execution.member_copies, 2048);
+            assert_eq!(
+                execution.peak_bytes,
+                execution.scratch_bytes + execution.retained_bytes
+            );
+            assert!(execution.member_tasks > 1 && execution.position_tasks > 1);
+            if threads >= 4 {
+                assert!(execution.peak_parallel_tasks > 1, "{threads} threads");
+            }
+            let actual = retained_posting_evidence(&entries, &postings);
+            assert_eq!(actual, expected);
+            let plan = (
+                execution.member_tasks,
+                execution.position_tasks,
+                execution.task_hash,
+                execution.retained_bytes,
+                execution.peak_bytes,
+                execution.scratch_bytes,
+                execution.admitted_member_rows,
+                execution.admitted_position_rows,
+            );
+            (actual, plan)
+        });
+        if let Some(expected) = expected_plan {
+            assert_eq!(plan, expected, "{threads} threads");
+        } else {
+            expected_plan = Some(plan);
+        }
+        assert_eq!(actual.len(), 2048);
+    }
+
+    let reader = SharedReader::open(&path).unwrap();
+    let keys = cores
+        .iter()
+        .copied()
+        .map(SharedKey::core)
+        .collect::<Vec<_>>();
+    let entries = keys
+        .iter()
+        .zip(reader.find_many(&keys).unwrap())
+        .map(|(key, group)| {
+            (
+                key.packed().unwrap(),
+                group.map(crate::trace_index::TraceSeed::Shared),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut refused = (0..entries.len()).map(|_| None).collect::<Vec<_>>();
+    assert!(
+        crate::trace_postings::prepare_shared_postings(&reader, &entries, &mut refused, 0, false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(refused.iter().all(Option::is_none));
+    let mut empty = [];
+    assert!(
+        crate::trace_postings::prepare_shared_postings(&reader, &[], &mut empty, 0, false)
+            .unwrap()
+            .unwrap()
+            .complete
+    );
+}
+
+#[test]
+fn bounded_posting_executor_matches_context_and_long_member_streams() {
+    let (directory, source) = grouped_lookup_fixture(0);
+    let packed = directory.path().join("postings-packed.shared");
+    let compact = directory.path().join("postings-compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let reader = SharedReader::open(&compact).unwrap();
+    let mut keys = [
+        SharedKey::core(TARGET_CORE),
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT >> 20,
+            length: 21,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT,
+            length: 31,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: TARGET_CONTEXT ^ 1,
+            length: 31,
+        },
+    ];
+    keys.sort_unstable_by_key(|key| key.packed().unwrap());
+    let entries = keys
+        .iter()
+        .zip(reader.find_many(&keys).unwrap())
+        .map(|(key, group)| {
+            (
+                key.packed().unwrap(),
+                group.map(crate::trace_index::TraceSeed::Shared),
+            )
+        })
+        .collect::<Vec<_>>();
+    let member_counts = entries
+        .iter()
+        .filter_map(|entry| match entry.1 {
+            Some(crate::trace_index::TraceSeed::Shared(group)) => Some(group.member_count()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(member_counts.contains(&1) && member_counts.iter().any(|&count| count > 1));
+    let expected = serial_posting_evidence(&reader, &entries);
+    let mut postings = (0..entries.len()).map(|_| None).collect::<Vec<_>>();
+    let execution = crate::trace_postings::prepare_shared_postings(
+        &reader,
+        &entries,
+        &mut postings,
+        128 * 1024 * 1024,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(execution.complete);
+    assert_eq!(retained_posting_evidence(&entries, &postings), expected);
+
+    let (_directory, reader, core, last_position) = compact_member_prefix_fixture(0);
+    let group = reader.find(SharedKey::core(core)).unwrap().unwrap();
+    assert_eq!((group.member_count(), group.occurrence_count()), (1, 5000));
+    let entries = [(
+        SharedKey::core(core).packed().unwrap(),
+        Some(crate::trace_index::TraceSeed::Shared(group)),
+    )];
+    let expected = serial_posting_evidence(&reader, &entries);
+    let mut postings = [None];
+    let execution = crate::trace_postings::prepare_shared_postings(
+        &reader,
+        &entries,
+        &mut postings,
+        128 * 1024 * 1024,
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(execution.complete);
+    assert_eq!(execution.admitted_position_rows, 5000);
+    let actual = retained_posting_evidence(&entries, &postings);
+    assert_eq!(actual, expected);
+    assert_eq!(actual[0].1[0].1.last().unwrap().1, last_position);
+}
+
+#[test]
+fn bounded_posting_executor_selects_earliest_error_and_publishes_nothing() {
+    let (directory, reader, _) = fixture(16);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("postings-packed.shared");
+    let compact = directory.path().join("postings-compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    mutate_and_resign(&compact, |bytes, header| {
+        let occurrences = header.section(Section::Occurrences);
+        let occurrence_width = header.row_bytes(Section::Occurrences) as usize;
+        let mut changed_position = false;
+        for row in bytes
+            [occurrences.offset as usize..(occurrences.offset + occurrences.length) as usize]
+            .chunks_exact_mut(occurrence_width)
+        {
+            if crate::jidx::read_u64(row, 16) == 0 {
+                let flags = crate::jidx::read_u32(row, 8) | 8;
+                row[8..12].copy_from_slice(&flags.to_le_bytes());
+                changed_position = true;
+                break;
+            }
+        }
+        assert!(changed_position);
+
+        let members = header.section(Section::Members);
+        let member_width = header.row_bytes(Section::Members) as usize;
+        let count = header.id_bytes() + 4;
+        let mut changed_member = false;
+        for row in bytes[members.offset as usize..(members.offset + members.length) as usize]
+            .chunks_exact_mut(member_width)
+        {
+            if row[0] == 1 {
+                row[count..count + 4].fill(0);
+                changed_member = true;
+                break;
+            }
+        }
+        assert!(changed_member);
+    });
+    let reader = SharedReader::open(&compact).unwrap();
+    let keys = [SharedKey::core(0), SharedKey::core(TARGET_CORE)];
+    let entries = keys
+        .iter()
+        .zip(reader.find_many(&keys).unwrap())
+        .map(|(key, group)| {
+            (
+                key.packed().unwrap(),
+                group.map(crate::trace_index::TraceSeed::Shared),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut postings = [None, None];
+    assert!(matches!(
+        crate::trace_postings::prepare_shared_postings(
+            &reader,
+            &entries,
+            &mut postings,
+            128 * 1024 * 1024,
+            true,
+        ),
+        Err(crate::trace::TraceError::Shared(SharedError::Invalid(
+            "occurrence row"
+        )))
+    ));
+    assert!(postings.iter().all(Option::is_none));
+}
+
+#[test]
+fn bounded_posting_executor_rejects_foreign_and_stale_entries() {
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("postings-packed.shared");
+    let compact = directory.path().join("postings-compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let first = SharedReader::open(&compact).unwrap();
+    let group = first.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let entries = [(
+        SharedKey::core(TARGET_CORE).packed().unwrap(),
+        Some(crate::trace_index::TraceSeed::Shared(group)),
+    )];
+    let second = SharedReader::open(&compact).unwrap();
+    let mut postings = [None];
+    assert!(matches!(
+        crate::trace_postings::prepare_shared_postings(
+            &second,
+            &entries,
+            &mut postings,
+            128 * 1024 * 1024,
+            false,
+        ),
+        Err(crate::trace::TraceError::Shared(SharedError::Invalid(
+            "group handle"
+        )))
+    ));
+    assert!(postings.iter().all(Option::is_none));
+
+    mutate_and_resign(&compact, |bytes, header| {
+        let occurrence = header.section(Section::Occurrences).offset as usize;
+        let flags = crate::jidx::read_u32(bytes, occurrence + 8) ^ 1;
+        bytes[occurrence + 8..occurrence + 12].copy_from_slice(&flags.to_le_bytes());
+    });
+    assert!(matches!(
+        crate::trace_postings::prepare_shared_postings(
+            &first,
+            &entries,
+            &mut postings,
+            128 * 1024 * 1024,
+            false,
+        ),
+        Err(crate::trace::TraceError::Shared(SharedError::SourceChanged))
+    ));
+    assert!(postings.iter().all(Option::is_none));
 }
 
 #[test]
