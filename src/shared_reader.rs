@@ -185,6 +185,7 @@ pub(crate) struct CoreRequestCounts {
     pub(crate) covered: usize,
     pub(crate) rejected: usize,
     pub(crate) uncovered: usize,
+    pub(crate) prescreened: usize,
     pub(crate) retained: usize,
     pub(crate) planned: usize,
 }

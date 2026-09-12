@@ -424,6 +424,11 @@ fn extraction_screening_matches_filter_free_results_for_mixed_queries() {
         let reads = engine.shared_read_stats().unwrap();
         assert_eq!(reads.filter_requests, stats.extraction_covered_probes);
         assert_eq!(reads.filter_rejects, stats.tokens_rejected_before_sort);
+        assert_eq!(
+            stats.core_requests_prescreened,
+            stats.core_requests_attempted
+        );
+        assert_eq!(stats.core_requests_uncovered, 0);
         assert_eq!(stats.core_requests_covered, 0);
         assert_eq!(stats.core_requests_rejected, 0);
     }

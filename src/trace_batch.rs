@@ -316,7 +316,8 @@ fn prepare_cores_inner(
             None => (false, true),
         };
         counts.covered += usize::from(covered);
-        counts.uncovered += usize::from(!covered);
+        counts.prescreened += usize::from(screened.is_some());
+        counts.uncovered += usize::from(!covered && screened.is_none());
         counts.rejected += usize::from(!keep);
         if keep {
             keys.push(key);

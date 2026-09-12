@@ -184,6 +184,7 @@ pub struct TraceBatchStats {
     pub core_requests_covered: u64,
     pub core_requests_rejected: u64,
     pub core_requests_uncovered: u64,
+    pub core_requests_prescreened: u64,
     pub core_requests_retained: u64,
     pub core_requests_planned: u64,
     pub core_lookup_fallbacks: u64,
@@ -615,6 +616,31 @@ impl TraceEngine {
     #[cfg(test)]
     pub(crate) fn assert_directory_associations(&self, sequence: &[u8], config: TraceConfig) {
         let actual = self.prepare("benchmark", sequence, config).unwrap();
+        if let Some(operation) = self.extraction_operation(true).unwrap() {
+            let mut fallback = prepare_query_screened(
+                "benchmark",
+                sequence,
+                config,
+                15,
+                false,
+                false,
+                Some(&operation),
+                true,
+            )
+            .unwrap();
+            self.prepare_shared_queries(
+                std::slice::from_mut(&mut fallback),
+                &[config.circular],
+                None,
+                Some(&operation),
+            )
+            .unwrap();
+            operation.finish().unwrap();
+            assert_eq!(
+                actual.positions_by_key.iter().collect::<Vec<_>>(),
+                fallback.positions_by_key.iter().collect::<Vec<_>>()
+            );
+        }
         for compact in [true, false] {
             let expected = self.prepare_directory(sequence, config, compact).unwrap();
             assert_eq!(
@@ -826,6 +852,7 @@ impl TraceEngine {
             stats.core_requests_covered += cores.requests.covered as u64;
             stats.core_requests_rejected += cores.requests.rejected as u64;
             stats.core_requests_uncovered += cores.requests.uncovered as u64;
+            stats.core_requests_prescreened += cores.requests.prescreened as u64;
             stats.core_requests_retained += cores.requests.retained as u64;
             stats.core_requests_planned += cores.requests.planned as u64;
             stats.core_lookup_ns += cores.lookup_ns;
@@ -3029,7 +3056,35 @@ fn prepare_query_screened(
     };
     let positions_by_key = match positions_by_key {
         Some(positions) => positions,
-        None => QueryPositions::new(query_seeds(&query, k, rescue_k15, config.circular)?),
+        None => {
+            let mut positions =
+                QueryPositions::new(query_seeds(&query, k, rescue_k15, config.circular)?);
+            if let Some(operation) = operation {
+                let mut counts = crate::shared_reader::CoreRequestCounts::default();
+                let mut error = None;
+                positions
+                    .directory
+                    .retain(|entry| match operation.screen(entry.key as u32) {
+                        Ok((covered, keep)) => {
+                            counts.attempted += 1;
+                            counts.covered += usize::from(covered);
+                            counts.uncovered += usize::from(!covered);
+                            counts.rejected += usize::from(!keep);
+                            counts.retained += usize::from(keep);
+                            keep
+                        }
+                        Err(failure) => {
+                            error = Some(failure);
+                            true
+                        }
+                    });
+                if let Some(error) = error {
+                    return Err(error.into());
+                }
+                operation.record(counts);
+            }
+            positions
+        }
     };
     let mut lookup_identity = [0; 35];
     lookup_identity[..32].copy_from_slice(&sha256(&query));
