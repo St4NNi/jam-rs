@@ -267,6 +267,136 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
     shared_trace_fixture(true, true);
 }
 
+#[test]
+fn sparse_shared_queries_preserve_bounded_batches_and_fallback_counts() {
+    const ISOLATED: &str = "JAM_SPARSE_QUERY_TEST_CHILD";
+    if std::env::var_os(ISOLATED).is_none() {
+        assert!(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "shared_trace_tests::sparse_shared_queries_preserve_bounded_batches_and_fallback_counts",
+                    "--nocapture",
+                ])
+                .env(ISOLATED, "1")
+                .env("RAYON_NUM_THREADS", "4")
+                .status()
+                .unwrap()
+                .success()
+        );
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let target = vec![b'A'; 128];
+    let reference = directory.path().join("reference.jidx");
+    let mut writer = JidxWriter::new(
+        &reference,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [1; 32],
+            manifest_sha256: [2; 32],
+        },
+    )
+    .unwrap();
+    writer
+        .begin_metagenome(write_bgzf(directory.path(), "target", &target))
+        .unwrap();
+    writer
+        .begin_contig(ContigInput {
+            name: "contig".into(),
+            length: target.len() as u64,
+            fasta_offset: 8,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+    writer.finish().unwrap();
+    let shared = directory.path().join("target.shared");
+    build_shared_index(&reference, &shared, 64).unwrap();
+    let packed = directory.path().join("target.packed.shared");
+    crate::shared_pack::repack_shared_index(&shared, &packed).unwrap();
+    let compact = directory.path().join("target.compact.shared");
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let index = crate::trace_index::TraceIndex::Shared(Box::new(
+        crate::shared_reader::SharedReader::open(&compact).unwrap(),
+    ));
+    let boundary = crate::trace_batch::lookup_budget(&index)
+        / (std::mem::size_of::<u32>()
+            + 2 * std::mem::size_of::<crate::shared_reader::SharedGroup>());
+    let query = xorshift_dna(101, boundary + boundary / 100 + 14);
+    assert!(query.len() > crate::cli::handlers::SHARED_BATCH_QUERY_BASES);
+    let mut keys = query
+        .bit_kmers(15, true)
+        .map(|(_, key, _)| key.0 as u32)
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    assert!(keys.len() > boundary && keys.len() < boundary + boundary / 100);
+    assert!(!keys.contains(&0));
+    let distinct = keys.len() as u64;
+    drop(keys);
+    let config = TraceConfig {
+        use_sketch: false,
+        circular: false,
+        ..TraceConfig::default()
+    };
+    let engine = TraceEngine::open_shared_observed(&compact, None, true).unwrap();
+    let result = engine.search("long-absent", &query, config).unwrap();
+    assert!(result.metagenomes.is_empty());
+    let stats = engine.batch_stats();
+    assert_eq!(stats.query_distinct_cores, distinct);
+    assert_eq!(stats.query_core_occurrences, (query.len() - 14) as u64);
+    assert_eq!(stats.core_lookup_fallbacks, 0);
+    assert_eq!(stats.nested_context_calls, 0);
+    assert_eq!(stats.query_executed_context_associations, 0);
+    let queries = [
+        ("absent".to_owned(), query[..2_000].to_vec()),
+        ("present".to_owned(), target),
+    ];
+    drop(query);
+    let mut expected = None;
+    let mut expected_logical = None;
+    for workers in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap();
+        let engine = TraceEngine::open_shared_observed(&compact, None, true).unwrap();
+        for repeat in 1..=3 {
+            let results = pool
+                .install(|| engine.search_batch(&queries, config).unwrap())
+                .into_iter()
+                .map(without_read_accounting)
+                .collect::<Vec<_>>();
+            assert_eq!(&results, expected.get_or_insert_with(|| results.clone()));
+            let stats = engine.batch_stats();
+            assert_eq!(stats.core_lookup_fallbacks, 0);
+            assert_eq!(stats.nested_context_calls, 114 * repeat);
+            let logical = [
+                stats.query_core_occurrences,
+                stats.query_context_associations,
+                stats.query_distinct_cores,
+                stats.query_executed_context_associations,
+            ];
+            let first = *expected_logical.get_or_insert(logical);
+            assert_eq!(logical, first.map(|count| count * repeat));
+        }
+    }
+    let reserved = crate::trace::CacheReservation::acquire(
+        &crate::trace::LOOKUP_CACHE_AVAILABLE,
+        crate::trace::LOOKUP_CACHE_BYTES,
+    )
+    .unwrap();
+    let engine = TraceEngine::open_shared_observed(&compact, None, true).unwrap();
+    let fallback = engine.search("absent", &queries[0].1, config).unwrap();
+    assert_eq!(without_read_accounting(fallback), expected.unwrap()[0]);
+    assert_eq!(engine.batch_stats().core_lookup_fallbacks, 1);
+    assert_eq!(engine.batch_stats().nested_context_calls, 1_986);
+    drop(reserved);
+}
+
 fn shared_trace_fixture(packed: bool, split: bool) {
     let directory = tempfile::tempdir().unwrap();
     let exact_target = dna(11, 800);

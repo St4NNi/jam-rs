@@ -825,6 +825,69 @@ fn sparse_core_admission_crosses_the_former_dense_budget_boundary() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn sparse_core_allocation_failure_falls_back_without_retaining_a_partial_table() {
+    use crate::trace_batch::prepare_cores;
+    use crate::trace_index::TraceIndex;
+
+    const ISOLATED: &str = "JAM_SHARED_CORE_ALLOCATION_ISOLATED";
+    if std::env::var_os(ISOLATED).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "shared_tests::sparse_core_allocation_failure_falls_back_without_retaining_a_partial_table",
+            ])
+            .env(ISOLATED, "1")
+            .env("MALLOC_ARENA_MAX", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
+    let (_directory, reader, _) = fixture(0);
+    let index = TraceIndex::Shared(Box::new(reader));
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let virtual_bytes = status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmSize:"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<libc::rlim_t>()
+        .unwrap()
+        * 1024;
+    let mut original = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: original is valid writable storage for the process limit.
+    assert_eq!(
+        unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut original) },
+        0
+    );
+    let constrained = libc::rlimit {
+        rlim_cur: original.rlim_cur.min(virtual_bytes + 8 * 1024 * 1024),
+        rlim_max: original.rlim_max,
+    };
+    let count = 64 * 1024 * 1024 / std::mem::size_of::<u32>();
+    assert!(count * std::mem::size_of::<u32>() < crate::trace_batch::lookup_budget(&index));
+    // SAFETY: constrained preserves the hard limit and only lowers this child's soft limit.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_AS, &constrained) }, 0);
+    // A short iterator returns before dispatch if the allocation unexpectedly succeeds.
+    let result = prepare_cores(&index, 0..1, count, false);
+    // SAFETY: original is the unchanged hard limit and the previously permitted soft limit.
+    assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_AS, &original) }, 0);
+    assert!(result.unwrap().is_none());
+    let recovered = prepare_cores(&index, [TARGET_CORE], 1, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.groups.len(), 1);
+    assert_eq!(recovered.groups[0].key().core, TARGET_CORE);
+}
+
 #[test]
 fn sparse_core_admission_falls_back_completely_when_dense_results_exceed_budget() {
     use crate::trace_batch::{lookup_budget, prepare_cores};

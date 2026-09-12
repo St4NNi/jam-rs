@@ -168,6 +168,7 @@ pub struct TraceBatchStats {
     pub query_executed_context_associations: u64,
     pub nested_context_calls: u64,
     pub core_lookup_tasks: u64,
+    pub core_lookup_fallbacks: u64,
     pub core_lookup_ns: u64,
     pub core_lookup_peak_bytes: usize,
     pub core_lookup_retained_bytes: usize,
@@ -635,6 +636,9 @@ impl TraceEngine {
             .iter()
             .flat_map(|query| query.positions_by_key.keys().map(|&key| key as u32));
         let cores = prepare_cores(&self.index, keys, count, self.observed)?;
+        if self.observed && cores.is_none() {
+            self.batch_stats.lock().unwrap().core_lookup_fallbacks += 1;
+        }
         if self.observed
             && let Some(cores) = &cores
         {

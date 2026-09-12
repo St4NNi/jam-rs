@@ -721,7 +721,14 @@ fn shared_prepare(criterion: &mut Criterion) {
     let absent_250k = sequence_from_state(250_000, 107);
     let mut mixed_250k = sequence(64_000);
     mixed_250k.extend(sequence_from_state(186_000, 109));
+    let boundary = 128 * 1024 * 1024
+        / (std::mem::size_of::<u32>()
+            + 2 * std::mem::size_of::<jam_rs::shared_reader::SharedGroup>());
+    let below_boundary = sequence_from_state(boundary - boundary / 100 + 14, 113);
+    let above_boundary = sequence_from_state(boundary + boundary / 100 + 14, 127);
     let workloads = [
+        ("boundary/below/linear", below_boundary, false),
+        ("boundary/above/linear", above_boundary, false),
         ("2kb/present/linear", present_2k, false),
         ("2kb/absent/linear", absent_2k, false),
         ("64kb/mixed/linear", mixed_64k, false),
@@ -736,6 +743,9 @@ fn shared_prepare(criterion: &mut Criterion) {
     group.measurement_time(Duration::from_secs(1));
     for (format, engine) in &engines {
         for (name, query, circular) in &workloads {
+            if *format == "v1" && name.starts_with("boundary/") {
+                continue;
+            }
             let config = TraceConfig {
                 circular: *circular,
                 use_sketch: false,
