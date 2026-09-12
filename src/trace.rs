@@ -131,6 +131,20 @@ pub struct TraceBatchStats {
     pub key_lookup_ns: u64,
     pub membership_access_ns: u64,
     pub position_access_ns: u64,
+    pub posting_member_tasks: u64,
+    pub posting_position_tasks: u64,
+    pub posting_plan_hash: u64,
+    pub posting_admitted_member_rows: u64,
+    pub posting_admitted_position_rows: u64,
+    pub posting_peak_parallel_tasks: u64,
+    pub posting_scratch_bytes: u64,
+    pub posting_member_copies: u64,
+    pub posting_initialized_position_bytes: u64,
+    pub posting_member_worker_elapsed_ns: u64,
+    pub posting_position_worker_elapsed_ns: u64,
+    pub posting_member_worker_cpu_ns: u64,
+    pub posting_position_worker_cpu_ns: u64,
+    pub posting_cpu_unavailable_tasks: u64,
     pub candidate_routing_ns: u64,
     pub region_formation_ns: u64,
     pub sequence_read_ns: u64,
@@ -868,6 +882,26 @@ impl TraceEngine {
             stats.key_lookup_ns += lookups.lookup_ns;
             stats.membership_access_ns += lookups.membership_ns;
             stats.position_access_ns += lookups.position_ns;
+            let posting = &lookups.posting_execution;
+            stats.posting_member_tasks += posting.member_tasks as u64;
+            stats.posting_position_tasks += posting.position_tasks as u64;
+            stats.posting_plan_hash =
+                stats.posting_plan_hash.wrapping_mul(0x100_0000_01b3) ^ posting.task_hash;
+            stats.posting_admitted_member_rows += posting.admitted_member_rows;
+            stats.posting_admitted_position_rows += posting.admitted_position_rows;
+            stats.posting_peak_parallel_tasks = stats
+                .posting_peak_parallel_tasks
+                .max(posting.peak_parallel_tasks as u64);
+            stats.posting_scratch_bytes = stats
+                .posting_scratch_bytes
+                .max(posting.scratch_bytes as u64);
+            stats.posting_member_copies += posting.member_copies;
+            stats.posting_initialized_position_bytes += posting.initialized_position_bytes as u64;
+            stats.posting_member_worker_elapsed_ns += posting.member_worker_elapsed_ns;
+            stats.posting_position_worker_elapsed_ns += posting.position_worker_elapsed_ns;
+            stats.posting_member_worker_cpu_ns += posting.member_worker_cpu_ns;
+            stats.posting_position_worker_cpu_ns += posting.position_worker_cpu_ns;
+            stats.posting_cpu_unavailable_tasks += posting.cpu_unavailable as u64;
         }
     }
 

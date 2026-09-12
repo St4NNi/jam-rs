@@ -43,6 +43,7 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) lookup_ns: u64,
     pub(crate) membership_ns: u64,
     pub(crate) position_ns: u64,
+    pub(crate) posting_execution: crate::trace_postings::PostingExecution,
     pub(crate) distinct_cores: u64,
     pub(crate) split_core_resolutions: u64,
     pub(crate) context_reuse_histogram_log2: [u64; 16],
@@ -609,7 +610,32 @@ pub(crate) fn prepare_lookup_with_cores(
     postings.resize_with(entries.len(), || None);
     let mut postings_complete = true;
     let mut context_occurrence_histogram_log2 = [0; 16];
-    for (ordinal, &(_, seed)) in entries.iter().enumerate() {
+    let execution = if let TraceIndex::Shared(reader) = index {
+        match crate::trace_postings::prepare_shared_postings(
+            reader,
+            &entries,
+            &mut postings,
+            reservation.bytes - capacity_bytes,
+            observed,
+        ) {
+            Err(TraceError::Shared(crate::shared_format::SharedError::ResourceLimit)) => None,
+            result => result?,
+        }
+    } else {
+        None
+    };
+    let serial_entries = if let Some(execution) = &execution {
+        peak_capacity_bound = peak_capacity_bound.max(capacity_bytes + execution.peak_bytes);
+        capacity_bytes += execution.retained_bytes;
+        membership_ns = execution.membership_ns;
+        position_ns = execution.position_ns;
+        postings_complete = execution.complete;
+        context_occurrence_histogram_log2 = execution.histogram;
+        &[][..]
+    } else {
+        entries.as_slice()
+    };
+    for (ordinal, &(_, seed)) in serial_entries.iter().enumerate() {
         let Some(seed) = seed else {
             continue;
         };
@@ -712,6 +738,7 @@ pub(crate) fn prepare_lookup_with_cores(
         lookup_ns,
         membership_ns,
         position_ns,
+        posting_execution: execution.unwrap_or_default(),
         distinct_cores,
         split_core_resolutions,
         context_reuse_histogram_log2,
