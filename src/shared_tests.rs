@@ -3480,6 +3480,7 @@ fn early_core_screening_counts_attempts_and_preserves_late_results() {
     let positive = (32..16_384)
         .find(|&core| operation.screen(core).unwrap().1)
         .unwrap();
+    let mut output = Vec::new();
     operation
         .resolve_sorted_cores_into(&[positive], &mut output)
         .unwrap();

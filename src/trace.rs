@@ -2396,7 +2396,7 @@ impl QueryPositions {
         }
     }
 
-    #[cfg(any(test, feature = "bench-internals"))]
+    #[cfg(test)]
     fn compact(query: &[u8], circular: bool) -> Option<Self> {
         Self::compact_screened(query, circular, None, false)
     }
