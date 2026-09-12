@@ -55,8 +55,10 @@ pub fn add_shared_core_filter(
         sections[kind as usize].extend_from_slice(source.section(kind, 0, length)?);
     }
     let singletons = sections[Section::Cores as usize]
-        .chunks_exact(4)
-        .filter(|row| read_u32(row, 0) & MULTIPLE_CORE == 0)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|row| read_u32(*row, 0) & MULTIPLE_CORE == 0)
         .count() as u64;
     header.version = 4;
     header.filter_source_sha256 = source.header.body_sha256;

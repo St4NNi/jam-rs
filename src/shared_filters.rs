@@ -37,7 +37,7 @@ pub(crate) fn build(source: &SharedFile, maximum_keys: usize) -> Result<Vec<u8>,
                 first as u64 * 4,
                 (count - first).min(1024) as u64 * 4,
             )?;
-            for bytes in page.chunks_exact(4) {
+            for bytes in page.as_chunks::<4>().0 {
                 let core = CoreRow::decode_key(bytes)?;
                 if previous.is_some_and(|before| before >= core) {
                     return Err(SharedError::Invalid("filter core order"));
