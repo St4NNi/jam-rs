@@ -817,7 +817,9 @@ fn sparse_core_admission_crosses_the_former_dense_budget_boundary() {
             if workers == 1 && count > boundary {
                 eprintln!(
                     "bounded_core_admission requests={count} peak_bytes={} retained_bytes={} tasks={}",
-                    result.peak_capacity_bound, result.capacity_bytes(), result.tasks
+                    result.peak_capacity_bound,
+                    result.capacity_bytes(),
+                    result.tasks
                 );
             }
             if count > boundary {
