@@ -1917,6 +1917,123 @@ fn compact_prefix_endpoints_and_cold_payloads_fail_closed() {
 }
 
 #[test]
+fn compact_sorted_core_errors_clear_sparse_output() {
+    #[derive(Clone, Copy)]
+    enum Corruption {
+        Prefix,
+        Tag,
+        ForeignPrefix,
+        Cold(u32),
+    }
+
+    let (directory, reader, _) = fixture(16);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    for (name, corruption, prior_successes) in [
+        ("prefix", Corruption::Prefix, 1),
+        ("tag", Corruption::Tag, 0),
+        ("foreign-prefix", Corruption::ForeignPrefix, 1),
+        ("cold-early", Corruption::Cold(0), 0),
+        ("cold-late", Corruption::Cold(TARGET_CORE), 1),
+    ] {
+        let compact = directory.path().join(format!("corrupt-{name}.shared"));
+        crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+        let selected = match corruption {
+            Corruption::Cold(core) => core,
+            _ => TARGET_CORE,
+        };
+        let ordinal = SharedReader::open(&compact)
+            .unwrap()
+            .find(SharedKey::core(selected))
+            .unwrap()
+            .unwrap()
+            .core_ordinal();
+        mutate_and_resign(&compact, |bytes, header| match corruption {
+            Corruption::Prefix => {
+                let prefix = usize::try_from(TARGET_CORE >> 14).unwrap();
+                let directory = header.section(Section::CorePrefixes).offset as usize;
+                let high = crate::jidx::read_u32(bytes, directory + (prefix + 1) * 4);
+                bytes[directory + prefix * 4..directory + prefix * 4 + 4]
+                    .copy_from_slice(&high.to_le_bytes());
+            }
+            Corruption::Tag => {
+                let hot = header.section(Section::Cores).offset as usize + ordinal as usize * 4;
+                let tagged = crate::jidx::read_u32(bytes, hot) | (1 << 30);
+                bytes[hot..hot + 4].copy_from_slice(&tagged.to_le_bytes());
+            }
+            Corruption::ForeignPrefix => {
+                let hot = header.section(Section::Cores).offset as usize + ordinal as usize * 4;
+                let tagged = crate::jidx::read_u32(bytes, hot);
+                let foreign = (tagged & (1 << 31)) | (TARGET_CORE - (1 << 14));
+                bytes[hot..hot + 4].copy_from_slice(&foreign.to_le_bytes());
+            }
+            Corruption::Cold(_) => {
+                let cold = header.section(Section::CorePayloads).offset as usize
+                    + ordinal as usize * usize::from(header.core_payload_bytes);
+                bytes[cold + 12] = 1;
+            }
+        });
+        let reader = SharedReader::open_observed(&compact).unwrap();
+        let before = reader.stats();
+        let mut output = Vec::new();
+        assert!(
+            reader
+                .resolve_sorted_cores_into(&[0, TARGET_CORE], &mut output)
+                .is_err(),
+            "{name}"
+        );
+        let after = reader.stats();
+        assert!(output.is_empty(), "{name}");
+        assert_eq!(
+            after.core_resolutions_present - before.core_resolutions_present,
+            prior_successes,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn compact_sorted_core_task_boundaries_repeat_boundary_evidence() {
+    let (directory, reader, _) = fixture(16);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let reader = SharedReader::open_observed(&compact).unwrap();
+    let reference = SharedReader::open(&compact).unwrap();
+    let mut boundary_hits = 0;
+    for task in [&[0, 1, 2][..], &[2, 3, TARGET_CORE, TARGET_CORE + 1][..]] {
+        let mut output = Vec::new();
+        reader.resolve_sorted_cores_into(task, &mut output).unwrap();
+        let expected = reference
+            .find_many(
+                &task
+                    .iter()
+                    .copied()
+                    .map(SharedKey::core)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+            .collect::<Vec<_>>();
+        let actual = output
+            .iter()
+            .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        boundary_hits += output.iter().filter(|group| group.key().core == 2).count();
+    }
+    assert_eq!(boundary_hits, 2);
+    assert!(reader.stats().core_view_creations >= 2);
+}
+
+#[test]
 fn compact_cold_row_crossing_a_page_preserves_the_selected_core() {
     let (directory, baseline, _) = fixture(316);
     let source = directory.path().join("fixture.shared");

@@ -134,23 +134,25 @@ pub(crate) fn prepare_cores(
         .capacity()
         .checked_mul(std::mem::size_of::<u32>())
         .and_then(|bytes| {
-            bytes.checked_add(keys.len().checked_mul(
-                std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
-                    + std::mem::size_of::<crate::shared_reader::SharedGroup>(),
-            )?)
+            bytes.checked_add(
+                keys.len()
+                    .checked_mul(2 * std::mem::size_of::<crate::shared_reader::SharedGroup>())?,
+            )
         })
         .and_then(|bytes| {
             bytes.checked_add(tasks.checked_mul(std::mem::size_of::<
-                Result<Vec<Option<crate::shared_reader::SharedGroup>>, TraceError>,
+                Result<Vec<crate::shared_reader::SharedGroup>, TraceError>,
             >())?)
         })
         .and_then(|bytes| {
-            bytes.checked_add(
+            bytes.checked_add(if reader.has_core_prefixes() {
+                0
+            } else {
                 rayon::current_num_threads()
                     .min(tasks)
                     .checked_mul(SEED_LOOKUP_BATCH_KEYS)?
-                    .checked_mul(std::mem::size_of::<crate::shared_seed::SharedKey>())?,
-            )
+                    .checked_mul(std::mem::size_of::<crate::shared_seed::SharedKey>())?
+            })
         })
         .and_then(|bytes| bytes.checked_add(4096 + std::mem::size_of::<SharedCoreLookups>()))
         .and_then(|bytes| {
@@ -179,12 +181,27 @@ pub(crate) fn prepare_cores(
         None
     };
     let lookup = |chunk: &[u32]| {
+        let mut groups = Vec::new();
+        if reader.has_core_prefixes() {
+            reader.resolve_sorted_cores_into(chunk, &mut groups)?;
+            return Ok::<_, TraceError>(groups);
+        }
         let contexts = chunk
             .iter()
             .copied()
             .map(crate::shared_seed::SharedKey::core)
             .collect::<Vec<_>>();
-        reader.find_many(&contexts).map_err(TraceError::from)
+        let found = reader.find_many(&contexts)?;
+        groups
+            .try_reserve_exact(found.iter().flatten().count())
+            .map_err(|_| TraceError::Shared(crate::shared_format::SharedError::ResourceLimit))?;
+        if groups.capacity() > chunk.len() {
+            return Err(TraceError::Shared(
+                crate::shared_format::SharedError::ResourceLimit,
+            ));
+        }
+        groups.extend(found.into_iter().flatten());
+        Ok(groups)
     };
     let chunks = if let Some(ranges) = &ranges {
         ranges
@@ -196,10 +213,27 @@ pub(crate) fn prepare_cores(
             .map(lookup)
             .collect::<Vec<_>>()
     };
+    let resource_limit = |error: &TraceError| {
+        matches!(
+            error,
+            TraceError::Shared(crate::shared_format::SharedError::ResourceLimit)
+        )
+    };
+    if chunks
+        .iter()
+        .any(|chunk| chunk.as_ref().is_err_and(resource_limit))
+    {
+        for chunk in chunks {
+            if let Err(error) = chunk
+                && !resource_limit(&error)
+            {
+                return Err(error);
+            }
+        }
+        return Ok(None);
+    }
     let count = chunks.iter().try_fold(0usize, |sum, chunk| {
-        chunk
-            .as_ref()
-            .map(|chunk| sum + chunk.iter().filter(|group| group.is_some()).count())
+        chunk.as_ref().map(|chunk| sum + chunk.len())
     });
     let count = match count {
         Ok(count) => count,
@@ -211,11 +245,14 @@ pub(crate) fn prepare_cores(
         }
     };
     let mut groups = Vec::new();
-    groups
-        .try_reserve_exact(count)
-        .map_err(|_| TraceError::Invalid("resolved core allocation"))?;
+    if groups.try_reserve_exact(count).is_err() {
+        return Ok(None);
+    }
+    if groups.capacity() > count {
+        return Ok(None);
+    }
     for chunk in chunks {
-        groups.extend(chunk?.into_iter().flatten());
+        groups.extend(chunk?);
     }
     drop(keys);
     drop(key_reservation);
