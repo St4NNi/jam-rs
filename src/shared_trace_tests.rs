@@ -351,10 +351,17 @@ fn sparse_shared_queries_preserve_bounded_batches_and_fallback_counts() {
     assert_eq!(stats.core_lookup_fallbacks, 0);
     assert_eq!(stats.nested_context_calls, 0);
     assert_eq!(stats.query_executed_context_associations, 0);
+    assert_eq!(stats.query_compact_core_queries, 1);
+    assert_eq!(stats.query_wide_core_queries, 0);
+    assert_eq!(stats.query_core_capacity_bytes, 0);
+    assert_eq!(stats.query_token_capacity_bytes, query.len() as u64 * 8);
+    assert!(stats.query_core_conversion_capacity_bound >= stats.query_token_capacity_bytes);
     let queries = [
         ("absent".to_owned(), query[..2_000].to_vec()),
         ("present".to_owned(), target),
     ];
+    let token_reservation =
+        (stats.query_token_reserved_peak_bytes / query.len() as u64) as usize * queries[0].1.len();
     drop(query);
     let mut expected = None;
     let mut expected_logical = None;
@@ -374,27 +381,45 @@ fn sparse_shared_queries_preserve_bounded_batches_and_fallback_counts() {
             let stats = engine.batch_stats();
             assert_eq!(stats.core_lookup_fallbacks, 0);
             assert_eq!(stats.nested_context_calls, 114 * repeat);
+            assert_eq!(stats.query_compact_core_queries, 2 * repeat);
+            assert_eq!(stats.query_wide_core_queries, 0);
             let logical = [
                 stats.query_core_occurrences,
                 stats.query_context_associations,
                 stats.query_distinct_cores,
                 stats.query_executed_context_associations,
+                stats.query_core_capacity_bytes,
+                stats.query_token_capacity_bytes,
+                stats.query_token_reserved_peak_bytes * repeat,
+                stats.query_core_conversion_capacity_bound * repeat,
             ];
             let first = *expected_logical.get_or_insert(logical);
             assert_eq!(logical, first.map(|count| count * repeat));
         }
     }
-    let reserved = crate::trace::CacheReservation::acquire(
-        &crate::trace::LOOKUP_CACHE_AVAILABLE,
-        crate::trace::LOOKUP_CACHE_BYTES,
-    )
-    .unwrap();
-    let engine = TraceEngine::open_shared_observed(&compact, None, true).unwrap();
-    let fallback = engine.search("absent", &queries[0].1, config).unwrap();
-    assert_eq!(without_read_accounting(fallback), expected.unwrap()[0]);
-    assert_eq!(engine.batch_stats().core_lookup_fallbacks, 1);
-    assert_eq!(engine.batch_stats().nested_context_calls, 1_986);
-    drop(reserved);
+    for token_bytes in [0, token_reservation] {
+        let reserved = crate::trace::CacheReservation::acquire(
+            &crate::trace::LOOKUP_CACHE_AVAILABLE,
+            crate::trace::LOOKUP_CACHE_BYTES - token_bytes,
+        )
+        .unwrap();
+        let engine = TraceEngine::open_shared_observed(&compact, None, true).unwrap();
+        let fallback = engine.search("absent", &queries[0].1, config).unwrap();
+        assert_eq!(
+            without_read_accounting(fallback),
+            expected.as_ref().unwrap()[0]
+        );
+        let stats = engine.batch_stats();
+        assert_eq!(stats.core_lookup_fallbacks, 1);
+        assert_eq!(stats.nested_context_calls, 1_986);
+        assert_eq!(stats.query_core_occurrences, 1_986);
+        assert_eq!(
+            stats.query_compact_core_queries,
+            u64::from(token_bytes != 0)
+        );
+        assert_eq!(stats.query_wide_core_queries, u64::from(token_bytes == 0));
+        drop(reserved);
+    }
 }
 
 fn shared_trace_fixture(packed: bool, split: bool) {

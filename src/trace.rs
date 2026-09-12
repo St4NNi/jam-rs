@@ -178,6 +178,11 @@ pub struct TraceBatchStats {
     pub executed_anchor_associations: u64,
     pub query_sequence_capacity_bytes: u64,
     pub query_core_capacity_bytes: u64,
+    pub query_token_capacity_bytes: u64,
+    pub query_token_reserved_peak_bytes: u64,
+    pub query_core_conversion_capacity_bound: u64,
+    pub query_compact_core_queries: u64,
+    pub query_wide_core_queries: u64,
     pub query_nested_capacity_bytes: u64,
     pub query_directory_capacity_bytes: u64,
     pub emitted_anchor_associations: u64,
@@ -602,17 +607,27 @@ impl TraceEngine {
         config: TraceConfig,
     ) -> Result<PreparedQuery, TraceError> {
         let started = self.observed.then(Instant::now);
-        let mut prepared = prepare_query(
+        let scratch = self
+            .index
+            .is_shared()
+            .then(|| reserve_query_tokens([sequence.len()], lookup_budget(&self.index)))
+            .flatten();
+        let mut prepared = prepare_query_with_tokens(
             query_id,
             sequence,
             config,
             self.index.k(),
             self.index.rescue_k15(),
+            scratch.is_some(),
         )?;
         if self.index.is_shared() {
-            self.prepare_shared_queries(std::slice::from_mut(&mut prepared), &[config.circular])?;
+            self.prepare_shared_queries(
+                std::slice::from_mut(&mut prepared),
+                &[config.circular],
+                scratch,
+            )?;
         } else {
-            self.record_prepared(&prepared, config.circular, 0);
+            self.record_prepared(&prepared, config.circular);
         }
         if let Some(started) = started {
             self.batch_stats.lock().unwrap().seed_generation_ns +=
@@ -625,7 +640,29 @@ impl TraceEngine {
         &self,
         prepared: &mut [PreparedQuery],
         circular: &[bool],
+        mut scratch: Option<CacheReservation<'static>>,
     ) -> Result<(), TraceError> {
+        if self.observed {
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.query_token_reserved_peak_bytes = stats.query_token_reserved_peak_bytes.max(
+                scratch
+                    .as_ref()
+                    .map_or(0, |reservation| reservation.bytes as u64),
+            );
+        }
+        if let Some(scratch) = &mut scratch {
+            let bytes = prepared
+                .iter()
+                .try_fold(0usize, |sum, query| {
+                    let bytes = query.positions_by_key.tokens.as_ref().map_or(0, |tokens| {
+                        tokens.capacity() * std::mem::size_of::<u64>()
+                            + tokens.len() * std::mem::size_of::<QuerySeed>()
+                    });
+                    sum.checked_add(bytes)
+                })
+                .ok_or(TraceError::Invalid("query token reservation"))?;
+            scratch.retain(bytes);
+        }
         let count = prepared
             .iter()
             .try_fold(0usize, |sum, query| {
@@ -650,20 +687,72 @@ impl TraceEngine {
             stats.core_lookup_retained_bytes =
                 stats.core_lookup_retained_bytes.max(cores.capacity_bytes());
         }
+        prepared.par_iter_mut().for_each(|query| {
+            query.shared_cores = cores.clone();
+            if let Some(cores) = &cores {
+                query.positions_by_key.directory.retain(|entry| {
+                    cores
+                        .groups
+                        .binary_search_by_key(&(entry.key as u32), |group| group.key().core)
+                        .is_ok()
+                });
+            }
+        });
+        let mut conversion_bytes = 0usize;
+        let mut capacity_bound = 0usize;
+        for query in prepared.iter() {
+            let positions = &query.positions_by_key;
+            let token_bytes = positions
+                .tokens
+                .as_ref()
+                .map_or(0, |tokens| tokens.capacity() * std::mem::size_of::<u64>());
+            let core_bytes = if positions.tokens.is_some() {
+                positions
+                    .directory
+                    .iter()
+                    .map(|entry| entry.count)
+                    .sum::<usize>()
+                    * std::mem::size_of::<QuerySeed>()
+            } else {
+                positions.core.capacity() * std::mem::size_of::<QuerySeed>()
+            };
+            if positions.tokens.is_some() {
+                conversion_bytes = conversion_bytes
+                    .checked_add(token_bytes + core_bytes)
+                    .ok_or(TraceError::Invalid("query core conversion size"))?;
+            }
+            capacity_bound = capacity_bound
+                .checked_add(
+                    token_bytes
+                        + core_bytes
+                        + positions.directory.capacity() * std::mem::size_of::<QueryKeyRange>()
+                        + query.query.capacity(),
+                )
+                .ok_or(TraceError::Invalid("query core capacity bound"))?;
+            if self.observed {
+                let mut stats = self.batch_stats.lock().unwrap();
+                stats.query_token_capacity_bytes += token_bytes as u64;
+                stats.query_compact_core_queries += u64::from(positions.tokens.is_some());
+                stats.query_wide_core_queries += u64::from(positions.tokens.is_none());
+            }
+        }
+        if let Some(scratch) = &mut scratch {
+            scratch.retain(conversion_bytes);
+        }
+        if self.observed {
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.query_core_conversion_capacity_bound = stats
+                .query_core_conversion_capacity_bound
+                .max(capacity_bound as u64);
+        }
+        prepared
+            .par_iter_mut()
+            .try_for_each(|query| query.positions_by_key.materialize_tokens())?;
+        drop(scratch);
         prepared
             .par_iter_mut()
             .zip(circular)
             .try_for_each(|(query, &circular)| {
-                let original_cores = query.positions_by_key.len();
-                query.shared_cores = cores.clone();
-                if let Some(cores) = &cores {
-                    query.positions_by_key.directory.retain(|entry| {
-                        cores
-                            .groups
-                            .binary_search_by_key(&(entry.key as u32), |group| group.key().core)
-                            .is_ok()
-                    });
-                }
                 let count: usize = query
                     .positions_by_key
                     .directory
@@ -736,12 +825,12 @@ impl TraceEngine {
                 query.positions_by_key.directory.shrink_to_fit();
                 query.lookup_identity =
                     sha256(&[query.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
-                self.record_prepared(query, circular, original_cores);
+                self.record_prepared(query, circular);
                 Ok(())
             })
     }
 
-    fn record_prepared(&self, prepared: &PreparedQuery, circular: bool, original_cores: usize) {
+    fn record_prepared(&self, prepared: &PreparedQuery, circular: bool) {
         if !self.observed {
             return;
         }
@@ -751,7 +840,7 @@ impl TraceEngine {
             .map(|positions| positions.len() as u64)
             .sum::<u64>();
         let associations = if self.index.is_shared() {
-            prepared.positions_by_key.core.len() as u64
+            prepared.positions_by_key.core_occurrences as u64
                 + possible_context_associations(&prepared.query, circular)
         } else {
             executed
@@ -769,8 +858,8 @@ impl TraceEngine {
             * std::mem::size_of::<QueryKeyRange>())
             as u64;
         if self.index.is_shared() {
-            stats.query_core_occurrences += prepared.positions_by_key.core.len() as u64;
-            stats.query_distinct_cores += original_cores as u64;
+            stats.query_core_occurrences += prepared.positions_by_key.core_occurrences as u64;
+            stats.query_distinct_cores += prepared.positions_by_key.core_distinct as u64;
             stats.nested_context_calls += prepared
                 .positions_by_key
                 .iter()
@@ -807,18 +896,29 @@ impl TraceEngine {
                 })
                 .collect();
         }
+        let scratch = self
+            .index
+            .is_shared()
+            .then(|| {
+                reserve_query_tokens(
+                    queries.iter().map(|(_, sequence)| sequence.len()),
+                    lookup_budget(&self.index),
+                )
+            })
+            .flatten();
         let mut prepared = queries
             .par_iter()
             .zip(circular)
             .enumerate()
             .map(|(ordinal, ((id, sequence), &circular))| {
                 let mut prepared = if self.index.is_shared() {
-                    prepare_query(
+                    prepare_query_with_tokens(
                         id.as_str(),
                         sequence,
                         TraceConfig { circular, ..config },
                         15,
                         false,
+                        scratch.is_some(),
                     )?
                 } else {
                     self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })?
@@ -828,7 +928,7 @@ impl TraceEngine {
             })
             .collect::<Result<Vec<_>, _>>()?;
         if self.index.is_shared() {
-            self.prepare_shared_queries(&mut prepared, circular)?;
+            self.prepare_shared_queries(&mut prepared, circular, scratch)?;
             if let Some(started) = started {
                 self.batch_stats.lock().unwrap().seed_generation_ns +=
                     started.elapsed().as_nanos() as u64;
@@ -2040,6 +2140,25 @@ struct QuerySeed {
     canonical_orientation: bool,
 }
 
+impl QuerySeed {
+    fn token(self) -> Option<u64> {
+        let position = u32::try_from(self.position).ok()?;
+        (self.packed_key < 1 << 30).then_some(
+            (self.packed_key << 33)
+                | (u64::from(position) << 1)
+                | u64::from(self.canonical_orientation),
+        )
+    }
+
+    fn from_token(token: u64) -> Self {
+        Self {
+            packed_key: token >> 33,
+            position: u64::from((token >> 1) as u32),
+            canonical_orientation: token & 1 != 0,
+        }
+    }
+}
+
 struct QueryKeyRange {
     key: u64,
     first: usize,
@@ -2048,6 +2167,9 @@ struct QueryKeyRange {
 
 struct QueryPositions {
     core: Vec<QuerySeed>,
+    tokens: Option<Vec<u64>>,
+    core_occurrences: usize,
+    core_distinct: usize,
     nested: Vec<QuerySeed>,
     directory: Vec<QueryKeyRange>,
 }
@@ -2058,7 +2180,7 @@ impl QueryPositions {
             (seed.packed_key, seed.position, seed.canonical_orientation)
         });
         let mut first = 0;
-        let directory = core
+        let directory: Vec<_> = core
             .chunk_by(|left, right| left.packed_key == right.packed_key)
             .map(|group| {
                 let entry = QueryKeyRange {
@@ -2071,10 +2193,96 @@ impl QueryPositions {
             })
             .collect();
         Self {
+            core_occurrences: core.len(),
+            core_distinct: directory.len(),
             core,
+            tokens: None,
             nested: Vec::new(),
             directory,
         }
+    }
+
+    fn compact(query: &[u8], circular: bool) -> Option<Self> {
+        u32::try_from(query.len().saturating_sub(1)).ok()?;
+        let mut tokens = Vec::new();
+        tokens.try_reserve_exact(query.len()).ok()?;
+        if tokens.capacity() > query.len() {
+            return None;
+        }
+        if query.len() >= 15 {
+            for (position, key, orientation) in query.bit_kmers(15, true) {
+                tokens.push(
+                    QuerySeed {
+                        packed_key: key.0,
+                        position: position as u64,
+                        canonical_orientation: orientation,
+                    }
+                    .token()?,
+                );
+            }
+            if circular {
+                let start = query.len() - 14;
+                let mut boundary = [0; 28];
+                boundary[..14].copy_from_slice(&query[start..]);
+                boundary[14..].copy_from_slice(&query[..14]);
+                for (position, key, orientation) in boundary.bit_kmers(15, true) {
+                    tokens.push(
+                        QuerySeed {
+                            packed_key: key.0,
+                            position: (start + position) as u64,
+                            canonical_orientation: orientation,
+                        }
+                        .token()?,
+                    );
+                }
+            }
+        }
+        tokens.sort_unstable();
+        let mut first = 0;
+        let directory: Vec<_> = tokens
+            .chunk_by(|left, right| left >> 33 == right >> 33)
+            .map(|group| {
+                let entry = QueryKeyRange {
+                    key: group[0] >> 33,
+                    first,
+                    count: group.len(),
+                };
+                first += group.len();
+                entry
+            })
+            .collect();
+        Some(Self {
+            core: Vec::new(),
+            core_occurrences: tokens.len(),
+            core_distinct: directory.len(),
+            tokens: Some(tokens),
+            nested: Vec::new(),
+            directory,
+        })
+    }
+
+    fn materialize_tokens(&mut self) -> Result<(), TraceError> {
+        let Some(tokens) = self.tokens.take() else {
+            return Ok(());
+        };
+        let count = self.directory.iter().map(|entry| entry.count).sum();
+        self.core
+            .try_reserve_exact(count)
+            .map_err(|_| TraceError::Invalid("query core associations"))?;
+        if self.core.capacity() > count {
+            return Err(TraceError::Invalid("query core association capacity"));
+        }
+        for entry in &mut self.directory {
+            let first = self.core.len();
+            self.core.extend(
+                tokens[entry.first..entry.first + entry.count]
+                    .iter()
+                    .copied()
+                    .map(QuerySeed::from_token),
+            );
+            entry.first = first;
+        }
+        Ok(())
     }
 
     fn add_nested(&mut self, mut nested: Vec<QuerySeed>, query_length: u64) {
@@ -2496,6 +2704,35 @@ pub(crate) fn prepare_query(
     k: u8,
     rescue_k15: bool,
 ) -> Result<PreparedQuery, TraceError> {
+    prepare_query_with_tokens(query_id, sequence, config, k, rescue_k15, false)
+}
+
+fn reserve_query_tokens(
+    lengths: impl IntoIterator<Item = usize>,
+    budget: usize,
+) -> Option<CacheReservation<'static>> {
+    let bytes = lengths
+        .into_iter()
+        .filter(|&length| u32::try_from(length.saturating_sub(1)).is_ok())
+        .try_fold(0usize, |sum, length| {
+            sum.checked_add(
+                length
+                    .checked_mul(std::mem::size_of::<u64>() + std::mem::size_of::<QuerySeed>())?,
+            )
+        })?;
+    (bytes <= budget)
+        .then(|| CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes))
+        .flatten()
+}
+
+fn prepare_query_with_tokens(
+    query_id: impl Into<String>,
+    sequence: &[u8],
+    config: TraceConfig,
+    k: u8,
+    rescue_k15: bool,
+    compact: bool,
+) -> Result<PreparedQuery, TraceError> {
     validate_config(config)?;
     let query_id = query_id.into();
     if query_id.is_empty()
@@ -2511,8 +2748,15 @@ pub(crate) fn prepare_query(
     }
     let query_length =
         u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
-    let positions_by_key =
-        QueryPositions::new(query_seeds(&query, k, rescue_k15, config.circular)?);
+    let positions_by_key = if compact && k == 15 && !rescue_k15 {
+        QueryPositions::compact(&query, config.circular)
+    } else {
+        None
+    };
+    let positions_by_key = match positions_by_key {
+        Some(positions) => positions,
+        None => QueryPositions::new(query_seeds(&query, k, rescue_k15, config.circular)?),
+    };
     let mut lookup_identity = [0; 35];
     lookup_identity[..32].copy_from_slice(&sha256(&query));
     lookup_identity[32..].copy_from_slice(&[k, u8::from(rescue_k15), u8::from(config.circular)]);
@@ -2788,6 +3032,83 @@ mod tests {
     }
 
     #[test]
+    fn compact_query_tokens_preserve_checked_boundaries_and_filtered_associations() {
+        let mut seeds = Vec::new();
+        for packed_key in [0, (1 << 30) - 1] {
+            for position in [0, u64::from(u32::MAX)] {
+                for canonical_orientation in [false, true] {
+                    let seed = QuerySeed {
+                        packed_key,
+                        position,
+                        canonical_orientation,
+                    };
+                    assert_eq!(QuerySeed::from_token(seed.token().unwrap()), seed);
+                    seeds.push(seed);
+                }
+            }
+        }
+        let mut tokens = seeds
+            .iter()
+            .rev()
+            .map(|seed| seed.token().unwrap())
+            .collect::<Vec<_>>();
+        tokens.sort_unstable();
+        assert_eq!(
+            tokens
+                .into_iter()
+                .map(QuerySeed::from_token)
+                .collect::<Vec<_>>(),
+            seeds
+        );
+        for seed in [
+            QuerySeed {
+                packed_key: 1 << 30,
+                position: 0,
+                canonical_orientation: false,
+            },
+            QuerySeed {
+                packed_key: 1,
+                position: u64::from(u32::MAX) + 1,
+                canonical_orientation: true,
+            },
+        ] {
+            assert!(seed.token().is_none());
+            let mut wide = QueryPositions::new(vec![seed]);
+            wide.materialize_tokens().unwrap();
+            assert_eq!(wide.core, [seed]);
+        }
+        for query in [b"".as_slice(), b"ACGT", b"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN"] {
+            let mut compact = QueryPositions::compact(query, true).unwrap();
+            compact.materialize_tokens().unwrap();
+            assert_eq!(compact.core_occurrences, 0);
+            assert!(compact.core.is_empty() && compact.directory.is_empty());
+        }
+        assert!(
+            prepare_query_with_tokens("empty", b"", TraceConfig::default(), 15, false, true)
+                .is_err()
+        );
+        let query = sequence();
+        let wide = QueryPositions::new(extract_query_seeds(query.as_bytes(), 15, true).unwrap());
+        for parity in [0, 1, 2] {
+            let mut compact = QueryPositions::compact(query.as_bytes(), true).unwrap();
+            compact.directory.retain(|entry| entry.key % 2 == parity);
+            compact.materialize_tokens().unwrap();
+            assert_eq!(compact.core_occurrences, wide.core.len());
+            assert_eq!(compact.core_distinct, wide.directory.len());
+            let expected = wide
+                .core
+                .iter()
+                .copied()
+                .filter(|seed| seed.packed_key % 2 == parity)
+                .collect::<Vec<_>>();
+            assert_eq!(compact.core, expected);
+            for (key, positions) in compact.iter() {
+                assert_eq!(positions, &wide[key]);
+            }
+        }
+    }
+
+    #[test]
     fn flat_query_associations_match_vector_groups_and_circular_extension() {
         for length in [2_000, 64_000, 250_000] {
             for variant in 0..3 {
@@ -2810,7 +3131,13 @@ mod tests {
                         circular,
                         ..TraceConfig::default()
                     };
-                    let mut prepared = prepare_query("flat", &input, config, 15, false).unwrap();
+                    let wide = prepare_query("flat", &input, config, 15, false).unwrap();
+                    let mut prepared =
+                        prepare_query_with_tokens("flat", &input, config, 15, false, true).unwrap();
+                    assert!(prepared.positions_by_key.tokens.is_some());
+                    prepared.positions_by_key.materialize_tokens().unwrap();
+                    assert_eq!(prepared.positions_by_key.core, wide.positions_by_key.core);
+                    drop(wide);
                     let mut extended = prepared.query.clone();
                     if circular {
                         extended.extend_from_slice(&prepared.query[..14]);
