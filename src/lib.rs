@@ -31,6 +31,8 @@ pub mod query;
 pub mod range_source;
 pub mod reader;
 mod shared_file;
+#[cfg(test)]
+mod shared_filters;
 pub mod shared_format;
 pub mod shared_pack;
 pub mod shared_reader;
