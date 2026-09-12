@@ -322,6 +322,7 @@ pub(crate) fn prepare_cores(
     let mut start = 0;
     while start < ranges.len() {
         let row_bytes = 2 * group_bytes
+            + reader.core_filter_workspace_per_key()
             + if reader.has_core_prefixes() {
                 0
             } else {

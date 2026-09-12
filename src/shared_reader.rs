@@ -19,6 +19,12 @@ static NEXT_READER_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 pub struct SharedReader {
     file: SharedFile,
+    core_filter: Option<crate::shared_filters::CoreFilter>,
+    filter_enabled: bool,
+    filter_requests: AtomicU64,
+    filter_rejects: AtomicU64,
+    filter_exact_hits: AtomicU64,
+    filter_fallbacks: AtomicU64,
     reader_token: u64,
     observed: bool,
     core_key_inspections: AtomicU64,
@@ -40,6 +46,12 @@ pub struct SharedReader {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct SharedReadStats {
+    pub filter_covered_cores: u64,
+    pub filter_requests: u64,
+    pub filter_rejects: u64,
+    pub filter_exact_hits: u64,
+    pub filter_fallbacks: u64,
+    pub filter_resident_bytes: usize,
     pub observed: bool,
     pub file: FileReadStats,
     pub core_key_inspections: u64,
@@ -270,15 +282,27 @@ impl SharedReader {
 
     fn open_inner(path: impl AsRef<Path>, observed: bool) -> Result<Self, SharedError> {
         let file = SharedFile::open(path, observed)?;
-        if file.header.version == 3 {
+        if file.header.version >= 3 {
             validate_core_prefixes(&file)?;
         }
+        let (core_filter, filter_fallbacks) = match crate::shared_filters::load(&file) {
+            Ok(filter) => (filter, 0),
+            Err(SharedError::ResourceLimit) => (None, 1),
+            Err(error) => return Err(error),
+        };
         let reader_token = NEXT_READER_TOKEN
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
                 token.checked_add(1)
             })
             .map_err(|_| SharedError::ResourceLimit)?;
         Ok(Self {
+            core_filter,
+            filter_enabled: !cfg!(feature = "bench-internals")
+                || std::env::var_os("JAM_CORE_FILTER_BYPASS").is_none(),
+            filter_requests: AtomicU64::new(0),
+            filter_rejects: AtomicU64::new(0),
+            filter_exact_hits: AtomicU64::new(0),
+            filter_fallbacks: AtomicU64::new(filter_fallbacks),
             file,
             reader_token,
             observed,
@@ -309,7 +333,15 @@ impl SharedReader {
     }
 
     pub(crate) fn has_core_prefixes(&self) -> bool {
-        self.file.header.version == 3
+        self.file.header.version >= 3
+    }
+
+    pub(crate) fn core_filter_workspace_per_key(&self) -> usize {
+        if self.core_filter.is_some() && self.filter_enabled {
+            size_of::<u32>()
+        } else {
+            0
+        }
     }
 
     pub fn occurrence_count(&self) -> u64 {
@@ -347,7 +379,7 @@ impl SharedReader {
 
     pub fn verify_checksum(&self) -> Result<(), SharedError> {
         self.file.verify_checksum()?;
-        if self.file.header.version == 3 {
+        if self.file.header.version >= 3 {
             self.audit_compact_cores()?;
         }
         self.file.verify_unchanged()
@@ -363,6 +395,15 @@ impl SharedReader {
 
     pub fn stats(&self) -> SharedReadStats {
         SharedReadStats {
+            filter_covered_cores: self
+                .core_filter
+                .as_ref()
+                .map_or(0, |filter| filter.covered_count()),
+            filter_requests: self.filter_requests.load(Ordering::Relaxed),
+            filter_rejects: self.filter_rejects.load(Ordering::Relaxed),
+            filter_exact_hits: self.filter_exact_hits.load(Ordering::Relaxed),
+            filter_fallbacks: self.filter_fallbacks.load(Ordering::Relaxed),
+            filter_resident_bytes: self.core_filter.as_ref().map_or(0, |filter| filter.bytes()),
             observed: self.observed,
             file: self.file.stats(),
             core_key_inspections: self.core_key_inspections.load(Ordering::Relaxed),
@@ -450,11 +491,49 @@ impl SharedReader {
             }
             previous = Some(core);
         }
+        let mut filtered = Vec::new();
+        let mut covered_end = 0;
+        let cores = if let Some(filter) = self.core_filter.as_ref().filter(|_| self.filter_enabled)
+        {
+            if filtered.try_reserve_exact(cores.len()).is_ok() && filtered.capacity() <= cores.len()
+            {
+                use xorf::Filter;
+                let view = filter.view();
+                covered_end = filter.end_prefix();
+                let covered = cores.partition_point(|core| *core >> 14 < covered_end);
+                filtered.extend(cores.iter().copied().filter(|core| {
+                    *core >> 14 >= covered_end
+                        || view.as_ref().is_some_and(|view| {
+                            view.contains(&crate::shared_filters::core_input(*core))
+                        })
+                }));
+                self.observe(&self.filter_requests, covered as u64);
+                self.observe(&self.filter_rejects, (cores.len() - filtered.len()) as u64);
+                self.observe(
+                    &self.core_resolutions_absent,
+                    (cores.len() - filtered.len()) as u64,
+                );
+                filtered.as_slice()
+            } else {
+                self.observe(&self.filter_fallbacks, 1);
+                cores
+            }
+        } else {
+            cores
+        };
         let result = self
             .resolve_sorted_cores_unchecked(cores, output)
             .and_then(|()| self.file.verify_unchanged());
         if result.is_err() {
             output.clear();
+        } else if self.observed && covered_end != 0 {
+            self.observe(
+                &self.filter_exact_hits,
+                output
+                    .iter()
+                    .filter(|group| group.key.core >> 14 < covered_end)
+                    .count() as u64,
+            );
         }
         result
     }
@@ -464,52 +543,10 @@ impl SharedReader {
         &self,
         maximum_keys: usize,
     ) -> Result<(Vec<u8>, usize, u32), SharedError> {
-        use xorf::DmaSerializable;
-        self.begin_operation()?;
-        if self.file.header.version != 3 {
-            return Err(SharedError::Invalid("filter requires split cores"));
-        }
-        let count =
-            usize::try_from(self.file.header.core_count).map_err(|_| SharedError::ResourceLimit)?;
-        let mut keys = Vec::new();
-        keys.try_reserve_exact(count.min(maximum_keys))
-            .map_err(|_| SharedError::ResourceLimit)?;
-        let mut end_prefix = 65_536;
-        let mut previous = None;
-        for first in (0..count).step_by(1024) {
-            let bytes = self.file.section(
-                Section::Cores,
-                first as u64 * 4,
-                (count - first).min(1024) as u64 * 4,
-            )?;
-            for bytes in bytes.chunks_exact(4) {
-                let core = CoreRow::decode_key(bytes)?;
-                if previous.is_some_and(|before| before >= core) {
-                    return Err(SharedError::Invalid("filter core order"));
-                }
-                previous = Some(core);
-                if keys.len() == maximum_keys {
-                    end_prefix = core >> 14;
-                    keys.truncate(keys.partition_point(|key| *key < u64::from(end_prefix) << 14));
-                    break;
-                }
-                keys.push(u64::from(core));
-            }
-            if end_prefix != 65_536 {
-                break;
-            }
-        }
-        self.file.verify_unchanged()?;
-        if keys.is_empty() {
-            return Ok((Vec::new(), 0, end_prefix));
-        }
-        let filter = crate::jidx_filters::build_binary_fuse(&keys)?;
-        let mut bytes = vec![0; xorf::BinaryFuse8::DESCRIPTOR_LEN];
-        filter.dma_copy_descriptor_to(&mut bytes);
-        bytes.extend_from_slice(filter.dma_fingerprints());
-        crate::jidx_filters::validate_descriptor(&bytes[..20], bytes.len() - 20)
-            .map_err(|_| SharedError::Invalid("filter descriptor"))?;
-        Ok((bytes, keys.len(), end_prefix))
+        let bytes = crate::shared_filters::build(&self.file, maximum_keys)?;
+        let count = read_u64(&bytes, 24) as usize;
+        let end_prefix = read_u32(&bytes, 16);
+        Ok((bytes[128..].to_vec(), count, end_prefix))
     }
 
     #[cfg(feature = "bench-internals")]
@@ -874,7 +911,7 @@ impl SharedReader {
         cores: &[u32],
         output: &mut Vec<SharedGroup>,
     ) -> Result<(), SharedError> {
-        if self.file.header.version != 3 {
+        if self.file.header.version < 3 {
             for &core in cores {
                 if let Some((ordinal, row)) = self.resolve_core_unchecked(core)? {
                     self.append_core_group(core, ordinal, row, cores.len(), output)?;
@@ -1089,7 +1126,7 @@ impl SharedReader {
         order: Option<&[usize]>,
         groups: &mut [Option<SharedGroup>],
     ) -> Result<(), SharedError> {
-        if self.file.header.version != 3 {
+        if self.file.header.version < 3 {
             return self.find_cores_many(
                 keys,
                 order,
@@ -1373,7 +1410,7 @@ impl SharedReader {
     }
 
     fn core_search_range(&self, core: u32) -> Result<(u64, u64), SharedError> {
-        if self.file.header.version == 3 {
+        if self.file.header.version >= 3 {
             self.core_prefix_range(core >> 14)
         } else {
             Ok((0, self.file.header.core_count))
@@ -1443,7 +1480,7 @@ impl SharedReader {
     fn core_row(&self, ordinal: u64) -> Result<CoreRow, SharedError> {
         let groups = self.file.header.section(Section::Groups).length
             / self.file.header.row_bytes(Section::Groups);
-        if self.file.header.version == 3 {
+        if self.file.header.version >= 3 {
             let hot = self.file.record(Section::Cores, ordinal, 4)?;
             let width = u64::from(self.file.header.core_payload_bytes);
             let payload = self.file.record(Section::CorePayloads, ordinal, width)?;
@@ -1976,7 +2013,7 @@ pub(crate) enum CoreKind {
 }
 
 impl CoreRow {
-    fn decode_key(bytes: &[u8]) -> Result<u32, SharedError> {
+    pub(crate) fn decode_key(bytes: &[u8]) -> Result<u32, SharedError> {
         let word = read_u32(bytes, 0);
         if word & !(MULTIPLE_CORE | CORE_MASK) != 0 {
             return Err(SharedError::Invalid("core row"));

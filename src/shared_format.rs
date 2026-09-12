@@ -30,6 +30,7 @@ pub(crate) enum Section {
     Checksums,
     CorePayloads,
     CorePrefixes,
+    CoreFilter,
 }
 
 impl Section {
@@ -58,6 +59,22 @@ impl Section {
         Self::Members,
         Self::References,
         Self::Occurrences,
+        Self::Checksums,
+    ];
+
+    const FILTERED: [Self; 13] = [
+        Self::Strings,
+        Self::Documents,
+        Self::Contigs,
+        Self::Gzi,
+        Self::CorePrefixes,
+        Self::Cores,
+        Self::CorePayloads,
+        Self::Groups,
+        Self::Members,
+        Self::References,
+        Self::Occurrences,
+        Self::CoreFilter,
         Self::Checksums,
     ];
 
@@ -96,12 +113,15 @@ pub(crate) struct SharedHeader {
     pub(crate) manifest_sha256: [u8; 32],
     pub(crate) body_sha256: [u8; 32],
     pub(crate) checksum_root_sha256: [u8; 32],
-    pub(crate) sections: [SectionRange; 12],
+    pub(crate) sections: [SectionRange; 13],
+    pub(crate) filter_source_sha256: [u8; 32],
 }
 
 impl SharedHeader {
     pub(crate) fn section_order(&self) -> &'static [Section] {
-        if self.version == 3 {
+        if self.version == 4 {
+            &Section::FILTERED
+        } else if self.version >= 3 {
             &Section::SPLIT
         } else {
             &Section::ALL
@@ -109,7 +129,12 @@ impl SharedHeader {
     }
 
     fn hash_offset(&self) -> usize {
-        HEADER_HASH_OFFSET + if self.version == 3 { 32 } else { 0 }
+        HEADER_HASH_OFFSET
+            + match self.version {
+                4 => 48,
+                3 => 32,
+                _ => 0,
+            }
     }
 
     pub(crate) fn id_bytes(&self) -> usize {
@@ -123,14 +148,14 @@ impl SharedHeader {
     }
 
     pub(crate) fn row_bytes(&self, section: Section) -> u64 {
-        if self.version == 3 {
+        if self.version >= 3 {
             match section {
                 Section::Cores => return 4,
                 Section::CorePayloads => return u64::from(self.core_payload_bytes),
                 _ => {}
             }
         }
-        if matches!(self.version, 2 | 3) {
+        if matches!(self.version, 2..=4) {
             match section {
                 Section::Groups => return 13 + self.id_bytes() as u64,
                 Section::Members => return 8 + self.id_bytes() as u64,
@@ -175,21 +200,34 @@ impl SharedHeader {
             put_u64(&mut out, 144 + 16 * index, section.offset);
             put_u64(&mut out, 152 + 16 * index, section.length);
         }
+        if self.version == 4 {
+            out[384..416].copy_from_slice(&self.filter_source_sha256);
+        }
         let digest = sha256(&out);
         out[self.hash_offset()..self.hash_offset() + 32].copy_from_slice(&digest);
         Ok(out)
     }
 
     pub(crate) fn decode(bytes: &[u8], file_bytes: u64) -> Result<Self, SharedError> {
-        let split = bytes.get(8) == Some(&3);
-        let hash_offset = HEADER_HASH_OFFSET + if split { 32 } else { 0 };
+        let filtered = bytes.get(8) == Some(&4);
+        let split = filtered || bytes.get(8) == Some(&3);
+        let hash_offset = HEADER_HASH_OFFSET
+            + if filtered {
+                48
+            } else if split {
+                32
+            } else {
+                0
+            };
         if bytes.len() != HEADER_BYTES
             || &bytes[..8] != b"JSHARED\0"
-            || !matches!(bytes[8], 1..=3)
+            || !matches!(bytes[8], 1..=4)
             || bytes[9..12] != [0, 0, 16]
             || bytes[15] != 0
             || (!split && bytes[14] != 0)
-            || bytes[hash_offset + 32..].iter().any(|&byte| byte != 0)
+            || bytes[if filtered { 416 } else { hash_offset + 32 }..]
+                .iter()
+                .any(|&byte| byte != 0)
         {
             return Err(SharedError::Invalid("header"));
         }
@@ -211,8 +249,21 @@ impl SharedHeader {
             manifest_sha256: bytes[48..80].try_into().unwrap(),
             body_sha256: bytes[80..112].try_into().unwrap(),
             checksum_root_sha256: bytes[112..144].try_into().unwrap(),
+            filter_source_sha256: if filtered {
+                bytes[384..416].try_into().unwrap()
+            } else {
+                [0; 32]
+            },
             sections: std::array::from_fn(|index| {
-                if !split && index >= Section::ALL.len() {
+                if index
+                    >= if filtered {
+                        13
+                    } else if split {
+                        12
+                    } else {
+                        10
+                    }
+                {
                     return SectionRange::default();
                 }
                 SectionRange {
@@ -228,12 +279,12 @@ impl SharedHeader {
     fn validate(&self, file_bytes: u64) -> Result<(), SharedError> {
         if !matches!(
             (self.version, self.core_payload_bytes),
-            (1 | 2, 0) | (3, 13 | 21)
+            (1 | 2, 0) | (3 | 4, 13 | 21)
         ) || self.window == 0
             || self.document_count == 0
             || self.contig_count == 0
             || self.core_count > self.occurrence_count
-            || self.version == 3 && self.core_count > u64::from(u32::MAX)
+            || self.version >= 3 && self.core_count > u64::from(u32::MAX)
         {
             return Err(SharedError::Invalid("header counts"));
         }
@@ -257,7 +308,7 @@ impl SharedHeader {
             || self.section(Section::Contigs).length != u64::from(self.contig_count) * 40
             || self.core_count.checked_mul(self.row_bytes(Section::Cores))
                 != Some(self.section(Section::Cores).length)
-            || self.version == 3
+            || self.version >= 3
                 && (self
                     .core_count
                     .checked_mul(u64::from(self.core_payload_bytes))
@@ -334,6 +385,7 @@ mod tests {
             body_sha256: [2; 32],
             checksum_root_sha256: [3; 32],
             sections,
+            filter_source_sha256: [0; 32],
         }
     }
 

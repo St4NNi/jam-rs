@@ -31,6 +31,40 @@ pub struct SharedCorePackStats {
     pub core_prefix_bytes: u64,
 }
 
+pub fn add_shared_core_filter(
+    input: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    maximum_keys: usize,
+) -> Result<SharedBuildStats, SharedError> {
+    let input = input.as_ref();
+    let source = SharedFile::open(input, false)?;
+    source.verify_checksum()?;
+    if source.header.version != 3 {
+        return Err(SharedError::Invalid("filter source version"));
+    }
+    let mut header = source.header.clone();
+    let mut sections: [Vec<u8>; 13] = std::array::from_fn(|_| Vec::new());
+    sections[Section::CoreFilter as usize] = crate::shared_filters::build(&source, maximum_keys)?;
+    for &kind in header.section_order() {
+        if kind == Section::Checksums {
+            continue;
+        }
+        let length = header.section(kind).length;
+        reserve(&mut sections[kind as usize], length as usize)?;
+        check_capacity(&sections)?;
+        sections[kind as usize].extend_from_slice(source.section(kind, 0, length)?);
+    }
+    let singletons = sections[Section::Cores as usize]
+        .chunks_exact(4)
+        .filter(|row| read_u32(row, 0) & MULTIPLE_CORE == 0)
+        .count() as u64;
+    header.version = 4;
+    header.filter_source_sha256 = source.header.body_sha256;
+    let bgzf_bytes = bgzf_bytes_once(input, header.document_count)?;
+    source.verify_unchanged()?;
+    publish(header, output.as_ref(), sections, bgzf_bytes, singletons)
+}
+
 pub fn repack_shared_index(
     input: impl AsRef<Path>,
     output: impl AsRef<Path>,
@@ -44,7 +78,7 @@ pub fn repack_shared_index(
     let mut header = source.header.clone();
     header.version = 2;
     let width = header.id_bytes();
-    let mut sections: [Vec<u8>; 12] = std::array::from_fn(|_| Vec::new());
+    let mut sections: [Vec<u8>; 13] = std::array::from_fn(|_| Vec::new());
     for kind in [
         Section::Strings,
         Section::Documents,
@@ -237,7 +271,7 @@ pub fn repack_shared_cores(
     let prefix_bytes = CORE_PREFIX_BOUNDARIES
         .checked_mul(4)
         .ok_or(SharedError::ResourceLimit)?;
-    let mut sections: [Vec<u8>; 12] = std::array::from_fn(|_| Vec::new());
+    let mut sections: [Vec<u8>; 13] = std::array::from_fn(|_| Vec::new());
     for kind in [
         Section::Strings,
         Section::Documents,
@@ -431,7 +465,7 @@ fn reserve(target: &mut Vec<u8>, bytes: usize) -> Result<(), SharedError> {
         .map_err(|_| SharedError::ResourceLimit)
 }
 
-fn check_capacity(sections: &[Vec<u8>; 12]) -> Result<(), SharedError> {
+fn check_capacity(sections: &[Vec<u8>; 13]) -> Result<(), SharedError> {
     if retained_capacity(sections)? > 1024 * 1024 * 1024 {
         return Err(SharedError::ResourceLimit);
     }
@@ -439,7 +473,7 @@ fn check_capacity(sections: &[Vec<u8>; 12]) -> Result<(), SharedError> {
 }
 
 fn check_additional_capacity(
-    sections: &[Vec<u8>; 12],
+    sections: &[Vec<u8>; 13],
     additional: usize,
 ) -> Result<(), SharedError> {
     if retained_capacity(sections)?
@@ -451,7 +485,7 @@ fn check_additional_capacity(
     Ok(())
 }
 
-fn retained_capacity(sections: &[Vec<u8>; 12]) -> Result<usize, SharedError> {
+fn retained_capacity(sections: &[Vec<u8>; 13]) -> Result<usize, SharedError> {
     sections.iter().try_fold(0usize, |total, section| {
         total
             .checked_add(section.capacity())

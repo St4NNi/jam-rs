@@ -1,14 +1,65 @@
 use crate::jidx::{put_u32, put_u64};
 use crate::jidx_filters::{build_binary_fuse, validate_descriptor};
-use crate::shared_format::{SharedError, read_u32, read_u64};
+use crate::shared_file::SharedFile;
+use crate::shared_format::{Section, SharedError, read_u32, read_u64};
+use crate::shared_reader::CoreRow;
 use xorf::{BinaryFuse8Ref, DmaSerializable, Filter, FilterRef};
 
 const METADATA_BYTES: usize = 128;
 const MAX_BYTES: usize = 8 * 1024 * 1024;
 const PREFIX_END: u32 = 65_536;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FILTER_TEST_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_BYTES) };
+}
+
 pub(crate) fn core_input(core: u32) -> u64 {
     u64::from(core)
+}
+
+pub(crate) fn build(source: &SharedFile, maximum_keys: usize) -> Result<Vec<u8>, SharedError> {
+    source.verify_unchanged()?;
+    if source.header.version != 3 {
+        return Err(SharedError::Invalid("filter requires split cores"));
+    }
+    let count =
+        usize::try_from(source.header.core_count).map_err(|_| SharedError::ResourceLimit)?;
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(count.min(maximum_keys))
+        .map_err(|_| SharedError::ResourceLimit)?;
+    let mut end_prefix = if maximum_keys == 0 { 0 } else { PREFIX_END };
+    let mut previous = None;
+    if maximum_keys != 0 {
+        'pages: for first in (0..count).step_by(1024) {
+            let page = source.section(
+                Section::Cores,
+                first as u64 * 4,
+                (count - first).min(1024) as u64 * 4,
+            )?;
+            for bytes in page.chunks_exact(4) {
+                let core = CoreRow::decode_key(bytes)?;
+                if previous.is_some_and(|before| before >= core) {
+                    return Err(SharedError::Invalid("filter core order"));
+                }
+                previous = Some(core);
+                if keys.len() == maximum_keys {
+                    end_prefix = core >> 14;
+                    keys.truncate(keys.partition_point(|key| *key < u64::from(end_prefix) << 14));
+                    break 'pages;
+                }
+                keys.push(core_input(core));
+            }
+        }
+    }
+    source.verify_unchanged()?;
+    encode(
+        &keys,
+        end_prefix,
+        source.header.core_count,
+        &source.header.manifest_sha256,
+        &source.header.body_sha256,
+    )
 }
 
 fn encode(
@@ -107,6 +158,46 @@ pub(crate) struct CoreFilter {
     bytes: Vec<u8>,
     end_prefix: u32,
     covered_count: u64,
+}
+
+pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError> {
+    if file.header.version != 4 {
+        return Ok(None);
+    }
+    file.verify_unchanged()?;
+    let bytes = file.section(
+        Section::CoreFilter,
+        0,
+        file.header.section(Section::CoreFilter).length,
+    )?;
+    let (end_prefix, covered_count) = validate(
+        bytes,
+        file.header.core_count,
+        &file.header.manifest_sha256,
+        &file.header.filter_source_sha256,
+    )?;
+    let boundary = file.section(Section::CorePrefixes, u64::from(end_prefix) * 4, 4)?;
+    if u64::from(read_u32(boundary, 0)) != covered_count {
+        return Err(SharedError::Invalid("core filter coverage"));
+    }
+    file.verify_unchanged()?;
+    #[cfg(test)]
+    let limit = FILTER_TEST_LIMIT.with(|limit| limit.get().min(MAX_BYTES));
+    #[cfg(not(test))]
+    let limit = MAX_BYTES;
+    if bytes.len() > limit {
+        return Err(SharedError::ResourceLimit);
+    }
+    let mut owned = Vec::new();
+    owned
+        .try_reserve_exact(bytes.len())
+        .map_err(|_| SharedError::ResourceLimit)?;
+    owned.extend_from_slice(bytes);
+    Ok(Some(CoreFilter {
+        bytes: owned,
+        end_prefix,
+        covered_count,
+    }))
 }
 
 impl CoreFilter {

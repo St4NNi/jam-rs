@@ -102,7 +102,7 @@ pub(crate) fn write_shared_index(
     window: u16,
     seeds: &mut [IndexedSeed],
 ) -> Result<SharedBuildStats, SharedError> {
-    let mut sections: [Vec<u8>; 12] = std::array::from_fn(|_| Vec::new());
+    let mut sections: [Vec<u8>; 13] = std::array::from_fn(|_| Vec::new());
     let (source_bases, bgzf_bytes_once) = metadata(reference, &mut sections)?;
     seeds.sort_unstable_by_key(|row| (row.seed.core, row.member, row.contig, row.seed.position));
     for rows in seeds.windows(2) {
@@ -233,7 +233,8 @@ pub(crate) fn write_shared_index(
             manifest_sha256: reference.header().manifest_sha256,
             body_sha256: [0; 32],
             checksum_root_sha256: [0; 32],
-            sections: [SectionRange::default(); 12],
+            sections: [SectionRange::default(); 13],
+            filter_source_sha256: [0; 32],
         },
         output,
         sections,
@@ -244,7 +245,7 @@ pub(crate) fn write_shared_index(
 
 fn metadata(
     reference: &JidxReader,
-    sections: &mut [Vec<u8>; 12],
+    sections: &mut [Vec<u8>; 13],
 ) -> Result<(u64, u64), SharedError> {
     let mut bases = 0u64;
     let mut objects = BTreeSet::new();
@@ -303,12 +304,12 @@ fn string(strings: &mut Vec<u8>, value: &str) -> Result<StringRef, SharedError> 
 pub(crate) fn publish(
     mut header: SharedHeader,
     output: &Path,
-    sections: [Vec<u8>; 12],
+    sections: [Vec<u8>; 13],
     bgzf_bytes_once: u64,
     singletons: u64,
 ) -> Result<SharedBuildStats, SharedError> {
     let mut offset = HEADER_BYTES as u64;
-    let mut ranges = [SectionRange::default(); 12];
+    let mut ranges = [SectionRange::default(); 13];
     for &kind in header.section_order() {
         offset = offset
             .checked_next_multiple_of(PAGE_BYTES)

@@ -31,7 +31,6 @@ pub mod query;
 pub mod range_source;
 pub mod reader;
 mod shared_file;
-#[cfg(test)]
 mod shared_filters;
 pub mod shared_format;
 pub mod shared_pack;
@@ -192,6 +191,18 @@ pub fn run() -> Result<()> {
 
         Commands::SharedCoreRepack { input, output } => {
             let stats = shared_pack::repack_shared_cores(input, output)?;
+            if !cli.silent {
+                println!("{}", serde_json::to_string(&stats)?);
+            }
+            Ok(())
+        }
+
+        Commands::SharedCoreFilter {
+            input,
+            output,
+            maximum_keys,
+        } => {
+            let stats = shared_pack::add_shared_core_filter(input, output, maximum_keys)?;
             if !cli.silent {
                 println!("{}", serde_json::to_string(&stats)?);
             }

@@ -139,6 +139,18 @@ pub enum Commands {
         output: PathBuf,
     },
 
+    /// Add an unreleased authenticated binary fuse section to a split shared index
+    #[command(arg_required_else_help = true)]
+    SharedCoreFilter {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Target-only cap rounded down to a complete ascending core prefix
+        #[arg(long, default_value_t = usize::MAX)]
+        maximum_keys: usize,
+    },
+
     /// Trace query sequences through a shard or collection
     #[command(arg_required_else_help = true)]
     Trace {
