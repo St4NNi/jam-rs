@@ -6,10 +6,11 @@ pub use crate::shared_file::FileReadStats;
 use crate::shared_file::SharedFile;
 use crate::shared_format::{
     CORE_MASK, CORE_PREFIX_BOUNDARIES, CORE_ROW_BYTES, MULTIPLE_CORE, OCCURRENCE_ROW_BYTES,
-    Section, SharedError, read_u32, read_u64,
+    PAGE_BYTES, Section, SharedError, read_u32, read_u64,
 };
 use crate::shared_seed::{SharedKey, SharedSeed};
 use serde::Serialize;
+use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -28,6 +29,8 @@ pub struct SharedReader {
     core_resolutions_absent: AtomicU64,
     grouped_core_rows: AtomicU64,
     grouped_core_rows_without_match: AtomicU64,
+    core_view_creations: AtomicU64,
+    core_view_comparisons: AtomicU64,
     directory_comparison_probes: AtomicU64,
     context_comparisons: AtomicU64,
     references_decoded: AtomicU64,
@@ -47,6 +50,8 @@ pub struct SharedReadStats {
     pub core_resolutions_absent: u64,
     pub grouped_core_rows: u64,
     pub grouped_core_rows_without_match: u64,
+    pub core_view_creations: u64,
+    pub core_view_comparisons: u64,
     pub directory_comparison_probes: u64,
     pub context_comparisons: u64,
     pub references_decoded: u64,
@@ -147,6 +152,46 @@ enum GroupLocation {
     },
 }
 
+#[derive(Clone, Copy)]
+struct CheckedCorePrefix {
+    prefix: u32,
+    first: u64,
+    end: u64,
+}
+
+struct CoreKeyView<'a> {
+    bytes: &'a [u8],
+    first_ordinal: u64,
+    prefix: u32,
+}
+
+impl CoreKeyView<'_> {
+    fn contains(&self, ordinal: u64) -> bool {
+        ordinal >= self.first_ordinal && ordinal - self.first_ordinal < self.bytes.len() as u64 / 4
+    }
+
+    fn key(&self, ordinal: u64) -> Result<u32, SharedError> {
+        let offset = usize::try_from(
+            ordinal
+                .checked_sub(self.first_ordinal)
+                .ok_or(SharedError::Invalid("core ordinal"))?
+                .checked_mul(4)
+                .ok_or(SharedError::Invalid("core ordinal"))?,
+        )
+        .map_err(|_| SharedError::ResourceLimit)?;
+        let bytes = self
+            .bytes
+            .get(
+                offset
+                    ..offset
+                        .checked_add(4)
+                        .ok_or(SharedError::Invalid("core ordinal"))?,
+            )
+            .ok_or(SharedError::Invalid("core ordinal"))?;
+        CoreRow::decode_key(bytes)
+    }
+}
+
 impl SharedReader {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SharedError> {
         Self::open_inner(path, false)
@@ -178,6 +223,8 @@ impl SharedReader {
             core_resolutions_absent: AtomicU64::new(0),
             grouped_core_rows: AtomicU64::new(0),
             grouped_core_rows_without_match: AtomicU64::new(0),
+            core_view_creations: AtomicU64::new(0),
+            core_view_comparisons: AtomicU64::new(0),
             directory_comparison_probes: AtomicU64::new(0),
             context_comparisons: AtomicU64::new(0),
             references_decoded: AtomicU64::new(0),
@@ -261,6 +308,8 @@ impl SharedReader {
             grouped_core_rows_without_match: self
                 .grouped_core_rows_without_match
                 .load(Ordering::Relaxed),
+            core_view_creations: self.core_view_creations.load(Ordering::Relaxed),
+            core_view_comparisons: self.core_view_comparisons.load(Ordering::Relaxed),
             directory_comparison_probes: self.directory_comparison_probes.load(Ordering::Relaxed),
             context_comparisons: self.context_comparisons.load(Ordering::Relaxed),
             references_decoded: self.references_decoded.load(Ordering::Relaxed),
@@ -312,6 +361,35 @@ impl SharedReader {
         }
         self.file.verify_unchanged()?;
         Ok(groups)
+    }
+
+    pub(crate) fn resolve_sorted_cores_into(
+        &self,
+        cores: &[u32],
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        if !output.is_empty() {
+            return Err(SharedError::Invalid("core result storage"));
+        }
+        if output.capacity() > cores.len() {
+            return Err(SharedError::ResourceLimit);
+        }
+        admit_result(output.capacity(), size_of::<SharedGroup>())?;
+        self.begin_operation()?;
+        let mut previous = None;
+        for &core in cores {
+            if core & !CORE_MASK != 0 || previous.is_some_and(|before| before >= core) {
+                return Err(SharedError::Invalid("sorted cores"));
+            }
+            previous = Some(core);
+        }
+        let result = self
+            .resolve_sorted_cores_unchecked(cores, output)
+            .and_then(|()| self.file.verify_unchanged());
+        if result.is_err() {
+            output.clear();
+        }
+        result
     }
 
     pub fn find_in_core(
@@ -648,6 +726,206 @@ impl SharedReader {
         Ok(None)
     }
 
+    fn resolve_sorted_cores_unchecked(
+        &self,
+        cores: &[u32],
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        if self.file.header.version != 3 {
+            for &core in cores {
+                if let Some((ordinal, row)) = self.resolve_core_unchecked(core)? {
+                    self.append_core_group(core, ordinal, row, cores.len(), output)?;
+                }
+            }
+            return Ok(());
+        }
+        let mut start = 0;
+        while start < cores.len() {
+            let prefix = cores[start] >> 14;
+            let mut end = start + 1;
+            while end < cores.len() && cores[end] >> 14 == prefix {
+                end += 1;
+            }
+            let checked = self.checked_core_prefix(prefix)?;
+            if checked.first == checked.end {
+                self.observe(&self.core_resolutions_absent, (end - start) as u64);
+            } else if use_full_core_view(checked.end - checked.first, end - start) {
+                self.resolve_cores_from_full_view(
+                    &cores[start..end],
+                    checked,
+                    cores.len(),
+                    output,
+                )?;
+            } else {
+                self.resolve_cores_from_page_views(
+                    &cores[start..end],
+                    checked,
+                    cores.len(),
+                    output,
+                )?;
+            }
+            start = end;
+        }
+        Ok(())
+    }
+
+    fn resolve_cores_from_full_view(
+        &self,
+        cores: &[u32],
+        checked: CheckedCorePrefix,
+        maximum_results: usize,
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        let view = self.checked_core_view(checked, checked.first..checked.end)?;
+        let mut ordinal = checked.first;
+        for &core in cores {
+            let mut found = None;
+            while ordinal < checked.end {
+                let candidate = self.core_view_key(&view, ordinal)?;
+                match candidate.cmp(&core) {
+                    std::cmp::Ordering::Less => ordinal += 1,
+                    std::cmp::Ordering::Equal => {
+                        found = Some(ordinal);
+                        ordinal += 1;
+                        break;
+                    }
+                    std::cmp::Ordering::Greater => break,
+                }
+            }
+            if let Some(ordinal) = found {
+                let row = self.core_row(ordinal)?;
+                if row.core != core {
+                    return Err(SharedError::Invalid("core row"));
+                }
+                self.observe(&self.core_resolutions_present, 1);
+                self.append_core_group(core, ordinal, row, maximum_results, output)?;
+            } else {
+                self.observe(&self.core_resolutions_absent, 1);
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_cores_from_page_views(
+        &self,
+        cores: &[u32],
+        checked: CheckedCorePrefix,
+        maximum_results: usize,
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        let keys_per_page = PAGE_BYTES / 4;
+        let mut view = None;
+        for &core in cores {
+            let mut low = checked.first;
+            let mut high = checked.end;
+            let mut found = None;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if view
+                    .as_ref()
+                    .is_none_or(|view: &CoreKeyView<'_>| !view.contains(middle))
+                {
+                    let page_first = middle / keys_per_page * keys_per_page;
+                    let first = page_first.max(checked.first);
+                    let end = page_first.saturating_add(keys_per_page).min(checked.end);
+                    view = Some(self.checked_core_view(checked, first..end)?);
+                }
+                let candidate = self.core_view_key(view.as_ref().unwrap(), middle)?;
+                match candidate.cmp(&core) {
+                    std::cmp::Ordering::Less => low = middle + 1,
+                    std::cmp::Ordering::Greater => high = middle,
+                    std::cmp::Ordering::Equal => {
+                        found = Some(middle);
+                        break;
+                    }
+                }
+            }
+            if let Some(ordinal) = found {
+                let row = self.core_row(ordinal)?;
+                if row.core != core {
+                    return Err(SharedError::Invalid("core row"));
+                }
+                self.observe(&self.core_resolutions_present, 1);
+                self.append_core_group(core, ordinal, row, maximum_results, output)?;
+            } else {
+                self.observe(&self.core_resolutions_absent, 1);
+            }
+        }
+        Ok(())
+    }
+
+    fn append_core_group(
+        &self,
+        core: u32,
+        ordinal: u64,
+        row: CoreRow,
+        maximum_results: usize,
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        let group = self
+            .group_from_core(ordinal, row, SharedKey::core(core))?
+            .ok_or(SharedError::Invalid("core group"))?;
+        if output.len() == output.capacity() {
+            let capacity = output.capacity();
+            let next = capacity
+                .checked_mul(2)
+                .unwrap_or(maximum_results)
+                .max(1)
+                .min(maximum_results);
+            if next <= capacity {
+                return Err(SharedError::ResourceLimit);
+            }
+            admit_result(next, size_of::<SharedGroup>())?;
+            output
+                .try_reserve_exact(next - capacity)
+                .map_err(|_| SharedError::ResourceLimit)?;
+            if output.capacity() > maximum_results {
+                return Err(SharedError::ResourceLimit);
+            }
+            admit_result(output.capacity(), size_of::<SharedGroup>())?;
+        }
+        output.push(group);
+        Ok(())
+    }
+
+    fn checked_core_view(
+        &self,
+        checked: CheckedCorePrefix,
+        ordinals: Range<u64>,
+    ) -> Result<CoreKeyView<'_>, SharedError> {
+        if ordinals.start >= ordinals.end
+            || ordinals.start < checked.first
+            || ordinals.end > checked.end
+        {
+            return Err(SharedError::Invalid("core view"));
+        }
+        let offset = ordinals
+            .start
+            .checked_mul(4)
+            .ok_or(SharedError::Invalid("core ordinal"))?;
+        let length = (ordinals.end - ordinals.start)
+            .checked_mul(4)
+            .ok_or(SharedError::Invalid("core ordinal"))?;
+        let bytes = self.file.section(Section::Cores, offset, length)?;
+        self.observe(&self.core_view_creations, 1);
+        Ok(CoreKeyView {
+            bytes,
+            first_ordinal: ordinals.start,
+            prefix: checked.prefix,
+        })
+    }
+
+    fn core_view_key(&self, view: &CoreKeyView<'_>, ordinal: u64) -> Result<u32, SharedError> {
+        let core = view.key(ordinal)?;
+        if core >> 14 != view.prefix {
+            return Err(SharedError::Invalid("core prefix membership"));
+        }
+        self.observe(&self.core_key_inspections, 1);
+        self.observe(&self.core_view_comparisons, 1);
+        self.observe(&self.directory_comparison_probes, 1);
+        Ok(core)
+    }
+
     fn find_many_ordered(
         &self,
         keys: &[SharedKey],
@@ -946,6 +1224,11 @@ impl SharedReader {
     }
 
     fn core_prefix_range(&self, prefix: u32) -> Result<(u64, u64), SharedError> {
+        let checked = self.checked_core_prefix(prefix)?;
+        Ok((checked.first, checked.end))
+    }
+
+    fn checked_core_prefix(&self, prefix: u32) -> Result<CheckedCorePrefix, SharedError> {
         if prefix as usize >= CORE_PREFIX_BOUNDARIES - 1 {
             return Err(SharedError::Invalid("core prefix"));
         }
@@ -953,7 +1236,7 @@ impl SharedReader {
         let bounds = self.file.section(Section::CorePrefixes, offset, 8)?;
         let low = u64::from(read_u32(bounds, 0));
         let high = u64::from(read_u32(bounds, 4));
-        if low > high || high > self.file.header.core_count {
+        if low > high || high > self.file.header.core_count || high - low > 1 << 14 {
             return Err(SharedError::Invalid("core prefix directory"));
         }
         if low < high
@@ -967,7 +1250,11 @@ impl SharedReader {
         if high < self.file.header.core_count && self.core_key(high)? >> 14 <= prefix {
             return Err(SharedError::Invalid("core prefix membership"));
         }
-        Ok((low, high))
+        Ok(CheckedCorePrefix {
+            prefix,
+            first: low,
+            end: high,
+        })
     }
 
     fn audit_compact_cores(&self) -> Result<(), SharedError> {
@@ -1701,6 +1988,12 @@ fn valid_context_code(code: u64) -> bool {
 
 fn ordered_index(order: Option<&[usize]>, position: usize) -> usize {
     order.map_or(position, |order| order[position])
+}
+
+fn use_full_core_view(core_count: u64, request_count: usize) -> bool {
+    let comparisons = u64::from(core_count.max(1).ilog2() + 1);
+    (request_count as u64).saturating_mul(comparisons)
+        >= core_count.saturating_add(request_count as u64)
 }
 
 fn occurrence_block_count(

@@ -516,6 +516,12 @@ fn key_only_probe_handles_empty_singleton_and_dictionary_edges() {
     let stats = empty.stats();
     assert_eq!(stats.core_key_inspections, 0);
     assert_eq!(stats.core_descriptor_inspections, 0);
+    let mut sparse = Vec::new();
+    empty
+        .resolve_sorted_cores_into(&[0, CORE_LIMIT - 1], &mut sparse)
+        .unwrap();
+    assert!(sparse.is_empty());
+    assert_eq!(sparse.capacity(), 0);
 
     let singleton = directory.path().join("singleton.shared");
     write_shared_index(
@@ -542,6 +548,28 @@ fn key_only_probe_handles_empty_singleton_and_dictionary_edges() {
     assert_eq!(stats.core_key_inspections, 3);
     assert_eq!(stats.core_descriptor_inspections, 1);
 
+    let singleton_packed = directory.path().join("singleton-packed.shared");
+    let singleton_compact = directory.path().join("singleton-compact.shared");
+    crate::shared_pack::repack_shared_index(
+        directory.path().join("singleton.shared"),
+        &singleton_packed,
+    )
+    .unwrap();
+    crate::shared_pack::repack_shared_cores(&singleton_packed, &singleton_compact).unwrap();
+    let singleton = SharedReader::open_observed(&singleton_compact).unwrap();
+    let mut sparse = Vec::new();
+    singleton
+        .resolve_sorted_cores_into(&[6, 7, 8], &mut sparse)
+        .unwrap();
+    assert_eq!(
+        sparse
+            .iter()
+            .map(|group| group.key().core)
+            .collect::<Vec<_>>(),
+        [7]
+    );
+    assert_eq!(sparse.capacity(), 1);
+
     let before = reader.stats();
     let groups = reader
         .find_many(&[SharedKey::core(0), SharedKey::core(TARGET_CORE + 1)])
@@ -557,6 +585,126 @@ fn key_only_probe_handles_empty_singleton_and_dictionary_edges() {
         2
     );
     assert!(after.core_key_inspections > before.core_key_inspections);
+}
+
+#[test]
+fn sorted_core_sparse_results_match_dense_lookup_and_bound_output() {
+    let (directory, reader, _) = fixture(8192);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+
+    let workload = |present: usize| {
+        let mut cores = (0..present as u32).collect::<Vec<_>>();
+        cores.extend(8192..8192 + (4096 - present) as u32);
+        cores
+    };
+    let mut spread = (1..=64u32)
+        .map(|prefix| (prefix << 14) | 12_345)
+        .filter(|&core| core != TARGET_CORE && core != TARGET_CORE + 1)
+        .collect::<Vec<_>>();
+    spread.extend([0, TARGET_CORE, TARGET_CORE + 1]);
+    spread.sort_unstable();
+    let workloads = [
+        ("absent", workload(0), 0),
+        ("10-percent", workload(410), 410),
+        ("50-percent", workload(2048), 2048),
+        ("all-present", workload(4096), 4096),
+        ("spread-prefixes", spread, 3),
+    ];
+    let evidence =
+        |group: &SharedGroup| (group.key(), group.member_count(), group.occurrence_count());
+    for (name, cores, expected_present) in workloads {
+        let reference = SharedReader::open(&compact).unwrap();
+        let keys = cores
+            .iter()
+            .copied()
+            .map(SharedKey::core)
+            .collect::<Vec<_>>();
+        let expected = reference
+            .find_many(&keys)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|group| evidence(&group))
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), expected_present, "{name}");
+
+        let reader = SharedReader::open_observed(&compact).unwrap();
+        let before = reader.stats();
+        let mut actual = Vec::new();
+        reader
+            .resolve_sorted_cores_into(&cores, &mut actual)
+            .unwrap();
+        let after = reader.stats();
+        assert_eq!(
+            actual.iter().map(evidence).collect::<Vec<_>>(),
+            expected,
+            "{name}"
+        );
+        assert!(actual.capacity() <= cores.len(), "{name}");
+        assert!(actual.capacity() >= actual.len(), "{name}");
+        assert_eq!(
+            after.core_descriptor_inspections - before.core_descriptor_inspections,
+            actual.len() as u64,
+            "{name}"
+        );
+        assert_eq!(
+            after.member_descriptor_inspections, before.member_descriptor_inspections,
+            "{name}"
+        );
+        assert_eq!(
+            after.references_decoded, before.references_decoded,
+            "{name}"
+        );
+        assert_eq!(
+            after.physical_positions_decoded, before.physical_positions_decoded,
+            "{name}"
+        );
+        if expected_present == 0 {
+            assert_eq!(actual.capacity(), 0);
+            assert!(after.core_view_creations > before.core_view_creations);
+            assert!(after.core_view_comparisons > before.core_view_comparisons);
+        }
+    }
+
+    let reader = SharedReader::open(&compact).unwrap();
+    for invalid in [vec![1, 0], vec![1, 1], vec![CORE_LIMIT]] {
+        let mut output = Vec::new();
+        assert!(matches!(
+            reader.resolve_sorted_cores_into(&invalid, &mut output),
+            Err(SharedError::Invalid("sorted cores"))
+        ));
+        assert!(output.is_empty());
+    }
+    let mut oversized = Vec::with_capacity(2);
+    assert!(matches!(
+        reader.resolve_sorted_cores_into(&[0], &mut oversized),
+        Err(SharedError::ResourceLimit)
+    ));
+
+    let first = SharedReader::open(&compact).unwrap();
+    let second = SharedReader::open(&compact).unwrap();
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    first
+        .resolve_sorted_cores_into(&[0, TARGET_CORE], &mut left)
+        .unwrap();
+    second
+        .resolve_sorted_cores_into(&[0, TARGET_CORE], &mut right)
+        .unwrap();
+    assert_eq!(
+        left.iter().map(evidence).collect::<Vec<_>>(),
+        right.iter().map(evidence).collect::<Vec<_>>()
+    );
+    assert_ne!(first.reader_token(), second.reader_token());
+    assert!(matches!(
+        second.members(left[0]),
+        Err(SharedError::Invalid("group handle"))
+    ));
 }
 
 #[test]
