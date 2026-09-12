@@ -507,11 +507,7 @@ pub(crate) fn build(seeds: impl Read, output: &Path, seed_count: u64) -> io::Res
             keys.push(key);
             previous_key = Some(key);
         }
-        let filter = BinaryFuse8::try_from(keys.as_slice())
-            .map_err(|_| invalid_data("BinaryFuse8 construction failed"))?;
-        if keys.iter().any(|key| !filter.contains(key)) {
-            return Err(invalid_data("BinaryFuse8 construction false negative"));
-        }
+        let filter = build_binary_fuse(&keys)?;
         let position = output.stream_position()?;
         let filter_offset = align_page(position).map_err(format_error)?;
         write_zeroes(&mut output, filter_offset - position)?;
@@ -581,7 +577,19 @@ fn filter<'a>(
     Ok(BinaryFuse8Ref::from_dma(descriptor, fingerprints))
 }
 
-fn validate_descriptor(descriptor: &[u8], fingerprint_length: usize) -> Result<(), JidxError> {
+pub(crate) fn build_binary_fuse(keys: &[u64]) -> io::Result<BinaryFuse8> {
+    let filter =
+        BinaryFuse8::try_from(keys).map_err(|_| invalid_data("BinaryFuse8 construction failed"))?;
+    if keys.iter().any(|key| !filter.contains(key)) {
+        return Err(invalid_data("BinaryFuse8 construction false negative"));
+    }
+    Ok(filter)
+}
+
+pub(crate) fn validate_descriptor(
+    descriptor: &[u8],
+    fingerprint_length: usize,
+) -> Result<(), JidxError> {
     if descriptor.len() != DESCRIPTOR_SIZE {
         return Err(JidxError::Invalid("seed filter descriptor"));
     }
@@ -730,6 +738,28 @@ mod tests {
                 output = &mut output[count..];
             }
             Ok(requested - output.len())
+        }
+    }
+
+    #[test]
+    fn binary_fuse_owned_and_checked_borrowed_preserve_zero_and_tiny_sets() {
+        for keys in [vec![0], vec![0, 1, (1 << 30) - 1], (0..10_000).collect()] {
+            let owned = build_binary_fuse(&keys).unwrap();
+            let mut descriptor = [0; DESCRIPTOR_SIZE];
+            owned.dma_copy_descriptor_to(&mut descriptor);
+            let fingerprints = owned.dma_fingerprints();
+            validate_descriptor(&descriptor, fingerprints.len()).unwrap();
+            let borrowed = BinaryFuse8Ref::from_dma(&descriptor, fingerprints);
+            for key in keys.iter().copied().chain(0..50_000) {
+                assert_eq!(owned.contains(&key), borrowed.contains(&key));
+                if keys.binary_search(&key).is_ok() {
+                    assert!(borrowed.contains(&key));
+                }
+            }
+            assert!(validate_descriptor(&descriptor[..19], fingerprints.len()).is_err());
+            assert!(validate_descriptor(&descriptor, fingerprints.len() - 1).is_err());
+            descriptor[12] ^= 1;
+            assert!(validate_descriptor(&descriptor, fingerprints.len()).is_err());
         }
     }
 

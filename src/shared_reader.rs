@@ -460,6 +460,59 @@ impl SharedReader {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub fn benchmark_core_filter(
+        &self,
+        maximum_keys: usize,
+    ) -> Result<(Vec<u8>, usize, u32), SharedError> {
+        use xorf::DmaSerializable;
+        self.begin_operation()?;
+        if self.file.header.version != 3 {
+            return Err(SharedError::Invalid("filter requires split cores"));
+        }
+        let count =
+            usize::try_from(self.file.header.core_count).map_err(|_| SharedError::ResourceLimit)?;
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(count.min(maximum_keys))
+            .map_err(|_| SharedError::ResourceLimit)?;
+        let mut end_prefix = 65_536;
+        let mut previous = None;
+        for first in (0..count).step_by(1024) {
+            let bytes = self.file.section(
+                Section::Cores,
+                first as u64 * 4,
+                (count - first).min(1024) as u64 * 4,
+            )?;
+            for bytes in bytes.chunks_exact(4) {
+                let core = CoreRow::decode_key(bytes)?;
+                if previous.is_some_and(|before| before >= core) {
+                    return Err(SharedError::Invalid("filter core order"));
+                }
+                previous = Some(core);
+                if keys.len() == maximum_keys {
+                    end_prefix = core >> 14;
+                    keys.truncate(keys.partition_point(|key| *key < u64::from(end_prefix) << 14));
+                    break;
+                }
+                keys.push(u64::from(core));
+            }
+            if end_prefix != 65_536 {
+                break;
+            }
+        }
+        self.file.verify_unchanged()?;
+        if keys.is_empty() {
+            return Ok((Vec::new(), 0, end_prefix));
+        }
+        let filter = crate::jidx_filters::build_binary_fuse(&keys)?;
+        let mut bytes = vec![0; xorf::BinaryFuse8::DESCRIPTOR_LEN];
+        filter.dma_copy_descriptor_to(&mut bytes);
+        bytes.extend_from_slice(filter.dma_fingerprints());
+        crate::jidx_filters::validate_descriptor(&bytes[..20], bytes.len() - 20)
+            .map_err(|_| SharedError::Invalid("filter descriptor"))?;
+        Ok((bytes, keys.len(), end_prefix))
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub fn benchmark_resolve_sorted_cores(
         &self,
         cores: &[u32],
