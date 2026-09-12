@@ -3,7 +3,7 @@ use jam_rs::alignment::{AlignmentConfig, AlignmentWorkspace};
 use jam_rs::jidx::sha256;
 use jam_rs::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use jam_rs::owner_postings;
-use jam_rs::shared_pack::{repack_shared_cores, repack_shared_index};
+use jam_rs::shared_pack::{add_shared_core_filter, repack_shared_cores, repack_shared_index};
 use jam_rs::shared_reader::SharedReader;
 use jam_rs::shared_seed::{HAS_CONTEXT_21, HAS_CONTEXT_31, SharedKey, select_shared_seeds};
 use jam_rs::shared_writer::build_shared_index;
@@ -478,14 +478,17 @@ fn shared_core_absent_fixture() -> &'static SharedCoreFixture {
     assert!(build.core_count >= 1_000_000, "{} cores", build.core_count);
     let v2_path = directory.path().join("large-target-v2.shared");
     let v3_path = directory.path().join("large-target-v3.shared");
+    let v4_path = directory.path().join("large-target-v4.shared");
     let converted = std::time::Instant::now();
     let v2 = repack_shared_index(&v1_path, &v2_path).unwrap();
     let v3 = repack_shared_cores(&v2_path, &v3_path).unwrap();
+    let v4 = add_shared_core_filter(&v3_path, &v4_path, usize::MAX).unwrap();
     eprintln!(
-        "shared_core_absent kernel setup: conversion {:.3}s, v2 {} bytes, v3 {} bytes, hot {}, cold {}, prefixes {} bytes",
+        "shared_core_absent kernel setup: conversion {:.3}s, v2 {} bytes, v3 {} bytes, v4 {} bytes, hot {}, cold {}, prefixes {} bytes",
         converted.elapsed().as_secs_f64(),
         v2.build.index_bytes,
         v3.build.index_bytes,
+        v4.index_bytes,
         v3.hot_core_bytes,
         v3.cold_core_bytes,
         v3.core_prefix_bytes,
@@ -521,6 +524,7 @@ fn shared_core_absent_fixture() -> &'static SharedCoreFixture {
         readers: vec![
             ("v2", v2_path.clone(), SharedReader::open(v2_path).unwrap()),
             ("v3", v3_path.clone(), SharedReader::open(v3_path).unwrap()),
+            ("v4", v4_path.clone(), SharedReader::open(v4_path).unwrap()),
         ],
         workloads,
     }
@@ -712,6 +716,167 @@ fn shared_core_filter(criterion: &mut Criterion) {
 fn shared_core_filter(_: &mut Criterion) {}
 
 #[cfg(feature = "bench-internals")]
+fn shared_core_planning(criterion: &mut Criterion) {
+    let fixture = shared_core_absent_fixture();
+    let (_, path, _) = fixture
+        .readers
+        .iter()
+        .find(|(version, _, _)| *version == "v4")
+        .unwrap();
+    let engine = TraceEngine::open_shared(path, None).unwrap();
+    let mut group = criterion.benchmark_group("shared_core_planning");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, source) in fixture.workloads.iter().filter(|(name, _)| {
+        matches!(
+            *name,
+            "spread/absent" | "spread/50pct_present" | "spread/present"
+        )
+    }) {
+        let directory = source.iter().map(|key| key.core).collect::<Vec<_>>();
+        for (reuse, repeats) in [("low_reuse_1", 1), ("high_reuse_16", 16)] {
+            let keys = (0..repeats)
+                .flat_map(|_| directory.iter().copied())
+                .collect::<Vec<_>>();
+            let (_, early_counts) = engine.benchmark_core_planning(&keys, true).unwrap();
+            let (_, late_counts) = engine.benchmark_core_planning(&keys, false).unwrap();
+            eprintln!(
+                "shared_core_planning {name}/{reuse} [attempted, covered, rejected, uncovered, retained, planned, tasks]: early={early_counts:?}, late={late_counts:?}"
+            );
+            if *name == "spread/present" {
+                assert_eq!(
+                    [
+                        early_counts[0],
+                        early_counts[4],
+                        early_counts[5],
+                        early_counts[6],
+                    ],
+                    [
+                        late_counts[0],
+                        late_counts[4],
+                        late_counts[5],
+                        late_counts[6],
+                    ],
+                );
+            }
+            group.throughput(Throughput::Elements(keys.len() as u64));
+            for (mode, early) in [("early", true), ("late", false)] {
+                group.bench_function(format!("{name}/{reuse}/{mode}"), |bencher| {
+                    bencher.iter(|| {
+                        engine
+                            .benchmark_core_planning(black_box(&keys), black_box(early))
+                            .unwrap()
+                    })
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_core_planning(_: &mut Criterion) {}
+
+#[cfg(feature = "bench-internals")]
+fn shared_context_task(criterion: &mut Criterion) {
+    let fixture = shared_core_absent_fixture();
+    let reader = &fixture
+        .readers
+        .iter()
+        .find(|(version, _, _)| *version == "v4")
+        .unwrap()
+        .2;
+    let keys = &fixture
+        .workloads
+        .iter()
+        .find(|(name, _)| *name == "spread/present")
+        .unwrap()
+        .1;
+    let cores = reader.find_many(&keys[..256]).unwrap();
+    let requests = cores
+        .into_iter()
+        .flatten()
+        .map(|core| {
+            (
+                core,
+                [
+                    core.key(),
+                    SharedKey {
+                        length: 21,
+                        context: 0,
+                        ..core.key()
+                    },
+                    SharedKey {
+                        length: 31,
+                        context: 0,
+                        ..core.key()
+                    },
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reader.benchmark_context_task(&requests, false).unwrap(),
+        reader.benchmark_context_task(&requests, true).unwrap()
+    );
+    let mut group = criterion.benchmark_group("shared_context_task");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, batched) in [("public_per_core", false), ("checked_task", true)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                reader
+                    .benchmark_context_task(black_box(&requests), batched)
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_context_task(_: &mut Criterion) {}
+
+fn shared_core_filter_open(criterion: &mut Criterion) {
+    let fixture = shared_core_absent_fixture();
+    let (_, path, resident) = fixture
+        .readers
+        .iter()
+        .find(|(version, _, _)| *version == "v4")
+        .unwrap();
+    let keys = &fixture
+        .workloads
+        .iter()
+        .find(|(name, _)| *name == "spread/50pct_present")
+        .unwrap()
+        .1;
+    let observed = SharedReader::open_observed(path).unwrap();
+    black_box(observed.find_many(keys).unwrap());
+    let stats = observed.stats();
+    eprintln!(
+        "shared_core_filter_open v4: filter_setup_ns={:?}, filter_owned_copies={}, identity_checks={}, reads={:?}",
+        stats.filter_setup_ns, stats.filter_owned_copies, stats.file.identity_checks, stats.file,
+    );
+    let mut group = criterion.benchmark_group("shared_core_filter_open");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    group.bench_function("v4/fresh_open_setup", |bencher| {
+        bencher.iter(|| SharedReader::open_observed(black_box(path)).unwrap())
+    });
+    group.throughput(Throughput::Elements(keys.len() as u64));
+    group.bench_function("v4/resident_reads", |bencher| {
+        bencher.iter(|| resident.find_many(black_box(keys)).unwrap())
+    });
+    group.finish();
+}
+
+#[cfg(feature = "bench-internals")]
 fn shared_posting_preparation(criterion: &mut Criterion) {
     let fixture = shared_core_absent_fixture();
     let (_, path, _) = fixture
@@ -781,15 +946,21 @@ fn shared_prepare(criterion: &mut Criterion) {
     let v1_path = directory.path().join("target.shared");
     let v2_path = directory.path().join("prepare-packed.shared");
     let v3_path = directory.path().join("prepare-compact.shared");
+    let v4_path = directory.path().join("prepare-filtered.shared");
     jam_rs::shared_pack::repack_shared_index(&v1_path, &v2_path).unwrap();
     jam_rs::shared_pack::repack_shared_cores(&v2_path, &v3_path).unwrap();
+    jam_rs::shared_pack::add_shared_core_filter(&v3_path, &v4_path, usize::MAX).unwrap();
     let engines = [
         ("v1", TraceEngine::open_shared(v1_path, None).unwrap()),
         ("v3", TraceEngine::open_shared(v3_path, None).unwrap()),
+        ("v4", TraceEngine::open_shared(v4_path, None).unwrap()),
     ];
     let present_2k = sequence(2_000);
     let absent_2k = sequence_from_state(2_000, 101);
     let present_64k = sequence(64_000);
+    let mut ambiguous_lowercase_2k = sequence(2_000);
+    ambiguous_lowercase_2k.make_ascii_lowercase();
+    ambiguous_lowercase_2k[960..1_040].fill(b'N');
     let mut mixed_64k = sequence(32_000);
     mixed_64k.extend(sequence_from_state(32_000, 103));
     let absent_250k = sequence_from_state(250_000, 107);
@@ -805,6 +976,11 @@ fn shared_prepare(criterion: &mut Criterion) {
         ("boundary/above/linear", above_boundary, false),
         ("2kb/present/linear", present_2k, false),
         ("2kb/absent/linear", absent_2k, false),
+        (
+            "2kb/ambiguous_lowercase/circular",
+            ambiguous_lowercase_2k,
+            true,
+        ),
         ("64kb/mixed/linear", mixed_64k, false),
         ("64kb/present/circular", present_64k, true),
         ("250kb/absent/linear", absent_250k, false),
@@ -1124,6 +1300,9 @@ criterion_group!(
     shared_core_absent,
     shared_core_search,
     shared_core_filter,
+    shared_core_planning,
+    shared_context_task,
+    shared_core_filter_open,
     shared_posting_preparation,
     shared_prepare,
     shared_resolved_handle,

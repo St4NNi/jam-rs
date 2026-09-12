@@ -174,3 +174,21 @@ fn checked_context_adapter_preserves_ordinals_and_publishes_only_complete_result
         Err(TraceError::Shared(SharedError::Invalid("group handle")))
     ));
 }
+
+#[test]
+fn checked_context_result_admission_clears_unpublished_records() {
+    let (_directory, reader, _) = fixture(0);
+    let core = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let count = 64 * 1024 * 1024 / std::mem::size_of::<Option<SharedGroup>>() + 1;
+    let keys = vec![core.key(); count];
+    let mut output = vec![Some(core); count];
+    let operation = reader.posting_operation().unwrap();
+    let before = reader.stats().core_descriptor_inspections;
+    assert!(matches!(
+        operation.find_in_core_into(core, &keys, &mut output),
+        Err(SharedError::ResourceLimit)
+    ));
+    assert!(output.iter().all(Option::is_none));
+    assert_eq!(reader.stats().core_descriptor_inspections, before);
+    operation.finish().unwrap();
+}

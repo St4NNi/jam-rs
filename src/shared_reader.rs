@@ -689,6 +689,31 @@ impl SharedReader {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub fn benchmark_context_task(
+        &self,
+        requests: &[(SharedGroup, [SharedKey; 3])],
+        batched: bool,
+    ) -> Result<Vec<Option<SharedGroup>>, SharedError> {
+        let mut output = vec![None; requests.len() * 3];
+        let operation = if batched {
+            Some(self.posting_operation()?)
+        } else {
+            None
+        };
+        for ((core, keys), slots) in requests.iter().zip(output.chunks_exact_mut(3)) {
+            if let Some(operation) = &operation {
+                operation.find_in_core_into(*core, keys, slots)?;
+            } else {
+                slots.copy_from_slice(&self.find_in_core(*core, keys)?);
+            }
+        }
+        if let Some(operation) = operation {
+            operation.finish()?;
+        }
+        Ok(output)
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub fn benchmark_core_filter(
         &self,
         maximum_keys: usize,
