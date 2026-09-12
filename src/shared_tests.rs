@@ -3267,6 +3267,11 @@ fn declared_binary_fuse_corruption_fails_before_negative_answers() {
     crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
         .unwrap();
     crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    crate::jidx_filters::FAIL_BINARY_FUSE_BUILD.with(|failure| failure.set(true));
+    let failed = crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX);
+    crate::jidx_filters::FAIL_BINARY_FUSE_BUILD.with(|failure| failure.set(false));
+    assert!(failed.is_err());
+    assert!(!filtered.exists());
     crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
     let original = std::fs::read(&filtered).unwrap();
     let header = SharedHeader::decode(&original[..HEADER_BYTES], original.len() as u64).unwrap();

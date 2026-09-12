@@ -13,6 +13,11 @@ const DIRECTORY_RECORD_SIZE: u64 = 40;
 const DESCRIPTOR_SIZE: usize = 20;
 const RESIDENT_FILTER_BYTES: u64 = 512 * 1024 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_BINARY_FUSE_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(Default)]
 struct FilterBodyCache {
     entries: Vec<(FilterCacheIdentity, Arc<Vec<u8>>)>,
@@ -578,6 +583,10 @@ fn filter<'a>(
 }
 
 pub(crate) fn build_binary_fuse(keys: &[u64]) -> io::Result<BinaryFuse8> {
+    #[cfg(test)]
+    if FAIL_BINARY_FUSE_BUILD.with(|failure| failure.get()) {
+        return Err(invalid_data("BinaryFuse8 construction failed"));
+    }
     let filter =
         BinaryFuse8::try_from(keys).map_err(|_| invalid_data("BinaryFuse8 construction failed"))?;
     if keys.iter().any(|key| !filter.contains(key)) {
