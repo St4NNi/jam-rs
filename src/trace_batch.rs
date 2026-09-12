@@ -9,6 +9,27 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
+fn worker_cpu_ns() -> Option<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the output pointer refers to an initialized timespec for this call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } != 0 {
+        return None;
+    }
+    u64::try_from(time.tv_sec)
+        .ok()?
+        .checked_mul(1_000_000_000)?
+        .checked_add(u64::try_from(time.tv_nsec).ok()?)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn worker_cpu_ns() -> Option<u64> {
+    None
+}
+
 pub(crate) struct SharedSeedLookups {
     pub(crate) identity: TraceCacheIdentity,
     pub(crate) entries: Vec<(u64, Option<TraceSeed>)>,
@@ -709,6 +730,19 @@ pub(crate) fn prepare_lookup_with_cores(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_cpu_clock_is_monotone_when_available() {
+        let Some(start) = worker_cpu_ns() else {
+            return;
+        };
+        let mut value = 1u64;
+        for i in 0..10_000 {
+            value = std::hint::black_box(value.wrapping_mul(3) ^ i);
+        }
+        std::hint::black_box(value);
+        assert!(worker_cpu_ns().is_some_and(|end| end > start));
+    }
 
     #[test]
     fn lookup_task_ranges_are_identical_across_workers_and_bound_heavy_cores() {
