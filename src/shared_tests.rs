@@ -1518,6 +1518,157 @@ fn member_prefix_fixture(preceding: u32) -> (tempfile::TempDir, SharedReader, u3
     )
 }
 
+fn compact_member_prefix_fixture(preceding: u32) -> (tempfile::TempDir, SharedReader, u32, u64) {
+    let (directory, reader, core, last_position) = member_prefix_fixture(preceding);
+    drop(reader);
+    let source = directory.path().join("members.shared");
+    let packed = directory.path().join("members-packed.shared");
+    let compact = directory.path().join("members-compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    (
+        directory,
+        SharedReader::open_observed(compact).unwrap(),
+        core,
+        last_position,
+    )
+}
+
+#[test]
+fn posting_operation_fills_admitted_member_and_occurrence_storage() {
+    let (_directory, reader, core, last_position) = compact_member_prefix_fixture(16);
+    let group = reader.find(SharedKey::core(core)).unwrap().unwrap();
+    let expected_members = reader.members(group).unwrap();
+    assert_eq!(expected_members.len(), 17);
+    let operation = reader.posting_operation().unwrap();
+
+    let mut empty = Vec::new();
+    operation
+        .append_member_range(group, 0, 0, &mut empty)
+        .unwrap();
+    assert!(empty.is_empty());
+    let mut partial = Vec::with_capacity(4);
+    operation
+        .append_member_range(group, 3, 4, &mut partial)
+        .unwrap();
+    assert_eq!(partial, expected_members[3..7]);
+    let mut exact = Vec::with_capacity(expected_members.len());
+    operation
+        .append_member_range(group, 0, expected_members.len(), &mut exact)
+        .unwrap();
+    assert_eq!(exact, expected_members);
+
+    let mut unadmitted = Vec::new();
+    assert!(matches!(
+        operation.append_member_range(group, 0, 1, &mut unadmitted),
+        Err(SharedError::ResourceLimit)
+    ));
+    assert!(unadmitted.is_empty());
+    assert!(matches!(
+        operation.append_member_range(group, group.member_count(), 1, &mut exact),
+        Err(SharedError::Invalid("member range"))
+    ));
+
+    let member = *expected_members.last().unwrap();
+    let expected = reader.member_occurrences(group, member).unwrap();
+    assert_eq!(expected.len(), 5000);
+    let blank = crate::jidx_reader::SeedOccurrence {
+        contig_id: 0,
+        position: 0,
+        canonical_orientation: false,
+    };
+    let mut first = vec![blank; 4096];
+    operation
+        .fill_occurrence_block(group, member, 0, &mut first)
+        .unwrap();
+    assert_eq!(first, expected[..4096]);
+    let mut tail = vec![blank; 904];
+    operation
+        .fill_occurrence_block(group, member, 4096, &mut tail)
+        .unwrap();
+    assert_eq!(tail, expected[4096..]);
+    assert_eq!(tail.last().unwrap().position, last_position);
+    let mut too_long = vec![blank; 905];
+    assert!(matches!(
+        operation.fill_occurrence_block(group, member, 4096, &mut too_long),
+        Err(SharedError::Invalid("occurrence block"))
+    ));
+    operation.finish().unwrap();
+}
+
+#[test]
+fn posting_operation_rejects_foreign_and_reopened_generation_handles() {
+    let (directory, reader, core, _) = compact_member_prefix_fixture(2);
+    let path = directory.path().join("members-compact.shared");
+    let group = reader.find(SharedKey::core(core)).unwrap().unwrap();
+    let member = reader.members(group).unwrap()[0];
+    let other = SharedReader::open(&path).unwrap();
+    let other_operation = other.posting_operation().unwrap();
+    let mut members = Vec::with_capacity(1);
+    assert!(matches!(
+        other_operation.append_member_range(group, 0, 1, &mut members),
+        Err(SharedError::Invalid("group handle"))
+    ));
+    let mut occurrence = [crate::jidx_reader::SeedOccurrence {
+        contig_id: 0,
+        position: 0,
+        canonical_orientation: false,
+    }];
+    assert!(matches!(
+        other_operation.fill_occurrence_block(group, member, 0, &mut occurrence),
+        Err(SharedError::Invalid("group handle"))
+    ));
+    other_operation.finish().unwrap();
+
+    let stale = reader.posting_operation().unwrap();
+    mutate_and_resign(&path, |bytes, header| {
+        let occurrence = header.section(Section::Occurrences).offset as usize;
+        let flags = crate::jidx::read_u32(bytes, occurrence + 8) ^ 1;
+        bytes[occurrence + 8..occurrence + 12].copy_from_slice(&flags.to_le_bytes());
+    });
+    assert!(matches!(stale.finish(), Err(SharedError::SourceChanged)));
+    let reopened = SharedReader::open(&path).unwrap();
+    let reopened_operation = reopened.posting_operation().unwrap();
+    assert!(matches!(
+        reopened_operation.append_member_range(group, 0, 1, &mut members),
+        Err(SharedError::Invalid("group handle"))
+    ));
+    reopened_operation.finish().unwrap();
+}
+
+#[test]
+fn posting_operation_keeps_only_valid_member_prefix_on_corruption() {
+    for (name, corrupt_ordinal, expected_prefix) in [("early", 0usize, 0), ("late", 8, 8)] {
+        let (directory, reader, core, _) = compact_member_prefix_fixture(16);
+        drop(reader);
+        let path = directory.path().join("members-compact.shared");
+        mutate_and_resign(&path, |bytes, header| {
+            let width = header.row_bytes(Section::Members) as usize;
+            let count = header.id_bytes() + 4;
+            let at = header.section(Section::Members).offset as usize + corrupt_ordinal * width;
+            bytes[at + count..at + count + 4].fill(0);
+        });
+        let reader = SharedReader::open(&path).unwrap();
+        let group = reader.find(SharedKey::core(core)).unwrap().unwrap();
+        let operation = reader.posting_operation().unwrap();
+        let mut members = Vec::with_capacity(group.member_count() as usize);
+        assert!(matches!(
+            operation.append_member_range(group, 0, group.member_count() as usize, &mut members),
+            Err(SharedError::Invalid("member row"))
+        ));
+        assert_eq!(members.len(), expected_prefix, "{name}");
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.metagenome_id)
+                .collect::<Vec<_>>(),
+            (0..expected_prefix as u32).collect::<Vec<_>>(),
+            "{name}"
+        );
+        operation.finish().unwrap();
+    }
+}
+
 #[test]
 fn selected_member_and_late_occurrence_do_not_replay_prefixes() {
     for preceding in [16u32, 4096, 16_384] {

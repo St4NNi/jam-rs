@@ -165,6 +165,68 @@ struct CoreKeyView<'a> {
     prefix: u32,
 }
 
+pub(crate) struct SharedPostingOperation<'a> {
+    reader: &'a SharedReader,
+}
+
+impl SharedPostingOperation<'_> {
+    pub(crate) fn append_member_range(
+        &self,
+        group: SharedGroup,
+        start: u32,
+        count: usize,
+        output: &mut Vec<SharedMember>,
+    ) -> Result<(), SharedError> {
+        self.reader.validate_group_token(group)?;
+        let count_u32 = u32::try_from(count).map_err(|_| SharedError::Invalid("member range"))?;
+        let end = start
+            .checked_add(count_u32)
+            .filter(|&end| end <= group.member_count)
+            .ok_or(SharedError::Invalid("member range"))?;
+        if output.capacity().saturating_sub(output.len()) < count {
+            return Err(SharedError::ResourceLimit);
+        }
+        // Keep the valid private prefix so ordered reduction can select earlier errors.
+        for offset in start..end {
+            let member = match group.location {
+                GroupLocation::Singleton { .. } => self.reader.singleton_member(group)?,
+                GroupLocation::Inline { .. } => self.reader.inline_member(group)?,
+                GroupLocation::Repeated { first_member, .. } => {
+                    let ordinal = first_member
+                        .checked_add(u64::from(offset))
+                        .ok_or(SharedError::Invalid("member range"))?;
+                    self.reader.member_row(group, ordinal)?
+                }
+            };
+            output.push(member);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn fill_occurrence_block(
+        &self,
+        group: SharedGroup,
+        member: SharedMember,
+        start: u64,
+        output: &mut [SeedOccurrence],
+    ) -> Result<(), SharedError> {
+        self.reader.validate_member_token(group, member)?;
+        if occurrence_block_count(member, start, output.len())? != output.len() {
+            return Err(SharedError::Invalid("occurrence block"));
+        }
+        let mut offset = 0;
+        self.reader
+            .occurrence_block_into_inner(group, member, start, output.len(), |occurrence| {
+                output[offset] = occurrence;
+                offset += 1;
+            })
+    }
+
+    pub(crate) fn finish(self) -> Result<(), SharedError> {
+        self.reader.file.verify_unchanged()
+    }
+}
+
 impl CoreKeyView<'_> {
     fn contains(&self, ordinal: u64) -> bool {
         ordinal >= self.first_ordinal && ordinal - self.first_ordinal < self.bytes.len() as u64 / 4
@@ -193,6 +255,11 @@ impl CoreKeyView<'_> {
 }
 
 impl SharedReader {
+    pub(crate) fn posting_operation(&self) -> Result<SharedPostingOperation<'_>, SharedError> {
+        self.begin_operation()?;
+        Ok(SharedPostingOperation { reader: self })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SharedError> {
         Self::open_inner(path, false)
     }
@@ -390,6 +457,16 @@ impl SharedReader {
             output.clear();
         }
         result
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub fn benchmark_resolve_sorted_cores(
+        &self,
+        cores: &[u32],
+    ) -> Result<Vec<SharedGroup>, SharedError> {
+        let mut output = Vec::new();
+        self.resolve_sorted_cores_into(cores, &mut output)?;
+        Ok(output)
     }
 
     pub fn find_in_core(
@@ -680,6 +757,10 @@ impl SharedReader {
 
     fn validate_group(&self, group: SharedGroup) -> Result<(), SharedError> {
         self.begin_operation()?;
+        self.validate_group_token(group)
+    }
+
+    fn validate_group_token(&self, group: SharedGroup) -> Result<(), SharedError> {
         if group.reader_token != self.reader_token {
             return Err(SharedError::Invalid("group handle"));
         }
@@ -687,7 +768,16 @@ impl SharedReader {
     }
 
     fn validate_member(&self, group: SharedGroup, member: SharedMember) -> Result<(), SharedError> {
-        self.validate_group(group)?;
+        self.begin_operation()?;
+        self.validate_member_token(group, member)
+    }
+
+    fn validate_member_token(
+        &self,
+        group: SharedGroup,
+        member: SharedMember,
+    ) -> Result<(), SharedError> {
+        self.validate_group_token(group)?;
         if member.reader_token != group.reader_token || member.group != group.location {
             return Err(SharedError::Invalid("member handle"));
         }
@@ -1429,7 +1519,9 @@ impl SharedReader {
             return Err(SharedError::ResourceLimit);
         }
         let output_start = output.len();
-        let result = self.occurrence_block_into_inner(group, member, start, count, output);
+        let result = self.occurrence_block_into_inner(group, member, start, count, |occurrence| {
+            output.push(occurrence);
+        });
         if result.is_err() {
             output.truncate(output_start);
         }
@@ -1442,7 +1534,7 @@ impl SharedReader {
         member: SharedMember,
         start: u64,
         count: usize,
-        output: &mut Vec<SeedOccurrence>,
+        mut emit: impl FnMut(SeedOccurrence),
     ) -> Result<(), SharedError> {
         let flank = u64::from((group.key.length - 15) / 2);
         if count == 0 {
@@ -1464,7 +1556,7 @@ impl SharedReader {
             };
             self.validate_position(member.metagenome_id, contig_id, position, flank)?;
             self.observe(&self.positions_decoded, 1);
-            output.push(SeedOccurrence {
+            emit(SeedOccurrence {
                 contig_id,
                 position,
                 canonical_orientation: flags & 1 != 0,
@@ -1475,7 +1567,7 @@ impl SharedReader {
             if start != 0 || member.occurrence_count != 1 {
                 return Err(SharedError::Invalid("direct occurrence"));
             }
-            output.push(self.decode_occurrence(
+            emit(self.decode_occurrence(
                 group,
                 member.metagenome_id,
                 member.first_reference,
@@ -1502,7 +1594,7 @@ impl SharedReader {
             } else {
                 u64::from(read_u32(raw, 0))
             };
-            output.push(self.decode_occurrence(group, member.metagenome_id, ordinal, flank)?);
+            emit(self.decode_occurrence(group, member.metagenome_id, ordinal, flank)?);
         }
         Ok(())
     }

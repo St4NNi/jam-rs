@@ -679,11 +679,7 @@ fn shared_resolved_handle(criterion: &mut Criterion) {
     group.nresamples(1_000);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_secs(1));
-    for (format, reader) in [
-        ("v1", &reference),
-        ("packed", &packed),
-        ("v3", &compact),
-    ] {
+    for (format, reader) in [("v1", &reference), ("packed", &packed), ("v3", &compact)] {
         let repeated = reader.find(repeated_key).unwrap().unwrap();
         let members = reader.members(repeated).unwrap();
         assert_eq!(members.len(), 1);
