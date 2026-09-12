@@ -498,12 +498,12 @@ impl SharedReader {
         admit_result(occurrences.capacity(), size_of::<SeedOccurrence>())?;
         let mut start = 0;
         while start < member.occurrence_count {
-            let block = self.occurrence_block_unchecked(group, member, start, 4096)?;
-            if block.is_empty() {
+            let decoded =
+                self.occurrence_block_into_unchecked(group, member, start, 4096, &mut occurrences)?;
+            if decoded == 0 {
                 return Err(SharedError::Invalid("occurrence progress"));
             }
-            start += block.len() as u64;
-            occurrences.extend(block);
+            start += decoded as u64;
         }
         self.file.verify_unchanged()?;
         Ok(occurrences)
@@ -1118,21 +1118,49 @@ impl SharedReader {
         start: u64,
         limit: usize,
     ) -> Result<Vec<SeedOccurrence>, SharedError> {
-        if limit == 0 || limit > 4096 || start > member.occurrence_count {
-            return Err(SharedError::Invalid("occurrence block"));
-        }
-        if start == member.occurrence_count {
-            return Ok(Vec::new());
-        }
-        let count = usize::try_from((member.occurrence_count - start).min(limit as u64))
-            .map_err(|_| SharedError::ResourceLimit)?;
-        let flank = u64::from((group.key.length - 15) / 2);
+        let count = occurrence_block_count(member, start, limit)?;
         admit_result(count, size_of::<SeedOccurrence>())?;
         let mut output = Vec::new();
         output
             .try_reserve_exact(count)
             .map_err(|_| SharedError::ResourceLimit)?;
         admit_result(output.capacity(), size_of::<SeedOccurrence>())?;
+        self.occurrence_block_into_unchecked(group, member, start, limit, &mut output)?;
+        Ok(output)
+    }
+
+    fn occurrence_block_into_unchecked(
+        &self,
+        group: SharedGroup,
+        member: SharedMember,
+        start: u64,
+        limit: usize,
+        output: &mut Vec<SeedOccurrence>,
+    ) -> Result<usize, SharedError> {
+        let count = occurrence_block_count(member, start, limit)?;
+        if output.capacity().saturating_sub(output.len()) < count {
+            return Err(SharedError::ResourceLimit);
+        }
+        let output_start = output.len();
+        let result = self.occurrence_block_into_inner(group, member, start, count, output);
+        if result.is_err() {
+            output.truncate(output_start);
+        }
+        result.map(|()| count)
+    }
+
+    fn occurrence_block_into_inner(
+        &self,
+        group: SharedGroup,
+        member: SharedMember,
+        start: u64,
+        count: usize,
+        output: &mut Vec<SeedOccurrence>,
+    ) -> Result<(), SharedError> {
+        let flank = u64::from((group.key.length - 15) / 2);
+        if count == 0 {
+            return Ok(());
+        }
         if let GroupLocation::Singleton { core_ordinal } = group.location {
             if start != 0 {
                 return Err(SharedError::Invalid("singleton occurrence"));
@@ -1154,7 +1182,7 @@ impl SharedReader {
                 position,
                 canonical_orientation: flags & 1 != 0,
             });
-            return Ok(output);
+            return Ok(());
         }
         if member.direct {
             if start != 0 || member.occurrence_count != 1 {
@@ -1166,7 +1194,7 @@ impl SharedReader {
                 member.first_reference,
                 flank,
             )?);
-            return Ok(output);
+            return Ok(());
         }
         let first = member
             .first_reference
@@ -1189,7 +1217,7 @@ impl SharedReader {
             };
             output.push(self.decode_occurrence(group, member.metagenome_id, ordinal, flank)?);
         }
-        Ok(output)
+        Ok(())
     }
 
     fn validate_occurrence_source(
@@ -1673,6 +1701,18 @@ fn valid_context_code(code: u64) -> bool {
 
 fn ordered_index(order: Option<&[usize]>, position: usize) -> usize {
     order.map_or(position, |order| order[position])
+}
+
+fn occurrence_block_count(
+    member: SharedMember,
+    start: u64,
+    limit: usize,
+) -> Result<usize, SharedError> {
+    if limit == 0 || limit > 4096 || start > member.occurrence_count {
+        return Err(SharedError::Invalid("occurrence block"));
+    }
+    usize::try_from((member.occurrence_count - start).min(limit as u64))
+        .map_err(|_| SharedError::ResourceLimit)
 }
 
 fn admit_result(count: usize, row_bytes: usize) -> Result<(), SharedError> {
