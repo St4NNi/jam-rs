@@ -44,6 +44,7 @@ pub mod sketch;
 pub mod trace;
 mod trace_batch;
 mod trace_index;
+mod trace_postings;
 pub mod writer;
 pub use cli::handlers::{
     handle_bias_create_command, handle_bias_stats_command, handle_distance_command,

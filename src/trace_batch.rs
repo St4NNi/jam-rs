@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
-fn worker_cpu_ns() -> Option<u64> {
+pub(crate) fn worker_cpu_ns() -> Option<u64> {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -26,7 +26,7 @@ fn worker_cpu_ns() -> Option<u64> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn worker_cpu_ns() -> Option<u64> {
+pub(crate) fn worker_cpu_ns() -> Option<u64> {
     None
 }
 
