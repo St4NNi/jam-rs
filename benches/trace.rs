@@ -950,10 +950,19 @@ fn shared_prepare(criterion: &mut Criterion) {
     jam_rs::shared_pack::repack_shared_index(&v1_path, &v2_path).unwrap();
     jam_rs::shared_pack::repack_shared_cores(&v2_path, &v3_path).unwrap();
     jam_rs::shared_pack::add_shared_core_filter(&v3_path, &v4_path, usize::MAX).unwrap();
+    let all_v1 = directory.path().join("prepare-all.shared");
+    let all_v2 = directory.path().join("prepare-all-packed.shared");
+    let all_v3 = directory.path().join("prepare-all-compact.shared");
+    let all_v4 = directory.path().join("prepare-all-filtered.shared");
+    build_shared_index(directory.path().join("target.jidx"), &all_v1, 1).unwrap();
+    jam_rs::shared_pack::repack_shared_index(&all_v1, &all_v2).unwrap();
+    jam_rs::shared_pack::repack_shared_cores(&all_v2, &all_v3).unwrap();
+    jam_rs::shared_pack::add_shared_core_filter(&all_v3, &all_v4, usize::MAX).unwrap();
     let engines = [
         ("v1", TraceEngine::open_shared(v1_path, None).unwrap()),
         ("v3", TraceEngine::open_shared(v3_path, None).unwrap()),
         ("v4", TraceEngine::open_shared(v4_path, None).unwrap()),
+        ("v4all", TraceEngine::open_shared(all_v4, None).unwrap()),
     ];
     let present_2k = sequence(2_000);
     let absent_2k = sequence_from_state(2_000, 101);
@@ -971,7 +980,13 @@ fn shared_prepare(criterion: &mut Criterion) {
             + 2 * std::mem::size_of::<jam_rs::shared_reader::SharedGroup>());
     let below_boundary = sequence_from_state(boundary - boundary / 100 + 14, 113);
     let above_boundary = sequence_from_state(boundary + boundary / 100 + 14, 127);
+    let repeated_present = sequence(127)
+        .into_iter()
+        .cycle()
+        .take(64_000)
+        .collect::<Vec<_>>();
     let workloads = [
+        ("64kb/repeated/linear", repeated_present, false),
         ("boundary/below/linear", below_boundary, false),
         ("boundary/above/linear", above_boundary, false),
         ("2kb/present/linear", present_2k, false),
@@ -1008,6 +1023,15 @@ fn shared_prepare(criterion: &mut Criterion) {
             } else {
                 format!("{format}/{name}")
             };
+            if format.starts_with("v4") {
+                group.bench_function(format!("{benchmark}/directory"), |bencher| {
+                    bencher.iter(|| {
+                        engine
+                            .benchmark_prepare_directory(black_box(query), black_box(config))
+                            .unwrap()
+                    })
+                });
+            }
             group.bench_function(benchmark, |bencher| {
                 bencher.iter(|| {
                     engine

@@ -3257,6 +3257,41 @@ fn binary_fuse_shared_ranges_preserve_complete_exact_evidence() {
             .unwrap()
             .unwrap();
         assert_eq!(resolved.groups.len(), expected.len());
+        let crate::trace_index::TraceIndex::Shared(reader) = &index else {
+            unreachable!()
+        };
+        if let Some(operation) = reader.core_operation().unwrap() {
+            let survivors = cores
+                .into_iter()
+                .filter(|&core| operation.screen(core).unwrap().1)
+                .collect::<Vec<_>>();
+            let probes = reader.stats().filter_requests;
+            let screened = crate::trace_batch::prepare_screened_cores(
+                &index,
+                survivors.iter().copied(),
+                survivors.len(),
+                false,
+                &operation,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(screened.groups, resolved.groups);
+            assert_eq!(reader.stats().filter_requests, probes);
+            let other = crate::trace_index::TraceIndex::Shared(Box::new(
+                SharedReader::open(&filtered).unwrap(),
+            ));
+            assert!(
+                crate::trace_batch::prepare_screened_cores(
+                    &other,
+                    survivors.iter().copied(),
+                    survivors.len(),
+                    false,
+                    &operation
+                )
+                .is_err()
+            );
+            operation.finish().unwrap();
+        }
     }
 }
 
@@ -3441,6 +3476,20 @@ fn early_core_screening_counts_attempts_and_preserves_late_results() {
         .resolve_sorted_cores_into(&[0, TARGET_CORE, TARGET_CORE + 1], &mut output)
         .unwrap();
     assert_eq!(output.len(), 3);
+    let operation = reader.core_operation().unwrap().unwrap();
+    let positive = (32..16_384)
+        .find(|&core| operation.screen(core).unwrap().1)
+        .unwrap();
+    operation
+        .resolve_sorted_cores_into(&[positive], &mut output)
+        .unwrap();
+    assert!(output.is_empty());
+    let mut changed = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&filtered)
+        .unwrap();
+    std::io::Write::write_all(&mut changed, &[0]).unwrap();
+    assert!(operation.finish().is_err());
 }
 
 #[test]

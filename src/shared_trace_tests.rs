@@ -268,6 +268,168 @@ fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
 }
 
 #[test]
+fn extraction_screening_matches_filter_free_results_for_mixed_queries() {
+    let directory = tempfile::tempdir().unwrap();
+    let target = xorshift_dna(0x1234_5678_9abc_def0, 768);
+    let reference = directory.path().join("reference.jidx");
+    let mut writer = JidxWriter::new(
+        &reference,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 1,
+            jam_sha256: [1; 32],
+            manifest_sha256: [2; 32],
+        },
+    )
+    .unwrap();
+    writer
+        .begin_metagenome(write_bgzf(directory.path(), "target", &target))
+        .unwrap();
+    writer
+        .begin_contig(ContigInput {
+            name: "contig".into(),
+            length: target.len() as u64,
+            fasta_offset: 8,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+    let repeat_target = vec![b'A'; 192];
+    writer
+        .begin_metagenome(write_bgzf(
+            directory.path(),
+            "z-repeat-target",
+            &repeat_target,
+        ))
+        .unwrap();
+    writer
+        .begin_contig(ContigInput {
+            name: "contig".into(),
+            length: repeat_target.len() as u64,
+            fasta_offset: 8,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+    writer.finish().unwrap();
+
+    let shared = directory.path().join("target.shared");
+    build_shared_index(&reference, &shared, 1).unwrap();
+    let packed = directory.path().join("target.packed.shared");
+    crate::shared_pack::repack_shared_index(&shared, &packed).unwrap();
+    let compact = directory.path().join("target.compact.shared");
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let filtered = directory.path().join("target.filtered.shared");
+    crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+
+    let reverse = reverse_complement(&target);
+    let circular = [target[600..].to_vec(), target[..600].to_vec()].concat();
+    let repeated_present = repeat_target;
+    let repeated_absent = vec![b'C'; 768];
+    let sparse = xorshift_dna(0xfedc_ba98_7654_3210, 2_048);
+    let ambiguous = [
+        target[..256].to_vec(),
+        vec![b'N'; 64],
+        target[512..].to_vec(),
+    ]
+    .concat();
+    let queries = vec![
+        ("present".to_owned(), target),
+        ("reverse".to_owned(), reverse),
+        ("circular".to_owned(), circular),
+        ("repeated-present".to_owned(), repeated_present),
+        ("repeated-absent".to_owned(), repeated_absent),
+        ("sparse".to_owned(), sparse),
+        ("ambiguous".to_owned(), ambiguous),
+        ("short".to_owned(), b"ACGTACGTACGTAC".to_vec()),
+    ];
+    let circular_flags = [false, false, true, false, false, false, false, false];
+    let config = TraceConfig {
+        use_sketch: false,
+        circular: false,
+        ..TraceConfig::default()
+    };
+    let association_engine = TraceEngine::open_shared_observed(&filtered, None, true).unwrap();
+    for ((_, query), &circular) in queries.iter().zip(&circular_flags) {
+        association_engine.assert_directory_associations(query, TraceConfig { circular, ..config });
+    }
+    let control = TraceEngine::open_shared_observed(&compact, None, true).unwrap();
+    let body = |path: &std::path::Path| {
+        crate::shared_file::SharedFile::open(path, false)
+            .unwrap()
+            .header
+            .body_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let control_body = body(&compact);
+    let filtered_body = body(&filtered);
+    let expected = control
+        .search_batch_topologies(&queries, config, &circular_flags)
+        .unwrap()
+        .into_iter()
+        .map(|result| {
+            let mut result = without_read_accounting(result);
+            assert_eq!(result.index.body_sha256, control_body);
+            result.index.body_sha256 = filtered_body.clone();
+            result
+        })
+        .collect::<Vec<_>>();
+    let control_stats = control.batch_stats();
+
+    for workers in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap();
+        let engine = TraceEngine::open_shared_observed(&filtered, None, true).unwrap();
+        let actual = pool
+            .install(|| {
+                engine
+                    .search_batch_topologies(&queries, config, &circular_flags)
+                    .unwrap()
+            })
+            .into_iter()
+            .map(without_read_accounting)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "thread count {workers}");
+
+        let stats = engine.batch_stats();
+        assert_eq!(
+            stats.query_core_occurrences,
+            control_stats.query_core_occurrences
+        );
+        assert_eq!(
+            stats.query_distinct_cores,
+            control_stats.query_distinct_cores
+        );
+        assert_eq!(
+            stats.extraction_occurrence_probes,
+            stats.query_core_occurrences
+        );
+        assert_eq!(
+            stats.extraction_covered_probes + stats.extraction_uncovered_probes,
+            stats.extraction_occurrence_probes
+        );
+        assert_eq!(
+            stats.tokens_rejected_before_sort + stats.surviving_tokens_sorted,
+            stats.extraction_occurrence_probes
+        );
+        assert!(stats.tokens_rejected_before_sort > 0);
+        assert!(stats.surviving_tokens_sorted > 0);
+        assert!(stats.surviving_distinct_query_cores > 0);
+        assert!(stats.surviving_distinct_query_cores <= stats.query_distinct_cores);
+        let reads = engine.shared_read_stats().unwrap();
+        assert_eq!(reads.filter_requests, stats.extraction_covered_probes);
+        assert_eq!(reads.filter_rejects, stats.tokens_rejected_before_sort);
+        assert_eq!(stats.core_requests_covered, 0);
+        assert_eq!(stats.core_requests_rejected, 0);
+    }
+}
+
+#[test]
 fn sparse_shared_queries_preserve_bounded_batches_and_fallback_counts() {
     const ISOLATED: &str = "JAM_SPARSE_QUERY_TEST_CHILD";
     if std::env::var_os(ISOLATED).is_none() {
