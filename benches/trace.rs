@@ -574,7 +574,15 @@ fn shared_core_absent(criterion: &mut Criterion) {
 #[cfg(feature = "bench-internals")]
 fn shared_prepare(criterion: &mut Criterion) {
     let (directory, _reader, _) = shared_lookup_fixture();
-    let engine = TraceEngine::open_shared(directory.path().join("target.shared"), None).unwrap();
+    let v1_path = directory.path().join("target.shared");
+    let v2_path = directory.path().join("prepare-packed.shared");
+    let v3_path = directory.path().join("prepare-compact.shared");
+    jam_rs::shared_pack::repack_shared_index(&v1_path, &v2_path).unwrap();
+    jam_rs::shared_pack::repack_shared_cores(&v2_path, &v3_path).unwrap();
+    let engines = [
+        ("v1", TraceEngine::open_shared(v1_path, None).unwrap()),
+        ("v3", TraceEngine::open_shared(v3_path, None).unwrap()),
+    ];
     let present_2k = sequence(2_000);
     let absent_2k = sequence_from_state(2_000, 101);
     let present_64k = sequence(64_000);
@@ -596,21 +604,28 @@ fn shared_prepare(criterion: &mut Criterion) {
     group.nresamples(1_000);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_secs(1));
-    for (name, query, circular) in workloads {
-        let config = TraceConfig {
-            circular,
-            use_sketch: false,
-            ..TraceConfig::default()
-        };
-        engine.benchmark_prepare(&query, config).unwrap();
-        group.throughput(Throughput::Bytes(query.len() as u64));
-        group.bench_function(name, |bencher| {
-            bencher.iter(|| {
-                engine
-                    .benchmark_prepare(black_box(&query), black_box(config))
-                    .unwrap()
-            })
-        });
+    for (format, engine) in &engines {
+        for (name, query, circular) in &workloads {
+            let config = TraceConfig {
+                circular: *circular,
+                use_sketch: false,
+                ..TraceConfig::default()
+            };
+            engine.benchmark_prepare(query, config).unwrap();
+            group.throughput(Throughput::Bytes(query.len() as u64));
+            let benchmark = if *format == "v1" {
+                (*name).to_owned()
+            } else {
+                format!("{format}/{name}")
+            };
+            group.bench_function(benchmark, |bencher| {
+                bencher.iter(|| {
+                    engine
+                        .benchmark_prepare(black_box(query), black_box(config))
+                        .unwrap()
+                })
+            });
+        }
     }
     group.finish();
 }
@@ -624,6 +639,13 @@ fn shared_resolved_handle(criterion: &mut Criterion) {
     jam_rs::shared_pack::repack_shared_index(directory.path().join("target.shared"), &packed_path)
         .unwrap();
     let packed = SharedReader::open(packed_path).unwrap();
+    let compact_path = directory.path().join("resolved-compact.shared");
+    jam_rs::shared_pack::repack_shared_cores(
+        directory.path().join("resolved-packed.shared"),
+        &compact_path,
+    )
+    .unwrap();
+    let compact = SharedReader::open(compact_path).unwrap();
     let repeated_key = workloads
         .iter()
         .find(|(name, _)| *name == "high_multiplicity")
@@ -657,7 +679,11 @@ fn shared_resolved_handle(criterion: &mut Criterion) {
     group.nresamples(1_000);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_secs(1));
-    for (format, reader) in [("v1", &reference), ("packed", &packed)] {
+    for (format, reader) in [
+        ("v1", &reference),
+        ("packed", &packed),
+        ("v3", &compact),
+    ] {
         let repeated = reader.find(repeated_key).unwrap().unwrap();
         let members = reader.members(repeated).unwrap();
         assert_eq!(members.len(), 1);
@@ -708,10 +734,13 @@ fn shared_geometry(criterion: &mut Criterion) {
     let (directory, _reader, _) = shared_lookup_fixture();
     let v1_path = directory.path().join("target.shared");
     let v2_path = directory.path().join("geometry-packed.shared");
+    let v3_path = directory.path().join("geometry-compact.shared");
     jam_rs::shared_pack::repack_shared_index(&v1_path, &v2_path).unwrap();
+    jam_rs::shared_pack::repack_shared_cores(&v2_path, &v3_path).unwrap();
     let engines = [
         ("v1", TraceEngine::open_shared(v1_path, None).unwrap()),
         ("v2", TraceEngine::open_shared(v2_path, None).unwrap()),
+        ("v3", TraceEngine::open_shared(v3_path, None).unwrap()),
     ];
     let repeated = sequence(127);
     let exact = repeated[..64].to_vec();

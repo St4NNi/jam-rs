@@ -514,7 +514,7 @@ fn shared_trace_fixture(packed: bool, split: bool) {
     .into_iter()
     .map(without_read_accounting)
     .collect::<Vec<_>>();
-    for threads in [1, 4, 8] {
+    for threads in [1, 4, 8, 16] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
