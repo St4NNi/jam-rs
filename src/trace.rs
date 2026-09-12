@@ -12,8 +12,8 @@ use crate::query::{QueryEngine, QueryError, QuerySketch};
 use crate::range_source::S3Config;
 use crate::reader::ReaderError;
 use crate::trace_batch::{
-    SharedCoreLookups, SharedSeedLookups, TraceBatch, lookup_budget, lookup_bytes, prepare_cores,
-    prepare_lookup_with_cores,
+    SharedCoreLookups, SharedSeedLookups, TraceBatch, lookup_budget, lookup_bytes, phase_elapsed,
+    phase_stamp, prepare_cores, prepare_lookup_with_cores, prepare_screened_cores,
 };
 use crate::trace_index::{
     TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex, TraceSeed,
@@ -161,7 +161,18 @@ pub struct TraceBatchStats {
     pub unique_keys: u64,
     pub distinct_cores: u64,
     pub split_core_resolutions: u64,
+    pub phase_extraction_ns: [u64; 2],
+    pub phase_core_lookup_ns: [u64; 2],
+    pub phase_context_generation_ns: [u64; 2],
+    pub phase_context_lookup_ns: [u64; 2],
+    pub phase_downstream_ns: [u64; 2],
     pub query_core_occurrences: u64,
+    pub extraction_occurrence_probes: u64,
+    pub extraction_covered_probes: u64,
+    pub extraction_uncovered_probes: u64,
+    pub tokens_rejected_before_sort: u64,
+    pub surviving_tokens_sorted: u64,
+    pub surviving_distinct_query_cores: u64,
     pub query_context_associations: u64,
     pub query_distinct_context_requests: u64,
     pub query_distinct_cores: u64,
@@ -571,6 +582,56 @@ impl TraceEngine {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub fn benchmark_prepare_directory(
+        &self,
+        sequence: &[u8],
+        config: TraceConfig,
+    ) -> Result<impl Sized, TraceError> {
+        self.prepare_directory(sequence, config, true)
+    }
+
+    #[cfg(any(test, feature = "bench-internals"))]
+    fn prepare_directory(
+        &self,
+        sequence: &[u8],
+        config: TraceConfig,
+        compact: bool,
+    ) -> Result<PreparedQuery, TraceError> {
+        let scratch = compact
+            .then(|| reserve_query_tokens([sequence.len()], lookup_budget(&self.index)))
+            .flatten();
+        let mut prepared =
+            prepare_query_with_tokens("benchmark", sequence, config, 15, false, scratch.is_some())?;
+        self.prepare_shared_queries(
+            std::slice::from_mut(&mut prepared),
+            &[config.circular],
+            scratch,
+            None,
+        )?;
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn assert_directory_associations(&self, sequence: &[u8], config: TraceConfig) {
+        let actual = self.prepare("benchmark", sequence, config).unwrap();
+        for compact in [true, false] {
+            let expected = self.prepare_directory(sequence, config, compact).unwrap();
+            assert_eq!(
+                actual.positions_by_key.core_occurrences,
+                expected.positions_by_key.core_occurrences
+            );
+            assert_eq!(
+                actual.positions_by_key.core_distinct,
+                expected.positions_by_key.core_distinct
+            );
+            assert_eq!(
+                actual.positions_by_key.iter().collect::<Vec<_>>(),
+                expected.positions_by_key.iter().collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub fn benchmark_posting_preparation(
         &self,
         keys: &[u64],
@@ -648,20 +709,27 @@ impl TraceEngine {
             .is_shared()
             .then(|| reserve_query_tokens([sequence.len()], lookup_budget(&self.index)))
             .flatten();
-        let mut prepared = prepare_query_with_tokens(
+        let operation = self.extraction_operation(scratch.is_some())?;
+        let mut prepared = prepare_query_screened(
             query_id,
             sequence,
             config,
             self.index.k(),
             self.index.rescue_k15(),
             scratch.is_some(),
+            operation.as_ref(),
+            self.observed,
         )?;
         if self.index.is_shared() {
             self.prepare_shared_queries(
                 std::slice::from_mut(&mut prepared),
                 &[config.circular],
                 scratch,
+                operation.as_ref(),
             )?;
+            if let Some(operation) = operation {
+                operation.finish()?;
+            }
         } else {
             self.record_prepared(&prepared, config.circular);
         }
@@ -672,12 +740,29 @@ impl TraceEngine {
         Ok(prepared)
     }
 
+    fn extraction_operation(
+        &self,
+        admitted: bool,
+    ) -> Result<Option<crate::shared_reader::SharedCoreOperation<'_>>, TraceError> {
+        match &self.index {
+            TraceIndex::Shared(reader) if admitted => Ok(reader.core_operation()?),
+            _ => Ok(None),
+        }
+    }
+
     fn prepare_shared_queries(
         &self,
         prepared: &mut [PreparedQuery],
         circular: &[bool],
         mut scratch: Option<CacheReservation<'static>>,
+        operation: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
     ) -> Result<(), TraceError> {
+        let core_phase = phase_stamp();
+        if let Some(operation) = operation {
+            for query in prepared.iter() {
+                operation.record(query.positions_by_key.occurrence_probes);
+            }
+        }
         if self.observed {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.query_token_reserved_peak_bytes = stats.query_token_reserved_peak_bytes.max(
@@ -699,6 +784,20 @@ impl TraceEngine {
                 .ok_or(TraceError::Invalid("query token reservation"))?;
             scratch.retain(bytes);
         }
+        if self.observed {
+            let mut stats = self.batch_stats.lock().unwrap();
+            for query in prepared.iter() {
+                let positions = &query.positions_by_key;
+                let probes = positions.occurrence_probes;
+                stats.extraction_occurrence_probes += probes.attempted as u64;
+                stats.extraction_covered_probes += probes.covered as u64;
+                stats.extraction_uncovered_probes += probes.uncovered as u64;
+                stats.tokens_rejected_before_sort += probes.rejected as u64;
+                stats.surviving_tokens_sorted +=
+                    positions.tokens.as_ref().map_or(0, Vec::len) as u64;
+                stats.surviving_distinct_query_cores += positions.directory.len() as u64;
+            }
+        }
         let count = prepared
             .iter()
             .try_fold(0usize, |sum, query| {
@@ -708,7 +807,12 @@ impl TraceEngine {
         let keys = prepared
             .iter()
             .flat_map(|query| query.positions_by_key.keys().map(|&key| key as u32));
-        let cores = prepare_cores(&self.index, keys, count, self.observed)?;
+        let cores = match operation {
+            Some(operation) => {
+                prepare_screened_cores(&self.index, keys, count, self.observed, operation)?
+            }
+            None => prepare_cores(&self.index, keys, count, self.observed)?,
+        };
         if self.observed && cores.is_none() {
             self.batch_stats.lock().unwrap().core_lookup_fallbacks += 1;
         }
@@ -791,7 +895,15 @@ impl TraceEngine {
             .par_iter_mut()
             .try_for_each(|query| query.positions_by_key.materialize_tokens())?;
         drop(scratch);
-        prepared
+        if core_phase.is_some() {
+            let elapsed = phase_elapsed(core_phase);
+            let mut stats = self.batch_stats.lock().unwrap();
+            for (total, value) in stats.phase_core_lookup_ns.iter_mut().zip(elapsed) {
+                *total += value;
+            }
+        }
+        let context_phase = phase_stamp();
+        let result = prepared
             .par_iter_mut()
             .zip(circular)
             .try_for_each(|(query, &circular)| {
@@ -869,7 +981,15 @@ impl TraceEngine {
                     sha256(&[query.lookup_identity.as_slice(), b"shared-contexts-v1"].concat());
                 self.record_prepared(query, circular);
                 Ok(())
-            })
+            });
+        if context_phase.is_some() {
+            let elapsed = phase_elapsed(context_phase);
+            let mut stats = self.batch_stats.lock().unwrap();
+            for (total, value) in stats.phase_context_generation_ns.iter_mut().zip(elapsed) {
+                *total += value;
+            }
+        }
+        result
     }
 
     fn record_prepared(&self, prepared: &PreparedQuery, circular: bool) {
@@ -938,6 +1058,7 @@ impl TraceEngine {
                 })
                 .collect();
         }
+        let extraction_phase = phase_stamp();
         let scratch = self
             .index
             .is_shared()
@@ -948,19 +1069,22 @@ impl TraceEngine {
                 )
             })
             .flatten();
+        let operation = self.extraction_operation(scratch.is_some())?;
         let mut prepared = queries
             .par_iter()
             .zip(circular)
             .enumerate()
             .map(|(ordinal, ((id, sequence), &circular))| {
                 let mut prepared = if self.index.is_shared() {
-                    prepare_query_with_tokens(
+                    prepare_query_screened(
                         id.as_str(),
                         sequence,
                         TraceConfig { circular, ..config },
                         15,
                         false,
                         scratch.is_some(),
+                        operation.as_ref(),
+                        self.observed,
                     )?
                 } else {
                     self.prepare(id.as_str(), sequence, TraceConfig { circular, ..config })?
@@ -969,14 +1093,33 @@ impl TraceEngine {
                 Ok::<_, TraceError>(prepared)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if extraction_phase.is_some() {
+            let elapsed = phase_elapsed(extraction_phase);
+            let mut stats = self.batch_stats.lock().unwrap();
+            for (total, value) in stats.phase_extraction_ns.iter_mut().zip(elapsed) {
+                *total += value;
+            }
+        }
         if self.index.is_shared() {
-            self.prepare_shared_queries(&mut prepared, circular, scratch)?;
+            self.prepare_shared_queries(&mut prepared, circular, scratch, operation.as_ref())?;
+            if let Some(operation) = operation {
+                operation.finish()?;
+            }
             if let Some(started) = started {
                 self.batch_stats.lock().unwrap().seed_generation_ns +=
                     started.elapsed().as_nanos() as u64;
             }
         }
+        let lookup_phase = phase_stamp();
         let batch = self.prepare_batch(&prepared)?;
+        if lookup_phase.is_some() {
+            let elapsed = phase_elapsed(lookup_phase);
+            let mut stats = self.batch_stats.lock().unwrap();
+            for (total, value) in stats.phase_context_lookup_ns.iter_mut().zip(elapsed) {
+                *total += value;
+            }
+        }
+        let downstream_phase = phase_stamp();
         let results = prepared
             .into_par_iter()
             .zip(circular)
@@ -985,6 +1128,13 @@ impl TraceEngine {
             })
             .collect();
         self.record_batch(&batch);
+        if downstream_phase.is_some() {
+            let elapsed = phase_elapsed(downstream_phase);
+            let mut stats = self.batch_stats.lock().unwrap();
+            for (total, value) in stats.phase_downstream_ns.iter_mut().zip(elapsed) {
+                *total += value;
+            }
+        }
         if let Some(started) = started {
             self.batch_stats.lock().unwrap().search_critical_ns +=
                 started.elapsed().as_nanos() as u64;
@@ -2212,6 +2362,7 @@ struct QueryPositions {
     tokens: Option<Vec<u64>>,
     core_occurrences: usize,
     core_distinct: usize,
+    occurrence_probes: crate::shared_reader::CoreRequestCounts,
     nested: Vec<QuerySeed>,
     directory: Vec<QueryKeyRange>,
 }
@@ -2237,6 +2388,7 @@ impl QueryPositions {
         Self {
             core_occurrences: core.len(),
             core_distinct: directory.len(),
+            occurrence_probes: Default::default(),
             core,
             tokens: None,
             nested: Vec::new(),
@@ -2244,15 +2396,58 @@ impl QueryPositions {
         }
     }
 
+    #[cfg(any(test, feature = "bench-internals"))]
     fn compact(query: &[u8], circular: bool) -> Option<Self> {
+        Self::compact_screened(query, circular, None, false)
+    }
+
+    fn compact_screened(
+        query: &[u8],
+        circular: bool,
+        operation: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
+        observed: bool,
+    ) -> Option<Self> {
         u32::try_from(query.len().saturating_sub(1)).ok()?;
         let mut tokens = Vec::new();
         tokens.try_reserve_exact(query.len()).ok()?;
         if tokens.capacity() > query.len() {
             return None;
         }
+        let mut original_keys = Vec::<u32>::new();
+        let _diagnostic_reservation = if observed && operation.is_some() {
+            let bytes = query.len().checked_mul(std::mem::size_of::<u32>())?;
+            let reservation = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes)?;
+            original_keys.try_reserve_exact(query.len()).ok()?;
+            if original_keys.capacity() > query.len() {
+                return None;
+            }
+            Some(reservation)
+        } else {
+            None
+        };
+        let mut occurrences = 0;
+        let mut probes = crate::shared_reader::CoreRequestCounts::default();
+        let mut retain = |core: u32| {
+            occurrences += 1;
+            let Some(operation) = operation else {
+                return Some(true);
+            };
+            if observed {
+                original_keys.push(core);
+            }
+            let (covered, keep) = operation.screen(core).ok()?;
+            probes.attempted += 1;
+            probes.covered += usize::from(covered);
+            probes.uncovered += usize::from(!covered);
+            probes.rejected += usize::from(!keep);
+            probes.retained += usize::from(keep);
+            Some(keep)
+        };
         if query.len() >= 15 {
             for (position, key, orientation) in query.bit_kmers(15, true) {
+                if !retain(key.0 as u32)? {
+                    continue;
+                }
                 tokens.push(
                     QuerySeed {
                         packed_key: key.0,
@@ -2268,6 +2463,9 @@ impl QueryPositions {
                 boundary[..14].copy_from_slice(&query[start..]);
                 boundary[14..].copy_from_slice(&query[..14]);
                 for (position, key, orientation) in boundary.bit_kmers(15, true) {
+                    if !retain(key.0 as u32)? {
+                        continue;
+                    }
                     tokens.push(
                         QuerySeed {
                             packed_key: key.0,
@@ -2293,10 +2491,20 @@ impl QueryPositions {
                 entry
             })
             .collect();
+        let core_distinct = if observed && operation.is_some() {
+            original_keys.sort_unstable();
+            original_keys.dedup();
+            original_keys.len()
+        } else if operation.is_none() {
+            directory.len()
+        } else {
+            0
+        };
         Some(Self {
             core: Vec::new(),
-            core_occurrences: tokens.len(),
-            core_distinct: directory.len(),
+            core_occurrences: occurrences,
+            core_distinct,
+            occurrence_probes: probes,
             tokens: Some(tokens),
             nested: Vec::new(),
             directory,
@@ -2775,6 +2983,22 @@ fn prepare_query_with_tokens(
     rescue_k15: bool,
     compact: bool,
 ) -> Result<PreparedQuery, TraceError> {
+    prepare_query_screened(
+        query_id, sequence, config, k, rescue_k15, compact, None, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_query_screened(
+    query_id: impl Into<String>,
+    sequence: &[u8],
+    config: TraceConfig,
+    k: u8,
+    rescue_k15: bool,
+    compact: bool,
+    operation: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
+    observed: bool,
+) -> Result<PreparedQuery, TraceError> {
     validate_config(config)?;
     let query_id = query_id.into();
     if query_id.is_empty()
@@ -2791,7 +3015,7 @@ fn prepare_query_with_tokens(
     let query_length =
         u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?;
     let positions_by_key = if compact && k == 15 && !rescue_k15 {
-        QueryPositions::compact(&query, config.circular)
+        QueryPositions::compact_screened(&query, config.circular, operation, observed)
     } else {
         None
     };

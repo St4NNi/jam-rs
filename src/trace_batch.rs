@@ -10,6 +10,42 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+pub(crate) fn phase_cost_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("JAM_PHASE_COST").is_some_and(|v| v == "1"))
+}
+
+pub(crate) fn phase_stamp() -> Option<(Instant, u64)> {
+    if !phase_cost_enabled() {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut time = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: time is initialized and writable for this process CPU sample.
+        if unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut time) } == 0 {
+            return Some((
+                Instant::now(),
+                time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64,
+            ));
+        }
+    }
+    None
+}
+
+pub(crate) fn phase_elapsed(start: Option<(Instant, u64)>) -> [u64; 2] {
+    match (start, phase_stamp()) {
+        (Some((wall, cpu)), Some((end_wall, end_cpu))) => [
+            end_wall.duration_since(wall).as_nanos() as u64,
+            end_cpu.saturating_sub(cpu),
+        ],
+        _ => [0; 2],
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn worker_cpu_ns() -> Option<u64> {
     let mut time = libc::timespec {
@@ -196,7 +232,7 @@ pub(crate) fn prepare_cores(
     request_count: usize,
     observed: bool,
 ) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
-    prepare_cores_inner(index, requests, request_count, observed, true)
+    prepare_cores_inner(index, requests, request_count, observed, true, None)
 }
 
 #[cfg(any(test, feature = "bench-internals"))]
@@ -206,7 +242,30 @@ pub(crate) fn prepare_cores_late(
     request_count: usize,
     observed: bool,
 ) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
-    prepare_cores_inner(index, requests, request_count, observed, false)
+    prepare_cores_inner(index, requests, request_count, observed, false, None)
+}
+
+pub(crate) fn prepare_screened_cores(
+    index: &TraceIndex,
+    requests: impl IntoIterator<Item = u32>,
+    request_count: usize,
+    observed: bool,
+    operation: &crate::shared_reader::SharedCoreOperation<'_>,
+) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
+    let TraceIndex::Shared(reader) = index else {
+        return Err(TraceError::Invalid("screened core index"));
+    };
+    if !operation.belongs_to(reader) {
+        return Err(TraceError::Invalid("screened core reader"));
+    }
+    prepare_cores_inner(
+        index,
+        requests,
+        request_count,
+        observed,
+        true,
+        Some(operation),
+    )
 }
 
 fn prepare_cores_inner(
@@ -215,6 +274,7 @@ fn prepare_cores_inner(
     request_count: usize,
     observed: bool,
     early: bool,
+    screened: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
 ) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
     let TraceIndex::Shared(reader) = index else {
         return Ok(None);
@@ -237,11 +297,12 @@ fn prepare_cores_inner(
     {
         return Ok(None);
     }
-    let operation = if early {
+    let owned_operation = if early && screened.is_none() {
         reader.core_operation()?
     } else {
         None
     };
+    let operation = screened.or(owned_operation.as_ref());
     let mut counts = crate::shared_reader::CoreRequestCounts::default();
     for key in requests {
         if counts.attempted == request_count {
@@ -249,7 +310,8 @@ fn prepare_cores_inner(
         }
         counts.attempted += 1;
         let (covered, keep) = match &operation {
-            Some(operation) => operation.screen(key)?,
+            Some(operation) if screened.is_none() => operation.screen(key)?,
+            Some(_) => (false, true),
             None => (false, true),
         };
         counts.covered += usize::from(covered);
@@ -441,7 +503,7 @@ fn prepare_cores_inner(
     drop(keys);
     drop(key_reservation);
     drop(ranges);
-    if let Some(operation) = operation {
+    if let Some(operation) = owned_operation {
         operation.finish()?;
     }
     if index.cache_file_identity()? != Some(identity) {

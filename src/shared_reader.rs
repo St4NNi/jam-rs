@@ -196,6 +196,10 @@ pub(crate) struct SharedCoreOperation<'a> {
 }
 
 impl SharedCoreOperation<'_> {
+    pub(crate) fn belongs_to(&self, reader: &SharedReader) -> bool {
+        std::ptr::eq(self.reader, reader)
+    }
+
     pub(crate) fn screen(&self, core: u32) -> Result<(bool, bool), SharedError> {
         use xorf::Filter;
         if core & !CORE_MASK != 0 {

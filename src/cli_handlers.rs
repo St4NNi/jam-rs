@@ -84,7 +84,9 @@ pub(crate) struct TraceArgs {
 pub(crate) const SHARED_BATCH_QUERY_BASES: usize = 640_000;
 
 pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
+    use crate::trace_batch::{phase_cost_enabled, phase_elapsed, phase_stamp};
     let invocation_started = std::time::Instant::now();
+    let invocation_phase = phase_stamp();
     let shared_input = matches!(&args.input, TraceInput::Shared { .. });
     let query_topology_header = matches!(
         &args.input,
@@ -148,7 +150,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         } => Engine::Shard(Box::new(TraceEngine::open_shared_observed(
             path,
             args.s3,
-            read_stats.is_some(),
+            read_stats.is_some() && !phase_cost_enabled(),
         )?)),
     };
     if args.audit_index {
@@ -162,11 +164,17 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
         Engine::Shard(_) => rayon::current_num_threads(),
         Engine::Collection(_) => rayon::current_num_threads().clamp(1, 4),
     };
+    let setup_cpu_ns = phase_elapsed(invocation_phase)[1];
+    let mut parsing_cpu_ns = 0;
+    let mut search_cpu_ns = 0;
+    let mut output_cpu_ns = 0;
+    let parsing_phase = phase_stamp();
     let startup_ended = std::time::Instant::now();
     let startup_ns = startup_ended.duration_since(invocation_started).as_nanos() as u64;
     let parsing_started = read_stats.as_ref().map(|_| startup_ended);
     let mut input = parse_fastx_file(&args.query)?;
     let mut parsing_ns = parsing_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+    parsing_cpu_ns += phase_elapsed(parsing_phase)[1];
     let mut output_ns = 0u64;
     let mut search_ns = 0u64;
     let mut temporary = tempfile::Builder::new()
@@ -177,6 +185,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     {
         let mut output = BufWriter::new(temporary.as_file_mut());
         loop {
+            let parsing_phase = phase_stamp();
             let parsing_started = read_stats.as_ref().map(|_| std::time::Instant::now());
             let mut queries = Vec::with_capacity(batch_size);
             let mut topologies = Vec::with_capacity(batch_size);
@@ -242,11 +251,13 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                 topologies.push(circular);
             }
             parsing_ns += parsing_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+            parsing_cpu_ns += phase_elapsed(parsing_phase)[1];
             if queries.is_empty() {
                 break;
             }
             match &engine {
                 Engine::Shard(engine) => {
+                    let search_phase = phase_stamp();
                     let search_started = read_stats.as_ref().map(|_| std::time::Instant::now());
                     let results = if query_topology_header {
                         engine.search_batch_topologies(&queries, args.config, &topologies)?
@@ -255,6 +266,8 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                     };
                     search_ns +=
                         search_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+                    search_cpu_ns += phase_elapsed(search_phase)[1];
+                    let output_phase = phase_stamp();
                     let output_started = read_stats.as_ref().map(|_| std::time::Instant::now());
                     for result in results {
                         serde_json::to_writer(&mut output, &result)?;
@@ -262,6 +275,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                     }
                     output_ns +=
                         output_started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+                    output_cpu_ns += phase_elapsed(output_phase)[1];
                 }
                 Engine::Collection(engine) => {
                     for result in engine.search_batch(&queries, args.config)? {
@@ -288,6 +302,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     }
     sync_directory(parent)?;
     let publication_ns = invocation_started.elapsed().as_nanos() as u64;
+    let publication_cpu_ns = phase_elapsed(invocation_phase)[1];
     if let Some(path) = read_stats {
         let Engine::Shard(engine) = &engine else {
             unreachable!()
@@ -304,6 +319,9 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
             &serde_json::json!({
                 "format": "jam-shared-read-stats-v1", "index": engine.shared_read_stats(), "batch": engine.batch_stats(),
                 "parsing_ns": parsing_ns, "output_ns": output_ns,
+                "phase_cost_mode": phase_cost_enabled(),
+                "phase_cost_semantics": "phase arrays are [elapsed_ns, process_cpu_ns] at disjoint batch barriers; core lookup includes token materialization; downstream combines membership, positions, candidates, regions, sequence access, alignment and results; normalization is in extraction; native mode has no phase samples",
+                "top_level_cpu_ns": { "setup": setup_cpu_ns, "parsing": parsing_cpu_ns, "search": search_cpu_ns, "result_serialization": output_cpu_ns, "finalization_and_other": publication_cpu_ns.saturating_sub(setup_cpu_ns + parsing_cpu_ns + search_cpu_ns + output_cpu_ns), "through_result_publication": publication_cpu_ns },
                 "top_level_ns": { "setup": startup_ns, "parsing": parsing_ns, "search": search_ns, "result_serialization": output_ns, "finalization_and_other": publication_ns.saturating_sub(startup_ns + parsing_ns + search_ns + output_ns), "through_result_publication": publication_ns },
                 "batch_limits": { "queries": 64, "query_bases": SHARED_BATCH_QUERY_BASES, "lookup_bytes": 134217728, "global_lookup_bytes": 268435456, "decoded_bgzf_bytes": 33554432, "concurrent_bgzf_reads": 4 },
                 "histogram_semantics": "16 base-2 bins starting at one, last bin at least 32768; reuse counts per-query distinct requests for an exact context; occurrence fanout counts positions per admitted positive context; totals are per lookup batch",
