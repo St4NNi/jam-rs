@@ -749,6 +749,64 @@ fn sorted_core_sparse_results_match_dense_lookup_and_bound_output() {
 }
 
 #[test]
+fn concentrated_absent_cores_visit_each_available_target_once() {
+    let (directory, reader, _) = fixture(0);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+
+    let prefix_start = TARGET_CORE >> 14 << 14;
+    let cores = (prefix_start..=TARGET_CORE + 1).collect::<Vec<_>>();
+    let keys = cores
+        .iter()
+        .copied()
+        .map(SharedKey::core)
+        .collect::<Vec<_>>();
+    let reference = SharedReader::open(&compact).unwrap();
+    let expected = reference
+        .find_many(&keys)
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+        .collect::<Vec<_>>();
+
+    let reader = SharedReader::open_observed(&compact).unwrap();
+    let before = reader.stats();
+    let mut actual = Vec::new();
+    reader
+        .resolve_sorted_cores_into(&cores, &mut actual)
+        .unwrap();
+    let after = reader.stats();
+    assert_eq!(
+        actual
+            .iter()
+            .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        after.core_view_comparisons - before.core_view_comparisons,
+        2
+    );
+    assert_eq!(
+        after.core_descriptor_inspections - before.core_descriptor_inspections,
+        2
+    );
+    assert_eq!(
+        after.core_resolutions_present - before.core_resolutions_present,
+        2
+    );
+    assert_eq!(
+        after.core_resolutions_absent - before.core_resolutions_absent,
+        cores.len() as u64 - 2
+    );
+}
+
+#[test]
 fn compact_core_rows_decode_narrow_and_wide_values_exactly() {
     let hot = 7u32.to_le_bytes();
     let mut narrow = [0u8; 13];

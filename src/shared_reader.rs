@@ -868,31 +868,35 @@ impl SharedReader {
     ) -> Result<(), SharedError> {
         let view = self.checked_core_view(checked, checked.first..checked.end)?;
         let mut ordinal = checked.first;
-        for &core in cores {
-            let mut found = None;
-            while ordinal < checked.end {
-                let candidate = self.core_view_key(&view, ordinal)?;
-                match candidate.cmp(&core) {
-                    std::cmp::Ordering::Less => ordinal += 1,
-                    std::cmp::Ordering::Equal => {
-                        found = Some(ordinal);
-                        ordinal += 1;
-                        break;
-                    }
-                    std::cmp::Ordering::Greater => break,
+        let mut request = 0;
+        while request < cores.len() && ordinal < checked.end {
+            let candidate = self.core_view_key(&view, ordinal)?;
+            if cores[request] < candidate {
+                let skipped = cores[request..].partition_point(|&core| core < candidate);
+                self.observe(&self.core_resolutions_absent, skipped as u64);
+                request += skipped;
+                if request == cores.len() {
+                    break;
                 }
             }
-            if let Some(ordinal) = found {
-                let row = self.core_row(ordinal)?;
-                if row.core != core {
-                    return Err(SharedError::Invalid("core row"));
-                }
-                self.observe(&self.core_resolutions_present, 1);
-                self.append_core_group(core, ordinal, row, maximum_results, output)?;
-            } else {
-                self.observe(&self.core_resolutions_absent, 1);
+            if candidate < cores[request] {
+                ordinal += 1;
+                continue;
             }
+            let core = cores[request];
+            let row = self.core_row(ordinal)?;
+            if row.core != core {
+                return Err(SharedError::Invalid("core row"));
+            }
+            self.observe(&self.core_resolutions_present, 1);
+            self.append_core_group(core, ordinal, row, maximum_results, output)?;
+            request += 1;
+            ordinal += 1;
         }
+        self.observe(
+            &self.core_resolutions_absent,
+            (cores.len() - request) as u64,
+        );
         Ok(())
     }
 
