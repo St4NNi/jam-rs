@@ -807,7 +807,7 @@ fn validate_cold(hot: &OwnerHotBlock, cold: &[u8]) -> Result<(), OwnerPostingsEr
         return Err(invalid("cold length"));
     }
     if let Some(last) = cold.last()
-        && hot.cold_bits % 8 != 0
+        && !hot.cold_bits.is_multiple_of(8)
         && last & !((1u8 << (hot.cold_bits % 8)) - 1) != 0
     {
         return Err(invalid("cold padding"));
@@ -817,7 +817,7 @@ fn validate_cold(hot: &OwnerHotBlock, cold: &[u8]) -> Result<(), OwnerPostingsEr
 
 fn validate_tail_padding(bytes: &[u8], bits: u64) -> Result<(), OwnerPostingsError> {
     if let Some(last) = bytes.last()
-        && bits % 8 != 0
+        && !bits.is_multiple_of(8)
         && last & !((1u8 << (bits % 8)) - 1) != 0
     {
         return Err(invalid("cold padding"));
@@ -866,12 +866,11 @@ fn validate_anchor_ordinals(
     }
     for member in members {
         let ordinal = member.member_ordinal;
-        if ordinal.is_multiple_of(MEMBER_ANCHOR_STRIDE)
-            || member.occurrence_count > LONG_MEMBER_OCCURRENCES
+        if (ordinal.is_multiple_of(MEMBER_ANCHOR_STRIDE)
+            || member.occurrence_count > LONG_MEMBER_OCCURRENCES)
+            && !accept(ordinal)
         {
-            if !accept(ordinal) {
-                return Ok(false);
-            }
+            return Ok(false);
         }
         if member.occurrence_count > LONG_MEMBER_OCCURRENCES {
             let after = ordinal
@@ -936,7 +935,7 @@ fn get_bit(bytes: &[u8], index: usize) -> bool {
 }
 
 fn validate_unused_bits(bytes: &[u8], bits: usize) -> Result<(), OwnerPostingsError> {
-    if bits % 8 != 0 && bytes.last().is_some_and(|last| last >> (bits % 8) != 0) {
+    if !bits.is_multiple_of(8) && bytes.last().is_some_and(|last| last >> (bits % 8) != 0) {
         return Err(invalid("bitmap padding"));
     }
     Ok(())

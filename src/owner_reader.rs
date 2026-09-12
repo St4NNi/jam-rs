@@ -331,10 +331,10 @@ impl OwnerReader {
 
 impl Drop for OwnerReader {
     fn drop(&mut self) {
-        if self.report_on_drop {
-            if let Ok(json) = serde_json::to_string(&self.read_snapshot()) {
-                eprintln!("owner_read_stats {json}");
-            }
+        if self.report_on_drop
+            && let Ok(json) = serde_json::to_string(&self.read_snapshot())
+        {
+            eprintln!("owner_read_stats {json}");
         }
     }
 }

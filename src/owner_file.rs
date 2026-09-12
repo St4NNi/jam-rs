@@ -832,10 +832,8 @@ impl OwnerFile {
         }
         self.verify_checksum_chain(index)?;
         self.verify_unchanged()?;
-        if self.file_identity.is_some() {
-            if word.fetch_or(mask, Ordering::Release) & mask == 0 {
-                self.observer.record_integrity(0, 0, 1, 0, 0);
-            }
+        if self.file_identity.is_some() && word.fetch_or(mask, Ordering::Release) & mask == 0 {
+            self.observer.record_integrity(0, 0, 1, 0, 0);
         }
         Ok(())
     }

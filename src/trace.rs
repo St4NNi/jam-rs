@@ -1208,7 +1208,7 @@ impl TraceEngine {
                     );
                 }
                 if let Some(lookups) = &mut lookups {
-                    lookups.cache_group(packed_key, index_seed, &documents);
+                    lookups.cache_group(packed_key, index_seed, documents);
                 }
             }
         }
