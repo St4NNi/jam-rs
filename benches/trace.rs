@@ -13,6 +13,7 @@ use std::fs::File;
 use std::hint::black_box;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 fn sequence(length: usize) -> Vec<u8> {
@@ -420,7 +421,9 @@ struct SharedCoreFixture {
     workloads: Vec<(&'static str, Vec<SharedKey>)>,
 }
 
-fn shared_core_absent_fixture() -> SharedCoreFixture {
+fn shared_core_absent_fixture() -> &'static SharedCoreFixture {
+    static FIXTURE: OnceLock<SharedCoreFixture> = OnceLock::new();
+    FIXTURE.get_or_init(|| {
     let directory = tempfile::tempdir().unwrap();
     let dna = sequence(1_050_000);
     let bgzf_path = directory.path().join("large-target.bgz");
@@ -519,6 +522,7 @@ fn shared_core_absent_fixture() -> SharedCoreFixture {
         ],
         workloads,
     }
+    })
 }
 
 fn shared_core_absent(criterion: &mut Criterion) {
@@ -532,9 +536,9 @@ fn shared_core_absent(criterion: &mut Criterion) {
         "shared_core_absent total kernel-only fixture setup: {:.3}s (excluded from lookup timing)",
         fixture_started.elapsed().as_secs_f64()
     );
-    for (name, keys) in &workloads {
+    for (name, keys) in workloads {
         let mut expected = None;
-        for (version, path, _) in &readers {
+        for (version, path, _) in readers {
             let observed = SharedReader::open_observed(path).unwrap();
             let actual = observed
                 .find_many(keys)
@@ -560,8 +564,8 @@ fn shared_core_absent(criterion: &mut Criterion) {
     group.nresamples(1_000);
     group.warm_up_time(Duration::from_millis(250));
     group.measurement_time(Duration::from_secs(1));
-    for (version, _, reader) in &readers {
-        for (name, keys) in &workloads {
+    for (version, _, reader) in readers {
+        for (name, keys) in workloads {
             group.throughput(Throughput::Elements(keys.len() as u64));
             group.bench_function(format!("{version}/{name}"), |bencher| {
                 bencher.iter(|| reader.find_many(black_box(keys)).unwrap())
@@ -570,6 +574,132 @@ fn shared_core_absent(criterion: &mut Criterion) {
     }
     group.finish();
 }
+
+#[cfg(feature = "bench-internals")]
+fn shared_core_search(criterion: &mut Criterion) {
+    let fixture = shared_core_absent_fixture();
+    let (_, path, reader) = fixture
+        .readers
+        .iter()
+        .find(|(version, _, _)| *version == "v3")
+        .unwrap();
+    let mut group = criterion.benchmark_group("shared_core_search");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, keys) in &fixture.workloads {
+        let cores = keys.iter().map(|key| key.core).collect::<Vec<_>>();
+        let dense = reader
+            .find_many(keys)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+            .collect::<Vec<_>>();
+        let sparse = reader
+            .benchmark_resolve_sorted_cores(&cores)
+            .unwrap()
+            .into_iter()
+            .map(|group| (group.key(), group.member_count(), group.occurrence_count()))
+            .collect::<Vec<_>>();
+        assert_eq!(sparse, dense, "{name}");
+
+        let fresh = SharedReader::open_observed(path).unwrap();
+        let fresh_results = fresh.benchmark_resolve_sorted_cores(&cores).unwrap();
+        black_box(fresh_results);
+        let stats = fresh.stats();
+        eprintln!(
+            "shared_core_search fresh-reader {name}: views={} comparisons={} payloads={} requested_bytes={} requested_pages={} authenticated_pages={}",
+            stats.core_view_creations,
+            stats.core_view_comparisons,
+            stats.core_descriptor_inspections,
+            stats.file.requested_bytes,
+            stats.file.requested_pages,
+            stats.file.authenticated_pages,
+        );
+
+        group.throughput(Throughput::Elements(keys.len() as u64));
+        group.bench_function(format!("{name}/dense_find_many"), |bencher| {
+            bencher.iter(|| reader.find_many(black_box(keys)).unwrap())
+        });
+        group.bench_function(format!("{name}/sparse_core_output"), |bencher| {
+            bencher.iter(|| {
+                reader
+                    .benchmark_resolve_sorted_cores(black_box(&cores))
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_core_search(_: &mut Criterion) {}
+
+#[cfg(feature = "bench-internals")]
+fn shared_posting_preparation(criterion: &mut Criterion) {
+    let fixture = shared_core_absent_fixture();
+    let (_, path, _) = fixture
+        .readers
+        .iter()
+        .find(|(version, _, _)| *version == "v3")
+        .unwrap();
+    let present = fixture
+        .workloads
+        .iter()
+        .find(|(name, _)| *name == "spread/present")
+        .unwrap()
+        .1
+        .iter()
+        .map(|key| key.core)
+        .collect::<Vec<_>>();
+    let engine = TraceEngine::open_shared(path, None).unwrap();
+    let workloads = [16usize, 256, 1024, 2048, 4096]
+        .map(|count| (count, sampled_present_cores(&present, count)));
+    eprintln!(
+        "shared_posting_preparation boundary: checked key resolution plus posting planning, member fill, position fill, and drop"
+    );
+    let mut group = criterion.benchmark_group("shared_posting_preparation");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (count, cores) in workloads {
+        let contexts = cores.into_iter().map(SharedKey::core).collect::<Vec<_>>();
+        let keys = contexts
+            .iter()
+            .map(|key| key.packed().unwrap())
+            .collect::<Vec<_>>();
+        let fresh_engine = TraceEngine::open_shared(path, None).unwrap();
+        let (retained, stats) = fresh_engine
+            .benchmark_posting_preparation(&keys, true, true)
+            .unwrap();
+        black_box(&retained);
+        drop(retained);
+        let fresh_reader = SharedReader::open_observed(path).unwrap();
+        black_box(fresh_reader.find_many(&contexts).unwrap());
+        eprintln!(
+            "shared_posting_preparation fresh-reader {count}: [member_tasks, position_tasks, member_wall_ns, position_wall_ns, member_cpu_ns, position_cpu_ns, member_rows, position_rows, scratch_bytes, retained_bytes, peak_parallel, plan_hash]={stats:?}; reader={:?}",
+            fresh_reader.stats(),
+        );
+
+        group.throughput(Throughput::Elements(keys.len() as u64));
+        for (mode, parallel) in [("serial", false), ("parallel", true)] {
+            group.bench_function(format!("{count}/{mode}"), |bencher| {
+                bencher.iter(|| {
+                    engine
+                        .benchmark_posting_preparation(black_box(&keys), black_box(parallel), false)
+                        .unwrap()
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_posting_preparation(_: &mut Criterion) {}
 
 #[cfg(feature = "bench-internals")]
 fn shared_prepare(criterion: &mut Criterion) {
@@ -908,6 +1038,8 @@ criterion_group!(
     owner_postings,
     shared_lookup,
     shared_core_absent,
+    shared_core_search,
+    shared_posting_preparation,
     shared_prepare,
     shared_resolved_handle,
     shared_geometry,

@@ -19,6 +19,7 @@ pub(crate) struct PostingExecution {
     pub(crate) retained_bytes: usize,
     pub(crate) peak_bytes: usize,
     pub(crate) complete: bool,
+    pub(crate) plan_ns: u64,
     pub(crate) membership_ns: u64,
     pub(crate) position_ns: u64,
     pub(crate) histogram: [u64; 16],
@@ -252,10 +253,47 @@ pub(crate) fn prepare_shared_postings(
     available: usize,
     observed: bool,
 ) -> Result<Option<PostingExecution>, TraceError> {
+    prepare_shared_postings_mode(reader, entries, postings, available, observed, None)
+}
+
+#[cfg(feature = "bench-internals")]
+pub(crate) fn benchmark_postings(
+    reader: &SharedReader,
+    entries: &[(u64, Option<TraceSeed>)],
+    postings: &mut [Option<BatchPosting>],
+    available: usize,
+    observed: bool,
+    parallel: bool,
+) -> Result<Option<PostingExecution>, TraceError> {
+    prepare_shared_postings_mode(
+        reader,
+        entries,
+        postings,
+        available,
+        observed,
+        Some(parallel),
+    )
+}
+
+fn prepare_shared_postings_mode(
+    reader: &SharedReader,
+    entries: &[(u64, Option<TraceSeed>)],
+    postings: &mut [Option<BatchPosting>],
+    available: usize,
+    observed: bool,
+    force_parallel: Option<bool>,
+) -> Result<Option<PostingExecution>, TraceError> {
     if entries.len() != postings.len() || postings.iter().any(Option::is_some) {
         return Err(TraceError::Invalid("posting slots"));
     }
-    let result = prepare_shared_postings_inner(reader, entries, postings, available, observed);
+    let result = prepare_shared_postings_inner(
+        reader,
+        entries,
+        postings,
+        available,
+        observed,
+        force_parallel,
+    );
     if result.is_err() {
         for posting in postings {
             *posting = None;
@@ -272,7 +310,9 @@ fn prepare_shared_postings_inner(
     postings: &mut [Option<BatchPosting>],
     available: usize,
     observed: bool,
+    force_parallel: Option<bool>,
 ) -> Result<Option<PostingExecution>, TraceError> {
+    let planning = observed.then(Instant::now);
     let mut all_members = 0u64;
     let mut work = 0u64;
     for &(_, seed) in entries {
@@ -295,10 +335,10 @@ fn prepare_shared_postings_inner(
     if all_members == 0 {
         return Ok(Some(execution));
     }
-    let lane_count = if work < POSTING_PARALLEL_ROWS {
-        1
-    } else {
+    let lane_count = if force_parallel.unwrap_or(work >= POSTING_PARALLEL_ROWS) {
         POSTING_LANES
+    } else {
+        1
     };
     let member_capacity = all_members.min(POSTING_MEMBER_ROWS as u64) as usize;
     // Both lane tables stay allocated through both passes. This deliberately
@@ -367,10 +407,12 @@ fn prepare_shared_postings_inner(
         }
     }
     execution.peak_bytes = workspace + execution.retained_bytes;
-    let parallel = execution
-        .admitted_member_rows
-        .saturating_add(execution.admitted_position_rows)
-        >= POSTING_PARALLEL_ROWS;
+    let parallel = force_parallel.unwrap_or(
+        execution
+            .admitted_member_rows
+            .saturating_add(execution.admitted_position_rows)
+            >= POSTING_PARALLEL_ROWS,
+    );
     let read = PostingRead {
         reader,
         entries,
@@ -379,6 +421,7 @@ fn prepare_shared_postings_inner(
         active: AtomicUsize::new(0),
         peak: AtomicUsize::new(0),
     };
+    execution.plan_ns = planning.map_or(0, |start| start.elapsed().as_nanos() as u64);
     let started = observed.then(Instant::now);
     let membership_error =
         execute_member_waves(&read, postings, &plans, &mut member_lanes, &mut execution)?;

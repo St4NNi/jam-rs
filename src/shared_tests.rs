@@ -187,6 +187,38 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
             3
         );
     }
+    let cached_lists = lookup
+        .postings
+        .iter()
+        .flatten()
+        .map(|posting| posting.occurrences.as_ref().unwrap().len() as u64)
+        .sum::<u64>();
+    let cached_rows = lookup
+        .postings
+        .iter()
+        .flatten()
+        .flat_map(|posting| posting.occurrences.as_ref().unwrap())
+        .map(|positions| positions.len() as u64)
+        .sum::<u64>();
+    assert_eq!(lookup.unused_positions(), Some((cached_lists, cached_rows)));
+    let first_rows = lookup.postings[0]
+        .as_ref()
+        .unwrap()
+        .occurrences
+        .as_ref()
+        .unwrap()[0]
+        .len() as u64;
+    lookup.mark_positions_used(0, 0);
+    assert_eq!(
+        lookup.unused_positions(),
+        Some((cached_lists - 1, cached_rows - first_rows))
+    );
+    lookup.mark_positions_used(0, 0);
+    assert_eq!(
+        lookup.unused_positions(),
+        Some((cached_lists - 1, cached_rows - first_rows))
+    );
+    assert_eq!(lookup.capacity_bytes, lookup._reservation.bytes);
     let first_key = lookup.entries[0].0;
     let direct = lookup.posting(first_key, Some(0)).unwrap().unwrap();
     let fallback = lookup.posting(first_key, None).unwrap().unwrap();
@@ -200,6 +232,15 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
         lookup.posting(lookup.entries[1].0, Some(0)),
         Err(crate::trace::TraceError::Invalid("batch posting ordinal"))
     ));
+    let requests = present
+        .iter()
+        .map(|key| (key.packed().unwrap(), 0))
+        .collect::<Vec<_>>();
+    let unobserved = crate::trace_batch::prepare_lookup(&index, requests, 1, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(unobserved.unused_positions(), None);
+    assert_eq!(unobserved.capacity_bytes, unobserved._reservation.bytes);
     println!(
         "requests_capacity={requests_capacity} entries_length={} entries_capacity={} associations_capacity={} retained_bytes={} reserved_bytes={} raw_document_bytes={} trace_document_bytes={} shared_group_bytes={} optional_group_bytes={} shared_member_bytes={}",
         lookup.entries.len(),

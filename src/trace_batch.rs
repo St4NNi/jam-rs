@@ -7,6 +7,7 @@ use crate::trace_index::{
 use rayon::prelude::*;
 use std::ops::Range;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[cfg(target_os = "linux")]
@@ -44,6 +45,7 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) membership_ns: u64,
     pub(crate) position_ns: u64,
     pub(crate) posting_execution: crate::trace_postings::PostingExecution,
+    usage: Option<PostingUsage>,
     pub(crate) distinct_cores: u64,
     pub(crate) split_core_resolutions: u64,
     pub(crate) context_reuse_histogram_log2: [u64; 16],
@@ -63,7 +65,84 @@ pub(crate) struct BatchPosting {
     pub(crate) occurrences: Option<Vec<Vec<crate::jidx_reader::SeedOccurrence>>>,
 }
 
+struct PostingUsage {
+    offsets: Vec<usize>,
+    used: Vec<AtomicU64>,
+}
+
+impl PostingUsage {
+    fn new(postings: &[Option<BatchPosting>], available: usize) -> Option<Self> {
+        let members = postings.iter().flatten().try_fold(0usize, |sum, posting| {
+            sum.checked_add(posting.occurrences.as_ref().map_or(0, Vec::len))
+        })?;
+        let offsets = postings.len().checked_add(1)?;
+        let words = members.div_ceil(64);
+        let bytes = offsets
+            .checked_mul(std::mem::size_of::<usize>())?
+            .checked_add(words.checked_mul(std::mem::size_of::<AtomicU64>())?)?;
+        if bytes > available {
+            return None;
+        }
+        let mut result = Self {
+            offsets: Vec::new(),
+            used: Vec::new(),
+        };
+        result.offsets.try_reserve_exact(offsets).ok()?;
+        result.used.try_reserve_exact(words).ok()?;
+        if result.capacity_bytes() > available {
+            return None;
+        }
+        result.used.resize_with(words, || AtomicU64::new(0));
+        let mut offset = 0;
+        for posting in postings {
+            result.offsets.push(offset);
+            offset += posting
+                .as_ref()
+                .and_then(|posting| posting.occurrences.as_ref())
+                .map_or(0, Vec::len);
+        }
+        result.offsets.push(offset);
+        Some(result)
+    }
+
+    fn capacity_bytes(&self) -> usize {
+        self.offsets.capacity() * std::mem::size_of::<usize>()
+            + self.used.capacity() * std::mem::size_of::<AtomicU64>()
+    }
+}
+
 impl SharedSeedLookups {
+    pub(crate) fn mark_positions_used(&self, ordinal: usize, member: usize) {
+        if let Some(usage) = &self.usage {
+            let start = usage.offsets[ordinal];
+            let offset = start + member;
+            assert!(offset < usage.offsets[ordinal + 1]);
+            usage.used[offset / 64].fetch_or(1 << (offset % 64), Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn unused_positions(&self) -> Option<(u64, u64)> {
+        let usage = self.usage.as_ref()?;
+        let mut lists = 0;
+        let mut rows = 0;
+        for (ordinal, posting) in self.postings.iter().enumerate() {
+            let Some(positions) = posting
+                .as_ref()
+                .and_then(|posting| posting.occurrences.as_ref())
+            else {
+                continue;
+            };
+            for (member, positions) in positions.iter().enumerate() {
+                let offset = usage.offsets[ordinal] + member;
+                if usage.used[offset / 64].load(Ordering::Relaxed) & (1 << (offset % 64)) == 0 {
+                    lists += 1;
+                    rows += positions.len() as u64;
+                }
+            }
+        }
+        Some((lists, rows))
+    }
+
     pub(crate) fn posting(
         &self,
         key: u64,
@@ -724,6 +803,11 @@ pub(crate) fn prepare_lookup_with_cores(
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("shared seed lookup identity"));
     }
+    let usage = observed
+        .then(|| PostingUsage::new(&postings, reservation.bytes - capacity_bytes))
+        .flatten();
+    capacity_bytes += usage.as_ref().map_or(0, PostingUsage::capacity_bytes);
+    peak_capacity_bound = peak_capacity_bound.max(capacity_bytes);
     reservation.retain(capacity_bytes);
     Ok(Some(SharedSeedLookups {
         identity,
@@ -739,6 +823,7 @@ pub(crate) fn prepare_lookup_with_cores(
         membership_ns,
         position_ns,
         posting_execution: execution.unwrap_or_default(),
+        usage,
         distinct_cores,
         split_core_resolutions,
         context_reuse_histogram_log2,

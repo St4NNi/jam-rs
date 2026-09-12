@@ -132,6 +132,7 @@ pub struct TraceBatchStats {
     pub membership_access_ns: u64,
     pub position_access_ns: u64,
     pub posting_member_tasks: u64,
+    pub posting_plan_ns: u64,
     pub posting_position_tasks: u64,
     pub posting_plan_hash: u64,
     pub posting_admitted_member_rows: u64,
@@ -145,6 +146,9 @@ pub struct TraceBatchStats {
     pub posting_member_worker_cpu_ns: u64,
     pub posting_position_worker_cpu_ns: u64,
     pub posting_cpu_unavailable_tasks: u64,
+    pub posting_unused_member_lists: u64,
+    pub posting_unused_position_rows: u64,
+    pub posting_usage_unavailable_batches: u64,
     pub candidate_routing_ns: u64,
     pub region_formation_ns: u64,
     pub sequence_read_ns: u64,
@@ -525,6 +529,54 @@ impl TraceEngine {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub fn benchmark_posting_preparation(
+        &self,
+        keys: &[u64],
+        parallel: bool,
+        observed: bool,
+    ) -> Result<(impl Sized, [u64; 12]), TraceError> {
+        let TraceIndex::Shared(reader) = &self.index else {
+            return Err(TraceError::Invalid("shared posting benchmark"));
+        };
+        let seeds = self.index.find_seeds_batch(keys)?;
+        let mut entries = keys
+            .iter()
+            .copied()
+            .zip(seeds)
+            .filter(|(_, seed)| seed.is_some())
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.0);
+        entries.dedup_by_key(|entry| entry.0);
+        let mut postings = (0..entries.len()).map(|_| None).collect::<Vec<_>>();
+        let stats = crate::trace_postings::benchmark_postings(
+            reader,
+            &entries,
+            &mut postings,
+            crate::trace_batch::lookup_budget(&self.index),
+            observed,
+            parallel,
+        )?
+        .ok_or(TraceError::Invalid("posting benchmark admission"))?;
+        Ok((
+            postings,
+            [
+                stats.member_tasks as u64,
+                stats.position_tasks as u64,
+                stats.membership_ns,
+                stats.position_ns,
+                stats.member_worker_cpu_ns,
+                stats.position_worker_cpu_ns,
+                stats.admitted_member_rows,
+                stats.admitted_position_rows,
+                stats.scratch_bytes as u64,
+                stats.retained_bytes as u64,
+                stats.peak_parallel_tasks as u64,
+                stats.task_hash,
+            ],
+        ))
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub fn benchmark_lookup(
         &self,
         keys: &[u64],
@@ -883,6 +935,7 @@ impl TraceEngine {
             stats.membership_access_ns += lookups.membership_ns;
             stats.position_access_ns += lookups.position_ns;
             let posting = &lookups.posting_execution;
+            stats.posting_plan_ns += posting.plan_ns;
             stats.posting_member_tasks += posting.member_tasks as u64;
             stats.posting_position_tasks += posting.position_tasks as u64;
             stats.posting_plan_hash =
@@ -902,6 +955,12 @@ impl TraceEngine {
             stats.posting_member_worker_cpu_ns += posting.member_worker_cpu_ns;
             stats.posting_position_worker_cpu_ns += posting.position_worker_cpu_ns;
             stats.posting_cpu_unavailable_tasks += posting.cpu_unavailable as u64;
+            if let Some((lists, rows)) = lookups.unused_positions() {
+                stats.posting_unused_member_lists += lists;
+                stats.posting_unused_position_rows += rows;
+            } else {
+                stats.posting_usage_unavailable_batches += 1;
+            }
         }
     }
 
@@ -1431,6 +1490,12 @@ impl TraceEngine {
                         Ok(())
                     };
                     if let Some(positions) = posting.and_then(|p| p.occurrences.as_ref()) {
+                        if let Some(shared) = batch_lookups {
+                            shared.mark_positions_used(
+                                key_chunk[seed_ordinal] as usize,
+                                document_ordinal,
+                            );
+                        }
                         visit(&positions[document_ordinal])?;
                     } else {
                         self.index.visit_occurrences(index_seed, document, visit)?;
