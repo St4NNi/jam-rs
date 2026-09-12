@@ -168,6 +168,12 @@ pub struct TraceBatchStats {
     pub query_executed_context_associations: u64,
     pub nested_context_calls: u64,
     pub core_lookup_tasks: u64,
+    pub core_requests_attempted: u64,
+    pub core_requests_covered: u64,
+    pub core_requests_rejected: u64,
+    pub core_requests_uncovered: u64,
+    pub core_requests_retained: u64,
+    pub core_requests_planned: u64,
     pub core_lookup_fallbacks: u64,
     pub core_lookup_ns: u64,
     pub core_lookup_peak_bytes: usize,
@@ -526,6 +532,36 @@ impl TraceEngine {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub fn benchmark_core_planning(
+        &self,
+        keys: &[u32],
+        early: bool,
+    ) -> Result<(impl Sized, [usize; 7]), TraceError> {
+        let result = if early {
+            prepare_cores(&self.index, keys.iter().copied(), keys.len(), false)?
+        } else {
+            crate::trace_batch::prepare_cores_late(
+                &self.index,
+                keys.iter().copied(),
+                keys.len(),
+                false,
+            )?
+        };
+        let counts = result.as_ref().map_or([0; 7], |r| {
+            [
+                r.requests.attempted,
+                r.requests.covered,
+                r.requests.rejected,
+                r.requests.uncovered,
+                r.requests.retained,
+                r.requests.planned,
+                r.tasks,
+            ]
+        });
+        Ok((result, counts))
+    }
+
+    #[cfg(feature = "bench-internals")]
     pub fn benchmark_prepare(
         &self,
         sequence: &[u8],
@@ -681,6 +717,12 @@ impl TraceEngine {
         {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.core_lookup_tasks += cores.tasks as u64;
+            stats.core_requests_attempted += cores.requests.attempted as u64;
+            stats.core_requests_covered += cores.requests.covered as u64;
+            stats.core_requests_rejected += cores.requests.rejected as u64;
+            stats.core_requests_uncovered += cores.requests.uncovered as u64;
+            stats.core_requests_retained += cores.requests.retained as u64;
+            stats.core_requests_planned += cores.requests.planned as u64;
             stats.core_lookup_ns += cores.lookup_ns;
             stats.core_lookup_peak_bytes =
                 stats.core_lookup_peak_bytes.max(cores.peak_capacity_bound);

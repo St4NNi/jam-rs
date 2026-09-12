@@ -3357,3 +3357,109 @@ fn binary_fuse_empty_and_memory_fallback_remain_complete() {
 
 #[path = "shared_context_tests.rs"]
 mod checked_context_tests;
+
+#[test]
+fn early_core_screening_counts_attempts_and_preserves_late_results() {
+    let (directory, _, _) = fixture(32);
+    let packed = directory.path().join("early-packed.shared");
+    let compact = directory.path().join("early-compact.shared");
+    let filtered = directory.path().join("early-filtered.shared");
+    crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
+        .unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    crate::shared_pack::add_shared_core_filter(&compact, &filtered, 32).unwrap();
+    let reader = SharedReader::open_observed(&filtered).unwrap();
+    let allocation = reader.filter_allocation();
+    let setup = reader.stats().filter_setup_ns;
+    let operation = reader.core_operation().unwrap().unwrap();
+    let before = reader.stats().file.requested_bytes;
+    let absent = (100..10_000)
+        .find(|&core| !operation.screen(core).unwrap().1)
+        .unwrap();
+    assert_eq!(reader.stats().file.requested_bytes, before);
+    operation.finish().unwrap();
+    let index = crate::trace_index::TraceIndex::Shared(Box::new(reader));
+    for requests in [
+        vec![0, absent, TARGET_CORE, absent, TARGET_CORE + 20],
+        (0..32).cycle().take(512).collect::<Vec<_>>(),
+    ] {
+        let early = crate::trace_batch::prepare_cores(
+            &index,
+            requests.iter().copied(),
+            requests.len(),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        let late = crate::trace_batch::prepare_cores_late(
+            &index,
+            requests.iter().copied(),
+            requests.len(),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(early.groups, late.groups);
+        assert_eq!(early.requests.attempted, requests.len());
+        assert_eq!(
+            early.requests.covered + early.requests.uncovered,
+            requests.len()
+        );
+        assert_eq!(
+            early.requests.rejected + early.requests.retained,
+            requests.len()
+        );
+        if requests.len() == 512 {
+            assert_eq!(early.requests.rejected, 0);
+            assert_eq!(early.requests.retained, 512);
+            assert_eq!(early.requests.planned, 32);
+        } else {
+            assert_eq!(early.requests.rejected, 2);
+        }
+    }
+    for count in [0, 1, 3] {
+        assert!(crate::trace_batch::prepare_cores(&index, [absent, absent], count, false).is_err());
+    }
+    let crate::trace_index::TraceIndex::Shared(reader) = &index else {
+        unreachable!()
+    };
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                let mut output = Vec::new();
+                reader
+                    .resolve_sorted_cores_into(&[0, absent, TARGET_CORE], &mut output)
+                    .unwrap();
+                assert_eq!(reader.filter_allocation(), allocation);
+            });
+        }
+    });
+    assert_eq!(reader.stats().filter_owned_copies, 1);
+    assert_eq!(reader.stats().filter_setup_ns, setup);
+    let mut output = Vec::new();
+    reader
+        .resolve_sorted_cores_into(&[0, TARGET_CORE, TARGET_CORE + 1], &mut output)
+        .unwrap();
+    assert_eq!(output.len(), 3);
+}
+
+#[test]
+fn oversized_filter_declaration_is_rejected_before_section_access() {
+    let (directory, _, _) = fixture(1);
+    let packed = directory.path().join("size-packed.shared");
+    let compact = directory.path().join("size-compact.shared");
+    let filtered = directory.path().join("size-filtered.shared");
+    crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
+        .unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+    let mut file = crate::shared_file::SharedFile::open(&filtered, true).unwrap();
+    file.header.sections[Section::CoreFilter as usize].length = 8 * 1024 * 1024 + 1;
+    let before = file.stats();
+    assert!(matches!(
+        crate::shared_filters::load(&file),
+        Err(SharedError::Invalid("core filter size"))
+    ));
+    assert_eq!(file.stats().requested_bytes, before.requested_bytes);
+    assert_eq!(file.stats().authenticated_pages, before.authenticated_pages);
+}

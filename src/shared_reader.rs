@@ -46,6 +46,8 @@ pub struct SharedReader {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct SharedReadStats {
+    pub filter_setup_ns: [u64; 3],
+    pub filter_owned_copies: u64,
     pub filter_covered_cores: u64,
     pub filter_requests: u64,
     pub filter_rejects: u64,
@@ -175,6 +177,75 @@ struct CoreKeyView<'a> {
     bytes: &'a [u8],
     first_ordinal: u64,
     prefix: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub(crate) struct CoreRequestCounts {
+    pub(crate) attempted: usize,
+    pub(crate) covered: usize,
+    pub(crate) rejected: usize,
+    pub(crate) uncovered: usize,
+    pub(crate) retained: usize,
+    pub(crate) planned: usize,
+}
+
+pub(crate) struct SharedCoreOperation<'a> {
+    reader: &'a SharedReader,
+    view: Option<xorf::BinaryFuse8Ref<'a>>,
+    end_prefix: u32,
+}
+
+impl SharedCoreOperation<'_> {
+    pub(crate) fn screen(&self, core: u32) -> Result<(bool, bool), SharedError> {
+        use xorf::Filter;
+        if core & !CORE_MASK != 0 {
+            return Err(SharedError::Invalid("shared core"));
+        }
+        let covered = core >> 14 < self.end_prefix;
+        Ok((
+            covered,
+            !covered
+                || self
+                    .view
+                    .as_ref()
+                    .is_some_and(|view| view.contains(&crate::shared_filters::core_input(core))),
+        ))
+    }
+
+    pub(crate) fn record(&self, counts: CoreRequestCounts) {
+        self.reader
+            .observe(&self.reader.filter_requests, counts.covered as u64);
+        self.reader
+            .observe(&self.reader.filter_rejects, counts.rejected as u64);
+    }
+
+    pub(crate) fn resolve_sorted_cores_into(
+        &self,
+        cores: &[u32],
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        SharedReader::validate_core_storage(cores.len(), output)?;
+        SharedReader::validate_sorted_cores(cores)?;
+        let result = self
+            .reader
+            .resolve_sorted_cores_unchecked(cores, cores.len(), output);
+        if result.is_err() {
+            output.clear();
+        } else if self.reader.observed {
+            self.reader.observe(
+                &self.reader.filter_exact_hits,
+                output
+                    .iter()
+                    .filter(|group| group.key.core >> 14 < self.end_prefix)
+                    .count() as u64,
+            );
+        }
+        result
+    }
+
+    pub(crate) fn finish(self) -> Result<(), SharedError> {
+        self.reader.file.verify_unchanged()
+    }
 }
 
 pub(crate) struct SharedPostingOperation<'a> {
@@ -319,6 +390,18 @@ impl CoreKeyView<'_> {
 }
 
 impl SharedReader {
+    pub(crate) fn core_operation(&self) -> Result<Option<SharedCoreOperation<'_>>, SharedError> {
+        let Some(filter) = self.core_filter.as_ref().filter(|_| self.filter_enabled) else {
+            return Ok(None);
+        };
+        self.begin_operation()?;
+        Ok(Some(SharedCoreOperation {
+            reader: self,
+            view: filter.view(),
+            end_prefix: filter.end_prefix(),
+        }))
+    }
+
     pub(crate) fn posting_operation(&self) -> Result<SharedPostingOperation<'_>, SharedError> {
         self.begin_operation()?;
         Ok(SharedPostingOperation { reader: self })
@@ -374,6 +457,11 @@ impl SharedReader {
             positions_decoded: AtomicU64::new(0),
             numeric_contig_resolutions: AtomicU64::new(0),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn filter_allocation(&self) -> Option<usize> {
+        self.core_filter.as_ref().map(|f| f.allocation())
     }
 
     pub fn window(&self) -> u16 {
@@ -447,6 +535,8 @@ impl SharedReader {
 
     pub fn stats(&self) -> SharedReadStats {
         SharedReadStats {
+            filter_setup_ns: self.core_filter.as_ref().map_or([0; 3], |f| f.setup_ns()),
+            filter_owned_copies: u64::from(self.core_filter.is_some()),
             filter_covered_cores: self
                 .core_filter
                 .as_ref()
@@ -523,19 +613,17 @@ impl SharedReader {
         Ok(groups)
     }
 
-    pub(crate) fn resolve_sorted_cores_into(
-        &self,
-        cores: &[u32],
-        output: &mut Vec<SharedGroup>,
-    ) -> Result<(), SharedError> {
+    fn validate_core_storage(maximum: usize, output: &Vec<SharedGroup>) -> Result<(), SharedError> {
         if !output.is_empty() {
             return Err(SharedError::Invalid("core result storage"));
         }
-        if output.capacity() > cores.len() {
+        if output.capacity() > maximum {
             return Err(SharedError::ResourceLimit);
         }
-        admit_result(output.capacity(), size_of::<SharedGroup>())?;
-        self.begin_operation()?;
+        admit_result(output.capacity(), size_of::<SharedGroup>())
+    }
+
+    fn validate_sorted_cores(cores: &[u32]) -> Result<(), SharedError> {
         let mut previous = None;
         for &core in cores {
             if core & !CORE_MASK != 0 || previous.is_some_and(|before| before >= core) {
@@ -543,39 +631,49 @@ impl SharedReader {
             }
             previous = Some(core);
         }
+        Ok(())
+    }
+
+    pub(crate) fn resolve_sorted_cores_into(
+        &self,
+        cores: &[u32],
+        output: &mut Vec<SharedGroup>,
+    ) -> Result<(), SharedError> {
+        Self::validate_core_storage(cores.len(), output)?;
+        self.begin_operation()?;
+        Self::validate_sorted_cores(cores)?;
         let mut filtered = Vec::new();
         let mut covered_end = 0;
-        let cores = if let Some(filter) = self.core_filter.as_ref().filter(|_| self.filter_enabled)
-        {
-            if filtered.try_reserve_exact(cores.len()).is_ok() && filtered.capacity() <= cores.len()
-            {
-                use xorf::Filter;
-                let view = filter.view();
-                covered_end = filter.end_prefix();
-                let covered = cores.partition_point(|core| *core >> 14 < covered_end);
-                filtered.extend(cores.iter().copied().filter(|core| {
-                    *core >> 14 >= covered_end
-                        || view.as_ref().is_some_and(|view| {
+        let result = (|| {
+            if let Some(filter) = self.core_filter.as_ref().filter(|_| self.filter_enabled) {
+                let covered = cores.partition_point(|core| *core >> 14 < filter.end_prefix());
+                if filtered.try_reserve_exact(covered).is_ok() && filtered.capacity() <= covered {
+                    use xorf::Filter;
+                    let view = filter.view();
+                    covered_end = filter.end_prefix();
+                    filtered.extend(cores[..covered].iter().copied().filter(|core| {
+                        view.as_ref().is_some_and(|view| {
                             view.contains(&crate::shared_filters::core_input(*core))
                         })
-                }));
-                self.observe(&self.filter_requests, covered as u64);
-                self.observe(&self.filter_rejects, (cores.len() - filtered.len()) as u64);
-                self.observe(
-                    &self.core_resolutions_absent,
-                    (cores.len() - filtered.len()) as u64,
-                );
-                filtered.as_slice()
-            } else {
+                    }));
+                    self.observe(&self.filter_requests, covered as u64);
+                    self.observe(&self.filter_rejects, (covered - filtered.len()) as u64);
+                    self.observe(
+                        &self.core_resolutions_absent,
+                        (covered - filtered.len()) as u64,
+                    );
+                    self.resolve_sorted_cores_unchecked(&filtered, cores.len(), output)?;
+                    return self.resolve_sorted_cores_unchecked(
+                        &cores[covered..],
+                        cores.len(),
+                        output,
+                    );
+                }
                 self.observe(&self.filter_fallbacks, 1);
-                cores
             }
-        } else {
-            cores
-        };
-        let result = self
-            .resolve_sorted_cores_unchecked(cores, output)
-            .and_then(|()| self.file.verify_unchanged());
+            self.resolve_sorted_cores_unchecked(cores, cores.len(), output)
+        })()
+        .and_then(|()| self.file.verify_unchanged());
         if result.is_err() {
             output.clear();
         } else if self.observed && covered_end != 0 {
@@ -961,12 +1059,13 @@ impl SharedReader {
     fn resolve_sorted_cores_unchecked(
         &self,
         cores: &[u32],
+        maximum_results: usize,
         output: &mut Vec<SharedGroup>,
     ) -> Result<(), SharedError> {
         if self.file.header.version < 3 {
             for &core in cores {
                 if let Some((ordinal, row)) = self.resolve_core_unchecked(core)? {
-                    self.append_core_group(core, ordinal, row, cores.len(), output)?;
+                    self.append_core_group(core, ordinal, row, maximum_results, output)?;
                 }
             }
             return Ok(());
@@ -985,14 +1084,14 @@ impl SharedReader {
                 self.resolve_cores_from_full_view(
                     &cores[start..end],
                     checked,
-                    cores.len(),
+                    maximum_results,
                     output,
                 )?;
             } else {
                 self.resolve_cores_from_page_views(
                     &cores[start..end],
                     checked,
-                    cores.len(),
+                    maximum_results,
                     output,
                 )?;
             }

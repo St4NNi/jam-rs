@@ -158,6 +158,7 @@ pub(crate) struct CoreFilter {
     bytes: Vec<u8>,
     end_prefix: u32,
     covered_count: u64,
+    setup_ns: [u64; 3],
 }
 
 pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError> {
@@ -165,11 +166,18 @@ pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError>
         return Ok(None);
     }
     file.verify_unchanged()?;
+    let length = file.header.section(Section::CoreFilter).length;
+    if length > MAX_BYTES as u64 {
+        return Err(SharedError::Invalid("core filter size"));
+    }
+    let observed = file.stats().observed;
+    let started = observed.then(std::time::Instant::now);
     let bytes = file.section(
         Section::CoreFilter,
         0,
         file.header.section(Section::CoreFilter).length,
     )?;
+    let authenticated = observed.then(std::time::Instant::now);
     let (end_prefix, covered_count) = validate(
         bytes,
         file.header.core_count,
@@ -188,6 +196,7 @@ pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError>
     if bytes.len() > limit {
         return Err(SharedError::ResourceLimit);
     }
+    let validated = observed.then(std::time::Instant::now);
     let mut owned = Vec::new();
     owned
         .try_reserve_exact(bytes.len())
@@ -197,10 +206,27 @@ pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError>
         bytes: owned,
         end_prefix,
         covered_count,
+        setup_ns: match (started, authenticated, validated) {
+            (Some(start), Some(auth), Some(valid)) => [
+                (auth - start).as_nanos() as u64,
+                (valid - auth).as_nanos() as u64,
+                valid.elapsed().as_nanos() as u64,
+            ],
+            _ => [0; 3],
+        },
     }))
 }
 
 impl CoreFilter {
+    pub(crate) fn setup_ns(&self) -> [u64; 3] {
+        self.setup_ns
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocation(&self) -> usize {
+        self.bytes.as_ptr() as usize
+    }
+
     pub(crate) fn view(&self) -> Option<BinaryFuse8Ref<'_>> {
         (self.covered_count != 0)
             .then(|| BinaryFuse8Ref::from_dma(&self.bytes[128..148], &self.bytes[148..]))
@@ -236,6 +262,7 @@ mod tests {
                 bytes,
                 end_prefix,
                 covered_count,
+                setup_ns: [0; 3],
             };
             assert_eq!(filter.end_prefix(), PREFIX_END);
             assert_eq!(filter.covered_count(), keys.len() as u64);

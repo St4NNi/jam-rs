@@ -179,6 +179,7 @@ pub(crate) struct SharedCoreLookups {
     pub(crate) groups: Vec<crate::shared_reader::SharedGroup>,
     pub(crate) peak_capacity_bound: usize,
     pub(crate) tasks: usize,
+    pub(crate) requests: crate::shared_reader::CoreRequestCounts,
     pub(crate) lookup_ns: u64,
     _reservation: CacheReservation<'static>,
 }
@@ -194,6 +195,26 @@ pub(crate) fn prepare_cores(
     requests: impl IntoIterator<Item = u32>,
     request_count: usize,
     observed: bool,
+) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
+    prepare_cores_inner(index, requests, request_count, observed, true)
+}
+
+#[cfg(any(test, feature = "bench-internals"))]
+pub(crate) fn prepare_cores_late(
+    index: &TraceIndex,
+    requests: impl IntoIterator<Item = u32>,
+    request_count: usize,
+    observed: bool,
+) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
+    prepare_cores_inner(index, requests, request_count, observed, false)
+}
+
+fn prepare_cores_inner(
+    index: &TraceIndex,
+    requests: impl IntoIterator<Item = u32>,
+    request_count: usize,
+    observed: bool,
+    early: bool,
 ) -> Result<Option<Arc<SharedCoreLookups>>, TraceError> {
     let TraceIndex::Shared(reader) = index else {
         return Ok(None);
@@ -216,17 +237,38 @@ pub(crate) fn prepare_cores(
     {
         return Ok(None);
     }
+    let operation = if early {
+        reader.core_operation()?
+    } else {
+        None
+    };
+    let mut counts = crate::shared_reader::CoreRequestCounts::default();
     for key in requests {
-        if keys.len() == request_count {
+        if counts.attempted == request_count {
             return Err(TraceError::Invalid("core request count"));
         }
-        keys.push(key);
+        counts.attempted += 1;
+        let (covered, keep) = match &operation {
+            Some(operation) => operation.screen(key)?,
+            None => (false, true),
+        };
+        counts.covered += usize::from(covered);
+        counts.uncovered += usize::from(!covered);
+        counts.rejected += usize::from(!keep);
+        if keep {
+            keys.push(key);
+        }
     }
-    if keys.len() != request_count {
+    if counts.attempted != request_count {
         return Err(TraceError::Invalid("core request count"));
     }
+    counts.retained = keys.len();
     keys.par_sort_unstable();
     keys.dedup();
+    counts.planned = keys.len();
+    if let Some(operation) = &operation {
+        operation.record(counts);
+    }
     let tasks = if reader.has_core_prefixes() {
         core_prefix_ranges(&keys).count()
     } else {
@@ -280,7 +322,10 @@ pub(crate) fn prepare_cores(
     let lookup = |chunk: &[u32]| {
         let mut groups = Vec::new();
         if reader.has_core_prefixes() {
-            reader.resolve_sorted_cores_into(chunk, &mut groups)?;
+            match &operation {
+                Some(operation) => operation.resolve_sorted_cores_into(chunk, &mut groups)?,
+                None => reader.resolve_sorted_cores_into(chunk, &mut groups)?,
+            }
             return Ok::<_, TraceError>(groups);
         }
         let mut contexts = Vec::new();
@@ -322,7 +367,11 @@ pub(crate) fn prepare_cores(
     let mut start = 0;
     while start < ranges.len() {
         let row_bytes = 2 * group_bytes
-            + reader.core_filter_workspace_per_key()
+            + if operation.is_none() {
+                reader.core_filter_workspace_per_key()
+            } else {
+                0
+            }
             + if reader.has_core_prefixes() {
                 0
             } else {
@@ -392,6 +441,9 @@ pub(crate) fn prepare_cores(
     drop(keys);
     drop(key_reservation);
     drop(ranges);
+    if let Some(operation) = operation {
+        operation.finish()?;
+    }
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("resolved core identity"));
     }
@@ -404,6 +456,7 @@ pub(crate) fn prepare_cores(
         groups,
         peak_capacity_bound: bytes,
         tasks,
+        requests: counts,
         lookup_ns: started.map_or(0, |started| started.elapsed().as_nanos() as u64),
         _reservation: reservation,
     })))
