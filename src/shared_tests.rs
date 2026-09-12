@@ -761,15 +761,34 @@ fn sparse_core_admission_crosses_the_former_dense_budget_boundary() {
     crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
     crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
     let index = TraceIndex::Shared(Box::new(SharedReader::open(&compact).unwrap()));
-    let boundary = lookup_budget(&index)
-        / (std::mem::size_of::<u32>() + 2 * std::mem::size_of::<SharedGroup>());
+    let old_bytes = |count: usize| {
+        count * (std::mem::size_of::<u32>() + 2 * std::mem::size_of::<SharedGroup>())
+            + count.div_ceil(crate::jidx_reader::SEED_LOOKUP_BATCH_KEYS)
+                * (std::mem::size_of::<Result<Vec<SharedGroup>, crate::trace::TraceError>>()
+                    + std::mem::size_of::<std::ops::Range<usize>>())
+            + 4096
+            + std::mem::size_of::<crate::trace_batch::SharedCoreLookups>()
+    };
+    let budget = lookup_budget(&index);
+    let mut boundary =
+        budget / (std::mem::size_of::<u32>() + 2 * std::mem::size_of::<SharedGroup>());
+    while old_bytes(boundary) > budget {
+        boundary -= 1;
+    }
+    assert!(old_bytes(boundary) <= budget && old_bytes(boundary + 1) > budget);
+    eprintln!(
+        "old_core_admission last_fitting={boundary} fitting_bytes={} first_rejected={} rejected_bytes={} budget={budget}",
+        old_bytes(boundary),
+        boundary + 1,
+        old_bytes(boundary + 1)
+    );
     let mut expected = None;
     for workers in [1, 4, 8, 16] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .build()
             .unwrap();
-        for count in [boundary - 1, boundary + 1] {
+        for count in [boundary, boundary + 1] {
             let result = pool.install(|| {
                 prepare_cores(&index, (0..count as u32).rev(), count, true)
                     .unwrap()
@@ -790,7 +809,17 @@ fn sparse_core_admission_crosses_the_former_dense_budget_boundary() {
             assert_eq!(actual, expected_keys);
             assert!(result.capacity_bytes() <= result.peak_capacity_bound);
             assert!(result.peak_capacity_bound <= lookup_budget(&index));
+            assert_eq!(
+                result.tasks,
+                count.div_ceil(crate::jidx_reader::SEED_LOOKUP_BATCH_KEYS)
+            );
             let evidence = (count, result.tasks, result.peak_capacity_bound);
+            if workers == 1 && count > boundary {
+                eprintln!(
+                    "bounded_core_admission requests={count} peak_bytes={} retained_bytes={} tasks={}",
+                    result.peak_capacity_bound, result.capacity_bytes(), result.tasks
+                );
+            }
             if count > boundary {
                 if let Some(expected) = expected {
                     assert_eq!(evidence, expected);
