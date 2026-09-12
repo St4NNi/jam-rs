@@ -5,7 +5,6 @@ use crate::trace_index::{
     TraceCacheIdentity, TraceDocument as SeedDocument, TraceIndex, TraceSeed,
 };
 use rayon::prelude::*;
-use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,7 +15,7 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) query_entries: Vec<u64>,
     pub(crate) attempted_keys: usize,
     pub(crate) query_ranges: Vec<Range<usize>>,
-    pub(crate) postings: BTreeMap<u64, BatchPosting>,
+    pub(crate) postings: Vec<Option<BatchPosting>>,
     pub(crate) postings_complete: bool,
     pub(crate) capacity_bytes: usize,
     pub(crate) peak_capacity_bound: usize,
@@ -40,6 +39,33 @@ pub(crate) struct SharedSeedLookups {
 pub(crate) struct BatchPosting {
     pub(crate) documents: Vec<SeedDocument>,
     pub(crate) occurrences: Option<Vec<Vec<crate::jidx_reader::SeedOccurrence>>>,
+}
+
+impl SharedSeedLookups {
+    pub(crate) fn posting(
+        &self,
+        key: u64,
+        ordinal: Option<usize>,
+    ) -> Result<Option<&BatchPosting>, TraceError> {
+        let ordinal = if let Some(ordinal) = ordinal {
+            if !self
+                .entries
+                .get(ordinal)
+                .is_some_and(|&(found, seed)| found == key && seed.is_some())
+            {
+                return Err(TraceError::Invalid("batch posting ordinal"));
+            }
+            ordinal
+        } else if let Ok(ordinal) = self.entries.binary_search_by_key(&key, |entry| entry.0) {
+            ordinal
+        } else {
+            return Ok(None);
+        };
+        self.postings
+            .get(ordinal)
+            .map(Option::as_ref)
+            .ok_or(TraceError::Invalid("batch posting ordinal"))
+    }
 }
 
 pub(crate) struct TraceBatch {
@@ -506,17 +532,31 @@ pub(crate) fn prepare_lookup_with_cores(
         + query_ranges.capacity() * std::mem::size_of::<Range<usize>>()
         + keys.capacity() * std::mem::size_of::<u64>()
         + entries.capacity() * std::mem::size_of::<(u64, Option<TraceSeed>)>();
-    let mut postings = BTreeMap::new();
+    let slot_bytes = entries
+        .len()
+        .checked_mul(std::mem::size_of::<Option<BatchPosting>>());
+    if slot_bytes.is_none_or(|bytes| capacity_bytes.saturating_add(bytes) > reservation.bytes) {
+        return Ok(None);
+    }
+    let mut postings = Vec::new();
+    postings
+        .try_reserve_exact(entries.len())
+        .map_err(|_| TraceError::Invalid("posting slots allocation"))?;
+    let slot_bytes = postings.capacity() * std::mem::size_of::<Option<BatchPosting>>();
+    if capacity_bytes.saturating_add(slot_bytes) > reservation.bytes {
+        return Ok(None);
+    }
+    capacity_bytes += slot_bytes;
+    peak_capacity_bound = peak_capacity_bound.max(capacity_bytes);
+    postings.resize_with(entries.len(), || None);
     let mut postings_complete = true;
     let mut context_occurrence_histogram_log2 = [0; 16];
-    for &(key, seed) in &entries {
+    for (ordinal, &(_, seed)) in entries.iter().enumerate() {
         let Some(seed) = seed else {
             continue;
         };
-        let document_bytes = 128usize.saturating_add(
-            (seed.document_frequency() as usize)
-                .saturating_mul(std::mem::size_of::<SeedDocument>()),
-        );
+        let document_bytes = (seed.document_frequency() as usize)
+            .saturating_mul(std::mem::size_of::<SeedDocument>());
         let document_workspace = (seed.document_frequency() as usize).saturating_mul(match index {
             TraceIndex::Shared(_) => std::mem::size_of::<crate::shared_reader::SharedMember>(),
             TraceIndex::Shard(_) => std::mem::size_of::<crate::jidx_reader::SeedDocument>(),
@@ -540,7 +580,7 @@ pub(crate) fn prepare_lookup_with_cores(
             context_occurrence_histogram_log2[occurrences.ilog2().min(15) as usize] += 1;
         }
         membership_ns += started.map_or(0, |started| started.elapsed().as_nanos() as u64);
-        let bytes = 128 + documents.capacity() * std::mem::size_of::<SeedDocument>();
+        let bytes = documents.capacity() * std::mem::size_of::<SeedDocument>();
         peak_capacity_bound = peak_capacity_bound.max(
             capacity_bytes
                 .saturating_add(bytes)
@@ -592,13 +632,10 @@ pub(crate) fn prepare_lookup_with_cores(
         } else {
             None
         };
-        postings.insert(
-            key,
-            BatchPosting {
-                documents,
-                occurrences,
-            },
-        );
+        postings[ordinal] = Some(BatchPosting {
+            documents,
+            occurrences,
+        });
     }
     if index.cache_file_identity()? != Some(identity) {
         return Err(TraceError::Invalid("shared seed lookup identity"));

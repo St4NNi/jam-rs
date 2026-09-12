@@ -852,10 +852,11 @@ impl TraceEngine {
                 stats.context_occurrence_histogram_log2[bucket] +=
                     lookups.context_occurrence_histogram_log2[bucket];
             }
-            stats.cached_groups += lookups.postings.len() as u64;
+            stats.cached_groups += lookups.postings.iter().flatten().count() as u64;
             stats.cached_positions += lookups
                 .postings
-                .values()
+                .iter()
+                .flatten()
                 .filter_map(|p| p.occurrences.as_ref())
                 .flatten()
                 .map(|positions| positions.len() as u64)
@@ -1035,6 +1036,7 @@ impl TraceEngine {
             chunk.clear();
             packed_keys.clear();
             resolved_seeds.clear();
+            let posting_ordinals = matching_keys.as_ref().map(|keys| keys.as_slice());
             for _ in 0..SEED_LOOKUP_BATCH_KEYS {
                 let next = if let Some(matching_keys) = &mut matching_keys {
                     matching_keys.next().map(|&ordinal| {
@@ -1059,7 +1061,9 @@ impl TraceEngine {
                 resolved_seeds = prepared.find_seeds(&self.index, &packed_keys)?;
             }
             let index_seeds = &resolved_seeds;
-            for ((packed_key, query_seeds), &index_seed) in chunk.iter().copied().zip(index_seeds) {
+            for (seed_ordinal, ((packed_key, query_seeds), &index_seed)) in
+                chunk.iter().copied().zip(index_seeds).enumerate()
+            {
                 let Some(index_seed) = index_seed else {
                     if let Some(lookups) = &mut lookups {
                         lookups.cache_negative(packed_key);
@@ -1070,13 +1074,18 @@ impl TraceEngine {
                 let query_positions = u64::try_from(query_seeds.len())
                     .map_err(|_| TraceError::Invalid("query seed count"))?;
                 let decoded_documents;
-                let documents =
-                    if let Some(posting) = shared.and_then(|s| s.postings.get(&packed_key)) {
-                        &posting.documents
-                    } else {
-                        decoded_documents = self.index.seed_documents(index_seed)?;
-                        &decoded_documents
-                    };
+                let posting_ordinal =
+                    posting_ordinals.map(|ordinals| ordinals[seed_ordinal] as usize);
+                let posting = shared
+                    .map(|s| s.posting(packed_key, posting_ordinal))
+                    .transpose()?
+                    .flatten();
+                let documents = if let Some(posting) = posting {
+                    &posting.documents
+                } else {
+                    decoded_documents = self.index.seed_documents(index_seed)?;
+                    &decoded_documents
+                };
                 for &document in documents {
                     let hits = document
                         .occurrence_count()
@@ -1249,7 +1258,8 @@ impl TraceEngine {
                 })
                 .collect::<Result<Vec<_>, TraceError>>()?;
 
-            for (&packed_key, (index_seed, cached_documents)) in packed_keys.iter().zip(index_seeds)
+            for (seed_ordinal, (&packed_key, (index_seed, cached_documents))) in
+                packed_keys.iter().zip(index_seeds).enumerate()
             {
                 let query_seeds = prepared
                     .positions_by_key
@@ -1260,9 +1270,10 @@ impl TraceEngine {
                 };
                 let seed_k = self.index.seed_length(packed_key)?;
                 let decoded_documents;
-                let posting = batch
-                    .and_then(|batch| batch.lookups.as_ref())
-                    .and_then(|s| s.postings.get(&packed_key));
+                let posting = batch_lookups
+                    .map(|s| s.posting(packed_key, Some(key_chunk[seed_ordinal] as usize)))
+                    .transpose()?
+                    .flatten();
                 let documents = if let Some(posting) = posting {
                     &posting.documents
                 } else if let Some(documents) = cached_documents {
@@ -1271,10 +1282,11 @@ impl TraceEngine {
                     decoded_documents = self.index.seed_documents(index_seed)?;
                     &decoded_documents
                 };
-                for document in documents
+                for (document_ordinal, document) in documents
                     .iter()
                     .copied()
-                    .filter(|document| candidate_ids.contains(&document.metagenome_id()))
+                    .enumerate()
+                    .filter(|(_, document)| candidate_ids.contains(&document.metagenome_id()))
                 {
                     let storage = match document {
                         SeedDocument::Shared(member) => Some(member.occurrence_storage_identity()),
@@ -1385,10 +1397,7 @@ impl TraceEngine {
                         Ok(())
                     };
                     if let Some(positions) = posting.and_then(|p| p.occurrences.as_ref()) {
-                        let ordinal = documents
-                            .binary_search_by_key(&document.metagenome_id(), |d| d.metagenome_id())
-                            .map_err(|_| TraceError::Invalid("batch member"))?;
-                        visit(&positions[ordinal])?;
+                        visit(&positions[document_ordinal])?;
                     } else {
                         self.index.visit_occurrences(index_seed, document, visit)?;
                     }

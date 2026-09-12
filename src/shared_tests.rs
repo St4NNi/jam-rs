@@ -166,7 +166,7 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
     assert_eq!(lookup.entries.len(), 3);
     assert_eq!(lookup.entries.capacity(), 3);
     assert_eq!(lookup.query_entries.capacity(), 6);
-    for posting in lookup.postings.values() {
+    for posting in lookup.postings.iter().flatten() {
         assert_eq!(posting.documents.len(), 2);
         assert_eq!(
             posting
@@ -187,6 +187,19 @@ fn absent_heavy_batch_preserves_successful_associations_and_reports_capacity() {
             3
         );
     }
+    let first_key = lookup.entries[0].0;
+    let direct = lookup.posting(first_key, Some(0)).unwrap().unwrap();
+    let fallback = lookup.posting(first_key, None).unwrap().unwrap();
+    assert!(std::ptr::eq(direct, fallback));
+    assert!(lookup.posting(u64::MAX, None).unwrap().is_none());
+    assert!(matches!(
+        lookup.posting(first_key, Some(lookup.entries.len())),
+        Err(crate::trace::TraceError::Invalid("batch posting ordinal"))
+    ));
+    assert!(matches!(
+        lookup.posting(lookup.entries[1].0, Some(0)),
+        Err(crate::trace::TraceError::Invalid("batch posting ordinal"))
+    ));
     println!(
         "requests_capacity={requests_capacity} entries_length={} entries_capacity={} associations_capacity={} retained_bytes={} reserved_bytes={} raw_document_bytes={} trace_document_bytes={} shared_group_bytes={} optional_group_bytes={} shared_member_bytes={}",
         lookup.entries.len(),
@@ -270,7 +283,10 @@ fn full_lookup_work_is_stable_across_worker_counts() {
             let postings = lookup
                 .postings
                 .iter()
-                .map(|(&key, posting)| {
+                .enumerate()
+                .filter_map(|(ordinal, posting)| posting.as_ref().map(|posting| (ordinal, posting)))
+                .map(|(ordinal, posting)| {
+                    let key = lookup.entries[ordinal].0;
                     let documents = posting
                         .documents
                         .iter()
