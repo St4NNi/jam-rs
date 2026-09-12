@@ -78,6 +78,7 @@ pub(crate) struct SharedSeedLookups {
     pub(crate) capacity_bytes: usize,
     pub(crate) peak_capacity_bound: usize,
     pub(crate) lookup_ns: u64,
+    pub(crate) phase_postings_ns: [u64; 2],
     pub(crate) membership_ns: u64,
     pub(crate) position_ns: u64,
     pub(crate) posting_execution: crate::trace_postings::PostingExecution,
@@ -812,6 +813,7 @@ pub(crate) fn prepare_lookup_with_cores(
     keys.shrink_to_fit();
     entries.shrink_to_fit();
     let lookup_ns = started.map_or(0, |started| started.elapsed().as_nanos() as u64);
+    let posting_phase = phase_stamp();
     let mut membership_ns = 0;
     let mut position_ns = 0;
     let mut capacity_bytes = 4096
@@ -969,6 +971,7 @@ pub(crate) fn prepare_lookup_with_cores(
         capacity_bytes,
         peak_capacity_bound,
         lookup_ns,
+        phase_postings_ns: phase_elapsed(posting_phase),
         membership_ns,
         position_ns,
         posting_execution: execution.unwrap_or_default(),

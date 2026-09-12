@@ -165,6 +165,7 @@ pub struct TraceBatchStats {
     pub phase_core_lookup_ns: [u64; 2],
     pub phase_context_generation_ns: [u64; 2],
     pub phase_context_lookup_ns: [u64; 2],
+    pub phase_postings_ns: [u64; 2],
     pub phase_downstream_ns: [u64; 2],
     pub query_core_occurrences: u64,
     pub extraction_occurrence_probes: u64,
@@ -1228,6 +1229,13 @@ impl TraceEngine {
             stats.lookup_reserved_bytes =
                 stats.lookup_reserved_bytes.max(lookups._reservation.bytes);
             stats.key_lookup_ns += lookups.lookup_ns;
+            for (total, value) in stats
+                .phase_postings_ns
+                .iter_mut()
+                .zip(lookups.phase_postings_ns)
+            {
+                *total += value;
+            }
             stats.membership_access_ns += lookups.membership_ns;
             stats.position_access_ns += lookups.position_ns;
             let posting = &lookups.posting_execution;
