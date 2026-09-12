@@ -223,7 +223,10 @@ impl TraceIndex {
         if self.cache_file_identity()? != Some(cores.identity) {
             return Err(TraceError::Invalid("resolved core identity"));
         }
-        let mut requests = Vec::with_capacity(keys.len());
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(keys.len())
+            .map_err(|_| crate::shared_format::SharedError::ResourceLimit)?;
         for (ordinal, &key) in keys.iter().enumerate() {
             requests.push((ordinal, shared_key(key)?));
         }
@@ -235,16 +238,37 @@ impl TraceIndex {
         {
             requests.sort_unstable_by_key(order);
         }
-        let mut result = vec![None; keys.len()];
-        let mut contexts = Vec::with_capacity(keys.len());
+        let mut result = Vec::new();
+        result
+            .try_reserve_exact(keys.len())
+            .map_err(|_| crate::shared_format::SharedError::ResourceLimit)?;
+        result.resize(keys.len(), None);
+        let mut contexts = Vec::new();
+        contexts
+            .try_reserve_exact(keys.len())
+            .map_err(|_| crate::shared_format::SharedError::ResourceLimit)?;
+        let mut groups = Vec::new();
+        groups
+            .try_reserve_exact(keys.len())
+            .map_err(|_| crate::shared_format::SharedError::ResourceLimit)?;
+        let operation = reader.posting_operation()?;
+        let mut core_ordinal = 0;
         for same_core in requests.chunk_by(|left, right| left.1.core == right.1.core) {
-            let Ok(ordinal) = cores
+            let core_key = same_core[0].1.core;
+            while cores
                 .groups
-                .binary_search_by_key(&same_core[0].1.core, |group| group.key().core)
+                .get(core_ordinal)
+                .is_some_and(|group| group.key().core < core_key)
+            {
+                core_ordinal += 1;
+            }
+            let Some(&core) = cores
+                .groups
+                .get(core_ordinal)
+                .filter(|group| group.key().core == core_key)
             else {
                 continue;
             };
-            let core = cores.groups[ordinal];
             contexts.clear();
             for &(ordinal, key) in same_core {
                 if key.length == 15 {
@@ -253,17 +277,19 @@ impl TraceIndex {
                     contexts.push(key);
                 }
             }
+            groups.resize(contexts.len(), None);
+            operation.find_in_core_into(core, &contexts, &mut groups)?;
             if !contexts.is_empty() {
-                let groups = reader.find_in_core(core, &contexts)?;
                 for ((ordinal, _), group) in same_core
                     .iter()
                     .filter(|(_, key)| key.length != 15)
-                    .zip(groups)
+                    .zip(groups.iter().copied())
                 {
                     result[*ordinal] = group.map(TraceSeed::Shared);
                 }
             }
         }
+        operation.finish()?;
         Ok(result)
     }
 

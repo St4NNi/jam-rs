@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct FileReadStats {
     pub observed: bool,
+    pub identity_checks: u64,
     pub requested_bytes: u64,
     pub requested_pages: u64,
     pub authenticated_pages: u64,
@@ -20,6 +21,7 @@ pub struct FileReadStats {
 
 pub(crate) struct SharedFile {
     observed: bool,
+    identity_checks: AtomicU64,
     file: File,
     mmap: Mmap,
     identity: Option<[u64; 7]>,
@@ -53,6 +55,7 @@ impl SharedFile {
         }
         let reader = Self {
             observed,
+            identity_checks: AtomicU64::new(1),
             file,
             mmap,
             identity,
@@ -79,6 +82,9 @@ impl SharedFile {
     }
 
     pub(crate) fn verify_unchanged(&self) -> Result<(), SharedError> {
+        if self.observed {
+            self.identity_checks.fetch_add(1, Ordering::Relaxed);
+        }
         if self.identity.is_some() && file_identity(&self.file)? != self.identity {
             return Err(SharedError::SourceChanged);
         }
@@ -203,6 +209,7 @@ impl SharedFile {
         let pages = self.authenticated_pages.load(Ordering::Relaxed);
         FileReadStats {
             observed: self.observed,
+            identity_checks: self.identity_checks.load(Ordering::Relaxed),
             requested_bytes: self.requested_bytes.load(Ordering::Relaxed),
             requested_pages: self.requested_pages.load(Ordering::Relaxed),
             authenticated_pages: pages,

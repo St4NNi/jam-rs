@@ -3354,3 +3354,6 @@ fn binary_fuse_empty_and_memory_fallback_remain_complete() {
         }
     }
 }
+
+#[path = "shared_context_tests.rs"]
+mod checked_context_tests;

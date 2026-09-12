@@ -182,6 +182,58 @@ pub(crate) struct SharedPostingOperation<'a> {
 }
 
 impl SharedPostingOperation<'_> {
+    pub(crate) fn find_in_core_into(
+        &self,
+        core: SharedGroup,
+        keys: &[SharedKey],
+        output: &mut [Option<SharedGroup>],
+    ) -> Result<(), SharedError> {
+        output.fill(None);
+        let result = (|| {
+            self.reader.validate_group_token(core)?;
+            if core.key.length != 15 || core.key.context != 0 {
+                return Err(SharedError::Invalid("core group"));
+            }
+            if output.len() != keys.len() {
+                return Err(SharedError::Invalid("context result storage"));
+            }
+            admit_result(keys.len(), size_of::<Option<SharedGroup>>())?;
+            let mut previous = None;
+            for key in keys {
+                let code = key
+                    .context_code()
+                    .ok_or(SharedError::Invalid("shared key"))?;
+                if key.core != core.key.core {
+                    return Err(SharedError::Invalid("core group key"));
+                }
+                if previous.is_some_and(|before| before > code) {
+                    return Err(SharedError::Invalid("sorted core contexts"));
+                }
+                previous = Some(code);
+            }
+            if !keys.is_empty() {
+                let row = self.reader.core_row(core.core_ordinal)?;
+                if row.core != core.key.core {
+                    return Err(SharedError::Invalid("core group"));
+                }
+                self.reader.find_contexts_many(
+                    keys,
+                    None,
+                    output,
+                    core.core_ordinal,
+                    row,
+                    0,
+                    keys.len(),
+                )?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            output.fill(None);
+        }
+        result
+    }
+
     pub(crate) fn append_member_range(
         &self,
         group: SharedGroup,
