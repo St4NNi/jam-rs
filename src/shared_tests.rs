@@ -749,6 +749,178 @@ fn sorted_core_sparse_results_match_dense_lookup_and_bound_output() {
 }
 
 #[test]
+fn sparse_core_admission_crosses_the_former_dense_budget_boundary() {
+    use crate::trace_batch::{lookup_budget, prepare_cores};
+    use crate::trace_index::TraceIndex;
+
+    let (directory, reader, _) = fixture(8192);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let index = TraceIndex::Shared(Box::new(SharedReader::open(&compact).unwrap()));
+    let boundary = lookup_budget(&index)
+        / (std::mem::size_of::<u32>() + 2 * std::mem::size_of::<SharedGroup>());
+    let mut expected = None;
+    for workers in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap();
+        for count in [boundary - 1, boundary + 1] {
+            let result = pool.install(|| {
+                prepare_cores(&index, (0..count as u32).rev(), count, true)
+                    .unwrap()
+                    .expect("sparse requests must fit beyond the former dense bound")
+            });
+            let actual = result
+                .groups
+                .iter()
+                .map(|group| group.key().core)
+                .collect::<Vec<_>>();
+            let expected_keys = (0..8192)
+                .chain(
+                    [TARGET_CORE, TARGET_CORE + 1]
+                        .into_iter()
+                        .filter(|&core| core < count as u32),
+                )
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected_keys);
+            assert!(result.capacity_bytes() <= result.peak_capacity_bound);
+            assert!(result.peak_capacity_bound <= lookup_budget(&index));
+            let evidence = (count, result.tasks, result.peak_capacity_bound);
+            if count > boundary {
+                if let Some(expected) = expected {
+                    assert_eq!(evidence, expected);
+                } else {
+                    expected = Some(evidence);
+                }
+            }
+        }
+    }
+    for count in [0, 8192] {
+        let result = prepare_cores(&index, 0..count as u32, count, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.groups.len(), count);
+    }
+    let excessive = lookup_budget(&index) / std::mem::size_of::<u32>() + 1;
+    assert!(
+        prepare_cores(&index, std::iter::empty(), excessive, false)
+            .unwrap()
+            .is_none()
+    );
+    for (requests, count) in [(vec![0], 0), (vec![], 1)] {
+        assert!(matches!(
+            prepare_cores(&index, requests, count, false),
+            Err(crate::trace::TraceError::Invalid("core request count"))
+        ));
+    }
+    assert!(
+        prepare_cores(&index, std::iter::empty(), usize::MAX, false)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn sparse_core_admission_falls_back_completely_when_dense_results_exceed_budget() {
+    use crate::trace_batch::{lookup_budget, prepare_cores};
+    use crate::trace_index::TraceIndex;
+
+    let count = 128 * 1024 * 1024
+        / (std::mem::size_of::<u32>() + 2 * std::mem::size_of::<SharedGroup>())
+        + 1;
+    let (directory, reader, _) = fixture(count as u32);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let index = TraceIndex::Shared(Box::new(SharedReader::open(&compact).unwrap()));
+    assert!(
+        prepare_cores(&index, 0..count as u32, count, false)
+            .unwrap()
+            .is_none()
+    );
+    let admitted = count - 2 * crate::jidx_reader::SEED_LOOKUP_BATCH_KEYS;
+    let result = prepare_cores(&index, 0..admitted as u32, admitted, false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.groups.len(), admitted);
+    assert!(
+        result
+            .groups
+            .iter()
+            .enumerate()
+            .all(|(core, group)| group.key().core == core as u32)
+    );
+    assert!(result.peak_capacity_bound <= lookup_budget(&index));
+    drop(result);
+    for present in [0, count / 10, count / 2] {
+        let requests = (0..present as u32).chain(2 * count as u32..(3 * count - present) as u32);
+        let result = prepare_cores(&index, requests, count, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.groups.len(), present);
+        assert!(
+            result
+                .groups
+                .iter()
+                .enumerate()
+                .all(|(core, group)| group.key().core == core as u32)
+        );
+        assert!(result.peak_capacity_bound <= lookup_budget(&index));
+    }
+}
+
+#[test]
+fn sparse_core_page_search_exhausts_the_monotone_interval_once() {
+    let (directory, reader, _) = fixture(8192);
+    drop(reader);
+    let source = directory.path().join("fixture.shared");
+    let packed = directory.path().join("packed.shared");
+    let compact = directory.path().join("compact.shared");
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    for first in [8191, 8192] {
+        let reader = SharedReader::open_observed(&compact).unwrap();
+        let cores = (first..8256).collect::<Vec<_>>();
+        let expected = reader
+            .find_many(
+                &cores
+                    .iter()
+                    .copied()
+                    .map(SharedKey::core)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let before = reader.stats();
+        let mut actual = Vec::new();
+        reader
+            .resolve_sorted_cores_into(&cores, &mut actual)
+            .unwrap();
+        let after = reader.stats();
+        assert_eq!(actual, expected);
+        assert!(after.core_view_comparisons - before.core_view_comparisons <= 14);
+        assert_eq!(
+            after.core_resolutions_absent - before.core_resolutions_absent,
+            64
+        );
+        assert_eq!(
+            after.core_resolutions_present - before.core_resolutions_present,
+            u64::from(first == 8191)
+        );
+    }
+}
+
+#[test]
 fn concentrated_absent_cores_visit_each_available_target_once() {
     let (directory, reader, _) = fixture(0);
     drop(reader);
@@ -2664,6 +2836,15 @@ fn compact_sorted_core_errors_clear_sparse_output() {
         assert_eq!(
             after.core_resolutions_present - before.core_resolutions_present,
             prior_successes,
+            "{name}"
+        );
+        let index =
+            crate::trace_index::TraceIndex::Shared(Box::new(SharedReader::open(&compact).unwrap()));
+        assert!(
+            matches!(
+                crate::trace_batch::prepare_cores(&index, [0, TARGET_CORE], 2, false),
+                Err(crate::trace::TraceError::Shared(_))
+            ),
             "{name}"
         );
     }

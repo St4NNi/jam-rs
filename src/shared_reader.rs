@@ -909,8 +909,16 @@ impl SharedReader {
     ) -> Result<(), SharedError> {
         let keys_per_page = PAGE_BYTES / 4;
         let mut view = None;
-        for &core in cores {
-            let mut low = checked.first;
+        let mut lower = checked.first;
+        for (request, &core) in cores.iter().enumerate() {
+            if lower == checked.end {
+                self.observe(
+                    &self.core_resolutions_absent,
+                    (cores.len() - request) as u64,
+                );
+                break;
+            }
+            let mut low = lower;
             let mut high = checked.end;
             let mut found = None;
             while low < high {
@@ -941,7 +949,9 @@ impl SharedReader {
                 }
                 self.observe(&self.core_resolutions_present, 1);
                 self.append_core_group(core, ordinal, row, maximum_results, output)?;
+                lower = ordinal + 1;
             } else {
+                lower = low;
                 self.observe(&self.core_resolutions_absent, 1);
             }
         }

@@ -210,9 +210,10 @@ pub(crate) fn prepare_cores(
         return Ok(None);
     };
     let mut keys = Vec::new();
-    keys.try_reserve_exact(request_count)
-        .map_err(|_| TraceError::Invalid("core request allocation"))?;
-    if keys.capacity() > request_count {
+    if key_bytes > lookup_budget(index)
+        || keys.try_reserve_exact(request_count).is_err()
+        || keys.capacity() > request_count
+    {
         return Ok(None);
     }
     for key in requests {
@@ -231,67 +232,72 @@ pub(crate) fn prepare_cores(
     } else {
         keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS)
     };
-    let Some(bytes) = keys
-        .capacity()
-        .checked_mul(std::mem::size_of::<u32>())
+    let group_bytes = std::mem::size_of::<crate::shared_reader::SharedGroup>();
+    let wave_tasks = 8usize;
+    let overhead = 4096 + std::mem::size_of::<SharedCoreLookups>();
+    let Some(base_bytes) = tasks
+        .checked_mul(
+            std::mem::size_of::<Range<usize>>()
+                + std::mem::size_of::<Vec<crate::shared_reader::SharedGroup>>(),
+        )
+        .and_then(|bytes| bytes.checked_add(key_bytes))
+        .and_then(|bytes| bytes.checked_add(overhead))
         .and_then(|bytes| {
-            bytes.checked_add(
-                keys.len()
-                    .checked_mul(2 * std::mem::size_of::<crate::shared_reader::SharedGroup>())?,
-            )
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(tasks.checked_mul(std::mem::size_of::<
+            bytes.checked_add(wave_tasks.checked_mul(std::mem::size_of::<
                 Result<Vec<crate::shared_reader::SharedGroup>, TraceError>,
             >())?)
-        })
-        .and_then(|bytes| {
-            bytes.checked_add(if reader.has_core_prefixes() {
-                0
-            } else {
-                rayon::current_num_threads()
-                    .min(tasks)
-                    .checked_mul(SEED_LOOKUP_BATCH_KEYS)?
-                    .checked_mul(std::mem::size_of::<crate::shared_seed::SharedKey>())?
-            })
-        })
-        .and_then(|bytes| bytes.checked_add(4096 + std::mem::size_of::<SharedCoreLookups>()))
-        .and_then(|bytes| {
-            bytes.checked_add(tasks.checked_mul(std::mem::size_of::<Range<usize>>())?)
         })
         .filter(|&bytes| bytes <= lookup_budget(index))
     else {
         return Ok(None);
     };
     let Some(mut reservation) =
-        CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes - key_reservation.bytes)
+        CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, base_bytes - key_bytes)
     else {
         return Ok(None);
     };
-    let ranges = if reader.has_core_prefixes() {
-        let mut ranges = Vec::new();
-        ranges
-            .try_reserve_exact(tasks)
-            .map_err(|_| TraceError::Invalid("core task allocation"))?;
-        if ranges.capacity() > tasks {
-            return Ok(None);
-        }
+    let mut ranges = Vec::new();
+    let mut chunks = Vec::new();
+    let mut wave = Vec::new();
+    if ranges.try_reserve_exact(tasks).is_err()
+        || chunks.try_reserve_exact(tasks).is_err()
+        || wave.try_reserve_exact(wave_tasks).is_err()
+        || ranges.capacity() > tasks
+        || chunks.capacity() > tasks
+        || wave.capacity() > wave_tasks
+    {
+        return Ok(None);
+    }
+    if reader.has_core_prefixes() {
         ranges.extend(core_prefix_ranges(&keys));
-        Some(ranges)
     } else {
-        None
-    };
+        ranges.extend(
+            (0..keys.len())
+                .step_by(SEED_LOOKUP_BATCH_KEYS)
+                .map(|start| start..(start + SEED_LOOKUP_BATCH_KEYS).min(keys.len())),
+        );
+    }
     let lookup = |chunk: &[u32]| {
         let mut groups = Vec::new();
         if reader.has_core_prefixes() {
             reader.resolve_sorted_cores_into(chunk, &mut groups)?;
             return Ok::<_, TraceError>(groups);
         }
-        let contexts = chunk
-            .iter()
-            .copied()
-            .map(crate::shared_seed::SharedKey::core)
-            .collect::<Vec<_>>();
+        let mut contexts = Vec::new();
+        contexts
+            .try_reserve_exact(chunk.len())
+            .map_err(|_| TraceError::Shared(crate::shared_format::SharedError::ResourceLimit))?;
+        if contexts.capacity() > chunk.len() {
+            return Err(TraceError::Shared(
+                crate::shared_format::SharedError::ResourceLimit,
+            ));
+        }
+        contexts.extend(
+            chunk
+                .iter()
+                .copied()
+                .map(crate::shared_seed::SharedKey::core),
+        );
         let found = reader.find_many(&contexts)?;
         groups
             .try_reserve_exact(found.iter().flatten().count())
@@ -304,57 +310,84 @@ pub(crate) fn prepare_cores(
         groups.extend(found.into_iter().flatten());
         Ok(groups)
     };
-    let chunks = if let Some(ranges) = &ranges {
-        ranges
-            .par_iter()
-            .map(|range| lookup(&keys[range.clone()]))
-            .collect::<Vec<_>>()
-    } else {
-        keys.par_chunks(SEED_LOOKUP_BATCH_KEYS)
-            .map(lookup)
-            .collect::<Vec<_>>()
-    };
     let resource_limit = |error: &TraceError| {
         matches!(
             error,
             TraceError::Shared(crate::shared_format::SharedError::ResourceLimit)
         )
     };
-    if chunks
-        .iter()
-        .any(|chunk| chunk.as_ref().is_err_and(resource_limit))
-    {
-        for chunk in chunks {
-            if let Err(error) = chunk
-                && !resource_limit(&error)
-            {
-                return Err(error);
+    let mut bytes = base_bytes;
+    let mut retained_bytes = base_bytes;
+    let mut count = 0usize;
+    let mut start = 0;
+    while start < ranges.len() {
+        let row_bytes = 2 * group_bytes
+            + if reader.has_core_prefixes() {
+                0
+            } else {
+                std::mem::size_of::<crate::shared_seed::SharedKey>()
+                    + std::mem::size_of::<Option<crate::shared_reader::SharedGroup>>()
+            };
+        let mut end = start;
+        let mut active_bytes = 0;
+        while end < ranges.len() && end - start < wave_tasks {
+            let next = active_bytes + ranges[end].len() * row_bytes;
+            if retained_bytes + next > lookup_budget(index) {
+                break;
+            }
+            active_bytes = next;
+            end += 1;
+        }
+        if end == start {
+            return Ok(None);
+        }
+        let Some(mut active) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, active_bytes)
+        else {
+            return Ok(None);
+        };
+        reservation.bytes += active.bytes;
+        active.bytes = 0;
+        bytes = bytes.max(retained_bytes + active_bytes);
+        ranges[start..end]
+            .par_iter()
+            .map(|range| lookup(&keys[range.clone()]))
+            .collect_into_vec(&mut wave);
+        let mut exhausted = false;
+        for chunk in wave.drain(..) {
+            match chunk {
+                Ok(chunk) => {
+                    retained_bytes += chunk.capacity() * group_bytes;
+                    count += chunk.len();
+                    chunks.push(chunk);
+                }
+                Err(error) if resource_limit(&error) => exhausted = true,
+                Err(error) => return Err(error),
             }
         }
+        if exhausted {
+            return Ok(None);
+        }
+        reservation.retain(retained_bytes - key_bytes);
+        start = end;
+    }
+    let merge_bytes = count * group_bytes;
+    if retained_bytes + merge_bytes > lookup_budget(index) {
         return Ok(None);
     }
-    let count = chunks.iter().try_fold(0usize, |sum, chunk| {
-        chunk.as_ref().map(|chunk| sum + chunk.len())
-    });
-    let count = match count {
-        Ok(count) => count,
-        Err(_) => {
-            for chunk in chunks {
-                chunk?;
-            }
-            unreachable!()
-        }
+    let Some(mut merge) = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, merge_bytes) else {
+        return Ok(None);
     };
+    reservation.bytes += merge.bytes;
+    merge.bytes = 0;
+    bytes = bytes.max(retained_bytes + merge_bytes);
     let mut groups = Vec::new();
-    if groups.try_reserve_exact(count).is_err() {
-        return Ok(None);
-    }
-    if groups.capacity() > count {
+    if groups.try_reserve_exact(count).is_err() || groups.capacity() > count {
         return Ok(None);
     }
     for chunk in chunks {
-        groups.extend(chunk?);
+        groups.extend(chunk);
     }
+    drop(wave);
     drop(keys);
     drop(key_reservation);
     drop(ranges);
