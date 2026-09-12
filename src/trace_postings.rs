@@ -236,6 +236,445 @@ fn run_position_lane(
     lane.timing = posting_timing(started, cpu);
 }
 
+struct PostingRead<'a> {
+    reader: &'a SharedReader,
+    entries: &'a [(u64, Option<TraceSeed>)],
+    parallel: bool,
+    observed: bool,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+pub(crate) fn prepare_shared_postings(
+    reader: &SharedReader,
+    entries: &[(u64, Option<TraceSeed>)],
+    postings: &mut [Option<BatchPosting>],
+    available: usize,
+    observed: bool,
+) -> Result<Option<PostingExecution>, TraceError> {
+    if entries.len() != postings.len() || postings.iter().any(Option::is_some) {
+        return Err(TraceError::Invalid("posting slots"));
+    }
+    let result = prepare_shared_postings_inner(reader, entries, postings, available, observed);
+    if result.is_err() {
+        for posting in postings {
+            *posting = None;
+        }
+    }
+    result
+}
+
+// available excludes existing lookup state and ordinal posting slots. The caller
+// retains its enclosing reservation until this function's work tables are gone.
+fn prepare_shared_postings_inner(
+    reader: &SharedReader,
+    entries: &[(u64, Option<TraceSeed>)],
+    postings: &mut [Option<BatchPosting>],
+    available: usize,
+    observed: bool,
+) -> Result<Option<PostingExecution>, TraceError> {
+    let mut all_members = 0u64;
+    let mut work = 0u64;
+    for &(_, seed) in entries {
+        match seed {
+            Some(TraceSeed::Shared(group)) => {
+                all_members = all_members.saturating_add(u64::from(group.member_count()));
+                work = work
+                    .saturating_add(u64::from(group.member_count()))
+                    .saturating_add(group.occurrence_count());
+            }
+            Some(_) => return Err(TraceError::Invalid("posting index")),
+            None => {}
+        }
+    }
+    let mut execution = PostingExecution {
+        complete: true,
+        task_hash: 0xcbf2_9ce4_8422_2325,
+        ..PostingExecution::default()
+    };
+    if all_members == 0 {
+        return Ok(Some(execution));
+    }
+    let lane_count = if work < POSTING_PARALLEL_ROWS {
+        1
+    } else {
+        POSTING_LANES
+    };
+    let member_capacity = all_members.min(POSTING_MEMBER_ROWS as u64) as usize;
+    // Both lane tables stay allocated through both passes. This deliberately
+    // charges their sum rather than releasing a still-live reservation.
+    let workspace = entries
+        .len()
+        .checked_mul(size_of::<PostingPlan>())
+        .and_then(|bytes| {
+            bytes.checked_add(lane_count.checked_mul(
+                size_of::<MemberLane>()
+                    + size_of::<PositionLane<'_>>()
+                    + POSTING_FRAGMENTS
+                        * (size_of::<MemberFragment>() + size_of::<PositionFragment<'_>>())
+                    + member_capacity * size_of::<SharedMember>(),
+            )?)
+        })
+        .and_then(|bytes| bytes.checked_add(4096));
+    let Some(workspace) = workspace.filter(|&bytes| bytes <= available) else {
+        return Ok(None);
+    };
+    let mut plans = posting_vec(entries.len())?;
+    plans.resize(entries.len(), PostingPlan::default());
+    let mut member_lanes = posting_vec(lane_count)?;
+    let mut position_lanes = posting_vec(lane_count)?;
+    for _ in 0..lane_count {
+        member_lanes.push(MemberLane {
+            fragments: posting_vec(POSTING_FRAGMENTS)?,
+            members: posting_vec(member_capacity)?,
+            failed_fragment: 0,
+            error: None,
+            timing: PostingTiming::default(),
+        });
+        position_lanes.push(PositionLane {
+            fragments: posting_vec(POSTING_FRAGMENTS)?,
+            error: None,
+            timing: PostingTiming::default(),
+        });
+    }
+    execution.scratch_bytes = workspace;
+    for (ordinal, &(_, seed)) in entries.iter().enumerate() {
+        let Some(TraceSeed::Shared(group)) = seed else {
+            continue;
+        };
+        let count = group.member_count() as usize;
+        let remaining = available - workspace - execution.retained_bytes;
+        let Some((positions, bytes)) =
+            posting_admission(remaining, count, group.occurrence_count())
+        else {
+            execution.complete = false;
+            continue;
+        };
+        let documents = posting_vec(count)?;
+        let occurrences = positions.then(|| posting_vec(count)).transpose()?;
+        postings[ordinal] = Some(BatchPosting {
+            documents,
+            occurrences,
+        });
+        plans[ordinal] = PostingPlan {
+            documents: true,
+            positions,
+        };
+        execution.retained_bytes += bytes;
+        execution.admitted_member_rows += u64::from(group.member_count());
+        if positions {
+            execution.admitted_position_rows += group.occurrence_count();
+        }
+    }
+    execution.peak_bytes = workspace + execution.retained_bytes;
+    let parallel = execution
+        .admitted_member_rows
+        .saturating_add(execution.admitted_position_rows)
+        >= POSTING_PARALLEL_ROWS;
+    let read = PostingRead {
+        reader,
+        entries,
+        parallel,
+        observed,
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+    };
+    let started = observed.then(Instant::now);
+    let membership_error =
+        execute_member_waves(&read, postings, &plans, &mut member_lanes, &mut execution)?;
+    execution.membership_ns = started.map_or(0, |start| start.elapsed().as_nanos() as u64);
+    let before = membership_error
+        .as_ref()
+        .map_or(entries.len(), |&(ordinal, _)| ordinal);
+    let started = observed.then(Instant::now);
+    initialize_posting_positions(postings, &plans, before, &mut execution)?;
+    let position_result =
+        execute_position_waves(&read, postings, before, position_lanes, &mut execution);
+    execution.position_ns = started.map_or(0, |start| start.elapsed().as_nanos() as u64);
+    execution.peak_parallel_tasks = read.peak.load(Ordering::Relaxed);
+    position_result?;
+    if let Some((_, error)) = membership_error {
+        return Err(error);
+    }
+    Ok(Some(execution))
+}
+
+fn execute_member_waves(
+    read: &PostingRead<'_>,
+    postings: &mut [Option<BatchPosting>],
+    plans: &[PostingPlan],
+    lanes: &mut [MemberLane],
+    execution: &mut PostingExecution,
+) -> Result<Option<(usize, TraceError)>, TraceError> {
+    let mut ordinal = 0;
+    let mut member_start = 0u32;
+    let mut occurrence_sum = 0u64;
+    loop {
+        let mut used = 0;
+        for lane in lanes.iter_mut() {
+            lane.fragments.clear();
+            lane.members.clear();
+            lane.error = None;
+            let mut rows = 0;
+            while rows < lane.members.capacity() && lane.fragments.len() < POSTING_FRAGMENTS {
+                while ordinal < plans.len() && !plans[ordinal].documents {
+                    ordinal += 1;
+                }
+                if ordinal == plans.len() {
+                    break;
+                }
+                let group = posting_group(read.entries, ordinal);
+                let count = ((group.member_count() - member_start) as usize)
+                    .min(lane.members.capacity() - rows);
+                lane.fragments.push(MemberFragment {
+                    ordinal,
+                    start: member_start,
+                    count,
+                });
+                rows += count;
+                member_start += count as u32;
+                if member_start == group.member_count() {
+                    ordinal += 1;
+                    member_start = 0;
+                }
+            }
+            if lane.fragments.is_empty() {
+                break;
+            }
+            used += 1;
+            execution.member_tasks += 1;
+            if read.observed {
+                posting_hash(&mut execution.task_hash, [0, lane.fragments.len() as u64]);
+                for fragment in &lane.fragments {
+                    posting_hash(
+                        &mut execution.task_hash,
+                        [
+                            fragment.ordinal as u64,
+                            u64::from(fragment.start),
+                            fragment.count as u64,
+                        ],
+                    );
+                }
+            }
+        }
+        if used == 0 {
+            return Ok(None);
+        }
+        let run = |lane: &mut MemberLane| {
+            run_member_lane(
+                read.reader,
+                read.entries,
+                lane,
+                read.observed,
+                &read.active,
+                &read.peak,
+            )
+        };
+        if read.parallel {
+            lanes[..used].par_iter_mut().for_each(run);
+        } else {
+            lanes[..used].iter_mut().for_each(run);
+        }
+        for lane in &lanes[..used] {
+            record_posting_timing(execution, &lane.timing, true, read.observed);
+        }
+        for lane in &mut lanes[..used] {
+            if lane.failed_fragment == usize::MAX
+                && let Some(error) = lane.error.take()
+            {
+                return Err(error);
+            }
+        }
+        for lane in &mut lanes[..used] {
+            let mut decoded = lane.members.iter().copied();
+            for (fragment_index, fragment) in lane.fragments.iter().enumerate() {
+                let group = posting_group(read.entries, fragment.ordinal);
+                let posting = postings[fragment.ordinal].as_mut().unwrap();
+                if posting.documents.len() != fragment.start as usize {
+                    return Ok(Some((
+                        fragment.ordinal,
+                        TraceError::Invalid("posting member progress"),
+                    )));
+                }
+                if fragment.start == 0 {
+                    occurrence_sum = 0;
+                }
+                for member in decoded.by_ref().take(fragment.count) {
+                    if posting
+                        .documents
+                        .last()
+                        .is_some_and(|previous| previous.metagenome_id() >= member.metagenome_id)
+                    {
+                        return Ok(Some((
+                            fragment.ordinal,
+                            posting_shared_error("member order"),
+                        )));
+                    }
+                    let Some(sum) = occurrence_sum.checked_add(member.occurrence_count()) else {
+                        return Ok(Some((
+                            fragment.ordinal,
+                            posting_shared_error("member occurrence count"),
+                        )));
+                    };
+                    occurrence_sum = sum;
+                    posting.documents.push(SeedDocument::Shared(member));
+                    execution.member_copies += 1;
+                }
+                if posting.documents.len() == group.member_count() as usize {
+                    if occurrence_sum != group.occurrence_count() {
+                        return Ok(Some((
+                            fragment.ordinal,
+                            posting_shared_error("member occurrence count"),
+                        )));
+                    }
+                    if read.observed {
+                        execution.histogram[occurrence_sum.ilog2().min(15) as usize] += 1;
+                    }
+                }
+                if fragment_index == lane.failed_fragment
+                    && let Some(error) = lane.error.take()
+                {
+                    return Ok(Some((fragment.ordinal, error)));
+                }
+                if posting.documents.len() != fragment.start as usize + fragment.count {
+                    return Ok(Some((
+                        fragment.ordinal,
+                        TraceError::Invalid("posting member progress"),
+                    )));
+                }
+            }
+        }
+    }
+}
+
+fn initialize_posting_positions(
+    postings: &mut [Option<BatchPosting>],
+    plans: &[PostingPlan],
+    before: usize,
+    execution: &mut PostingExecution,
+) -> Result<(), TraceError> {
+    for (posting, plan) in postings[..before].iter_mut().zip(plans) {
+        if !plan.positions {
+            continue;
+        }
+        let posting = posting.as_mut().unwrap();
+        let occurrences = posting.occurrences.as_mut().unwrap();
+        for document in &posting.documents {
+            let count = usize::try_from(document.occurrence_count())
+                .map_err(|_| TraceError::Invalid("posting position count"))?;
+            let mut values = posting_vec(count)?;
+            values.resize(
+                count,
+                SeedOccurrence {
+                    contig_id: 0,
+                    position: 0,
+                    canonical_orientation: false,
+                },
+            );
+            execution.initialized_position_bytes += values.capacity() * size_of::<SeedOccurrence>();
+            occurrences.push(values);
+        }
+    }
+    Ok(())
+}
+
+fn execute_position_waves<'a>(
+    read: &PostingRead<'_>,
+    postings: &'a mut [Option<BatchPosting>],
+    before: usize,
+    mut lanes: Vec<PositionLane<'a>>,
+    execution: &mut PostingExecution,
+) -> Result<(), TraceError> {
+    let mut blocks = postings[..before]
+        .iter_mut()
+        .enumerate()
+        .flat_map(|(ordinal, posting)| {
+            posting.iter_mut().flat_map(move |posting| {
+                let group = posting_group(read.entries, ordinal);
+                let documents = &posting.documents;
+                posting.occurrences.iter_mut().flat_map(move |members| {
+                    members.iter_mut().zip(documents).enumerate().flat_map(
+                        move |(member_ordinal, (values, document))| {
+                            let SeedDocument::Shared(member) = *document else {
+                                unreachable!()
+                            };
+                            values.chunks_mut(POSTING_POSITION_ROWS).enumerate().map(
+                                move |(block, output)| PositionFragment {
+                                    ordinal,
+                                    member_ordinal,
+                                    group,
+                                    member,
+                                    start: (block * POSTING_POSITION_ROWS) as u64,
+                                    output,
+                                },
+                            )
+                        },
+                    )
+                })
+            })
+        });
+    let mut pending = None;
+    loop {
+        for lane in &mut lanes {
+            lane.fragments.clear();
+            lane.error = None;
+        }
+        let mut used = 0;
+        for lane in lanes.iter_mut() {
+            let mut rows = 0;
+            while rows < POSTING_POSITION_ROWS && lane.fragments.len() < POSTING_FRAGMENTS {
+                let Some(fragment) = pending.take().or_else(|| blocks.next()) else {
+                    break;
+                };
+                if rows + fragment.output.len() > POSTING_POSITION_ROWS {
+                    pending = Some(fragment);
+                    break;
+                }
+                rows += fragment.output.len();
+                lane.fragments.push(fragment);
+            }
+            if lane.fragments.is_empty() {
+                break;
+            }
+            used += 1;
+            execution.position_tasks += 1;
+            if read.observed {
+                posting_hash(&mut execution.task_hash, [1, lane.fragments.len() as u64]);
+                for fragment in &lane.fragments {
+                    posting_hash(
+                        &mut execution.task_hash,
+                        [
+                            fragment.ordinal as u64,
+                            fragment.member_ordinal as u64,
+                            fragment.start,
+                            fragment.output.len() as u64,
+                        ],
+                    );
+                }
+            }
+        }
+        if used == 0 {
+            return Ok(());
+        }
+        let run = |lane: &mut PositionLane<'_>| {
+            run_position_lane(read.reader, lane, read.observed, &read.active, &read.peak)
+        };
+        if read.parallel {
+            lanes[..used].par_iter_mut().for_each(run);
+        } else {
+            lanes[..used].iter_mut().for_each(run);
+        }
+        for lane in &lanes[..used] {
+            record_posting_timing(execution, &lane.timing, false, read.observed);
+        }
+        for lane in &mut lanes[..used] {
+            if let Some(error) = lane.error.take() {
+                return Err(error);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
