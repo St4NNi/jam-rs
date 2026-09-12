@@ -1936,6 +1936,7 @@ fn bounded_posting_executor_is_stable_and_parallel_for_many_singletons() {
             if threads >= 4 {
                 assert!(execution.peak_parallel_tasks > 1, "{threads} threads");
             }
+            assert!(execution.peak_parallel_tasks <= 4, "{threads} threads");
             let actual = retained_posting_evidence(&entries, &postings);
             assert_eq!(actual, expected);
             let plan = (

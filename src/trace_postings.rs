@@ -453,7 +453,7 @@ fn execute_member_waves(
     let mut member_start = 0u32;
     let mut occurrence_sum = 0u64;
     loop {
-        let mut used = 0;
+        let mut used = 0usize;
         for lane in lanes.iter_mut() {
             lane.fragments.clear();
             lane.members.clear();
@@ -514,7 +514,10 @@ fn execute_member_waves(
             )
         };
         if read.parallel {
-            lanes[..used].par_iter_mut().for_each(run);
+            let chunk_size = used.div_ceil(4).max(1);
+            lanes[..used]
+                .par_chunks_mut(chunk_size)
+                .for_each(|chunk| chunk.iter_mut().for_each(&run));
         } else {
             lanes[..used].iter_mut().for_each(run);
         }
@@ -662,7 +665,7 @@ fn execute_position_waves<'a>(
             lane.fragments.clear();
             lane.error = None;
         }
-        let mut used = 0;
+        let mut used = 0usize;
         for lane in lanes.iter_mut() {
             let mut rows = 0;
             while rows < POSTING_POSITION_ROWS && lane.fragments.len() < POSTING_FRAGMENTS {
@@ -703,7 +706,10 @@ fn execute_position_waves<'a>(
             run_position_lane(read.reader, lane, read.observed, &read.active, &read.peak)
         };
         if read.parallel {
-            lanes[..used].par_iter_mut().for_each(run);
+            let chunk_size = used.div_ceil(4).max(1);
+            lanes[..used]
+                .par_chunks_mut(chunk_size)
+                .for_each(|chunk| chunk.iter_mut().for_each(&run));
         } else {
             lanes[..used].iter_mut().for_each(run);
         }
