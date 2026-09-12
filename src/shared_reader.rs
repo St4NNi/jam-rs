@@ -700,7 +700,10 @@ impl SharedReader {
         } else {
             None
         };
-        for ((core, keys), slots) in requests.iter().zip(output.chunks_exact_mut(3)) {
+        for ((core, keys), slots) in requests
+            .iter()
+            .zip(output.as_chunks_mut::<3>().0.iter_mut())
+        {
             if let Some(operation) = &operation {
                 operation.find_in_core_into(*core, keys, slots)?;
             } else {
