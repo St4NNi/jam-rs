@@ -1,0 +1,16 @@
+.git
+.claude
+.agents
+.codex
+AGENTS.md
+CLAUDE.md
+.jam-agent-state
+.tmp
+target
+tools/out
+tools/target
+**/__pycache__
+test.*
+tests/testfiles/all*
+tests/testfiles/plas*
+tests/testfiles/chrom*

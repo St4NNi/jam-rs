@@ -14,7 +14,7 @@ keywords = [
     "jaccard",
 ]
 categories = ["command-line-utilities", "science", "algorithms"]
-exclude = ["/tests"]
+exclude = ["/tests", "/.claude", "/.tmp", "/.jam-agent-state", "/tools/out", "/tools/target"]
 readme = "README.md"
 
 

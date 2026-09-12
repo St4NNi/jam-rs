@@ -13,3 +13,8 @@
 tests/testfiles/all*
 tests/testfiles/plas*
 tests/testfiles/chrom*
+/.claude/*
+!/.claude/settings.local.json
+/.tmp/
+/.jam-agent-state/
+**/__pycache__/
