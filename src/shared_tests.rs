@@ -3190,3 +3190,160 @@ fn packed_direct_locators_are_bounded_by_physical_placements() {
         }
     }
 }
+
+#[test]
+fn binary_fuse_shared_ranges_preserve_complete_exact_evidence() {
+    let (directory, baseline, _) = fixture(32);
+    let packed = directory.path().join("fuse-packed.shared");
+    let compact = directory.path().join("fuse-compact.shared");
+    crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
+        .unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let cores = [
+        0,
+        1,
+        31,
+        32,
+        16_383,
+        16_384,
+        ((TARGET_CORE >> 14) << 14) - 1,
+        (TARGET_CORE >> 14) << 14,
+        TARGET_CORE - 1,
+        TARGET_CORE,
+        TARGET_CORE + 1,
+        CORE_LIMIT - 1,
+    ];
+    for maximum in [0, 32, usize::MAX] {
+        let filtered = directory.path().join(format!("fuse-{maximum}.shared"));
+        crate::shared_pack::add_shared_core_filter(&compact, &filtered, maximum).unwrap();
+        assert!(crate::shared_pack::add_shared_core_filter(&compact, &filtered, maximum).is_err());
+        let reader = SharedReader::open_observed(&filtered).unwrap();
+        reader.verify_checksum().unwrap();
+        let mut groups = Vec::new();
+        reader
+            .resolve_sorted_cores_into(&cores, &mut groups)
+            .unwrap();
+        let actual = groups
+            .iter()
+            .map(|group| group_evidence(&reader, Some(*group)))
+            .collect::<Vec<_>>();
+        let expected = cores
+            .iter()
+            .filter_map(|&core| baseline.find(SharedKey::core(core)).unwrap())
+            .map(|group| group_evidence(&baseline, Some(group)))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(reader.stats().core_resolutions_present, groups.len() as u64);
+        assert_eq!(
+            reader.stats().core_resolutions_absent,
+            (cores.len() - groups.len()) as u64
+        );
+        let core = groups.iter().find(|g| g.key().core == TARGET_CORE).unwrap();
+        for context in [TARGET_CONTEXT, TARGET_CONTEXT ^ 1] {
+            let key = SharedKey {
+                core: TARGET_CORE,
+                context,
+                length: 31,
+            };
+            assert_eq!(
+                group_evidence(&reader, reader.find_in_core(*core, &[key]).unwrap()[0]),
+                group_evidence(&baseline, baseline.find(key).unwrap())
+            );
+        }
+        let index = crate::trace_index::TraceIndex::Shared(Box::new(reader));
+        let resolved = crate::trace_batch::prepare_cores(&index, cores, cores.len(), false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.groups.len(), expected.len());
+    }
+}
+
+#[test]
+fn declared_binary_fuse_corruption_fails_before_negative_answers() {
+    let (directory, _, _) = fixture(32);
+    let packed = directory.path().join("fuse-packed.shared");
+    let compact = directory.path().join("fuse-compact.shared");
+    let filtered = directory.path().join("fuse.shared");
+    crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
+        .unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+    let original = std::fs::read(&filtered).unwrap();
+    let header = SharedHeader::decode(&original[..HEADER_BYTES], original.len() as u64).unwrap();
+    let offset = header.section(Section::CoreFilter).offset as usize;
+    for relative in [0, 8, 12, 16, 24, 48, 80, 128, 148] {
+        let corrupted = directory
+            .path()
+            .join(format!("fuse-corrupt-{relative}.shared"));
+        let mut bytes = original.clone();
+        bytes[offset + relative] ^= 1;
+        std::fs::write(&corrupted, bytes).unwrap();
+        assert!(SharedReader::open(&corrupted).is_err());
+    }
+    for relative in [8, 12, 24, 48, 80, 128 + 12] {
+        let malformed = directory
+            .path()
+            .join(format!("fuse-malformed-{relative}.shared"));
+        std::fs::write(&malformed, &original).unwrap();
+        mutate_and_resign(&malformed, |bytes, _| bytes[offset + relative] ^= 1);
+        assert!(SharedReader::open(&malformed).is_err());
+    }
+    let truncated = directory.path().join("fuse-truncated.shared");
+    std::fs::write(&truncated, &original[..original.len() - 1]).unwrap();
+    assert!(SharedReader::open(truncated).is_err());
+    let reader = SharedReader::open(&filtered).unwrap();
+    let mut altered = original.clone();
+    altered[offset + 148] ^= 1;
+    std::fs::write(&filtered, altered).unwrap();
+    assert!(matches!(
+        reader.resolve_sorted_cores_into(&[100], &mut Vec::new()),
+        Err(SharedError::SourceChanged)
+    ));
+}
+
+#[test]
+fn binary_fuse_empty_and_memory_fallback_remain_complete() {
+    let (directory, _, _) = fixture(32);
+    for empty in [false, true] {
+        let source = if empty {
+            let path = directory.path().join("empty-filter-source.shared");
+            let reference = JidxReader::open(directory.path().join("metadata.jidx")).unwrap();
+            write_shared_index(&reference, &path, 64, &mut []).unwrap();
+            path
+        } else {
+            directory.path().join("fixture.shared")
+        };
+        let packed = directory
+            .path()
+            .join(format!("fallback-{empty}-packed.shared"));
+        let compact = directory
+            .path()
+            .join(format!("fallback-{empty}-compact.shared"));
+        let filtered = directory
+            .path()
+            .join(format!("fallback-{empty}-filtered.shared"));
+        crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+        crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+        crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+        let expected = SharedReader::open(&compact).unwrap();
+        for budget in [0, 8 * 1024 * 1024] {
+            let old = crate::shared_filters::FILTER_TEST_LIMIT.with(|limit| limit.replace(budget));
+            let reader = SharedReader::open_observed(&filtered);
+            crate::shared_filters::FILTER_TEST_LIMIT.with(|limit| limit.set(old));
+            let reader = reader.unwrap();
+            assert_eq!(reader.stats().filter_fallbacks, u64::from(budget == 0));
+            let cores = [0, 1, 100, TARGET_CORE, TARGET_CORE + 1];
+            let mut groups = Vec::new();
+            reader
+                .resolve_sorted_cores_into(&cores, &mut groups)
+                .unwrap();
+            let actual = groups.into_iter().map(|g| g.key()).collect::<Vec<_>>();
+            let expected = cores
+                .into_iter()
+                .filter_map(|c| expected.find(SharedKey::core(c)).unwrap())
+                .map(|g| g.key())
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
+    }
+}
