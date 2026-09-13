@@ -3093,6 +3093,18 @@ struct QueryKeyRange {
     count: usize,
 }
 
+/// Owned linear k15 start positions per extraction task of one long query.
+const EXTRACTION_TASK_STARTS: usize = 16_384;
+
+/// Counts one extraction task writes before they are reduced in start order.
+#[derive(Default)]
+struct ExtractionTask {
+    tokens: usize,
+    keys: usize,
+    occurrences: usize,
+    probes: crate::shared_reader::CoreRequestCounts,
+}
+
 struct QueryPositions {
     core: Vec<QuerySeed>,
     tokens: Option<Vec<u64>>,
@@ -3143,6 +3155,22 @@ impl QueryPositions {
         operation: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
         observed: bool,
     ) -> Option<Self> {
+        Self::compact_screened_in_chunks(
+            query,
+            circular,
+            operation,
+            observed,
+            EXTRACTION_TASK_STARTS,
+        )
+    }
+
+    fn compact_screened_in_chunks(
+        query: &[u8],
+        circular: bool,
+        operation: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
+        observed: bool,
+        task_starts: usize,
+    ) -> Option<Self> {
         u32::try_from(query.len().saturating_sub(1)).ok()?;
         let mut tokens = Vec::new();
         tokens.try_reserve_exact(query.len()).ok()?;
@@ -3161,16 +3189,16 @@ impl QueryPositions {
         } else {
             None
         };
+        let keyed = observed && operation.is_some();
         let mut occurrences = 0;
         let mut probes = crate::shared_reader::CoreRequestCounts::default();
-        let mut retain = |core: u32| {
-            occurrences += 1;
+        let retain = |core: u32,
+                      occurrences: &mut usize,
+                      probes: &mut crate::shared_reader::CoreRequestCounts| {
+            *occurrences += 1;
             let Some(operation) = operation else {
                 return Some(true);
             };
-            if observed {
-                original_keys.push(core);
-            }
             let (covered, keep) = operation.screen(core).ok()?;
             probes.attempted += 1;
             probes.covered += usize::from(covered);
@@ -3180,26 +3208,90 @@ impl QueryPositions {
             Some(keep)
         };
         if query.len() >= 15 {
-            for (position, key, orientation) in query.bit_kmers(15, true) {
-                if !retain(key.0 as u32)? {
-                    continue;
-                }
-                tokens.push(
-                    QuerySeed {
+            // Each task owns a contiguous range of linear starts, reads up to 14 further bases, and
+            // writes its survivors and diagnostic keys into disjoint slices of the query-length
+            // buffers. Outputs are then joined in start order, so the sort below sees every token.
+            let starts = query.len() - 14;
+            tokens.resize(starts, 0);
+            if keyed {
+                original_keys.resize(starts, 0);
+            }
+            let extract = |first: usize, tokens: &mut [u64], keys: &mut [u32]| {
+                let mut output = ExtractionTask::default();
+                let bases = &query[first..first + tokens.len() + 14];
+                for (offset, key, orientation) in bases.bit_kmers(15, true) {
+                    let core = key.0 as u32;
+                    if keyed {
+                        keys[output.keys] = core;
+                        output.keys += 1;
+                    }
+                    if !retain(core, &mut output.occurrences, &mut output.probes)? {
+                        continue;
+                    }
+                    tokens[output.tokens] = QuerySeed {
                         packed_key: key.0,
-                        position: position as u64,
+                        position: (first + offset) as u64,
                         canonical_orientation: orientation,
                     }
-                    .token()?,
-                );
+                    .token()?;
+                    output.tokens += 1;
+                }
+                Some(output)
+            };
+            let task_starts = task_starts.max(1);
+            let outputs = if starts <= task_starts {
+                vec![extract(0, &mut tokens, &mut original_keys)]
+            } else {
+                let tasks = starts.div_ceil(task_starts);
+                let mut slices = Vec::new();
+                slices.try_reserve_exact(tasks).ok()?;
+                let mut token_rest = &mut tokens[..];
+                let mut key_rest = &mut original_keys[..];
+                for task in 0..tasks {
+                    let owned = task_starts.min(token_rest.len());
+                    let (task_tokens, rest) = token_rest.split_at_mut(owned);
+                    token_rest = rest;
+                    let (task_keys, rest) = key_rest.split_at_mut(if keyed { owned } else { 0 });
+                    key_rest = rest;
+                    slices.push((task * task_starts, task_tokens, task_keys));
+                }
+                let mut outputs = Vec::new();
+                outputs.try_reserve_exact(tasks).ok()?;
+                slices
+                    .into_par_iter()
+                    .map(|(first, tokens, keys)| extract(first, tokens, keys))
+                    .collect_into_vec(&mut outputs);
+                outputs
+            };
+            let (mut written, mut written_keys) = (0, 0);
+            for (task, output) in outputs.into_iter().enumerate() {
+                let output = output?;
+                let first = task * task_starts;
+                tokens.copy_within(first..first + output.tokens, written);
+                written += output.tokens;
+                if keyed {
+                    original_keys.copy_within(first..first + output.keys, written_keys);
+                    written_keys += output.keys;
+                }
+                occurrences += output.occurrences;
+                probes.attempted += output.probes.attempted;
+                probes.covered += output.probes.covered;
+                probes.uncovered += output.probes.uncovered;
+                probes.rejected += output.probes.rejected;
+                probes.retained += output.probes.retained;
             }
+            tokens.truncate(written);
+            original_keys.truncate(written_keys);
             if circular {
                 let start = query.len() - 14;
                 let mut boundary = [0; 28];
                 boundary[..14].copy_from_slice(&query[start..]);
                 boundary[14..].copy_from_slice(&query[..14]);
                 for (position, key, orientation) in boundary.bit_kmers(15, true) {
-                    if !retain(key.0 as u32)? {
+                    if keyed {
+                        original_keys.push(key.0 as u32);
+                    }
+                    if !retain(key.0 as u32, &mut occurrences, &mut probes)? {
                         continue;
                     }
                     tokens.push(
@@ -4284,6 +4376,229 @@ mod tests {
             for (key, positions) in compact.iter() {
                 assert_eq!(positions, &wide[key]);
             }
+        }
+    }
+
+    /// Window-by-window oracle for screened compact extraction: every run of 15 bases from A, C,
+    /// G and T at its start position, then the circular origin windows.
+    fn oracle_screened_tokens(
+        query: &[u8],
+        circular: bool,
+        operation: Option<&crate::shared_reader::SharedCoreOperation<'_>>,
+    ) -> (Vec<u64>, [usize; 5], usize, usize) {
+        let mut windows = Vec::new();
+        if query.len() >= 15 {
+            windows.extend(
+                (0..=query.len() - 15).map(|start| (start, query[start..start + 15].to_vec())),
+            );
+            if circular {
+                let start = query.len() - 14;
+                windows.extend((0..14).map(|offset| {
+                    let window = query[start + offset..]
+                        .iter()
+                        .chain(&query[..=offset])
+                        .copied()
+                        .collect::<Vec<_>>();
+                    (start + offset, window)
+                }));
+            }
+        }
+        let code = |base: &u8| {
+            b"ACGT"
+                .iter()
+                .position(|b| b == base)
+                .map(|code| code as u64)
+        };
+        let (mut tokens, mut keys) = (Vec::new(), std::collections::BTreeSet::new());
+        let (mut counts, mut occurrences) = ([0usize; 5], 0);
+        for (start, window) in windows {
+            let Some(codes) = window.iter().map(code).collect::<Option<Vec<_>>>() else {
+                continue;
+            };
+            let forward = codes.iter().fold(0, |key, code| key << 2 | code);
+            let reverse = codes
+                .iter()
+                .rev()
+                .fold(0, |key, code| key << 2 | (3 - code));
+            let (key, orientation) = if forward > reverse {
+                (reverse, true)
+            } else {
+                (forward, false)
+            };
+            occurrences += 1;
+            keys.insert(key);
+            if let Some(operation) = operation {
+                let (covered, keep) = operation.screen(key as u32).unwrap();
+                let flags = [true, covered, !covered, !keep, keep];
+                for (count, flag) in counts.iter_mut().zip(flags) {
+                    *count += usize::from(flag);
+                }
+                if !keep {
+                    continue;
+                }
+            }
+            tokens.push(
+                QuerySeed {
+                    packed_key: key,
+                    position: start as u64,
+                    canonical_orientation: orientation,
+                }
+                .token()
+                .unwrap(),
+            );
+        }
+        tokens.sort_unstable();
+        (tokens, counts, occurrences, keys.len())
+    }
+
+    #[test]
+    fn chunked_compact_extraction_matches_window_oracle_at_task_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = |name: &str| directory.path().join(name);
+        let (shared, _, contigs) = write_range_sources(directory.path(), 1);
+        crate::shared_pack::repack_shared_index(&shared, path("packed.shared")).unwrap();
+        crate::shared_pack::repack_shared_cores(path("packed.shared"), path("compact.shared"))
+            .unwrap();
+        let cores = crate::shared_reader::SharedReader::open(path("compact.shared"))
+            .unwrap()
+            .core_count() as usize;
+        for (name, maximum) in [("partial.shared", cores / 3), ("full.shared", usize::MAX)] {
+            crate::shared_pack::add_shared_core_filter(path("compact.shared"), path(name), maximum)
+                .unwrap();
+        }
+        let readers = ["partial.shared", "full.shared"]
+            .map(|name| crate::shared_reader::SharedReader::open(path(name)).unwrap());
+        let operations = readers
+            .iter()
+            .map(|reader| reader.core_operation().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        let present = &contigs[0][..3_000];
+        let absent = window_dna(0x51ed_270b_27b3_8c2f, 3_000);
+        let mut mixed = [&present[..700], &absent[..700], &present[900..1_600]].concat();
+        // Ambiguity runs cross the boundaries of tasks with 16, 17 and 64 owned starts.
+        for at in [10, 60, 250, 1_010] {
+            mixed[at..at + 9].fill(b'N');
+        }
+        let mut queries = vec![
+            present.to_vec(),
+            absent.clone(),
+            mixed,
+            vec![b'A'; 300],
+            b"AC".repeat(150),
+            b"ACGTN".repeat(60),
+        ];
+        // Lengths below, at and just above k, and owned starts around task multiples.
+        queries.extend((0..32).map(|length| present[..length].to_vec()));
+        for task in [7, 16, 17, 64] {
+            for starts in [task * 5 - 1, task * 5, task * 5 + 1] {
+                queries.push(absent[..starts + 14].to_vec());
+            }
+        }
+        let filters = [None, Some(&operations[0]), Some(&operations[1])];
+        let mut expected = Vec::new();
+        for query in &queries {
+            for circular in [false, true] {
+                for operation in filters {
+                    expected.push(oracle_screened_tokens(query, circular, operation));
+                }
+            }
+        }
+        let (poly_a, _, _, _) = &expected[3 * 6];
+        assert!(poly_a.iter().all(|token| token >> 33 == 0) && !poly_a.is_empty());
+        for workers in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                let mut expected = expected.iter();
+                for query in &queries {
+                    for circular in [false, true] {
+                        for operation in filters {
+                            let (tokens, counts, occurrences, distinct) = expected.next().unwrap();
+                            for observed in [false, true] {
+                                for task in [7, 16, 17, 64, EXTRACTION_TASK_STARTS] {
+                                    let case = format!(
+                                        "workers={workers} length={} circular={circular} filter={} observed={observed} task={task}",
+                                        query.len(),
+                                        operation.is_some()
+                                    );
+                                    let actual = QueryPositions::compact_screened_in_chunks(
+                                        query, circular, operation, observed, task,
+                                    )
+                                    .unwrap();
+                                    assert_eq!(actual.tokens.as_deref(), Some(&tokens[..]), "{case}");
+                                    let mut first = 0;
+                                    for (entry, group) in actual
+                                        .directory
+                                        .iter()
+                                        .zip(tokens.chunk_by(|left, right| left >> 33 == right >> 33))
+                                    {
+                                        assert_eq!(
+                                            (entry.key, entry.first, entry.count),
+                                            (group[0] >> 33, first, group.len()),
+                                            "{case}"
+                                        );
+                                        first += group.len();
+                                    }
+                                    assert_eq!(first, tokens.len(), "{case}");
+                                    let probes = actual.occurrence_probes;
+                                    assert_eq!(
+                                        [
+                                            probes.attempted,
+                                            probes.covered,
+                                            probes.uncovered,
+                                            probes.rejected,
+                                            probes.retained
+                                        ],
+                                        *counts,
+                                        "{case}"
+                                    );
+                                    assert_eq!(actual.core_occurrences, *occurrences, "{case}");
+                                    let distinct = if operation.is_none() || observed {
+                                        *distinct
+                                    } else {
+                                        0
+                                    };
+                                    assert_eq!(actual.core_distinct, distinct, "{case}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        // A long mixed query runs several default-size tasks against both filters.
+        let long = [&contigs[0][..], &absent, &contigs[1][..]]
+            .concat()
+            .repeat(5);
+        assert!(long.len() > 4 * EXTRACTION_TASK_STARTS);
+        for operation in filters {
+            let (tokens, counts, occurrences, _) = oracle_screened_tokens(&long, true, operation);
+            for workers in [1, 4, 8, 16] {
+                let actual = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap()
+                    .install(|| QueryPositions::compact_screened(&long, true, operation, true))
+                    .unwrap();
+                assert_eq!(actual.tokens.as_deref(), Some(&tokens[..]));
+                let probes = actual.occurrence_probes;
+                assert_eq!(
+                    [
+                        probes.attempted,
+                        probes.covered,
+                        probes.uncovered,
+                        probes.rejected,
+                        probes.retained
+                    ],
+                    counts
+                );
+                assert_eq!(actual.core_occurrences, occurrences);
+            }
+        }
+        for operation in operations {
+            operation.finish().unwrap();
         }
     }
 
