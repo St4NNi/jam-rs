@@ -193,6 +193,9 @@ pub struct AlignmentWork {
     pub endpoint_cells: u64,
     pub endpoint_recurrence_cells: u64,
     pub local_passes: u64,
+    pub local_chunked_passes: u64,
+    pub local_chunks: u64,
+    pub local_recomputed_cells: u64,
     pub endpoint_passes: u64,
     pub reverse_bytes: u64,
     pub endpoint_scratch_bytes: u64,
@@ -218,6 +221,9 @@ impl AlignmentWork {
         self.endpoint_cells += other.endpoint_cells;
         self.endpoint_recurrence_cells += other.endpoint_recurrence_cells;
         self.local_passes += other.local_passes;
+        self.local_chunked_passes += other.local_chunked_passes;
+        self.local_chunks += other.local_chunks;
+        self.local_recomputed_cells += other.local_recomputed_cells;
         self.endpoint_passes += other.endpoint_passes;
         self.reverse_bytes += other.reverse_bytes;
         self.endpoint_scratch_bytes += other.endpoint_scratch_bytes;
@@ -239,6 +245,7 @@ pub(crate) fn elapsed_cpu(start: Option<u64>) -> u64 {
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
     observed: bool,
+    resident_chunks: bool,
     pub(crate) work: AlignmentWork,
     traceback_nanoseconds: u64,
     endpoint_nanoseconds: u64,
@@ -247,6 +254,12 @@ pub struct AlignmentWorkspace {
     compact_cells: Vec<u16>,
     #[cfg(target_arch = "x86_64")]
     waves: [Vec<i32>; 3],
+    #[cfg(target_arch = "x86_64")]
+    chunk_waves: Vec<(usize, usize)>,
+    #[cfg(target_arch = "x86_64")]
+    chunk_carries: Vec<WaveCarry>,
+    #[cfg(target_arch = "x86_64")]
+    checkpoints: Vec<i32>,
     endpoint_cells: EndpointWorkspace,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
@@ -350,7 +363,10 @@ impl TraceAlignmentWorkspace {
             trace_alignment_bytes(max_query_bases, max_target_bases, endpoint_bases, config)?;
         let permit = TRACE_ALIGNMENT_POOL.acquire(bytes)?;
         Ok(Self {
-            workspace: AlignmentWorkspace::default(),
+            workspace: AlignmentWorkspace {
+                resident_chunks: true,
+                ..AlignmentWorkspace::default()
+            },
             _permit: permit,
         })
     }
@@ -377,10 +393,22 @@ fn trace_alignment_bytes(
         .checked_mul(2)
         .and_then(|value| value.checked_add(1))
         .ok_or(AlignmentAdmissionError::ByteOverflow)?;
-    let core_cells = query_rows
+    let local_cells = query_rows
         .checked_mul(target_columns.min(band_columns))
-        .ok_or(AlignmentAdmissionError::ByteOverflow)?
-        .min(config.max_cells);
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let core_cells = local_cells.min(config.max_cells);
+    // Longer traced tasks keep one resident chunk plus two saved score waves per chunk.
+    // Greedy whole-wave chunks satisfy chunks <= 2 * ceil(cells / max_cells).
+    let chunks = if local_cells > config.max_cells {
+        local_cells
+            .div_ceil(config.max_cells)
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(AlignmentAdmissionError::ByteOverflow)?
+    } else {
+        0
+    };
+    let wave_width = band_columns.div_ceil(2).min(query_rows);
     let endpoint_query = max_query_bases.min(endpoint_bases);
     let endpoint_target = max_target_bases.min(endpoint_bases);
     let endpoint_cells = endpoint_query
@@ -414,6 +442,18 @@ fn trace_alignment_bytes(
             .ok_or(AlignmentAdmissionError::ByteOverflow)?,
         doubled_vec_bytes::<EditOperation>(path_bases)?,
         doubled_vec_bytes::<u8>(max_target_bases)?,
+        doubled_vec_bytes::<i32>(
+            wave_width
+                .checked_mul(9)
+                .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        )?,
+        doubled_vec_bytes::<i32>(
+            chunks
+                .checked_mul(6)
+                .and_then(|value| value.checked_mul(wave_width))
+                .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        )?,
+        doubled_vec_bytes::<[Option<(usize, usize)>; 3]>(chunks)?,
     ])?;
     let run_entries = path_bases
         .checked_mul(3)
@@ -478,6 +518,9 @@ impl AlignmentWorkspace {
             bytes
                 + self.compact_cells.capacity() * 2
                 + self.waves.iter().map(|w| w.capacity() * 4).sum::<usize>()
+                + self.chunk_waves.capacity() * std::mem::size_of::<(usize, usize)>()
+                + self.chunk_carries.capacity() * std::mem::size_of::<WaveCarry>()
+                + self.checkpoints.capacity() * 4
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -620,7 +663,12 @@ impl AlignmentWorkspace {
             // SAFETY: the runtime feature check guards every AVX2 instruction in this path.
             return unsafe { self.align_raw_avx2(query, target, config) };
         }
-        self.align_raw_scalar(query, target, config)
+        let result = self.align_raw_scalar(query, target, config);
+        #[cfg(target_arch = "x86_64")]
+        if self.resident_chunks && matches!(result, Err(AlignmentError::MatrixTooLarge { .. })) {
+            return self.align_raw_waves_scalar(query, target, config);
+        }
+        result
     }
 
     fn align_raw_scalar(
@@ -790,6 +838,29 @@ impl AlignmentWorkspace {
         target: &[u8],
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
+        // SAFETY: this function enables AVX2 for the inlined wave driver.
+        unsafe { self.align_raw_waves::<true>(query, target, config) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn align_raw_waves_scalar(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> Result<RawAlignment, AlignmentError> {
+        // SAFETY: the scalar instantiation never calls AVX2 code.
+        unsafe { self.align_raw_waves::<false>(query, target, config) }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn align_raw_waves<const VECTOR: bool>(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> Result<RawAlignment, AlignmentError> {
         let init_cpu = observed_cpu(self.observed);
         config.validate()?;
         if query.is_empty() {
@@ -810,17 +881,6 @@ impl AlignmentWorkspace {
         if total_cells == 0 {
             return Err(AlignmentError::BandExcludesInput);
         }
-        if total_cells > config.max_cells {
-            return Err(AlignmentError::MatrixTooLarge {
-                cells: total_cells,
-                max_cells: config.max_cells,
-            });
-        }
-
-        if self.observed {
-            self.work.growth_operations += u64::from(self.compact_cells.capacity() < total_cells);
-        }
-        self.compact_cells.resize(total_cells, 0);
         let last_wave = query
             .len()
             .checked_add(target.len())
@@ -834,6 +894,22 @@ impl AlignmentWorkspace {
             }
         }
         debug_assert_eq!(wave_cells, total_cells);
+        // Traced tasks may exceed max_cells: they keep at most max_cells traceback cells
+        // resident and recompute earlier waves from checkpoints. Direct callers keep the limit.
+        let chunked = total_cells > config.max_cells;
+        if chunked && (!self.resident_chunks || max_wave_width > config.max_cells) {
+            return Err(AlignmentError::MatrixTooLarge {
+                cells: total_cells,
+                max_cells: config.max_cells,
+            });
+        }
+        if !chunked {
+            if self.observed {
+                self.work.growth_operations +=
+                    u64::from(self.compact_cells.capacity() < total_cells);
+            }
+            self.compact_cells.resize(total_cells, 0);
+        }
         let wave_scores = max_wave_width
             .checked_mul(3)
             .ok_or(AlignmentError::LengthOverflow)?;
@@ -849,43 +925,134 @@ impl AlignmentWorkspace {
                 u64::from(narrow_local_scores(query.len(), target.len(), config));
             self.work.local_passes += 1;
             self.work.local_cells += total_cells as u64;
+            self.work.local_chunked_passes += u64::from(chunked);
             self.work.local_init_cpu_ns += elapsed_cpu(init_cpu);
         }
         let matrix_cpu = observed_cpu(self.observed);
-        let gap_open_score = gap_open(config);
         let mut best = BestCell::default();
-        let mut older_range = None;
-        let mut previous_range = None;
-        for wave in 0..=last_wave {
+        let mut carry = WaveCarry::default();
+        if chunked {
+            self.chunk_waves.clear();
+            self.chunk_carries.clear();
+            self.checkpoints.clear();
+            let width = |wave| {
+                wave_range(query.len(), target.len(), config, wave).map_or(0, WaveRange::width)
+            };
+            let mut first = 0;
+            while first <= last_wave {
+                let mut last = first;
+                let mut cells = width(first);
+                while last < last_wave && cells + width(last + 1) <= config.max_cells {
+                    last += 1;
+                    cells += width(last);
+                }
+                self.save_checkpoint(carry, max_wave_width);
+                self.chunk_waves.push((first, last));
+                self.layout_chunk(query.len(), target.len(), config, first, last)?;
+                // SAFETY: forwarded from this function's contract.
+                unsafe {
+                    self.fill_waves::<VECTOR>(
+                        query,
+                        target,
+                        config,
+                        (first, last, max_wave_width),
+                        &mut carry,
+                        &mut best,
+                        self.observed,
+                    );
+                }
+                self.work.local_chunks += u64::from(self.observed);
+                first = last + 1;
+            }
+        } else {
+            // SAFETY: forwarded from this function's contract.
+            unsafe {
+                self.fill_waves::<VECTOR>(
+                    query,
+                    target,
+                    config,
+                    (0, last_wave, max_wave_width),
+                    &mut carry,
+                    &mut best,
+                    self.observed,
+                );
+            }
+        }
+        self.work.local_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
+        if best.score <= 0 {
+            return Err(AlignmentError::NoAlignment);
+        }
+
+        let (query_start, target_start) = if chunked {
+            // SAFETY: forwarded from this function's contract.
+            unsafe {
+                self.traceback_chunked::<VECTOR>(query, target, config, max_wave_width, best)?
+            }
+        } else {
+            self.traceback_compact(query, target, best)?
+        };
+        let edit_script = runs_from_operations(&self.operations)?;
+        let summary = summarize_runs(&edit_script)?;
+        Ok(RawAlignment {
+            score: best.score,
+            query_interval: Interval::new(query_start as u64, best.query_index as u64)?,
+            target_interval: Interval::new(target_start as u64, best.target_index as u64)?,
+            cigar: cigar_from_runs(&edit_script)?,
+            edit_script,
+            summary,
+        })
+    }
+
+    /// Fills waves first..=last with the retained recurrence. Callers must enable AVX2 when
+    /// VECTOR is true.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_waves<const VECTOR: bool>(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        (first_wave, last_wave, stride): (usize, usize, usize),
+        carry: &mut WaveCarry,
+        best: &mut BestCell,
+        count: bool,
+    ) {
+        let gap_open_score = gap_open(config);
+        for wave in first_wave..=last_wave {
             let current_range = wave_range(query.len(), target.len(), config, wave);
             if let Some(current_range) = current_range {
                 let (older_previous, current) = self.waves.split_at_mut(2);
-                let older = older_range.map(|range| ScoreWave {
+                let older = carry.older.map(|range| ScoreWave {
                     range,
                     scores: &older_previous[0],
-                    stride: max_wave_width,
+                    stride,
                 });
-                let previous = previous_range.map(|range| ScoreWave {
+                let previous = carry.previous.map(|range| ScoreWave {
                     range,
                     scores: &older_previous[1],
-                    stride: max_wave_width,
+                    stride,
                 });
                 let current = &mut current[0];
                 let mut row = current_range.start;
-                let vector_range = older.zip(previous).and_then(|(older, previous)| {
-                    let start = current_range
-                        .start
-                        .max(older.range.start.saturating_add(1))
-                        .max(previous.range.start.saturating_add(1))
-                        .max(1);
-                    let end = current_range
-                        .end
-                        .min(older.range.end.saturating_add(1))
-                        .min(previous.range.end)
-                        .min(wave.saturating_sub(1));
-                    (start <= end).then_some((start, end, older, previous))
-                });
-                if self.observed {
+                let vector_range =
+                    older
+                        .zip(previous)
+                        .filter(|_| VECTOR)
+                        .and_then(|(older, previous)| {
+                            let start = current_range
+                                .start
+                                .max(older.range.start.saturating_add(1))
+                                .max(previous.range.start.saturating_add(1))
+                                .max(1);
+                            let end = current_range
+                                .end
+                                .min(older.range.end.saturating_add(1))
+                                .min(previous.range.end)
+                                .min(wave.saturating_sub(1));
+                            (start <= end).then_some((start, end, older, previous))
+                        });
+                if count {
                     let vectors =
                         vector_range.map_or(0, |(start, end, _, _)| (end - start + 1) / 8 * 8);
                     self.work.local_vector8_cells += vectors as u64;
@@ -904,22 +1071,22 @@ impl AlignmentWorkspace {
                             wave,
                             row,
                             current_range,
-                            max_wave_width,
-                            older_range.map(|range| ScoreWave {
+                            stride,
+                            carry.older.map(|range| ScoreWave {
                                 range,
                                 scores: &older_previous[0],
-                                stride: max_wave_width,
+                                stride,
                             }),
-                            previous_range.map(|range| ScoreWave {
+                            carry.previous.map(|range| ScoreWave {
                                 range,
                                 scores: &older_previous[1],
-                                stride: max_wave_width,
+                                stride,
                             }),
                             current,
                             &mut self.compact_cells,
                             &self.row_offsets,
                             &self.row_starts,
-                            &mut best,
+                            best,
                         );
                         row += 1;
                     }
@@ -936,14 +1103,14 @@ impl AlignmentWorkspace {
                                 wave,
                                 row,
                                 current_range,
-                                max_wave_width,
+                                stride,
                                 older,
                                 previous,
                                 current,
                                 &mut self.compact_cells,
                                 &self.row_offsets,
                                 &self.row_starts,
-                                &mut best,
+                                best,
                             );
                         }
                         row += 8;
@@ -958,46 +1125,135 @@ impl AlignmentWorkspace {
                         wave,
                         row,
                         current_range,
-                        max_wave_width,
-                        older_range.map(|range| ScoreWave {
+                        stride,
+                        carry.older.map(|range| ScoreWave {
                             range,
                             scores: &older_previous[0],
-                            stride: max_wave_width,
+                            stride,
                         }),
-                        previous_range.map(|range| ScoreWave {
+                        carry.previous.map(|range| ScoreWave {
                             range,
                             scores: &older_previous[1],
-                            stride: max_wave_width,
+                            stride,
                         }),
                         current,
                         &mut self.compact_cells,
                         &self.row_offsets,
                         &self.row_starts,
-                        &mut best,
+                        best,
                     );
                     row += 1;
                 }
             }
             self.waves.rotate_left(1);
-            older_range = previous_range;
-            previous_range = current_range;
+            carry.older = carry.previous;
+            carry.previous = current_range;
         }
-        self.work.local_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
-        if best.score <= 0 {
-            return Err(AlignmentError::NoAlignment);
-        }
+    }
 
-        let (query_start, target_start) = self.traceback_compact(query, target, best)?;
-        let edit_script = runs_from_operations(&self.operations)?;
-        let summary = summarize_runs(&edit_script)?;
-        Ok(RawAlignment {
-            score: best.score,
-            query_interval: Interval::new(query_start as u64, best.query_index as u64)?,
-            target_interval: Interval::new(target_start as u64, best.target_index as u64)?,
-            cigar: cigar_from_runs(&edit_script)?,
-            edit_script,
-            summary,
-        })
+    /// Row layout of the cells in waves first..=last, reusing the row metadata vectors.
+    #[cfg(target_arch = "x86_64")]
+    fn layout_chunk(
+        &mut self,
+        query_len: usize,
+        target_len: usize,
+        config: AlignmentConfig,
+        first_wave: usize,
+        last_wave: usize,
+    ) -> Result<usize, AlignmentError> {
+        let mut total = 0usize;
+        for query_index in 0..=query_len {
+            let columns = band_row(
+                query_index,
+                target_len,
+                config.diagonal_offset,
+                config.band_width,
+            )?
+            .and_then(|(start, end)| {
+                let start = start.max(first_wave.saturating_sub(query_index));
+                let end = end.min(last_wave.checked_sub(query_index)?);
+                (start <= end).then_some((start, end))
+            });
+            let (start, width) = columns.map_or((0, 0), |(start, end)| (start, end - start + 1));
+            self.row_offsets[query_index] = total;
+            self.row_starts[query_index] = start;
+            self.row_widths[query_index] = width;
+            total = total
+                .checked_add(width)
+                .ok_or(AlignmentError::LengthOverflow)?;
+        }
+        if self.observed {
+            self.work.growth_operations += u64::from(self.compact_cells.capacity() < total);
+        }
+        self.compact_cells.resize(total, 0);
+        Ok(total)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn save_checkpoint(&mut self, carry: WaveCarry, stride: usize) {
+        self.chunk_carries.push(carry);
+        self.checkpoints
+            .extend_from_slice(&self.waves[0][..3 * stride]);
+        self.checkpoints
+            .extend_from_slice(&self.waves[1][..3 * stride]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    unsafe fn traceback_chunked<const VECTOR: bool>(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        stride: usize,
+        best: BestCell,
+    ) -> Result<(usize, usize), AlignmentError> {
+        let cpu = observed_cpu(self.observed);
+        let started = self.observed.then(std::time::Instant::now);
+        self.operations.clear();
+        let mut position = (best.query_index, best.target_index, best.state);
+        let mut chunk = self
+            .chunk_waves
+            .partition_point(|&(first, _)| first <= position.0 + position.1)
+            .checked_sub(1)
+            .ok_or(AlignmentError::InvalidTraceback)?;
+        loop {
+            let (first, last) = self.chunk_waves[chunk];
+            let stop = last.min(position.0 + position.1);
+            let mut carry = self.chunk_carries[chunk];
+            let saved = &self.checkpoints[chunk * 6 * stride..(chunk + 1) * 6 * stride];
+            self.waves[0][..3 * stride].copy_from_slice(&saved[..3 * stride]);
+            self.waves[1][..3 * stride].copy_from_slice(&saved[3 * stride..]);
+            let cells = self.layout_chunk(query.len(), target.len(), config, first, stop)?;
+            if self.observed {
+                self.work.local_recomputed_cells += cells as u64;
+            }
+            let mut ignored = BestCell::default();
+            // SAFETY: forwarded from this function's contract.
+            unsafe {
+                self.fill_waves::<VECTOR>(
+                    query,
+                    target,
+                    config,
+                    (first, stop, stride),
+                    &mut carry,
+                    &mut ignored,
+                    false,
+                );
+            }
+            if self.trace_operations(query, target, &mut position, first)? {
+                break;
+            }
+            chunk = chunk
+                .checked_sub(1)
+                .ok_or(AlignmentError::InvalidTraceback)?;
+        }
+        self.operations.reverse();
+        if let Some(started) = started {
+            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
+        }
+        Ok((position.0, position.1))
     }
 
     fn prepare_rows(
@@ -1100,17 +1356,41 @@ impl AlignmentWorkspace {
     ) -> Result<(usize, usize), AlignmentError> {
         let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
-        let mut query_index = best.query_index;
-        let mut target_index = best.target_index;
-        let mut state = best.state;
         self.operations.clear();
-        while query_index > 0 || target_index > 0 {
+        let mut position = (best.query_index, best.target_index, best.state);
+        self.trace_operations(query, target, &mut position, 0)?;
+        self.operations.reverse();
+        if let Some(started) = started {
+            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
+        }
+        Ok((position.0, position.1))
+    }
+
+    /// Appends reversed operations until the local start, or returns false before a wave
+    /// below first_wave whose traceback cells are not resident.
+    #[cfg(target_arch = "x86_64")]
+    fn trace_operations(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        position: &mut (usize, usize, u8),
+        first_wave: usize,
+    ) -> Result<bool, AlignmentError> {
+        let (mut query_index, mut target_index, mut state) = *position;
+        let complete = loop {
+            if query_index == 0 && target_index == 0 {
+                break true;
+            }
+            if query_index + target_index < first_wave {
+                break false;
+            }
             let index = self
                 .cell_index_checked(query_index, target_index)
                 .ok_or(AlignmentError::TracebackOutsideBand)?;
             let traceback = self.compact_cells[index];
             if state > DELETION || !traceback_positive(traceback, state) {
-                break;
+                break true;
             }
             let previous = traceback_previous(traceback, state);
             match state {
@@ -1136,16 +1416,12 @@ impl AlignmentWorkspace {
                 _ => return Err(AlignmentError::InvalidTraceback),
             }
             if previous == START {
-                break;
+                break true;
             }
             state = previous;
-        }
-        self.operations.reverse();
-        if let Some(started) = started {
-            self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
-            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
-        }
-        Ok((query_index, target_index))
+        };
+        *position = (query_index, target_index, state);
+        Ok(complete)
     }
 }
 
@@ -1193,8 +1469,16 @@ fn prepare_wave(scores: &mut Vec<i32>, length: usize) {
     scores.resize(length, 0);
 }
 
+/// Score wave ranges carried into the next wave, saved at each resident chunk start.
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default)]
+struct WaveCarry {
+    older: Option<WaveRange>,
+    previous: Option<WaveRange>,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone, Copy, Debug)]
 struct WaveRange {
     start: usize,
     end: usize,
@@ -2743,7 +3027,7 @@ mod tests {
         };
         let bytes = trace_alignment_bytes(64 * 1024, 64 * 1024, 256, trace_config).unwrap();
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(bytes, 548_695_138);
+        assert_eq!(bytes, 548_736_106);
     }
 
     #[test]
