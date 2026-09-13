@@ -4630,7 +4630,7 @@ mod tests {
                 .windows(15)
                 .map(|window| window.bit_kmers(15, true).next().unwrap().1.0 as u32),
         );
-        requests.extend_from_slice(&requests[..500].to_vec());
+        requests.extend_from_within(..500);
         let mut distinct = requests.clone();
         distinct.sort_unstable();
         distinct.dedup();
