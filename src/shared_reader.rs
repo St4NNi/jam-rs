@@ -1045,6 +1045,17 @@ impl SharedReader {
 
     pub fn numeric_contig(&self, id: u32) -> Result<Option<NumericContig>, SharedError> {
         self.begin_operation()?;
+        let result = self.numeric_contig_unchecked(id)?;
+        self.file.verify_unchanged()?;
+        Ok(result)
+    }
+
+    /// Contig metadata without the file identity checks of `numeric_contig`. Pages are still
+    /// authenticated; callers check the file identity before and after a phase of such reads.
+    pub(crate) fn numeric_contig_unchecked(
+        &self,
+        id: u32,
+    ) -> Result<Option<NumericContig>, SharedError> {
         if id >= self.file.header.contig_count {
             return Ok(None);
         }
@@ -1053,13 +1064,11 @@ impl SharedReader {
             return Err(SharedError::Invalid("contig metadata"));
         }
         self.observe(&self.numeric_contig_resolutions, 1);
-        let result = NumericContig {
+        Ok(Some(NumericContig {
             id,
             metagenome_id: record.document_id,
             length: record.length,
-        };
-        self.file.verify_unchanged()?;
-        Ok(Some(result))
+        }))
     }
 
     fn begin_operation(&self) -> Result<(), SharedError> {

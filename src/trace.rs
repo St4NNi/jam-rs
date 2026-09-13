@@ -1640,6 +1640,9 @@ impl TraceEngine {
         let geometry_cpu = crate::alignment::observed_cpu(self.observed);
         validate_config(config)?;
         self.index.enable_selected_front_metadata();
+        // Contig metadata in the hit loop is read without per-record identity checks; the
+        // file identity is checked here and again after the loop.
+        self.index.cache_file_identity()?;
         let lookups = if let Some(lookups) = lookups {
             if lookups.header_sha256 != self.index.header_sha256()?
                 || lookups.query_identity != prepared.lookup_identity
@@ -1794,7 +1797,7 @@ impl TraceEngine {
                             {
                                 let contig = self
                                     .index
-                                    .numeric_contig(occurrence.contig_id)?
+                                    .numeric_contig_unchecked(occurrence.contig_id)?
                                     .ok_or(TraceError::Invalid("missing occurrence contig"))?;
                                 slot.insert(contig);
                             }
@@ -1836,7 +1839,7 @@ impl TraceEngine {
                                     *contig
                                 } else {
                                     self.index
-                                        .numeric_contig(occurrence.contig_id)?
+                                        .numeric_contig_unchecked(occurrence.contig_id)?
                                         .ok_or(TraceError::Invalid("missing occurrence contig"))?
                                 };
                                 let strand = if seed.canonical_orientation
@@ -1915,6 +1918,7 @@ impl TraceEngine {
                 }
             }
         }
+        self.index.cache_file_identity()?;
         let mut predecessor_tests = 0;
         let geometric_hits = if self.observed {
             region_hits
@@ -2397,53 +2401,69 @@ impl TraceEngine {
         for contig_spans in spans.values_mut() {
             coalesce_spans(contig_spans);
         }
-        let mut loaded = BTreeMap::new();
-        let mut reads = HashMap::new();
-        for metagenome_id in tasks
+        // Metagenomes are read independently; the shared block cache bounds concurrent decodes.
+        let metagenomes = tasks
             .iter()
             .map(|task| task.metagenome_id)
             .collect::<BTreeSet<_>>()
-        {
-            let source = self
-                .index
-                .metagenome(metagenome_id)?
-                .ok_or(TraceError::Invalid("missing source metagenome"))?;
-            let mut reader = if let Some(cache) = cache {
-                BgzfReader::open_with_cache(source, self.s3.as_ref(), verify, Arc::clone(cache))?
-            } else {
-                BgzfReader::open(source, self.s3.as_ref(), verify)?
-            };
-            if self.observed {
-                reader.enable_timing();
-            }
-            for (&(_, contig_id), contig_spans) in
-                spans.range((metagenome_id, 0)..=(metagenome_id, u32::MAX))
-            {
-                let contig = self
+            .into_iter()
+            .collect::<Vec<_>>();
+        let per_metagenome = metagenomes
+            .par_iter()
+            .map(|&metagenome_id| {
+                let source = self
                     .index
-                    .contig(contig_id)?
-                    .ok_or(TraceError::Invalid("missing source contig"))?;
-                let loaded_ranges = loaded
-                    .entry((metagenome_id, contig_id))
-                    .or_insert_with(Vec::new);
-                for &(start, end) in contig_spans {
-                    loaded_ranges.push(LoadedRange {
-                        offset: start,
-                        end,
-                        sequence: reader.read_contig_range(contig, start, end)?,
-                    });
+                    .metagenome(metagenome_id)?
+                    .ok_or(TraceError::Invalid("missing source metagenome"))?;
+                let mut reader = if let Some(cache) = cache {
+                    BgzfReader::open_with_cache(
+                        source,
+                        self.s3.as_ref(),
+                        verify,
+                        Arc::clone(cache),
+                    )?
+                } else {
+                    BgzfReader::open(source, self.s3.as_ref(), verify)?
+                };
+                if self.observed {
+                    reader.enable_timing();
                 }
-            }
-            if self.observed {
-                let mut stats = self.batch_stats.lock().unwrap();
-                stats.sequence_read_ns += reader.range_stats().read_nanoseconds.unwrap_or(0);
-                stats.bgzf_decode_and_handling_ns +=
-                    reader.decompression_nanoseconds().unwrap_or(0);
-            }
-            reads.insert(
-                metagenome_id,
-                (reader.range_stats(), reader.blocks_decoded()),
-            );
+                let mut loaded = Vec::new();
+                for (&(_, contig_id), contig_spans) in
+                    spans.range((metagenome_id, 0)..=(metagenome_id, u32::MAX))
+                {
+                    let contig = self
+                        .index
+                        .contig(contig_id)?
+                        .ok_or(TraceError::Invalid("missing source contig"))?;
+                    let mut loaded_ranges = Vec::with_capacity(contig_spans.len());
+                    for &(start, end) in contig_spans {
+                        loaded_ranges.push(LoadedRange {
+                            offset: start,
+                            end,
+                            sequence: reader.read_contig_range(contig, start, end)?,
+                        });
+                    }
+                    loaded.push(((metagenome_id, contig_id), loaded_ranges));
+                }
+                if self.observed {
+                    let mut stats = self.batch_stats.lock().unwrap();
+                    stats.sequence_read_ns += reader.range_stats().read_nanoseconds.unwrap_or(0);
+                    stats.bgzf_decode_and_handling_ns +=
+                        reader.decompression_nanoseconds().unwrap_or(0);
+                }
+                Ok((
+                    metagenome_id,
+                    loaded,
+                    (reader.range_stats(), reader.blocks_decoded()),
+                ))
+            })
+            .collect::<Result<Vec<_>, TraceError>>()?;
+        let mut loaded = BTreeMap::new();
+        let mut reads = HashMap::new();
+        for (metagenome_id, ranges, read) in per_metagenome {
+            loaded.extend(ranges);
+            reads.insert(metagenome_id, read);
         }
         Ok((loaded, reads))
     }

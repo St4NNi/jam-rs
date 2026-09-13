@@ -398,6 +398,17 @@ impl TraceIndex {
             }))
     }
 
+    /// Contig metadata inside a phase whose file identity the caller checks before and after.
+    pub(crate) fn numeric_contig_unchecked(
+        &self,
+        id: u32,
+    ) -> Result<Option<crate::shared_reader::NumericContig>, TraceError> {
+        if let Self::Shared(index) = self {
+            return Ok(index.numeric_contig_unchecked(id)?);
+        }
+        self.numeric_contig(id)
+    }
+
     pub(crate) fn enable_selected_front_metadata(&self) {
         if let Self::Shard(index) = self {
             index.enable_selected_front_metadata();
