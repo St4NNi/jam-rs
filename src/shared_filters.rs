@@ -177,6 +177,8 @@ pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError>
     }
     let observed = file.stats().observed;
     let started = observed.then(std::time::Instant::now);
+    // The filter is read whole at open, so its pages are authenticated on the pool first.
+    file.authenticate_section_pages(Section::CoreFilter)?;
     let bytes = file.section(
         Section::CoreFilter,
         0,

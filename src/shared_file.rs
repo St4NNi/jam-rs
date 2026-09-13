@@ -92,6 +92,26 @@ impl SharedFile {
         Ok(())
     }
 
+    /// Authenticates every page of a whole section on the current pool, in tasks of 64 pages.
+    /// A later `section` read of the range finds the pages verified; without a file identity it
+    /// verifies them again. The first failing task in page order supplies the error.
+    pub(crate) fn authenticate_section_pages(&self, kind: Section) -> Result<(), SharedError> {
+        use rayon::prelude::*;
+        let section = self.header.section(kind);
+        if section.length == 0 {
+            return Ok(());
+        }
+        let first = section.offset / PAGE_BYTES;
+        let last = (section.offset + section.length - 1) / PAGE_BYTES;
+        let pages = (first..=last).collect::<Vec<_>>();
+        let mut results = Vec::new();
+        pages
+            .par_chunks(64)
+            .map(|chunk| chunk.iter().try_for_each(|&page| self.authenticate(page)))
+            .collect_into_vec(&mut results);
+        results.into_iter().collect()
+    }
+
     pub(crate) fn section(
         &self,
         kind: Section,
@@ -436,5 +456,70 @@ mod tests {
         file.authenticate(sibling).unwrap();
         assert_eq!(file.known(sibling), file.identity().is_some());
         assert!(!file.known(parent));
+    }
+
+    #[test]
+    fn parallel_section_authentication_matches_sequential_reads_and_fails_in_page_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_index(directory.path(), |_, _| {});
+        let sequential = SharedFile::open(&path, true).unwrap();
+        // The largest data section spans several 64-page tasks.
+        let kind = *sequential
+            .header
+            .section_order()
+            .iter()
+            .filter(|&&kind| kind != Section::Checksums)
+            .max_by_key(|&&kind| sequential.header.section(kind).length)
+            .unwrap();
+        let section = sequential.header.section(kind);
+        assert!(section.length > 2 * 64 * PAGE_BYTES);
+        let pages =
+            section.offset / PAGE_BYTES..=(section.offset + section.length - 1) / PAGE_BYTES;
+        sequential.section(kind, 0, section.length).unwrap();
+        let expected = sequential.stats();
+        for workers in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let file = SharedFile::open(&path, true).unwrap();
+            pool.install(|| file.authenticate_section_pages(kind))
+                .unwrap();
+            assert!(
+                pages
+                    .clone()
+                    .all(|page| file.known(page) == file.identity().is_some())
+            );
+            let parallel = file.stats();
+            assert_eq!(parallel.authenticated_pages, expected.authenticated_pages);
+            assert!(parallel.hash_attempts >= expected.hash_attempts);
+            file.section(kind, 0, section.length).unwrap();
+            if file.identity().is_some() {
+                assert_eq!(file.stats().hash_attempts, parallel.hash_attempts);
+            }
+        }
+
+        // Corrupted data pages in two different tasks fail every worker count with the same
+        // error and leave both pages unverified.
+        let corrupted_directory = tempfile::tempdir().unwrap();
+        let corrupted = write_index(corrupted_directory.path(), |bytes, _| {
+            bytes[(section.offset + 3 * PAGE_BYTES + 9) as usize] ^= 1;
+            bytes[(section.offset + section.length - PAGE_BYTES + 9) as usize] ^= 1;
+        });
+        for workers in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let file = SharedFile::open(&corrupted, false).unwrap();
+            let result = pool.install(|| file.authenticate_section_pages(kind));
+            assert!(
+                matches!(result, Err(SharedError::ChecksumMismatch)),
+                "workers={workers}"
+            );
+            let first = section.offset / PAGE_BYTES + 3;
+            let last = (section.offset + section.length - 1) / PAGE_BYTES;
+            assert!(!file.known(first) && !file.known(last));
+        }
     }
 }
