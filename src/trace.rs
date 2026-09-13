@@ -2149,19 +2149,41 @@ impl TraceEngine {
         loaded: &BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
         config: TraceConfig,
     ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
-        let (max_query_bases, max_target_bases) =
-            tasks
-                .iter()
-                .try_fold((0usize, 0usize), |(query_bases, target_bases), task| {
-                    let query = usize::try_from(task.query_span)
-                        .map_err(|_| TraceError::Invalid("query window"))?;
-                    let target = task
-                        .target_end
-                        .checked_sub(task.target_start)
-                        .and_then(|span| usize::try_from(span).ok())
-                        .ok_or(TraceError::Invalid("loaded range"))?;
-                    Ok::<_, TraceError>((query_bases.max(query), target_bases.max(target)))
-                })?;
+        let mut geometry = [0usize; 4];
+        for task in tasks {
+            let query_bases = usize::try_from(task.query_span)
+                .map_err(|_| TraceError::Invalid("query window"))?;
+            let target_bases = task
+                .target_end
+                .checked_sub(task.target_start)
+                .and_then(|span| usize::try_from(span).ok())
+                .ok_or(TraceError::Invalid("loaded range"))?;
+            let path_bases = query_bases
+                .checked_add(target_bases)
+                .ok_or(TraceError::Invalid("task window"))?;
+            let cells = task_local_cells(task, target_bases, query.len(), config)?;
+            for (maximum, value) in
+                geometry
+                    .iter_mut()
+                    .zip([query_bases, target_bases, path_bases, cells])
+            {
+                *maximum = (*maximum).max(value);
+            }
+        }
+        let [
+            max_query_bases,
+            max_target_bases,
+            max_path_bases,
+            max_local_cells,
+        ] = geometry;
+        let workspace_bytes = crate::alignment::trace_alignment_bytes(
+            max_query_bases,
+            max_target_bases,
+            max_path_bases,
+            max_local_cells,
+            config.endpoint_bases,
+            config.alignment,
+        );
         if self.observed {
             let diagnostic = tasks
                 .len()
@@ -2199,12 +2221,7 @@ impl TraceEngine {
             if self.observed {
                 self.batch_stats.lock().unwrap().alignment_workspaces += 1;
             }
-            TraceAlignmentWorkspace::acquire(
-                max_query_bases,
-                max_target_bases,
-                config.endpoint_bases,
-                config.alignment,
-            )
+            workspace_bytes.and_then(TraceAlignmentWorkspace::acquire)
         };
         tasks
             .par_iter()
@@ -3122,7 +3139,8 @@ fn fragment_envelope(
             let target_span = bounded_target.1 - bounded_target.0;
             let diagonal =
                 envelope_diagonal(region, query_start, bounded_target.0, query_length, config)?;
-            if !envelope_fits_workspace(query_span, target_span, diagonal, config)? {
+            // Longer local tasks run in resident chunks; only endpoint completion must fit.
+            if !endpoint_fits_workspace(query_span, target_span, config)? {
                 return Err(TraceError::Invalid(
                     "fragment envelope exceeds alignment workspace",
                 ));
@@ -3191,12 +3209,55 @@ fn envelope_fits_workspace(
         .max_cells
         .checked_sub(reserve)
         .ok_or(TraceError::Invalid("alignment workspace reserve"))?;
+    Ok(local_cells <= usable && endpoint_fits_workspace(query_span, target_span, config)?)
+}
+
+fn endpoint_fits_workspace(
+    query_span: u64,
+    target_span: u64,
+    config: TraceConfig,
+) -> Result<bool, TraceError> {
+    let query = usize::try_from(query_span).map_err(|_| TraceError::Invalid("query window"))?;
+    let target = usize::try_from(target_span).map_err(|_| TraceError::Invalid("target window"))?;
     let endpoint_cells = query
         .min(config.endpoint_bases)
         .checked_add(1)
         .and_then(|rows| rows.checked_mul(target.min(config.endpoint_bases).saturating_add(1)))
         .ok_or(TraceError::Invalid("endpoint workspace"))?;
-    Ok(local_cells <= usable && endpoint_cells <= config.alignment.max_cells)
+    Ok(endpoint_cells <= config.alignment.max_cells)
+}
+
+/// Local cells a task can store on any diagonal it runs. A circular whole-query task may retry
+/// on another diagonal, so it uses row and column bounds that hold for every diagonal.
+fn task_local_cells(
+    task: &AlignmentTask,
+    target: usize,
+    query_length: usize,
+    config: TraceConfig,
+) -> Result<usize, TraceError> {
+    let query =
+        usize::try_from(task.query_span).map_err(|_| TraceError::Invalid("query window"))?;
+    if !(config.circular && query == query_length) {
+        return Ok(crate::alignment::band_cells(
+            query,
+            target,
+            task.diagonal_offset,
+            config.alignment.band_width,
+        )?);
+    }
+    let band = usize::try_from(config.alignment.band_width)
+        .ok()
+        .and_then(|band| band.checked_mul(2)?.checked_add(1))
+        .ok_or(TraceError::Invalid("alignment band"))?;
+    let rows = query
+        .checked_add(1)
+        .and_then(|rows| rows.checked_mul(target.saturating_add(1).min(band)));
+    let columns = target
+        .checked_add(1)
+        .and_then(|columns| columns.checked_mul(query.saturating_add(1).min(band)));
+    rows.zip(columns)
+        .map(|(rows, columns)| rows.min(columns))
+        .ok_or(TraceError::Invalid("task local cells"))
 }
 
 fn projected_query_window(
@@ -4680,6 +4741,33 @@ mod tests {
             )
             .unwrap()
         );
+        // A smaller resident bound no longer rejects the task: the full contig window no longer
+        // fits, so the bounded window is chosen and runs in resident chunks when needed.
+        let smaller = TraceConfig {
+            alignment: AlignmentConfig {
+                max_cells: 250_000,
+                ..config.alignment
+            },
+            ..config
+        };
+        let bounded = fragment_envelope(
+            &region,
+            envelope_key(Strand::Forward),
+            100_000,
+            60_000,
+            smaller,
+        )
+        .unwrap();
+        assert!(bounded.target_start > 0 && bounded.target_end < 60_000);
+        assert!(
+            !envelope_fits_workspace(
+                envelope.query_span,
+                60_000,
+                envelope.diagonal_offset,
+                smaller
+            )
+            .unwrap()
+        );
         assert!(
             fragment_envelope(
                 &region,
@@ -4687,11 +4775,12 @@ mod tests {
                 100_000,
                 60_000,
                 TraceConfig {
+                    endpoint_bases: 600,
                     alignment: AlignmentConfig {
-                        max_cells: 250_000,
-                        ..config.alignment
+                        max_cells: 300_000,
+                        ..smaller.alignment
                     },
-                    ..config
+                    ..smaller
                 },
             )
             .is_err()
@@ -5659,5 +5748,119 @@ mod tests {
         );
         assert!(alignment_accepted(&retry.selected, config));
         assert!(retry_improves(&initial.selected, &retry.selected, false));
+    }
+
+    #[test]
+    fn distant_collinear_anchor_task_runs_in_resident_chunks_across_workers() {
+        use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
+        // Shape of the rejected BCF tasks: two anchored segments joined by a long gap on a
+        // contig longer than the short-contig window, so every run uses the same bounded window.
+        let directory = tempfile::tempdir().unwrap();
+        let target = window_dna(0x0f1e_2d3c_4b5a_6978, 70_000);
+        let mut query = window_dna(0x1357_9bdf_2468_ace0, 12_000);
+        query[1_000..1_150].copy_from_slice(&target[20_000..20_150]);
+        query[11_000..11_150].copy_from_slice(&target[30_000..30_150]);
+        let bgzf_path = directory.path().join("target.bgz");
+        let mut raw = b">contig\n".to_vec();
+        for line in target.chunks(80) {
+            raw.extend_from_slice(line);
+            raw.push(b'\n');
+        }
+        let mut writer = bgzf::io::Writer::new(File::create(&bgzf_path).unwrap());
+        let mut blocks = Vec::new();
+        for (ordinal, chunk) in raw.chunks(32_000).enumerate() {
+            if ordinal > 0 {
+                blocks.push((writer.position(), (ordinal * 32_000) as u64));
+            }
+            writer.write_all(chunk).unwrap();
+            writer.flush().unwrap();
+        }
+        writer.finish().unwrap();
+        let gzi_path = directory.path().join("target.gzi");
+        gzi::fs::write(&gzi_path, &gzi::Index::from(blocks)).unwrap();
+        let bytes = std::fs::read(&bgzf_path).unwrap();
+        let reference = directory.path().join("reference.jidx");
+        let mut jidx = JidxWriter::new(
+            &reference,
+            &JidxInput {
+                k: 15,
+                rescue_k15: false,
+                minimizer_window: 16,
+                jam_sha256: [1; 32],
+                manifest_sha256: [2; 32],
+            },
+        )
+        .unwrap();
+        jidx.begin_metagenome(MetagenomeInput {
+            name: "target".into(),
+            bgzf_uri: bgzf_path.to_str().unwrap().to_owned(),
+            bgzf_bytes: bytes.len() as u64,
+            bgzf_sha256: crate::jidx::sha256(&bytes),
+            gzi: std::fs::read(gzi_path).unwrap(),
+        })
+        .unwrap();
+        jidx.begin_contig(ContigInput {
+            name: "contig".into(),
+            length: target.len() as u64,
+            fasta_offset: 8,
+            line_bases: 80,
+            line_width: 81,
+        })
+        .unwrap();
+        jidx.finish().unwrap();
+        let shared = directory.path().join("target.shared");
+        crate::shared_writer::build_shared_index(&reference, &shared, 16).unwrap();
+
+        let unchunked = TraceConfig {
+            use_sketch: false,
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let chunked = TraceConfig {
+            alignment: AlignmentConfig {
+                max_cells: 500_000,
+                ..unchunked.alignment
+            },
+            ..unchunked
+        };
+        let without_reads = |mut result: TraceResult| {
+            for metagenome in &mut result.metagenomes {
+                metagenome.compressed_bytes_read = 0;
+                metagenome.range_requests = 0;
+                metagenome.bgzf_blocks_decoded = 0;
+            }
+            result
+        };
+        let expected = without_reads(
+            TraceEngine::open_shared(&shared, None)
+                .unwrap()
+                .search("gap", &query, unchunked)
+                .unwrap(),
+        );
+        let fragments = expected.metagenomes[0]
+            .mosaic
+            .primary
+            .iter()
+            .map(|selected| selected.fragment.alignment.query_interval)
+            .collect::<Vec<_>>();
+        // One task yields one local alignment: the better of the two anchored segments.
+        assert!(fragments.iter().any(|interval| {
+            [1_000, 11_000]
+                .iter()
+                .any(|&start| interval.start <= start && interval.end >= start + 150)
+        }));
+        for workers in [1, 4] {
+            let mut engine = TraceEngine::open_shared(&shared, None).unwrap();
+            engine.observed = true;
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            let result = pool.install(|| engine.search("gap", &query, chunked).unwrap());
+            assert_eq!(without_reads(result), expected);
+            let work = engine.batch_stats().alignment_work;
+            assert!(work.local_chunked_passes > 0 && work.local_chunks > work.local_chunked_passes);
+            assert!(work.local_recomputed_cells > 0);
+        }
     }
 }

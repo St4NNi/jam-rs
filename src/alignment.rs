@@ -353,14 +353,7 @@ pub(crate) struct TraceAlignmentWorkspace {
 }
 
 impl TraceAlignmentWorkspace {
-    pub(crate) fn acquire(
-        max_query_bases: usize,
-        max_target_bases: usize,
-        endpoint_bases: usize,
-        config: AlignmentConfig,
-    ) -> Result<Self, AlignmentAdmissionError> {
-        let bytes =
-            trace_alignment_bytes(max_query_bases, max_target_bases, endpoint_bases, config)?;
+    pub(crate) fn acquire(bytes: usize) -> Result<Self, AlignmentAdmissionError> {
         let permit = TRACE_ALIGNMENT_POOL.acquire(bytes)?;
         Ok(Self {
             workspace: AlignmentWorkspace {
@@ -376,16 +369,17 @@ impl TraceAlignmentWorkspace {
     }
 }
 
-fn trace_alignment_bytes(
+/// Bytes for one reused trace workspace. Each maximum is taken over the tasks it may run, so
+/// retained capacities are covered without combining the spans of different tasks.
+pub(crate) fn trace_alignment_bytes(
     max_query_bases: usize,
     max_target_bases: usize,
+    max_path_bases: usize,
+    max_local_cells: usize,
     endpoint_bases: usize,
     config: AlignmentConfig,
 ) -> Result<usize, AlignmentAdmissionError> {
     let query_rows = max_query_bases
-        .checked_add(1)
-        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
-    let target_columns = max_target_bases
         .checked_add(1)
         .ok_or(AlignmentAdmissionError::ByteOverflow)?;
     let band_columns = usize::try_from(config.band_width)
@@ -393,9 +387,7 @@ fn trace_alignment_bytes(
         .checked_mul(2)
         .and_then(|value| value.checked_add(1))
         .ok_or(AlignmentAdmissionError::ByteOverflow)?;
-    let local_cells = query_rows
-        .checked_mul(target_columns.min(band_columns))
-        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let local_cells = max_local_cells;
     let core_cells = local_cells.min(config.max_cells);
     // Longer traced tasks keep one resident chunk plus two saved score waves per chunk.
     // Greedy whole-wave chunks satisfy chunks <= 2 * ceil(cells / max_cells).
@@ -420,9 +412,7 @@ fn trace_alignment_bytes(
         })
         .ok_or(AlignmentAdmissionError::ByteOverflow)?
         .min(config.max_cells);
-    let path_bases = max_query_bases
-        .checked_add(max_target_bases)
-        .ok_or(AlignmentAdmissionError::ByteOverflow)?;
+    let path_bases = max_path_bases;
     let endpoint_path_bases = endpoint_query
         .checked_add(endpoint_target)
         .ok_or(AlignmentAdmissionError::ByteOverflow)?;
@@ -3102,7 +3092,8 @@ mod tests {
     fn admitted_workspace_preserves_alignment_and_bounds_default_trace() {
         let mut plain = AlignmentWorkspace::default();
         let expected = plain.align(b"ACGTACGT", b"ACGTGACGT", config()).unwrap();
-        let mut admitted = TraceAlignmentWorkspace::acquire(8, 9, 0, config()).unwrap();
+        let bytes = trace_alignment_bytes(8, 9, 17, 9 * 17, 0, config()).unwrap();
+        let mut admitted = TraceAlignmentWorkspace::acquire(bytes).unwrap();
         let actual = admitted
             .workspace_mut()
             .align(b"ACGTACGT", b"ACGTGACGT", config())
@@ -3112,7 +3103,15 @@ mod tests {
             max_cells: 1 << 24,
             ..AlignmentConfig::default()
         };
-        let bytes = trace_alignment_bytes(64 * 1024, 64 * 1024, 256, trace_config).unwrap();
+        let bytes = trace_alignment_bytes(
+            64 * 1024,
+            64 * 1024,
+            128 * 1024,
+            (64 * 1024 + 1) * 257,
+            256,
+            trace_config,
+        )
+        .unwrap();
         #[cfg(target_pointer_width = "64")]
         assert_eq!(bytes, 548_736_106);
     }
