@@ -923,6 +923,12 @@ impl AlignmentWorkspace {
             prepare_wave(wave, wave_scores);
         }
 
+        #[cfg(test)]
+        let wide = WIDE_LOCAL_KERNEL.get();
+        #[cfg(not(test))]
+        let wide = false;
+        // Proven narrow passes store scores in i16 planes and evaluate sixteen AVX2 lanes.
+        let narrow = VECTOR && !wide && narrow_local_scores(query.len(), target.len(), config);
         if self.observed {
             self.work.local_narrow_eligible_passes +=
                 u64::from(narrow_local_scores(query.len(), target.len(), config));
@@ -958,6 +964,7 @@ impl AlignmentWorkspace {
                         query,
                         target,
                         config,
+                        narrow,
                         (first, last, max_wave_width),
                         &mut carry,
                         &mut best,
@@ -974,6 +981,7 @@ impl AlignmentWorkspace {
                     query,
                     target,
                     config,
+                    narrow,
                     (0, last_wave, max_wave_width),
                     &mut carry,
                     &mut best,
@@ -989,7 +997,14 @@ impl AlignmentWorkspace {
         let (query_start, target_start) = if chunked {
             // SAFETY: forwarded from this function's contract.
             unsafe {
-                self.traceback_chunked::<VECTOR>(query, target, config, max_wave_width, best)?
+                self.traceback_chunked::<VECTOR>(
+                    query,
+                    target,
+                    config,
+                    narrow,
+                    max_wave_width,
+                    best,
+                )?
             }
         } else {
             self.traceback_compact(query, target, config, best)?
@@ -1026,12 +1041,13 @@ impl AlignmentWorkspace {
         unsafe { self.fill_waves::<i32, true>(query, target, config, waves, carry, best, count) }
     }
 
-    /// Fills waves with the vector or scalar recurrence. Callers must enable AVX2 when VECTOR is
-    /// true.
+    /// Runs `fill_waves` with i16 score planes and sixteen AVX2 lanes. Callers must enable AVX2
+    /// and prove the pass narrow with `narrow_local_scores`.
     #[cfg(target_arch = "x86_64")]
-    #[inline(always)]
+    #[target_feature(enable = "avx2")]
+    #[inline(never)]
     #[allow(clippy::too_many_arguments)]
-    unsafe fn fill_waves_selected<const VECTOR: bool>(
+    unsafe fn fill_waves16_avx2(
         &mut self,
         query: &[u8],
         target: &[u8],
@@ -1041,9 +1057,31 @@ impl AlignmentWorkspace {
         best: &mut BestCell,
         count: bool,
     ) {
+        // SAFETY: this function enables AVX2 and the caller proves the narrow score bound.
+        unsafe { self.fill_waves::<i16, true>(query, target, config, waves, carry, best, count) }
+    }
+
+    /// Fills waves with the vector or scalar recurrence. Callers must enable AVX2 when VECTOR is
+    /// true, and pass `narrow` only for vector passes proven by `narrow_local_scores`.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_waves_selected<const VECTOR: bool>(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        narrow: bool,
+        waves: (usize, usize, usize),
+        carry: &mut WaveCarry,
+        best: &mut BestCell,
+        count: bool,
+    ) {
         // SAFETY: forwarded from this function's contract.
         unsafe {
-            if VECTOR {
+            if VECTOR && narrow {
+                self.fill_waves16_avx2(query, target, config, waves, carry, best, count)
+            } else if VECTOR {
                 self.fill_waves_avx2(query, target, config, waves, carry, best, count)
             } else {
                 self.fill_waves::<i32, false>(query, target, config, waves, carry, best, count)
@@ -1072,6 +1110,7 @@ impl AlignmentWorkspace {
             if let Some(current_range) = current_range {
                 let wave_base = self.wave_offsets[wave - first_wave];
                 let (older_previous, current) = self.waves.split_at_mut(2);
+                // An i16 view of an i32 wave buffer holds the same three planes of stride cells.
                 let older_scores: &[S] = bytemuck::cast_slice(&older_previous[0][..]);
                 let previous_scores: &[S] = bytemuck::cast_slice(&older_previous[1][..]);
                 let older = carry.older.map(|range| ScoreWave {
@@ -1109,7 +1148,11 @@ impl AlignmentWorkspace {
                             .filter(|&width| width >= S::LANES)
                             .unwrap_or(0)
                     });
-                    self.work.local_vector8_cells += vectors as u64;
+                    if S::LANES == 16 {
+                        self.work.local_vector16_cells += vectors as u64;
+                    } else {
+                        self.work.local_vector8_cells += vectors as u64;
+                    }
                     self.work.local_scalar_cells += (current_range.width() - vectors) as u64;
                     self.work.local_boundary_cells += u64::from(current_range.contains(0))
                         + u64::from(current_range.contains(wave))
@@ -1254,11 +1297,13 @@ impl AlignmentWorkspace {
 
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     unsafe fn traceback_chunked<const VECTOR: bool>(
         &mut self,
         query: &[u8],
         target: &[u8],
         config: AlignmentConfig,
+        narrow: bool,
         stride: usize,
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
@@ -1289,6 +1334,7 @@ impl AlignmentWorkspace {
                     query,
                     target,
                     config,
+                    narrow,
                     (first, stop, stride),
                     &mut carry,
                     &mut ignored,
@@ -1611,7 +1657,8 @@ impl<S: WaveScore> ScoreWave<'_, S> {
     }
 }
 
-/// Score plane element of the local wave recurrence.
+/// Score plane element of the local wave recurrence. i16 planes are used only for passes that
+/// `narrow_local_scores` proves narrow, so both element types store identical scores.
 #[cfg(target_arch = "x86_64")]
 trait WaveScore: bytemuck::Pod {
     const LANES: usize;
@@ -1673,6 +1720,58 @@ impl WaveScore for i32 {
         // SAFETY: forwarded from this function's contract.
         unsafe {
             fill_wave_avx2(
+                query,
+                target,
+                config,
+                gap_open_score,
+                wave,
+                row,
+                current_range,
+                stride,
+                older,
+                previous,
+                current,
+                traceback,
+                wave_base,
+                best,
+            )
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+impl WaveScore for i16 {
+    const LANES: usize = 16;
+
+    fn get(self) -> i32 {
+        i32::from(self)
+    }
+
+    fn put(score: i32) -> Self {
+        debug_assert!(i16::try_from(score).is_ok());
+        score as i16
+    }
+
+    #[inline(always)]
+    unsafe fn fill_block(
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        gap_open_score: i32,
+        wave: usize,
+        row: usize,
+        current_range: WaveRange,
+        stride: usize,
+        older: ScoreWave<'_, Self>,
+        previous: ScoreWave<'_, Self>,
+        current: &mut [Self],
+        traceback: &mut [u16],
+        wave_base: usize,
+        best: &mut BestCell,
+    ) {
+        // SAFETY: forwarded from this function's contract.
+        unsafe {
+            fill_wave16_avx2(
                 query,
                 target,
                 config,
@@ -2056,6 +2155,200 @@ unsafe fn fill_wave_avx2(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn load_wave16(scores: ScoreWave<'_, i16>, state: usize, row: usize) -> __m256i {
+    debug_assert!(scores.range.contains(row));
+    debug_assert!(scores.range.contains(row + 15));
+    let offset = state * scores.stride + row - scores.range.start;
+    // SAFETY: the caller proves rows row..row+15 are inside this wave and each state plane
+    // has stride elements in an i16 view of at least three strides.
+    unsafe { _mm256_loadu_si256(scores.scores.as_ptr().add(offset).cast()) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn choose16_avx2(m: __m256i, i: __m256i, d: __m256i) -> (__m256i, __m256i) {
+    let zero = _mm256_setzero_si256();
+    let one = _mm256_set1_epi16(1);
+    let two = _mm256_set1_epi16(2);
+    let i_better = _mm256_cmpgt_epi16(i, m);
+    let mut score = _mm256_blendv_epi8(m, i, i_better);
+    let mut state = _mm256_blendv_epi8(zero, one, i_better);
+    let d_better = _mm256_cmpgt_epi16(d, score);
+    score = _mm256_blendv_epi8(score, d, d_better);
+    state = _mm256_blendv_epi8(state, two, d_better);
+    (score, state)
+}
+
+/// AVX2 recurrence for sixteen cells with i16 scores, operation for operation the recurrence of
+/// `fill_wave_avx2`. `narrow_local_scores` proves every stored score and raw candidate fits in
+/// i16, so no lane wraps or saturates and scores, traces and the best cell are identical.
+/// Inlined into its single AVX2-enabled caller; callers must enable AVX2.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+unsafe fn fill_wave16_avx2(
+    query: &[u8],
+    target: &[u8],
+    config: AlignmentConfig,
+    gap_open_score: i32,
+    wave: usize,
+    row: usize,
+    current_range: WaveRange,
+    stride: usize,
+    older: ScoreWave<'_, i16>,
+    previous: ScoreWave<'_, i16>,
+    current: &mut [i16],
+    traceback: &mut [u16],
+    wave_base: usize,
+    best: &mut BestCell,
+) {
+    unsafe {
+        debug_assert!(row > 0);
+        debug_assert!(row + 15 < wave);
+        debug_assert!(row + 15 <= query.len());
+        debug_assert!(current_range.contains(row));
+        debug_assert!(current_range.contains(row + 15));
+        debug_assert!(current.len() >= 3 * stride);
+        let first_target = wave - row;
+        debug_assert!(first_target >= 16 && first_target <= target.len());
+
+        let query_bytes = _mm_loadu_si128(query.as_ptr().add(row - 1).cast());
+        let target_bytes = _mm_loadu_si128(target.as_ptr().add(first_target - 16).cast());
+        let reverse = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+        let target_bytes = _mm_shuffle_epi8(target_bytes, reverse);
+        let equal = _mm_cmpeq_epi8(
+            lowercase_ascii_8(query_bytes),
+            lowercase_ascii_8(target_bytes),
+        );
+        let equal = _mm256_cvtepi8_epi16(equal);
+        // The narrow proof bounds every scoring term to i16.
+        let substitution = _mm256_blendv_epi8(
+            _mm256_set1_epi16(config.mismatch_score as i16),
+            _mm256_set1_epi16(config.match_score as i16),
+            equal,
+        );
+        let gap_open = _mm256_set1_epi16(gap_open_score as i16);
+        let gap_extend = _mm256_set1_epi16(config.gap_extend_score as i16);
+
+        let (diagonal, diagonal_state) = choose16_avx2(
+            load_wave16(older, MATCH as usize, row - 1),
+            load_wave16(older, INSERTION as usize, row - 1),
+            load_wave16(older, DELETION as usize, row - 1),
+        );
+        let match_raw = _mm256_adds_epi16(diagonal, substitution);
+        let zero = _mm256_setzero_si256();
+        let match_positive = _mm256_cmpgt_epi16(match_raw, zero);
+        let match_scores = _mm256_and_si256(match_raw, match_positive);
+        let match_start = _mm256_cmpeq_epi16(match_raw, substitution);
+        let match_previous = _mm256_blendv_epi8(
+            diagonal_state,
+            _mm256_set1_epi16(i16::from(START)),
+            match_start,
+        );
+
+        let left_m = _mm256_add_epi16(load_wave16(previous, MATCH as usize, row), gap_open);
+        let left_i = _mm256_add_epi16(load_wave16(previous, INSERTION as usize, row), gap_extend);
+        let left_d = _mm256_add_epi16(load_wave16(previous, DELETION as usize, row), gap_open);
+        let (insertion_raw, insertion_previous) = choose16_avx2(left_m, left_i, left_d);
+        let insertion_positive = _mm256_cmpgt_epi16(insertion_raw, zero);
+        let insertion_scores = _mm256_and_si256(insertion_raw, insertion_positive);
+
+        let above_m = _mm256_add_epi16(load_wave16(previous, MATCH as usize, row - 1), gap_open);
+        let above_i =
+            _mm256_add_epi16(load_wave16(previous, INSERTION as usize, row - 1), gap_open);
+        let above_d = _mm256_add_epi16(
+            load_wave16(previous, DELETION as usize, row - 1),
+            gap_extend,
+        );
+        let (deletion_raw, deletion_previous) = choose16_avx2(above_m, above_i, above_d);
+        let deletion_positive = _mm256_cmpgt_epi16(deletion_raw, zero);
+        let deletion_scores = _mm256_and_si256(deletion_raw, deletion_positive);
+
+        let wave_offset = row - current_range.start;
+        _mm256_storeu_si256(current.as_mut_ptr().add(wave_offset).cast(), match_scores);
+        _mm256_storeu_si256(
+            current.as_mut_ptr().add(stride + wave_offset).cast(),
+            insertion_scores,
+        );
+        _mm256_storeu_si256(
+            current.as_mut_ptr().add(2 * stride + wave_offset).cast(),
+            deletion_scores,
+        );
+
+        let mut trace = _mm256_and_si256(match_positive, _mm256_set1_epi16(1));
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi16::<3>(_mm256_and_si256(match_previous, match_positive)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_and_si256(insertion_positive, _mm256_set1_epi16(2)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi16::<5>(_mm256_and_si256(insertion_previous, insertion_positive)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_and_si256(deletion_positive, _mm256_set1_epi16(4)),
+        );
+        trace = _mm256_or_si256(
+            trace,
+            _mm256_slli_epi16::<7>(_mm256_and_si256(deletion_previous, deletion_positive)),
+        );
+        debug_assert!(wave_base + wave_offset + 16 <= traceback.len());
+        // SAFETY: the wave layout stores this wave's cells contiguously, and rows row..=row+15
+        // lie inside current_range. Traces use nine bits, so each lane is one traceback cell.
+        _mm256_storeu_si256(
+            traceback.as_mut_ptr().add(wave_base + wave_offset).cast(),
+            trace,
+        );
+        let (lane_best_scores, _) = choose16_avx2(match_scores, insertion_scores, deletion_scores);
+        // Stored scores are non-negative, so i16::MAX ^ score orders lanes in reverse and the
+        // unsigned minimum gives the block maximum.
+        let halves = _mm_max_epi16(
+            _mm256_castsi256_si128(lane_best_scores),
+            _mm256_extracti128_si256::<1>(lane_best_scores),
+        );
+        let reversed = _mm_xor_si128(halves, _mm_set1_epi16(i16::MAX));
+        let block_score =
+            i32::from(i16::MAX) - (_mm_cvtsi128_si32(_mm_minpos_epu16(reversed)) & 0xffff);
+        // BestCell only changes for a higher score or an equal, earlier cell, so a block below
+        // the current best cannot change it.
+        if block_score > 0 && block_score >= best.score {
+            let mut matches = [0i16; 16];
+            let mut insertions = [0i16; 16];
+            let mut deletions = [0i16; 16];
+            _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
+            _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
+            _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
+            let best_lanes = _mm256_movemask_epi8(_mm256_cmpeq_epi16(
+                lane_best_scores,
+                _mm256_set1_epi16(block_score as i16),
+            )) as u32;
+            // Each lane sets two mask bits. As in `fill_wave_avx2`, the first lane with the block
+            // maximum is the lexicographically earliest candidate.
+            let block_lane = best_lanes.trailing_zeros() as usize / 2;
+            let query_index = row + block_lane;
+            let target_index = wave - query_index;
+            best.consider(
+                query_index,
+                target_index,
+                Cell {
+                    scores: [
+                        i32::from(matches[block_lane]),
+                        i32::from(insertions[block_lane]),
+                        i32::from(deletions[block_lane]),
+                    ],
+                    previous: [0; 3],
+                },
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Cell {
     scores: [i32; 3],
@@ -2160,6 +2453,8 @@ impl EndpointWorkspace {
 thread_local! {
     /// Selects the scalar endpoint kernel on AVX2 hosts, so tests can compare both kernels.
     static SCALAR_ENDPOINT_KERNEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Selects the i32 eight-lane local kernel for narrow passes, so tests can compare widths.
+    static WIDE_LOCAL_KERNEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -3453,9 +3748,10 @@ mod tests {
             .collect()
     }
 
-    /// Checks the scalar and AVX2 wave kernels against the unbounded scalar row kernel: equal
-    /// alignments (best-cell tie order included), equal traceback cells, and vector counters
-    /// that count each cell once although a final block may evaluate some lanes twice.
+    /// Checks the scalar, dispatched AVX2 and forced eight-lane AVX2 wave kernels against the
+    /// unbounded scalar row kernel: equal alignments (best-cell tie order included), equal
+    /// traceback cells, and vector counters that count each cell once although a final block may
+    /// evaluate some lanes twice. Dispatch uses sixteen lanes for proven narrow passes.
     #[cfg(target_arch = "x86_64")]
     fn assert_wave_kernels_match(
         query: &[u8],
@@ -3471,37 +3767,62 @@ mod tests {
         };
         let expected =
             forward(AlignmentWorkspace::default().align_raw_scalar(query, target, unbounded));
-        let [(scalar_result, scalar), (vector_result, vector)] = [false, true].map(|avx2| {
+        let [
+            (scalar_result, scalar),
+            (vector_result, vector),
+            (wide_result, wide),
+        ] = [0, 1, 2].map(|kernel| {
             let mut workspace = AlignmentWorkspace {
                 resident_chunks: true,
                 ..AlignmentWorkspace::default()
             };
             workspace.enable_timing();
-            let result = if avx2 {
+            WIDE_LOCAL_KERNEL.set(kernel == 2);
+            let result = if kernel == 0 {
+                workspace.align_raw_waves_scalar(query, target, config)
+            } else {
                 // SAFETY: callers return early unless AVX2 is available.
                 unsafe { workspace.align_raw_avx2(query, target, config) }
-            } else {
-                workspace.align_raw_waves_scalar(query, target, config)
             };
+            WIDE_LOCAL_KERNEL.set(false);
             (forward(result), workspace)
         });
-        let case = format!("{config:?} query={query:?} target={target:?}");
-        assert_eq!(scalar_result, expected, "{case}");
-        assert_eq!(vector_result, expected, "{case}");
-        assert_eq!(
-            vector.compact_cells.len(),
-            scalar.compact_cells.len(),
-            "{case}"
+        // Sequences are generated by the tests, so the case names only the configuration.
+        let case = format!(
+            "{config:?} query_len={} target_len={}",
+            query.len(),
+            target.len()
         );
-        let mismatch = vector
-            .compact_cells
-            .iter()
-            .zip(&scalar.compact_cells)
-            .position(|(vector, scalar)| vector != scalar);
-        assert_eq!(mismatch, None, "{case}");
+        assert_eq!(scalar_result, expected, "{case}");
+        for (result, workspace) in [(&vector_result, &vector), (&wide_result, &wide)] {
+            assert_eq!(result, &expected, "{case}");
+            assert_eq!(
+                workspace.compact_cells.len(),
+                scalar.compact_cells.len(),
+                "{case}"
+            );
+            let mismatch = workspace
+                .compact_cells
+                .iter()
+                .zip(&scalar.compact_cells)
+                .position(|(vector, scalar)| vector != scalar);
+            assert_eq!(mismatch, None, "{case}");
+        }
 
         let widths = vector_wave_widths(query.len(), target.len(), config);
-        let blocked = widths.iter().filter(|&&width| width >= 8).sum::<usize>() as u64;
+        let blocked_by = |lanes| {
+            widths
+                .iter()
+                .filter(|&&width| width >= lanes)
+                .sum::<usize>() as u64
+        };
+        let blocked = blocked_by(8);
+        let narrow = narrow_local_scores(query.len(), target.len(), config);
+        let (vector8, vector16) = if narrow {
+            (0, blocked_by(16))
+        } else {
+            (blocked, 0)
+        };
         let total = band_cells(
             query.len(),
             target.len(),
@@ -3509,22 +3830,38 @@ mod tests {
             config.band_width,
         )
         .unwrap() as u64;
-        for work in [scalar.work, vector.work] {
+        for work in [scalar.work, vector.work, wide.work] {
             assert_eq!(work.local_cells, total, "{case}");
         }
-        assert_eq!(vector.work.local_vector8_cells, blocked, "{case}");
+        assert_eq!(wide.work.local_vector8_cells, blocked, "{case}");
+        assert_eq!(wide.work.local_vector16_cells, 0, "{case}");
+        assert_eq!(
+            wide.work.local_scalar_cells,
+            wide.work.local_cells - blocked,
+            "{case}"
+        );
+        assert_eq!(
+            (
+                vector.work.local_vector8_cells,
+                vector.work.local_vector16_cells
+            ),
+            (vector8, vector16),
+            "{case}"
+        );
         assert_eq!(
             vector.work.local_scalar_cells,
-            vector.work.local_cells - blocked,
+            vector.work.local_cells - vector8 - vector16,
             "{case}"
         );
         assert_eq!(scalar.work.local_vector8_cells, 0);
         assert_eq!(scalar.work.local_scalar_cells, scalar.work.local_cells);
-        assert_eq!(vector.work.local_chunks, scalar.work.local_chunks, "{case}");
-        assert_eq!(
-            vector.work.local_recomputed_cells, scalar.work.local_recomputed_cells,
-            "{case}"
-        );
+        for work in [vector.work, wide.work] {
+            assert_eq!(work.local_chunks, scalar.work.local_chunks, "{case}");
+            assert_eq!(
+                work.local_recomputed_cells, scalar.work.local_recomputed_cells,
+                "{case}"
+            );
+        }
         (expected, widths)
     }
 
