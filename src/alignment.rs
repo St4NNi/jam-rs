@@ -431,6 +431,12 @@ pub(crate) fn trace_alignment_bytes(
         )?
         .checked_mul(2)
         .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        doubled_vec_bytes::<i32>(
+            endpoint_query
+                .checked_add(9)
+                .and_then(|stride| stride.checked_mul(9))
+                .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        )?,
         doubled_vec_bytes::<usize>(query_rows)?
             .checked_mul(3)
             .ok_or(AlignmentAdmissionError::ByteOverflow)?,
@@ -2052,6 +2058,8 @@ const NEGATIVE: i32 = i32::MIN / 4;
 struct EndpointMatrix {
     rows: [Vec<[i32; 3]>; 2],
     previous: Vec<u8>,
+    /// Three anti-diagonal score waves of the AVX2 kernel: wave, state, then query row.
+    waves: Vec<i32>,
     operations: Vec<EditOperation>,
 }
 
@@ -2070,6 +2078,7 @@ impl EndpointWorkspace {
             .map(|row| row.capacity() * std::mem::size_of::<[i32; 3]>())
             .sum::<usize>()
             + self.matrix.previous.capacity()
+            + self.matrix.waves.capacity() * std::mem::size_of::<i32>()
             + self.matrix.operations.capacity() * std::mem::size_of::<EditOperation>()
             + self.left_query.capacity()
             + self.left_target.capacity()
@@ -2230,6 +2239,206 @@ fn complete_endpoints(
     })
 }
 
+/// Keeps the best endpoint cell: higher score, then the later (row + column, row, column) and
+/// the lower state. The comparison is a total order, so the visiting order does not matter.
+fn endpoint_consider(
+    best: &mut (i32, usize, usize, u8),
+    row: usize,
+    column: usize,
+    scores: [i32; 3],
+) {
+    let (score, state) = maximum(scores);
+    let candidate = (
+        row.saturating_add(column),
+        row,
+        column,
+        std::cmp::Reverse(state),
+    );
+    let current = (
+        best.1.saturating_add(best.2),
+        best.1,
+        best.2,
+        std::cmp::Reverse(best.3),
+    );
+    if score > best.0 || (score == best.0 && candidate > current) {
+        *best = (score, row, column, state);
+    }
+}
+
+/// Anchored semiglobal recurrence evaluated along anti-diagonals. A cell reads only the two
+/// previous anti-diagonals, the scores, saturation, tie order and traceback bits equal the row
+/// kernel, and the best cell comes from the last row and column through `endpoint_consider`.
+/// Callers must enable AVX2 and set the border tracebacks.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn endpoint_waves_avx2(
+    matrix: &mut EndpointMatrix,
+    query: &[u8],
+    target: &[u8],
+    config: AlignmentConfig,
+    best: &mut (i32, usize, usize, u8),
+) {
+    let (query_len, target_len) = (query.len(), target.len());
+    let columns = target_len + 1;
+    let stride = query_len + 9;
+    matrix.waves.clear();
+    matrix.waves.resize(9 * stride, NEGATIVE);
+    let open = gap_open(config);
+    let border = |length: usize| {
+        config.gap_open_score.saturating_add(
+            config
+                .gap_extend_score
+                .saturating_mul(i32::try_from(length).unwrap_or(i32::MAX)),
+        )
+    };
+    let index = |slot: usize, state: u8, row: usize| (slot * 3 + state as usize) * stride + row;
+    let mut slots = [0usize, 1, 2];
+    for wave in 0..=query_len + target_len {
+        let [older, previous, current] = slots;
+        let waves = &mut matrix.waves;
+        let read = |waves: &Vec<i32>, slot, row| {
+            [
+                waves[index(slot, MATCH, row)],
+                waves[index(slot, INSERTION, row)],
+                waves[index(slot, DELETION, row)],
+            ]
+        };
+        let low = wave.saturating_sub(target_len);
+        let high = query_len.min(wave);
+        let mut row = low;
+        while row <= high {
+            let column = wave - row;
+            if row == 0 || column == 0 {
+                let cell = match (row, column) {
+                    (0, 0) => [0, NEGATIVE, NEGATIVE],
+                    (0, _) => [NEGATIVE, border(column), NEGATIVE],
+                    _ => [NEGATIVE, NEGATIVE, border(row)],
+                };
+                for state in [MATCH, INSERTION, DELETION] {
+                    waves[index(current, state, row)] = cell[state as usize];
+                }
+                row += 1;
+                continue;
+            }
+            let last = high.min(wave - 1);
+            if last + 1 - row < 8 {
+                let diagonal = read(waves, older, row - 1);
+                let above = read(waves, previous, row - 1);
+                let left = read(waves, previous, row);
+                let (score, match_state) = maximum(diagonal);
+                let substitution = if query[row - 1].eq_ignore_ascii_case(&target[column - 1]) {
+                    config.match_score
+                } else {
+                    config.mismatch_score
+                };
+                let (deletion, deletion_state) = maximum([
+                    above[MATCH as usize].saturating_add(open),
+                    above[INSERTION as usize].saturating_add(open),
+                    above[DELETION as usize].saturating_add(config.gap_extend_score),
+                ]);
+                let (insertion, insertion_state) = maximum([
+                    left[MATCH as usize].saturating_add(open),
+                    left[INSERTION as usize].saturating_add(config.gap_extend_score),
+                    left[DELETION as usize].saturating_add(open),
+                ]);
+                waves[index(current, MATCH, row)] = score.saturating_add(substitution);
+                waves[index(current, INSERTION, row)] = insertion;
+                waves[index(current, DELETION, row)] = deletion;
+                matrix.previous[row * columns + column] =
+                    match_state | (insertion_state << 2) | (deletion_state << 4);
+                row += 1;
+                continue;
+            }
+            // Full blocks, then one block ending at `last`; overlapping cells are rewritten with
+            // identical values because they read only earlier anti-diagonals.
+            let mut block = row;
+            loop {
+                let start = block.min(last - 7);
+                // SAFETY: rows start..start+8 are interior cells of this wave, so their query
+                // bytes, reversed target bytes and wave rows start-1..start+8 are in bounds.
+                unsafe {
+                    let load = |slot: usize, state: u8, row: usize| {
+                        _mm256_loadu_si256(waves.as_ptr().add(index(slot, state, row)).cast())
+                    };
+                    let query_bytes = _mm_loadl_epi64(query.as_ptr().add(start - 1).cast());
+                    let target_bytes =
+                        _mm_loadl_epi64(target.as_ptr().add(wave - start - 8).cast());
+                    let reverse =
+                        _mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, -1, -1, -1, -1, -1, -1, -1, -1);
+                    let equal = _mm256_cvtepi8_epi32(_mm_cmpeq_epi8(
+                        lowercase_ascii_8(query_bytes),
+                        lowercase_ascii_8(_mm_shuffle_epi8(target_bytes, reverse)),
+                    ));
+                    let substitution = _mm256_blendv_epi8(
+                        _mm256_set1_epi32(config.mismatch_score),
+                        _mm256_set1_epi32(config.match_score),
+                        equal,
+                    );
+                    let (diagonal, match_state) = choose_avx2(
+                        load(older, MATCH, start - 1),
+                        load(older, INSERTION, start - 1),
+                        load(older, DELETION, start - 1),
+                    );
+                    let open = _mm256_set1_epi32(open);
+                    let extend = _mm256_set1_epi32(config.gap_extend_score);
+                    let (deletion, deletion_state) = choose_avx2(
+                        saturating_add_avx2(load(previous, MATCH, start - 1), open),
+                        saturating_add_avx2(load(previous, INSERTION, start - 1), open),
+                        saturating_add_avx2(load(previous, DELETION, start - 1), extend),
+                    );
+                    let (insertion, insertion_state) = choose_avx2(
+                        saturating_add_avx2(load(previous, MATCH, start), open),
+                        saturating_add_avx2(load(previous, INSERTION, start), extend),
+                        saturating_add_avx2(load(previous, DELETION, start), open),
+                    );
+                    let scores = waves.as_mut_ptr();
+                    _mm256_storeu_si256(
+                        scores.add(index(current, MATCH, start)).cast(),
+                        saturating_add_avx2(diagonal, substitution),
+                    );
+                    _mm256_storeu_si256(
+                        scores.add(index(current, INSERTION, start)).cast(),
+                        insertion,
+                    );
+                    _mm256_storeu_si256(
+                        scores.add(index(current, DELETION, start)).cast(),
+                        deletion,
+                    );
+                    let packed = _mm256_or_si256(
+                        match_state,
+                        _mm256_or_si256(
+                            _mm256_slli_epi32::<2>(insertion_state),
+                            _mm256_slli_epi32::<4>(deletion_state),
+                        ),
+                    );
+                    let mut lanes = [0i32; 8];
+                    _mm256_storeu_si256(lanes.as_mut_ptr().cast(), packed);
+                    let first = start * columns + wave - start;
+                    for (lane, &value) in lanes.iter().enumerate() {
+                        matrix.previous[first + lane * (columns - 1)] = value as u8;
+                    }
+                }
+                if start + 7 == last {
+                    break;
+                }
+                block += 8;
+            }
+            row = last + 1;
+        }
+        let waves = &matrix.waves;
+        if let Some(row) = wave.checked_sub(target_len).filter(|&row| row <= query_len) {
+            endpoint_consider(best, row, target_len, read(waves, current, row));
+        }
+        if let Some(column) = wave
+            .checked_sub(query_len)
+            .filter(|&column| column <= target_len)
+        {
+            endpoint_consider(best, query_len, column, read(waves, current, query_len));
+        }
+        slots = [previous, current, older];
+    }
+}
+
 fn anchored_semiglobal(
     matrix: &mut EndpointMatrix,
     query: &[u8],
@@ -2297,26 +2506,23 @@ fn anchored_semiglobal(
     }
     let matrix_cpu = observed_cpu(work.is_some());
     let mut best = (NEGATIVE, 0usize, 0usize, START);
-    let mut consider = |row: usize, column: usize, scores| {
-        let (score, state) = maximum(scores);
-        let candidate = (
-            row.saturating_add(column),
-            row,
-            column,
-            std::cmp::Reverse(state),
-        );
-        let current = (
-            best.1.saturating_add(best.2),
-            best.1,
-            best.2,
-            std::cmp::Reverse(best.3),
-        );
-        if score > best.0 || (score == best.0 && candidate > current) {
-            best = (score, row, column, state);
+    #[cfg(target_arch = "x86_64")]
+    let vector = is_x86_feature_detected!("avx2");
+    #[cfg(not(target_arch = "x86_64"))]
+    let vector = false;
+    #[cfg(target_arch = "x86_64")]
+    if vector {
+        for row in 1..rows {
+            let state = if row == 1 { MATCH } else { DELETION };
+            matrix.previous[row * columns] = (INITIAL_PREVIOUS & !(3 << 4)) | (state << 4);
         }
-    };
-    consider(0, columns - 1, matrix.rows[0][columns - 1]);
-    for row in 1..rows {
+        // SAFETY: the runtime feature check guards every AVX2 instruction in this call.
+        unsafe { endpoint_waves_avx2(matrix, query, target, config, &mut best) };
+    }
+    if !vector {
+        endpoint_consider(&mut best, 0, columns - 1, matrix.rows[0][columns - 1]);
+    }
+    for row in (1..rows).filter(|_| !vector) {
         let first = row * columns;
         let [previous, current] = &mut matrix.rows;
         let previous = &previous[..columns];
@@ -2362,10 +2568,10 @@ fn anchored_semiglobal(
         }
         if row + 1 == rows {
             for (column, &scores) in current.iter().enumerate() {
-                consider(row, column, scores);
+                endpoint_consider(&mut best, row, column, scores);
             }
         } else {
-            consider(row, columns - 1, current[columns - 1]);
+            endpoint_consider(&mut best, row, columns - 1, current[columns - 1]);
         }
         matrix.rows.swap(0, 1);
     }
@@ -3193,7 +3399,7 @@ mod tests {
         )
         .unwrap();
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(bytes, 550_833_290);
+        assert_eq!(bytes, 550_852_370);
     }
 
     #[test]
@@ -3451,6 +3657,45 @@ mod tests {
                     ..config()
                 },
             );
+        }
+    }
+
+    #[test]
+    fn endpoint_kernel_matches_reference_for_wide_saturating_and_tied_inputs() {
+        const BASES: &[u8] = b"ACgtN";
+        let configs = [
+            AlignmentConfig {
+                match_score: i32::MAX,
+                mismatch_score: i32::MIN,
+                gap_open_score: i32::MIN,
+                gap_extend_score: i32::MIN,
+                ..config()
+            },
+            AlignmentConfig {
+                match_score: 1,
+                mismatch_score: 0,
+                gap_open_score: 0,
+                gap_extend_score: 0,
+                ..config()
+            },
+        ];
+        let mut state = 0xbb67_ae85_84ca_a73bu64;
+        let mut matrix = EndpointMatrix::default();
+        let mut reference = Vec::new();
+        for case in 0..96usize {
+            let mut next = |modulus: usize| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                (state >> 33) as usize % modulus
+            };
+            let (query_len, target_len) = (8 + next(40), 8 + next(40));
+            let query = (0..query_len)
+                .map(|_| BASES[next(BASES.len())])
+                .collect::<Vec<_>>();
+            let target = (0..target_len)
+                .map(|_| BASES[next(BASES.len())])
+                .collect::<Vec<_>>();
+            let config = configs[case % configs.len()];
+            assert_endpoint_case(&mut matrix, &mut reference, &query, &target, config);
         }
     }
 
