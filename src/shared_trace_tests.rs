@@ -262,9 +262,10 @@ fn without_read_accounting(mut result: crate::trace::TraceResult) -> crate::trac
 
 #[test]
 fn shared_index_traces_strong_weak_mixed_reverse_and_circular_queries() {
-    shared_trace_fixture(false, false);
-    shared_trace_fixture(true, false);
-    shared_trace_fixture(true, true);
+    shared_trace_fixture(1);
+    shared_trace_fixture(2);
+    shared_trace_fixture(3);
+    assert_eq!(shared_trace_fixture(4), shared_trace_fixture(5));
 }
 
 #[test]
@@ -322,6 +323,8 @@ fn extraction_screening_matches_filter_free_results_for_mixed_queries() {
     crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
     let filtered = directory.path().join("target.filtered.shared");
     crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+    let placed = directory.path().join("target.placed.shared");
+    crate::shared_pack::repack_shared_contexts(&filtered, &placed).unwrap();
 
     let reverse = reverse_complement(&target);
     let circular = [target[600..].to_vec(), target[..600].to_vec()].concat();
@@ -379,12 +382,16 @@ fn extraction_screening_matches_filter_free_results_for_mixed_queries() {
         .collect::<Vec<_>>();
     let control_stats = control.batch_stats();
 
-    for workers in [1, 4, 8, 16] {
+    for (path, workers) in [&filtered, &placed]
+        .into_iter()
+        .flat_map(|path| [1, 4, 8, 16].map(|workers| (path, workers)))
+    {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(workers)
             .build()
             .unwrap();
-        let engine = TraceEngine::open_shared_observed(&filtered, None, true).unwrap();
+        let engine = TraceEngine::open_shared_observed(path, None, true).unwrap();
+        let path_body = body(path);
         let actual = pool
             .install(|| {
                 engine
@@ -392,9 +399,14 @@ fn extraction_screening_matches_filter_free_results_for_mixed_queries() {
                     .unwrap()
             })
             .into_iter()
-            .map(without_read_accounting)
+            .map(|result| {
+                let mut result = without_read_accounting(result);
+                assert_eq!(result.index.body_sha256, path_body);
+                result.index.body_sha256 = filtered_body.clone();
+                result
+            })
             .collect::<Vec<_>>();
-        assert_eq!(actual, expected, "thread count {workers}");
+        assert_eq!(actual, expected, "{path:?} thread count {workers}");
 
         let stats = engine.batch_stats();
         assert_eq!(
@@ -589,7 +601,15 @@ fn sparse_shared_queries_preserve_bounded_batches_and_fallback_counts() {
     }
 }
 
-fn shared_trace_fixture(packed: bool, split: bool) {
+// Returns the trace outputs without read accounting or the index body digest.
+fn shared_trace_fixture(version: u16) -> Vec<serde_json::Value> {
+    let (packed, split) = (version >= 2, version >= 3);
+    let mut outputs = Vec::new();
+    let mut record = |result: &crate::trace::TraceResult| {
+        let mut value = without_json_read_accounting(serde_json::to_value(result).unwrap());
+        value["index"]["body_sha256"] = serde_json::json!("");
+        outputs.push(value);
+    };
     let directory = tempfile::tempdir().unwrap();
     let exact_target = dna(11, 800);
     let mixed_target = dna(29, 800);
@@ -649,6 +669,20 @@ fn shared_trace_fixture(packed: bool, split: bool) {
     } else {
         shared
     };
+    let shared = if version >= 4 {
+        let output = directory.path().join("targets.filtered.shared");
+        crate::shared_pack::add_shared_core_filter(&shared, &output, usize::MAX).unwrap();
+        output
+    } else {
+        shared
+    };
+    let shared = if version == 5 {
+        let output = directory.path().join("targets.placed.shared");
+        crate::shared_pack::repack_shared_contexts(&shared, &output).unwrap();
+        output
+    } else {
+        shared
+    };
     assert_eq!(stats.source_bases, 6_320);
     std::fs::remove_file(&reference).unwrap();
     assert!(!reference.exists());
@@ -693,6 +727,7 @@ fn shared_trace_fixture(packed: bool, split: bool) {
         .unwrap();
     let observed = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
     let numeric_result = observed.search("exact", &exact_query, linear).unwrap();
+    batch.iter().chain([&numeric_result]).for_each(&mut record);
     assert_eq!(
         without_read_accounting(numeric_result),
         without_read_accounting(batch[0].clone())
@@ -750,6 +785,7 @@ fn shared_trace_fixture(packed: bool, split: bool) {
     validate_score(mixed);
 
     let reverse = engine.search("reverse", &reverse_query, linear).unwrap();
+    record(&reverse);
     let reverse = alignment(&reverse, "exact");
     assert_eq!(
         reverse.target_interval,
@@ -767,6 +803,7 @@ fn shared_trace_fixture(packed: bool, split: bool) {
             },
         )
         .unwrap();
+    record(&circular);
     let trace = circular
         .metagenomes
         .iter()
@@ -836,6 +873,7 @@ fn shared_trace_fixture(packed: bool, split: bool) {
     .into_iter()
     .map(without_read_accounting)
     .collect::<Vec<_>>();
+    expected_topologies.iter().for_each(&mut record);
     for threads in [1, 4, 8, 16] {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
@@ -926,6 +964,7 @@ fn shared_trace_fixture(packed: bool, split: bool) {
     ];
     let batch_engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
     let batch_results = batch_engine.search_batch(&queries, linear).unwrap();
+    batch_results.iter().for_each(&mut record);
     let batch_stats = batch_engine.batch_stats();
     let batch_reads = batch_engine.shared_read_stats().unwrap();
     let mut separate_results = Vec::new();
@@ -961,4 +1000,114 @@ fn shared_trace_fixture(packed: bool, split: bool) {
     assert!(batch_stats.unique_keys < separate_unique_keys);
     assert!(batch_stats.cached_positions < separate_cached_positions);
     assert!(batch_stats.bgzf_cache_hits > 0);
+    outputs
+}
+
+#[test]
+fn context_placements_round_trip_sequence_built_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let core = xorshift_dna(0x51, 15);
+    let copy =
+        |left: u64, right: u64| [xorshift_dna(left, 8), core.clone(), xorshift_dna(right, 8)];
+    let [left, _, right] = copy(1, 2);
+    let mut changed = left.clone();
+    changed[..5].copy_from_slice(&xorshift_dna(3, 5));
+    let mut ambiguous = left.clone();
+    ambiguous[1] = b'N';
+    let first = [
+        xorshift_dna(4, 120),
+        copy(1, 2).concat(),
+        xorshift_dna(5, 40),
+        [changed, core.clone(), right.clone()].concat(),
+        xorshift_dna(6, 40),
+        [ambiguous, core.clone(), right].concat(),
+        vec![b'A'; 64],
+    ]
+    .concat();
+    let second = [
+        b"GC".to_vec(),
+        core.clone(),
+        xorshift_dna(7, 30),
+        reverse_complement(&copy(1, 2).concat()),
+        xorshift_dna(8, 60),
+        b"AC".repeat(20),
+    ]
+    .concat();
+    let short = [b"T".to_vec(), core.clone(), b"GCA".to_vec()].concat();
+    let repeat = [vec![b'A'; 96], vec![b'N'; 4], vec![b'A'; 40]].concat();
+    let targets = [("a", first), ("b", second), ("c", short), ("d", repeat)];
+    let reference = directory.path().join("reference.jidx");
+    let mut writer = JidxWriter::new(
+        &reference,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 1,
+            jam_sha256: [1; 32],
+            manifest_sha256: [2; 32],
+        },
+    )
+    .unwrap();
+    for (name, sequence) in &targets {
+        writer
+            .begin_metagenome(write_bgzf(directory.path(), name, sequence))
+            .unwrap();
+        writer
+            .begin_contig(ContigInput {
+                name: "contig".into(),
+                length: sequence.len() as u64,
+                fasta_offset: 8,
+                line_bases: 80,
+                line_width: 81,
+            })
+            .unwrap();
+    }
+    writer.finish().unwrap();
+    let shared = directory.path().join("target.shared");
+    build_shared_index(&reference, &shared, 1).unwrap();
+    let packed = directory.path().join("target.packed.shared");
+    crate::shared_pack::repack_shared_index(&shared, &packed).unwrap();
+    let compact = directory.path().join("target.compact.shared");
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let filtered = directory.path().join("target.filtered.shared");
+    crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+    let placed = directory.path().join("target.placed.shared");
+    let stats = crate::shared_pack::repack_shared_contexts(&filtered, &placed).unwrap();
+    assert!(stats.repeated_cores > 0 && stats.directory_rows > 0 && stats.single_member_cores > 0);
+
+    let mut keys = Vec::new();
+    for (_, sequence) in &targets {
+        for seed in select_shared_seeds(sequence, 1).unwrap() {
+            for key in [15, 21, 31]
+                .into_iter()
+                .filter_map(|length| seed.key(length))
+            {
+                keys.push(key);
+                keys.push(match key.length {
+                    15 => crate::shared_seed::SharedKey::core(key.core ^ 1),
+                    _ => crate::shared_seed::SharedKey {
+                        context: key.context ^ 1,
+                        ..key
+                    },
+                });
+            }
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    let seeds = select_shared_seeds(&targets[0].1, 1).unwrap();
+    let copies = seeds
+        .iter()
+        .filter(|seed| seed.position >= 120 && seed.key(15) == seeds[128].key(15))
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 3);
+    assert_eq!(
+        copies.iter().filter(|seed| seed.key(21).is_some()).count(),
+        3
+    );
+    assert_eq!(
+        copies.iter().filter(|seed| seed.key(31).is_some()).count(),
+        2
+    );
+    crate::shared_tests::assert_context_round_trip(&filtered, &placed, &keys);
 }
