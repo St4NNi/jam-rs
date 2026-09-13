@@ -4603,6 +4603,130 @@ mod tests {
     }
 
     #[test]
+    fn split_core_lookup_tasks_match_one_reader_call_and_fail_deterministically() {
+        use crate::shared_format::{Section, SharedError};
+        use crate::trace_index::TraceIndex;
+        let directory = tempfile::tempdir().unwrap();
+        let path = |name: &str| directory.path().join(name);
+        let (shared, _, contigs) = write_range_sources(directory.path(), 2);
+        crate::shared_pack::repack_shared_index(&shared, path("packed.shared")).unwrap();
+        crate::shared_pack::repack_shared_cores(path("packed.shared"), path("compact.shared"))
+            .unwrap();
+        let cores = crate::shared_reader::SharedReader::open(path("compact.shared"))
+            .unwrap()
+            .core_count() as usize;
+        for (name, maximum) in [("partial.shared", cores / 3), ("full.shared", usize::MAX)] {
+            crate::shared_pack::add_shared_core_filter(path("compact.shared"), path(name), maximum)
+                .unwrap();
+        }
+        // Present cores from every contig, absent random cores and repeated requests.
+        let mut requests = contigs
+            .iter()
+            .flat_map(|contig| extract_query_seeds(contig, 15, false).unwrap())
+            .map(|seed| seed.packed_key as u32)
+            .collect::<Vec<_>>();
+        requests.extend(
+            window_dna(0x2545_f491_4f6c_dd1d, 20_000)
+                .windows(15)
+                .map(|window| window.bit_kmers(15, true).next().unwrap().1.0 as u32),
+        );
+        requests.extend_from_slice(&requests[..500].to_vec());
+        let mut distinct = requests.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        for name in ["partial.shared", "full.shared"] {
+            let reader = crate::shared_reader::SharedReader::open(path(name)).unwrap();
+            let mut expected = Vec::new();
+            reader
+                .resolve_sorted_cores_into(&distinct, &mut expected)
+                .unwrap();
+            assert!(!expected.is_empty() && expected.len() < distinct.len());
+            let index = TraceIndex::Shared(Box::new(reader));
+            let TraceIndex::Shared(reader) = &index else {
+                unreachable!()
+            };
+            let operation = reader.core_operation().unwrap().unwrap();
+            let survivors = requests
+                .iter()
+                .copied()
+                .filter(|&core| operation.screen(core).unwrap().1)
+                .collect::<Vec<_>>();
+            for workers in [1, 4, 8, 16] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap();
+                let (early, screened) = pool.install(|| {
+                    let early = crate::trace_batch::prepare_cores(
+                        &index,
+                        requests.iter().copied(),
+                        requests.len(),
+                        true,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    let screened = crate::trace_batch::prepare_screened_cores(
+                        &index,
+                        survivors.iter().copied(),
+                        survivors.len(),
+                        true,
+                        &operation,
+                    )
+                    .unwrap()
+                    .unwrap();
+                    (early, screened)
+                });
+                assert_eq!(early.groups, expected, "{name} workers={workers}");
+                assert_eq!(screened.groups, expected, "{name} workers={workers}");
+                assert!(
+                    early.tasks > 1 && screened.tasks > 1,
+                    "{name} workers={workers}"
+                );
+            }
+            operation.finish().unwrap();
+        }
+
+        // Corrupted core and payload pages fail every worker count with the checksum error and
+        // publish no groups.
+        let corrupted = path("corrupted.shared");
+        std::fs::copy(path("partial.shared"), &corrupted).unwrap();
+        let header = crate::shared_file::SharedFile::open(&corrupted, false)
+            .unwrap()
+            .header;
+        let mut bytes = std::fs::read(&corrupted).unwrap();
+        for kind in [Section::Cores, Section::CorePayloads] {
+            let section = header.section(kind);
+            assert!(section.length > 17);
+            bytes[(section.offset + 17) as usize] ^= 1;
+        }
+        std::fs::write(&corrupted, bytes).unwrap();
+        for workers in [1, 4, 8, 16] {
+            let index = TraceIndex::Shared(Box::new(
+                crate::shared_reader::SharedReader::open(&corrupted).unwrap(),
+            ));
+            let result = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap()
+                .install(|| {
+                    crate::trace_batch::prepare_cores(
+                        &index,
+                        distinct.iter().copied(),
+                        distinct.len(),
+                        false,
+                    )
+                });
+            assert!(
+                matches!(
+                    result,
+                    Err(TraceError::Shared(SharedError::ChecksumMismatch))
+                ),
+                "workers={workers}"
+            );
+        }
+    }
+
+    #[test]
     fn flat_query_associations_match_vector_groups_and_circular_extension() {
         for length in [2_000, 64_000, 250_000] {
             for variant in 0..3 {

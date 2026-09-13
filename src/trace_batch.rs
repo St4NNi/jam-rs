@@ -339,7 +339,7 @@ fn prepare_cores_inner(
         keys.len().div_ceil(SEED_LOOKUP_BATCH_KEYS)
     };
     let group_bytes = std::mem::size_of::<crate::shared_reader::SharedGroup>();
-    let wave_tasks = 8usize;
+    let wave_tasks = CORE_LOOKUP_TASKS;
     let overhead = 4096 + std::mem::size_of::<SharedCoreLookups>();
     let Some(base_bytes) = tasks
         .checked_mul(
@@ -542,20 +542,39 @@ fn lookup_chunk_keys() -> usize {
     SEED_LOOKUP_BATCH_KEYS
 }
 
+/// Target number of exact core lookup tasks, so a sparse survivor set still spans the pool.
+const CORE_LOOKUP_TASKS: usize = 64;
+/// Smallest exact core lookup task, so small request sets do not pay per-task dispatch.
+const MIN_CORE_LOOKUP_TASK_KEYS: usize = 256;
+
+/// Splits sorted cores into lookup tasks whose size depends only on the key count, never on the
+/// worker count. A task keeps each core prefix group whole unless the group alone exceeds one
+/// batch.
 fn core_prefix_ranges(keys: &[u32]) -> impl Iterator<Item = Range<usize>> + '_ {
+    let target = keys
+        .len()
+        .div_ceil(CORE_LOOKUP_TASKS)
+        .clamp(MIN_CORE_LOOKUP_TASK_KEYS, SEED_LOOKUP_BATCH_KEYS);
     let mut start = 0;
     std::iter::from_fn(move || {
         if start == keys.len() {
             return None;
         }
-        let mut end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
-        if end < keys.len() {
+        let mut end = (start + target).min(keys.len());
+        if end < keys.len() && keys[end - 1] >> 14 == keys[end] >> 14 {
             let prefix = keys[end] >> 14;
-            while end > start && keys[end - 1] >> 14 == prefix {
-                end -= 1;
-            }
-            if end == start {
-                end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+            let limit = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+            let group_end = end + keys[end..limit].partition_point(|key| key >> 14 == prefix);
+            if group_end == keys.len() || keys[group_end] >> 14 != prefix {
+                end = group_end;
+            } else {
+                let group_start =
+                    start + keys[start..end].partition_point(|key| key >> 14 < prefix);
+                end = if group_start > start {
+                    group_start
+                } else {
+                    limit
+                };
             }
         }
         let range = start..end;
@@ -995,6 +1014,93 @@ pub(crate) fn prepare_lookup_with_cores(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn core_lookup_tasks_cover_keys_and_keep_prefix_groups_whole() {
+        let reference = |keys: &[u32]| {
+            // The former split: whole batches ending before a shared prefix group.
+            let mut ranges = Vec::new();
+            let mut start = 0;
+            while start < keys.len() {
+                let mut end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+                if end < keys.len() {
+                    let prefix = keys[end] >> 14;
+                    while end > start && keys[end - 1] >> 14 == prefix {
+                        end -= 1;
+                    }
+                    if end == start {
+                        end = (start + SEED_LOOKUP_BATCH_KEYS).min(keys.len());
+                    }
+                }
+                ranges.push(start..end);
+                start = end;
+            }
+            ranges
+        };
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 34) as u32
+        };
+        let sorted = |mut keys: Vec<u32>| {
+            keys.sort_unstable();
+            keys.dedup();
+            keys
+        };
+        let sparse = sorted((0..11_839).map(|_| next()).collect());
+        let dense = sorted((0..2_200_000).map(|_| next()).collect());
+        assert!(dense.len() >= CORE_LOOKUP_TASKS * SEED_LOOKUP_BATCH_KEYS);
+        let one_prefix = (0..40_000).map(|core| 7 << 14 | core).collect::<Vec<_>>();
+        let straddling = sorted(
+            (0..300)
+                .map(|core| 1 << 14 | core)
+                .chain((0..300).map(|core| 2 << 14 | core))
+                .chain((0..20_000).map(|_| next()))
+                .collect(),
+        );
+        for keys in [
+            vec![],
+            vec![0, (1 << 30) - 1],
+            sparse,
+            dense,
+            one_prefix,
+            straddling,
+        ] {
+            let ranges = core_prefix_ranges(&keys).collect::<Vec<_>>();
+            assert_eq!(
+                ranges.iter().map(|range| range.len()).sum::<usize>(),
+                keys.len()
+            );
+            for pair in ranges.windows(2) {
+                assert_eq!(pair[0].end, pair[1].start);
+            }
+            for range in &ranges {
+                assert!(!range.is_empty() && range.len() <= SEED_LOOKUP_BATCH_KEYS);
+                // A group spans two tasks only when it alone exceeds one batch.
+                if range.end < keys.len() && keys[range.end - 1] >> 14 == keys[range.end] >> 14 {
+                    let prefix = keys[range.end] >> 14;
+                    assert!(
+                        keys.iter().filter(|key| *key >> 14 == prefix).count()
+                            > SEED_LOOKUP_BATCH_KEYS
+                    );
+                }
+            }
+            if keys.len() <= MIN_CORE_LOOKUP_TASK_KEYS {
+                assert!(ranges.len() <= 1);
+            } else if keys.len() <= CORE_LOOKUP_TASKS * SEED_LOOKUP_BATCH_KEYS {
+                assert!(ranges.len() > 1 || keys.iter().all(|key| key >> 14 == keys[0] >> 14));
+            }
+            if keys.len() >= CORE_LOOKUP_TASKS * SEED_LOOKUP_BATCH_KEYS {
+                assert_eq!(ranges, reference(&keys));
+            }
+        }
+        assert_eq!(
+            core_prefix_ranges(&sorted((0..11_839).map(|core| core * 90_000).collect())).count(),
+            47
+        );
+    }
 
     #[test]
     fn worker_cpu_clock_is_monotone_when_available() {
