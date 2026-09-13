@@ -2975,6 +2975,93 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn resident_chunks_match_unbounded_alignment() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let mut chunked_cases = 0;
+        for case in 0..128 {
+            let alphabet = if case % 3 == 0 { 2 } else { 4 };
+            let mut query: Vec<u8> = (0..24 + next(200))
+                .map(|_| b"ACGT"[next(alphabet) as usize])
+                .collect();
+            let mut target: Vec<u8> = (0..next(24)).map(|_| b"ACGT"[next(4) as usize]).collect();
+            for &base in &query {
+                match next(24) {
+                    0 => {}
+                    1 => {
+                        target.push(base);
+                        target.extend((0..1 + next(9)).map(|_| b"ACGT"[next(4) as usize]));
+                    }
+                    2 => target.push(b"ACGT"[next(4) as usize]),
+                    _ => target.push(base),
+                }
+            }
+            if case % 7 == 0 {
+                query.reverse();
+            }
+            let band_width = 2 + next(15) as u32;
+            let base = AlignmentConfig {
+                band_width,
+                diagonal_offset: next(11) as i64 - 5,
+                max_cells: usize::MAX,
+                ..AlignmentConfig::default()
+            };
+            let expected = AlignmentWorkspace::default().align(&query, &target, base);
+            let mut reference = AlignmentWorkspace::default();
+            let scalar = reference
+                .align_raw_scalar(&query, &target, base)
+                .and_then(|raw| finish(raw, Strand::Forward, 0, target.len()));
+            assert_eq!(scalar, expected);
+            let total =
+                band_cells(query.len(), target.len(), base.diagonal_offset, band_width).unwrap();
+            let smallest = band_width as usize + 1;
+            for max_cells in [smallest, smallest + 7, total / 3 + 1, total.max(2) - 1] {
+                let config = AlignmentConfig {
+                    max_cells: max_cells.max(smallest),
+                    ..base
+                };
+                let mut chunked = AlignmentWorkspace {
+                    resident_chunks: true,
+                    ..AlignmentWorkspace::default()
+                };
+                chunked.enable_timing();
+                assert_eq!(
+                    chunked.align(&query, &target, config),
+                    expected,
+                    "case {case} max_cells {}",
+                    config.max_cells
+                );
+                let mut portable = AlignmentWorkspace {
+                    resident_chunks: true,
+                    ..AlignmentWorkspace::default()
+                };
+                let portable_result = portable
+                    .align_raw_waves_scalar(&query, &target, config)
+                    .and_then(|raw| finish(raw, Strand::Forward, 0, target.len()));
+                assert_eq!(portable_result, expected);
+                if total > config.max_cells {
+                    assert!(chunked.work.local_chunks >= 2);
+                    assert_eq!(chunked.work.local_chunked_passes, 1);
+                    assert!(chunked.work.local_recomputed_cells <= total as u64);
+                    assert!(chunked.compact_cells.capacity() <= (2 * config.max_cells).max(8));
+                    assert!(matches!(
+                        AlignmentWorkspace::default().align(&query, &target, config),
+                        Err(AlignmentError::MatrixTooLarge { .. })
+                    ));
+                    chunked_cases += 1;
+                }
+            }
+        }
+        assert!(chunked_cases > 250, "{chunked_cases}");
+    }
+
     #[test]
     fn trace_alignment_permits_exclude_wait_and_release() {
         let pool = AlignmentBytePool::new(10);
