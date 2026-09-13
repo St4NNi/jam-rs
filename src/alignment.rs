@@ -3888,6 +3888,68 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
+    fn sixteen_lanes_match_eight_lanes_at_the_narrow_score_bound() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        // The last eligible length stores 31,000 and evaluates raw candidates of 32,000, while
+        // mismatches and gap opens add i16::MIN to non-negative stored scores.
+        let extreme = AlignmentConfig {
+            match_score: 1_000,
+            mismatch_score: i32::from(i16::MIN),
+            gap_open_score: i32::from(i16::MIN) + 1_000,
+            gap_extend_score: -1_000,
+            band_width: 40,
+            ..AlignmentConfig::default()
+        };
+        assert_eq!(gap_open(extreme), i32::from(i16::MIN));
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize % bound
+        };
+        for (length, narrow) in [(31, true), (32, false)] {
+            let query = (0..length).map(|_| b"ACGT"[next(4)]).collect::<Vec<_>>();
+            assert_eq!(narrow_local_scores(length, length, extreme), narrow);
+            let mut changed = query.clone();
+            changed[length / 2] = if changed[length / 2] == b'A' {
+                b'C'
+            } else {
+                b'A'
+            };
+            let mut gapped = query.clone();
+            gapped.remove(length / 3);
+            for target in [&query, &changed, &gapped] {
+                // 64 cells force resident chunks, so traceback recomputes narrow waves.
+                for max_cells in [usize::MAX, 64] {
+                    let config = AlignmentConfig {
+                        max_cells,
+                        ..extreme
+                    };
+                    let (expected, widths) = assert_wave_kernels_match(&query, target, config);
+                    assert!(widths.iter().any(|&width| width >= 16));
+                    if target == &query {
+                        assert_eq!(expected.unwrap().score, length as i32 * 1_000);
+                    }
+                }
+            }
+        }
+
+        // Default scores on the longest eligible identity reach 32,764.
+        let query = (0..16_382).map(|_| b"ACGT"[next(4)]).collect::<Vec<_>>();
+        let config = AlignmentConfig {
+            band_width: 16,
+            ..AlignmentConfig::default()
+        };
+        assert!(narrow_local_scores(query.len(), query.len(), config));
+        let (expected, _) = assert_wave_kernels_match(&query, &query, config);
+        assert_eq!(expected.unwrap().score, 32_764);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
     fn wave_tail_blocks_match_scalar_at_lane_boundaries_with_ties_and_saturation() {
         if !is_x86_feature_detected!("avx2") {
             return;
