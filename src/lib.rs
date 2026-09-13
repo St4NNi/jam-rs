@@ -45,6 +45,8 @@ pub mod sketch;
 pub mod trace;
 mod trace_batch;
 mod trace_index;
+#[cfg(test)]
+mod trace_island_tests;
 mod trace_islands;
 mod trace_postings;
 pub mod writer;

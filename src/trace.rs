@@ -121,7 +121,7 @@ pub struct TraceEngine {
     sample_to_metagenome: Vec<MetagenomeId>,
     s3: Option<S3Config>,
     batch_stats: Mutex<TraceBatchStats>,
-    observed: bool,
+    pub(crate) observed: bool,
     pub(crate) region_policy: crate::trace_islands::RegionPolicy,
     /// Directory for per-query region support ledgers (diagnostic runs only).
     pub(crate) region_ledger: Option<PathBuf>,
