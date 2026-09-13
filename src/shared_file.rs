@@ -15,6 +15,8 @@ pub struct FileReadStats {
     pub requested_pages: u64,
     pub authenticated_pages: u64,
     pub authenticated_bytes: u64,
+    /// Page hashes computed, including failed and repeated verifications of one page.
+    pub hash_attempts: u64,
     pub resident_integrity_bytes: usize,
 }
 
@@ -30,6 +32,7 @@ pub(crate) struct SharedFile {
     requested_bytes: AtomicU64,
     requested_pages: AtomicU64,
     authenticated_pages: AtomicU64,
+    hash_attempts: AtomicU64,
 }
 
 impl SharedFile {
@@ -63,6 +66,7 @@ impl SharedFile {
             requested_bytes: AtomicU64::new(HEADER_BYTES as u64),
             requested_pages: AtomicU64::new(1),
             authenticated_pages: AtomicU64::new(1),
+            hash_attempts: AtomicU64::new(1),
         };
         reader.verify_unchanged()?;
         let top = reader
@@ -153,8 +157,11 @@ impl SharedFile {
     }
 
     /// Verifies a page against its parent hash without a lock: the mapped generation is
-    /// immutable, verification is idempotent and the verified bit is set atomically, so
-    /// concurrent readers of an unverified page at most hash it twice.
+    /// immutable, verification is idempotent and the verified bit is set atomically. Each
+    /// caller that finds the bit clear hashes the page once, so N racing callers may hash it
+    /// up to N times; callers that start after the bit is published do not hash it again. A
+    /// failed verification never sets the bit, so every later call hashes the page again.
+    /// Without a file identity no bit is kept, and every call hashes the page.
     fn authenticate_page(&self, page: u64) -> Result<(), SharedError> {
         if self.known(page) {
             return Ok(());
@@ -188,12 +195,13 @@ impl SharedFile {
                 self.header.checksum_root_sha256
             }
         };
+        self.hash_attempts.fetch_add(1, Ordering::Relaxed);
         let digest: [u8; 32] = sha256(&self.mmap[byte as usize..(byte + PAGE_BYTES) as usize]);
         if digest != expected {
             return Err(SharedError::ChecksumMismatch);
         }
         let bit = 1u64 << (page % 64);
-        // A page verified concurrently by two readers is counted once.
+        // A page verified concurrently by several readers is counted once.
         if self.identity.is_none()
             || self.verified[page as usize / 64].fetch_or(bit, Ordering::AcqRel) & bit == 0
         {
@@ -211,6 +219,7 @@ impl SharedFile {
             requested_pages: self.requested_pages.load(Ordering::Relaxed),
             authenticated_pages: pages,
             authenticated_bytes: pages * PAGE_BYTES,
+            hash_attempts: self.hash_attempts.load(Ordering::Relaxed),
             resident_integrity_bytes: self.verified.len() * 8
                 + self.levels.capacity() * std::mem::size_of::<ChecksumLevel>(),
         }
@@ -244,5 +253,188 @@ fn file_identity(file: &File) -> std::io::Result<Option<[u64; 7]>> {
     {
         let _ = file;
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jidx_reader::JidxReader;
+    use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
+    use crate::shared_seed::SharedSeed;
+    use crate::shared_writer::{IndexedSeed, write_shared_index};
+    use std::sync::Barrier;
+
+    const WORKERS: usize = 8;
+
+    /// Writes a shared index with two checksum levels, so data pages have a non-root parent.
+    fn write_index(directory: &Path, corrupt: impl FnOnce(&mut [u8], u64)) -> std::path::PathBuf {
+        let jidx = directory.join("metadata.jidx");
+        let mut writer = JidxWriter::new(
+            &jidx,
+            &JidxInput {
+                k: 15,
+                rescue_k15: false,
+                minimizer_window: 64,
+                jam_sha256: [1; 32],
+                manifest_sha256: [2; 32],
+            },
+        )
+        .unwrap();
+        writer
+            .begin_metagenome(MetagenomeInput {
+                name: "a".into(),
+                bgzf_uri: "a.bgz".into(),
+                bgzf_bytes: 100,
+                bgzf_sha256: [3; 32],
+                gzi: vec![0; 8],
+            })
+            .unwrap();
+        writer
+            .begin_contig(ContigInput {
+                name: "a-contig".into(),
+                length: 100_000,
+                fasta_offset: 4,
+                line_bases: 80,
+                line_width: 81,
+            })
+            .unwrap();
+        writer.finish().unwrap();
+        let reference = JidxReader::open(&jidx).unwrap();
+        let mut seeds = (0..40_000)
+            .map(|core| IndexedSeed {
+                member: 0,
+                contig: 0,
+                seed: SharedSeed {
+                    core,
+                    context: 0,
+                    flags: 0,
+                    position: u64::from(core % 90_000),
+                },
+            })
+            .collect::<Vec<_>>();
+        let path = directory.join("pages.shared");
+        write_shared_index(&reference, &path, 64, &mut seeds).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let header = SharedHeader::decode(&bytes[..HEADER_BYTES], bytes.len() as u64).unwrap();
+        let checksums = header.section(Section::Checksums).offset;
+        assert!(checksum_layout(checksums / PAGE_BYTES - 1).unwrap().len() >= 2);
+        corrupt(&mut bytes, checksums);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// Runs one authentication of `page` on each worker, all released together.
+    fn race(file: &SharedFile, page: u64) -> Vec<Result<(), SharedError>> {
+        let barrier = Barrier::new(WORKERS);
+        std::thread::scope(|scope| {
+            let workers = (0..WORKERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        file.authenticate(page)
+                    })
+                })
+                .collect::<Vec<_>>();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect()
+        })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn racing_first_verification_publishes_one_page_for_other_workers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_index(directory.path(), |_, _| {});
+        let file = SharedFile::open(&path, false).unwrap();
+        // Page 1 verifies the checksum parent that page 2 shares.
+        file.authenticate(1).unwrap();
+        let before = file.stats();
+        assert!(race(&file, 2).iter().all(Result::is_ok));
+        let raced = file.stats();
+        assert!(file.known(2));
+        assert_eq!(raced.authenticated_pages - before.authenticated_pages, 1);
+        let hashes = raced.hash_attempts - before.hash_attempts;
+        assert!((1..=WORKERS as u64).contains(&hashes), "{hashes}");
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| file.authenticate(2).unwrap());
+        });
+        assert_eq!(file.stats().hash_attempts, raced.hash_attempts);
+        assert_eq!(file.stats().authenticated_pages, raced.authenticated_pages);
+    }
+
+    #[test]
+    fn corrupted_data_page_is_hashed_again_and_never_published() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_index(directory.path(), |bytes, _| {
+            bytes[2 * PAGE_BYTES as usize + 17] ^= 1;
+        });
+        let file = SharedFile::open(&path, false).unwrap();
+        file.authenticate(1).unwrap();
+        let before = file.stats();
+        assert!(
+            race(&file, 2)
+                .iter()
+                .all(|result| matches!(result, Err(SharedError::ChecksumMismatch)))
+        );
+        let failed = file.stats();
+        assert!(!file.known(2));
+        assert_eq!(failed.authenticated_pages, before.authenticated_pages);
+        // Without a published bit, every racing caller hashes the page.
+        assert_eq!(failed.hash_attempts - before.hash_attempts, WORKERS as u64);
+
+        let (kind, section) = file
+            .header
+            .section_order()
+            .iter()
+            .map(|&kind| (kind, file.header.section(kind)))
+            .find(|(_, section)| {
+                (section.offset..section.offset + section.length).contains(&(2 * PAGE_BYTES))
+            })
+            .unwrap();
+        assert!(matches!(
+            file.section(kind, 2 * PAGE_BYTES - section.offset, 1),
+            Err(SharedError::ChecksumMismatch)
+        ));
+        assert!(!file.known(2));
+        assert_eq!(file.stats().hash_attempts, failed.hash_attempts + 1);
+        assert_eq!(file.stats().authenticated_pages, before.authenticated_pages);
+    }
+
+    #[test]
+    fn corrupted_checksum_parent_fails_its_data_pages_on_every_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_index(directory.path(), |bytes, checksums| {
+            bytes[checksums as usize + 5] ^= 1;
+        });
+        // Opening verifies only the root, which the corrupted first-level page does not change.
+        let file = SharedFile::open(&path, false).unwrap();
+        let parent = file.header.section(Section::Checksums).offset / PAGE_BYTES;
+        let sibling = 1 + 128;
+        assert!(sibling < parent);
+        let before = file.stats();
+        assert!(
+            race(&file, 1)
+                .iter()
+                .all(|result| matches!(result, Err(SharedError::ChecksumMismatch)))
+        );
+        let failed = file.stats();
+        assert!(!file.known(1) && !file.known(parent));
+        assert_eq!(failed.authenticated_pages, before.authenticated_pages);
+        // Each caller hashes only the parent, which fails before the data page is hashed.
+        assert_eq!(failed.hash_attempts - before.hash_attempts, WORKERS as u64);
+        assert!(matches!(
+            file.authenticate(2),
+            Err(SharedError::ChecksumMismatch)
+        ));
+        assert_eq!(file.stats().hash_attempts, failed.hash_attempts + 1);
+
+        // A data page under an intact first-level page still verifies.
+        file.authenticate(sibling).unwrap();
+        assert_eq!(file.known(sibling), file.identity().is_some());
+        assert!(!file.known(parent));
     }
 }
