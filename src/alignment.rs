@@ -175,9 +175,61 @@ impl Alignment {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct AlignmentWork {
+    pub local_init_cpu_ns: u64,
+    pub local_matrix_cpu_ns: u64,
+    pub local_trace_cpu_ns: u64,
+    pub endpoint_init_cpu_ns: u64,
+    pub endpoint_matrix_cpu_ns: u64,
+    pub endpoint_trace_cpu_ns: u64,
+    pub endpoint_total_cpu_ns: u64,
+    pub local_cells: u64,
+    pub endpoint_cells: u64,
+    pub endpoint_recurrence_cells: u64,
+    pub local_passes: u64,
+    pub endpoint_passes: u64,
+    pub reverse_bytes: u64,
+    pub endpoint_scratch_bytes: u64,
+    pub growth_operations: u64,
+    pub capacity_bytes: u64,
+}
+
+impl AlignmentWork {
+    pub(crate) fn add(&mut self, other: Self) {
+        self.local_init_cpu_ns += other.local_init_cpu_ns;
+        self.local_matrix_cpu_ns += other.local_matrix_cpu_ns;
+        self.local_trace_cpu_ns += other.local_trace_cpu_ns;
+        self.endpoint_init_cpu_ns += other.endpoint_init_cpu_ns;
+        self.endpoint_matrix_cpu_ns += other.endpoint_matrix_cpu_ns;
+        self.endpoint_trace_cpu_ns += other.endpoint_trace_cpu_ns;
+        self.endpoint_total_cpu_ns += other.endpoint_total_cpu_ns;
+        self.local_cells += other.local_cells;
+        self.endpoint_cells += other.endpoint_cells;
+        self.endpoint_recurrence_cells += other.endpoint_recurrence_cells;
+        self.local_passes += other.local_passes;
+        self.endpoint_passes += other.endpoint_passes;
+        self.reverse_bytes += other.reverse_bytes;
+        self.endpoint_scratch_bytes += other.endpoint_scratch_bytes;
+        self.growth_operations += other.growth_operations;
+        self.capacity_bytes += other.capacity_bytes;
+    }
+}
+
+pub(crate) fn observed_cpu(observed: bool) -> Option<u64> {
+    observed.then(crate::trace_batch::worker_cpu_ns).flatten()
+}
+
+pub(crate) fn elapsed_cpu(start: Option<u64>) -> u64 {
+    start
+        .and_then(|start| crate::trace_batch::worker_cpu_ns().map(|end| end.saturating_sub(start)))
+        .unwrap_or(0)
+}
+
 #[derive(Debug, Default)]
 pub struct AlignmentWorkspace {
     observed: bool,
+    pub(crate) work: AlignmentWork,
     traceback_nanoseconds: u64,
     endpoint_nanoseconds: u64,
     cells: Vec<Cell>,
@@ -395,6 +447,27 @@ fn checked_sum(values: &[usize]) -> Result<usize, AlignmentAdmissionError> {
 }
 
 impl AlignmentWorkspace {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let bytes = self.cells.capacity() * std::mem::size_of::<Cell>()
+            + self.endpoint_cells.capacity() * std::mem::size_of::<EndpointCell>()
+            + (self.row_offsets.capacity()
+                + self.row_starts.capacity()
+                + self.row_widths.capacity())
+                * std::mem::size_of::<usize>()
+            + self.operations.capacity() * std::mem::size_of::<EditOperation>()
+            + self.reverse.capacity();
+        #[cfg(target_arch = "x86_64")]
+        {
+            bytes
+                + self.compact_cells.capacity() * 2
+                + self.waves.iter().map(|w| w.capacity() * 4).sum::<usize>()
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            bytes
+        }
+    }
+
     pub(crate) fn enable_timing(&mut self) {
         self.observed = true;
     }
@@ -424,10 +497,12 @@ impl AlignmentWorkspace {
         config: AlignmentConfig,
     ) -> Result<Alignment, AlignmentError> {
         let raw = self.align_raw(query, target, config)?;
+        let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
         let result = finish(raw, Strand::Forward, 0, target.len());
         if let Some(started) = started {
             self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
         }
         result
     }
@@ -447,15 +522,20 @@ impl AlignmentWorkspace {
                 reverse.clear();
                 reverse.reserve(target.len());
                 reverse.extend(target.iter().rev().map(|base| complement(*base)));
+                if self.observed {
+                    self.work.reverse_bytes += target.len() as u64;
+                }
                 let result = self.align_raw(query, &reverse, config);
                 self.reverse = reverse;
                 result?
             }
         };
+        let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
         let result = finish(raw, strand, target_offset, target.len());
         if let Some(started) = started {
             self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
         }
         result
     }
@@ -469,6 +549,7 @@ impl AlignmentWorkspace {
         max_extension: usize,
         config: AlignmentConfig,
     ) -> Result<EndpointCompletion, AlignmentError> {
+        let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
         config.validate()?;
         let result = match core.strand {
@@ -480,12 +561,16 @@ impl AlignmentWorkspace {
                 target_offset,
                 max_extension,
                 config,
+                self.observed.then_some(&mut self.work),
             ),
             Strand::Reverse => {
                 let mut reverse = std::mem::take(&mut self.reverse);
                 reverse.clear();
                 reverse.reserve(target.len());
                 reverse.extend(target.iter().rev().map(|base| complement(*base)));
+                if self.observed {
+                    self.work.reverse_bytes += target.len() as u64;
+                }
                 let result = complete_endpoints(
                     &mut self.endpoint_cells,
                     core,
@@ -494,12 +579,14 @@ impl AlignmentWorkspace {
                     target_offset,
                     max_extension,
                     config,
+                    self.observed.then_some(&mut self.work),
                 );
                 self.reverse = reverse;
                 result
             }
         };
         if let Some(started) = started {
+            self.work.endpoint_total_cpu_ns += elapsed_cpu(cpu);
             self.endpoint_nanoseconds += started.elapsed().as_nanos() as u64;
         }
         result
@@ -525,6 +612,7 @@ impl AlignmentWorkspace {
         target: &[u8],
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
+        let init_cpu = observed_cpu(self.observed);
         config.validate()?;
         if query.is_empty() {
             return Err(AlignmentError::EmptyQuery);
@@ -550,6 +638,9 @@ impl AlignmentWorkspace {
                 max_cells: config.max_cells,
             });
         }
+        if self.observed {
+            self.work.growth_operations += u64::from(self.cells.capacity() < total_cells);
+        }
         if self.cells.len() < total_cells {
             self.cells.resize(total_cells, Cell::default());
         } else {
@@ -557,6 +648,12 @@ impl AlignmentWorkspace {
             self.cells.truncate(total_cells);
         }
 
+        if self.observed {
+            self.work.local_passes += 1;
+            self.work.local_cells += total_cells as u64;
+            self.work.local_init_cpu_ns += elapsed_cpu(init_cpu);
+        }
+        let matrix_cpu = observed_cpu(self.observed);
         let gap_open_score = gap_open(config);
         let mut best = BestCell::default();
         for query_index in 0..=query.len() {
@@ -641,6 +738,7 @@ impl AlignmentWorkspace {
                 best.consider(query_index, target_index, cell);
             }
         }
+        self.work.local_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
         if best.score <= 0 {
             return Err(AlignmentError::NoAlignment);
         }
@@ -666,6 +764,7 @@ impl AlignmentWorkspace {
         target: &[u8],
         config: AlignmentConfig,
     ) -> Result<RawAlignment, AlignmentError> {
+        let init_cpu = observed_cpu(self.observed);
         config.validate()?;
         if query.is_empty() {
             return Err(AlignmentError::EmptyQuery);
@@ -692,6 +791,9 @@ impl AlignmentWorkspace {
             });
         }
 
+        if self.observed {
+            self.work.growth_operations += u64::from(self.compact_cells.capacity() < total_cells);
+        }
         self.compact_cells.resize(total_cells, 0);
         let last_wave = query
             .len()
@@ -710,9 +812,18 @@ impl AlignmentWorkspace {
             .checked_mul(3)
             .ok_or(AlignmentError::LengthOverflow)?;
         for wave in &mut self.waves {
+            if self.observed {
+                self.work.growth_operations += u64::from(wave.capacity() < wave_scores);
+            }
             prepare_wave(wave, wave_scores);
         }
 
+        if self.observed {
+            self.work.local_passes += 1;
+            self.work.local_cells += total_cells as u64;
+            self.work.local_init_cpu_ns += elapsed_cpu(init_cpu);
+        }
+        let matrix_cpu = observed_cpu(self.observed);
         let gap_open_score = gap_open(config);
         let mut best = BestCell::default();
         let mut older_range = None;
@@ -834,6 +945,7 @@ impl AlignmentWorkspace {
             older_range = previous_range;
             previous_range = current_range;
         }
+        self.work.local_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
         if best.score <= 0 {
             return Err(AlignmentError::NoAlignment);
         }
@@ -901,6 +1013,7 @@ impl AlignmentWorkspace {
         target: &[u8],
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
+        let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
         let mut query_index = best.query_index;
         let mut target_index = best.target_index;
@@ -945,6 +1058,7 @@ impl AlignmentWorkspace {
         self.operations.reverse();
         if let Some(started) = started {
             self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
         }
         Ok((query_index, target_index))
     }
@@ -956,6 +1070,7 @@ impl AlignmentWorkspace {
         target: &[u8],
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
+        let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
         let mut query_index = best.query_index;
         let mut target_index = best.target_index;
@@ -1000,6 +1115,7 @@ impl AlignmentWorkspace {
         self.operations.reverse();
         if let Some(started) = started {
             self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
+            self.work.local_trace_cpu_ns += elapsed_cpu(cpu);
         }
         Ok((query_index, target_index))
     }
@@ -1516,6 +1632,7 @@ struct EndpointResult {
     matrix_cells: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_endpoints(
     cells: &mut Vec<EndpointCell>,
     mut core: Alignment,
@@ -1524,6 +1641,7 @@ fn complete_endpoints(
     target_offset: u64,
     max_extension: usize,
     config: AlignmentConfig,
+    mut work: Option<&mut AlignmentWork>,
 ) -> Result<EndpointCompletion, AlignmentError> {
     let forward_target_len = target.len();
     core.validate_cigar()?;
@@ -1570,7 +1688,16 @@ fn complete_endpoints(
         .rev()
         .copied()
         .collect();
-    let mut left = anchored_semiglobal(cells, &left_query, &left_target, config)?;
+    if let Some(work) = work.as_deref_mut() {
+        work.endpoint_scratch_bytes += (left_query.len() + left_target.len()) as u64;
+    }
+    let mut left = anchored_semiglobal(
+        cells,
+        &left_query,
+        &left_target,
+        config,
+        work.as_deref_mut(),
+    )?;
     left.runs.reverse();
 
     let query_limit = query_end.saturating_add(max_extension).min(query.len());
@@ -1580,6 +1707,7 @@ fn complete_endpoints(
         &query[query_end..query_limit],
         &target[target_end..target_limit],
         config,
+        work,
     )?;
 
     let mut runs = Vec::with_capacity(left.runs.len() + core.edit_script.len() + right.runs.len());
@@ -1635,6 +1763,7 @@ fn anchored_semiglobal(
     query: &[u8],
     target: &[u8],
     config: AlignmentConfig,
+    mut work: Option<&mut AlignmentWork>,
 ) -> Result<EndpointResult, AlignmentError> {
     if query.is_empty() || target.is_empty() {
         return Ok(EndpointResult {
@@ -1661,6 +1790,13 @@ fn anchored_semiglobal(
             max_cells: config.max_cells,
         });
     }
+    let init_cpu = observed_cpu(work.is_some());
+    if let Some(work) = work.as_deref_mut() {
+        work.endpoint_passes += 1;
+        work.endpoint_cells += matrix_cells as u64;
+        work.endpoint_recurrence_cells += (query.len() * target.len()) as u64;
+        work.growth_operations += u64::from(cells.capacity() < matrix_cells);
+    }
     cells.resize(matrix_cells, EndpointCell::default());
     cells.fill(EndpointCell::default());
     cells[0].scores[MATCH as usize] = 0;
@@ -1672,6 +1808,10 @@ fn anchored_semiglobal(
         );
         cell.previous[INSERTION as usize] = if column == 1 { MATCH } else { INSERTION };
     }
+    if let Some(work) = work.as_deref_mut() {
+        work.endpoint_init_cpu_ns += elapsed_cpu(init_cpu);
+    }
+    let matrix_cpu = observed_cpu(work.is_some());
     for row in 1..rows {
         let first = row * columns;
         let (previous, current) = cells.split_at_mut(first);
@@ -1744,6 +1884,10 @@ fn anchored_semiglobal(
         return Err(AlignmentError::NoAlignment);
     }
 
+    if let Some(work) = work.as_deref_mut() {
+        work.endpoint_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
+    }
+    let trace_cpu = observed_cpu(work.is_some());
     let mut row = best.1;
     let mut column = best.2;
     let mut state = best.3;
@@ -1776,8 +1920,13 @@ fn anchored_semiglobal(
         state = previous;
     }
     operations.reverse();
+    let runs = runs_from_operations(&operations)?;
+    if let Some(work) = work {
+        work.endpoint_trace_cpu_ns += elapsed_cpu(trace_cpu);
+        work.endpoint_scratch_bytes += operations.len() as u64;
+    }
     Ok(EndpointResult {
-        runs: runs_from_operations(&operations)?,
+        runs,
         query_bases: best.1,
         target_bases: best.2,
         matrix_cells,
@@ -2286,7 +2435,7 @@ mod tests {
     fn semiglobal_completion_leaves_outer_overhang_free() {
         let mut cells = Vec::new();
         let result =
-            anchored_semiglobal(&mut cells, b"ACGTACGT", b"ACGTACGTCCCC", config()).unwrap();
+            anchored_semiglobal(&mut cells, b"ACGTACGT", b"ACGTACGTCCCC", config(), None).unwrap();
         assert_eq!((result.query_bases, result.target_bases), (8, 8));
         assert_eq!(cigar_from_runs(&result.runs).unwrap(), "8=");
     }
@@ -2294,9 +2443,10 @@ mod tests {
     #[test]
     fn semiglobal_workspace_growth_matches_fresh_workspace() {
         let mut reused = Vec::new();
-        anchored_semiglobal(&mut reused, b"A", b"A", config()).unwrap();
-        let reused_result = anchored_semiglobal(&mut reused, b"C", b"AAA", config()).unwrap();
-        let fresh_result = anchored_semiglobal(&mut Vec::new(), b"C", b"AAA", config()).unwrap();
+        anchored_semiglobal(&mut reused, b"A", b"A", config(), None).unwrap();
+        let reused_result = anchored_semiglobal(&mut reused, b"C", b"AAA", config(), None).unwrap();
+        let fresh_result =
+            anchored_semiglobal(&mut Vec::new(), b"C", b"AAA", config(), None).unwrap();
 
         assert_eq!(reused_result.runs, fresh_result.runs);
         assert_eq!(reused_result.query_bases, fresh_result.query_bases);

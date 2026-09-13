@@ -127,6 +127,25 @@ pub struct TraceEngine {
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct TraceBatchStats {
     pub timings_observed: bool,
+    // Candidate ordering, geometry, windows, inclusive circular retries, result reduction.
+    // Retry CPU overlaps the alignment kernel samples; it is never added to them.
+    pub downstream_thread_cpu_ns: [u64; 5],
+    pub alignment_work: crate::alignment::AlignmentWork,
+    pub alignment_tasks: u64,
+    pub identical_alignment_tasks: u64,
+    pub alignment_workspaces: u64,
+    pub alignment_query_bytes: u64,
+    pub alignment_target_bytes: u64,
+    pub alignment_query_max: u64,
+    pub alignment_target_max: u64,
+    pub circular_retries: u64,
+    pub copied_query_bytes: u64,
+    pub returned_alignments: u64,
+    pub rejected_alignments: u64,
+    pub region_predecessor_tests: u64,
+    pub geometric_hits: u64,
+    pub fragments_before_dedup: u64,
+    pub fragments_after_dedup: u64,
     pub seed_generation_ns: u64,
     pub key_lookup_ns: u64,
     pub membership_access_ns: u64,
@@ -1309,6 +1328,13 @@ impl TraceEngine {
         }
     }
 
+    fn downstream_cpu(&self, stage: usize, start: Option<u64>) {
+        if start.is_some() {
+            let elapsed = crate::alignment::elapsed_cpu(start);
+            self.batch_stats.lock().unwrap().downstream_thread_cpu_ns[stage] += elapsed;
+        }
+    }
+
     fn record_alignment_time(
         &self,
         started: Option<Instant>,
@@ -1320,6 +1346,9 @@ impl TraceEngine {
             let traceback = workspace.traceback_nanoseconds().saturating_sub(before.0);
             let endpoint = workspace.endpoint_nanoseconds().saturating_sub(before.1);
             let mut stats = self.batch_stats.lock().unwrap();
+            let mut work = workspace.work;
+            work.capacity_bytes = workspace.retained_bytes() as u64;
+            stats.alignment_work.add(work);
             stats.alignment_ns += elapsed.saturating_sub(traceback).saturating_sub(endpoint);
             stats.traceback_and_cigar_ns += traceback;
             stats.endpoint_completion_ns += endpoint;
@@ -1332,6 +1361,7 @@ impl TraceEngine {
         config: TraceConfig,
         batch: Option<&TraceBatch>,
     ) -> Result<TraceResult, TraceError> {
+        let cpu = crate::alignment::observed_cpu(self.observed);
         let shared = batch.and_then(|batch| batch.lookups.as_ref());
         let cache_bytes = LOOKUP_CACHE_BYTES / rayon::current_num_threads().max(1);
         let census = self.candidate_census_with_shared(&prepared, config, cache_bytes, shared)?;
@@ -1366,6 +1396,7 @@ impl TraceEngine {
         };
         let candidates_screened =
             u32::try_from(candidates.len()).map_err(|_| TraceError::Invalid("candidate count"))?;
+        self.downstream_cpu(0, cpu);
         let metagenomes = self.trace_selected_with_batch(
             &prepared,
             candidates,
@@ -1577,6 +1608,7 @@ impl TraceEngine {
         batch: Option<&TraceBatch>,
     ) -> Result<Vec<MetagenomeTrace>, TraceError> {
         let started = self.observed.then(Instant::now);
+        let geometry_cpu = crate::alignment::observed_cpu(self.observed);
         validate_config(config)?;
         self.index.enable_selected_front_metadata();
         let lookups = if let Some(lookups) = lookups {
@@ -1834,11 +1866,37 @@ impl TraceEngine {
                 }
             }
         }
-        let regions = form_regions(region_hits, config.diagonal_bin_bases);
+        let mut predecessor_tests = 0;
+        let geometric_hits = if self.observed {
+            region_hits
+                .values()
+                .map(|hits| match hits {
+                    RegionHits::Empty => 0,
+                    RegionHits::One(_) => 1,
+                    RegionHits::Many(hits) => hits.len(),
+                    RegionHits::Unique(hits) => hits.len(),
+                })
+                .sum::<usize>()
+        } else {
+            0
+        };
+        let regions = if self.observed {
+            form_regions_observed(
+                region_hits,
+                config.diagonal_bin_bases,
+                Some(&mut predecessor_tests),
+            )
+        } else {
+            form_regions(region_hits, config.diagonal_bin_bases)
+        };
+        self.downstream_cpu(1, geometry_cpu);
+        let task_cpu = crate::alignment::observed_cpu(self.observed);
 
         let tasks = self.tasks(regions, prepared.query_length, config)?;
         if let Some(started) = started {
             let mut stats = self.batch_stats.lock().unwrap();
+            stats.region_predecessor_tests += predecessor_tests;
+            stats.geometric_hits += geometric_hits as u64;
             stats.region_formation_ns += started.elapsed().as_nanos() as u64;
             stats.emitted_anchor_associations += emitted_anchor_associations;
             stats.executed_anchor_associations += executed_anchor_associations;
@@ -1866,7 +1924,11 @@ impl TraceEngine {
             config.verify_resources,
             batch.map(|batch| &batch.sequence),
         )?;
+        self.downstream_cpu(2, task_cpu);
         let fragments = self.align_tasks(&prepared.query, &tasks, &loaded, config)?;
+        let result_cpu = crate::alignment::observed_cpu(self.observed);
+        let mut before_dedup = 0u64;
+        let mut after_dedup = 0u64;
         let mut by_metagenome = BTreeMap::<MetagenomeId, Vec<Fragment>>::new();
         for (metagenome_id, fragment) in fragments {
             by_metagenome
@@ -1879,6 +1941,8 @@ impl TraceEngine {
         for candidate in candidates {
             let fragments = by_metagenome.remove(&candidate.id).unwrap_or_default();
             let mosaic = build_mosaic(prepared.query_length, &fragments)?;
+            before_dedup += fragments.len() as u64;
+            after_dedup += (mosaic.primary.len() + mosaic.alternatives.len()) as u64;
             let mut contig_ids = BTreeSet::new();
             for fragment in mosaic
                 .primary
@@ -1913,6 +1977,12 @@ impl TraceEngine {
                 contigs,
                 mosaic,
             });
+        }
+        self.downstream_cpu(4, result_cpu);
+        if self.observed {
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.fragments_before_dedup += before_dedup;
+            stats.fragments_after_dedup += after_dedup;
         }
         Ok(metagenomes)
     }
@@ -2110,7 +2180,38 @@ impl TraceEngine {
                         .ok_or(TraceError::Invalid("loaded range"))?;
                     Ok::<_, TraceError>((query_bases.max(query), target_bases.max(target)))
                 })?;
+        if self.observed {
+            let diagnostic_bytes = tasks
+                .len()
+                .checked_mul(128)
+                .and_then(|bytes| bytes.checked_add(4096))
+                .ok_or(TraceError::Invalid("task diagnostic budget"))?;
+            let _diagnostic = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, diagnostic_bytes)
+                .ok_or(TraceError::Invalid("task diagnostic budget"))?;
+            // Query identity, topology, index generation and configuration are fixed for this call.
+            let unique: BTreeSet<_> = tasks
+                .iter()
+                .map(|t| {
+                    (
+                        t.metagenome_id,
+                        t.contig_id,
+                        t.strand,
+                        t.query_start,
+                        t.query_span,
+                        t.target_start,
+                        t.target_end,
+                        t.diagonal_offset,
+                    )
+                })
+                .collect();
+            let mut stats = self.batch_stats.lock().unwrap();
+            stats.alignment_tasks += tasks.len() as u64;
+            stats.identical_alignment_tasks += (tasks.len() - unique.len()) as u64;
+        }
         let workspace = || {
+            if self.observed {
+                self.batch_stats.lock().unwrap().alignment_workspaces += 1;
+            }
             TraceAlignmentWorkspace::acquire(
                 max_query_bases,
                 max_target_bases,
@@ -2127,12 +2228,14 @@ impl TraceEngine {
                     .workspace_mut();
                 if self.observed {
                     workspace.enable_timing();
+                    workspace.work = Default::default();
                 }
                 let started = self.observed.then(Instant::now);
                 let before = (
                     workspace.traceback_nanoseconds(),
                     workspace.endpoint_nanoseconds(),
                 );
+                let window_cpu = crate::alignment::observed_cpu(self.observed);
                 let query_window =
                     linearize_query(query, task.query_start, task.query_span, config.circular)?;
                 let loaded = loaded
@@ -2151,6 +2254,17 @@ impl TraceEngine {
                     .sequence
                     .get(start..end)
                     .ok_or(TraceError::Invalid("loaded range"))?;
+                self.downstream_cpu(2, window_cpu);
+                if self.observed {
+                    let mut stats = self.batch_stats.lock().unwrap();
+                    stats.alignment_query_bytes += query_window.len() as u64;
+                    stats.alignment_target_bytes += target.len() as u64;
+                    stats.alignment_query_max =
+                        stats.alignment_query_max.max(query_window.len() as u64);
+                    stats.alignment_target_max =
+                        stats.alignment_target_max.max(target.len() as u64);
+                    stats.copied_query_bytes += query_window.len() as u64;
+                }
                 let mut alignment_config = config.alignment;
                 alignment_config.diagonal_offset = task.diagonal_offset;
                 let Some(initial) = align_task_window(
@@ -2164,6 +2278,9 @@ impl TraceEngine {
                 )?
                 else {
                     self.record_alignment_time(started, workspace, before);
+                    if self.observed {
+                        self.batch_stats.lock().unwrap().rejected_alignments += 1;
+                    }
                     return Ok(None);
                 };
                 let mut alignment = initial.selected;
@@ -2190,6 +2307,12 @@ impl TraceEngine {
                     None
                 };
                 if let Some((retry_start, retry_diagonal)) = retry {
+                    let retry_cpu = crate::alignment::observed_cpu(self.observed);
+                    if self.observed {
+                        let mut stats = self.batch_stats.lock().unwrap();
+                        stats.circular_retries += 1;
+                        stats.copied_query_bytes += task.query_span;
+                    }
                     let retry_query = linearize_query(query, retry_start, task.query_span, true)?;
                     alignment_config.diagonal_offset = retry_diagonal;
                     if let Some(retry) = align_task_window(
@@ -2206,18 +2329,27 @@ impl TraceEngine {
                         alignment = retry.selected;
                         query_start = retry_start;
                     }
+                    self.downstream_cpu(3, retry_cpu);
                 }
                 if !alignment_accepted(&alignment, config) {
                     self.record_alignment_time(started, workspace, before);
+                    if self.observed {
+                        self.batch_stats.lock().unwrap().rejected_alignments += 1;
+                    }
                     return Ok(None);
                 }
+                let projection_cpu = crate::alignment::observed_cpu(self.observed);
                 let query_segments = query_segments(
                     query_start,
                     alignment.query_interval,
                     u64::try_from(query.len()).map_err(|_| TraceError::Invalid("query length"))?,
                     config.circular,
                 )?;
+                self.downstream_cpu(4, projection_cpu);
                 self.record_alignment_time(started, workspace, before);
+                if self.observed {
+                    self.batch_stats.lock().unwrap().returned_alignments += 1;
+                }
                 Ok(Some((
                     task.metagenome_id,
                     Fragment {
@@ -2273,22 +2405,83 @@ fn align_task_window(
         Err(AlignmentError::NoAlignment) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let completed = workspace
-        .complete_endpoints(
-            core.clone(),
+    let completion = workspace.complete_endpoints(
+        core.clone(),
+        query,
+        target,
+        target_start,
+        config.endpoint_bases,
+        alignment_config,
+    )?;
+    #[cfg(feature = "bench-internals")]
+    if workspace.work.local_passes > 0 {
+        retain_alignment_fixture(
             query,
             target,
             target_start,
-            config.endpoint_bases,
             alignment_config,
-        )?
-        .alignment;
+            config,
+            &core,
+            &completion,
+        )?;
+    }
+    let completed = completion.alignment;
     let selected = if completed.identity() >= config.min_identity {
         completed
     } else {
         core.clone()
     };
     Ok(Some(WindowAlignment { core, selected }))
+}
+
+#[cfg(feature = "bench-internals")]
+fn retain_alignment_fixture(
+    query: &[u8],
+    target: &[u8],
+    target_start: u64,
+    alignment: AlignmentConfig,
+    config: TraceConfig,
+    core: &crate::alignment::Alignment,
+    completed: &crate::alignment::EndpointCompletion,
+) -> Result<(), TraceError> {
+    static ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let Some(root) =
+        ROOT.get_or_init(|| std::env::var_os("JAM_ALIGNMENT_FIXTURES").map(Into::into))
+    else {
+        return Ok(());
+    };
+    let ordinal = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if ordinal >= 16 {
+        return Ok(());
+    }
+    let bytes = query
+        .len()
+        .checked_add(target.len())
+        .and_then(|bases| bases.checked_mul(64))
+        .and_then(|bytes| bytes.checked_add(65536))
+        .ok_or(TraceError::Invalid("alignment fixture budget"))?;
+    let _reservation = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes)
+        .ok_or(TraceError::Invalid("alignment fixture budget"))?;
+    let path = root.join(format!("task-{ordinal:02}.json"));
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    serde_json::to_writer(&file, &serde_json::json!({
+        "query": query, "target": target, "target_start": target_start,
+        "scoring": [alignment.match_score, alignment.mismatch_score, alignment.gap_open_score, alignment.gap_extend_score],
+        "band_width": alignment.band_width, "diagonal_offset": alignment.diagonal_offset,
+        "max_cells": alignment.max_cells, "endpoint_bases": config.endpoint_bases,
+        "circular": config.circular, "min_identity": config.min_identity,
+        "min_aligned_bases": config.min_aligned_bases, "core": core,
+        "completed": completed.alignment,
+        "metrics": [completed.metrics.left_query_bases, completed.metrics.left_target_bases,
+                    completed.metrics.right_query_bases, completed.metrics.right_target_bases,
+                    completed.metrics.matrix_cells],
+    })).map_err(|_| TraceError::Invalid("alignment fixture serialization"))?;
+    file.sync_all()?;
+    Ok(())
 }
 
 fn circular_retry(
@@ -2766,6 +2959,14 @@ fn form_regions(
     hits_by_contig: BTreeMap<RegionKey, RegionHits>,
     max_diagonal_drift: u64,
 ) -> Vec<(RegionKey, RegionAccumulator)> {
+    form_regions_observed(hits_by_contig, max_diagonal_drift, None)
+}
+
+fn form_regions_observed(
+    hits_by_contig: BTreeMap<RegionKey, RegionHits>,
+    max_diagonal_drift: u64,
+    mut predecessor_tests: Option<&mut u64>,
+) -> Vec<(RegionKey, RegionAccumulator)> {
     let mut output = Vec::new();
     for (key, hits) in hits_by_contig {
         let ordered = matches!(hits, RegionHits::Unique(_));
@@ -2790,11 +2991,12 @@ fn form_regions(
         }
         let mut regions = Vec::<RegionAccumulator>::new();
         for hit in hits {
-            if let Some(region) = regions
-                .iter_mut()
-                .rev()
-                .find(|region| region.accepts(hit, max_diagonal_drift))
-            {
+            if let Some(region) = regions.iter_mut().rev().find(|region| {
+                if let Some(tests) = predecessor_tests.as_deref_mut() {
+                    *tests += 1;
+                }
+                region.accepts(hit, max_diagonal_drift)
+            }) {
                 region.add(hit);
             } else {
                 regions.push(RegionAccumulator::new(hit));
