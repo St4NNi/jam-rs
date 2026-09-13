@@ -1,5 +1,7 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use jam_rs::alignment::{AlignmentConfig, AlignmentWorkspace};
+use jam_rs::alignment::{
+    Alignment, AlignmentConfig, AlignmentWorkspace, EditOperation, EditRun, Interval, Strand,
+};
 use jam_rs::jidx::sha256;
 use jam_rs::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
 use jam_rs::owner_postings;
@@ -55,6 +57,74 @@ fn affine_alignment(criterion: &mut Criterion) {
                 .unwrap()
         })
     });
+    group.finish();
+}
+
+fn endpoint_fixture(flank: usize) -> (Vec<u8>, Vec<u8>, Alignment) {
+    let core_length = 32;
+    let mut query = vec![b'A'; flank];
+    query.extend(std::iter::repeat_n(b'C', core_length));
+    query.extend(std::iter::repeat_n(b'G', flank));
+    let mut target = vec![b'T'; flank];
+    target.extend(std::iter::repeat_n(b'C', core_length));
+    target.extend(std::iter::repeat_n(b'A', flank));
+    let core = Alignment {
+        score: (core_length * 2) as i32,
+        strand: Strand::Forward,
+        query_interval: Interval::new(flank as u64, (flank + core_length) as u64).unwrap(),
+        target_interval: Interval::new(flank as u64, (flank + core_length) as u64).unwrap(),
+        matches: core_length as u64,
+        substitutions: 0,
+        insertions: 0,
+        deletions: 0,
+        cigar: format!("{core_length}="),
+        edit_script: vec![EditRun {
+            operation: EditOperation::Equal,
+            length: core_length as u32,
+        }],
+    };
+    (query, target, core)
+}
+
+fn trace_endpoint(criterion: &mut Criterion) {
+    let config = AlignmentConfig::default();
+    let mut group = criterion.benchmark_group("trace_endpoint");
+    group.sample_size(10);
+    group.warm_up_time(Duration::from_millis(100));
+    group.measurement_time(Duration::from_millis(300));
+    for flank in [32, 256] {
+        let (query, target, core) = endpoint_fixture(flank);
+        group.throughput(Throughput::Bytes((query.len() + target.len()) as u64));
+        group.bench_function(format!("{flank}/fresh"), |bencher| {
+            bencher.iter(|| {
+                AlignmentWorkspace::default()
+                    .complete_endpoints(
+                        black_box(core.clone()),
+                        black_box(&query),
+                        black_box(&target),
+                        0,
+                        flank,
+                        config,
+                    )
+                    .unwrap()
+            })
+        });
+        let mut workspace = AlignmentWorkspace::default();
+        group.bench_function(format!("{flank}/reused"), |bencher| {
+            bencher.iter(|| {
+                workspace
+                    .complete_endpoints(
+                        black_box(core.clone()),
+                        black_box(&query),
+                        black_box(&target),
+                        0,
+                        flank,
+                        config,
+                    )
+                    .unwrap()
+            })
+        });
+    }
     group.finish();
 }
 
@@ -1319,6 +1389,7 @@ fn shared_packed(criterion: &mut Criterion) {
 criterion_group!(
     benches,
     affine_alignment,
+    trace_endpoint,
     owner_postings,
     shared_lookup,
     shared_core_absent,
