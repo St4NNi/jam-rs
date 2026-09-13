@@ -391,23 +391,20 @@ impl CoreKeyView<'_> {
     }
 
     fn key(&self, ordinal: u64) -> Result<u32, SharedError> {
-        let offset = usize::try_from(
-            ordinal
-                .checked_sub(self.first_ordinal)
-                .ok_or(SharedError::Invalid("core ordinal"))?
-                .checked_mul(4)
-                .ok_or(SharedError::Invalid("core ordinal"))?,
-        )
-        .map_err(|_| SharedError::ResourceLimit)?;
-        let bytes = self
-            .bytes
-            .get(
-                offset
-                    ..offset
-                        .checked_add(4)
-                        .ok_or(SharedError::Invalid("core ordinal"))?,
-            )
-            .ok_or(SharedError::Invalid("core ordinal"))?;
+        // Errors are built only when returned; this runs once per inspected core key.
+        let Some(offset) = ordinal
+            .checked_sub(self.first_ordinal)
+            .and_then(|relative| relative.checked_mul(4))
+        else {
+            return Err(SharedError::Invalid("core ordinal"));
+        };
+        let offset = usize::try_from(offset).map_err(|_| SharedError::ResourceLimit)?;
+        let Some(bytes) = offset
+            .checked_add(4)
+            .and_then(|end| self.bytes.get(offset..end))
+        else {
+            return Err(SharedError::Invalid("core ordinal"));
+        };
         CoreRow::decode_key(bytes)
     }
 }
@@ -1318,13 +1315,12 @@ impl SharedReader {
         {
             return Err(SharedError::Invalid("core view"));
         }
-        let offset = ordinals
-            .start
-            .checked_mul(4)
-            .ok_or(SharedError::Invalid("core ordinal"))?;
-        let length = (ordinals.end - ordinals.start)
-            .checked_mul(4)
-            .ok_or(SharedError::Invalid("core ordinal"))?;
+        let (Some(offset), Some(length)) = (
+            ordinals.start.checked_mul(4),
+            (ordinals.end - ordinals.start).checked_mul(4),
+        ) else {
+            return Err(SharedError::Invalid("core ordinal"));
+        };
         let bytes = self.file.section(Section::Cores, offset, length)?;
         self.observe(&self.core_view_creations, 1);
         Ok(CoreKeyView {
@@ -1724,9 +1720,9 @@ impl SharedReader {
     }
 
     fn core_key(&self, ordinal: u64) -> Result<u32, SharedError> {
-        let offset = ordinal
-            .checked_mul(self.file.header.row_bytes(Section::Cores))
-            .ok_or(SharedError::Invalid("core ordinal"))?;
+        let Some(offset) = ordinal.checked_mul(self.file.header.row_bytes(Section::Cores)) else {
+            return Err(SharedError::Invalid("core ordinal"));
+        };
         let bytes = self.file.section(Section::Cores, offset, 4)?;
         self.observe(&self.core_key_inspections, 1);
         CoreRow::decode_key(bytes)

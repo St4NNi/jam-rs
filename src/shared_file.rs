@@ -98,10 +98,13 @@ impl SharedFile {
         length: u64,
     ) -> Result<&[u8], SharedError> {
         let section = self.header.section(kind);
-        let end = offset
+        // Errors are built only when returned; this runs for every index read.
+        let Some(end) = offset
             .checked_add(length)
             .filter(|&end| end <= section.length)
-            .ok_or(SharedError::Invalid("section request"))?;
+        else {
+            return Err(SharedError::Invalid("section request"));
+        };
         let start = section.offset + offset;
         let end = section.offset + end;
         if self.observed {
@@ -118,9 +121,10 @@ impl SharedFile {
                 self.authenticate(page)?;
             }
         }
-        self.mmap
-            .get(start as usize..end as usize)
-            .ok_or(SharedError::Invalid("mapped extent"))
+        match self.mmap.get(start as usize..end as usize) {
+            Some(bytes) => Ok(bytes),
+            None => Err(SharedError::Invalid("mapped extent")),
+        }
     }
 
     pub(crate) fn record(
@@ -132,13 +136,10 @@ impl SharedFile {
         if size != self.header.row_bytes(kind) {
             return Err(SharedError::Invalid("record size"));
         }
-        self.section(
-            kind,
-            ordinal
-                .checked_mul(size)
-                .ok_or(SharedError::Invalid("record ordinal"))?,
-            size,
-        )
+        let Some(offset) = ordinal.checked_mul(size) else {
+            return Err(SharedError::Invalid("record ordinal"));
+        };
+        self.section(kind, offset, size)
     }
 
     fn known(&self, page: u64) -> bool {
