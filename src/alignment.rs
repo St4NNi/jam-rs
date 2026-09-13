@@ -1023,7 +1023,7 @@ impl AlignmentWorkspace {
         count: bool,
     ) {
         // SAFETY: this function enables AVX2 for the vector instantiation.
-        unsafe { self.fill_waves::<true>(query, target, config, waves, carry, best, count) }
+        unsafe { self.fill_waves::<i32, true>(query, target, config, waves, carry, best, count) }
     }
 
     /// Fills waves with the vector or scalar recurrence. Callers must enable AVX2 when VECTOR is
@@ -1046,7 +1046,7 @@ impl AlignmentWorkspace {
             if VECTOR {
                 self.fill_waves_avx2(query, target, config, waves, carry, best, count)
             } else {
-                self.fill_waves::<false>(query, target, config, waves, carry, best, count)
+                self.fill_waves::<i32, false>(query, target, config, waves, carry, best, count)
             }
         }
     }
@@ -1056,7 +1056,7 @@ impl AlignmentWorkspace {
     #[cfg(target_arch = "x86_64")]
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    unsafe fn fill_waves<const VECTOR: bool>(
+    unsafe fn fill_waves<S: WaveScore, const VECTOR: bool>(
         &mut self,
         query: &[u8],
         target: &[u8],
@@ -1072,17 +1072,19 @@ impl AlignmentWorkspace {
             if let Some(current_range) = current_range {
                 let wave_base = self.wave_offsets[wave - first_wave];
                 let (older_previous, current) = self.waves.split_at_mut(2);
+                let older_scores: &[S] = bytemuck::cast_slice(&older_previous[0][..]);
+                let previous_scores: &[S] = bytemuck::cast_slice(&older_previous[1][..]);
                 let older = carry.older.map(|range| ScoreWave {
                     range,
-                    scores: &older_previous[0],
+                    scores: older_scores,
                     stride,
                 });
                 let previous = carry.previous.map(|range| ScoreWave {
                     range,
-                    scores: &older_previous[1],
+                    scores: previous_scores,
                     stride,
                 });
-                let current = &mut current[0];
+                let current: &mut [S] = bytemuck::cast_slice_mut(&mut current[0][..]);
                 let mut row = current_range.start;
                 let vector_range =
                     older
@@ -1104,7 +1106,7 @@ impl AlignmentWorkspace {
                 if count {
                     let vectors = vector_range.map_or(0, |(start, end, _, _)| {
                         Some(end - start + 1)
-                            .filter(|&width| width >= 8)
+                            .filter(|&width| width >= S::LANES)
                             .unwrap_or(0)
                     });
                     self.work.local_vector8_cells += vectors as u64;
@@ -1124,16 +1126,8 @@ impl AlignmentWorkspace {
                             row,
                             current_range,
                             stride,
-                            carry.older.map(|range| ScoreWave {
-                                range,
-                                scores: &older_previous[0],
-                                stride,
-                            }),
-                            carry.previous.map(|range| ScoreWave {
-                                range,
-                                scores: &older_previous[1],
-                                stride,
-                            }),
+                            Some(older),
+                            Some(previous),
                             current,
                             &mut self.compact_cells,
                             wave_base,
@@ -1141,12 +1135,15 @@ impl AlignmentWorkspace {
                         );
                         row += 1;
                     }
-                    while row.checked_add(7).is_some_and(|last| last <= end) {
-                        // SAFETY: vector_range proves eight current, diagonal, left, and above
-                        // cells are in their wave slices. row>=1 and row+7<=wave-1 prove the
-                        // eight query and reverse-loaded target bytes are also in bounds.
+                    while row
+                        .checked_add(S::LANES - 1)
+                        .is_some_and(|last| last <= end)
+                    {
+                        // SAFETY: vector_range proves LANES current, diagonal, left, and above
+                        // cells are in their wave slices. row>=1 and row+LANES-1<=wave-1 prove
+                        // the query and reverse-loaded target bytes are also in bounds.
                         unsafe {
-                            fill_wave_avx2(
+                            S::fill_block(
                                 query,
                                 target,
                                 config,
@@ -1163,21 +1160,22 @@ impl AlignmentWorkspace {
                                 best,
                             );
                         }
-                        row += 8;
+                        row += S::LANES;
                     }
                     // Cells of one wave depend only on the two earlier waves, so a final block
                     // overlapping finished cells rewrites identical scores and traces, and
                     // BestCell ignores a repeated identical cell.
-                    if row <= end && end + 1 - start >= 8 {
-                        // SAFETY: end-7..=end lies inside vector_range, as for the blocks above.
+                    if row <= end && end + 1 - start >= S::LANES {
+                        // SAFETY: the last LANES rows through end lie inside vector_range, as for
+                        // the blocks above.
                         unsafe {
-                            fill_wave_avx2(
+                            S::fill_block(
                                 query,
                                 target,
                                 config,
                                 gap_open_score,
                                 wave,
-                                end - 7,
+                                end + 1 - S::LANES,
                                 current_range,
                                 stride,
                                 older,
@@ -1201,16 +1199,8 @@ impl AlignmentWorkspace {
                         row,
                         current_range,
                         stride,
-                        carry.older.map(|range| ScoreWave {
-                            range,
-                            scores: &older_previous[0],
-                            stride,
-                        }),
-                        carry.previous.map(|range| ScoreWave {
-                            range,
-                            scores: &older_previous[1],
-                            stride,
-                        }),
+                        older,
+                        previous,
                         current,
                         &mut self.compact_cells,
                         wave_base,
@@ -1601,29 +1591,110 @@ fn ceil_div2(value: i128) -> i128 {
 
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
-struct ScoreWave<'a> {
+struct ScoreWave<'a, S = i32> {
     range: WaveRange,
-    scores: &'a [i32],
+    scores: &'a [S],
     stride: usize,
 }
 
 #[cfg(target_arch = "x86_64")]
-impl ScoreWave<'_> {
+impl<S: WaveScore> ScoreWave<'_, S> {
     fn cell(self, row: usize) -> Option<[i32; 3]> {
         self.range.contains(row).then(|| {
             let offset = row - self.range.start;
             [
-                self.scores[offset],
-                self.scores[self.stride + offset],
-                self.scores[2 * self.stride + offset],
+                self.scores[offset].get(),
+                self.scores[self.stride + offset].get(),
+                self.scores[2 * self.stride + offset].get(),
             ]
         })
     }
 }
 
+/// Score plane element of the local wave recurrence.
+#[cfg(target_arch = "x86_64")]
+trait WaveScore: bytemuck::Pod {
+    const LANES: usize;
+
+    fn get(self) -> i32;
+
+    fn put(score: i32) -> Self;
+
+    /// Evaluates LANES cells of one wave. Callers must enable AVX2 and prove the block bounds
+    /// that `fill_wave_avx2` documents.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_block(
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        gap_open_score: i32,
+        wave: usize,
+        row: usize,
+        current_range: WaveRange,
+        stride: usize,
+        older: ScoreWave<'_, Self>,
+        previous: ScoreWave<'_, Self>,
+        current: &mut [Self],
+        traceback: &mut [u16],
+        wave_base: usize,
+        best: &mut BestCell,
+    );
+}
+
+#[cfg(target_arch = "x86_64")]
+impl WaveScore for i32 {
+    const LANES: usize = 8;
+
+    fn get(self) -> i32 {
+        self
+    }
+
+    fn put(score: i32) -> Self {
+        score
+    }
+
+    #[inline(always)]
+    unsafe fn fill_block(
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        gap_open_score: i32,
+        wave: usize,
+        row: usize,
+        current_range: WaveRange,
+        stride: usize,
+        older: ScoreWave<'_, Self>,
+        previous: ScoreWave<'_, Self>,
+        current: &mut [Self],
+        traceback: &mut [u16],
+        wave_base: usize,
+        best: &mut BestCell,
+    ) {
+        // SAFETY: forwarded from this function's contract.
+        unsafe {
+            fill_wave_avx2(
+                query,
+                target,
+                config,
+                gap_open_score,
+                wave,
+                row,
+                current_range,
+                stride,
+                older,
+                previous,
+                current,
+                traceback,
+                wave_base,
+                best,
+            )
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
-fn fill_wave_scalar(
+fn fill_wave_scalar<S: WaveScore>(
     query: &[u8],
     target: &[u8],
     config: AlignmentConfig,
@@ -1632,9 +1703,9 @@ fn fill_wave_scalar(
     row: usize,
     current_range: WaveRange,
     stride: usize,
-    older: Option<ScoreWave<'_>>,
-    previous: Option<ScoreWave<'_>>,
-    current: &mut [i32],
+    older: Option<ScoreWave<'_, S>>,
+    previous: Option<ScoreWave<'_, S>>,
+    current: &mut [S],
     traceback: &mut [u16],
     wave_base: usize,
     best: &mut BestCell,
@@ -1643,9 +1714,9 @@ fn fill_wave_scalar(
     let wave_offset = row - current_range.start;
     let trace_index = wave_base + row - current_range.start;
     if row == 0 && target_index == 0 {
-        current[wave_offset] = 0;
-        current[stride + wave_offset] = 0;
-        current[2 * stride + wave_offset] = 0;
+        current[wave_offset] = S::put(0);
+        current[stride + wave_offset] = S::put(0);
+        current[2 * stride + wave_offset] = S::put(0);
         traceback[trace_index] = 0;
         return;
     }
@@ -1696,9 +1767,9 @@ fn fill_wave_scalar(
             cell.previous[DELETION as usize] = state;
         }
     }
-    current[wave_offset] = cell.scores[MATCH as usize];
-    current[stride + wave_offset] = cell.scores[INSERTION as usize];
-    current[2 * stride + wave_offset] = cell.scores[DELETION as usize];
+    current[wave_offset] = S::put(cell.scores[MATCH as usize]);
+    current[stride + wave_offset] = S::put(cell.scores[INSERTION as usize]);
+    current[2 * stride + wave_offset] = S::put(cell.scores[DELETION as usize]);
     traceback[trace_index] = encode_traceback(cell);
     best.consider(row, target_index, cell);
 }
