@@ -162,7 +162,7 @@ pub(crate) struct CoreFilter {
 }
 
 pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError> {
-    if file.header.version != 4 {
+    if !matches!(file.header.version, 4 | 5) {
         return Ok(None);
     }
     file.verify_unchanged()?;

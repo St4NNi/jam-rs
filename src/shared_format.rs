@@ -119,7 +119,7 @@ pub(crate) struct SharedHeader {
 
 impl SharedHeader {
     pub(crate) fn section_order(&self) -> &'static [Section] {
-        if self.version == 4 {
+        if self.version >= 4 {
             &Section::FILTERED
         } else if self.version >= 3 {
             &Section::SPLIT
@@ -131,7 +131,7 @@ impl SharedHeader {
     fn hash_offset(&self) -> usize {
         HEADER_HASH_OFFSET
             + match self.version {
-                4 => 48,
+                4 | 5 => 48,
                 3 => 32,
                 _ => 0,
             }
@@ -155,7 +155,14 @@ impl SharedHeader {
                 _ => {}
             }
         }
-        if matches!(self.version, 2..=4) {
+        if self.version == 5 {
+            match section {
+                Section::Members => return self.id_bytes() as u64 + 4,
+                Section::Occurrences => return u64::from(self.core_payload_bytes),
+                _ => {}
+            }
+        }
+        if matches!(self.version, 2..=5) {
             match section {
                 Section::Groups => return 13 + self.id_bytes() as u64,
                 Section::Members => return 8 + self.id_bytes() as u64,
@@ -200,7 +207,7 @@ impl SharedHeader {
             put_u64(&mut out, 144 + 16 * index, section.offset);
             put_u64(&mut out, 152 + 16 * index, section.length);
         }
-        if self.version == 4 {
+        if self.version >= 4 {
             out[384..416].copy_from_slice(&self.filter_source_sha256);
         }
         let digest = sha256(&out);
@@ -209,7 +216,7 @@ impl SharedHeader {
     }
 
     pub(crate) fn decode(bytes: &[u8], file_bytes: u64) -> Result<Self, SharedError> {
-        let filtered = bytes.get(8) == Some(&4);
+        let filtered = matches!(bytes.get(8), Some(4 | 5));
         let split = filtered || bytes.get(8) == Some(&3);
         let hash_offset = HEADER_HASH_OFFSET
             + if filtered {
@@ -221,7 +228,7 @@ impl SharedHeader {
             };
         if bytes.len() != HEADER_BYTES
             || &bytes[..8] != b"JSHARED\0"
-            || !matches!(bytes[8], 1..=4)
+            || !matches!(bytes[8], 1..=5)
             || bytes[9..12] != [0, 0, 16]
             || bytes[15] != 0
             || (!split && bytes[14] != 0)
@@ -279,7 +286,7 @@ impl SharedHeader {
     fn validate(&self, file_bytes: u64) -> Result<(), SharedError> {
         if !matches!(
             (self.version, self.core_payload_bytes),
-            (1 | 2, 0) | (3 | 4, 13 | 21)
+            (1 | 2, 0) | (3..=5, 13 | 21)
         ) || self.window == 0
             || self.document_count == 0
             || self.contig_count == 0
@@ -315,6 +322,9 @@ impl SharedHeader {
                     != Some(self.section(Section::CorePayloads).length)
                     || self.section(Section::CorePrefixes).length
                         != CORE_PREFIX_BOUNDARIES as u64 * 4)
+            || self.version == 5
+                && (self.section(Section::Groups).length != 0
+                    || self.section(Section::References).length != 0)
         {
             return Err(SharedError::Invalid("section counts"));
         }
@@ -439,6 +449,53 @@ mod tests {
             assert_eq!(header.row_bytes(Section::Groups), 13 + width as u64);
             assert_eq!(header.row_bytes(Section::Members), 8 + width as u64);
             assert_eq!(header.row_bytes(Section::References), 4);
+        }
+    }
+
+    fn laid_out(mut header: SharedHeader) -> SharedHeader {
+        let mut offset = HEADER_BYTES as u64;
+        for &kind in header.section_order() {
+            offset = offset.next_multiple_of(PAGE_BYTES);
+            header.sections[kind as usize].offset = offset;
+            offset += header.section(kind).length;
+        }
+        let checksums = header.section(Section::Checksums);
+        let levels = checksum_layout(checksums.offset / PAGE_BYTES - 1).unwrap();
+        let top = levels.last().unwrap();
+        header.sections[Section::Checksums as usize].length =
+            top.offset + top.page_count * PAGE_BYTES;
+        header
+    }
+
+    #[test]
+    fn context_header_binds_placement_rows_and_empty_group_sections() {
+        for width in [13, 21] {
+            let mut header = fixture();
+            header.version = 5;
+            header.core_payload_bytes = width;
+            header.filter_source_sha256 = [4; 32];
+            header.sections[Section::Cores as usize].length = 4;
+            header.sections[Section::CorePayloads as usize].length = u64::from(width);
+            header.sections[Section::CorePrefixes as usize].length =
+                CORE_PREFIX_BOUNDARIES as u64 * 4;
+            header.sections[Section::Members as usize].length = 10;
+            header.sections[Section::Occurrences as usize].length = 2 * u64::from(width);
+            let header = laid_out(header);
+            let end = header.section(Section::Checksums);
+            assert_eq!(
+                SharedHeader::decode(&header.encode().unwrap(), end.offset + end.length).unwrap(),
+                header
+            );
+            assert_eq!(header.row_bytes(Section::Members), 5);
+            assert_eq!(header.row_bytes(Section::Occurrences), u64::from(width));
+            for section in [Section::Groups, Section::References] {
+                let mut bad = header.clone();
+                bad.sections[section as usize].length = header.row_bytes(section);
+                assert!(laid_out(bad).encode().is_err());
+            }
+            let mut bad = header.clone();
+            bad.sections[Section::Occurrences as usize].length += 1;
+            assert!(laid_out(bad).encode().is_err());
         }
     }
 
