@@ -60,60 +60,6 @@ fn affine_alignment(criterion: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(feature = "bench-internals")]
-fn local_lane_execution(criterion: &mut Criterion) {
-    let mut group = criterion.benchmark_group("local_lane_execution");
-    group.sample_size(10);
-    group.warm_up_time(Duration::from_millis(100));
-    group.measurement_time(Duration::from_millis(300));
-    for (name, qlen, tlen, diagonal, band, positive) in [
-        ("short_tail", 31, 47, 0, 8, true),
-        ("2kb", 2000, 6000, 2000, 128, true),
-        ("wide_target", 6247, 41651, 35000, 128, true),
-        ("random", 3000, 8000, 2500, 128, false),
-        ("wide_fallback", 20000, 21000, 0, 16, true),
-    ] {
-        let query = sequence(qlen);
-        let mut target = sequence_from_state(tlen, 71);
-        if positive {
-            target[diagonal..diagonal + qlen].copy_from_slice(&query);
-        }
-        let config = AlignmentConfig {
-            diagonal_offset: diagonal as i64,
-            band_width: band,
-            ..AlignmentConfig::default()
-        };
-        for reused in [false, true] {
-            for wide in [true, false] {
-                let mut workspace = AlignmentWorkspace::default();
-                let mode = if wide { "wide" } else { "dispatch" };
-                let lifetime = if reused { "reused" } else { "fresh" };
-                group.bench_function(format!("{name}/{mode}/{lifetime}"), |bencher| {
-                    bencher.iter(|| {
-                        if !reused {
-                            workspace = AlignmentWorkspace::default();
-                        }
-                        let result = if wide {
-                            workspace.benchmark_align_wide(
-                                black_box(&query),
-                                black_box(&target),
-                                config,
-                            )
-                        } else {
-                            workspace.align(black_box(&query), black_box(&target), config)
-                        };
-                        black_box(result)
-                    })
-                });
-            }
-        }
-    }
-    group.finish();
-}
-
-#[cfg(not(feature = "bench-internals"))]
-fn local_lane_execution(_: &mut Criterion) {}
-
 fn endpoint_fixture(flank: usize) -> (Vec<u8>, Vec<u8>, Alignment) {
     let core_length = 32;
     let mut query = vec![b'A'; flank];
@@ -1443,7 +1389,6 @@ fn shared_packed(criterion: &mut Criterion) {
 criterion_group!(
     benches,
     affine_alignment,
-    local_lane_execution,
     trace_endpoint,
     owner_postings,
     shared_lookup,

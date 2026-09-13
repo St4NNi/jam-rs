@@ -609,22 +609,6 @@ impl AlignmentWorkspace {
         result
     }
 
-    #[cfg(feature = "bench-internals")]
-    pub fn benchmark_align_wide(
-        &mut self,
-        query: &[u8],
-        target: &[u8],
-        config: AlignmentConfig,
-    ) -> Result<Alignment, AlignmentError> {
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") {
-            // SAFETY: runtime feature detection; the existing wide path is explicitly selected.
-            let raw = unsafe { self.align_raw_avx2(query, target, config, false) }?;
-            return finish(raw, Strand::Forward, 0, target.len());
-        }
-        self.align(query, target, config)
-    }
-
     fn align_raw(
         &mut self,
         query: &[u8],
@@ -634,7 +618,7 @@ impl AlignmentWorkspace {
         #[cfg(target_arch = "x86_64")]
         if is_x86_feature_detected!("avx2") {
             // SAFETY: the runtime feature check guards every AVX2 instruction in this path.
-            return unsafe { self.align_raw_avx2(query, target, config, true) };
+            return unsafe { self.align_raw_avx2(query, target, config) };
         }
         self.align_raw_scalar(query, target, config)
     }
@@ -805,7 +789,6 @@ impl AlignmentWorkspace {
         query: &[u8],
         target: &[u8],
         config: AlignmentConfig,
-        allow_narrow: bool,
     ) -> Result<RawAlignment, AlignmentError> {
         let init_cpu = observed_cpu(self.observed);
         config.validate()?;
@@ -869,7 +852,6 @@ impl AlignmentWorkspace {
             self.work.local_init_cpu_ns += elapsed_cpu(init_cpu);
         }
         let matrix_cpu = observed_cpu(self.observed);
-        let narrow = allow_narrow && narrow_local_scores(query.len(), target.len(), config);
         let gap_open_score = gap_open(config);
         let mut best = BestCell::default();
         let mut older_range = None;
@@ -906,9 +888,7 @@ impl AlignmentWorkspace {
                 if self.observed {
                     let vectors =
                         vector_range.map_or(0, |(start, end, _, _)| (end - start + 1) / 8 * 8);
-                    let narrow_cells = if narrow { vectors / 16 * 16 } else { 0 };
-                    self.work.local_vector16_cells += narrow_cells as u64;
-                    self.work.local_vector8_cells += (vectors - narrow_cells) as u64;
+                    self.work.local_vector8_cells += vectors as u64;
                     self.work.local_scalar_cells += (current_range.width() - vectors) as u64;
                     self.work.local_boundary_cells += u64::from(current_range.contains(0))
                         + u64::from(current_range.contains(wave))
@@ -942,30 +922,6 @@ impl AlignmentWorkspace {
                             &mut best,
                         );
                         row += 1;
-                    }
-                    while narrow && row.checked_add(15).is_some_and(|last| last <= end) {
-                        // SAFETY: the checked score bound prevents lane overflow; vector_range
-                        // proves all sixteen predecessor cells and checked byte slices exist.
-                        unsafe {
-                            fill_wave_narrow_avx2(
-                                query,
-                                target,
-                                config,
-                                gap_open_score,
-                                wave,
-                                row,
-                                current_range,
-                                max_wave_width,
-                                older,
-                                previous,
-                                current,
-                                &mut self.compact_cells,
-                                &self.row_offsets,
-                                &self.row_starts,
-                                &mut best,
-                            );
-                        }
-                        row += 16;
                     }
                     while row.checked_add(7).is_some_and(|last| last <= end) {
                         // SAFETY: vector_range proves eight current, diagonal, left, and above
@@ -1634,213 +1590,6 @@ unsafe fn fill_wave_avx2(
                         matches[block_lane],
                         insertions[block_lane],
                         deletions[block_lane],
-                    ],
-                    previous: [0; 3],
-                },
-            );
-        }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn load_wave_narrow(scores: ScoreWave<'_>, state: usize, row: usize) -> __m256i {
-    // The caller proves sixteen valid cells and nonnegative scores no larger than i16::MAX.
-    unsafe {
-        _mm256_permute4x64_epi64::<0xd8>(_mm256_packs_epi32(
-            load_wave(scores, state, row),
-            load_wave(scores, state, row + 8),
-        ))
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn choose_narrow_avx2(m: __m256i, i: __m256i, d: __m256i) -> (__m256i, __m256i) {
-    let zero = _mm256_setzero_si256();
-    let i_better = _mm256_cmpgt_epi16(i, m);
-    let score = _mm256_blendv_epi8(m, i, i_better);
-    let state = _mm256_blendv_epi8(zero, _mm256_set1_epi16(1), i_better);
-    let d_better = _mm256_cmpgt_epi16(d, score);
-    (
-        _mm256_blendv_epi8(score, d, d_better),
-        _mm256_blendv_epi8(state, _mm256_set1_epi16(2), d_better),
-    )
-}
-
-#[cfg(target_arch = "x86_64")]
-#[allow(clippy::too_many_arguments)]
-#[target_feature(enable = "avx2")]
-unsafe fn fill_wave_narrow_avx2(
-    query: &[u8],
-    target: &[u8],
-    config: AlignmentConfig,
-    gap_open_score: i32,
-    wave: usize,
-    row: usize,
-    current_range: WaveRange,
-    stride: usize,
-    older: ScoreWave<'_>,
-    previous: ScoreWave<'_>,
-    current: &mut [i32],
-    traceback: &mut [u16],
-    row_offsets: &[usize],
-    row_starts: &[usize],
-    best: &mut BestCell,
-) {
-    unsafe {
-        debug_assert!(row > 0);
-        debug_assert!(row + 15 < wave);
-        debug_assert!(row + 15 <= query.len());
-        debug_assert!(current_range.contains(row));
-        debug_assert!(current_range.contains(row + 15));
-        debug_assert!(current.len() >= 3 * stride);
-        let first_target = wave - row;
-        debug_assert!(first_target >= 16 && first_target <= target.len());
-
-        let query_bytes = _mm_loadu_si128(query[row - 1..row + 15].as_ptr().cast());
-        let target_bytes = _mm_loadu_si128(target[first_target - 16..first_target].as_ptr().cast());
-        let reverse = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        let target_bytes = _mm_shuffle_epi8(target_bytes, reverse);
-        let equal = _mm_cmpeq_epi8(
-            lowercase_ascii_8(query_bytes),
-            lowercase_ascii_8(target_bytes),
-        );
-        let equal = _mm256_cvtepi8_epi16(equal);
-        let substitution = _mm256_blendv_epi8(
-            _mm256_set1_epi16(config.mismatch_score as i16),
-            _mm256_set1_epi16(config.match_score as i16),
-            equal,
-        );
-
-        let (diagonal, diagonal_state) = choose_narrow_avx2(
-            load_wave_narrow(older, MATCH as usize, row - 1),
-            load_wave_narrow(older, INSERTION as usize, row - 1),
-            load_wave_narrow(older, DELETION as usize, row - 1),
-        );
-        let match_raw = _mm256_add_epi16(diagonal, substitution);
-        let zero = _mm256_setzero_si256();
-        let match_positive = _mm256_cmpgt_epi16(match_raw, zero);
-        let match_scores = _mm256_and_si256(match_raw, match_positive);
-        let match_start = _mm256_cmpeq_epi16(match_raw, substitution);
-        let match_previous = _mm256_blendv_epi8(
-            diagonal_state,
-            _mm256_set1_epi16(i16::from(START)),
-            match_start,
-        );
-
-        let left_m = _mm256_add_epi16(
-            load_wave_narrow(previous, MATCH as usize, row),
-            _mm256_set1_epi16(gap_open_score as i16),
-        );
-        let left_i = _mm256_add_epi16(
-            load_wave_narrow(previous, INSERTION as usize, row),
-            _mm256_set1_epi16(config.gap_extend_score as i16),
-        );
-        let left_d = _mm256_add_epi16(
-            load_wave_narrow(previous, DELETION as usize, row),
-            _mm256_set1_epi16(gap_open_score as i16),
-        );
-        let (insertion_raw, insertion_previous) = choose_narrow_avx2(left_m, left_i, left_d);
-        let insertion_positive = _mm256_cmpgt_epi16(insertion_raw, zero);
-        let insertion_scores = _mm256_and_si256(insertion_raw, insertion_positive);
-
-        let above_m = _mm256_add_epi16(
-            load_wave_narrow(previous, MATCH as usize, row - 1),
-            _mm256_set1_epi16(gap_open_score as i16),
-        );
-        let above_i = _mm256_add_epi16(
-            load_wave_narrow(previous, INSERTION as usize, row - 1),
-            _mm256_set1_epi16(gap_open_score as i16),
-        );
-        let above_d = _mm256_add_epi16(
-            load_wave_narrow(previous, DELETION as usize, row - 1),
-            _mm256_set1_epi16(config.gap_extend_score as i16),
-        );
-        let (deletion_raw, deletion_previous) = choose_narrow_avx2(above_m, above_i, above_d);
-        let deletion_positive = _mm256_cmpgt_epi16(deletion_raw, zero);
-        let deletion_scores = _mm256_and_si256(deletion_raw, deletion_positive);
-
-        let wave_offset = row - current_range.start;
-        for (state, scores) in [match_scores, insertion_scores, deletion_scores]
-            .into_iter()
-            .enumerate()
-        {
-            let slots =
-                &mut current[state * stride + wave_offset..state * stride + wave_offset + 16];
-            _mm256_storeu_si256(
-                slots.as_mut_ptr().cast(),
-                _mm256_cvtepi16_epi32(_mm256_castsi256_si128(scores)),
-            );
-            _mm256_storeu_si256(
-                slots[8..].as_mut_ptr().cast(),
-                _mm256_cvtepi16_epi32(_mm256_extracti128_si256::<1>(scores)),
-            );
-        }
-
-        let mut trace = _mm256_and_si256(match_positive, _mm256_set1_epi16(1));
-        trace = _mm256_or_si256(
-            trace,
-            _mm256_slli_epi16::<3>(_mm256_and_si256(match_previous, match_positive)),
-        );
-        trace = _mm256_or_si256(
-            trace,
-            _mm256_and_si256(insertion_positive, _mm256_set1_epi16(2)),
-        );
-        trace = _mm256_or_si256(
-            trace,
-            _mm256_slli_epi16::<5>(_mm256_and_si256(insertion_previous, insertion_positive)),
-        );
-        trace = _mm256_or_si256(
-            trace,
-            _mm256_and_si256(deletion_positive, _mm256_set1_epi16(4)),
-        );
-        trace = _mm256_or_si256(
-            trace,
-            _mm256_slli_epi16::<7>(_mm256_and_si256(deletion_previous, deletion_positive)),
-        );
-
-        let mut matches = [0i16; 16];
-        let mut insertions = [0i16; 16];
-        let mut deletions = [0i16; 16];
-        let mut traces = [0i16; 16];
-        _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
-        _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
-        _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
-        _mm256_storeu_si256(traces.as_mut_ptr().cast(), trace);
-        let (lane_best_scores, _) =
-            choose_narrow_avx2(match_scores, insertion_scores, deletion_scores);
-        for (lane, &trace) in traces.iter().enumerate() {
-            let query_index = row + lane;
-            let target_index = wave - query_index;
-            let trace_index = row_offsets[query_index] + target_index - row_starts[query_index];
-            traceback[trace_index] = trace as u16;
-        }
-        let mut block_best = _mm256_max_epi16(
-            lane_best_scores,
-            _mm256_permute2x128_si256::<0x01>(lane_best_scores, lane_best_scores),
-        );
-        block_best = _mm256_max_epi16(block_best, _mm256_shuffle_epi32::<0x4e>(block_best));
-        block_best = _mm256_max_epi16(block_best, _mm256_shuffle_epi32::<0xb1>(block_best));
-        block_best = _mm256_max_epi16(block_best, _mm256_srli_si256::<2>(block_best));
-        let block_score = _mm256_extract_epi16::<0>(block_best);
-        let block_best = _mm256_set1_epi16(block_score as i16);
-        if block_score > 0 {
-            let best_lanes = _mm256_movemask_epi8(_mm256_cmpeq_epi16(lane_best_scores, block_best));
-            let block_lane = best_lanes.trailing_zeros() as usize / 2;
-            // Lanes are in ascending query-index order. The first lane with the block maximum
-            // is therefore lexicographically earliest; every lesser or later equal lane loses
-            // after this unchanged BestCell comparison.
-            let query_index = row + block_lane;
-            let target_index = wave - query_index;
-            best.consider(
-                query_index,
-                target_index,
-                Cell {
-                    scores: [
-                        i32::from(matches[block_lane]),
-                        i32::from(insertions[block_lane]),
-                        i32::from(deletions[block_lane]),
                     ],
                     previous: [0; 3],
                 },
@@ -2735,145 +2484,6 @@ mod tests {
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn compare_local_widths(query: &[u8], target: &[u8], config: AlignmentConfig) {
-        let mut narrow = AlignmentWorkspace::default();
-        let mut wide = AlignmentWorkspace::default();
-        let mut scalar = AlignmentWorkspace::default();
-        // SAFETY: each caller checks AVX2; true permits only the checked narrow path.
-        let actual = unsafe { narrow.align_raw_avx2(query, target, config, true) }
-            .and_then(|raw| finish(raw, Strand::Forward, 0, target.len()));
-        let expected = unsafe { wide.align_raw_avx2(query, target, config, false) }
-            .and_then(|raw| finish(raw, Strand::Forward, 0, target.len()));
-        let oracle = scalar
-            .align_raw_scalar(query, target, config)
-            .and_then(|raw| finish(raw, Strand::Forward, 0, target.len()));
-        assert_eq!(
-            actual, expected,
-            "q={query:?} t={target:?} config={config:?}"
-        );
-        assert_eq!(actual, oracle);
-        assert_eq!(narrow.compact_cells, wide.compact_cells);
-        assert_eq!(narrow.waves, wide.waves);
-    }
-
-    #[cfg(target_arch = "x86_64")]
-    #[test]
-    fn narrow_local_matches_wide_and_scalar() {
-        if !is_x86_feature_detected!("avx2") {
-            return;
-        }
-        let mut state = 71u64;
-        for case in 0..160 {
-            let qlen = [0, 1, 15, 16, 17, 31, 32, 63, 128, 257][case % 10];
-            let tlen = [0, 1, 17, 16, 31, 32, 64, 127, 256, 269][(case / 10) % 10];
-            let mut sequence = |len| {
-                (0..len)
-                    .map(|_| {
-                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                        b"ACGTNRYKMacgtnryk"[(state >> 60) as usize]
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let q = sequence(qlen);
-            let t = sequence(tlen);
-            for diagonal_offset in [-21, 0, 21] {
-                compare_local_widths(
-                    &q,
-                    &t,
-                    AlignmentConfig {
-                        band_width: 32,
-                        diagonal_offset,
-                        ..config()
-                    },
-                );
-            }
-        }
-        for q in ac_strings(3) {
-            for t in ac_strings(3) {
-                let mut query = vec![b'A'; 32];
-                query.extend(q.clone());
-                query.extend_from_slice(&[b'C'; 32]);
-                let mut target = vec![b'A'; 32];
-                target.extend(t);
-                target.extend_from_slice(&[b'C'; 32]);
-                for cfg in [
-                    AlignmentConfig {
-                        band_width: 64,
-                        ..config()
-                    },
-                    AlignmentConfig {
-                        band_width: 64,
-                        mismatch_score: 0,
-                        gap_open_score: 0,
-                        gap_extend_score: 0,
-                        ..config()
-                    },
-                ] {
-                    compare_local_widths(&query, &target, cfg);
-                }
-            }
-        }
-        for cfg in [
-            AlignmentConfig {
-                match_score: 255,
-                band_width: 64,
-                ..config()
-            },
-            AlignmentConfig {
-                mismatch_score: i16::MIN.into(),
-                band_width: 64,
-                ..config()
-            },
-            AlignmentConfig {
-                match_score: i32::MAX,
-                band_width: 64,
-                ..config()
-            },
-        ] {
-            compare_local_widths(&[b'A'; 128], &[b'A'; 129], cfg);
-        }
-        compare_local_widths(
-            &[b'A'; 31],
-            &[b'A'; 32],
-            AlignmentConfig {
-                match_score: 1000,
-                gap_open_score: -32760,
-                gap_extend_score: -8,
-                band_width: 64,
-                ..config()
-            },
-        );
-        let mut workspace = AlignmentWorkspace::default();
-        workspace.enable_timing();
-        workspace
-            .align(
-                &[b'A'; 128],
-                &[b'A'; 128],
-                AlignmentConfig {
-                    band_width: 64,
-                    ..config()
-                },
-            )
-            .unwrap();
-        assert!(workspace.work.local_vector16_cells > 0);
-        for (length, match_score, diagonal_offset) in
-            [(257, i32::MAX, 0), (31, 2, -7), (128, 2, 17), (65, 2, 0)]
-        {
-            let cfg = AlignmentConfig {
-                match_score,
-                diagonal_offset,
-                band_width: 64,
-                ..config()
-            };
-            let query = vec![b'A'; length];
-            let target = vec![b'A'; length + 19];
-            let actual = workspace.align(&query, &target, cfg);
-            let expected = AlignmentWorkspace::default().align(&query, &target, cfg);
-            assert_eq!(actual, expected);
-        }
-    }
-
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn local_lane_counts_and_narrow_bounds() {
         assert!(narrow_local_scores(6_247, 41_651, config()));
@@ -2961,7 +2571,7 @@ mod tests {
                     .and_then(|raw| finish(raw, strand, 17, target.len()));
                 let mut avx2 = AlignmentWorkspace::default();
                 // SAFETY: this test returns early unless AVX2 is available.
-                let forced = unsafe { avx2.align_raw_avx2(query, &oriented_target, config, false) }
+                let forced = unsafe { avx2.align_raw_avx2(query, &oriented_target, config) }
                     .and_then(|raw| finish(raw, strand, 17, target.len()));
                 assert_eq!(actual, expected);
                 assert_eq!(forced, expected);
