@@ -941,7 +941,7 @@ impl AlignmentWorkspace {
                 self.layout_chunk(query.len(), target.len(), config, first, last)?;
                 // SAFETY: forwarded from this function's contract.
                 unsafe {
-                    self.fill_waves::<VECTOR>(
+                    self.fill_waves_selected::<VECTOR>(
                         query,
                         target,
                         config,
@@ -957,7 +957,7 @@ impl AlignmentWorkspace {
         } else {
             // SAFETY: forwarded from this function's contract.
             unsafe {
-                self.fill_waves::<VECTOR>(
+                self.fill_waves_selected::<VECTOR>(
                     query,
                     target,
                     config,
@@ -991,6 +991,51 @@ impl AlignmentWorkspace {
             edit_script,
             summary,
         })
+    }
+
+    /// Runs `fill_waves` with its AVX2 recurrence in one out-of-line body, so the three wave
+    /// drivers share one inlined copy of the vector kernel. Callers must enable AVX2.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_waves_avx2(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        waves: (usize, usize, usize),
+        carry: &mut WaveCarry,
+        best: &mut BestCell,
+        count: bool,
+    ) {
+        // SAFETY: this function enables AVX2 for the vector instantiation.
+        unsafe { self.fill_waves::<true>(query, target, config, waves, carry, best, count) }
+    }
+
+    /// Fills waves with the vector or scalar recurrence. Callers must enable AVX2 when VECTOR is
+    /// true.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn fill_waves_selected<const VECTOR: bool>(
+        &mut self,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+        waves: (usize, usize, usize),
+        carry: &mut WaveCarry,
+        best: &mut BestCell,
+        count: bool,
+    ) {
+        // SAFETY: forwarded from this function's contract.
+        unsafe {
+            if VECTOR {
+                self.fill_waves_avx2(query, target, config, waves, carry, best, count)
+            } else {
+                self.fill_waves::<false>(query, target, config, waves, carry, best, count)
+            }
+        }
     }
 
     /// Fills waves first..=last with the retained recurrence. Callers must enable AVX2 when
@@ -1221,7 +1266,7 @@ impl AlignmentWorkspace {
             let mut ignored = BestCell::default();
             // SAFETY: forwarded from this function's contract.
             unsafe {
-                self.fill_waves::<VECTOR>(
+                self.fill_waves_selected::<VECTOR>(
                     query,
                     target,
                     config,
@@ -1724,9 +1769,11 @@ unsafe fn lowercase_ascii_8(bytes: __m128i) -> __m128i {
     }
 }
 
+/// AVX2 recurrence for eight cells. Inlined into its single AVX2-enabled caller, the vector
+/// instantiation of `fill_waves`; callers must enable AVX2.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::too_many_arguments)]
-#[target_feature(enable = "avx2")]
+#[inline(always)]
 unsafe fn fill_wave_avx2(
     query: &[u8],
     target: &[u8],
