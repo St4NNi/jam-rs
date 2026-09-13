@@ -259,7 +259,9 @@ pub fn repack_shared_cores(
                 singletons += 1;
                 wide |= core_payload_needs_wide(row.kind);
             }
-            CoreKind::Repeated { .. } => wide |= core_payload_needs_wide(row.kind),
+            CoreKind::Repeated { .. } | CoreKind::Placed { .. } => {
+                wide |= core_payload_needs_wide(row.kind)
+            }
         }
     }
     let core_payload_bytes = if wide { 21 } else { 13 };
@@ -364,6 +366,11 @@ fn core_payload_needs_wide(kind: CoreKind) -> bool {
             occurrence_count,
             ..
         } => u32::try_from(first_group).is_err() || u32::try_from(occurrence_count).is_err(),
+        CoreKind::Placed {
+            first_placement,
+            member_count,
+            ..
+        } => u32::try_from(first_placement).is_err() || member_count > u32::from(u8::MAX),
     }
 }
 
@@ -438,6 +445,35 @@ fn encode_core_payload(
             target.extend_from_slice(&first_group.to_le_bytes());
             target.extend_from_slice(&group_count.to_le_bytes());
             target.extend_from_slice(&occurrence_count.to_le_bytes());
+            target.push(0);
+        }
+        (
+            false,
+            CoreKind::Placed {
+                first_placement,
+                placement_count,
+                member_locator,
+                member_count,
+            },
+        ) => {
+            target.extend_from_slice(&narrow(first_placement)?.to_le_bytes());
+            target.extend_from_slice(&placement_count.to_le_bytes());
+            target.extend_from_slice(&member_locator.to_le_bytes());
+            target.push(u8::try_from(member_count).map_err(|_| SharedError::ResourceLimit)?);
+        }
+        (
+            true,
+            CoreKind::Placed {
+                first_placement,
+                placement_count,
+                member_locator,
+                member_count,
+            },
+        ) => {
+            target.extend_from_slice(&first_placement.to_le_bytes());
+            target.extend_from_slice(&placement_count.to_le_bytes());
+            target.extend_from_slice(&member_locator.to_le_bytes());
+            target.extend_from_slice(&member_count.to_le_bytes());
             target.push(0);
         }
     }

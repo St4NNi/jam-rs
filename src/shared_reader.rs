@@ -6,7 +6,7 @@ pub use crate::shared_file::FileReadStats;
 use crate::shared_file::SharedFile;
 use crate::shared_format::{
     CORE_MASK, CORE_PREFIX_BOUNDARIES, CORE_ROW_BYTES, MULTIPLE_CORE, OCCURRENCE_ROW_BYTES,
-    PAGE_BYTES, Section, SharedError, read_u32, read_u64,
+    PAGE_BYTES, Section, SharedError, SharedHeader, placement_order, read_u32, read_u64,
 };
 use crate::shared_seed::{SharedKey, SharedSeed};
 use serde::Serialize;
@@ -140,6 +140,7 @@ impl SharedMember {
                 GroupLocation::Repeated { .. } | GroupLocation::Inline { .. } => {
                     (3, self.first_reference)
                 }
+                GroupLocation::Placed { .. } => (5, self.first_reference),
             }
         };
         SharedOccurrenceStorage {
@@ -163,6 +164,13 @@ enum GroupLocation {
     Inline {
         group_ordinal: u64,
         member: u64,
+    },
+    Placed {
+        first_placement: u64,
+        placement_count: u32,
+        member_locator: u32,
+        member_count: u32,
+        key_length: u8,
     },
 }
 
@@ -327,6 +335,15 @@ impl SharedPostingOperation<'_> {
             return Err(SharedError::ResourceLimit);
         }
         // Keep the valid private prefix so ordered reduction can select earlier errors.
+        if let GroupLocation::Placed { .. } = group.location {
+            let before = output.len();
+            self.reader
+                .placed_members(group, start, end, |member| output.push(member))?;
+            if output.len() - before != count {
+                return Err(SharedError::Invalid("member range"));
+            }
+            return Ok(());
+        }
         for offset in start..end {
             let member = match group.location {
                 GroupLocation::Singleton { .. } => self.reader.singleton_member(group)?,
@@ -337,6 +354,7 @@ impl SharedPostingOperation<'_> {
                         .ok_or(SharedError::Invalid("member range"))?;
                     self.reader.member_row(group, ordinal)?
                 }
+                GroupLocation::Placed { .. } => unreachable!(),
             };
             output.push(member);
         }
@@ -868,6 +886,24 @@ impl SharedReader {
                 }
                 members
             }
+            GroupLocation::Placed { .. } => {
+                let mut members = Vec::new();
+                members
+                    .try_reserve_exact(group.member_count as usize)
+                    .map_err(|_| SharedError::ResourceLimit)?;
+                admit_result(members.capacity(), size_of::<SharedMember>())?;
+                self.placed_members(group, 0, group.member_count, |member| members.push(member))?;
+                if members.len() != group.member_count as usize
+                    || members
+                        .iter()
+                        .map(|member| member.occurrence_count)
+                        .sum::<u64>()
+                        != group.occurrence_count
+                {
+                    return Err(SharedError::Invalid("member occurrence count"));
+                }
+                members
+            }
         };
         self.file.verify_unchanged()?;
         Ok(members)
@@ -882,11 +918,16 @@ impl SharedReader {
         if metagenome_id >= self.file.header.document_count {
             return Ok(None);
         }
+        if let GroupLocation::Placed { .. } = group.location {
+            let result = self.placed_member(group, metagenome_id)?;
+            self.file.verify_unchanged()?;
+            return Ok(result);
+        }
         let GroupLocation::Repeated { first_member, .. } = group.location else {
             let member = match group.location {
                 GroupLocation::Singleton { .. } => self.singleton_member(group)?,
                 GroupLocation::Inline { .. } => self.inline_member(group)?,
-                GroupLocation::Repeated { .. } => unreachable!(),
+                GroupLocation::Repeated { .. } | GroupLocation::Placed { .. } => unreachable!(),
             };
             let result = (member.metagenome_id == metagenome_id).then_some(member);
             self.file.verify_unchanged()?;
@@ -1429,7 +1470,7 @@ impl SharedReader {
         end: usize,
     ) -> Result<(), SharedError> {
         match row.kind {
-            CoreKind::Singleton { .. } => {
+            CoreKind::Singleton { .. } | CoreKind::Placed { .. } => {
                 let mut request = start;
                 while request < end {
                     let request_index = ordered_index(order, request);
@@ -1669,7 +1710,11 @@ impl SharedReader {
             let width = u64::from(self.file.header.core_payload_bytes);
             let payload = self.file.record(Section::CorePayloads, ordinal, width)?;
             self.observe(&self.core_inspections, 1);
-            CoreRow::decode_compact(hot, payload, self.file.header.contig_count, groups)
+            if self.file.header.version == 5 {
+                CoreRow::decode_placed(hot, payload, &self.file.header)
+            } else {
+                CoreRow::decode_compact(hot, payload, self.file.header.contig_count, groups)
+            }
         } else {
             let width = self.file.header.row_bytes(Section::Cores);
             let bytes = self.file.record(Section::Cores, ordinal, width)?;
@@ -1849,6 +1894,58 @@ impl SharedReader {
                 position,
                 canonical_orientation: flags & 1 != 0,
             });
+            return Ok(());
+        }
+        if let GroupLocation::Placed {
+            first_placement,
+            placement_count,
+            ..
+        } = group.location
+        {
+            if member.first_reference < first_placement
+                || member.first_reference - first_placement + member.occurrence_count
+                    > u64::from(placement_count)
+            {
+                return Err(SharedError::Invalid("placement range"));
+            }
+            let first = member.first_reference + start;
+            // A later block continues the order check from the placement before it.
+            let mut previous = if start == 0 {
+                None
+            } else {
+                let (context, contig_id, flags, position) = self.placement(first - 1)?;
+                Some((placement_order(flags, context), contig_id, position))
+            };
+            let width = self.file.header.row_bytes(Section::Occurrences);
+            let rows =
+                self.file
+                    .section(Section::Occurrences, first * width, count as u64 * width)?;
+            for row in rows.chunks_exact(width as usize) {
+                let (context, contig_id, flags, position) =
+                    decode_placement(row, self.file.header.contig_count)
+                        .ok_or(SharedError::Invalid("placement row"))?;
+                let order = (placement_order(flags, context), contig_id, position);
+                if previous.is_some_and(|before| before >= order) {
+                    return Err(SharedError::Invalid("placement order"));
+                }
+                previous = Some(order);
+                let seed = SharedSeed {
+                    core: group.key.core,
+                    context,
+                    flags: flags as u8,
+                    position,
+                };
+                if seed.key(group.key.length) != Some(group.key) {
+                    return Err(SharedError::Invalid("occurrence context"));
+                }
+                self.validate_position(member.metagenome_id, contig_id, position, flank)?;
+                self.observe(&self.positions_decoded, 1);
+                emit(SeedOccurrence {
+                    contig_id,
+                    position,
+                    canonical_orientation: flags & 1 != 0,
+                });
+            }
             return Ok(());
         }
         if member.direct {
@@ -2038,6 +2135,41 @@ impl SharedReader {
                 occurrence_count: 1,
             }));
         }
+        if let CoreKind::Placed {
+            first_placement,
+            placement_count,
+            member_locator,
+            member_count,
+        } = row.kind
+        {
+            let mut group = SharedGroup {
+                reader_token: self.reader_token,
+                key,
+                core_ordinal,
+                location: GroupLocation::Placed {
+                    first_placement,
+                    placement_count,
+                    member_locator,
+                    member_count,
+                    key_length: key.length,
+                },
+                member_count,
+                occurrence_count: u64::from(placement_count),
+            };
+            if key.length != 15 {
+                let (mut members, mut occurrences) = (0, 0);
+                self.placed_members(group, 0, u32::MAX, |member| {
+                    members += 1;
+                    occurrences += member.occurrence_count;
+                })?;
+                if members == 0 {
+                    return Ok(None);
+                }
+                group.member_count = members;
+                group.occurrence_count = occurrences;
+            }
+            return Ok(Some(group));
+        }
         let CoreKind::Repeated {
             first_group,
             group_count,
@@ -2075,6 +2207,201 @@ impl SharedReader {
             }
         }
         Ok(None)
+    }
+
+    fn placement(&self, ordinal: u64) -> Result<(u32, u32, u32, u64), SharedError> {
+        let width = self.file.header.row_bytes(Section::Occurrences);
+        let bytes = self.file.record(Section::Occurrences, ordinal, width)?;
+        self.observe(&self.context_comparisons, 1);
+        decode_placement(bytes, self.file.header.contig_count)
+            .ok_or(SharedError::Invalid("placement row"))
+    }
+
+    // Returns the member ID and exclusive run end of one member of a version 5 core.
+    fn placed_run(
+        &self,
+        location: GroupLocation,
+        index: u32,
+        previous: Option<(u32, u32)>,
+    ) -> Result<(u32, u32), SharedError> {
+        let GroupLocation::Placed {
+            placement_count,
+            member_locator,
+            member_count,
+            ..
+        } = location
+        else {
+            return Err(SharedError::Invalid("placed group"));
+        };
+        if index >= member_count {
+            return Err(SharedError::Invalid("member ordinal"));
+        }
+        if member_count == 1 {
+            return Ok((member_locator, placement_count));
+        }
+        let width = self.file.header.id_bytes();
+        let bytes = self.file.record(
+            Section::Members,
+            u64::from(member_locator) + u64::from(index),
+            width as u64 + 4,
+        )?;
+        self.observe(&self.member_inspections, 1);
+        let (id, end) = (read_id(bytes, 0, width), read_u32(bytes, width));
+        if id >= self.file.header.document_count
+            || end == 0
+            || end > placement_count
+            || index + 1 == member_count && end != placement_count
+            || previous.is_some_and(|(before, start)| before >= id || start >= end)
+        {
+            return Err(SharedError::Invalid("member directory"));
+        }
+        Ok((id, end))
+    }
+
+    // Finds the placements of a member run that match the group key.
+    fn placed_range(
+        &self,
+        group: SharedGroup,
+        start: u32,
+        end: u32,
+    ) -> Result<(u64, u64), SharedError> {
+        let GroupLocation::Placed {
+            first_placement, ..
+        } = group.location
+        else {
+            return Err(SharedError::Invalid("placed group"));
+        };
+        let (low, high) = match group.key.length {
+            15 => return Ok((u64::from(start), u64::from(end))),
+            21 => {
+                let low = placement_order(2, group.key.context << 20);
+                (low, low + (1 << 21))
+            }
+            31 => {
+                let low = placement_order(6, group.key.context);
+                (low, low + 1)
+            }
+            _ => return Err(SharedError::Invalid("shared key")),
+        };
+        let partition = |mut first: u64, bound: u64| {
+            let mut last = u64::from(end);
+            while first < last {
+                let middle = first + (last - first) / 2;
+                let (context, _, flags, _) = self.placement(first_placement + middle)?;
+                if placement_order(flags, context) < bound {
+                    first = middle + 1;
+                } else {
+                    last = middle;
+                }
+            }
+            Ok::<_, SharedError>(first)
+        };
+        let lower = partition(u64::from(start), low)?;
+        Ok((lower, partition(lower, high)?))
+    }
+
+    // Emits the nonempty members of a version 5 group from the start-th to before the end-th.
+    fn placed_members(
+        &self,
+        group: SharedGroup,
+        start: u32,
+        end: u32,
+        mut emit: impl FnMut(SharedMember),
+    ) -> Result<(), SharedError> {
+        let GroupLocation::Placed {
+            first_placement,
+            member_count,
+            ..
+        } = group.location
+        else {
+            return Err(SharedError::Invalid("placed group"));
+        };
+        if start >= end {
+            return Ok(());
+        }
+        // Every run belongs to the core group, so it can skip straight to the start-th run.
+        let (mut index, mut seen, mut previous) = if group.key.length == 15 && start > 0 {
+            let previous = self.placed_run(group.location, start - 1, None)?;
+            (start, start, Some(previous))
+        } else {
+            (0, 0, None)
+        };
+        while index < member_count && seen < end {
+            let (id, run_end) = self.placed_run(group.location, index, previous)?;
+            let run_start = previous.map_or(0, |(_, end)| end);
+            previous = Some((id, run_end));
+            index += 1;
+            let (low, high) = self.placed_range(group, run_start, run_end)?;
+            if low < high {
+                if seen >= start {
+                    emit(SharedMember {
+                        reader_token: self.reader_token,
+                        group: group.location,
+                        metagenome_id: id,
+                        first_reference: first_placement + low,
+                        occurrence_count: high - low,
+                        direct: false,
+                    });
+                }
+                seen += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn placed_member(
+        &self,
+        group: SharedGroup,
+        metagenome_id: u32,
+    ) -> Result<Option<SharedMember>, SharedError> {
+        let GroupLocation::Placed {
+            first_placement,
+            placement_count,
+            member_locator,
+            member_count,
+            ..
+        } = group.location
+        else {
+            return Err(SharedError::Invalid("placed group"));
+        };
+        let (index, run_end) = if member_count == 1 {
+            if member_locator != metagenome_id {
+                return Ok(None);
+            }
+            (0, placement_count)
+        } else {
+            let (mut low, mut high) = (0, member_count);
+            loop {
+                if low == high {
+                    return Ok(None);
+                }
+                let middle = low + (high - low) / 2;
+                let (id, end) = self.placed_run(group.location, middle, None)?;
+                match id.cmp(&metagenome_id) {
+                    std::cmp::Ordering::Less => low = middle + 1,
+                    std::cmp::Ordering::Greater => high = middle,
+                    std::cmp::Ordering::Equal => break (middle, end),
+                }
+            }
+        };
+        let run_start = if index == 0 {
+            0
+        } else {
+            let (id, end) = self.placed_run(group.location, index - 1, None)?;
+            if id >= metagenome_id || end >= run_end {
+                return Err(SharedError::Invalid("member directory"));
+            }
+            end
+        };
+        let (low, high) = self.placed_range(group, run_start, run_end)?;
+        Ok((low < high).then_some(SharedMember {
+            reader_token: group.reader_token,
+            group: group.location,
+            metagenome_id,
+            first_reference: first_placement + low,
+            occurrence_count: high - low,
+            direct: false,
+        }))
     }
 
     fn group_row(&self, ordinal: u64) -> Result<GroupRow, SharedError> {
@@ -2194,6 +2521,12 @@ pub(crate) enum CoreKind {
         group_count: u32,
         occurrence_count: u64,
     },
+    Placed {
+        first_placement: u64,
+        placement_count: u32,
+        member_locator: u32,
+        member_count: u32,
+    },
 }
 
 impl CoreRow {
@@ -2266,24 +2599,8 @@ impl CoreRow {
         let word = read_u32(hot, 0);
         let core = Self::decode_key(hot)?;
         let kind = if word & MULTIPLE_CORE == 0 {
-            let context = read_u32(payload, 0);
-            let contig_id = read_u32(payload, 4);
-            let (position, flags) = if payload.len() == 13 {
-                (u64::from(read_u32(payload, 8)), u32::from(payload[12]))
-            } else {
-                if read_u32(payload, 16) != 0 {
-                    return Err(SharedError::Invalid("singleton core"));
-                }
-                (read_u64(payload, 8), u32::from(payload[20]))
-            };
-            if flags & !7 != 0
-                || flags & 4 != 0 && flags & 2 == 0
-                || flags & 2 == 0 && context != 0
-                || flags & 4 == 0 && context & ((1 << 20) - 1) != 0
-                || contig_id >= contig_count
-            {
-                return Err(SharedError::Invalid("singleton core"));
-            }
+            let (context, contig_id, flags, position) = decode_placement(payload, contig_count)
+                .ok_or(SharedError::Invalid("singleton core"))?;
             CoreKind::Singleton {
                 context,
                 contig_id,
@@ -2323,6 +2640,87 @@ impl CoreRow {
         };
         Ok(Self { core, kind })
     }
+
+    pub(crate) fn decode_placed(
+        hot: &[u8],
+        payload: &[u8],
+        header: &SharedHeader,
+    ) -> Result<Self, SharedError> {
+        if hot.len() != 4 || read_u32(hot, 0) & MULTIPLE_CORE == 0 {
+            return Self::decode_compact(hot, payload, header.contig_count, 0);
+        }
+        let core = Self::decode_key(hot)?;
+        let (first_placement, placement_count, member_locator, member_count, reserved) =
+            match payload.len() {
+                13 => (
+                    u64::from(read_u32(payload, 0)),
+                    read_u32(payload, 4),
+                    read_u32(payload, 8),
+                    u32::from(payload[12]),
+                    0,
+                ),
+                21 => (
+                    read_u64(payload, 0),
+                    read_u32(payload, 8),
+                    read_u32(payload, 12),
+                    read_u32(payload, 16),
+                    payload[20],
+                ),
+                _ => return Err(SharedError::Invalid("core row")),
+            };
+        let placements =
+            header.section(Section::Occurrences).length / header.row_bytes(Section::Occurrences);
+        let directory =
+            header.section(Section::Members).length / header.row_bytes(Section::Members);
+        if reserved != 0
+            || placement_count < 2
+            || member_count == 0
+            || member_count > placement_count
+            || member_count > header.document_count
+            || first_placement
+                .checked_add(u64::from(placement_count))
+                .is_none_or(|end| end > placements)
+            || if member_count == 1 {
+                member_locator >= header.document_count
+            } else {
+                u64::from(member_locator) + u64::from(member_count) > directory
+            }
+        {
+            return Err(SharedError::Invalid("repeated core"));
+        }
+        Ok(Self {
+            core,
+            kind: CoreKind::Placed {
+                first_placement,
+                placement_count,
+                member_locator,
+                member_count,
+            },
+        })
+    }
+}
+
+// Decodes a singleton core payload or a version 5 placement row of the same layout.
+fn decode_placement(payload: &[u8], contig_count: u32) -> Option<(u32, u32, u32, u64)> {
+    let context = read_u32(payload, 0);
+    let contig_id = read_u32(payload, 4);
+    let (position, flags) = if payload.len() == 13 {
+        (u64::from(read_u32(payload, 8)), u32::from(payload[12]))
+    } else {
+        if read_u32(payload, 16) != 0 {
+            return None;
+        }
+        (read_u64(payload, 8), u32::from(payload[20]))
+    };
+    if flags & !7 != 0
+        || flags & 4 != 0 && flags & 2 == 0
+        || flags & 2 == 0 && context != 0
+        || flags & 4 == 0 && context & ((1 << 20) - 1) != 0
+        || contig_id >= contig_count
+    {
+        return None;
+    }
+    Some((context, contig_id, flags, position))
 }
 
 struct GroupRow {

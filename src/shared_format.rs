@@ -341,6 +341,14 @@ impl SharedHeader {
     }
 }
 
+// Orders version 5 placements so each 21 and 31 context is one range inside a member run.
+pub(crate) fn placement_order(flags: u32, context: u32) -> u64 {
+    (u64::from(flags & 2 != 0) << 33)
+        | (u64::from(context >> 20) << 21)
+        | (u64::from(flags & 4 != 0) << 20)
+        | u64::from(context & 0xf_ffff)
+}
+
 #[derive(Debug, Error)]
 pub enum SharedError {
     #[error("shared-anchor I/O failed: {0}")]
@@ -497,6 +505,9 @@ mod tests {
             bad.sections[Section::Occurrences as usize].length += 1;
             assert!(laid_out(bad).encode().is_err());
         }
+        assert!(placement_order(0, 0) < placement_order(2, 0));
+        assert!(placement_order(2, 5 << 20) < placement_order(6, (5 << 20) | 1));
+        assert!(placement_order(6, (5 << 20) | 0xf_ffff) < placement_order(2, 6 << 20));
     }
 
     #[test]
