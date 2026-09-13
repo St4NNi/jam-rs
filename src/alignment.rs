@@ -260,6 +260,10 @@ pub struct AlignmentWorkspace {
     chunk_carries: Vec<WaveCarry>,
     #[cfg(target_arch = "x86_64")]
     checkpoints: Vec<i32>,
+    /// Traceback offset of each laid-out wave, relative to the layout's first wave, plus the
+    /// total; one wave's cells are stored contiguously in query-row order.
+    #[cfg(target_arch = "x86_64")]
+    wave_offsets: Vec<usize>,
     endpoint_cells: EndpointWorkspace,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
@@ -430,6 +434,12 @@ pub(crate) fn trace_alignment_bytes(
         doubled_vec_bytes::<usize>(query_rows)?
             .checked_mul(3)
             .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        doubled_vec_bytes::<usize>(
+            query_rows
+                .checked_add(max_target_bases)
+                .and_then(|waves| waves.checked_add(1))
+                .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        )?,
         doubled_vec_bytes::<EditOperation>(path_bases)?,
         doubled_vec_bytes::<u8>(max_target_bases)?,
         doubled_vec_bytes::<i32>(
@@ -511,6 +521,7 @@ impl AlignmentWorkspace {
                 + self.chunk_waves.capacity() * std::mem::size_of::<(usize, usize)>()
                 + self.chunk_carries.capacity() * std::mem::size_of::<WaveCarry>()
                 + self.checkpoints.capacity() * 4
+                + self.wave_offsets.capacity() * std::mem::size_of::<usize>()
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -894,11 +905,7 @@ impl AlignmentWorkspace {
             });
         }
         if !chunked {
-            if self.observed {
-                self.work.growth_operations +=
-                    u64::from(self.compact_cells.capacity() < total_cells);
-            }
-            self.compact_cells.resize(total_cells, 0);
+            self.layout_chunk(query.len(), target.len(), config, 0, last_wave)?;
         }
         let wave_scores = max_wave_width
             .checked_mul(3)
@@ -979,7 +986,7 @@ impl AlignmentWorkspace {
                 self.traceback_chunked::<VECTOR>(query, target, config, max_wave_width, best)?
             }
         } else {
-            self.traceback_compact(query, target, best)?
+            self.traceback_compact(query, target, config, best)?
         };
         let edit_script = runs_from_operations(&self.operations)?;
         let summary = summarize_runs(&edit_script)?;
@@ -1057,6 +1064,7 @@ impl AlignmentWorkspace {
         for wave in first_wave..=last_wave {
             let current_range = wave_range(query.len(), target.len(), config, wave);
             if let Some(current_range) = current_range {
+                let wave_base = self.wave_offsets[wave - first_wave];
                 let (older_previous, current) = self.waves.split_at_mut(2);
                 let older = carry.older.map(|range| ScoreWave {
                     range,
@@ -1088,8 +1096,11 @@ impl AlignmentWorkspace {
                             (start <= end).then_some((start, end, older, previous))
                         });
                 if count {
-                    let vectors =
-                        vector_range.map_or(0, |(start, end, _, _)| (end - start + 1) / 8 * 8);
+                    let vectors = vector_range.map_or(0, |(start, end, _, _)| {
+                        Some(end - start + 1)
+                            .filter(|&width| width >= 8)
+                            .unwrap_or(0)
+                    });
                     self.work.local_vector8_cells += vectors as u64;
                     self.work.local_scalar_cells += (current_range.width() - vectors) as u64;
                     self.work.local_boundary_cells += u64::from(current_range.contains(0))
@@ -1119,8 +1130,7 @@ impl AlignmentWorkspace {
                             }),
                             current,
                             &mut self.compact_cells,
-                            &self.row_offsets,
-                            &self.row_starts,
+                            wave_base,
                             best,
                         );
                         row += 1;
@@ -1143,12 +1153,36 @@ impl AlignmentWorkspace {
                                 previous,
                                 current,
                                 &mut self.compact_cells,
-                                &self.row_offsets,
-                                &self.row_starts,
+                                wave_base,
                                 best,
                             );
                         }
                         row += 8;
+                    }
+                    // Cells of one wave depend only on the two earlier waves, so a final block
+                    // overlapping finished cells rewrites identical scores and traces, and
+                    // BestCell ignores a repeated identical cell.
+                    if row <= end && end + 1 - start >= 8 {
+                        // SAFETY: end-7..=end lies inside vector_range, as for the blocks above.
+                        unsafe {
+                            fill_wave_avx2(
+                                query,
+                                target,
+                                config,
+                                gap_open_score,
+                                wave,
+                                end - 7,
+                                current_range,
+                                stride,
+                                older,
+                                previous,
+                                current,
+                                &mut self.compact_cells,
+                                wave_base,
+                                best,
+                            );
+                        }
+                        row = end + 1;
                     }
                 }
                 while row <= current_range.end {
@@ -1173,8 +1207,7 @@ impl AlignmentWorkspace {
                         }),
                         current,
                         &mut self.compact_cells,
-                        &self.row_offsets,
-                        &self.row_starts,
+                        wave_base,
                         best,
                     );
                     row += 1;
@@ -1186,7 +1219,8 @@ impl AlignmentWorkspace {
         }
     }
 
-    /// Row layout of the cells in waves first..=last, reusing the row metadata vectors.
+    /// Wave layout of the traceback cells in waves first..=last: each wave's cells are
+    /// contiguous, so one vector block writes its eight traces together.
     #[cfg(target_arch = "x86_64")]
     fn layout_chunk(
         &mut self,
@@ -1197,26 +1231,15 @@ impl AlignmentWorkspace {
         last_wave: usize,
     ) -> Result<usize, AlignmentError> {
         let mut total = 0usize;
-        for query_index in 0..=query_len {
-            let columns = band_row(
-                query_index,
-                target_len,
-                config.diagonal_offset,
-                config.band_width,
-            )?
-            .and_then(|(start, end)| {
-                let start = start.max(first_wave.saturating_sub(query_index));
-                let end = end.min(last_wave.checked_sub(query_index)?);
-                (start <= end).then_some((start, end))
-            });
-            let (start, width) = columns.map_or((0, 0), |(start, end)| (start, end - start + 1));
-            self.row_offsets[query_index] = total;
-            self.row_starts[query_index] = start;
-            self.row_widths[query_index] = width;
+        self.wave_offsets.clear();
+        for wave in first_wave..=last_wave {
+            self.wave_offsets.push(total);
+            let width = wave_range(query_len, target_len, config, wave).map_or(0, WaveRange::width);
             total = total
                 .checked_add(width)
                 .ok_or(AlignmentError::LengthOverflow)?;
         }
+        self.wave_offsets.push(total);
         if self.observed {
             self.work.growth_operations += u64::from(self.compact_cells.capacity() < total);
         }
@@ -1276,7 +1299,7 @@ impl AlignmentWorkspace {
                     false,
                 );
             }
-            if self.trace_operations(query, target, &mut position, first)? {
+            if self.trace_operations(query, target, config, &mut position, first)? {
                 break;
             }
             chunk = chunk
@@ -1387,13 +1410,14 @@ impl AlignmentWorkspace {
         &mut self,
         query: &[u8],
         target: &[u8],
+        config: AlignmentConfig,
         best: BestCell,
     ) -> Result<(usize, usize), AlignmentError> {
         let cpu = observed_cpu(self.observed);
         let started = self.observed.then(std::time::Instant::now);
         self.operations.clear();
         let mut position = (best.query_index, best.target_index, best.state);
-        self.trace_operations(query, target, &mut position, 0)?;
+        self.trace_operations(query, target, config, &mut position, 0)?;
         self.operations.reverse();
         if let Some(started) = started {
             self.traceback_nanoseconds += started.elapsed().as_nanos() as u64;
@@ -1409,6 +1433,7 @@ impl AlignmentWorkspace {
         &mut self,
         query: &[u8],
         target: &[u8],
+        config: AlignmentConfig,
         position: &mut (usize, usize, u8),
         first_wave: usize,
     ) -> Result<bool, AlignmentError> {
@@ -1420,8 +1445,14 @@ impl AlignmentWorkspace {
             if query_index + target_index < first_wave {
                 break false;
             }
-            let index = self
-                .cell_index_checked(query_index, target_index)
+            let wave = query_index + target_index;
+            let index = wave_range(query.len(), target.len(), config, wave)
+                .filter(|range| range.contains(query_index))
+                .and_then(|range| {
+                    let base = *self.wave_offsets.get(wave - first_wave)?;
+                    (base + query_index - range.start < *self.wave_offsets.last()?)
+                        .then_some(base + query_index - range.start)
+                })
                 .ok_or(AlignmentError::TracebackOutsideBand)?;
             let traceback = self.compact_cells[index];
             if state > DELETION || !traceback_positive(traceback, state) {
@@ -1599,13 +1630,12 @@ fn fill_wave_scalar(
     previous: Option<ScoreWave<'_>>,
     current: &mut [i32],
     traceback: &mut [u16],
-    row_offsets: &[usize],
-    row_starts: &[usize],
+    wave_base: usize,
     best: &mut BestCell,
 ) {
     let target_index = wave - row;
     let wave_offset = row - current_range.start;
-    let trace_index = row_offsets[row] + target_index - row_starts[row];
+    let trace_index = wave_base + row - current_range.start;
     if row == 0 && target_index == 0 {
         current[wave_offset] = 0;
         current[stride + wave_offset] = 0;
@@ -1787,8 +1817,7 @@ unsafe fn fill_wave_avx2(
     previous: ScoreWave<'_>,
     current: &mut [i32],
     traceback: &mut [u16],
-    row_offsets: &[usize],
-    row_starts: &[usize],
+    wave_base: usize,
     best: &mut BestCell,
 ) {
     unsafe {
@@ -1897,21 +1926,17 @@ unsafe fn fill_wave_avx2(
             _mm256_slli_epi32::<7>(_mm256_and_si256(deletion_previous, deletion_positive)),
         );
 
-        let mut matches = [0i32; 8];
-        let mut insertions = [0i32; 8];
-        let mut deletions = [0i32; 8];
-        let mut traces = [0i32; 8];
-        _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
-        _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
-        _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
-        _mm256_storeu_si256(traces.as_mut_ptr().cast(), trace);
+        // Traces use nine bits, so unsigned saturation to 16 bits is exact. Packing places lanes
+        // 0..3 and 4..7 in separate 128-bit halves; the permutation joins them in lane order.
+        let packed = _mm256_permute4x64_epi64::<0xD8>(_mm256_packus_epi32(trace, zero));
+        debug_assert!(wave_base + wave_offset + 8 <= traceback.len());
+        // SAFETY: the wave layout stores this wave's cells contiguously, and rows row..=row+7
+        // lie inside current_range, so the eight cells are inside the laid-out traceback.
+        _mm_storeu_si128(
+            traceback.as_mut_ptr().add(wave_base + wave_offset).cast(),
+            _mm256_castsi256_si128(packed),
+        );
         let (lane_best_scores, _) = choose_avx2(match_scores, insertion_scores, deletion_scores);
-        for (lane, &trace) in traces.iter().enumerate() {
-            let query_index = row + lane;
-            let target_index = wave - query_index;
-            let trace_index = row_offsets[query_index] + target_index - row_starts[query_index];
-            traceback[trace_index] = trace as u16;
-        }
         let mut block_best = _mm256_max_epi32(
             lane_best_scores,
             _mm256_permute2x128_si256::<0x01>(lane_best_scores, lane_best_scores),
@@ -1919,7 +1944,15 @@ unsafe fn fill_wave_avx2(
         block_best = _mm256_max_epi32(block_best, _mm256_shuffle_epi32::<0x4e>(block_best));
         block_best = _mm256_max_epi32(block_best, _mm256_shuffle_epi32::<0xb1>(block_best));
         let block_score = _mm256_extract_epi32::<0>(block_best);
-        if block_score > 0 {
+        // BestCell only changes for a higher score or an equal, earlier cell, so a block below
+        // the current best cannot change it.
+        if block_score > 0 && block_score >= best.score {
+            let mut matches = [0i32; 8];
+            let mut insertions = [0i32; 8];
+            let mut deletions = [0i32; 8];
+            _mm256_storeu_si256(matches.as_mut_ptr().cast(), match_scores);
+            _mm256_storeu_si256(insertions.as_mut_ptr().cast(), insertion_scores);
+            _mm256_storeu_si256(deletions.as_mut_ptr().cast(), deletion_scores);
             let best_lanes = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpeq_epi32(
                 lane_best_scores,
                 block_best,
@@ -3160,7 +3193,7 @@ mod tests {
         )
         .unwrap();
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(bytes, 548_736_106);
+        assert_eq!(bytes, 550_833_290);
     }
 
     #[test]
