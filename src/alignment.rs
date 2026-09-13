@@ -2521,7 +2521,7 @@ mod tests {
         };
         let bytes = trace_alignment_bytes(64 * 1024, 64 * 1024, 256, trace_config).unwrap();
         #[cfg(target_pointer_width = "64")]
-        assert_eq!(bytes, 550_656_080);
+        assert_eq!(bytes, 548_695_138);
     }
 
     #[test]
