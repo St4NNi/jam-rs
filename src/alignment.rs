@@ -237,7 +237,7 @@ pub struct AlignmentWorkspace {
     compact_cells: Vec<u16>,
     #[cfg(target_arch = "x86_64")]
     waves: [Vec<i32>; 3],
-    endpoint_cells: Vec<EndpointCell>,
+    endpoint_cells: EndpointWorkspace,
     row_offsets: Vec<usize>,
     row_starts: Vec<usize>,
     row_widths: Vec<usize>,
@@ -247,7 +247,7 @@ pub struct AlignmentWorkspace {
 
 pub(crate) const TRACE_ALIGNMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
 // Covers at most ten retained workspace Vecs and conservative simultaneous task temporaries.
-const TRACE_ALIGNMENT_ALLOCATION_COUNT: usize = 24;
+const TRACE_ALIGNMENT_ALLOCATION_COUNT: usize = 26;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub(crate) enum AlignmentAdmissionError {
@@ -391,7 +391,14 @@ fn trace_alignment_bytes(
 
     let retained = checked_sum(&[
         doubled_vec_bytes::<Cell>(core_cells)?,
-        doubled_vec_bytes::<EndpointCell>(endpoint_cells)?,
+        doubled_vec_bytes::<u8>(endpoint_cells)?,
+        doubled_vec_bytes::<[i32; 3]>(
+            endpoint_target
+                .checked_add(1)
+                .ok_or(AlignmentAdmissionError::ByteOverflow)?,
+        )?
+        .checked_mul(2)
+        .ok_or(AlignmentAdmissionError::ByteOverflow)?,
         doubled_vec_bytes::<usize>(query_rows)?
             .checked_mul(3)
             .ok_or(AlignmentAdmissionError::ByteOverflow)?,
@@ -449,7 +456,7 @@ fn checked_sum(values: &[usize]) -> Result<usize, AlignmentAdmissionError> {
 impl AlignmentWorkspace {
     pub(crate) fn retained_bytes(&self) -> usize {
         let bytes = self.cells.capacity() * std::mem::size_of::<Cell>()
-            + self.endpoint_cells.capacity() * std::mem::size_of::<EndpointCell>()
+            + self.endpoint_cells.capacity_bytes()
             + (self.row_offsets.capacity()
                 + self.row_starts.capacity()
                 + self.row_widths.capacity())
@@ -1610,12 +1617,42 @@ pub struct EndpointCompletion {
 
 const NEGATIVE: i32 = i32::MIN / 4;
 
+#[derive(Debug, Default)]
+struct EndpointMatrix {
+    rows: [Vec<[i32; 3]>; 2],
+    previous: Vec<u8>,
+    operations: Vec<EditOperation>,
+}
+
+#[derive(Debug, Default)]
+struct EndpointWorkspace {
+    matrix: EndpointMatrix,
+    left_query: Vec<u8>,
+    left_target: Vec<u8>,
+}
+
+impl EndpointWorkspace {
+    fn capacity_bytes(&self) -> usize {
+        self.matrix
+            .rows
+            .iter()
+            .map(|row| row.capacity() * std::mem::size_of::<[i32; 3]>())
+            .sum::<usize>()
+            + self.matrix.previous.capacity()
+            + self.matrix.operations.capacity() * std::mem::size_of::<EditOperation>()
+            + self.left_query.capacity()
+            + self.left_target.capacity()
+    }
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct EndpointCell {
     scores: [i32; 3],
     previous: [u8; 3],
 }
 
+#[cfg(test)]
 impl Default for EndpointCell {
     fn default() -> Self {
         Self {
@@ -1634,7 +1671,7 @@ struct EndpointResult {
 
 #[allow(clippy::too_many_arguments)]
 fn complete_endpoints(
-    cells: &mut Vec<EndpointCell>,
+    workspace: &mut EndpointWorkspace,
     mut core: Alignment,
     query: &[u8],
     target: &[u8],
@@ -1678,32 +1715,36 @@ fn complete_endpoints(
 
     let left_query_len = query_start.min(max_extension);
     let left_target_len = target_start.min(max_extension);
-    let left_query: Vec<_> = query[query_start - left_query_len..query_start]
-        .iter()
-        .rev()
-        .copied()
-        .collect();
-    let left_target: Vec<_> = target[target_start - left_target_len..target_start]
-        .iter()
-        .rev()
-        .copied()
-        .collect();
+    let EndpointWorkspace {
+        matrix,
+        left_query,
+        left_target,
+    } = workspace;
+    left_query.clear();
+    left_query.extend(
+        query[query_start - left_query_len..query_start]
+            .iter()
+            .rev()
+            .copied(),
+    );
+    left_target.clear();
+    left_target.extend(
+        target[target_start - left_target_len..target_start]
+            .iter()
+            .rev()
+            .copied(),
+    );
     if let Some(work) = work.as_deref_mut() {
         work.endpoint_scratch_bytes += (left_query.len() + left_target.len()) as u64;
     }
-    let mut left = anchored_semiglobal(
-        cells,
-        &left_query,
-        &left_target,
-        config,
-        work.as_deref_mut(),
-    )?;
+    let mut left =
+        anchored_semiglobal(matrix, left_query, left_target, config, work.as_deref_mut())?;
     left.runs.reverse();
 
     let query_limit = query_end.saturating_add(max_extension).min(query.len());
     let target_limit = target_end.saturating_add(max_extension).min(target.len());
     let right = anchored_semiglobal(
-        cells,
+        matrix,
         &query[query_end..query_limit],
         &target[target_end..target_limit],
         config,
@@ -1759,7 +1800,7 @@ fn complete_endpoints(
 }
 
 fn anchored_semiglobal(
-    cells: &mut Vec<EndpointCell>,
+    matrix: &mut EndpointMatrix,
     query: &[u8],
     target: &[u8],
     config: AlignmentConfig,
@@ -1795,7 +1836,193 @@ fn anchored_semiglobal(
         work.endpoint_passes += 1;
         work.endpoint_cells += matrix_cells as u64;
         work.endpoint_recurrence_cells += (query.len() * target.len()) as u64;
-        work.growth_operations += u64::from(cells.capacity() < matrix_cells);
+        work.growth_operations += u64::from(matrix.previous.capacity() < matrix_cells)
+            + matrix
+                .rows
+                .iter()
+                .filter(|row| row.capacity() < columns)
+                .count() as u64;
+    }
+    // Two bits per predecessor; the high two bits are reserved zero.
+    const INITIAL_PREVIOUS: u8 = START | (START << 2) | (START << 4);
+    matrix.previous.resize(matrix_cells, INITIAL_PREVIOUS);
+    matrix.previous.fill(INITIAL_PREVIOUS);
+    for row in &mut matrix.rows {
+        row.resize(columns, [NEGATIVE; 3]);
+    }
+    matrix.rows[0][0] = [0, NEGATIVE, NEGATIVE];
+    for column in 1..columns {
+        matrix.rows[0][column] = [NEGATIVE; 3];
+        matrix.rows[0][column][INSERTION as usize] = config.gap_open_score.saturating_add(
+            config
+                .gap_extend_score
+                .saturating_mul(i32::try_from(column).unwrap_or(i32::MAX)),
+        );
+        let state = if column == 1 { MATCH } else { INSERTION };
+        matrix.previous[column] = (INITIAL_PREVIOUS & !(3 << 2)) | (state << 2);
+    }
+    if let Some(work) = work.as_deref_mut() {
+        work.endpoint_init_cpu_ns += elapsed_cpu(init_cpu);
+    }
+    let matrix_cpu = observed_cpu(work.is_some());
+    let mut best = (NEGATIVE, 0usize, 0usize, START);
+    let mut consider = |row: usize, column: usize, scores| {
+        let (score, state) = maximum(scores);
+        let candidate = (
+            row.saturating_add(column),
+            row,
+            column,
+            std::cmp::Reverse(state),
+        );
+        let current = (
+            best.1.saturating_add(best.2),
+            best.1,
+            best.2,
+            std::cmp::Reverse(best.3),
+        );
+        if score > best.0 || (score == best.0 && candidate > current) {
+            best = (score, row, column, state);
+        }
+    };
+    consider(0, columns - 1, matrix.rows[0][columns - 1]);
+    for row in 1..rows {
+        let first = row * columns;
+        let [previous, current] = &mut matrix.rows;
+        current[0] = [NEGATIVE; 3];
+        current[0][DELETION as usize] = config.gap_open_score.saturating_add(
+            config
+                .gap_extend_score
+                .saturating_mul(i32::try_from(row).unwrap_or(i32::MAX)),
+        );
+        let state = if row == 1 { MATCH } else { DELETION };
+        matrix.previous[first] = (INITIAL_PREVIOUS & !(3 << 4)) | (state << 4);
+        if row + 1 == rows {
+            consider(row, 0, current[0]);
+        }
+        for column in 1..columns {
+            let (score, state) = maximum(previous[column - 1]);
+            let left = current[column - 1];
+            let cell = &mut current[column];
+            cell[MATCH as usize] = score.saturating_add(
+                if query[row - 1].eq_ignore_ascii_case(&target[column - 1]) {
+                    config.match_score
+                } else {
+                    config.mismatch_score
+                },
+            );
+            let mut packed = state;
+
+            let above = previous[column];
+            let (score, state) = maximum([
+                above[MATCH as usize].saturating_add(gap_open(config)),
+                above[INSERTION as usize].saturating_add(gap_open(config)),
+                above[DELETION as usize].saturating_add(config.gap_extend_score),
+            ]);
+            cell[DELETION as usize] = score;
+            packed |= state << 4;
+
+            let (score, state) = maximum([
+                left[MATCH as usize].saturating_add(gap_open(config)),
+                left[INSERTION as usize].saturating_add(config.gap_extend_score),
+                left[DELETION as usize].saturating_add(gap_open(config)),
+            ]);
+            cell[INSERTION as usize] = score;
+            matrix.previous[first + column] = packed | (state << 2);
+            if row + 1 == rows || column + 1 == columns {
+                consider(row, column, *cell);
+            }
+        }
+        matrix.rows.swap(0, 1);
+    }
+
+    if best.3 > DELETION {
+        return Err(AlignmentError::NoAlignment);
+    }
+
+    if let Some(work) = work.as_deref_mut() {
+        work.endpoint_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
+    }
+    let trace_cpu = observed_cpu(work.is_some());
+    let mut row = best.1;
+    let mut column = best.2;
+    let mut state = best.3;
+    let operations = &mut matrix.operations;
+    operations.clear();
+    operations.reserve(row.saturating_add(column));
+    while row > 0 || column > 0 {
+        let index = row * columns + column;
+        let packed = matrix.previous[index];
+        debug_assert_eq!(packed & 0xc0, 0);
+        let previous = (packed >> (2 * state)) & 3;
+        match state {
+            MATCH if row > 0 && column > 0 => {
+                operations.push(
+                    if query[row - 1].eq_ignore_ascii_case(&target[column - 1]) {
+                        EditOperation::Equal
+                    } else {
+                        EditOperation::Substitution
+                    },
+                );
+                row -= 1;
+                column -= 1;
+            }
+            INSERTION if column > 0 => {
+                operations.push(EditOperation::Insertion);
+                column -= 1;
+            }
+            DELETION if row > 0 => {
+                operations.push(EditOperation::Deletion);
+                row -= 1;
+            }
+            _ => return Err(AlignmentError::InvalidTraceback),
+        }
+        state = previous;
+    }
+    operations.reverse();
+    let runs = runs_from_operations(operations)?;
+    if let Some(work) = work {
+        work.endpoint_trace_cpu_ns += elapsed_cpu(trace_cpu);
+        work.endpoint_scratch_bytes += operations.len() as u64;
+    }
+    Ok(EndpointResult {
+        runs,
+        query_bases: best.1,
+        target_bases: best.2,
+        matrix_cells,
+    })
+}
+
+#[cfg(test)]
+fn anchored_semiglobal_reference(
+    cells: &mut Vec<EndpointCell>,
+    query: &[u8],
+    target: &[u8],
+    config: AlignmentConfig,
+) -> Result<EndpointResult, AlignmentError> {
+    if query.is_empty() || target.is_empty() {
+        return Ok(EndpointResult {
+            runs: Vec::new(),
+            query_bases: 0,
+            target_bases: 0,
+            matrix_cells: 0,
+        });
+    }
+    let rows = query
+        .len()
+        .checked_add(1)
+        .ok_or(AlignmentError::LengthOverflow)?;
+    let columns = target
+        .len()
+        .checked_add(1)
+        .ok_or(AlignmentError::LengthOverflow)?;
+    let matrix_cells = rows
+        .checked_mul(columns)
+        .ok_or(AlignmentError::LengthOverflow)?;
+    if matrix_cells > config.max_cells {
+        return Err(AlignmentError::MatrixTooLarge {
+            cells: matrix_cells,
+            max_cells: config.max_cells,
+        });
     }
     cells.resize(matrix_cells, EndpointCell::default());
     cells.fill(EndpointCell::default());
@@ -1808,10 +2035,6 @@ fn anchored_semiglobal(
         );
         cell.previous[INSERTION as usize] = if column == 1 { MATCH } else { INSERTION };
     }
-    if let Some(work) = work.as_deref_mut() {
-        work.endpoint_init_cpu_ns += elapsed_cpu(init_cpu);
-    }
-    let matrix_cpu = observed_cpu(work.is_some());
     for row in 1..rows {
         let first = row * columns;
         let (previous, current) = cells.split_at_mut(first);
@@ -1884,10 +2107,6 @@ fn anchored_semiglobal(
         return Err(AlignmentError::NoAlignment);
     }
 
-    if let Some(work) = work.as_deref_mut() {
-        work.endpoint_matrix_cpu_ns += elapsed_cpu(matrix_cpu);
-    }
-    let trace_cpu = observed_cpu(work.is_some());
     let mut row = best.1;
     let mut column = best.2;
     let mut state = best.3;
@@ -1920,13 +2139,8 @@ fn anchored_semiglobal(
         state = previous;
     }
     operations.reverse();
-    let runs = runs_from_operations(&operations)?;
-    if let Some(work) = work {
-        work.endpoint_trace_cpu_ns += elapsed_cpu(trace_cpu);
-        work.endpoint_scratch_bytes += operations.len() as u64;
-    }
     Ok(EndpointResult {
-        runs,
+        runs: runs_from_operations(&operations)?,
         query_bases: best.1,
         target_bases: best.2,
         matrix_cells,
@@ -2433,7 +2647,7 @@ mod tests {
 
     #[test]
     fn semiglobal_completion_leaves_outer_overhang_free() {
-        let mut cells = Vec::new();
+        let mut cells = EndpointMatrix::default();
         let result =
             anchored_semiglobal(&mut cells, b"ACGTACGT", b"ACGTACGTCCCC", config(), None).unwrap();
         assert_eq!((result.query_bases, result.target_bases), (8, 8));
@@ -2442,11 +2656,12 @@ mod tests {
 
     #[test]
     fn semiglobal_workspace_growth_matches_fresh_workspace() {
-        let mut reused = Vec::new();
+        let mut reused = EndpointMatrix::default();
         anchored_semiglobal(&mut reused, b"A", b"A", config(), None).unwrap();
         let reused_result = anchored_semiglobal(&mut reused, b"C", b"AAA", config(), None).unwrap();
         let fresh_result =
-            anchored_semiglobal(&mut Vec::new(), b"C", b"AAA", config(), None).unwrap();
+            anchored_semiglobal(&mut EndpointMatrix::default(), b"C", b"AAA", config(), None)
+                .unwrap();
 
         assert_eq!(reused_result.runs, fresh_result.runs);
         assert_eq!(reused_result.query_bases, fresh_result.query_bases);
