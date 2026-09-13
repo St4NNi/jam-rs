@@ -3480,19 +3480,6 @@ pub(crate) fn fragment_envelope(
     contig_length: u64,
     config: TraceConfig,
 ) -> Result<FragmentEnvelope, TraceError> {
-    scoped_fragment_envelope(region, key, query_length, contig_length, config, true)
-}
-
-/// Fragment envelope; `whole_short_contig` selects the whole-contig window for short contigs.
-/// Without it every contig uses the bounded window around the region's own support.
-pub(crate) fn scoped_fragment_envelope(
-    region: &RegionAccumulator,
-    key: RegionKey,
-    query_length: u64,
-    contig_length: u64,
-    config: TraceConfig,
-    whole_short_contig: bool,
-) -> Result<FragmentEnvelope, TraceError> {
     let k = u64::from(key.k);
     let query_seed_end = region
         .query_end
@@ -3543,7 +3530,7 @@ pub(crate) fn scoped_fragment_envelope(
             config.circular,
         )
     };
-    let full_query = (whole_short_contig && contig_length <= SHORT_CONTIG_ENVELOPE_BYTES)
+    let full_query = (contig_length <= SHORT_CONTIG_ENVELOPE_BYTES)
         .then(|| projection(bounded_target))
         .transpose()?;
     // The admitted geometry uses the same final diagonal that alignment receives.
@@ -5080,7 +5067,7 @@ mod tests {
     }
 
     #[test]
-    fn islands_split_distant_anchor_groups_and_bound_short_contig_windows() {
+    fn islands_split_only_distant_anchor_groups_on_long_contigs() {
         let config = TraceConfig {
             circular: false,
             ..TraceConfig::default()
@@ -5122,12 +5109,7 @@ mod tests {
             })
         };
         assert_eq!(plan(&[5_000, 5_500, 6_000], 200_000), None);
-        // A short contig's whole-contig parent window is trialed with bounded local windows.
-        let short = plan(&[5_000, 5_020], 64 * 1024).unwrap();
-        assert_eq!(short.len(), 1);
-        assert_eq!(short[0].0, 0..2);
-        assert!(short[0].1.target_left && short[0].1.target_right);
-        assert_eq!(plan(&[5_000, 35_000], 64 * 1024).unwrap().len(), 2);
+        assert_eq!(plan(&[5_000, 35_000], 64 * 1024), None);
         let split = plan(&[5_000, 5_900, 35_000], 200_000).unwrap();
         assert_eq!(split.len(), 2);
         assert_eq!((split[0].0.clone(), split[1].0.clone()), (0..2, 2..3));
