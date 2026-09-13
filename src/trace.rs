@@ -2460,6 +2460,10 @@ impl TraceEngine {
                     (reader.range_stats(), reader.blocks_decoded()),
                 ))
             })
+            .collect::<Vec<_>>();
+        // The first error in metagenome order is returned, as a serial load would return it.
+        let per_metagenome = per_metagenome
+            .into_iter()
             .collect::<Result<Vec<_>, TraceError>>()?;
         let mut loaded = BTreeMap::new();
         let mut reads = HashMap::new();
@@ -6702,6 +6706,73 @@ mod tests {
         while !ready() {
             assert!(started.elapsed() < std::time::Duration::from_secs(5));
             std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parallel_range_loads_return_the_first_metagenome_error() {
+        use crate::bgzf_cache::BgzfBlockIdentity;
+        use std::os::unix::fs::MetadataExt;
+        let directory = tempfile::tempdir().unwrap();
+        let (shared, paths, contigs) = write_range_sources(directory.path(), 2);
+        let engine = TraceEngine::open_shared(&shared, None).unwrap();
+        let tasks = range_tasks(&engine, &contigs);
+        // Metagenome 1 fails as soon as its reader opens.
+        std::fs::remove_file(&paths[1]).unwrap();
+        // Metagenome 0 fails later: this test holds its first block and then publishes bytes
+        // that are not bases.
+        let bytes = std::fs::read(&paths[0]).unwrap();
+        let metadata = paths[0].metadata().unwrap();
+        let held = BgzfBlockIdentity {
+            source_sha256: sha256(&bytes),
+            source_bytes: bytes.len() as u64,
+            locator_sha256: sha256(paths[0].to_str().unwrap().as_bytes()),
+            local_file: Some([
+                metadata.dev(),
+                metadata.ino(),
+                metadata.len(),
+                metadata.mtime() as u64,
+                metadata.mtime_nsec() as u64,
+                metadata.ctime() as u64,
+                metadata.ctime_nsec() as u64,
+            ]),
+            compressed_offset: 0,
+            uncompressed_offset: 0,
+        };
+        for threads in [1, 4] {
+            let cache = Arc::new(BgzfBlockCache::new(DEFAULT_BATCH_BGZF_CACHE_BYTES).unwrap());
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let (cache, pool, engine, tasks) = (&cache, &pool, &engine, &tasks);
+            let error = std::thread::scope(|scope| {
+                let holder = scope.spawn(move || {
+                    cache.with_block(
+                        held,
+                        || {
+                            released.recv().unwrap();
+                            Ok::<_, BgzfError>(vec![b'!'; 4_096])
+                        },
+                        |_| Ok(()),
+                    )
+                });
+                wait_until(|| cache.stats().loading_blocks == 1);
+                let load = scope
+                    .spawn(move || pool.install(|| engine.load_ranges(tasks, false, Some(cache))));
+                wait_until(|| cache.stats().waits >= 1);
+                // A worker has opened metagenome 1 long before this; a serial load has not.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                release.send(()).unwrap();
+                holder.join().unwrap().unwrap();
+                load.join().unwrap().err().unwrap()
+            });
+            assert!(
+                matches!(error, TraceError::Bgzf(BgzfError::InvalidFasta)),
+                "{threads} threads: {error}"
+            );
         }
     }
 
