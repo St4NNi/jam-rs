@@ -45,6 +45,7 @@ pub mod sketch;
 pub mod trace;
 mod trace_batch;
 mod trace_index;
+mod trace_islands;
 mod trace_postings;
 pub mod writer;
 pub use cli::handlers::{

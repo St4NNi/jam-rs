@@ -122,6 +122,7 @@ pub struct TraceEngine {
     s3: Option<S3Config>,
     batch_stats: Mutex<TraceBatchStats>,
     observed: bool,
+    pub(crate) region_policy: crate::trace_islands::RegionPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -431,6 +432,17 @@ impl CachedSeedLookups {
     }
 }
 
+/// Internal region-policy study switch; release builds always use parent envelopes.
+fn study_region_policy() -> Result<crate::trace_islands::RegionPolicy, TraceError> {
+    #[cfg(feature = "bench-internals")]
+    match std::env::var("JAM_REGION_POLICY").as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("parent") => {}
+        Ok("islands") => return Ok(crate::trace_islands::RegionPolicy::Islands),
+        _ => return Err(TraceError::Invalid("JAM_REGION_POLICY")),
+    }
+    Ok(crate::trace_islands::RegionPolicy::Parent)
+}
+
 impl TraceEngine {
     pub fn open(
         jam: impl AsRef<Path>,
@@ -475,6 +487,7 @@ impl TraceEngine {
             s3,
             batch_stats: Mutex::default(),
             observed: false,
+            region_policy: Default::default(),
         })
     }
 
@@ -491,6 +504,7 @@ impl TraceEngine {
             s3,
             batch_stats: Mutex::default(),
             observed: false,
+            region_policy: Default::default(),
         })
     }
 
@@ -516,6 +530,7 @@ impl TraceEngine {
             s3,
             batch_stats: Mutex::default(),
             observed,
+            region_policy: study_region_policy()?,
         })
     }
 
@@ -1881,11 +1896,16 @@ impl TraceEngine {
         } else {
             0
         };
-        let regions = if self.observed {
+        // Island planning keeps each region's ordered anchors; charged by the per-pair routing
+        // reservation, which covers later SeedHit storage.
+        let retain_support = self.region_policy != crate::trace_islands::RegionPolicy::Parent;
+        let mut support = Vec::new();
+        let regions = if self.observed || retain_support {
             form_regions_observed(
                 region_hits,
                 config.diagonal_bin_bases,
                 Some(&mut predecessor_tests),
+                retain_support.then_some(&mut support),
             )
         } else {
             form_regions(region_hits, config.diagonal_bin_bases)
@@ -1893,7 +1913,8 @@ impl TraceEngine {
         self.downstream_cpu(1, geometry_cpu);
         let task_cpu = crate::alignment::observed_cpu(self.observed);
 
-        let tasks = self.tasks(regions, prepared.query_length, config)?;
+        let (tasks, split_parents) =
+            self.tasks(regions, &support, prepared.query_length, config)?;
         if let Some(started) = started {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.region_predecessor_tests += predecessor_tests;
@@ -1920,13 +1941,30 @@ impl TraceEngine {
         drop(metadata_reservation);
         drop(geometries);
         drop(geometry_reservation);
-        let (loaded, reads) = self.load_ranges(
+        let (loaded, mut reads) = self.load_ranges(
             &tasks,
             config.verify_resources,
             batch.map(|batch| &batch.sequence),
         )?;
         self.downstream_cpu(2, task_cpu);
-        let fragments = self.align_tasks(&prepared.query, &tasks, &loaded, config)?;
+        let outcomes = self.align_tasks(&prepared.query, &tasks, &loaded, config)?;
+        drop(loaded);
+        let fragments = if split_parents.is_empty() {
+            outcomes
+                .into_iter()
+                .filter_map(|outcome| outcome.fragment)
+                .collect::<Vec<_>>()
+        } else {
+            self.finish_island_tasks(
+                prepared,
+                &tasks,
+                outcomes,
+                &split_parents,
+                &mut reads,
+                config,
+                batch,
+            )?
+        };
         let result_cpu = crate::alignment::observed_cpu(self.observed);
         let mut before_dedup = 0u64;
         let mut after_dedup = 0u64;
@@ -2031,13 +2069,18 @@ impl TraceEngine {
             .collect::<Result<Vec<_>, TraceError>>()
     }
 
+    /// Plans alignment tasks. Under the island policy a split parent contributes its islands to
+    /// the returned tasks and its full envelope to the second list, which holds fallbacks only.
     fn tasks(
         &self,
         regions: Vec<(RegionKey, RegionAccumulator)>,
+        support: &[SeedHit],
         query_length: u64,
         config: TraceConfig,
-    ) -> Result<Vec<AlignmentTask>, TraceError> {
+    ) -> Result<(Vec<AlignmentTask>, Vec<AlignmentTask>), TraceError> {
         let mut tasks = Vec::new();
+        let mut split_parents = Vec::new();
+        let mut parent = 0u32;
         for (key, region) in regions {
             let minimum = if self.index.is_shared() {
                 config.min_seed_hits
@@ -2052,7 +2095,7 @@ impl TraceEngine {
                 .contig(key.contig_id)?
                 .ok_or(TraceError::Invalid("missing region contig"))?;
             let envelope = fragment_envelope(&region, key, query_length, contig.length, config)?;
-            tasks.push(AlignmentTask {
+            let task = |envelope: &FragmentEnvelope, island| AlignmentTask {
                 metagenome_id: key.metagenome_id,
                 contig_id: key.contig_id,
                 strand: key.strand,
@@ -2061,7 +2104,35 @@ impl TraceEngine {
                 target_start: envelope.target_start,
                 target_end: envelope.target_end,
                 diagonal_offset: envelope.diagonal_offset,
-            });
+                parent,
+                island,
+            };
+            let anchors = &support[region.support.clone()];
+            let islands = match self.region_policy {
+                crate::trace_islands::RegionPolicy::Parent => None,
+                crate::trace_islands::RegionPolicy::Islands => crate::trace_islands::plan_islands(
+                    &region,
+                    &envelope,
+                    anchors,
+                    key,
+                    query_length,
+                    contig.length,
+                    config,
+                )?,
+            };
+            if let Some(islands) = islands {
+                tasks.extend(
+                    islands
+                        .iter()
+                        .map(|island| task(&island.envelope, Some(island.edges))),
+                );
+                split_parents.push(task(&envelope, None));
+            } else {
+                tasks.push(task(&envelope, None));
+            }
+            parent = parent
+                .checked_add(1)
+                .ok_or(TraceError::Invalid("region count"))?;
         }
         tasks.sort_unstable_by_key(|task| {
             (
@@ -2072,7 +2143,86 @@ impl TraceEngine {
                 task.query_start,
             )
         });
-        Ok(tasks)
+        Ok((tasks, split_parents))
+    }
+
+    /// Applies the island fallback rule and returns fragments in parent task order. Any inner-edge
+    /// contact of an island reruns its full parent, whose result replaces all of its islands.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_island_tasks(
+        &self,
+        prepared: &PreparedQuery,
+        tasks: &[AlignmentTask],
+        outcomes: Vec<TaskOutcome>,
+        split_parents: &[AlignmentTask],
+        reads: &mut HashMap<MetagenomeId, (crate::range_source::RangeStats, u64)>,
+        config: TraceConfig,
+        batch: Option<&TraceBatch>,
+    ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
+        let fallback_parents = tasks
+            .iter()
+            .zip(&outcomes)
+            .filter(|(_, outcome)| outcome.contact)
+            .map(|(task, _)| task.parent)
+            .collect::<BTreeSet<_>>();
+        let fallback = split_parents
+            .iter()
+            .filter(|task| fallback_parents.contains(&task.parent))
+            .cloned()
+            .collect::<Vec<_>>();
+        let fallback_outcomes = if fallback.is_empty() {
+            Vec::new()
+        } else {
+            let (loaded, fallback_reads) = self.load_ranges(
+                &fallback,
+                config.verify_resources,
+                batch.map(|batch| &batch.sequence),
+            )?;
+            for (metagenome_id, (stats, blocks)) in fallback_reads {
+                let entry = reads.entry(metagenome_id).or_default();
+                entry.0.metadata_requests += stats.metadata_requests;
+                entry.0.read_requests += stats.read_requests;
+                entry.0.bytes_read += stats.bytes_read;
+                entry.0.read_nanoseconds = match (entry.0.read_nanoseconds, stats.read_nanoseconds)
+                {
+                    (Some(first), Some(second)) => Some(first + second),
+                    (first, second) => first.or(second),
+                };
+                entry.1 += blocks;
+            }
+            self.align_tasks(&prepared.query, &fallback, &loaded, config)?
+        };
+        let mut keyed = Vec::new();
+        let roles = tasks
+            .iter()
+            .map(|task| {
+                if task.island.is_some() {
+                    "island"
+                } else {
+                    "parent"
+                }
+            })
+            .chain(fallback.iter().map(|_| "fallback"));
+        for ((role, task), outcome) in roles
+            .zip(tasks.iter().chain(&fallback))
+            .zip(outcomes.into_iter().chain(fallback_outcomes))
+        {
+            if role == "island" && fallback_parents.contains(&task.parent) {
+                continue;
+            }
+            if let Some(fragment) = outcome.fragment {
+                let key = (
+                    task.metagenome_id,
+                    task.contig_id,
+                    task.strand,
+                    task.target_start,
+                    task.query_start,
+                );
+                keyed.push((key, fragment));
+            }
+        }
+        keyed.sort_by_key(|(key, _)| *key);
+        Ok(keyed.into_iter().map(|(_, fragment)| fragment).collect())
     }
 
     fn load_ranges(
@@ -2148,7 +2298,7 @@ impl TraceEngine {
         tasks: &[AlignmentTask],
         loaded: &BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
         config: TraceConfig,
-    ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
+    ) -> Result<Vec<TaskOutcome>, TraceError> {
         let mut geometry = [0usize; 4];
         for task in tasks {
             let query_bases = usize::try_from(task.query_span)
@@ -2271,6 +2421,7 @@ impl TraceEngine {
                 }
                 let mut alignment_config = config.alignment;
                 alignment_config.diagonal_offset = task.diagonal_offset;
+                let margin = config.endpoint_bases as u64;
                 let Some(initial) = align_task_window(
                     workspace,
                     &query_window,
@@ -2285,8 +2436,13 @@ impl TraceEngine {
                     if self.observed {
                         self.batch_stats.lock().unwrap().rejected_alignments += 1;
                     }
-                    return Ok(None);
+                    return Ok(TaskOutcome {
+                        fragment: None,
+                        contact: false,
+                    });
                 };
+                let mut contact =
+                    crate::trace_islands::touches_inner_edge(task, &initial.core, margin);
                 let mut alignment = initial.selected;
                 let initial_accepted = alignment_accepted(&alignment, config);
                 let mut query_start = task.query_start;
@@ -2335,12 +2491,16 @@ impl TraceEngine {
                     }
                     self.downstream_cpu(3, retry_cpu);
                 }
+                contact |= crate::trace_islands::touches_inner_edge(task, &alignment, margin);
                 if !alignment_accepted(&alignment, config) {
                     self.record_alignment_time(started, workspace, before);
                     if self.observed {
                         self.batch_stats.lock().unwrap().rejected_alignments += 1;
                     }
-                    return Ok(None);
+                    return Ok(TaskOutcome {
+                        fragment: None,
+                        contact,
+                    });
                 }
                 let projection_cpu = crate::alignment::observed_cpu(self.observed);
                 let query_segments = query_segments(
@@ -2354,22 +2514,26 @@ impl TraceEngine {
                 if self.observed {
                     self.batch_stats.lock().unwrap().returned_alignments += 1;
                 }
-                Ok(Some((
-                    task.metagenome_id,
-                    Fragment {
-                        contig_id: task.contig_id,
-                        query_segments,
-                        alignment,
-                    },
-                )))
-            })
-            .filter_map(|result| match result {
-                Ok(Some(value)) => Some(Ok(value)),
-                Ok(None) => None,
-                Err(error) => Some(Err(error)),
+                Ok(TaskOutcome {
+                    fragment: Some((
+                        task.metagenome_id,
+                        Fragment {
+                            contig_id: task.contig_id,
+                            query_segments,
+                            alignment,
+                        },
+                    )),
+                    contact,
+                })
             })
             .collect()
     }
+}
+
+/// Result of one alignment task. `contact` is set only for island tasks.
+struct TaskOutcome {
+    fragment: Option<(MetagenomeId, Fragment)>,
+    contact: bool,
 }
 
 struct WindowAlignment {
@@ -2865,18 +3029,18 @@ impl std::ops::Index<&u64> for QueryPositions {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct RegionKey {
-    metagenome_id: MetagenomeId,
-    contig_id: ContigId,
-    strand: Strand,
-    k: u8,
+pub(crate) struct RegionKey {
+    pub(crate) metagenome_id: MetagenomeId,
+    pub(crate) contig_id: ContigId,
+    pub(crate) strand: Strand,
+    pub(crate) k: u8,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SeedHit {
-    query: u64,
-    target: u64,
-    diagonal: i128,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SeedHit {
+    pub(crate) query: u64,
+    pub(crate) target: u64,
+    pub(crate) diagonal: i128,
 }
 
 #[derive(Default)]
@@ -2942,18 +3106,20 @@ impl RegionHits {
     }
 }
 
-struct RegionAccumulator {
-    query_start: u64,
-    query_end: u64,
-    target_start: u64,
-    target_end: u64,
-    diagonal_min: i128,
-    diagonal_max: i128,
-    hits: u32,
+pub(crate) struct RegionAccumulator {
+    pub(crate) query_start: u64,
+    pub(crate) query_end: u64,
+    pub(crate) target_start: u64,
+    pub(crate) target_end: u64,
+    pub(crate) diagonal_min: i128,
+    pub(crate) diagonal_max: i128,
+    pub(crate) hits: u32,
+    /// Ordered anchors of this region in the query's support array, when retained.
+    pub(crate) support: std::ops::Range<usize>,
 }
 
 impl RegionAccumulator {
-    fn new(hit: SeedHit) -> Self {
+    pub(crate) fn new(hit: SeedHit) -> Self {
         Self {
             query_start: hit.query,
             query_end: hit.query,
@@ -2962,6 +3128,7 @@ impl RegionAccumulator {
             diagonal_min: hit.diagonal,
             diagonal_max: hit.diagonal,
             hits: 1,
+            support: 0..0,
         }
     }
 
@@ -2972,7 +3139,7 @@ impl RegionAccumulator {
                 >= self.diagonal_max.max(hit.diagonal)
     }
 
-    fn add(&mut self, hit: SeedHit) {
+    pub(crate) fn add(&mut self, hit: SeedHit) {
         self.query_end = hit.query;
         self.target_end = hit.target;
         self.diagonal_min = self.diagonal_min.min(hit.diagonal);
@@ -2985,13 +3152,16 @@ fn form_regions(
     hits_by_contig: BTreeMap<RegionKey, RegionHits>,
     max_diagonal_drift: u64,
 ) -> Vec<(RegionKey, RegionAccumulator)> {
-    form_regions_observed(hits_by_contig, max_diagonal_drift, None)
+    form_regions_observed(hits_by_contig, max_diagonal_drift, None, None)
 }
 
+/// Forms regions. With `support`, each region's anchors are appended to one ordered array and
+/// the region keeps its range; anchors stay in query order within the range.
 fn form_regions_observed(
     hits_by_contig: BTreeMap<RegionKey, RegionHits>,
     max_diagonal_drift: u64,
     mut predecessor_tests: Option<&mut u64>,
+    mut support: Option<&mut Vec<SeedHit>>,
 ) -> Vec<(RegionKey, RegionAccumulator)> {
     let mut output = Vec::new();
     for (key, hits) in hits_by_contig {
@@ -3016,16 +3186,42 @@ fn form_regions_observed(
             hits.sort_unstable_by_key(|hit| (hit.query, hit.target));
         }
         let mut regions = Vec::<RegionAccumulator>::new();
-        for hit in hits {
-            if let Some(region) = regions.iter_mut().rev().find(|region| {
-                if let Some(tests) = predecessor_tests.as_deref_mut() {
-                    *tests += 1;
-                }
-                region.accepts(hit, max_diagonal_drift)
-            }) {
+        let mut owners = Vec::new();
+        for &hit in &hits {
+            if let Some((ordinal, region)) =
+                regions.iter_mut().enumerate().rev().find(|(_, region)| {
+                    if let Some(tests) = predecessor_tests.as_deref_mut() {
+                        *tests += 1;
+                    }
+                    region.accepts(hit, max_diagonal_drift)
+                })
+            {
                 region.add(hit);
+                if support.is_some() {
+                    owners.push(ordinal);
+                }
             } else {
+                if support.is_some() {
+                    owners.push(regions.len());
+                }
                 regions.push(RegionAccumulator::new(hit));
+            }
+        }
+        if let Some(support) = support.as_deref_mut() {
+            let mut next = vec![0usize; regions.len()];
+            for &owner in &owners {
+                next[owner] += 1;
+            }
+            let mut offset = support.len();
+            for (region, next) in regions.iter_mut().zip(&mut next) {
+                region.support = offset..offset + *next;
+                *next = offset;
+                offset = region.support.end;
+            }
+            support.resize(offset, SeedHit::default());
+            for (&hit, &owner) in hits.iter().zip(&owners) {
+                support[next[owner]] = hit;
+                next[owner] += 1;
             }
         }
         output.extend(regions.into_iter().map(|region| (key, region)));
@@ -3033,31 +3229,36 @@ fn form_regions_observed(
     output
 }
 
-struct AlignmentTask {
+#[derive(Clone)]
+pub(crate) struct AlignmentTask {
     metagenome_id: MetagenomeId,
     contig_id: ContigId,
     strand: Strand,
-    query_start: u64,
-    query_span: u64,
-    target_start: u64,
-    target_end: u64,
+    pub(crate) query_start: u64,
+    pub(crate) query_span: u64,
+    pub(crate) target_start: u64,
+    pub(crate) target_end: u64,
     diagonal_offset: i64,
+    /// Ordinal of the admitted parent region within this query.
+    parent: u32,
+    /// Inner island sides; `None` for a full parent envelope.
+    pub(crate) island: Option<crate::trace_islands::InnerEdges>,
 }
 
-const SHORT_CONTIG_ENVELOPE_BYTES: u64 = 64 * 1024;
+pub(crate) const SHORT_CONTIG_ENVELOPE_BYTES: u64 = 64 * 1024;
 const LONG_CONTIG_ENVELOPE_FLANK_LIMIT: u64 = 16 * 1024;
 const ALIGNMENT_CELL_RESERVE_DIVISOR: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FragmentEnvelope {
-    query_start: u64,
-    query_span: u64,
-    target_start: u64,
-    target_end: u64,
-    diagonal_offset: i64,
+pub(crate) struct FragmentEnvelope {
+    pub(crate) query_start: u64,
+    pub(crate) query_span: u64,
+    pub(crate) target_start: u64,
+    pub(crate) target_end: u64,
+    pub(crate) diagonal_offset: i64,
 }
 
-fn fragment_envelope(
+pub(crate) fn fragment_envelope(
     region: &RegionAccumulator,
     key: RegionKey,
     query_length: u64,
@@ -4312,6 +4513,8 @@ mod tests {
                     target_start: 0,
                     target_end: padded_target.len() as u64,
                     diagonal_offset: 0,
+                    parent: 0,
+                    island: None,
                 }],
                 &BTreeMap::from([(
                     (0, 0),
@@ -4328,6 +4531,10 @@ mod tests {
                 },
             )
             .unwrap();
+        let fragments = fragments
+            .into_iter()
+            .filter_map(|outcome| outcome.fragment)
+            .collect::<Vec<_>>();
         assert_eq!(fragments.len(), 1);
         assert_eq!(fragments[0].1.alignment.identity(), 1.0);
         assert_eq!(
@@ -4575,6 +4782,7 @@ mod tests {
             diagonal_min: i128::from(target) - i128::from(query),
             diagonal_max: i128::from(target) - i128::from(query),
             hits,
+            support: 0..0,
         }
     }
 
@@ -5704,6 +5912,8 @@ mod tests {
             target_start: 0,
             target_end: target.len() as u64,
             diagonal_offset: 20,
+            parent: 0,
+            island: None,
         };
         let mut initial_config = config.alignment;
         initial_config.diagonal_offset = task.diagonal_offset;
