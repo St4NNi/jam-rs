@@ -4988,6 +4988,138 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn island_window_accepts_forty_base_eighty_percent_trace_without_exact_fifteen_mer() {
+        let substitute = |base: u8| if base == b'A' { b'C' } else { b'A' };
+        let core = window_dna(0x40b0_5eed, 40);
+        let config = TraceConfig::default();
+        let mut alignment_config = config.alignment;
+        alignment_config.diagonal_offset = 100;
+        let run = |mismatches: &[usize]| {
+            let mut fragment = core.clone();
+            for &at in mismatches {
+                fragment[at] = substitute(fragment[at]);
+            }
+            let longest_exact = fragment
+                .iter()
+                .zip(&core)
+                .fold((0, 0), |(run, best), (a, b)| {
+                    let run = if a == b { run + 1 } else { 0 };
+                    (run, best.max(run))
+                })
+                .1;
+            assert!(longest_exact < 15);
+            let left = window_dna(0x51, 900);
+            let right = window_dna(0x52, 900);
+            let mut target_left = window_dna(0x61, 1_000);
+            let mut target_right = window_dna(0x62, 1_000);
+            // Unrelated flanks start with forced mismatches, so the trace cannot grow by chance.
+            for offset in 1..=3 {
+                target_left[1_000 - offset] = substitute(left[900 - offset]);
+                target_right[offset - 1] = substitute(right[offset - 1]);
+            }
+            let query = [left, fragment, right].concat();
+            let target = [target_left, core.clone(), target_right].concat();
+            let mut workspace = AlignmentWorkspace::default();
+            let window = align_task_window(
+                &mut workspace,
+                &query,
+                &target,
+                0,
+                Strand::Forward,
+                alignment_config,
+                config,
+            )
+            .unwrap()
+            .unwrap();
+            let task = AlignmentTask {
+                metagenome_id: 0,
+                contig_id: 0,
+                strand: Strand::Forward,
+                query_start: 0,
+                query_span: query.len() as u64,
+                target_start: 0,
+                target_end: target.len() as u64,
+                diagonal_offset: 100,
+                parent: 0,
+                island: Some(crate::trace_islands::InnerEdges {
+                    query_left: true,
+                    query_right: true,
+                    target_left: true,
+                    target_right: true,
+                }),
+            };
+            let contact = crate::trace_islands::touches_inner_edge(
+                &task,
+                &window.selected,
+                config.endpoint_bases as u64,
+            );
+            (window.selected, contact)
+        };
+        let eight: Vec<usize> = (2..40).step_by(5).collect();
+        let (accepted, contact) = run(&eight);
+        assert_eq!(accepted.query_interval, Interval::new(900, 940).unwrap());
+        assert_eq!((accepted.matches, accepted.substitutions), (32, 8));
+        assert!(alignment_accepted(&accepted, config) && !contact);
+        let nine = [eight.as_slice(), &[20]].concat();
+        let (rejected, _) = run(&nine);
+        assert!(!alignment_accepted(&rejected, config));
+    }
+
+    #[test]
+    fn islands_split_only_distant_anchor_groups_on_long_contigs() {
+        let config = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let key = envelope_key(Strand::Forward);
+        let anchors = |positions: &[u64]| {
+            positions
+                .iter()
+                .map(|&query| SeedHit {
+                    query,
+                    target: query + 20_000,
+                    diagonal: 20_000,
+                })
+                .collect::<Vec<_>>()
+        };
+        let plan = |positions: &[u64], contig_length: u64| {
+            let hits = anchors(positions);
+            let mut region = RegionAccumulator::new(hits[0]);
+            for &hit in &hits[1..] {
+                region.add(hit);
+            }
+            region.support = 0..hits.len();
+            let envelope = fragment_envelope(&region, key, 45_000, contig_length, config).unwrap();
+            crate::trace_islands::plan_islands(
+                &region,
+                &envelope,
+                &hits,
+                key,
+                45_000,
+                contig_length,
+                config,
+            )
+            .unwrap()
+            .map(|islands| {
+                islands
+                    .iter()
+                    .map(|island| (island.region.support.clone(), island.edges))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(plan(&[5_000, 5_500, 6_000], 200_000), None);
+        assert_eq!(plan(&[5_000, 35_000], 64 * 1024), None);
+        let split = plan(&[5_000, 5_900, 35_000], 200_000).unwrap();
+        assert_eq!(split.len(), 2);
+        assert_eq!((split[0].0.clone(), split[1].0.clone()), (0..2, 2..3));
+        let [first, second] = [split[0].1, split[1].1];
+        assert!(first.query_left && first.target_left && first.query_right && first.target_right);
+        assert!(
+            second.query_left && second.target_left && second.query_right && second.target_right
+        );
+    }
+
     fn envelope_region(query: u64, target: u64, hits: u32) -> RegionAccumulator {
         RegionAccumulator {
             query_start: query,
