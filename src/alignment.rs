@@ -1888,6 +1888,9 @@ fn anchored_semiglobal(
     for row in 1..rows {
         let first = row * columns;
         let [previous, current] = &mut matrix.rows;
+        let previous = &previous[..columns];
+        let current = &mut current[..columns];
+        let traceback = &mut matrix.previous[first..first + columns];
         current[0] = [NEGATIVE; 3];
         current[0][DELETION as usize] = config.gap_open_score.saturating_add(
             config
@@ -1895,10 +1898,7 @@ fn anchored_semiglobal(
                 .saturating_mul(i32::try_from(row).unwrap_or(i32::MAX)),
         );
         let state = if row == 1 { MATCH } else { DELETION };
-        matrix.previous[first] = (INITIAL_PREVIOUS & !(3 << 4)) | (state << 4);
-        if row + 1 == rows {
-            consider(row, 0, current[0]);
-        }
+        traceback[0] = (INITIAL_PREVIOUS & !(3 << 4)) | (state << 4);
         for column in 1..columns {
             let (score, state) = maximum(previous[column - 1]);
             let left = current[column - 1];
@@ -1927,10 +1927,14 @@ fn anchored_semiglobal(
                 left[DELETION as usize].saturating_add(gap_open(config)),
             ]);
             cell[INSERTION as usize] = score;
-            matrix.previous[first + column] = packed | (state << 2);
-            if row + 1 == rows || column + 1 == columns {
-                consider(row, column, *cell);
+            traceback[column] = packed | (state << 2);
+        }
+        if row + 1 == rows {
+            for (column, &scores) in current.iter().enumerate() {
+                consider(row, column, scores);
             }
+        } else {
+            consider(row, columns - 1, current[columns - 1]);
         }
         matrix.rows.swap(0, 1);
     }
