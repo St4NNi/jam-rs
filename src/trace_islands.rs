@@ -5,11 +5,17 @@
 //! a group of the parent's own anchors; islands inherit the parent's admission and are never
 //! admitted again on their own.
 
-use crate::alignment::Alignment;
+use crate::alignment::{Alignment, AlignmentWork};
 use crate::trace::{
     AlignmentTask, FragmentEnvelope, RegionAccumulator, RegionKey, SHORT_CONTIG_ENVELOPE_BYTES,
     SeedHit, TraceConfig, TraceError, fragment_envelope,
 };
+use serde::Serialize;
+
+/// Seed length of the core anchors the shared index projects every context onto.
+const ANCHOR_BASES: u64 = 15;
+/// Anchor coordinates are written only for small regions; counts are always written.
+const LEDGER_ANCHOR_LIMIT: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum RegionPolicy {
@@ -17,7 +23,17 @@ pub(crate) enum RegionPolicy {
     #[default]
     Parent,
     /// Split parents run one task per island; any inner-edge contact reruns the full parent.
+    #[cfg_attr(not(any(test, feature = "bench-internals")), allow(dead_code))]
     Islands,
+}
+
+impl RegionPolicy {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Islands => "islands",
+        }
+    }
 }
 
 /// Island window sides that lie strictly inside the parent window. Only these sides can hide an
@@ -135,4 +151,179 @@ pub(crate) fn touches_inner_edge(task: &AlignmentTask, alignment: &Alignment, ma
         || (edges.query_right && query.end.saturating_add(margin) > task.query_span)
         || (edges.target_left && target.start < task.target_start.saturating_add(margin))
         || (edges.target_right && target.end.saturating_add(margin) > task.target_end)
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct WindowLedger {
+    pub(crate) query_start: u64,
+    pub(crate) query_span: u64,
+    pub(crate) target_start: u64,
+    pub(crate) target_end: u64,
+    pub(crate) diagonal_offset: i64,
+    pub(crate) anchors: u32,
+}
+
+impl WindowLedger {
+    pub(crate) fn new(envelope: &FragmentEnvelope, anchors: u32) -> Self {
+        Self {
+            query_start: envelope.query_start,
+            query_span: envelope.query_span,
+            target_start: envelope.target_start,
+            target_end: envelope.target_end,
+            diagonal_offset: envelope.diagonal_offset,
+            anchors,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AlignmentLedger {
+    pub(crate) query_start: u64,
+    pub(crate) query_end: u64,
+    pub(crate) target_start: u64,
+    pub(crate) target_end: u64,
+    pub(crate) score: i32,
+    pub(crate) identity: f64,
+    /// Parent anchors whose query start lies inside the aligned query interval.
+    pub(crate) anchors_inside: u32,
+    /// Query bases from the aligned interval to the nearest parent anchor; zero when inside.
+    pub(crate) nearest_anchor_distance: u64,
+}
+
+impl AlignmentLedger {
+    pub(crate) fn new(
+        alignment: &Alignment,
+        window_start: u64,
+        anchors: &[SeedHit],
+        query_length: u64,
+    ) -> Self {
+        let interval = alignment.query_interval;
+        let mut inside = 0;
+        let mut nearest = u64::MAX;
+        for anchor in anchors {
+            let position = if anchor.query >= window_start {
+                anchor.query - window_start
+            } else {
+                anchor.query + query_length - window_start
+            };
+            if position >= interval.start && position < interval.end {
+                inside += 1;
+                nearest = 0;
+            } else {
+                let distance = if position < interval.start {
+                    interval.start - position
+                } else {
+                    position + 1 - interval.end
+                };
+                nearest = nearest.min(distance);
+            }
+        }
+        Self {
+            query_start: interval.start,
+            query_end: interval.end,
+            target_start: alignment.target_interval.start,
+            target_end: alignment.target_interval.end,
+            score: alignment.score,
+            identity: alignment.identity(),
+            anchors_inside: inside,
+            nearest_anchor_distance: nearest,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct TaskLedger {
+    /// `parent`, `island` or `fallback`.
+    pub(crate) role: &'static str,
+    pub(crate) window: WindowLedger,
+    pub(crate) band_cells: u64,
+    pub(crate) work: AlignmentWork,
+    pub(crate) core: Option<AlignmentLedger>,
+    pub(crate) selected: Option<AlignmentLedger>,
+    pub(crate) accepted: bool,
+    pub(crate) contact: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct SupportLedger {
+    pub(crate) anchors: u32,
+    pub(crate) anchors_with_21: u32,
+    pub(crate) anchors_with_31: u32,
+    pub(crate) anchor_query: Vec<u64>,
+    pub(crate) anchor_target: Vec<u64>,
+    pub(crate) union_query_bases: u64,
+    pub(crate) union_target_bases: u64,
+    pub(crate) query_span: u64,
+    pub(crate) target_span: u64,
+    pub(crate) max_query_gap: u64,
+    pub(crate) max_target_gap: u64,
+    pub(crate) max_gap_difference: u64,
+    pub(crate) diagonal_spread: u64,
+}
+
+impl SupportLedger {
+    /// Summarizes distinct core anchor pairs. `contexts` holds one bit per anchor for 21 (2) and
+    /// 31 (4) contexts; contexts are evidence about the same pair, not further hits.
+    pub(crate) fn new(anchors: &[SeedHit], contexts: &[u8]) -> Self {
+        let mut ledger = Self {
+            anchors: u32::try_from(anchors.len()).unwrap_or(u32::MAX),
+            ..Self::default()
+        };
+        let (Some(first), Some(last)) = (anchors.first(), anchors.last()) else {
+            return ledger;
+        };
+        ledger.anchors_with_21 = contexts.iter().filter(|&&mask| mask & 2 != 0).count() as u32;
+        ledger.anchors_with_31 = contexts.iter().filter(|&&mask| mask & 4 != 0).count() as u32;
+        if anchors.len() <= LEDGER_ANCHOR_LIMIT {
+            ledger.anchor_query = anchors.iter().map(|hit| hit.query).collect();
+            ledger.anchor_target = anchors.iter().map(|hit| hit.target).collect();
+        }
+        ledger.query_span = last.query + ANCHOR_BASES - first.query;
+        ledger.target_span = last.target + ANCHOR_BASES - first.target;
+        let (mut diagonal_min, mut diagonal_max) = (first.diagonal, first.diagonal);
+        let mut query_end = first.query;
+        let mut target_end = first.target;
+        for (index, hit) in anchors.iter().enumerate() {
+            ledger.union_query_bases +=
+                ANCHOR_BASES - query_end.saturating_sub(hit.query).min(ANCHOR_BASES);
+            ledger.union_target_bases +=
+                ANCHOR_BASES - target_end.saturating_sub(hit.target).min(ANCHOR_BASES);
+            if index > 0 {
+                let previous = anchors[index - 1];
+                ledger.max_query_gap = ledger
+                    .max_query_gap
+                    .max(hit.query.saturating_sub(previous.query + ANCHOR_BASES));
+                ledger.max_target_gap = ledger
+                    .max_target_gap
+                    .max(hit.target.saturating_sub(previous.target + ANCHOR_BASES));
+                ledger.max_gap_difference = ledger
+                    .max_gap_difference
+                    .max((hit.diagonal - previous.diagonal).unsigned_abs() as u64);
+            }
+            query_end = hit.query + ANCHOR_BASES;
+            target_end = hit.target + ANCHOR_BASES;
+            diagonal_min = diagonal_min.min(hit.diagonal);
+            diagonal_max = diagonal_max.max(hit.diagonal);
+        }
+        ledger.diagonal_spread = (diagonal_max - diagonal_min).unsigned_abs() as u64;
+        ledger
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ParentLedger {
+    pub(crate) query_id: String,
+    pub(crate) query_length: u64,
+    pub(crate) circular: bool,
+    pub(crate) policy: &'static str,
+    pub(crate) parent: u32,
+    pub(crate) metagenome_id: u32,
+    pub(crate) contig_id: u32,
+    pub(crate) contig_length: u64,
+    pub(crate) strand: crate::alignment::Strand,
+    pub(crate) support: SupportLedger,
+    pub(crate) parent_window: WindowLedger,
+    pub(crate) islands: Vec<WindowLedger>,
+    pub(crate) fallback: bool,
+    pub(crate) tasks: Vec<TaskLedger>,
 }

@@ -123,6 +123,8 @@ pub struct TraceEngine {
     batch_stats: Mutex<TraceBatchStats>,
     observed: bool,
     pub(crate) region_policy: crate::trace_islands::RegionPolicy,
+    /// Directory for per-query region support ledgers (diagnostic runs only).
+    pub(crate) region_ledger: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -443,6 +445,14 @@ fn study_region_policy() -> Result<crate::trace_islands::RegionPolicy, TraceErro
     Ok(crate::trace_islands::RegionPolicy::Parent)
 }
 
+fn study_region_ledger() -> Option<PathBuf> {
+    #[cfg(feature = "bench-internals")]
+    if let Some(path) = std::env::var_os("JAM_REGION_LEDGER") {
+        return Some(path.into());
+    }
+    None
+}
+
 impl TraceEngine {
     pub fn open(
         jam: impl AsRef<Path>,
@@ -488,6 +498,7 @@ impl TraceEngine {
             batch_stats: Mutex::default(),
             observed: false,
             region_policy: Default::default(),
+            region_ledger: None,
         })
     }
 
@@ -505,6 +516,7 @@ impl TraceEngine {
             batch_stats: Mutex::default(),
             observed: false,
             region_policy: Default::default(),
+            region_ledger: None,
         })
     }
 
@@ -531,6 +543,7 @@ impl TraceEngine {
             batch_stats: Mutex::default(),
             observed,
             region_policy: study_region_policy()?,
+            region_ledger: study_region_ledger(),
         })
     }
 
@@ -1668,6 +1681,8 @@ impl TraceEngine {
             (reservation.bytes - 4096) / geometry_row_bytes
         });
         let mut geometries = BTreeSet::<SharedGeometry>::new();
+        // Ledger runs record 21/31 contexts per core pair, so repeated geometries are replayed.
+        let mut region_ledger = self.region_ledger.as_ref().map(|_| RegionLedger::default());
         let mut routing_reserved_bytes = 4096usize;
         let batch_lookups = batch.and_then(|batch| batch.lookups.as_ref());
         if let Some(shared) = batch_lookups
@@ -1803,10 +1818,11 @@ impl TraceEngine {
                                     seed.canonical_orientation,
                                 );
                                 if geometries.len() < geometry_limit {
-                                    if !geometries.insert(geometry) {
+                                    if !geometries.insert(geometry) && region_ledger.is_none() {
                                         continue;
                                     }
-                                } else if geometries.contains(&geometry) {
+                                } else if geometries.contains(&geometry) && region_ledger.is_none()
+                                {
                                     continue;
                                 }
                             }
@@ -1859,6 +1875,23 @@ impl TraceEngine {
                                     target: oriented_position,
                                     diagonal,
                                 };
+                                if let Some(ledger) = region_ledger.as_mut() {
+                                    let context = match seed_k {
+                                        21 => 2,
+                                        31 => 4,
+                                        _ => 1,
+                                    };
+                                    let key = RegionKey {
+                                        metagenome_id: contig.metagenome_id,
+                                        contig_id: contig.id,
+                                        strand,
+                                        k: region_k,
+                                    };
+                                    *ledger
+                                        .contexts
+                                        .entry((key, query_position, oriented_position))
+                                        .or_default() |= context;
+                                }
                                 if self.index.is_shared() {
                                     region.push_unique(hit, &mut routing_reserved_bytes)?;
                                 } else {
@@ -1896,9 +1929,10 @@ impl TraceEngine {
         } else {
             0
         };
-        // Island planning keeps each region's ordered anchors; charged by the per-pair routing
-        // reservation, which covers later SeedHit storage.
-        let retain_support = self.region_policy != crate::trace_islands::RegionPolicy::Parent;
+        // Island planning and ledgers keep each region's ordered anchors; charged by the
+        // per-pair routing reservation, which covers later SeedHit storage.
+        let retain_support = self.region_policy != crate::trace_islands::RegionPolicy::Parent
+            || region_ledger.is_some();
         let mut support = Vec::new();
         let regions = if self.observed || retain_support {
             form_regions_observed(
@@ -1913,8 +1947,13 @@ impl TraceEngine {
         self.downstream_cpu(1, geometry_cpu);
         let task_cpu = crate::alignment::observed_cpu(self.observed);
 
-        let (tasks, split_parents) =
-            self.tasks(regions, &support, prepared.query_length, config)?;
+        let (tasks, split_parents) = self.tasks(
+            regions,
+            &support,
+            prepared.query_length,
+            config,
+            region_ledger.as_mut(),
+        )?;
         if let Some(started) = started {
             let mut stats = self.batch_stats.lock().unwrap();
             stats.region_predecessor_tests += predecessor_tests;
@@ -1949,7 +1988,7 @@ impl TraceEngine {
         self.downstream_cpu(2, task_cpu);
         let outcomes = self.align_tasks(&prepared.query, &tasks, &loaded, config)?;
         drop(loaded);
-        let fragments = if split_parents.is_empty() {
+        let fragments = if split_parents.is_empty() && region_ledger.is_none() {
             outcomes
                 .into_iter()
                 .filter_map(|outcome| outcome.fragment)
@@ -1960,7 +1999,9 @@ impl TraceEngine {
                 &tasks,
                 outcomes,
                 &split_parents,
+                &support,
                 &mut reads,
+                region_ledger,
                 config,
                 batch,
             )?
@@ -2077,6 +2118,7 @@ impl TraceEngine {
         support: &[SeedHit],
         query_length: u64,
         config: TraceConfig,
+        mut ledger: Option<&mut RegionLedger>,
     ) -> Result<(Vec<AlignmentTask>, Vec<AlignmentTask>), TraceError> {
         let mut tasks = Vec::new();
         let mut split_parents = Vec::new();
@@ -2120,6 +2162,44 @@ impl TraceEngine {
                     config,
                 )?,
             };
+            if let Some(ledger) = ledger.as_deref_mut() {
+                let contexts = anchors
+                    .iter()
+                    .map(|hit| {
+                        ledger
+                            .contexts
+                            .get(&(key, hit.query, hit.target))
+                            .copied()
+                            .unwrap_or(0)
+                    })
+                    .collect::<Vec<_>>();
+                ledger.support.push(region.support.clone());
+                ledger.parents.push(crate::trace_islands::ParentLedger {
+                    query_id: String::new(),
+                    query_length,
+                    circular: config.circular,
+                    policy: self.region_policy.name(),
+                    parent,
+                    metagenome_id: key.metagenome_id,
+                    contig_id: key.contig_id,
+                    contig_length: contig.length,
+                    strand: key.strand,
+                    support: crate::trace_islands::SupportLedger::new(anchors, &contexts),
+                    parent_window: crate::trace_islands::WindowLedger::new(&envelope, region.hits),
+                    islands: islands
+                        .iter()
+                        .flatten()
+                        .map(|island| {
+                            crate::trace_islands::WindowLedger::new(
+                                &island.envelope,
+                                island.region.hits,
+                            )
+                        })
+                        .collect(),
+                    fallback: false,
+                    tasks: Vec::new(),
+                });
+            }
             if let Some(islands) = islands {
                 tasks.extend(
                     islands
@@ -2155,7 +2235,9 @@ impl TraceEngine {
         tasks: &[AlignmentTask],
         outcomes: Vec<TaskOutcome>,
         split_parents: &[AlignmentTask],
+        support: &[SeedHit],
         reads: &mut HashMap<MetagenomeId, (crate::range_source::RangeStats, u64)>,
+        mut ledger: Option<RegionLedger>,
         config: TraceConfig,
         batch: Option<&TraceBatch>,
     ) -> Result<Vec<(MetagenomeId, Fragment)>, TraceError> {
@@ -2192,6 +2274,7 @@ impl TraceEngine {
             }
             self.align_tasks(&prepared.query, &fallback, &loaded, config)?
         };
+        let query_length = prepared.query_length;
         let mut keyed = Vec::new();
         let roles = tasks
             .iter()
@@ -2207,6 +2290,56 @@ impl TraceEngine {
             .zip(tasks.iter().chain(&fallback))
             .zip(outcomes.into_iter().chain(fallback_outcomes))
         {
+            if let Some(RegionLedger {
+                support: ranges,
+                parents,
+                ..
+            }) = ledger.as_mut()
+            {
+                let parent = &mut parents[task.parent as usize];
+                parent.fallback |= role == "fallback";
+                let anchors = &support[ranges[task.parent as usize].clone()];
+                let observation = outcome.ledger.as_deref();
+                parent.tasks.push(crate::trace_islands::TaskLedger {
+                    role,
+                    window: crate::trace_islands::WindowLedger::new(
+                        &FragmentEnvelope {
+                            query_start: task.query_start,
+                            query_span: task.query_span,
+                            target_start: task.target_start,
+                            target_end: task.target_end,
+                            diagonal_offset: task.diagonal_offset,
+                        },
+                        0,
+                    ),
+                    band_cells: observation.map_or(0, |observed| observed.band_cells),
+                    work: observation
+                        .map(|observed| observed.work)
+                        .unwrap_or_default(),
+                    core: observation.and_then(|observed| {
+                        observed.core.as_ref().map(|alignment| {
+                            crate::trace_islands::AlignmentLedger::new(
+                                alignment,
+                                task.query_start,
+                                anchors,
+                                query_length,
+                            )
+                        })
+                    }),
+                    selected: observation.and_then(|observed| {
+                        observed.selected.as_ref().map(|alignment| {
+                            crate::trace_islands::AlignmentLedger::new(
+                                alignment,
+                                observed.query_start,
+                                anchors,
+                                query_length,
+                            )
+                        })
+                    }),
+                    accepted: outcome.fragment.is_some(),
+                    contact: outcome.contact,
+                });
+            }
             if role == "island" && fallback_parents.contains(&task.parent) {
                 continue;
             }
@@ -2222,6 +2355,29 @@ impl TraceEngine {
             }
         }
         keyed.sort_by_key(|(key, _)| *key);
+        if let (Some(ledger), Some(directory)) = (ledger, &self.region_ledger) {
+            use std::io::Write as _;
+            let name = format!(
+                "{}-{}.jsonl",
+                &digest_hex(sha256(prepared.query_id.as_bytes()))[..16],
+                self.region_policy.name()
+            );
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(directory.join(name))?;
+            let mut writer = io::BufWriter::new(file);
+            for mut parent in ledger.parents {
+                parent.query_id.clone_from(&prepared.query_id);
+                serde_json::to_writer(&mut writer, &parent)
+                    .map_err(|_| TraceError::Invalid("region ledger serialization"))?;
+                writer.write_all(b"\n")?;
+            }
+            writer
+                .into_inner()
+                .map_err(|error| TraceError::Io(error.into_error()))?
+                .sync_all()?;
+        }
         Ok(keyed.into_iter().map(|(_, fragment)| fragment).collect())
     }
 
@@ -2299,6 +2455,7 @@ impl TraceEngine {
         loaded: &BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
         config: TraceConfig,
     ) -> Result<Vec<TaskOutcome>, TraceError> {
+        let ledger = self.region_ledger.is_some();
         let mut geometry = [0usize; 4];
         for task in tasks {
             let query_bases = usize::try_from(task.query_span)
@@ -2439,6 +2596,22 @@ impl TraceEngine {
                     return Ok(TaskOutcome {
                         fragment: None,
                         contact: false,
+                        ledger: ledger.then(|| {
+                            Box::new(TaskObservation {
+                                work: workspace.work,
+                                band_cells: task_local_cells(
+                                    task,
+                                    target.len(),
+                                    query.len(),
+                                    config,
+                                )
+                                .unwrap_or(usize::MAX)
+                                    as u64,
+                                core: None,
+                                selected: None,
+                                query_start: task.query_start,
+                            })
+                        }),
                     });
                 };
                 let mut contact =
@@ -2492,6 +2665,26 @@ impl TraceEngine {
                     self.downstream_cpu(3, retry_cpu);
                 }
                 contact |= crate::trace_islands::touches_inner_edge(task, &alignment, margin);
+                let observation =
+                    |workspace: &crate::alignment::AlignmentWorkspace,
+                     alignment: &crate::alignment::Alignment| {
+                        ledger.then(|| {
+                            Box::new(TaskObservation {
+                                work: workspace.work,
+                                band_cells: task_local_cells(
+                                    task,
+                                    target.len(),
+                                    query.len(),
+                                    config,
+                                )
+                                .unwrap_or(usize::MAX)
+                                    as u64,
+                                core: Some(initial.core.clone()),
+                                selected: Some(alignment.clone()),
+                                query_start,
+                            })
+                        })
+                    };
                 if !alignment_accepted(&alignment, config) {
                     self.record_alignment_time(started, workspace, before);
                     if self.observed {
@@ -2500,6 +2693,7 @@ impl TraceEngine {
                     return Ok(TaskOutcome {
                         fragment: None,
                         contact,
+                        ledger: observation(workspace, &alignment),
                     });
                 }
                 let projection_cpu = crate::alignment::observed_cpu(self.observed);
@@ -2514,6 +2708,7 @@ impl TraceEngine {
                 if self.observed {
                     self.batch_stats.lock().unwrap().returned_alignments += 1;
                 }
+                let ledger = observation(workspace, &alignment);
                 Ok(TaskOutcome {
                     fragment: Some((
                         task.metagenome_id,
@@ -2524,16 +2719,36 @@ impl TraceEngine {
                         },
                     )),
                     contact,
+                    ledger,
                 })
             })
             .collect()
     }
 }
 
+/// Diagnostic region support for one query: 21/31 context bits per core pair, each admitted
+/// parent's anchor range and its ledger record.
+#[derive(Default)]
+struct RegionLedger {
+    contexts: BTreeMap<(RegionKey, u64, u64), u8>,
+    support: Vec<std::ops::Range<usize>>,
+    parents: Vec<crate::trace_islands::ParentLedger>,
+}
+
 /// Result of one alignment task. `contact` is set only for island tasks.
 struct TaskOutcome {
     fragment: Option<(MetagenomeId, Fragment)>,
     contact: bool,
+    ledger: Option<Box<TaskObservation>>,
+}
+
+/// Per-task work and alignments retained for the region support ledger.
+struct TaskObservation {
+    work: crate::alignment::AlignmentWork,
+    band_cells: u64,
+    core: Option<crate::alignment::Alignment>,
+    selected: Option<crate::alignment::Alignment>,
+    query_start: u64,
 }
 
 struct WindowAlignment {
