@@ -6,7 +6,7 @@
 
 use crate::alignment::{Interval, Strand};
 use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
-use crate::trace::{TraceConfig, TraceEngine, TraceResult};
+use crate::trace::{SearchCompletion, TraceBatchStats, TraceConfig, TraceEngine, TraceResult};
 use crate::trace_islands::RegionPolicy;
 use noodles_bgzf::{self as bgzf, gzi};
 use std::fs::File;
@@ -369,28 +369,40 @@ fn classify(reference: &[Placed], candidate: &[Placed]) -> serde_json::Value {
     serde_json::Value::Array(rows)
 }
 
-fn run_suite(seed: u64) -> Vec<serde_json::Value> {
+/// Long and short target contigs of one seed and the shared index built from them.
+fn suite_target(seed: u64, directory: &std::path::Path) -> (Vec<u8>, Vec<u8>, std::path::PathBuf) {
     let mut rng = Rng(seed.rotate_left(17) | 1);
     let mut long = rng.dna(LONG_CONTIG);
     let element = long[ELEMENT_COPIES[0]..ELEMENT_COPIES[0] + ELEMENT_BASES].to_vec();
     long[ELEMENT_COPIES[1]..ELEMENT_COPIES[1] + ELEMENT_BASES].copy_from_slice(&element);
     let short = rng.dna(SHORT_CONTIG);
+    let shared = write_target(directory, &[("long", &long), ("short", &short)]);
+    (long, short, shared)
+}
+
+fn run_case(
+    shared: &std::path::Path,
+    case: &Case,
+    policy: RegionPolicy,
+) -> (TraceResult, TraceBatchStats) {
+    let config = TraceConfig {
+        use_sketch: false,
+        circular: case.circular,
+        ..TraceConfig::default()
+    };
+    let mut engine = TraceEngine::open_shared(shared, None).unwrap();
+    engine.observed = true;
+    engine.region_policy = policy;
+    let result = engine.search(case.name, &case.query, config).unwrap();
+    (result, engine.batch_stats())
+}
+
+fn run_suite(seed: u64) -> Vec<serde_json::Value> {
     let directory = tempfile::tempdir().unwrap();
-    let shared = write_target(directory.path(), &[("long", &long), ("short", &short)]);
+    let (long, short, shared) = suite_target(seed, directory.path());
     let mut rows = Vec::new();
     for case in cases(seed, &long, &short) {
-        let config = TraceConfig {
-            use_sketch: false,
-            circular: case.circular,
-            ..TraceConfig::default()
-        };
-        let run = |policy| {
-            let mut engine = TraceEngine::open_shared(&shared, None).unwrap();
-            engine.observed = true;
-            engine.region_policy = policy;
-            let result = engine.search(case.name, &case.query, config).unwrap();
-            (result, engine.batch_stats())
-        };
+        let run = |policy| run_case(&shared, &case, policy);
         let (reference, reference_stats) = run(RegionPolicy::Parent);
         let (candidate, candidate_stats) = run(RegionPolicy::Islands);
         let (reference_placed, candidate_placed) = (placed(&reference), placed(&candidate));
@@ -447,4 +459,85 @@ fn island_suite_check_seeds_report_interval_changes() {
             println!("{row}");
         }
     }
+}
+
+/// Asserted island regression on the frozen `internal_fragment_without_anchors` case and the
+/// development seed. The parent envelope finds 598 bases of the 600-base internal fragment. The two
+/// islands cover only the anchor blocks, so they lose that fragment and return a 40-base alignment
+/// at the first anchor instead. Each mode is checked against its own reference. The loss is a known
+/// study result, not a product requirement. A deliberate future correction that removes the loss
+/// must update this regression with evidence.
+#[test]
+fn islands_lose_internal_fragment_without_anchors_on_development_seed() {
+    let seed = DEVELOPMENT_SEEDS[0];
+    let directory = tempfile::tempdir().unwrap();
+    let (long, short, shared) = suite_target(seed, directory.path());
+    let case = cases(seed, &long, &short)
+        .into_iter()
+        .find(|case| case.name == "internal_fragment_without_anchors")
+        .unwrap();
+    // Alignment tasks, completion, metagenomes, then for each primary (true) or alternative
+    // fragment its score and match, substitution, insertion and deletion counts.
+    let summary = |(result, stats): &(TraceResult, TraceBatchStats)| {
+        let fragments = result
+            .metagenomes
+            .iter()
+            .flat_map(|metagenome| {
+                let mosaic = &metagenome.mosaic;
+                mosaic
+                    .primary
+                    .iter()
+                    .map(|selected| (true, &selected.fragment))
+                    .chain(mosaic.alternatives.iter().map(|fragment| (false, fragment)))
+            })
+            .map(|(primary, fragment)| {
+                let alignment = &fragment.alignment;
+                let edits = [
+                    alignment.matches,
+                    alignment.substitutions,
+                    alignment.insertions,
+                    alignment.deletions,
+                ];
+                (primary, alignment.score, edits)
+            })
+            .collect::<Vec<_>>();
+        let complete = result.completion == SearchCompletion::Complete;
+        (
+            stats.alignment_tasks,
+            complete,
+            result.metagenomes.len(),
+            fragments,
+        )
+    };
+    // Query and target intervals of the internal fragment and of the first anchor alignment.
+    let interval = |start, end| Interval { start, end };
+    let internal = (interval(20_000, 20_598), interval(80_000, 80_598));
+    let anchor = (interval(5_000, 5_050), interval(65_000, 65_040));
+    let forward = |(query, target): (Interval, Interval)| Placed {
+        contig_id: 0,
+        strand: Strand::Forward,
+        query: vec![query],
+        target,
+    };
+    let reference = run_case(&shared, &case, RegionPolicy::Parent);
+    let reference_placed = placed(&reference.0);
+    assert_eq!(
+        summary(&reference),
+        (1, true, 1, vec![(true, 771, [513, 85, 0, 0])])
+    );
+    assert_eq!(reference_placed, [forward(internal)]);
+    let candidate = run_case(&shared, &case, RegionPolicy::Islands);
+    let candidate_placed = placed(&candidate.0);
+    assert_eq!(
+        summary(&candidate),
+        (2, true, 1, vec![(true, 65, [40, 0, 0, 10])])
+    );
+    assert_eq!(candidate_placed, [forward(anchor)]);
+    assert_eq!(
+        classify(&reference_placed, &candidate_placed),
+        serde_json::json!([
+            {"class": "lost", "query": [internal.0], "target": internal.1},
+            {"class": "gained", "query": [anchor.0], "target": anchor.1},
+        ])
+    );
 }

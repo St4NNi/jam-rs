@@ -436,21 +436,98 @@ impl CachedSeedLookups {
 
 /// Internal region-policy study switch; release builds always use parent envelopes.
 fn study_region_policy() -> Result<crate::trace_islands::RegionPolicy, TraceError> {
+    region_policy_from(|| std::env::var("JAM_REGION_POLICY"))
+}
+
+/// Calls `read` for the `JAM_REGION_POLICY` value only in `bench-internals` builds.
+fn region_policy_from(
+    read: impl FnOnce() -> Result<String, std::env::VarError>,
+) -> Result<crate::trace_islands::RegionPolicy, TraceError> {
     #[cfg(feature = "bench-internals")]
-    match std::env::var("JAM_REGION_POLICY").as_deref() {
+    match read().as_deref() {
         Err(std::env::VarError::NotPresent) | Ok("parent") => {}
         Ok("islands") => return Ok(crate::trace_islands::RegionPolicy::Islands),
         _ => return Err(TraceError::Invalid("JAM_REGION_POLICY")),
     }
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = read;
     Ok(crate::trace_islands::RegionPolicy::Parent)
 }
 
 fn study_region_ledger() -> Option<PathBuf> {
+    region_ledger_from(|| std::env::var_os("JAM_REGION_LEDGER"))
+}
+
+/// Calls `read` for the `JAM_REGION_LEDGER` value only in `bench-internals` builds.
+fn region_ledger_from(read: impl FnOnce() -> Option<std::ffi::OsString>) -> Option<PathBuf> {
     #[cfg(feature = "bench-internals")]
-    if let Some(path) = std::env::var_os("JAM_REGION_LEDGER") {
+    if let Some(path) = read() {
         return Some(path.into());
     }
+    #[cfg(not(feature = "bench-internals"))]
+    let _ = read;
     None
+}
+
+#[cfg(test)]
+mod region_study_switch_tests {
+    use super::{region_ledger_from, region_policy_from};
+    use crate::trace_islands::RegionPolicy;
+    use std::env::VarError;
+
+    #[cfg(not(feature = "bench-internals"))]
+    #[test]
+    fn default_build_ignores_region_study_environment() {
+        let islands = region_policy_from(|| Ok("islands".to_owned())).unwrap();
+        assert_eq!(islands, RegionPolicy::Parent);
+        let invalid = region_policy_from(|| Err(VarError::NotUnicode("islands".into()))).unwrap();
+        assert_eq!(invalid, RegionPolicy::Parent);
+        assert_eq!(region_ledger_from(|| Some("ledger".into())), None);
+        // Default builds never read either variable.
+        let unread = region_policy_from(|| unreachable!("JAM_REGION_POLICY was read")).unwrap();
+        assert_eq!(unread, RegionPolicy::Parent);
+        assert_eq!(
+            region_ledger_from(|| unreachable!("JAM_REGION_LEDGER was read")),
+            None
+        );
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[test]
+    fn bench_internals_build_reads_region_study_environment() {
+        let read = |value: Result<&str, VarError>| {
+            region_policy_from(|| value.map(str::to_owned)).map_err(|error| error.to_string())
+        };
+        assert_eq!(read(Ok("islands")), Ok(RegionPolicy::Islands));
+        assert_eq!(read(Ok("parent")), Ok(RegionPolicy::Parent));
+        assert_eq!(read(Err(VarError::NotPresent)), Ok(RegionPolicy::Parent));
+        assert!(read(Ok("Islands")).is_err());
+        assert!(read(Err(VarError::NotUnicode("islands".into()))).is_err());
+        assert_eq!(
+            region_ledger_from(|| Some("ledger".into())),
+            Some("ledger".into())
+        );
+        assert_eq!(region_ledger_from(|| None), None);
+    }
+
+    #[test]
+    fn cli_has_no_region_study_argument() {
+        fn check(command: &clap::Command) {
+            for argument in command.get_arguments() {
+                let id = argument.get_id().as_str().to_ascii_lowercase();
+                let long = argument.get_long().unwrap_or_default().to_ascii_lowercase();
+                for word in ["island", "policy", "ledger"] {
+                    assert!(
+                        !id.contains(word) && !long.contains(word),
+                        "{} {id}",
+                        command.get_name()
+                    );
+                }
+            }
+            command.get_subcommands().for_each(check);
+        }
+        check(&<crate::cli::Cli as clap::CommandFactory>::command());
+    }
 }
 
 impl TraceEngine {
