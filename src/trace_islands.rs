@@ -7,8 +7,8 @@
 
 use crate::alignment::{Alignment, AlignmentWork};
 use crate::trace::{
-    AlignmentTask, FragmentEnvelope, RegionAccumulator, RegionKey, SHORT_CONTIG_ENVELOPE_BYTES,
-    SeedHit, TraceConfig, TraceError, fragment_envelope,
+    AlignmentTask, FragmentEnvelope, RegionAccumulator, RegionKey, SeedHit, TraceConfig,
+    TraceError, scoped_fragment_envelope,
 };
 use serde::Serialize;
 
@@ -74,8 +74,9 @@ fn windows_overlap(first: &Island, second: &Island, query_length: u64) -> bool {
 }
 
 /// Splits an admitted parent into islands. Each anchor starts its own group; adjacent groups
-/// merge while their standard envelopes share a base in both target and unwrapped query
-/// coordinates. Returns `None` when the parent stays one group or uses the short-contig window.
+/// merge while their bounded envelopes share a base in both target and unwrapped query
+/// coordinates. Islands never use the whole-contig window of a short contig. Returns `None` when
+/// the only island window equals the parent window.
 pub(crate) fn plan_islands(
     parent: &RegionAccumulator,
     parent_envelope: &FragmentEnvelope,
@@ -85,15 +86,18 @@ pub(crate) fn plan_islands(
     contig_length: u64,
     config: TraceConfig,
 ) -> Result<Option<Vec<Island>>, TraceError> {
-    if contig_length <= SHORT_CONTIG_ENVELOPE_BYTES || anchors.len() < 2 {
+    if anchors.is_empty() {
         return Ok(None);
     }
+    let bounded = |region: &RegionAccumulator| {
+        scoped_fragment_envelope(region, key, query_length, contig_length, config, false)
+    };
     let mut islands = Vec::<Island>::new();
     for (ordinal, &hit) in anchors.iter().enumerate() {
         let mut region = RegionAccumulator::new(hit);
         let position = parent.support.start + ordinal;
         region.support = position..position + 1;
-        let envelope = fragment_envelope(&region, key, query_length, contig_length, config)?;
+        let envelope = bounded(&region)?;
         islands.push(Island {
             region,
             envelope,
@@ -115,11 +119,10 @@ pub(crate) fn plan_islands(
             region.diagonal_max = region.diagonal_max.max(last.region.diagonal_max);
             region.hits = region.hits.saturating_add(last.region.hits);
             region.support.end = last.region.support.end;
-            previous.envelope =
-                fragment_envelope(region, key, query_length, contig_length, config)?;
+            previous.envelope = bounded(region)?;
         }
     }
-    if islands.len() < 2 {
+    if islands.len() == 1 && islands[0].envelope == *parent_envelope {
         return Ok(None);
     }
     let (parent_start, parent_end) =
