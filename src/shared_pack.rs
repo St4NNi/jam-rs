@@ -1,10 +1,12 @@
 use crate::jidx::{read_u32, read_u64};
+use crate::jidx_reader::SeedOccurrence;
 use crate::shared_file::SharedFile;
 use crate::shared_format::{
-    CORE_PREFIX_BOUNDARIES, CORE_ROW_BYTES, MULTIPLE_CORE, Section, SharedError,
+    CORE_PREFIX_BOUNDARIES, CORE_ROW_BYTES, MULTIPLE_CORE, Section, SharedError, placement_order,
 };
 use crate::shared_reader::{CoreKind, CoreRow, SharedReader};
-use crate::shared_writer::{BUILD_BYTES, SharedBuildStats, publish};
+use crate::shared_seed::{SharedKey, SharedSeed};
+use crate::shared_writer::{BUILD_BYTES, IndexedSeed, SharedBuildStats, publish};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -29,6 +31,16 @@ pub struct SharedCorePackStats {
     pub hot_core_bytes: u64,
     pub cold_core_bytes: u64,
     pub core_prefix_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SharedContextPackStats {
+    pub build: SharedBuildStats,
+    pub repeated_cores: u64,
+    pub placements: u64,
+    pub directory_rows: u64,
+    pub single_member_cores: u64,
+    pub wide_rows: bool,
 }
 
 pub fn add_shared_core_filter(
@@ -358,6 +370,308 @@ pub fn repack_shared_cores(
     })
 }
 
+pub fn repack_shared_contexts(
+    input: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+) -> Result<SharedContextPackStats, SharedError> {
+    let input = input.as_ref();
+    let source = SharedFile::open(input, false)?;
+    source.verify_checksum()?;
+    if source.header.version != 4 {
+        return Err(SharedError::Invalid("context packing source version"));
+    }
+    let reader = SharedReader::open(input)?;
+    let (wide, (sections, counts)) = match pack_contexts(&source, &reader, false)? {
+        Some(packed) => (false, packed),
+        None => (
+            true,
+            pack_contexts(&source, &reader, true)?.ok_or(SharedError::ResourceLimit)?,
+        ),
+    };
+    let [
+        repeated_cores,
+        placements,
+        directory_rows,
+        single_member_cores,
+    ] = counts;
+    let mut header = source.header.clone();
+    header.version = 5;
+    header.core_payload_bytes = if wide { 21 } else { 13 };
+    let bgzf_bytes = bgzf_bytes_once(input, header.document_count)?;
+    source.verify_unchanged()?;
+    let singletons = header.core_count - repeated_cores;
+    Ok(SharedContextPackStats {
+        build: publish(header, output.as_ref(), sections, bgzf_bytes, singletons)?,
+        repeated_cores,
+        placements,
+        directory_rows,
+        single_member_cores,
+        wide_rows: wide,
+    })
+}
+
+// Returns None when a narrow pass meets a value that needs wide rows.
+#[allow(clippy::type_complexity)]
+fn pack_contexts(
+    source: &SharedFile,
+    reader: &SharedReader,
+    wide: bool,
+) -> Result<Option<([Vec<u8>; 13], [u64; 4])>, SharedError> {
+    let header = &source.header;
+    let width = if wide { 21 } else { 13 };
+    let id_bytes = header.id_bytes();
+    let occurrence_rows = header.section(Section::Occurrences).length / 24;
+    let rows = usize::try_from(occurrence_rows).map_err(|_| SharedError::ResourceLimit)?;
+    let core_count = usize::try_from(header.core_count).map_err(|_| SharedError::ResourceLimit)?;
+    let payload_bytes = core_count
+        .checked_mul(width)
+        .ok_or(SharedError::ResourceLimit)?;
+    let placement_bytes = rows.checked_mul(width).ok_or(SharedError::ResourceLimit)?;
+    // Each directory row names a member with at least one placement.
+    let directory_bytes = rows
+        .checked_mul(id_bytes + 4)
+        .ok_or(SharedError::ResourceLimit)?;
+    let mut sections: [Vec<u8>; 13] = std::array::from_fn(|_| Vec::new());
+    for kind in [
+        Section::Strings,
+        Section::Documents,
+        Section::Contigs,
+        Section::Gzi,
+        Section::CorePrefixes,
+        Section::Cores,
+        Section::CoreFilter,
+    ] {
+        let length = header.section(kind).length;
+        if length > BUILD_BYTES as u64 {
+            return Err(SharedError::ResourceLimit);
+        }
+        reserve(&mut sections[kind as usize], length as usize)?;
+        check_capacity(&sections)?;
+        sections[kind as usize].extend_from_slice(source.section(kind, 0, length)?);
+    }
+    let added_capacity = payload_bytes
+        .checked_add(placement_bytes)
+        .and_then(|bytes| bytes.checked_add(directory_bytes))
+        .ok_or(SharedError::ResourceLimit)?;
+    check_additional_capacity(&sections, added_capacity)?;
+    reserve(&mut sections[Section::CorePayloads as usize], payload_bytes)?;
+    reserve(
+        &mut sections[Section::Occurrences as usize],
+        placement_bytes,
+    )?;
+    reserve(&mut sections[Section::Members as usize], directory_bytes)?;
+    check_capacity(&sections)?;
+    let source_width = u64::from(header.core_payload_bytes);
+    let group_rows = header.section(Section::Groups).length / header.row_bytes(Section::Groups);
+    let payloads = source.section(
+        Section::CorePayloads,
+        0,
+        header.section(Section::CorePayloads).length,
+    )?;
+    let occurrences = source.section(
+        Section::Occurrences,
+        0,
+        header.section(Section::Occurrences).length,
+    )?;
+    let cores = source.section(Section::Cores, 0, header.section(Section::Cores).length)?;
+    let operation = reader.posting_operation()?;
+    let mut members = Vec::new();
+    let mut block = vec![
+        SeedOccurrence {
+            contig_id: 0,
+            position: 0,
+            canonical_orientation: false,
+        };
+        4096
+    ];
+    let mut seeds = Vec::<IndexedSeed>::new();
+    let mut contexts = Vec::new();
+    let mut keys = Vec::new();
+    let mut expected = Vec::new();
+    let mut found = Vec::new();
+    let mut next_occurrence = 0u64;
+    let mut counts = [0u64; 4];
+    for (ordinal, hot) in cores.as_chunks::<4>().0.iter().enumerate() {
+        let payload = &payloads[ordinal * source_width as usize..][..source_width as usize];
+        let row = CoreRow::decode_compact(hot, payload, header.contig_count, group_rows)?;
+        let CoreKind::Repeated {
+            group_count,
+            occurrence_count,
+            ..
+        } = row.kind
+        else {
+            if !wide && core_payload_needs_wide(row.kind) {
+                return Ok(None);
+            }
+            encode_core_payload(
+                &mut sections[Section::CorePayloads as usize],
+                row.kind,
+                wide,
+            )?;
+            continue;
+        };
+        let core = reader
+            .group_at(ordinal as u64, SharedKey::core(row.core))?
+            .filter(|group| group.occurrence_count() == occurrence_count)
+            .ok_or(SharedError::Invalid("context packing core group"))?;
+        members.clear();
+        members
+            .try_reserve(core.member_count() as usize)
+            .map_err(|_| SharedError::ResourceLimit)?;
+        operation.append_member_range(core, 0, core.member_count() as usize, &mut members)?;
+        if members
+            .windows(2)
+            .any(|pair| pair[0].metagenome_id >= pair[1].metagenome_id)
+        {
+            return Err(SharedError::Invalid("context packing member order"));
+        }
+        // The source keeps each repeated core in the next contiguous occurrence rows.
+        let first = next_occurrence;
+        next_occurrence = first
+            .checked_add(occurrence_count)
+            .filter(|&end| end <= occurrence_rows)
+            .ok_or(SharedError::Invalid("context packing occurrence range"))?;
+        seeds.clear();
+        for member in &members {
+            let mut start = 0;
+            while start < member.occurrence_count() {
+                let count = (member.occurrence_count() - start).min(4096) as usize;
+                operation.fill_occurrence_block(core, *member, start, &mut block[..count])?;
+                for occurrence in &block[..count] {
+                    let ordinal = first + seeds.len() as u64;
+                    if ordinal >= next_occurrence {
+                        return Err(SharedError::Invalid("context packing occurrence"));
+                    }
+                    let raw = &occurrences[ordinal as usize * 24..][..24];
+                    let (context, flags) = (read_u32(raw, 0), read_u32(raw, 8));
+                    if flags & !7 != 0
+                        || flags & 4 != 0 && flags & 2 == 0
+                        || flags & 2 == 0 && context != 0
+                        || flags & 4 == 0 && context & ((1 << 20) - 1) != 0
+                        || read_u32(raw, 12) != 0
+                        || read_u32(raw, 4) != occurrence.contig_id
+                        || read_u64(raw, 16) != occurrence.position
+                        || (flags & 1 != 0) != occurrence.canonical_orientation
+                    {
+                        return Err(SharedError::Invalid("context packing occurrence"));
+                    }
+                    seeds.push(IndexedSeed {
+                        member: member.metagenome_id,
+                        contig: occurrence.contig_id,
+                        seed: SharedSeed {
+                            core: row.core,
+                            context,
+                            flags: flags as u8,
+                            position: occurrence.position,
+                        },
+                    });
+                }
+                start += count as u64;
+            }
+        }
+        if first + seeds.len() as u64 != next_occurrence {
+            return Err(SharedError::Invalid("context packing occurrence"));
+        }
+        contexts.clear();
+        for seed in &seeds {
+            for length in [15, 21, 31] {
+                if let Some(key) = seed.seed.key(length) {
+                    contexts.push((key.length, key.context, seed.member));
+                }
+            }
+        }
+        contexts.sort_unstable();
+        keys.clear();
+        expected.clear();
+        for group in contexts.chunk_by(|left, right| left.0 == right.0 && left.1 == right.1) {
+            let member_count = 1 + group
+                .windows(2)
+                .filter(|pair| pair[0].2 != pair[1].2)
+                .count();
+            keys.push(SharedKey {
+                core: row.core,
+                context: group[0].1,
+                length: group[0].0,
+            });
+            expected.push((member_count as u32, group.len() as u64));
+        }
+        if keys.len() != group_count as usize {
+            return Err(SharedError::Invalid("context packing group count"));
+        }
+        found.clear();
+        found.resize(keys.len(), None);
+        operation.find_in_core_into(core, &keys, &mut found)?;
+        for (group, &(member_count, occurrence_count)) in found.iter().zip(&expected) {
+            if group.is_none_or(|group| {
+                group.member_count() != member_count || group.occurrence_count() != occurrence_count
+            }) {
+                return Err(SharedError::Invalid("context packing group"));
+            }
+        }
+        seeds.sort_unstable_by_key(|seed| {
+            (
+                seed.member,
+                placement_order(u32::from(seed.seed.flags), seed.seed.context),
+                seed.contig,
+                seed.seed.position,
+            )
+        });
+        let first_placement = sections[Section::Occurrences as usize].len() / width;
+        for seed in &seeds {
+            let kind = CoreKind::Singleton {
+                context: seed.seed.context,
+                contig_id: seed.contig,
+                flags: u32::from(seed.seed.flags),
+                position: seed.seed.position,
+            };
+            if !wide && core_payload_needs_wide(kind) {
+                return Ok(None);
+            }
+            encode_core_payload(&mut sections[Section::Occurrences as usize], kind, wide)?;
+        }
+        let placement_count = narrow(seeds.len() as u64)?;
+        let runs = seeds.chunk_by(|left, right| left.member == right.member);
+        let member_count = narrow(runs.clone().count() as u64)?;
+        let member_locator = if member_count == 1 {
+            counts[3] += 1;
+            seeds[0].member
+        } else {
+            let directory = &mut sections[Section::Members as usize];
+            let locator = narrow((directory.len() / (id_bytes + 4)) as u64)?;
+            let mut end = 0;
+            for run in runs {
+                end += run.len() as u32;
+                directory.extend_from_slice(&run[0].member.to_le_bytes()[..id_bytes]);
+                directory.extend_from_slice(&end.to_le_bytes());
+                counts[2] += 1;
+            }
+            locator
+        };
+        let kind = CoreKind::Placed {
+            first_placement: first_placement as u64,
+            placement_count,
+            member_locator,
+            member_count,
+        };
+        if !wide && core_payload_needs_wide(kind) {
+            return Ok(None);
+        }
+        encode_core_payload(&mut sections[Section::CorePayloads as usize], kind, wide)?;
+        counts[0] += 1;
+        counts[1] += seeds.len() as u64;
+    }
+    operation.finish()?;
+    if next_occurrence != occurrence_rows
+        || header.core_count - counts[0] + counts[1] != header.occurrence_count
+        || sections[Section::CorePayloads as usize].len() != payload_bytes
+        || sections[Section::Occurrences as usize].len() != placement_bytes
+    {
+        return Err(SharedError::Invalid("context packing lengths"));
+    }
+    check_capacity(&sections)?;
+    Ok(Some((sections, counts)))
+}
+
 fn core_payload_needs_wide(kind: CoreKind) -> bool {
     match kind {
         CoreKind::Singleton { position, .. } => u32::try_from(position).is_err(),
@@ -578,6 +892,37 @@ mod tests {
         assert_eq!(&bytes[21..29], &0x1122_3344u64.to_le_bytes());
         assert_eq!(&bytes[33..41], &0x99aa_bbccu64.to_le_bytes());
         assert_eq!(bytes[41], 0);
+    }
+
+    #[test]
+    fn placed_core_payloads_use_exact_narrow_and_wide_layouts() {
+        let placed = |first_placement, member_count| CoreKind::Placed {
+            first_placement,
+            placement_count: 0x5566_7788,
+            member_locator: 0x99aa_bbcc,
+            member_count,
+        };
+        let mut bytes = Vec::new();
+        super::encode_core_payload(&mut bytes, placed(0x1122_3344, 255), false).unwrap();
+        assert_eq!(
+            bytes,
+            [
+                0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0xcc, 0xbb, 0xaa, 0x99, 255
+            ]
+        );
+        assert!(super::encode_core_payload(&mut bytes, placed(0, 256), false).is_err());
+        bytes.clear();
+        let first = u64::from(u32::MAX) + 1;
+        super::encode_core_payload(&mut bytes, placed(first, 256), true).unwrap();
+        assert_eq!(&bytes[..8], &first.to_le_bytes());
+        assert_eq!(
+            &bytes[8..16],
+            &[0x88, 0x77, 0x66, 0x55, 0xcc, 0xbb, 0xaa, 0x99]
+        );
+        assert_eq!(&bytes[16..], &[0, 1, 0, 0, 0]);
+        assert!(!super::core_payload_needs_wide(placed(first - 1, 255)));
+        assert!(super::core_payload_needs_wide(placed(first, 1)));
+        assert!(super::core_payload_needs_wide(placed(0, 256)));
     }
 
     #[test]
