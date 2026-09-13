@@ -133,6 +133,7 @@ pub struct TraceBatchStats {
     pub alignment_work: crate::alignment::AlignmentWork,
     pub alignment_tasks: u64,
     pub identical_alignment_tasks: u64,
+    pub task_signature_unavailable_queries: u64,
     pub alignment_workspaces: u64,
     pub alignment_query_bytes: u64,
     pub alignment_target_bytes: u64,
@@ -2181,32 +2182,37 @@ impl TraceEngine {
                     Ok::<_, TraceError>((query_bases.max(query), target_bases.max(target)))
                 })?;
         if self.observed {
-            let diagnostic_bytes = tasks
+            let diagnostic = tasks
                 .len()
                 .checked_mul(128)
                 .and_then(|bytes| bytes.checked_add(4096))
-                .ok_or(TraceError::Invalid("task diagnostic budget"))?;
-            let _diagnostic = CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, diagnostic_bytes)
-                .ok_or(TraceError::Invalid("task diagnostic budget"))?;
+                .and_then(|bytes| CacheReservation::acquire(&LOOKUP_CACHE_AVAILABLE, bytes));
             // Query identity, topology, index generation and configuration are fixed for this call.
-            let unique: BTreeSet<_> = tasks
-                .iter()
-                .map(|t| {
-                    (
-                        t.metagenome_id,
-                        t.contig_id,
-                        t.strand,
-                        t.query_start,
-                        t.query_span,
-                        t.target_start,
-                        t.target_end,
-                        t.diagonal_offset,
-                    )
-                })
-                .collect();
+            let duplicates = diagnostic.as_ref().map(|_| {
+                let unique: BTreeSet<_> = tasks
+                    .iter()
+                    .map(|t| {
+                        (
+                            t.metagenome_id,
+                            t.contig_id,
+                            t.strand,
+                            t.query_start,
+                            t.query_span,
+                            t.target_start,
+                            t.target_end,
+                            t.diagonal_offset,
+                        )
+                    })
+                    .collect();
+                (tasks.len() - unique.len()) as u64
+            });
             let mut stats = self.batch_stats.lock().unwrap();
             stats.alignment_tasks += tasks.len() as u64;
-            stats.identical_alignment_tasks += (tasks.len() - unique.len()) as u64;
+            if let Some(duplicates) = duplicates {
+                stats.identical_alignment_tasks += duplicates;
+            } else {
+                stats.task_signature_unavailable_queries += 1;
+            }
         }
         let workspace = || {
             if self.observed {
