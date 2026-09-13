@@ -13,7 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const BUILD_BYTES: usize = 1024 * 1024 * 1024;
+pub(crate) const BUILD_BYTES: usize = if usize::BITS >= 64 {
+    (8u64 * 1024 * 1024 * 1024) as usize
+} else {
+    1024 * 1024 * 1024
+};
 const SOURCE_CHUNK_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]

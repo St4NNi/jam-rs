@@ -4,7 +4,7 @@ use crate::shared_format::{
     CORE_PREFIX_BOUNDARIES, CORE_ROW_BYTES, MULTIPLE_CORE, Section, SharedError,
 };
 use crate::shared_reader::{CoreKind, CoreRow, SharedReader};
-use crate::shared_writer::{SharedBuildStats, publish};
+use crate::shared_writer::{BUILD_BYTES, SharedBuildStats, publish};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -90,7 +90,7 @@ pub fn repack_shared_index(
         Section::Occurrences,
     ] {
         let length = header.section(kind).length;
-        if length > 1024 * 1024 * 1024 {
+        if length > BUILD_BYTES as u64 {
             return Err(SharedError::ResourceLimit);
         }
         sections[kind as usize] = source.section(kind, 0, length)?.to_vec();
@@ -204,7 +204,7 @@ pub fn repack_shared_index(
             .checked_add(count)
             .ok_or(SharedError::ResourceLimit)?;
         expected_member = end;
-        if sections.iter().map(Vec::capacity).sum::<usize>() > 1024 * 1024 * 1024 {
+        if sections.iter().map(Vec::capacity).sum::<usize>() > BUILD_BYTES {
             return Err(SharedError::ResourceLimit);
         }
     }
@@ -285,7 +285,7 @@ pub fn repack_shared_cores(
         Section::Occurrences,
     ] {
         let length = header.section(kind).length;
-        if length > 1024 * 1024 * 1024 {
+        if length > BUILD_BYTES as u64 {
             return Err(SharedError::ResourceLimit);
         }
         sections[kind as usize] = source.section(kind, 0, length)?.to_vec();
@@ -468,7 +468,7 @@ fn reserve(target: &mut Vec<u8>, bytes: usize) -> Result<(), SharedError> {
 }
 
 fn check_capacity(sections: &[Vec<u8>; 13]) -> Result<(), SharedError> {
-    if retained_capacity(sections)? > 1024 * 1024 * 1024 {
+    if retained_capacity(sections)? > BUILD_BYTES {
         return Err(SharedError::ResourceLimit);
     }
     Ok(())
@@ -480,7 +480,7 @@ fn check_additional_capacity(
 ) -> Result<(), SharedError> {
     if retained_capacity(sections)?
         .checked_add(additional)
-        .is_none_or(|bytes| bytes > 1024 * 1024 * 1024)
+        .is_none_or(|bytes| bytes > BUILD_BYTES)
     {
         return Err(SharedError::ResourceLimit);
     }
