@@ -3816,6 +3816,7 @@ fn context_placements_match_filtered_groups_for_every_key() {
             ],
             [5, 615, 10, 2]
         );
+        assert_eq!(stats.build.repeated_core_positions, 615);
         let sections = &stats.build.section_bytes;
         assert_eq!([sections["Groups"], sections["References"]], [0, 0]);
         assert_eq!(

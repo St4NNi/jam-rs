@@ -393,7 +393,8 @@ pub(crate) fn publish(
             / header.row_bytes(Section::Members),
         occurrence_references: ranges[Section::References as usize].length
             / header.row_bytes(Section::References),
-        repeated_core_positions: ranges[Section::Occurrences as usize].length / 24,
+        repeated_core_positions: ranges[Section::Occurrences as usize].length
+            / header.row_bytes(Section::Occurrences),
         index_bytes: file_bytes,
         bgzf_bytes_once,
         complete_query_ready_bytes: file_bytes
