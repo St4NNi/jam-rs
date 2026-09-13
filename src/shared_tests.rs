@@ -3513,3 +3513,422 @@ fn oversized_filter_declaration_is_rejected_before_section_access() {
     assert_eq!(file.stats().requested_bytes, before.requested_bytes);
     assert_eq!(file.stats().authenticated_pages, before.authenticated_pages);
 }
+
+fn context_fixture(
+    wide: bool,
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    Vec<SharedKey>,
+    crate::shared_pack::SharedContextPackStats,
+) {
+    const HEAVY_CORE: u32 = TARGET_CORE + 70_000;
+    let directory = tempfile::tempdir().unwrap();
+    let jidx = directory.path().join("contexts.jidx");
+    let mut writer = JidxWriter::new(
+        &jidx,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [61; 32],
+            manifest_sha256: [62; 32],
+        },
+    )
+    .unwrap();
+    // Contig IDs are 0 and 1, 2 and 3, 4, then 5 and 6.
+    let huge = if wide { 1 << 33 } else { 100_000 };
+    let contigs: [&[u64]; 4] = [&[100_000, 40], &[100_000, 18], &[100_000], &[100_000, huge]];
+    for (id, lengths) in contigs.into_iter().enumerate() {
+        writer
+            .begin_metagenome(MetagenomeInput {
+                name: format!("context-{id}"),
+                bgzf_uri: format!("context-{id}.bgz"),
+                bgzf_bytes: 100,
+                bgzf_sha256: [63; 32],
+                gzi: vec![0; 8],
+            })
+            .unwrap();
+        for (index, &length) in lengths.iter().enumerate() {
+            writer
+                .begin_contig(ContigInput {
+                    name: format!("context-{id}-{index}"),
+                    length,
+                    fasta_offset: 4,
+                    line_bases: 80,
+                    line_width: 81,
+                })
+                .unwrap();
+        }
+    }
+    writer.finish().unwrap();
+    let reference = JidxReader::open(&jidx).unwrap();
+    let (x, y) = (0x5a5u32 << 20, 0x0c3u32 << 20);
+    let indexed =
+        |member: u32, contig: u32, core: u32, flags: u8, context: u32, position: u64| IndexedSeed {
+            member,
+            contig,
+            seed: SharedSeed {
+                core,
+                context,
+                flags,
+                position,
+            },
+        };
+    let mut seeds = vec![
+        // Rare cores, two without contexts at contig ends.
+        indexed(0, 0, 10, 7, x | 1, 50),
+        indexed(1, 3, 11, 0, 0, 3),
+        indexed(2, 4, 12, 1, 0, 1),
+        // One member without contexts at both ends of a short contig.
+        indexed(0, 1, 20, 0, 0, 0),
+        indexed(0, 1, 20, 1, 0, 25),
+        // Ambiguous bases remove the outer shell or both shells.
+        indexed(1, 2, 30, 2, x, 1000),
+        indexed(1, 2, 30, 0, 0, 2000),
+        indexed(2, 4, 30, 6, x | 9, 500),
+        // One member with several contexts.
+        indexed(2, 4, 40, 6, x | 3, 600),
+        indexed(2, 4, 40, 6, x | 4, 700),
+        indexed(2, 4, 40, 2, y, 800),
+        // Metagenome 0 has two 31 contexts below one 21 context.
+        indexed(0, 0, TARGET_CORE, 6, x | 1, 100),
+        indexed(0, 0, TARGET_CORE, 7, x | 2, 200),
+        indexed(0, 1, TARGET_CORE, 2, x, 10),
+        indexed(1, 2, TARGET_CORE, 6, x | 1, 300),
+        indexed(2, 4, TARGET_CORE, 2, y, 400),
+        indexed(3, 5, TARGET_CORE, 3, y, 7),
+        indexed(3, 6, TARGET_CORE, 0, 0, 900),
+    ];
+    for ordinal in 0..600u32 {
+        let member = ordinal % 4;
+        let flags = [0u8, 2, 6, 6, 6, 6, 6][ordinal as usize % 7] | (ordinal % 2) as u8;
+        let context = match flags & 6 {
+            0 => 0,
+            2 => (ordinal % 3) << 20,
+            _ => ((ordinal % 3) << 20) | (ordinal % 5),
+        };
+        let contig = [0, 2, 4, 5 + ordinal % 2][member as usize];
+        let base = if wide && contig == 6 {
+            u64::from(u32::MAX)
+        } else {
+            0
+        };
+        seeds.push(indexed(
+            member,
+            contig,
+            HEAVY_CORE,
+            flags,
+            context,
+            base + 1000 + u64::from(ordinal),
+        ));
+    }
+    let mut keys = seeds
+        .iter()
+        .flat_map(|row| [15, 21, 31].map(|length| row.seed.key(length)))
+        .flatten()
+        .collect::<Vec<_>>();
+    for core in [10, 11, 12, 20, 30, 40, TARGET_CORE, HEAVY_CORE] {
+        keys.push(SharedKey::core(core + 100));
+        for (length, context) in [
+            (21, 0x7ff),
+            (21, x >> 20),
+            (21, y >> 20),
+            (21, 0),
+            (31, x | 0x77),
+            (31, x | 1),
+            (31, 0),
+            (31, (2 << 20) | 4),
+        ] {
+            keys.push(SharedKey {
+                core,
+                context,
+                length,
+            });
+        }
+    }
+    keys.sort_unstable_by_key(|key| (key.core, key.length, key.context));
+    keys.dedup();
+    let source = directory.path().join("contexts.shared");
+    let packed = directory.path().join("contexts-packed.shared");
+    let compact = directory.path().join("contexts-compact.shared");
+    let filtered = directory.path().join("contexts-filtered.shared");
+    let placed = directory.path().join("contexts-placed.shared");
+    write_shared_index(&reference, &source, 64, &mut seeds).unwrap();
+    crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
+    crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+    let stats = crate::shared_pack::repack_shared_contexts(&filtered, &placed).unwrap();
+    (directory, filtered, placed, keys, stats)
+}
+
+#[allow(clippy::type_complexity)]
+fn placed_evidence(
+    reader: &SharedReader,
+    group: Option<SharedGroup>,
+) -> Option<(u32, u64, Vec<(u32, u64, Vec<(u32, u64, bool)>)>)> {
+    let group = group?;
+    let members = reader
+        .members(group)
+        .unwrap()
+        .into_iter()
+        .map(|member| {
+            let occurrences = sorted_occurrences(reader.member_occurrences(group, member).unwrap());
+            (member.metagenome_id, member.occurrence_count(), occurrences)
+        })
+        .collect();
+    Some((group.member_count(), group.occurrence_count(), members))
+}
+
+fn sorted_occurrences(values: Vec<crate::jidx_reader::SeedOccurrence>) -> Vec<(u32, u64, bool)> {
+    let mut values = values
+        .into_iter()
+        .map(|value| (value.contig_id, value.position, value.canonical_orientation))
+        .collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
+// Compares a filtered index with its context placement layout through the reader API.
+pub(crate) fn assert_context_round_trip(
+    filtered: &std::path::Path,
+    placed: &std::path::Path,
+    keys: &[SharedKey],
+) {
+    let counts = |members: &[crate::shared_reader::SharedMember]| {
+        members
+            .iter()
+            .map(|member| (member.metagenome_id, member.occurrence_count()))
+            .collect::<Vec<_>>()
+    };
+    let blank = crate::jidx_reader::SeedOccurrence {
+        contig_id: 0,
+        position: 0,
+        canonical_orientation: false,
+    };
+    let baseline = SharedReader::open(filtered).unwrap();
+    let reader = SharedReader::open(placed).unwrap();
+    reader.verify_checksum().unwrap();
+    let baseline_operation = baseline.posting_operation().unwrap();
+    let operation = reader.posting_operation().unwrap();
+    let groups = reader.find_many(keys).unwrap();
+    for (&key, &group) in keys.iter().zip(&groups) {
+        let expected = baseline.find(key).unwrap();
+        assert_eq!(reader.find(key).unwrap(), group);
+        assert_eq!(
+            placed_evidence(&reader, group),
+            placed_evidence(&baseline, expected),
+            "{key:?}"
+        );
+        if key.length != 15
+            && let Some(core) = reader.find(SharedKey::core(key.core)).unwrap()
+        {
+            assert_eq!(reader.find_in_core(core, &[key]).unwrap(), [group]);
+            let mut slot = [None];
+            operation
+                .find_in_core_into(core, &[key], &mut slot)
+                .unwrap();
+            assert_eq!(slot, [group]);
+        }
+        let (Some(group), Some(expected)) = (group, expected) else {
+            continue;
+        };
+        let members = reader.members(group).unwrap();
+        for id in 0..=reader.document_count() {
+            let member = reader.member(group, id).unwrap();
+            let wanted = baseline.member(expected, id).unwrap();
+            assert_eq!(
+                counts(member.as_slice()),
+                counts(wanted.as_slice()),
+                "{key:?}"
+            );
+            let (Some(member), Some(wanted)) = (member, wanted) else {
+                continue;
+            };
+            assert!(members.contains(&member));
+            let expected_values =
+                sorted_occurrences(baseline.member_occurrences(expected, wanted).unwrap());
+            for limit in [1, 3] {
+                let (mut values, mut filled) = (Vec::new(), Vec::new());
+                while (values.len() as u64) < member.occurrence_count() {
+                    let start = values.len() as u64;
+                    values.extend(
+                        reader
+                            .occurrence_block(group, member, start, limit)
+                            .unwrap(),
+                    );
+                    let mut block =
+                        vec![blank; (member.occurrence_count() - start).min(limit as u64) as usize];
+                    operation
+                        .fill_occurrence_block(group, member, start, &mut block)
+                        .unwrap();
+                    filled.extend(block);
+                }
+                assert_eq!(filled, values);
+                assert_eq!(sorted_occurrences(values), expected_values);
+            }
+        }
+        let count = group.member_count();
+        for start in 0..=count {
+            for length in [0, 1, count - start] {
+                let length = length.min(count - start) as usize;
+                let mut actual = Vec::with_capacity(length);
+                operation
+                    .append_member_range(group, start, length, &mut actual)
+                    .unwrap();
+                let mut wanted = Vec::with_capacity(length);
+                baseline_operation
+                    .append_member_range(expected, start, length, &mut wanted)
+                    .unwrap();
+                assert_eq!(actual, members[start as usize..][..length]);
+                assert_eq!(counts(&actual), counts(&wanted));
+            }
+        }
+    }
+    let mut cores = keys.iter().map(|key| key.core).collect::<Vec<_>>();
+    cores.sort_unstable();
+    cores.dedup();
+    let mut resolved = Vec::new();
+    reader
+        .resolve_sorted_cores_into(&cores, &mut resolved)
+        .unwrap();
+    let expected = cores
+        .iter()
+        .filter_map(|&core| reader.find(SharedKey::core(core)).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(resolved, expected);
+    operation.finish().unwrap();
+    baseline_operation.finish().unwrap();
+}
+
+#[test]
+fn context_placements_match_filtered_groups_for_every_key() {
+    for wide in [false, true] {
+        let (_directory, filtered, placed, keys, stats) = context_fixture(wide);
+        assert_eq!(stats.wide_rows, wide);
+        assert_eq!(
+            [
+                stats.repeated_cores,
+                stats.placements,
+                stats.directory_rows,
+                stats.single_member_cores
+            ],
+            [5, 615, 10, 2]
+        );
+        let sections = &stats.build.section_bytes;
+        assert_eq!([sections["Groups"], sections["References"]], [0, 0]);
+        assert_eq!(
+            sections["Occurrences"],
+            if wide { 615 * 21 } else { 615 * 13 }
+        );
+        assert_context_round_trip(&filtered, &placed, &keys);
+        let reader = SharedReader::open(&placed).unwrap();
+        let find = |context, length| {
+            reader
+                .find(SharedKey {
+                    core: TARGET_CORE,
+                    context,
+                    length,
+                })
+                .unwrap()
+                .unwrap()
+        };
+        let inner = find(0x5a5, 21);
+        assert_eq!((inner.member_count(), inner.occurrence_count()), (2, 4));
+        let children = [find(0x5a50_0001, 31), find(0x5a50_0002, 31)];
+        assert_eq!(children.map(|group| group.member_count()), [2, 1]);
+    }
+}
+
+#[test]
+fn context_placement_corruption_fails_closed() {
+    let (directory, _, placed, _, _) = context_fixture(false);
+    let flipped = directory.path().join("flipped.shared");
+    let mut bytes = std::fs::read(&placed).unwrap();
+    let header = SharedHeader::decode(&bytes[..HEADER_BYTES], bytes.len() as u64).unwrap();
+    bytes[header.section(Section::Occurrences).offset as usize + 4] ^= 1;
+    std::fs::write(&flipped, bytes).unwrap();
+    let reader = SharedReader::open(&flipped).unwrap();
+    let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let member = reader.member(group, 0).unwrap().unwrap();
+    assert!(matches!(
+        reader.member_occurrences(group, member),
+        Err(SharedError::ChecksumMismatch)
+    ));
+    assert!(matches!(
+        reader.verify_checksum(),
+        Err(SharedError::ChecksumMismatch)
+    ));
+
+    // Core 30 is the first core with directory rows, for metagenomes 1 and 2.
+    for swap_ids in [true, false] {
+        let path = directory
+            .path()
+            .join(format!("directory-{swap_ids}.shared"));
+        std::fs::copy(&placed, &path).unwrap();
+        mutate_and_resign(&path, |bytes, header| {
+            let rows = header.section(Section::Members).offset as usize;
+            let width = header.row_bytes(Section::Members) as usize;
+            if swap_ids {
+                bytes.swap(rows, rows + width);
+            } else {
+                bytes.copy_within(rows + width + 1..rows + 2 * width, rows + 1);
+            }
+        });
+        let reader = SharedReader::open(&path).unwrap();
+        let group = reader.find(SharedKey::core(30)).unwrap().unwrap();
+        assert!(matches!(
+            reader.members(group),
+            Err(SharedError::Invalid("member directory"))
+        ));
+        assert!(matches!(
+            reader.find(SharedKey {
+                core: 30,
+                context: 0x5a5,
+                length: 21,
+            }),
+            Err(SharedError::Invalid("member directory"))
+        ));
+    }
+
+    // Placements 8 and 9 start the run of metagenome 0 in the target core.
+    let path = directory.path().join("order.shared");
+    std::fs::copy(&placed, &path).unwrap();
+    mutate_and_resign(&path, |bytes, header| {
+        let width = header.row_bytes(Section::Occurrences) as usize;
+        let row = header.section(Section::Occurrences).offset as usize + 8 * width;
+        let (left, right) = bytes[row..row + 2 * width].split_at_mut(width);
+        left.swap_with_slice(right);
+    });
+    let reader = SharedReader::open(&path).unwrap();
+    let group = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let member = reader.member(group, 0).unwrap().unwrap();
+    assert!(matches!(
+        reader.member_occurrences(group, member),
+        Err(SharedError::Invalid("placement order"))
+    ));
+    assert!(matches!(
+        reader.occurrence_block(group, member, 1, 1),
+        Err(SharedError::Invalid("placement order"))
+    ));
+}
+
+#[test]
+fn context_packing_accepts_only_filtered_sources() {
+    let (directory, filtered, placed, _, _) = context_fixture(false);
+    let output = directory.path().join("again.shared");
+    for source in [
+        "contexts.shared",
+        "contexts-packed.shared",
+        "contexts-compact.shared",
+        "contexts-placed.shared",
+    ] {
+        assert!(matches!(
+            crate::shared_pack::repack_shared_contexts(directory.path().join(source), &output),
+            Err(SharedError::Invalid("context packing source version"))
+        ));
+    }
+    assert!(!output.exists());
+    assert!(crate::shared_pack::repack_shared_contexts(&filtered, &placed).is_err());
+}
