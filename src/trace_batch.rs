@@ -547,6 +547,11 @@ const CORE_LOOKUP_TASKS: usize = 64;
 /// Smallest exact core lookup task, so small request sets do not pay per-task dispatch.
 const MIN_CORE_LOOKUP_TASK_KEYS: usize = 256;
 
+#[cfg(test)]
+pub(crate) fn core_lookup_task_count(keys: &[u32]) -> usize {
+    core_prefix_ranges(keys).count()
+}
+
 /// Splits sorted cores into lookup tasks whose size depends only on the key count, never on the
 /// worker count. A task keeps each core prefix group whole unless the group alone exceeds one
 /// batch.
@@ -1167,14 +1172,20 @@ mod tests {
             .iter()
             .map(|&core| u64::from(core))
             .collect::<Vec<_>>();
-        let expected = vec![0..28_000, 28_000..55_000];
+        // Core lookup tasks target 1/64 of the keys and keep each prefix whole; context lookups
+        // still fill whole batches.
+        let core_expected = vec![0..16_000, 16_000..28_000, 28_000..42_000, 42_000..55_000];
+        let context_expected = vec![0..28_000, 28_000..55_000];
         for workers in [1, 4, 8, 16] {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(workers)
                 .build()
                 .unwrap();
             pool.install(|| {
-                assert_eq!(core_prefix_ranges(&cores).collect::<Vec<_>>(), expected);
+                assert_eq!(
+                    core_prefix_ranges(&cores).collect::<Vec<_>>(),
+                    core_expected
+                );
                 assert_eq!(
                     lookup_ranges(&keys, true)
                         .map(|(range, split)| {
@@ -1182,7 +1193,7 @@ mod tests {
                             range
                         })
                         .collect::<Vec<_>>(),
-                    expected
+                    context_expected
                 );
             });
         }

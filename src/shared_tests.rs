@@ -809,10 +809,12 @@ fn sparse_core_admission_crosses_the_former_dense_budget_boundary() {
             assert_eq!(actual, expected_keys);
             assert!(result.capacity_bytes() <= result.peak_capacity_bound);
             assert!(result.peak_capacity_bound <= lookup_budget(&index));
+            let keys = (0..count as u32).collect::<Vec<_>>();
             assert_eq!(
                 result.tasks,
-                count.div_ceil(crate::jidx_reader::SEED_LOOKUP_BATCH_KEYS)
+                crate::trace_batch::core_lookup_task_count(&keys)
             );
+            assert!(result.tasks <= 64);
             let evidence = (count, result.tasks, result.peak_capacity_bound);
             if workers == 1 && count > boundary {
                 eprintln!(
