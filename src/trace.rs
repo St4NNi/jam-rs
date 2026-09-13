@@ -1918,6 +1918,8 @@ impl TraceEngine {
                 }
             }
         }
+        #[cfg(test)]
+        tests::run_hit_loop_end_hook(&prepared.query_id);
         self.index.cache_file_identity()?;
         let mut predecessor_tests = 0;
         let geometric_hits = if self.observed {
@@ -4070,6 +4072,23 @@ mod tests {
     use crate::writer::{BuildConfig, build};
     use noodles_bgzf::{self as bgzf, gzi};
     use std::io::Write;
+
+    type HitLoopEndHook = (String, Box<dyn FnOnce() + Send>);
+
+    /// Runs once after the hit loop of the named query and before the identity check that ends
+    /// the phase, so a test can change the index file identity inside the phase.
+    static HIT_LOOP_END_HOOK: Mutex<Option<HitLoopEndHook>> = Mutex::new(None);
+
+    pub(super) fn run_hit_loop_end_hook(query_id: &str) {
+        let mut hook = HIT_LOOP_END_HOOK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if hook.as_ref().is_some_and(|(id, _)| id == query_id) {
+            let (_, run) = hook.take().unwrap();
+            drop(hook);
+            run();
+        }
+    }
 
     #[test]
     fn lookup_cache_reservations_share_and_release_the_byte_limit() {
@@ -6439,5 +6458,345 @@ mod tests {
             assert!(work.local_chunked_passes > 0 && work.local_chunks > work.local_chunked_passes);
             assert!(work.local_recomputed_cells > 0);
         }
+    }
+
+    /// Writes one BGZF source per metagenome, each with two contigs in several blocks, and a
+    /// shared index over them. Returns the index, the source paths and the contigs in ID order.
+    fn write_range_sources(
+        directory: &Path,
+        metagenomes: usize,
+    ) -> (PathBuf, Vec<PathBuf>, Vec<Vec<u8>>) {
+        use crate::jidx_writer::{ContigInput, JidxInput, JidxWriter, MetagenomeInput};
+        let reference = directory.join("sources.jidx");
+        let mut jidx = JidxWriter::new(
+            &reference,
+            &JidxInput {
+                k: 15,
+                rescue_k15: false,
+                minimizer_window: 64,
+                jam_sha256: [1; 32],
+                manifest_sha256: [2; 32],
+            },
+        )
+        .unwrap();
+        let (mut paths, mut contigs) = (Vec::new(), Vec::new());
+        for metagenome in 0..metagenomes {
+            let sequences = [0, 1].map(|contig| {
+                window_dna((3 + 2 * metagenome + contig) as u64, 6_000 + 700 * contig)
+            });
+            let mut raw = Vec::new();
+            let mut offsets = Vec::new();
+            for (name, sequence) in ["a", "b"].iter().zip(&sequences) {
+                raw.extend_from_slice(format!(">{name}\n").as_bytes());
+                offsets.push(raw.len() as u64);
+                for line in sequence.chunks(80) {
+                    raw.extend_from_slice(line);
+                    raw.push(b'\n');
+                }
+            }
+            let path = directory.join(format!("source-{metagenome}.bgz"));
+            let mut writer = bgzf::io::Writer::new(File::create(&path).unwrap());
+            let mut blocks = Vec::new();
+            for (ordinal, chunk) in raw.chunks(3_000).enumerate() {
+                if ordinal > 0 {
+                    blocks.push((writer.position(), (ordinal * 3_000) as u64));
+                }
+                writer.write_all(chunk).unwrap();
+                writer.flush().unwrap();
+            }
+            writer.finish().unwrap();
+            let mut gzi = gzi::io::Writer::new(Vec::new());
+            gzi.write_index(&gzi::Index::from(blocks)).unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            jidx.begin_metagenome(MetagenomeInput {
+                name: format!("source-{metagenome}"),
+                bgzf_uri: path.to_str().unwrap().to_owned(),
+                bgzf_bytes: bytes.len() as u64,
+                bgzf_sha256: sha256(&bytes),
+                gzi: gzi.into_inner(),
+            })
+            .unwrap();
+            for ((name, sequence), offset) in ["a", "b"].iter().zip(&sequences).zip(offsets) {
+                jidx.begin_contig(ContigInput {
+                    name: (*name).into(),
+                    length: sequence.len() as u64,
+                    fasta_offset: offset,
+                    line_bases: 80,
+                    line_width: 81,
+                })
+                .unwrap();
+            }
+            paths.push(path);
+            contigs.extend(sequences);
+        }
+        jidx.finish().unwrap();
+        let shared = directory.join("sources.shared");
+        crate::shared_writer::build_shared_index(&reference, &shared, 64).unwrap();
+        (shared, paths, contigs)
+    }
+
+    /// Overlapping, adjacent and repeated spans on every contig, interleaved across metagenomes.
+    fn range_tasks(engine: &TraceEngine, contigs: &[Vec<u8>]) -> Vec<AlignmentTask> {
+        let mut tasks = Vec::new();
+        for (start, end) in [
+            (10, 2_500),
+            (5_000, 5_990),
+            (2_000, 3_100),
+            (3_100, 3_300),
+            (10, 2_500),
+        ] {
+            for contig_id in (0..contigs.len() as u32).rev() {
+                let contig = engine.index.contig(contig_id).unwrap().unwrap();
+                tasks.push(AlignmentTask {
+                    metagenome_id: contig.metagenome_id,
+                    contig_id,
+                    strand: Strand::Forward,
+                    query_start: 0,
+                    query_span: 1,
+                    target_start: start,
+                    target_end: end,
+                    diagonal_offset: 0,
+                    parent: 0,
+                    island: None,
+                });
+            }
+        }
+        tasks
+    }
+
+    type ComparableRanges = BTreeMap<(MetagenomeId, ContigId), Vec<(u64, u64, Vec<u8>)>>;
+
+    fn comparable(
+        loaded: BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
+    ) -> ComparableRanges {
+        loaded
+            .into_iter()
+            .map(|(key, ranges)| {
+                let ranges = ranges
+                    .into_iter()
+                    .map(|range| (range.offset, range.end, range.sequence));
+                (key, ranges.collect())
+            })
+            .collect()
+    }
+
+    /// Serial reference: one reader per metagenome in ID order, each coalesced span read once.
+    fn serial_ranges(
+        engine: &TraceEngine,
+        tasks: &[AlignmentTask],
+        cache: Option<&Arc<BgzfBlockCache>>,
+    ) -> (
+        ComparableRanges,
+        HashMap<MetagenomeId, (crate::range_source::RangeStats, u64)>,
+    ) {
+        let mut spans = BTreeMap::<(MetagenomeId, ContigId), Vec<(u64, u64)>>::new();
+        for task in tasks {
+            spans
+                .entry((task.metagenome_id, task.contig_id))
+                .or_default()
+                .push((task.target_start, task.target_end));
+        }
+        spans.values_mut().for_each(coalesce_spans);
+        let (mut loaded, mut reads) = (BTreeMap::new(), HashMap::new());
+        for metagenome_id in spans.keys().map(|&(id, _)| id).collect::<BTreeSet<_>>() {
+            let source = engine.index.metagenome(metagenome_id).unwrap().unwrap();
+            let mut reader = match cache {
+                Some(cache) => BgzfReader::open_with_cache(source, None, true, Arc::clone(cache)),
+                None => BgzfReader::open(source, None, true),
+            }
+            .unwrap();
+            for (&key, contig_spans) in spans.range((metagenome_id, 0)..=(metagenome_id, u32::MAX))
+            {
+                let contig = engine.index.contig(key.1).unwrap().unwrap();
+                let ranges = contig_spans.iter().map(|&(start, end)| {
+                    (
+                        start,
+                        end,
+                        reader.read_contig_range(contig, start, end).unwrap(),
+                    )
+                });
+                loaded.insert(key, ranges.collect());
+            }
+            reads.insert(
+                metagenome_id,
+                (reader.range_stats(), reader.blocks_decoded()),
+            );
+        }
+        (loaded, reads)
+    }
+
+    #[test]
+    fn parallel_range_loads_match_serial_reads_and_accounting() {
+        let directory = tempfile::tempdir().unwrap();
+        let (shared, _, contigs) = write_range_sources(directory.path(), 4);
+        let engine = TraceEngine::open_shared(&shared, None).unwrap();
+        let tasks = range_tasks(&engine, &contigs);
+        for cached in [false, true] {
+            // A fresh default batch cache per load keeps every block resident, as in one query.
+            let cache = || {
+                cached
+                    .then(|| Arc::new(BgzfBlockCache::new(DEFAULT_BATCH_BGZF_CACHE_BYTES).unwrap()))
+            };
+            let (expected, expected_reads) = serial_ranges(&engine, &tasks, cache().as_ref());
+            assert_eq!(expected.len(), contigs.len());
+            for (&(_, contig_id), ranges) in &expected {
+                assert_eq!(ranges.len(), 2);
+                for (start, end, sequence) in ranges {
+                    assert_eq!(
+                        sequence,
+                        &contigs[contig_id as usize][*start as usize..*end as usize]
+                    );
+                }
+            }
+            assert!(
+                expected_reads
+                    .values()
+                    .all(|(stats, blocks)| stats.read_requests > 0 && *blocks >= 3)
+            );
+            for threads in [1, 3, 8] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let (loaded, reads) = pool
+                    .install(|| engine.load_ranges(&tasks, true, cache().as_ref()))
+                    .unwrap();
+                assert_eq!(
+                    comparable(loaded),
+                    expected,
+                    "{threads} threads, cache {cached}"
+                );
+                assert_eq!(reads, expected_reads, "{threads} threads, cache {cached}");
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_range_loads_respect_shared_block_admission() {
+        use crate::bgzf_cache::{MAX_BGZF_BLOCK_BYTES, MAX_CONCURRENT_BGZF_DECODES};
+        let directory = tempfile::tempdir().unwrap();
+        let (shared, _, contigs) = write_range_sources(directory.path(), 4);
+        let engine = TraceEngine::open_shared(&shared, None).unwrap();
+        let tasks = range_tasks(&engine, &contigs);
+        let (expected, _) = serial_ranges(&engine, &tasks, None);
+        // The cache holds fewer blocks than the loads read, so parallel readers share a small
+        // byte budget and evict blocks.
+        let cache = Arc::new(BgzfBlockCache::new(4 * MAX_BGZF_BLOCK_BYTES).unwrap());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .unwrap();
+        let (loaded, _) = pool
+            .install(|| engine.load_ranges(&tasks, true, Some(&cache)))
+            .unwrap();
+        assert_eq!(comparable(loaded), expected);
+        let stats = cache.stats();
+        assert!(stats.peak_loading_blocks <= MAX_CONCURRENT_BGZF_DECODES);
+        assert!(stats.peak_accounted_bytes <= stats.capacity_bytes);
+        assert_eq!((stats.loading_blocks, stats.reserved_bytes), (0, 0));
+        assert!(stats.evictions > 0);
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let started = Instant::now();
+        while !ready() {
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_change_inside_hit_loop_fails_before_output_publication() {
+        use crate::shared_format::SharedError;
+        let directory = tempfile::tempdir().unwrap();
+        let (shared, _, contigs) = write_range_sources(directory.path(), 1);
+        let (id, sequence) = ("identity-phase-boundary", &contigs[0][..900]);
+        let query = directory.path().join("identity.fa");
+        std::fs::write(
+            &query,
+            format!(">{id}\n{}\n", String::from_utf8_lossy(sequence)),
+        )
+        .unwrap();
+        let config = TraceConfig {
+            use_sketch: false,
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let trace = |output: &Path| {
+            handle_trace_command(TraceArgs {
+                query: query.clone(),
+                input: TraceInput::Shared {
+                    path: shared.clone(),
+                    read_stats: None,
+                    query_topology_header: false,
+                },
+                audit_index: false,
+                output: output.to_owned(),
+                query_id: None,
+                config,
+                s3: None,
+                force: false,
+            })
+        };
+        // Contig metadata inside the hit loop is read without identity checks; this changes the
+        // file identity after those reads and before the check that ends the phase.
+        let change_identity_after_hit_loop = |seconds: u64| {
+            let index = shared.clone();
+            *HIT_LOOP_END_HOOK.lock().unwrap() = Some((
+                id.to_owned(),
+                Box::new(move || {
+                    let times = std::fs::FileTimes::new().set_modified(
+                        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+                    );
+                    let file = File::options().write(true).open(index).unwrap();
+                    file.set_times(times).unwrap();
+                }),
+            ));
+        };
+
+        let unchanged = directory.path().join("unchanged.jsonl");
+        trace(&unchanged).unwrap();
+        let result = serde_json::from_str::<serde_json::Value>(
+            &std::fs::read_to_string(&unchanged).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            result["metagenomes"][0]["mosaic"]["covered_bases"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        let engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
+        engine.search(id, sequence, config).unwrap();
+        assert!(engine.batch_stats().geometric_hits > 0);
+
+        change_identity_after_hit_loop(42);
+        let changed = directory.path().join("changed.jsonl");
+        let error = trace(&changed).unwrap_err();
+        assert!(HIT_LOOP_END_HOOK.lock().unwrap().is_none());
+        assert!(
+            format!("{error:#}").contains(&SharedError::SourceChanged.to_string()),
+            "{error:#}"
+        );
+        assert!(!changed.exists());
+        assert!(std::fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".jam-trace-")
+        }));
+
+        // The phase check fails before regions are formed from the hits.
+        let engine = TraceEngine::open_shared_observed(&shared, None, true).unwrap();
+        change_identity_after_hit_loop(43);
+        let error = engine.search(id, sequence, config).err().unwrap();
+        assert!(HIT_LOOP_END_HOOK.lock().unwrap().is_none());
+        assert_eq!(
+            error.to_string(),
+            TraceError::Io(io::Error::other(SharedError::SourceChanged)).to_string()
+        );
+        assert_eq!(engine.batch_stats().geometric_hits, 0);
     }
 }
