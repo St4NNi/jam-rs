@@ -2429,6 +2429,7 @@ fn align_task_window(
             config,
             &core,
             &completion,
+            workspace.work,
         )?;
     }
     let completed = completion.alignment;
@@ -2441,6 +2442,7 @@ fn align_task_window(
 }
 
 #[cfg(feature = "bench-internals")]
+#[allow(clippy::too_many_arguments)]
 fn retain_alignment_fixture(
     query: &[u8],
     target: &[u8],
@@ -2449,6 +2451,7 @@ fn retain_alignment_fixture(
     config: TraceConfig,
     core: &crate::alignment::Alignment,
     completed: &crate::alignment::EndpointCompletion,
+    work: crate::alignment::AlignmentWork,
 ) -> Result<(), TraceError> {
     static ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -2458,6 +2461,25 @@ fn retain_alignment_fixture(
         return Ok(());
     };
     let ordinal = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if ordinal < 256 {
+        let selected = if completed.alignment.identity() >= config.min_identity {
+            &completed.alignment
+        } else {
+            core
+        };
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(root.join(format!("local-task-{ordinal:03}.json")))?;
+        serde_json::to_writer(&file, &serde_json::json!({
+            "query_length": query.len(), "target_length": target.len(),
+            "strand": core.strand, "band": alignment.band_width,
+            "diagonal": alignment.diagonal_offset,
+            "scoring": [alignment.match_score, alignment.mismatch_score, alignment.gap_open_score, alignment.gap_extend_score],
+            "accepted": alignment_accepted(selected, config), "work": work,
+        })).map_err(|_| TraceError::Invalid("local task summary"))?;
+        file.sync_all()?;
+    }
     if ordinal >= 16 {
         return Ok(());
     }

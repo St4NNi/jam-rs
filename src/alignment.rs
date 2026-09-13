@@ -185,6 +185,11 @@ pub struct AlignmentWork {
     pub endpoint_trace_cpu_ns: u64,
     pub endpoint_total_cpu_ns: u64,
     pub local_cells: u64,
+    pub local_vector8_cells: u64,
+    pub local_vector16_cells: u64,
+    pub local_scalar_cells: u64,
+    pub local_boundary_cells: u64,
+    pub local_narrow_eligible_passes: u64,
     pub endpoint_cells: u64,
     pub endpoint_recurrence_cells: u64,
     pub local_passes: u64,
@@ -205,6 +210,11 @@ impl AlignmentWork {
         self.endpoint_trace_cpu_ns += other.endpoint_trace_cpu_ns;
         self.endpoint_total_cpu_ns += other.endpoint_total_cpu_ns;
         self.local_cells += other.local_cells;
+        self.local_vector8_cells += other.local_vector8_cells;
+        self.local_vector16_cells += other.local_vector16_cells;
+        self.local_scalar_cells += other.local_scalar_cells;
+        self.local_boundary_cells += other.local_boundary_cells;
+        self.local_narrow_eligible_passes += other.local_narrow_eligible_passes;
         self.endpoint_cells += other.endpoint_cells;
         self.endpoint_recurrence_cells += other.endpoint_recurrence_cells;
         self.local_passes += other.local_passes;
@@ -658,6 +668,15 @@ impl AlignmentWorkspace {
         if self.observed {
             self.work.local_passes += 1;
             self.work.local_cells += total_cells as u64;
+            self.work.local_scalar_cells += total_cells as u64;
+            self.work.local_boundary_cells += self.row_widths[0] as u64
+                + self
+                    .row_starts
+                    .iter()
+                    .zip(&self.row_widths)
+                    .skip(1)
+                    .filter(|&(start, width)| *start == 0 && *width > 0)
+                    .count() as u64;
             self.work.local_init_cpu_ns += elapsed_cpu(init_cpu);
         }
         let matrix_cpu = observed_cpu(self.observed);
@@ -826,6 +845,8 @@ impl AlignmentWorkspace {
         }
 
         if self.observed {
+            self.work.local_narrow_eligible_passes +=
+                u64::from(narrow_local_scores(query.len(), target.len(), config));
             self.work.local_passes += 1;
             self.work.local_cells += total_cells as u64;
             self.work.local_init_cpu_ns += elapsed_cpu(init_cpu);
@@ -864,6 +885,15 @@ impl AlignmentWorkspace {
                         .min(wave.saturating_sub(1));
                     (start <= end).then_some((start, end, older, previous))
                 });
+                if self.observed {
+                    let vectors =
+                        vector_range.map_or(0, |(start, end, _, _)| (end - start + 1) / 8 * 8);
+                    self.work.local_vector8_cells += vectors as u64;
+                    self.work.local_scalar_cells += (current_range.width() - vectors) as u64;
+                    self.work.local_boundary_cells += u64::from(current_range.contains(0))
+                        + u64::from(current_range.contains(wave))
+                        - u64::from(wave == 0 && current_range.contains(0));
+                }
                 if let Some((start, end, older, previous)) = vector_range {
                     while row < start {
                         fill_wave_scalar(
@@ -1289,6 +1319,26 @@ fn fill_wave_scalar(
     current[2 * stride + wave_offset] = cell.scores[DELETION as usize];
     traceback[trace_index] = encode_traceback(cell);
     best.consider(row, target_index, cell);
+}
+
+#[cfg(target_arch = "x86_64")]
+fn narrow_local_scores(query_len: usize, target_len: usize, config: AlignmentConfig) -> bool {
+    // Stored local states are in [0, min(lengths)*match]: gaps and mismatches cannot
+    // increase them. Every raw candidate is a stored state plus one scoring term.
+    let upper = i64::try_from(query_len.min(target_len))
+        .ok()
+        .and_then(|len| len.checked_mul(i64::from(config.match_score)))
+        .and_then(|score| score.checked_add(i64::from(config.match_score)));
+    config.validate().is_ok()
+        && upper.is_some_and(|score| score <= i64::from(i16::MAX))
+        && [
+            config.match_score,
+            config.mismatch_score,
+            gap_open(config),
+            config.gap_extend_score,
+        ]
+        .iter()
+        .all(|&score| i16::try_from(score).is_ok())
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2435,6 +2485,62 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
+    fn local_lane_counts_and_narrow_bounds() {
+        assert!(narrow_local_scores(6_247, 41_651, config()));
+        assert!(narrow_local_scores(16_382, 20_000, config()));
+        assert!(!narrow_local_scores(16_383, 20_000, config()));
+        for changed in [
+            AlignmentConfig {
+                mismatch_score: i32::MIN,
+                ..config()
+            },
+            AlignmentConfig {
+                match_score: i32::MAX,
+                ..config()
+            },
+            AlignmentConfig {
+                gap_open_score: i32::MIN,
+                ..config()
+            },
+        ] {
+            assert!(!narrow_local_scores(32, 32, changed));
+        }
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        for length in [7, 8, 15, 16, 17, 63] {
+            for diagonal_offset in [-17, 0, 17] {
+                let cfg = AlignmentConfig {
+                    band_width: 16,
+                    diagonal_offset,
+                    ..config()
+                };
+                let mut workspace = AlignmentWorkspace::default();
+                workspace.enable_timing();
+                let _ = workspace.align(&vec![b'A'; length], &vec![b'A'; length + 5], cfg);
+                let work = workspace.work;
+                let mut slots = 0;
+                let mut boundary = 0;
+                for q in 0..=length {
+                    for t in 0..=length + 5 {
+                        if ((t as i64 - q as i64) - diagonal_offset).abs() <= 16 {
+                            slots += 1;
+                            boundary += u64::from(q == 0 || t == 0);
+                        }
+                    }
+                }
+                assert_eq!(work.local_cells, slots);
+                assert_eq!(work.local_boundary_cells, boundary);
+                assert_eq!(
+                    work.local_vector8_cells + work.local_vector16_cells + work.local_scalar_cells,
+                    slots
+                );
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
     fn runtime_dispatch_matches_scalar_and_forced_avx2() {
         if !is_x86_feature_detected!("avx2") {
             return;
@@ -2843,6 +2949,11 @@ mod tests {
             .filter(|path| {
                 path.extension()
                     .is_some_and(|extension| extension == "json")
+                    && path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with("task-")
             })
             .collect::<Vec<_>>();
         paths.sort();
