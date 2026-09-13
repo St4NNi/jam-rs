@@ -2085,6 +2085,12 @@ impl EndpointWorkspace {
     }
 }
 
+#[cfg(all(test, target_arch = "x86_64"))]
+thread_local! {
+    /// Selects the scalar endpoint kernel on AVX2 hosts, so tests can compare both kernels.
+    static SCALAR_ENDPOINT_KERNEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct EndpointCell {
@@ -2508,6 +2514,8 @@ fn anchored_semiglobal(
     let mut best = (NEGATIVE, 0usize, 0usize, START);
     #[cfg(target_arch = "x86_64")]
     let vector = is_x86_feature_detected!("avx2");
+    #[cfg(all(test, target_arch = "x86_64"))]
+    let vector = vector && !SCALAR_ENDPOINT_KERNEL.get();
     #[cfg(not(target_arch = "x86_64"))]
     let vector = false;
     #[cfg(target_arch = "x86_64")]
@@ -3338,6 +3346,267 @@ mod tests {
         assert!(chunked_cases > 250, "{chunked_cases}");
     }
 
+    /// Rows per wave that the AVX2 driver may fill in eight-lane blocks: interior cells whose
+    /// diagonal, left and above cells are inside the band. Found by brute force over cells.
+    #[cfg(target_arch = "x86_64")]
+    fn vector_wave_widths(
+        query_len: usize,
+        target_len: usize,
+        config: AlignmentConfig,
+    ) -> Vec<usize> {
+        let band = |query: usize, target: usize| {
+            query <= query_len
+                && target <= target_len
+                && (target as i64 - query as i64 - config.diagonal_offset).abs()
+                    <= i64::from(config.band_width)
+        };
+        let (low, high) = (
+            config.diagonal_offset - i64::from(config.band_width),
+            config.diagonal_offset + i64::from(config.band_width),
+        );
+        (0..=query_len + target_len)
+            .map(|wave| {
+                // Only rows with low <= wave - 2 * row <= high can be inside the band.
+                let first = ((wave as i64 - high) / 2 - 1).max(1) as usize;
+                let last = ((wave as i64 - low) / 2 + 1).clamp(0, query_len as i64) as usize;
+                (first..=last.min(wave.saturating_sub(1)))
+                    .filter(|&query| {
+                        let target = wave - query;
+                        band(query, target)
+                            && band(query - 1, target - 1)
+                            && band(query, target - 1)
+                            && band(query - 1, target)
+                    })
+                    .count()
+            })
+            .collect()
+    }
+
+    /// Checks the scalar and AVX2 wave kernels against the unbounded scalar row kernel: equal
+    /// alignments (best-cell tie order included), equal traceback cells, and vector counters
+    /// that count each cell once although a final block may evaluate some lanes twice.
+    #[cfg(target_arch = "x86_64")]
+    fn assert_wave_kernels_match(
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) -> (Result<Alignment, AlignmentError>, Vec<usize>) {
+        let forward = |raw: Result<RawAlignment, AlignmentError>| {
+            raw.and_then(|raw| finish(raw, Strand::Forward, 0, target.len()))
+        };
+        let unbounded = AlignmentConfig {
+            max_cells: usize::MAX,
+            ..config
+        };
+        let expected =
+            forward(AlignmentWorkspace::default().align_raw_scalar(query, target, unbounded));
+        let [(scalar_result, scalar), (vector_result, vector)] = [false, true].map(|avx2| {
+            let mut workspace = AlignmentWorkspace {
+                resident_chunks: true,
+                ..AlignmentWorkspace::default()
+            };
+            workspace.enable_timing();
+            let result = if avx2 {
+                // SAFETY: callers return early unless AVX2 is available.
+                unsafe { workspace.align_raw_avx2(query, target, config) }
+            } else {
+                workspace.align_raw_waves_scalar(query, target, config)
+            };
+            (forward(result), workspace)
+        });
+        let case = format!("{config:?} query={query:?} target={target:?}");
+        assert_eq!(scalar_result, expected, "{case}");
+        assert_eq!(vector_result, expected, "{case}");
+        assert_eq!(
+            vector.compact_cells.len(),
+            scalar.compact_cells.len(),
+            "{case}"
+        );
+        let mismatch = vector
+            .compact_cells
+            .iter()
+            .zip(&scalar.compact_cells)
+            .position(|(vector, scalar)| vector != scalar);
+        assert_eq!(mismatch, None, "{case}");
+
+        let widths = vector_wave_widths(query.len(), target.len(), config);
+        let blocked = widths.iter().filter(|&&width| width >= 8).sum::<usize>() as u64;
+        let total = band_cells(
+            query.len(),
+            target.len(),
+            config.diagonal_offset,
+            config.band_width,
+        )
+        .unwrap() as u64;
+        for work in [scalar.work, vector.work] {
+            assert_eq!(work.local_cells, total, "{case}");
+        }
+        assert_eq!(vector.work.local_vector8_cells, blocked, "{case}");
+        assert_eq!(
+            vector.work.local_scalar_cells,
+            vector.work.local_cells - blocked,
+            "{case}"
+        );
+        assert_eq!(scalar.work.local_vector8_cells, 0);
+        assert_eq!(scalar.work.local_scalar_cells, scalar.work.local_cells);
+        assert_eq!(vector.work.local_chunks, scalar.work.local_chunks, "{case}");
+        assert_eq!(
+            vector.work.local_recomputed_cells, scalar.work.local_recomputed_cells,
+            "{case}"
+        );
+        (expected, widths)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn tie_and_saturation_configs() -> [AlignmentConfig; 3] {
+        [
+            AlignmentConfig::default(),
+            AlignmentConfig {
+                match_score: 1,
+                mismatch_score: 0,
+                gap_open_score: 0,
+                gap_extend_score: 0,
+                ..AlignmentConfig::default()
+            },
+            AlignmentConfig {
+                match_score: i32::MAX,
+                mismatch_score: i32::MIN,
+                gap_open_score: i32::MIN,
+                gap_extend_score: i32::MIN,
+                ..AlignmentConfig::default()
+            },
+        ]
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn wave_tail_blocks_match_scalar_at_lane_boundaries_with_ties_and_saturation() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut state = 0x3c6e_f372_fe94_f82bu64;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize % bound
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for config in tie_and_saturation_configs() {
+            for band_width in [0, 3, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 23] {
+                // Offsets clip waves at the matrix edges, leave early waves empty, or exclude the
+                // whole input.
+                for diagonal_offset in [-6, 0, 11, 80] {
+                    for (query_len, target_len) in [(40, 48), (13, 61), (57, 9)] {
+                        let random = (0..query_len + target_len)
+                            .map(|_| b"ACGTacgt"[next(8)])
+                            .collect::<Vec<_>>();
+                        let uniform = [b'A'; 128];
+                        for bases in [&random[..], &uniform[..]] {
+                            let (query, target) = bases.split_at(query_len);
+                            let config = AlignmentConfig {
+                                band_width,
+                                diagonal_offset,
+                                ..config
+                            };
+                            let (_, widths) =
+                                assert_wave_kernels_match(query, &target[..target_len], config);
+                            seen.extend(widths);
+                        }
+                    }
+                }
+            }
+        }
+        for width in [0, 7, 8, 9, 15, 16, 17] {
+            assert!(seen.contains(&width), "wave width {width} not covered");
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn chunked_wave_tails_match_scalar_across_carries_with_ties_and_saturation() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let mut state = 0xa54f_f53a_5f1d_36f1u64;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as usize % bound
+        };
+        for config in tie_and_saturation_configs() {
+            for band_width in [7, 8, 9, 15, 16, 17] {
+                for diagonal_offset in [-3, 0, 4] {
+                    let query = (0..64).map(|_| b"ACGt"[next(4)]).collect::<Vec<_>>();
+                    let mut target = Vec::new();
+                    for &base in &query {
+                        match next(12) {
+                            0 => target.extend([base, b"ACGT"[next(4)]]),
+                            1 => {}
+                            2 => target.push(b"ACGT"[next(4)]),
+                            _ => target.push(base),
+                        }
+                    }
+                    let base = AlignmentConfig {
+                        band_width,
+                        diagonal_offset,
+                        ..config
+                    };
+                    let total =
+                        band_cells(query.len(), target.len(), diagonal_offset, band_width).unwrap();
+                    let widest = (0..=query.len() + target.len())
+                        .filter_map(|wave| wave_range(query.len(), target.len(), base, wave))
+                        .map(WaveRange::width)
+                        .max()
+                        .unwrap();
+                    // The smallest resident chunk, one wider by a partial block, and chunks of
+                    // about half the band.
+                    for max_cells in [widest, widest + 9, total / 2] {
+                        assert!(widest <= max_cells && max_cells < total);
+                        let config = AlignmentConfig { max_cells, ..base };
+                        assert!(assert_wave_kernels_match(&query, &target, config).0.is_ok());
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn known_band_limited_case_matches_scalar_kernels() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        // Inputs of default_band_retains_known_gap256_bounded_counterexample.
+        let dna = |mut state: u64, length: usize| {
+            (0..length)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    b"ACGT"[(state & 3) as usize]
+                })
+                .collect::<Vec<_>>()
+        };
+        let query = dna(0x9e37_79b9_7f4a_7c15 ^ 1_000, 1_000);
+        let mut homolog = query.clone();
+        homolog.splice(500..500, dna(0xabcd_dcba ^ 256, 256));
+        let mut target = dna(0x1234_5678_9abc_def0 ^ 4_096, 4_096);
+        target[1_420..2_676].copy_from_slice(&homolog);
+        // The default band stops at the 256-base insertion; a wider band in that test finds the
+        // longer alignment with the dispatched kernel.
+        let config = AlignmentConfig {
+            diagonal_offset: 1_420,
+            band_width: 128,
+            max_cells: 20_000_000,
+            ..AlignmentConfig::default()
+        };
+        let (alignment, _) = assert_wave_kernels_match(&query, &target, config);
+        let alignment = alignment.unwrap();
+        assert_eq!((alignment.score, alignment.cigar.as_str()), (1_000, "500="));
+    }
+
     #[test]
     fn trace_alignment_permits_exclude_wait_and_release() {
         let pool = AlignmentBytePool::new(10);
@@ -3726,6 +3995,53 @@ mod tests {
             b"AAAAAAAAA",
             limited,
         );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn endpoint_waves_match_scalar_kernel_bits_at_lane_boundaries() {
+        if !is_x86_feature_detected!("avx2") {
+            return;
+        }
+        let lengths = [1, 7, 8, 9, 15, 16, 17, 24, 25];
+        let mut state = 0x510e_527f_ade6_82d1u64;
+        let mut next = move |bound: usize| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (state >> 33) as usize % bound
+        };
+        let mut vector = EndpointMatrix::default();
+        let mut scalar = EndpointMatrix::default();
+        for (case, config) in tie_and_saturation_configs().into_iter().enumerate() {
+            for query_len in lengths {
+                for target_len in lengths {
+                    let mut sequence = |length| {
+                        (0..length)
+                            .map(|_| if case == 1 { b'A' } else { b"ACgtN"[next(5)] })
+                            .collect::<Vec<_>>()
+                    };
+                    let (query, target) = (sequence(query_len), sequence(target_len));
+                    let actual = anchored_semiglobal(&mut vector, &query, &target, config, None);
+                    SCALAR_ENDPOINT_KERNEL.set(true);
+                    let expected = anchored_semiglobal(&mut scalar, &query, &target, config, None);
+                    SCALAR_ENDPOINT_KERNEL.set(false);
+                    let summary = |result: Result<EndpointResult, AlignmentError>| {
+                        result.map(|result| {
+                            (
+                                result.runs,
+                                result.query_bases,
+                                result.target_bases,
+                                result.matrix_cells,
+                            )
+                        })
+                    };
+                    let inputs = format!("{config:?} query={query:?} target={target:?}");
+                    assert_eq!(summary(actual), summary(expected), "{inputs}");
+                    assert_eq!(vector.previous, scalar.previous, "{inputs}");
+                }
+            }
+        }
+        assert!(!vector.waves.is_empty());
+        assert!(scalar.waves.is_empty());
     }
 
     #[derive(serde::Deserialize)]
