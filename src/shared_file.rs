@@ -5,7 +5,6 @@ use memmap2::{Mmap, MmapOptions};
 use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -28,7 +27,6 @@ pub(crate) struct SharedFile {
     pub(crate) header: SharedHeader,
     levels: Vec<ChecksumLevel>,
     verified: Box<[AtomicU64]>,
-    authentication: Mutex<()>,
     requested_bytes: AtomicU64,
     requested_pages: AtomicU64,
     authenticated_pages: AtomicU64,
@@ -62,7 +60,6 @@ impl SharedFile {
             header,
             levels,
             verified: (0..words).map(|_| AtomicU64::new(0)).collect(),
-            authentication: Mutex::new(()),
             requested_bytes: AtomicU64::new(HEADER_BYTES as u64),
             requested_pages: AtomicU64::new(1),
             authenticated_pages: AtomicU64::new(1),
@@ -152,17 +149,13 @@ impl SharedFile {
         if page >= self.mmap.len() as u64 / PAGE_BYTES || page == 0 {
             return Err(SharedError::Invalid("authentication page"));
         }
-        if self.known(page) {
-            return Ok(());
-        }
-        let _guard = self
-            .authentication
-            .lock()
-            .map_err(|_| SharedError::Invalid("authentication state"))?;
-        self.authenticate_locked(page)
+        self.authenticate_page(page)
     }
 
-    fn authenticate_locked(&self, page: u64) -> Result<(), SharedError> {
+    /// Verifies a page against its parent hash without a lock: the mapped generation is
+    /// immutable, verification is idempotent and the verified bit is set atomically, so
+    /// concurrent readers of an unverified page at most hash it twice.
+    fn authenticate_page(&self, page: u64) -> Result<(), SharedError> {
         if self.known(page) {
             return Ok(());
         }
@@ -170,7 +163,7 @@ impl SharedFile {
         let byte = page * PAGE_BYTES;
         let expected: [u8; 32] = if byte < checksums.offset {
             let hash_offset = checksums.offset + (page - 1) * 32;
-            self.authenticate_locked(hash_offset / PAGE_BYTES)?;
+            self.authenticate_page(hash_offset / PAGE_BYTES)?;
             self.mmap[hash_offset as usize..hash_offset as usize + 32]
                 .try_into()
                 .unwrap()
@@ -187,7 +180,7 @@ impl SharedFile {
             if let Some(parent) = self.levels.get(index + 1) {
                 let page_index = (byte - checksums.offset - level.offset) / PAGE_BYTES;
                 let hash_offset = checksums.offset + parent.offset + page_index * 32;
-                self.authenticate_locked(hash_offset / PAGE_BYTES)?;
+                self.authenticate_page(hash_offset / PAGE_BYTES)?;
                 self.mmap[hash_offset as usize..hash_offset as usize + 32]
                     .try_into()
                     .unwrap()
@@ -199,9 +192,12 @@ impl SharedFile {
         if digest != expected {
             return Err(SharedError::ChecksumMismatch);
         }
-        self.authenticated_pages.fetch_add(1, Ordering::Relaxed);
-        if self.identity.is_some() {
-            self.verified[page as usize / 64].fetch_or(1u64 << (page % 64), Ordering::Release);
+        let bit = 1u64 << (page % 64);
+        // A page verified concurrently by two readers is counted once.
+        if self.identity.is_none()
+            || self.verified[page as usize / 64].fetch_or(bit, Ordering::AcqRel) & bit == 0
+        {
+            self.authenticated_pages.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
     }
