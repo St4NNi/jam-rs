@@ -3823,6 +3823,15 @@ fn context_placements_match_filtered_groups_for_every_key() {
             if wide { 615 * 21 } else { 615 * 13 }
         );
         assert_context_round_trip(&filtered, &placed, &keys);
+        let diagnostic = context_diagnostic(&filtered, &placed, 65_536);
+        assert_eq!(
+            [
+                &diagnostic["groups"],
+                &diagnostic["placements"],
+                &diagnostic["mismatches"]
+            ],
+            [38, 1579, 0]
+        );
         let reader = SharedReader::open(&placed).unwrap();
         let find = |context, length| {
             reader
@@ -3931,4 +3940,176 @@ fn context_packing_accepts_only_filtered_sources() {
     }
     assert!(!output.exists());
     assert!(crate::shared_pack::repack_shared_contexts(&filtered, &placed).is_err());
+}
+
+// Compares all present keys and one absent key per level for each core of the sampled prefixes.
+fn context_diagnostic(
+    filtered: &std::path::Path,
+    placed: &std::path::Path,
+    sample: u32,
+) -> serde_json::Value {
+    assert!((1..=65_536).contains(&sample));
+    let source = crate::shared_file::SharedFile::open(filtered, false).unwrap();
+    let header = &source.header;
+    assert_eq!(header.version, 4);
+    let width = u64::from(header.core_payload_bytes);
+    let group_rows = header.section(Section::Groups).length / header.row_bytes(Section::Groups);
+    let rows = |first: u64, count: u64| {
+        let hot = source
+            .section(Section::Cores, first * 4, count * 4)
+            .unwrap();
+        let payloads = source
+            .section(Section::CorePayloads, first * width, count * width)
+            .unwrap();
+        hot.as_chunks::<4>()
+            .0
+            .iter()
+            .zip(payloads.chunks_exact(width as usize))
+            .map(|(hot, payload)| {
+                CoreRow::decode_compact(hot, payload, header.contig_count, group_rows).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let baseline = SharedReader::open_observed(filtered).unwrap();
+    let reader = SharedReader::open_observed(placed).unwrap();
+    let (mut ordinal, mut next_occurrence) = (0, 0);
+    let (mut keys_compared, mut groups, mut members, mut placements, mut mismatches) =
+        (0, 0, 0, 0, 0);
+    for index in 0..u64::from(sample) {
+        let prefix = (index * 65_536 / u64::from(sample)) as u32;
+        let bounds = source
+            .section(Section::CorePrefixes, u64::from(prefix) * 4, 8)
+            .unwrap();
+        let (first, end) = (
+            u64::from(crate::jidx::read_u32(bounds, 0)),
+            u64::from(crate::jidx::read_u32(bounds, 4)),
+        );
+        // The filtered layout keeps each repeated core in the next contiguous occurrence rows.
+        while ordinal < first {
+            let count = (first - ordinal).min(1 << 16);
+            for row in rows(ordinal, count) {
+                if let CoreKind::Repeated {
+                    occurrence_count, ..
+                } = row.kind
+                {
+                    next_occurrence += occurrence_count;
+                }
+            }
+            ordinal += count;
+        }
+        let prefix_rows = rows(first, end - first);
+        let cores = prefix_rows.iter().map(|row| row.core).collect::<Vec<_>>();
+        let mut keys = Vec::new();
+        for row in &prefix_rows {
+            let core = row.core;
+            let contexts = match row.kind {
+                CoreKind::Singleton { context, flags, .. } => vec![(context, flags)],
+                CoreKind::Repeated {
+                    occurrence_count, ..
+                } => {
+                    let bytes = source
+                        .section(
+                            Section::Occurrences,
+                            next_occurrence * 24,
+                            occurrence_count * 24,
+                        )
+                        .unwrap();
+                    next_occurrence += occurrence_count;
+                    bytes
+                        .as_chunks::<24>()
+                        .0
+                        .iter()
+                        .map(|raw| (crate::jidx::read_u32(raw, 0), crate::jidx::read_u32(raw, 8)))
+                        .collect()
+                }
+                CoreKind::Placed { .. } => unreachable!(),
+            };
+            let present = contexts
+                .into_iter()
+                .flat_map(|(context, flags)| {
+                    let seed = SharedSeed {
+                        core,
+                        context,
+                        flags: flags as u8,
+                        position: 0,
+                    };
+                    [15, 21, 31].map(|length| seed.key(length))
+                })
+                .flatten()
+                .collect::<std::collections::BTreeSet<_>>();
+            let absent = |context, length| {
+                !present.contains(&SharedKey {
+                    core,
+                    context,
+                    length,
+                })
+            };
+            keys.extend(
+                (core + 1..(prefix + 1) << 14)
+                    .chain((prefix << 14..core).rev())
+                    .find(|value| cores.binary_search(value).is_err())
+                    .map(SharedKey::core),
+            );
+            for (length, limit) in [(21, 1 << 12), (31, u32::MAX)] {
+                keys.extend(
+                    (0..limit)
+                        .find(|&context| absent(context, length))
+                        .map(|context| SharedKey {
+                            core,
+                            context,
+                            length,
+                        }),
+                );
+            }
+            keys.extend(present);
+        }
+        ordinal = end;
+        let expected = baseline.find_many(&keys).unwrap();
+        let actual = reader.find_many(&keys).unwrap();
+        for (expected, actual) in expected.into_iter().zip(actual) {
+            let expected = placed_evidence(&baseline, expected);
+            if let Some((member_count, occurrence_count, _)) = &expected {
+                groups += 1;
+                members += u64::from(*member_count);
+                placements += occurrence_count;
+            }
+            keys_compared += 1;
+            mismatches += u64::from(expected != placed_evidence(&reader, actual));
+        }
+    }
+    let file = |stats: SharedReadStats| {
+        serde_json::json!({
+            "requested_pages": stats.file.requested_pages,
+            "authenticated_pages": stats.file.authenticated_pages,
+            "group_inspections": stats.group_descriptor_inspections,
+            "member_inspections": stats.member_descriptor_inspections,
+            "positions_decoded": stats.physical_positions_decoded,
+        })
+    };
+    serde_json::json!({
+        "diagnostic": "shared_context_placements",
+        "sample_prefixes": sample,
+        "keys": keys_compared,
+        "groups": groups,
+        "members": members,
+        "placements": placements,
+        "mismatches": mismatches,
+        "v4": file(baseline.stats()),
+        "v5": file(reader.stats()),
+    })
+}
+
+#[test]
+#[ignore = "actual-target context placement diagnostic"]
+fn context_placements_actual_target_diagnostic() {
+    let path = |name| {
+        std::path::PathBuf::from(
+            std::env::var_os(name).unwrap_or_else(|| panic!("{name} names an index")),
+        )
+    };
+    let sample =
+        std::env::var("JAM_CONTEXT_SAMPLE_PREFIXES").map_or(16, |value| value.parse().unwrap());
+    let result = context_diagnostic(&path("JAM_V4_INDEX"), &path("JAM_V5_INDEX"), sample);
+    println!("{result}");
+    assert_eq!(result["mismatches"], 0);
 }
