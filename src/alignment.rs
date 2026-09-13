@@ -246,7 +246,7 @@ pub struct AlignmentWorkspace {
 }
 
 pub(crate) const TRACE_ALIGNMENT_BUDGET_BYTES: usize = 2 * 1024 * 1024 * 1024;
-// Covers at most ten retained workspace Vecs and conservative simultaneous task temporaries.
+// Covers retained workspace buffers and conservative simultaneous task temporaries.
 const TRACE_ALIGNMENT_ALLOCATION_COUNT: usize = 26;
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -2643,6 +2643,277 @@ mod tests {
             Interval::new(100, 108).unwrap()
         );
         assert_eq!(completed.alignment.cigar, "8=");
+    }
+
+    fn assert_endpoint_case(
+        matrix: &mut EndpointMatrix,
+        reference: &mut Vec<EndpointCell>,
+        query: &[u8],
+        target: &[u8],
+        config: AlignmentConfig,
+    ) {
+        let actual = anchored_semiglobal(matrix, query, target, config, None);
+        let expected = anchored_semiglobal_reference(reference, query, target, config);
+        match (actual, expected) {
+            (Ok(actual), Ok(expected)) => {
+                assert_eq!(
+                    actual.runs, expected.runs,
+                    "query={query:?} target={target:?}"
+                );
+                assert_eq!(actual.query_bases, expected.query_bases);
+                assert_eq!(actual.target_bases, expected.target_bases);
+                assert_eq!(actual.matrix_cells, expected.matrix_cells);
+                assert!(matrix.previous.iter().all(|packed| packed & 0xc0 == 0));
+            }
+            (Err(actual), Err(expected)) => assert_eq!(actual, expected),
+            (Ok(_), Err(expected)) => panic!(
+                "candidate succeeded for query={query:?} target={target:?}, reference failed: {expected}"
+            ),
+            (Err(actual), Ok(_)) => panic!(
+                "candidate failed for query={query:?} target={target:?}, reference succeeded: {actual}"
+            ),
+        }
+    }
+
+    fn ac_strings(max_len: usize) -> Vec<Vec<u8>> {
+        let mut strings = Vec::new();
+        for len in 0..=max_len {
+            for bits in 0..(1usize << len) {
+                strings.push(
+                    (0..len)
+                        .map(|index| if bits & (1 << index) == 0 { b'A' } else { b'C' })
+                        .collect(),
+                );
+            }
+        }
+        strings
+    }
+
+    #[test]
+    fn endpoint_kernel_matches_reference_exhaustively() {
+        let strings = ac_strings(4);
+        let configs = [
+            config(),
+            AlignmentConfig {
+                match_score: 1,
+                mismatch_score: 0,
+                gap_open_score: 0,
+                gap_extend_score: 0,
+                ..config()
+            },
+            AlignmentConfig {
+                match_score: 7,
+                mismatch_score: -11,
+                gap_open_score: -13,
+                gap_extend_score: -17,
+                ..config()
+            },
+            AlignmentConfig {
+                match_score: i32::MAX,
+                mismatch_score: i32::MIN,
+                gap_open_score: i32::MIN,
+                gap_extend_score: i32::MIN,
+                ..config()
+            },
+        ];
+        let mut matrix = EndpointMatrix::default();
+        let mut reference = Vec::new();
+        for config in configs {
+            for query in &strings {
+                for target in &strings {
+                    assert_endpoint_case(&mut matrix, &mut reference, query, target, config);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn endpoint_kernel_matches_reference_for_bounded_mixed_inputs() {
+        const BASES: &[u8] = b"ACGTNRYKMacgtnryk";
+        let mut state = 0x6a09_e667_f3bc_c909u64;
+        let mut matrix = EndpointMatrix::default();
+        let mut reference = Vec::new();
+        for case in 0..256usize {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let query_len = if case % 17 == 0 {
+                257
+            } else {
+                (state as usize) % 96
+            };
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let target_len = if case % 19 == 0 {
+                257
+            } else {
+                (state as usize) % 96
+            };
+            let mut make_sequence = |len| {
+                (0..len)
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        BASES[(state >> 59) as usize % BASES.len()]
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let query = make_sequence(query_len);
+            let target = make_sequence(target_len);
+            let config = AlignmentConfig {
+                match_score: 3,
+                mismatch_score: -7,
+                gap_open_score: -9,
+                gap_extend_score: -2,
+                max_cells: 70_000,
+                ..config()
+            };
+            assert_endpoint_case(&mut matrix, &mut reference, &query, &target, config);
+        }
+        for (query_len, target_len) in [(1, 257), (257, 1), (256, 257), (257, 256), (257, 257)] {
+            let query = vec![b'A'; query_len];
+            let target = vec![b'C'; target_len];
+            assert_endpoint_case(
+                &mut matrix,
+                &mut reference,
+                &query,
+                &target,
+                AlignmentConfig {
+                    max_cells: 70_000,
+                    ..config()
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn endpoint_kernel_reuses_buffers_and_preserves_errors() {
+        let mut matrix = EndpointMatrix::default();
+        let mut reference = Vec::new();
+        for length in [257, 1, 96, 3] {
+            assert_endpoint_case(
+                &mut matrix,
+                &mut reference,
+                &vec![b'A'; length],
+                &vec![b'A'; length],
+                AlignmentConfig {
+                    max_cells: 70_000,
+                    ..config()
+                },
+            );
+        }
+        let limited = AlignmentConfig {
+            max_cells: 89,
+            ..config()
+        };
+        assert_endpoint_case(
+            &mut matrix,
+            &mut reference,
+            b"AAAAAAAA",
+            b"AAAAAAAAA",
+            limited,
+        );
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RetainedEndpointFixture {
+        query: Vec<u8>,
+        target: Vec<u8>,
+        target_start: u64,
+        scoring: [i32; 4],
+        band_width: u32,
+        diagonal_offset: i64,
+        max_cells: usize,
+        endpoint_bases: usize,
+        circular: bool,
+        min_identity: f64,
+        min_aligned_bases: u64,
+        core: Alignment,
+        completed: Alignment,
+        metrics: [usize; 5],
+    }
+
+    #[test]
+    #[ignore = "requires retained BCF fixtures in JAM_ALIGNMENT_FIXTURES"]
+    fn retained_bcf_endpoint_fixtures_match() {
+        let root = std::env::var_os("JAM_ALIGNMENT_FIXTURES").expect("fixture directory");
+        let mut paths = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert!(!paths.is_empty());
+        assert!(paths.len() <= 16, "fixture set must remain bounded");
+        for path in paths {
+            let fixture: RetainedEndpointFixture =
+                serde_json::from_reader(std::fs::File::open(&path).unwrap()).unwrap();
+            let config = AlignmentConfig {
+                match_score: fixture.scoring[0],
+                mismatch_score: fixture.scoring[1],
+                gap_open_score: fixture.scoring[2],
+                gap_extend_score: fixture.scoring[3],
+                band_width: fixture.band_width,
+                diagonal_offset: fixture.diagonal_offset,
+                max_cells: fixture.max_cells,
+            };
+            let mut workspace = AlignmentWorkspace::default();
+            let core = workspace
+                .align_oriented(
+                    &fixture.query,
+                    &fixture.target,
+                    fixture.target_start,
+                    fixture.core.strand,
+                    config,
+                )
+                .unwrap();
+            assert_eq!(core, fixture.core, "{}", path.display());
+            let completion = workspace
+                .complete_endpoints(
+                    core.clone(),
+                    &fixture.query,
+                    &fixture.target,
+                    fixture.target_start,
+                    fixture.endpoint_bases,
+                    config,
+                )
+                .unwrap();
+            assert_eq!(
+                completion.alignment,
+                fixture.completed,
+                "{}",
+                path.display()
+            );
+            assert_eq!(
+                [
+                    completion.metrics.left_query_bases,
+                    completion.metrics.left_target_bases,
+                    completion.metrics.right_query_bases,
+                    completion.metrics.right_target_bases,
+                    completion.metrics.matrix_cells
+                ],
+                fixture.metrics,
+                "{}",
+                path.display()
+            );
+            let selected = if completion.alignment.identity() >= fixture.min_identity {
+                &completion.alignment
+            } else {
+                &core
+            };
+            let expected = if fixture.completed.identity() >= fixture.min_identity {
+                &fixture.completed
+            } else {
+                &fixture.core
+            };
+            assert_eq!(selected, expected, "{}", path.display());
+            assert_eq!(
+                selected.identity() >= fixture.min_identity
+                    && selected.query_interval.len() >= fixture.min_aligned_bases,
+                expected.identity() >= fixture.min_identity
+                    && expected.query_interval.len() >= fixture.min_aligned_bases
+            );
+            let _ = fixture.circular;
+        }
     }
 
     #[test]
