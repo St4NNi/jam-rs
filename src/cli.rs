@@ -151,6 +151,15 @@ pub enum Commands {
         maximum_keys: usize,
     },
 
+    /// Store the context groups of a filtered shared index as ordered placements
+    #[command(arg_required_else_help = true)]
+    SharedContextRepack {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+
     /// Trace query sequences through a shard or collection
     #[command(arg_required_else_help = true)]
     Trace {

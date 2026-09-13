@@ -209,6 +209,14 @@ pub fn run() -> Result<()> {
             Ok(())
         }
 
+        Commands::SharedContextRepack { input, output } => {
+            let stats = shared_pack::repack_shared_contexts(input, output)?;
+            if !cli.silent {
+                println!("{}", serde_json::to_string(&stats)?);
+            }
+            Ok(())
+        }
+
         Commands::Trace {
             query,
             database,
