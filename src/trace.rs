@@ -2052,25 +2052,6 @@ impl TraceEngine {
                 .contig(key.contig_id)?
                 .ok_or(TraceError::Invalid("missing region contig"))?;
             let envelope = fragment_envelope(&region, key, query_length, contig.length, config)?;
-            let oriented_start = match key.strand {
-                Strand::Forward => envelope.target_start,
-                Strand::Reverse => contig.length - envelope.target_end,
-            };
-            let target_relative = region.target_start - oriented_start;
-            let query_relative = if region.query_start >= envelope.query_start {
-                region.query_start - envelope.query_start
-            } else if config.circular {
-                region
-                    .query_start
-                    .checked_add(query_length)
-                    .and_then(|position| position.checked_sub(envelope.query_start))
-                    .ok_or(TraceError::Invalid("task query position"))?
-            } else {
-                return Err(TraceError::Invalid("task query position"));
-            };
-            let diagonal_offset =
-                i64::try_from(i128::from(target_relative) - i128::from(query_relative))
-                    .map_err(|_| TraceError::Invalid("task diagonal"))?;
             tasks.push(AlignmentTask {
                 metagenome_id: key.metagenome_id,
                 contig_id: key.contig_id,
@@ -2079,7 +2060,7 @@ impl TraceEngine {
                 query_span: envelope.query_span,
                 target_start: envelope.target_start,
                 target_end: envelope.target_end,
-                diagonal_offset,
+                diagonal_offset: envelope.diagonal_offset,
             });
         }
         tasks.sort_unstable_by_key(|task| {
@@ -3056,6 +3037,7 @@ struct FragmentEnvelope {
     query_span: u64,
     target_start: u64,
     target_end: u64,
+    diagonal_offset: i64,
 }
 
 fn fragment_envelope(
@@ -3118,20 +3100,40 @@ fn fragment_envelope(
     let full_query = (contig_length <= SHORT_CONTIG_ENVELOPE_BYTES)
         .then(|| projection(bounded_target))
         .transpose()?;
-    let (oriented_start, oriented_end, query_start, query_span) =
-        if let Some((query_start, query_span)) = full_query
-            && envelope_fits_workspace(query_span, contig_length, config)?
-        {
-            (0, contig_length, query_start, query_span)
+    // The admitted geometry uses the same final diagonal that alignment receives.
+    let full = match full_query {
+        Some((query_start, query_span)) => {
+            let diagonal = envelope_diagonal(region, query_start, 0, query_length, config)?;
+            envelope_fits_workspace(query_span, contig_length, diagonal, config)?.then_some((
+                0,
+                contig_length,
+                query_start,
+                query_span,
+                diagonal,
+            ))
+        }
+        None => None,
+    };
+    let (oriented_start, oriented_end, query_start, query_span, diagonal_offset) =
+        if let Some(full) = full {
+            full
         } else {
             let (query_start, query_span) = projection(bounded_target)?;
             let target_span = bounded_target.1 - bounded_target.0;
-            if !envelope_fits_workspace(query_span, target_span, config)? {
+            let diagonal =
+                envelope_diagonal(region, query_start, bounded_target.0, query_length, config)?;
+            if !envelope_fits_workspace(query_span, target_span, diagonal, config)? {
                 return Err(TraceError::Invalid(
                     "fragment envelope exceeds alignment workspace",
                 ));
             }
-            (bounded_target.0, bounded_target.1, query_start, query_span)
+            (
+                bounded_target.0,
+                bounded_target.1,
+                query_start,
+                query_span,
+                diagonal,
+            )
         };
     let (target_start, target_end) = match key.strand {
         Strand::Forward => (oriented_start, oriented_end),
@@ -3142,26 +3144,47 @@ fn fragment_envelope(
         query_span,
         target_start,
         target_end,
+        diagonal_offset,
     })
+}
+
+/// Local diagonal of the region's first anchor inside an oriented task window.
+fn envelope_diagonal(
+    region: &RegionAccumulator,
+    query_start: u64,
+    oriented_start: u64,
+    query_length: u64,
+    config: TraceConfig,
+) -> Result<i64, TraceError> {
+    let target_relative = region
+        .target_start
+        .checked_sub(oriented_start)
+        .ok_or(TraceError::Invalid("task target position"))?;
+    let query_relative = if region.query_start >= query_start {
+        region.query_start - query_start
+    } else if config.circular {
+        region
+            .query_start
+            .checked_add(query_length)
+            .and_then(|position| position.checked_sub(query_start))
+            .ok_or(TraceError::Invalid("task query position"))?
+    } else {
+        return Err(TraceError::Invalid("task query position"));
+    };
+    i64::try_from(i128::from(target_relative) - i128::from(query_relative))
+        .map_err(|_| TraceError::Invalid("task diagonal"))
 }
 
 fn envelope_fits_workspace(
     query_span: u64,
     target_span: u64,
+    diagonal_offset: i64,
     config: TraceConfig,
 ) -> Result<bool, TraceError> {
     let query = usize::try_from(query_span).map_err(|_| TraceError::Invalid("query window"))?;
     let target = usize::try_from(target_span).map_err(|_| TraceError::Invalid("target window"))?;
-    let band = usize::try_from(config.alignment.band_width)
-        .map_err(|_| TraceError::Invalid("alignment band"))?;
-    let band_columns = band
-        .checked_mul(2)
-        .and_then(|value| value.checked_add(1))
-        .ok_or(TraceError::Invalid("alignment band"))?;
-    let local_cells = query
-        .checked_add(1)
-        .and_then(|rows| rows.checked_mul(target.saturating_add(1).min(band_columns)))
-        .ok_or(TraceError::Invalid("fragment envelope workspace"))?;
+    let local_cells =
+        crate::alignment::band_cells(query, target, diagonal_offset, config.alignment.band_width)?;
     let reserve = (config.alignment.max_cells / ALIGNMENT_CELL_RESERVE_DIVISOR).max(1);
     let usable = config
         .alignment
@@ -4652,6 +4675,7 @@ mod tests {
             envelope_fits_workspace(
                 envelope.query_span,
                 envelope.target_end - envelope.target_start,
+                envelope.diagonal_offset,
                 config,
             )
             .unwrap()
@@ -4672,6 +4696,85 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn envelope_diagonal_places_first_anchor_on_band_center() {
+        let linear = TraceConfig {
+            circular: false,
+            ..TraceConfig::default()
+        };
+        let cases = [
+            (envelope_region(1_184, 700, 3), 2_000, 800, linear),
+            (envelope_region(1_184, 50_784, 3), 2_000, 100_000, linear),
+            (
+                envelope_region(1_950, 150, 1),
+                2_000,
+                400,
+                TraceConfig::default(),
+            ),
+            (
+                envelope_region(40, 90_000, 2),
+                2_000,
+                100_000,
+                TraceConfig::default(),
+            ),
+        ];
+        for (region, query_length, contig_length, config) in cases {
+            for strand in [Strand::Forward, Strand::Reverse] {
+                let envelope = fragment_envelope(
+                    &region,
+                    envelope_key(strand),
+                    query_length,
+                    contig_length,
+                    config,
+                )
+                .unwrap();
+                let oriented_start = match strand {
+                    Strand::Forward => envelope.target_start,
+                    Strand::Reverse => contig_length - envelope.target_end,
+                };
+                let query_relative =
+                    (region.query_start + query_length - envelope.query_start) % query_length;
+                let target_relative = region.target_start - oriented_start;
+                assert_eq!(
+                    envelope.diagonal_offset,
+                    target_relative as i64 - query_relative as i64
+                );
+                let query = envelope.query_span as usize;
+                let target = (envelope.target_end - envelope.target_start) as usize;
+                let row = crate::alignment::band_row(
+                    query_relative as usize,
+                    target,
+                    envelope.diagonal_offset,
+                    config.alignment.band_width,
+                )
+                .unwrap()
+                .unwrap();
+                assert!(row.0 <= target_relative as usize && target_relative as usize <= row.1);
+                let mut workspace = AlignmentWorkspace::default();
+                workspace.enable_timing();
+                let sequence = vec![b'A'; query.max(target)];
+                let _ = workspace.align(
+                    &sequence[..query],
+                    &sequence[..target],
+                    AlignmentConfig {
+                        diagonal_offset: envelope.diagonal_offset,
+                        ..config.alignment
+                    },
+                );
+                assert_eq!(
+                    workspace.work.local_cells as usize,
+                    crate::alignment::band_cells(
+                        query,
+                        target,
+                        envelope.diagonal_offset,
+                        config.alignment.band_width
+                    )
+                    .unwrap()
+                );
+            }
+        }
     }
 
     fn exact_alignment_pairs(

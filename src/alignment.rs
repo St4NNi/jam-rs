@@ -1009,24 +1009,15 @@ impl AlignmentWorkspace {
         self.row_offsets.clear();
         self.row_starts.clear();
         self.row_widths.clear();
-        let target_len = i128::try_from(target_len).map_err(|_| AlignmentError::LengthOverflow)?;
-        let band = i128::from(config.band_width);
-        let diagonal = i128::from(config.diagonal_offset);
         let mut total = 0usize;
         for query_index in 0..=query_len {
-            let center =
-                i128::try_from(query_index).map_err(|_| AlignmentError::LengthOverflow)? + diagonal;
-            let low = center - band;
-            let high = center + band;
-            let (start, width) = if high < 0 || low > target_len {
-                (0, 0)
-            } else {
-                let start =
-                    usize::try_from(low.max(0)).map_err(|_| AlignmentError::LengthOverflow)?;
-                let end = usize::try_from(high.min(target_len))
-                    .map_err(|_| AlignmentError::LengthOverflow)?;
-                (start, end - start + 1)
-            };
+            let (start, width) = band_row(
+                query_index,
+                target_len,
+                config.diagonal_offset,
+                config.band_width,
+            )?
+            .map_or((0, 0), |(start, end)| (start, end - start + 1));
             self.row_offsets.push(total);
             self.row_starts.push(start);
             self.row_widths.push(width);
@@ -1156,6 +1147,42 @@ impl AlignmentWorkspace {
         }
         Ok((query_index, target_index))
     }
+}
+
+/// Inclusive target columns stored for one query row of a clipped diagonal band.
+pub(crate) fn band_row(
+    query_index: usize,
+    target_len: usize,
+    diagonal_offset: i64,
+    band_width: u32,
+) -> Result<Option<(usize, usize)>, AlignmentError> {
+    let target_len = i128::try_from(target_len).map_err(|_| AlignmentError::LengthOverflow)?;
+    let center = i128::try_from(query_index).map_err(|_| AlignmentError::LengthOverflow)?
+        + i128::from(diagonal_offset);
+    let low = center - i128::from(band_width);
+    let high = center + i128::from(band_width);
+    if high < 0 || low > target_len {
+        return Ok(None);
+    }
+    let start = usize::try_from(low.max(0)).map_err(|_| AlignmentError::LengthOverflow)?;
+    let end = usize::try_from(high.min(target_len)).map_err(|_| AlignmentError::LengthOverflow)?;
+    Ok(Some((start, end)))
+}
+
+/// Exact local cells stored for query rows 0..=query_len, counted without row metadata.
+pub(crate) fn band_cells(
+    query_len: usize,
+    target_len: usize,
+    diagonal_offset: i64,
+    band_width: u32,
+) -> Result<usize, AlignmentError> {
+    (0..=query_len).try_fold(0usize, |total, query_index| {
+        let width = band_row(query_index, target_len, diagonal_offset, band_width)?
+            .map_or(0, |(start, end)| end - start + 1);
+        total
+            .checked_add(width)
+            .ok_or(AlignmentError::LengthOverflow)
+    })
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2537,6 +2564,91 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn band_cells_match_kernel_row_and_wave_layouts() {
+        let brute = |m: usize, n: usize, d: i64, w: u32| {
+            (0..=m)
+                .flat_map(|i| (0..=n).map(move |j| (i, j)))
+                .filter(|&(i, j)| (j as i64 - i as i64 - d).abs() <= i64::from(w))
+                .count()
+        };
+        let cases: [(usize, usize, i64, u32); 16] = [
+            (0, 0, 0, 0),
+            (1, 1, 0, 0),
+            (40, 3, 0, 4),
+            (3, 40, 0, 4),
+            (60, 60, -45, 8),
+            (60, 60, 45, 8),
+            (60, 20, 30, 8),
+            (20, 20, 29, 8),
+            (20, 20, -29, 8),
+            (20, 20, 28, 8),
+            (20, 20, -28, 8),
+            (500, 7, -3, 128),
+            (7, 500, 3, 128),
+            (300, 280, -17, 16),
+            (900, 120, -700, 64),
+            (120, 900, 700, 64),
+        ];
+        for (m, n, d, w) in cases {
+            let expected = brute(m, n, d, w);
+            assert_eq!(band_cells(m, n, d, w).unwrap(), expected, "{m} {n} {d} {w}");
+            let cfg = AlignmentConfig {
+                band_width: w,
+                diagonal_offset: d,
+                ..config()
+            };
+            let mut workspace = AlignmentWorkspace::default();
+            workspace.prepare_rows(m, n, cfg).unwrap();
+            for i in 0..=m {
+                let row = band_row(i, n, d, w).unwrap();
+                assert_eq!(
+                    (workspace.row_starts[i], workspace.row_widths[i]),
+                    row.map_or((0, 0), |(start, end)| (start, end - start + 1))
+                );
+            }
+            assert_eq!(workspace.row_offsets[m] + workspace.row_widths[m], expected);
+            if m > 0 && n > 0 && expected > 0 {
+                let (query, target) = (vec![b'A'; m], vec![b'C'; n]);
+                let mut scalar = AlignmentWorkspace::default();
+                scalar.enable_timing();
+                let _ = scalar.align_raw_scalar(&query, &target, cfg);
+                assert_eq!(scalar.work.local_cells as usize, expected);
+                #[cfg(target_arch = "x86_64")]
+                if is_x86_feature_detected!("avx2") {
+                    let mut avx2 = AlignmentWorkspace::default();
+                    avx2.enable_timing();
+                    // SAFETY: guarded by the runtime AVX2 check.
+                    let _ = unsafe { avx2.align_raw_avx2(&query, &target, cfg) };
+                    assert_eq!(avx2.work.local_cells as usize, expected);
+                }
+            }
+            #[cfg(target_arch = "x86_64")]
+            assert_eq!(
+                (0..=m + n)
+                    .filter_map(|wave| wave_range(m, n, cfg, wave))
+                    .map(WaveRange::width)
+                    .sum::<usize>(),
+                expected
+            );
+        }
+        // Rows outside a short target leave the exact count well below rows times band.
+        let (m, n, d, w) = (61_200, 50_000, -5_000, 128);
+        let conservative = (m + 1) * (2 * w as usize + 1);
+        let exact = band_cells(m, n, d, w).unwrap();
+        assert!(conservative > 15_728_640 && exact <= 15_728_640, "{exact}");
+        assert_eq!(
+            exact,
+            (0..=m)
+                .map(|i| {
+                    let low = (i as i64 + d - i64::from(w)).max(0);
+                    let high = (i as i64 + d + i64::from(w)).min(n as i64);
+                    (high - low + 1).max(0) as usize
+                })
+                .sum::<usize>()
+        );
     }
 
     #[cfg(target_arch = "x86_64")]
