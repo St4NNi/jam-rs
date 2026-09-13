@@ -6,12 +6,17 @@ use crate::shared_reader::CoreRow;
 use xorf::{BinaryFuse8Ref, DmaSerializable, Filter, FilterRef};
 
 const METADATA_BYTES: usize = 128;
-const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// Largest filter section this reader supports. Readers before this bound accepted at most
+/// 8 MiB and reject larger sections with an error.
+pub(crate) const MAX_BYTES: usize = 32 * 1024 * 1024;
+/// Largest filter copy one open reader keeps in memory; larger supported filters fall back to
+/// complete exact lookup.
+pub(crate) const RESIDENT_BYTES: usize = 32 * 1024 * 1024;
 const PREFIX_END: u32 = 65_536;
 
 #[cfg(test)]
 thread_local! {
-    pub(crate) static FILTER_TEST_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_BYTES) };
+    pub(crate) static FILTER_TEST_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(RESIDENT_BYTES) };
 }
 
 pub(crate) fn core_input(core: u32) -> u64 {
@@ -20,7 +25,7 @@ pub(crate) fn core_input(core: u32) -> u64 {
 
 pub(crate) fn build(source: &SharedFile, maximum_keys: usize) -> Result<Vec<u8>, SharedError> {
     source.verify_unchanged()?;
-    if source.header.version != 3 {
+    if !matches!(source.header.version, 3 | 5) {
         return Err(SharedError::Invalid("filter requires split cores"));
     }
     let count =
@@ -190,9 +195,9 @@ pub(crate) fn load(file: &SharedFile) -> Result<Option<CoreFilter>, SharedError>
     }
     file.verify_unchanged()?;
     #[cfg(test)]
-    let limit = FILTER_TEST_LIMIT.with(|limit| limit.get().min(MAX_BYTES));
+    let limit = FILTER_TEST_LIMIT.with(|limit| limit.get().min(RESIDENT_BYTES));
     #[cfg(not(test))]
-    let limit = MAX_BYTES;
+    let limit = RESIDENT_BYTES;
     if bytes.len() > limit {
         return Err(SharedError::ResourceLimit);
     }

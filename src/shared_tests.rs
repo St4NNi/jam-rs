@@ -3201,6 +3201,10 @@ fn binary_fuse_shared_ranges_preserve_complete_exact_evidence() {
     crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
         .unwrap();
     crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    let partial = directory.path().join("fuse-partial.shared");
+    let placed = directory.path().join("fuse-placed.shared");
+    crate::shared_pack::add_shared_core_filter(&compact, &partial, 32).unwrap();
+    crate::shared_pack::repack_shared_contexts(&partial, &placed).unwrap();
     let cores = [
         0,
         1,
@@ -3215,10 +3219,15 @@ fn binary_fuse_shared_ranges_preserve_complete_exact_evidence() {
         TARGET_CORE + 1,
         CORE_LIMIT - 1,
     ];
-    for maximum in [0, 32, usize::MAX] {
-        let filtered = directory.path().join(format!("fuse-{maximum}.shared"));
-        crate::shared_pack::add_shared_core_filter(&compact, &filtered, maximum).unwrap();
-        assert!(crate::shared_pack::add_shared_core_filter(&compact, &filtered, maximum).is_err());
+    for (source, maximum) in [0, 32, usize::MAX]
+        .into_iter()
+        .flat_map(|maximum| [(&compact, maximum), (&placed, maximum)])
+    {
+        let filtered = directory
+            .path()
+            .join(format!("fuse-{maximum}-{}.shared", source == &placed));
+        crate::shared_pack::add_shared_core_filter(source, &filtered, maximum).unwrap();
+        assert!(crate::shared_pack::add_shared_core_filter(source, &filtered, maximum).is_err());
         let reader = SharedReader::open_observed(&filtered).unwrap();
         reader.verify_checksum().unwrap();
         let mut groups = Vec::new();
@@ -3300,37 +3309,44 @@ fn declared_binary_fuse_corruption_fails_before_negative_answers() {
     let (directory, _, _) = fixture(32);
     let packed = directory.path().join("fuse-packed.shared");
     let compact = directory.path().join("fuse-compact.shared");
-    let filtered = directory.path().join("fuse.shared");
+    let partial = directory.path().join("fuse-partial.shared");
+    let placed = directory.path().join("fuse-placed.shared");
     crate::shared_pack::repack_shared_index(directory.path().join("fixture.shared"), &packed)
         .unwrap();
     crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+    crate::shared_pack::add_shared_core_filter(&compact, &partial, 32).unwrap();
+    crate::shared_pack::repack_shared_contexts(&partial, &placed).unwrap();
+    for source in [compact, placed] {
+        declared_filter_corruption_fails(directory.path(), &source);
+    }
+}
+
+fn declared_filter_corruption_fails(directory: &std::path::Path, source: &std::path::Path) {
+    let name = source.file_stem().unwrap().to_str().unwrap();
+    let filtered = directory.join(format!("{name}-fuse.shared"));
     crate::jidx_filters::FAIL_BINARY_FUSE_BUILD.with(|failure| failure.set(true));
-    let failed = crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX);
+    let failed = crate::shared_pack::add_shared_core_filter(source, &filtered, usize::MAX);
     crate::jidx_filters::FAIL_BINARY_FUSE_BUILD.with(|failure| failure.set(false));
     assert!(failed.is_err());
     assert!(!filtered.exists());
-    crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+    crate::shared_pack::add_shared_core_filter(source, &filtered, usize::MAX).unwrap();
     let original = std::fs::read(&filtered).unwrap();
     let header = SharedHeader::decode(&original[..HEADER_BYTES], original.len() as u64).unwrap();
     let offset = header.section(Section::CoreFilter).offset as usize;
     for relative in [0, 8, 12, 16, 24, 48, 80, 128, 148] {
-        let corrupted = directory
-            .path()
-            .join(format!("fuse-corrupt-{relative}.shared"));
+        let corrupted = directory.join(format!("{name}-corrupt-{relative}.shared"));
         let mut bytes = original.clone();
         bytes[offset + relative] ^= 1;
         std::fs::write(&corrupted, bytes).unwrap();
         assert!(SharedReader::open(&corrupted).is_err());
     }
     for relative in [8, 12, 24, 48, 80, 128 + 12] {
-        let malformed = directory
-            .path()
-            .join(format!("fuse-malformed-{relative}.shared"));
+        let malformed = directory.join(format!("{name}-malformed-{relative}.shared"));
         std::fs::write(&malformed, &original).unwrap();
         mutate_and_resign(&malformed, |bytes, _| bytes[offset + relative] ^= 1);
         assert!(SharedReader::open(&malformed).is_err());
     }
-    let truncated = directory.path().join("fuse-truncated.shared");
+    let truncated = directory.join(format!("{name}-truncated.shared"));
     std::fs::write(&truncated, &original[..original.len() - 1]).unwrap();
     assert!(SharedReader::open(truncated).is_err());
     let reader = SharedReader::open(&filtered).unwrap();
@@ -3367,25 +3383,43 @@ fn binary_fuse_empty_and_memory_fallback_remain_complete() {
         crate::shared_pack::repack_shared_index(&source, &packed).unwrap();
         crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
         crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
+        let placed = directory
+            .path()
+            .join(format!("fallback-{empty}-placed.shared"));
+        let replaced = directory
+            .path()
+            .join(format!("fallback-{empty}-replaced.shared"));
+        crate::shared_pack::repack_shared_contexts(&filtered, &placed).unwrap();
+        crate::shared_pack::add_shared_core_filter(&placed, &replaced, usize::MAX).unwrap();
         let expected = SharedReader::open(&compact).unwrap();
-        for budget in [0, 8 * 1024 * 1024] {
-            let old = crate::shared_filters::FILTER_TEST_LIMIT.with(|limit| limit.replace(budget));
-            let reader = SharedReader::open_observed(&filtered);
-            crate::shared_filters::FILTER_TEST_LIMIT.with(|limit| limit.set(old));
-            let reader = reader.unwrap();
-            assert_eq!(reader.stats().filter_fallbacks, u64::from(budget == 0));
-            let cores = [0, 1, 100, TARGET_CORE, TARGET_CORE + 1];
-            let mut groups = Vec::new();
-            reader
-                .resolve_sorted_cores_into(&cores, &mut groups)
-                .unwrap();
-            let actual = groups.into_iter().map(|g| g.key()).collect::<Vec<_>>();
-            let expected = cores
-                .into_iter()
-                .filter_map(|c| expected.find(SharedKey::core(c)).unwrap())
-                .map(|g| g.key())
-                .collect::<Vec<_>>();
-            assert_eq!(actual, expected);
+        for path in [&filtered, &replaced] {
+            let file = crate::shared_file::SharedFile::open(path, false).unwrap();
+            let length = file.header.section(Section::CoreFilter).length as usize;
+            drop(file);
+            for budget in [0, length - 1, length, crate::shared_filters::RESIDENT_BYTES] {
+                let old =
+                    crate::shared_filters::FILTER_TEST_LIMIT.with(|limit| limit.replace(budget));
+                let reader = SharedReader::open_observed(path);
+                crate::shared_filters::FILTER_TEST_LIMIT.with(|limit| limit.set(old));
+                let reader = reader.unwrap();
+                assert_eq!(reader.stats().filter_fallbacks, u64::from(budget < length));
+                assert_eq!(
+                    reader.stats().filter_resident_bytes,
+                    if budget < length { 0 } else { length }
+                );
+                let cores = [0, 1, 100, TARGET_CORE, TARGET_CORE + 1];
+                let mut groups = Vec::new();
+                reader
+                    .resolve_sorted_cores_into(&cores, &mut groups)
+                    .unwrap();
+                let actual = groups.into_iter().map(|g| g.key()).collect::<Vec<_>>();
+                let expected = cores
+                    .into_iter()
+                    .filter_map(|c| expected.find(SharedKey::core(c)).unwrap())
+                    .map(|g| g.key())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            }
         }
     }
 }
@@ -3504,7 +3538,8 @@ fn oversized_filter_declaration_is_rejected_before_section_access() {
     crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
     crate::shared_pack::add_shared_core_filter(&compact, &filtered, usize::MAX).unwrap();
     let mut file = crate::shared_file::SharedFile::open(&filtered, true).unwrap();
-    file.header.sections[Section::CoreFilter as usize].length = 8 * 1024 * 1024 + 1;
+    let maximum = crate::shared_filters::MAX_BYTES as u64;
+    file.header.sections[Section::CoreFilter as usize].length = maximum + 1;
     let before = file.stats();
     assert!(matches!(
         crate::shared_filters::load(&file),
@@ -3512,6 +3547,120 @@ fn oversized_filter_declaration_is_rejected_before_section_access() {
     ));
     assert_eq!(file.stats().requested_bytes, before.requested_bytes);
     assert_eq!(file.stats().authenticated_pages, before.authenticated_pages);
+    // Sections above the former 8 MiB bound pass the size gate and fail only on their extent.
+    for length in [8 * 1024 * 1024 + 1, maximum] {
+        file.header.sections[Section::CoreFilter as usize].length = length;
+        assert!(!matches!(
+            crate::shared_filters::load(&file),
+            Ok(_) | Err(SharedError::Invalid("core filter size"))
+        ));
+    }
+}
+
+#[test]
+fn placed_filter_replacement_changes_only_the_filter() {
+    for wide in [false, true] {
+        let (directory, filtered, placed, keys, stats) = context_fixture(wide);
+        let path = |name: &str| directory.path().join(name);
+        let (partial, source, full) = (
+            path("partial-filtered.shared"),
+            path("partial-placed.shared"),
+            path("replaced-full.shared"),
+        );
+        let compact = path("contexts-compact.shared");
+        let count = crate::shared_file::SharedFile::open(&compact, false)
+            .unwrap()
+            .header
+            .core_count;
+        crate::shared_pack::add_shared_core_filter(&compact, &partial, count as usize - 1).unwrap();
+        crate::shared_pack::repack_shared_contexts(&partial, &source).unwrap();
+        for rejected in [&filtered, &path("contexts-packed.shared")] {
+            assert!(matches!(
+                crate::shared_pack::add_shared_core_filter(rejected, &full, usize::MAX),
+                Err(SharedError::Invalid("filter source version"))
+            ));
+            assert!(!full.exists());
+        }
+        let replaced =
+            crate::shared_pack::add_shared_core_filter(&source, &full, usize::MAX).unwrap();
+        assert!(crate::shared_pack::add_shared_core_filter(&source, &full, usize::MAX).is_err());
+        let open = |path| crate::shared_file::SharedFile::open(path, false).unwrap();
+        let (before, after, reference) = (open(&source), open(&full), open(&placed));
+        after.verify_checksum().unwrap();
+        let mut expected = before.header.clone();
+        expected.body_sha256 = after.header.body_sha256;
+        expected.checksum_root_sha256 = after.header.checksum_root_sha256;
+        expected.sections = after.header.sections;
+        expected.filter_source_sha256 = before.header.body_sha256;
+        assert_eq!(after.header, expected);
+        assert_eq!(after.header.version, 5);
+        let bytes = |file: &crate::shared_file::SharedFile, kind| {
+            file.section(kind, 0, file.header.section(kind).length)
+                .unwrap()
+                .to_vec()
+        };
+        for &kind in after.header.section_order() {
+            if !matches!(kind, Section::CoreFilter | Section::Checksums) {
+                assert_eq!(bytes(&after, kind), bytes(&before, kind), "{kind:?}");
+            }
+        }
+        // The same complete key set gives the same fingerprints; only the source binding differs.
+        let (old, new) = (
+            bytes(&reference, Section::CoreFilter),
+            bytes(&after, Section::CoreFilter),
+        );
+        assert_eq!(
+            (new.len(), &new[..80], &new[112..]),
+            (old.len(), &old[..80], &old[112..])
+        );
+        assert_eq!(new[80..112], before.header.body_sha256);
+        let coverage = |filter: &[u8]| {
+            (
+                u32::from_le_bytes(filter[16..20].try_into().unwrap()),
+                u64::from_le_bytes(filter[24..32].try_into().unwrap()),
+            )
+        };
+        let partial_coverage = coverage(&bytes(&before, Section::CoreFilter));
+        assert!(partial_coverage.0 < 65_536 && partial_coverage.1 < count);
+        assert_eq!(coverage(&new), (65_536, count));
+        assert_eq!(replaced.singleton_cores, stats.build.singleton_cores);
+        assert_eq!(replaced.bgzf_bytes_once, stats.build.bgzf_bytes_once);
+        assert_eq!(
+            replaced.index_bytes,
+            std::fs::metadata(&full).unwrap().len()
+        );
+        assert_eq!(
+            replaced.complete_query_ready_bytes,
+            replaced.index_bytes + replaced.bgzf_bytes_once
+        );
+        assert_context_round_trip(&placed, &full, &keys);
+        assert_context_round_trip(&source, &full, &keys);
+
+        let reader = SharedReader::open_observed(&full).unwrap();
+        assert_eq!(reader.stats().filter_covered_cores, reader.core_count());
+        assert_eq!(reader.stats().filter_fallbacks, 0);
+        let cores = bytes(&after, Section::Cores)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|row| CoreRow::decode_key(row).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(cores.len() as u64, reader.core_count());
+        let operation = reader.core_operation().unwrap().unwrap();
+        for &core in &cores {
+            assert_eq!(operation.screen(core).unwrap(), (true, true));
+        }
+        // An absent core that passes the filter still resolves through exact lookup to nothing.
+        let positive = (0..CORE_LIMIT)
+            .find(|core| cores.binary_search(core).is_err() && operation.screen(*core).unwrap().1)
+            .unwrap();
+        let mut output = Vec::new();
+        operation
+            .resolve_sorted_cores_into(&[positive], &mut output)
+            .unwrap();
+        assert!(output.is_empty());
+        operation.finish().unwrap();
+    }
 }
 
 fn context_fixture(

@@ -51,14 +51,16 @@ pub fn add_shared_core_filter(
     let input = input.as_ref();
     let source = SharedFile::open(input, false)?;
     source.verify_checksum()?;
-    if source.header.version != 3 {
+    // Version 3 gains a filter as version 4; version 5 replaces its filter and stays version 5.
+    if !matches!(source.header.version, 3 | 5) {
         return Err(SharedError::Invalid("filter source version"));
     }
     let mut header = source.header.clone();
     let mut sections: [Vec<u8>; 13] = std::array::from_fn(|_| Vec::new());
     sections[Section::CoreFilter as usize] = crate::shared_filters::build(&source, maximum_keys)?;
     for &kind in header.section_order() {
-        if kind == Section::Checksums {
+        // The old filter and checksum pages are rebuilt, never copied.
+        if matches!(kind, Section::Checksums | Section::CoreFilter) {
             continue;
         }
         let length = header.section(kind).length;
@@ -72,7 +74,9 @@ pub fn add_shared_core_filter(
         .iter()
         .filter(|row| read_u32(*row, 0) & MULTIPLE_CORE == 0)
         .count() as u64;
-    header.version = 4;
+    if header.version == 3 {
+        header.version = 4;
+    }
     header.filter_source_sha256 = source.header.body_sha256;
     let bgzf_bytes = bgzf_bytes_once(input, header.document_count)?;
     source.verify_unchanged()?;
