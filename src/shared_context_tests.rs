@@ -1,6 +1,100 @@
 use super::*;
 
 #[test]
+fn retained_context_members_match_preserved_counts_and_positions() {
+    for wide in [false, true] {
+        let (_directory, preserved, placed, keys, _) = context_fixture(wide);
+        let reference = SharedReader::open(preserved).unwrap();
+        let reader = SharedReader::open_observed(&placed).unwrap();
+        for workers in [1, 4, 8, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            pool.install(|| {
+                // Also request children without their 21 ancestor, with repeated associations.
+                for children_only in [false, true] {
+                    for same_core in keys.chunk_by(|left, right| left.core == right.core) {
+                        let Some(core) = reader.find(SharedKey::core(same_core[0].core)).unwrap()
+                        else {
+                            continue;
+                        };
+                        let contexts = same_core
+                            .iter()
+                            .copied()
+                            .filter(|key| !children_only || key.length == 31)
+                            .flat_map(|key| [key, key])
+                            .collect::<Vec<_>>();
+                        let expected = reader.find_in_core(core, &contexts).unwrap();
+                        let mut output = vec![None; contexts.len()];
+                        let mut retained = Vec::with_capacity(2048);
+                        let operation = reader.posting_operation().unwrap();
+                        let complete = operation
+                            .find_in_core_with_members_into(
+                                core,
+                                &contexts,
+                                &mut output,
+                                &mut retained,
+                            )
+                            .unwrap();
+                        assert_eq!(output.as_slice(), expected.as_slice());
+                        operation.finish().unwrap();
+                        for (ordinal, (&key, group)) in contexts.iter().zip(output).enumerate() {
+                            assert_eq!(
+                                placed_evidence(&reader, group),
+                                placed_evidence(&reference, reference.find(key).unwrap())
+                            );
+                            let Some(group) = group else {
+                                continue;
+                            };
+                            if !complete {
+                                continue;
+                            }
+                            let first = if ordinal % 2 == 0 {
+                                ordinal
+                            } else {
+                                ordinal - 1
+                            };
+                            let actual = retained
+                                .iter()
+                                .filter(|(index, _)| *index == first)
+                                .map(|(_, member)| *member)
+                                .collect::<Vec<_>>();
+                            assert_eq!(actual, reader.members(group).unwrap());
+                            let before = reader.stats().placement_bound_searches;
+                            let operation = reader.posting_operation().unwrap();
+                            for member in actual {
+                                let mut positions = vec![
+                                    crate::jidx_reader::SeedOccurrence {
+                                        contig_id: 0,
+                                        position: 0,
+                                        canonical_orientation: false,
+                                    };
+                                    member.occurrence_count() as usize
+                                ];
+                                operation
+                                    .fill_occurrence_block(group, member, 0, &mut positions)
+                                    .unwrap();
+                                assert_eq!(
+                                    positions,
+                                    reader.member_occurrences(group, member).unwrap()
+                                );
+                            }
+                            operation.finish().unwrap();
+                            assert_eq!(
+                                reader.stats().placement_bound_searches,
+                                before,
+                                "retained ranges must not be searched during position fill"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[test]
 fn checked_contexts_match_public_results_with_constant_identity_checks() {
     let (_directory, reader, _) = fixture(2);
     let cores = [0, TARGET_CORE, TARGET_CORE + 1]

@@ -39,6 +39,12 @@ pub struct SharedReader {
     core_view_comparisons: AtomicU64,
     directory_comparison_probes: AtomicU64,
     context_comparisons: AtomicU64,
+    context_member_runs: AtomicU64,
+    retained_context_members: AtomicU64,
+    context_member_fallbacks: AtomicU64,
+    placement_bound_searches: AtomicU64,
+    context_posting_members_reused: AtomicU64,
+    context_posting_members_fallback: AtomicU64,
     references_decoded: AtomicU64,
     positions_decoded: AtomicU64,
     numeric_contig_resolutions: AtomicU64,
@@ -68,6 +74,12 @@ pub struct SharedReadStats {
     pub core_view_comparisons: u64,
     pub directory_comparison_probes: u64,
     pub context_comparisons: u64,
+    pub context_member_runs: u64,
+    pub retained_context_members: u64,
+    pub context_member_fallbacks: u64,
+    pub placement_bound_searches: u64,
+    pub context_posting_members_reused: u64,
+    pub context_posting_members_fallback: u64,
     pub references_decoded: u64,
     pub physical_positions_decoded: u64,
     pub numeric_contig_resolutions: u64,
@@ -274,27 +286,7 @@ impl SharedPostingOperation<'_> {
     ) -> Result<(), SharedError> {
         output.fill(None);
         let result = (|| {
-            self.reader.validate_group_token(core)?;
-            if core.key.length != 15 || core.key.context != 0 {
-                return Err(SharedError::Invalid("core group"));
-            }
-            if output.len() != keys.len() {
-                return Err(SharedError::Invalid("context result storage"));
-            }
-            admit_result(keys.len(), size_of::<Option<SharedGroup>>())?;
-            let mut previous = None;
-            for key in keys {
-                let code = key
-                    .context_code()
-                    .ok_or(SharedError::Invalid("shared key"))?;
-                if key.core != core.key.core {
-                    return Err(SharedError::Invalid("core group key"));
-                }
-                if previous.is_some_and(|before| before > code) {
-                    return Err(SharedError::Invalid("sorted core contexts"));
-                }
-                previous = Some(code);
-            }
+            self.validate_context_storage(core, keys, output)?;
             if !keys.is_empty() {
                 let row = self.reader.core_row(core.core_ordinal)?;
                 if row.core != core.key.core {
@@ -314,6 +306,75 @@ impl SharedPostingOperation<'_> {
         })();
         if result.is_err() {
             output.fill(None);
+        }
+        result
+    }
+
+    fn validate_context_storage(
+        &self,
+        core: SharedGroup,
+        keys: &[SharedKey],
+        output: &[Option<SharedGroup>],
+    ) -> Result<(), SharedError> {
+        self.reader.validate_group_token(core)?;
+        if core.key.length != 15 || core.key.context != 0 {
+            return Err(SharedError::Invalid("core group"));
+        }
+        if output.len() != keys.len() {
+            return Err(SharedError::Invalid("context result storage"));
+        }
+        admit_result(keys.len(), size_of::<Option<SharedGroup>>())?;
+        let mut previous = None;
+        for key in keys {
+            let code = key
+                .context_code()
+                .ok_or(SharedError::Invalid("shared key"))?;
+            if key.core != core.key.core {
+                return Err(SharedError::Invalid("core group key"));
+            }
+            if previous.is_some_and(|before| before > code) {
+                return Err(SharedError::Invalid("sorted core contexts"));
+            }
+            previous = Some(code);
+        }
+        Ok(())
+    }
+
+    // The caller admits actual Vec capacity. An exhausted core retains no partial member list.
+    pub(crate) fn find_in_core_with_members_into(
+        &self,
+        core: SharedGroup,
+        keys: &[SharedKey],
+        output: &mut [Option<SharedGroup>],
+        members: &mut Vec<(usize, SharedMember)>,
+    ) -> Result<bool, SharedError> {
+        let before = members.len();
+        output.fill(None);
+        let result = (|| {
+            self.validate_context_storage(core, keys, output)?;
+            admit_result(members.capacity(), size_of::<(usize, SharedMember)>())?;
+            let row = self.reader.core_row(core.core_ordinal)?;
+            if row.core != core.key.core {
+                return Err(SharedError::Invalid("core group"));
+            }
+            let CoreKind::Placed { .. } = row.kind else {
+                self.reader.find_contexts_many(
+                    keys,
+                    None,
+                    output,
+                    core.core_ordinal,
+                    row,
+                    0,
+                    keys.len(),
+                )?;
+                return Ok(false);
+            };
+            self.reader
+                .find_placed_contexts(core, keys, output, members)
+        })();
+        if result.is_err() {
+            output.fill(None);
+            members.truncate(before);
         }
         result
     }
@@ -473,6 +534,12 @@ impl SharedReader {
             core_view_comparisons: AtomicU64::new(0),
             directory_comparison_probes: AtomicU64::new(0),
             context_comparisons: AtomicU64::new(0),
+            context_member_runs: AtomicU64::new(0),
+            retained_context_members: AtomicU64::new(0),
+            context_member_fallbacks: AtomicU64::new(0),
+            placement_bound_searches: AtomicU64::new(0),
+            context_posting_members_reused: AtomicU64::new(0),
+            context_posting_members_fallback: AtomicU64::new(0),
             references_decoded: AtomicU64::new(0),
             positions_decoded: AtomicU64::new(0),
             numeric_contig_resolutions: AtomicU64::new(0),
@@ -582,6 +649,16 @@ impl SharedReader {
             core_view_comparisons: self.core_view_comparisons.load(Ordering::Relaxed),
             directory_comparison_probes: self.directory_comparison_probes.load(Ordering::Relaxed),
             context_comparisons: self.context_comparisons.load(Ordering::Relaxed),
+            context_member_runs: self.context_member_runs.load(Ordering::Relaxed),
+            retained_context_members: self.retained_context_members.load(Ordering::Relaxed),
+            context_member_fallbacks: self.context_member_fallbacks.load(Ordering::Relaxed),
+            placement_bound_searches: self.placement_bound_searches.load(Ordering::Relaxed),
+            context_posting_members_reused: self
+                .context_posting_members_reused
+                .load(Ordering::Relaxed),
+            context_posting_members_fallback: self
+                .context_posting_members_fallback
+                .load(Ordering::Relaxed),
             references_decoded: self.references_decoded.load(Ordering::Relaxed),
             physical_positions_decoded: self.positions_decoded.load(Ordering::Relaxed),
             numeric_contig_resolutions: self.numeric_contig_resolutions.load(Ordering::Relaxed),
@@ -706,6 +783,55 @@ impl SharedReader {
             );
         }
         result
+    }
+
+    #[cfg(feature = "bench-internals")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn benchmark_context_reuse(
+        &self,
+        core: Option<SharedGroup>,
+        keys: &[SharedKey],
+        output: &mut [Option<SharedGroup>],
+        members: &mut Vec<(usize, SharedMember)>,
+        reuse: bool,
+        fill: bool,
+    ) -> Result<u64, SharedError> {
+        let core = match core {
+            Some(core) => core,
+            None => self.find(SharedKey::core(keys[0].core))?.unwrap(),
+        };
+        members.clear();
+        let operation = self.posting_operation()?;
+        let retained = if reuse {
+            operation.find_in_core_with_members_into(core, keys, output, members)?
+        } else {
+            operation.find_in_core_into(core, keys, output)?;
+            false
+        };
+        let count = if !fill {
+            output
+                .iter()
+                .flatten()
+                .map(|group| group.occurrence_count())
+                .sum()
+        } else if retained {
+            members
+                .iter()
+                .map(|(_, member)| member.occurrence_count())
+                .sum()
+        } else {
+            let mut count = 0;
+            for group in output.iter().flatten() {
+                count += self
+                    .members(*group)?
+                    .iter()
+                    .map(|member| member.occurrence_count())
+                    .sum::<u64>();
+            }
+            count
+        };
+        operation.finish()?;
+        Ok(count)
     }
 
     #[cfg(feature = "bench-internals")]
@@ -2214,6 +2340,141 @@ impl SharedReader {
         Ok(None)
     }
 
+    fn find_placed_contexts(
+        &self,
+        core: SharedGroup,
+        keys: &[SharedKey],
+        output: &mut [Option<SharedGroup>],
+        members: &mut Vec<(usize, SharedMember)>,
+    ) -> Result<bool, SharedError> {
+        let GroupLocation::Placed {
+            first_placement,
+            placement_count,
+            member_locator,
+            member_count,
+            ..
+        } = core.location
+        else {
+            return Err(SharedError::Invalid("placed group"));
+        };
+        if keys.iter().all(|key| key.length == 15) {
+            output.fill(Some(core));
+            return Ok(false);
+        }
+        for (index, &key) in keys.iter().enumerate() {
+            if index > 0 && key == keys[index - 1] {
+                continue;
+            }
+            output[index] = Some(if key.length == 15 {
+                core
+            } else {
+                SharedGroup {
+                    key,
+                    location: GroupLocation::Placed {
+                        first_placement,
+                        placement_count,
+                        member_locator,
+                        member_count,
+                        key_length: key.length,
+                    },
+                    member_count: 0,
+                    occurrence_count: 0,
+                    ..core
+                }
+            });
+        }
+        let before = members.len();
+        let mut retained = true;
+        let width = self.file.header.id_bytes() + 4;
+        let rows_per_span = 4096 / width;
+        let placement_width = self.file.header.row_bytes(Section::Occurrences);
+        let mut directory = &[][..];
+        let mut previous = None;
+        for index in 0..member_count {
+            let (id, end) = if member_count == 1 {
+                (member_locator, placement_count)
+            } else {
+                let span_index = index as usize % rows_per_span;
+                if span_index == 0 {
+                    let rows = (member_count - index).min(rows_per_span as u32);
+                    directory = self.file.section(
+                        Section::Members,
+                        (u64::from(member_locator) + u64::from(index)) * width as u64,
+                        u64::from(rows) * width as u64,
+                    )?;
+                }
+                self.decode_placed_run(
+                    core.location,
+                    index,
+                    previous,
+                    &directory[span_index * width..(span_index + 1) * width],
+                )?
+            };
+            self.observe(&self.context_member_runs, 1);
+            let start = previous.map_or(0, |(_, end)| end);
+            previous = Some((id, end));
+            let run_bytes = u64::from(end - start) * placement_width;
+            let resident = if keys.len() > 1 && run_bytes <= 4096 {
+                Some(self.file.section(
+                    Section::Occurrences,
+                    (first_placement + u64::from(start)) * placement_width,
+                    run_bytes,
+                )?)
+            } else {
+                None
+            };
+            for (ordinal, &key) in keys.iter().enumerate() {
+                if ordinal > 0 && key == keys[ordinal - 1] {
+                    continue;
+                }
+                let group = output[ordinal].as_mut().unwrap();
+                let (low, high) = self.placed_range_view(*group, start, end, resident)?;
+                if low == high {
+                    continue;
+                }
+                if key.length != 15 {
+                    group.member_count += 1;
+                    group.occurrence_count += high - low;
+                }
+                if retained && members.len() == members.capacity() {
+                    members.truncate(before);
+                    retained = false;
+                }
+                if retained {
+                    members.push((
+                        ordinal,
+                        SharedMember {
+                            reader_token: self.reader_token,
+                            group: group.location,
+                            metagenome_id: id,
+                            first_reference: first_placement + low,
+                            occurrence_count: high - low,
+                            direct: false,
+                        },
+                    ));
+                }
+            }
+        }
+        for index in 0..keys.len() {
+            if index > 0 && keys[index] == keys[index - 1] {
+                output[index] = output[index - 1];
+            } else if output[index].is_some_and(|group| group.member_count == 0) {
+                output[index] = None;
+            }
+        }
+        if retained {
+            members[before..]
+                .sort_unstable_by_key(|&(ordinal, member)| (ordinal, member.metagenome_id));
+            self.observe(
+                &self.retained_context_members,
+                (members.len() - before) as u64,
+            );
+        } else {
+            self.observe(&self.context_member_fallbacks, 1);
+        }
+        Ok(retained)
+    }
+
     fn placement(&self, ordinal: u64) -> Result<(u32, u32, u32, u64), SharedError> {
         let width = self.file.header.row_bytes(Section::Occurrences);
         let bytes = self.file.record(Section::Occurrences, ordinal, width)?;
@@ -2250,6 +2511,25 @@ impl SharedReader {
             u64::from(member_locator) + u64::from(index),
             width as u64 + 4,
         )?;
+        self.decode_placed_run(location, index, previous, bytes)
+    }
+
+    fn decode_placed_run(
+        &self,
+        location: GroupLocation,
+        index: u32,
+        previous: Option<(u32, u32)>,
+        bytes: &[u8],
+    ) -> Result<(u32, u32), SharedError> {
+        let GroupLocation::Placed {
+            placement_count,
+            member_count,
+            ..
+        } = location
+        else {
+            return Err(SharedError::Invalid("placed group"));
+        };
+        let width = self.file.header.id_bytes();
         self.observe(&self.member_inspections, 1);
         let (id, end) = (read_id(bytes, 0, width), read_u32(bytes, width));
         if id >= self.file.header.document_count
@@ -2270,6 +2550,16 @@ impl SharedReader {
         start: u32,
         end: u32,
     ) -> Result<(u64, u64), SharedError> {
+        self.placed_range_view(group, start, end, None)
+    }
+
+    fn placed_range_view(
+        &self,
+        group: SharedGroup,
+        start: u32,
+        end: u32,
+        resident: Option<&[u8]>,
+    ) -> Result<(u64, u64), SharedError> {
         let GroupLocation::Placed {
             first_placement, ..
         } = group.location
@@ -2289,10 +2579,19 @@ impl SharedReader {
             _ => return Err(SharedError::Invalid("shared key")),
         };
         let partition = |mut first: u64, bound: u64| {
+            self.observe(&self.placement_bound_searches, 1);
             let mut last = u64::from(end);
             while first < last {
                 let middle = first + (last - first) / 2;
-                let (context, _, flags, _) = self.placement(first_placement + middle)?;
+                let (context, _, flags, _) = if let Some(bytes) = resident {
+                    let width = self.file.header.row_bytes(Section::Occurrences) as usize;
+                    let at = (middle - u64::from(start)) as usize * width;
+                    self.observe(&self.context_comparisons, 1);
+                    decode_placement(&bytes[at..at + width], self.file.header.contig_count)
+                        .ok_or(SharedError::Invalid("placement row"))?
+                } else {
+                    self.placement(first_placement + middle)?
+                };
                 if placement_order(flags, context) < bound {
                     first = middle + 1;
                 } else {
@@ -2479,6 +2778,11 @@ impl SharedReader {
             member_count,
             inline_member,
         })
+    }
+
+    pub(crate) fn record_context_posting_members(&self, reused: usize, fallback: usize) {
+        self.observe(&self.context_posting_members_reused, reused as u64);
+        self.observe(&self.context_posting_members_fallback, fallback as u64);
     }
 
     fn observe(&self, counter: &AtomicU64, count: u64) {
