@@ -789,6 +789,28 @@ impl SharedReader {
     }
 
     #[cfg(feature = "bench-internals")]
+    pub fn benchmark_context_fixture(reference: &Path, output: &Path) -> Result<(), SharedError> {
+        let reference = crate::jidx_reader::JidxReader::open(reference)?;
+        let mut seeds = [(1, 16), (2, 4096)]
+            .into_iter()
+            .flat_map(|(core, count)| {
+                (0..count).map(move |index| crate::shared_writer::IndexedSeed {
+                    member: 0,
+                    contig: 0,
+                    seed: SharedSeed {
+                        core,
+                        context: index % 64,
+                        flags: 6 | (index % 2) as u8,
+                        position: u64::from(index + core * 10_000),
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        crate::shared_writer::write_shared_index(&reference, output, 64, &mut seeds)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "bench-internals")]
     #[allow(clippy::too_many_arguments)]
     pub fn benchmark_context_reuse(
         &self,

@@ -288,6 +288,227 @@ fn retained_context_batch_postings_do_not_search_members_again() {
     }
 }
 
+fn retained_run_fixture(documents: u32, heavy: bool) -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().unwrap();
+    let metadata = directory.path().join("runs.jidx");
+    let mut writer = JidxWriter::new(
+        &metadata,
+        &JidxInput {
+            k: 15,
+            rescue_k15: false,
+            minimizer_window: 64,
+            jam_sha256: [1; 32],
+            manifest_sha256: [2; 32],
+        },
+    )
+    .unwrap();
+    let mut seeds = Vec::new();
+    for member in 0..documents {
+        writer
+            .begin_metagenome(MetagenomeInput {
+                name: format!("run-{member:04}"),
+                bgzf_uri: format!("run-{member}.bgz"),
+                bgzf_bytes: 100,
+                bgzf_sha256: [3; 32],
+                gzi: vec![0; 8],
+            })
+            .unwrap();
+        writer
+            .begin_contig(ContigInput {
+                name: format!("contig-{member}"),
+                length: 100_000,
+                fasta_offset: 4,
+                line_bases: 80,
+                line_width: 81,
+            })
+            .unwrap();
+        let count = if heavy && member == 0 { 4096 } else { 3 };
+        for index in 0..count {
+            let context = if heavy {
+                if member == 0 {
+                    index % 64
+                } else if member + 1 == documents {
+                    65_536
+                } else {
+                    100_000
+                }
+            } else {
+                member * 32_768
+            };
+            seeds.push(IndexedSeed {
+                member,
+                contig: member,
+                seed: SharedSeed {
+                    core: TARGET_CORE,
+                    context,
+                    flags: 6 | (index % 2) as u8,
+                    // Repeated context occurrences on both strands remain distinct.
+                    position: 100 + u64::from(index),
+                },
+            });
+        }
+    }
+    writer.finish().unwrap();
+    let reference = JidxReader::open(metadata).unwrap();
+    let paths = [
+        "runs.shared",
+        "runs-packed.shared",
+        "runs-core.shared",
+        "runs-filter.shared",
+        "runs-placed.shared",
+    ]
+    .map(|name| directory.path().join(name));
+    write_shared_index(&reference, &paths[0], 64, &mut seeds).unwrap();
+    crate::shared_pack::repack_shared_index(&paths[0], &paths[1]).unwrap();
+    crate::shared_pack::repack_shared_cores(&paths[1], &paths[2]).unwrap();
+    crate::shared_pack::add_shared_core_filter(&paths[2], &paths[3], usize::MAX).unwrap();
+    crate::shared_pack::repack_shared_contexts(&paths[3], &paths[4]).unwrap();
+    (directory, paths[4].clone())
+}
+
+#[test]
+fn retained_context_large_selective_runs_and_late_members_match() {
+    let (directory, path) = retained_run_fixture(900, true);
+    let reader = SharedReader::open_observed(path).unwrap();
+    let reference = SharedReader::open(directory.path().join("runs.shared")).unwrap();
+    let core = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    for dense in [false, true] {
+        let mut keys = (0..if dense { 64 } else { 1 })
+            .chain([65_536, 65_537])
+            .map(|context| SharedKey {
+                core: TARGET_CORE,
+                context,
+                length: 31,
+            })
+            .collect::<Vec<_>>();
+        keys.insert(
+            0,
+            SharedKey {
+                core: TARGET_CORE,
+                context: 0,
+                length: 21,
+            },
+        );
+        let expected = reader.find_in_core(core, &keys).unwrap();
+        let mut output = vec![None; keys.len()];
+        let mut members = Vec::with_capacity(2000);
+        let operation = reader.posting_operation().unwrap();
+        let before = reader.stats();
+        assert!(
+            operation
+                .find_in_core_with_members_into(core, &keys, &mut output, &mut members)
+                .unwrap()
+        );
+        operation.finish().unwrap();
+        let after = reader.stats();
+        assert_eq!(output, expected);
+        assert_eq!(
+            after.member_descriptor_inspections - before.member_descriptor_inspections,
+            900
+        );
+        for (ordinal, (&key, group)) in keys.iter().zip(output).enumerate() {
+            assert_eq!(
+                placed_evidence(&reader, group),
+                placed_evidence(&reference, reference.find(key).unwrap())
+            );
+            if let Some(group) = group {
+                assert_eq!(
+                    members
+                        .iter()
+                        .filter(|(index, _)| *index == ordinal)
+                        .map(|(_, member)| *member)
+                        .collect::<Vec<_>>(),
+                    reader.members(group).unwrap()
+                );
+            }
+        }
+        assert_eq!(
+            members
+                .iter()
+                .find(|(ordinal, _)| keys[*ordinal].context == 65_536)
+                .unwrap()
+                .1
+                .metagenome_id,
+            899
+        );
+    }
+}
+
+#[test]
+fn retained_context_first_middle_last_task_allocation_failures_are_complete() {
+    use crate::trace_batch::{
+        CONTEXT_ALLOCATION_FAILURE, prepare_cores, prepare_lookup_with_cores,
+    };
+    use crate::trace_index::TraceIndex;
+    let (_directory, path) = retained_run_fixture(3, false);
+    let requests = (0..=65_536)
+        .map(|context| {
+            (
+                SharedKey {
+                    core: TARGET_CORE,
+                    context,
+                    length: 31,
+                }
+                .packed()
+                .unwrap(),
+                0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut expected = None;
+    for workers in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap();
+        for failure in [None, Some(0), Some(1), Some(2)] {
+            let actual = pool.install(|| {
+                let index =
+                    TraceIndex::Shared(Box::new(SharedReader::open_observed(&path).unwrap()));
+                let cores = prepare_cores(&index, [TARGET_CORE], 1, true)
+                    .unwrap()
+                    .unwrap();
+                CONTEXT_ALLOCATION_FAILURE.set(failure);
+                let lookup =
+                    prepare_lookup_with_cores(&index, requests.clone(), 1, true, Some(&cores))
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(CONTEXT_ALLOCATION_FAILURE.get(), None);
+                assert_eq!(lookup.lookup_tasks, 3);
+                assert!(lookup.postings_complete);
+                lookup
+                    .postings
+                    .iter()
+                    .flatten()
+                    .map(|posting| {
+                        (
+                            posting
+                                .documents
+                                .iter()
+                                .map(|document| {
+                                    (document.metagenome_id(), document.occurrence_count())
+                                })
+                                .collect::<Vec<_>>(),
+                            posting.occurrences.as_ref().unwrap().clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(actual.len(), 3);
+            assert!(
+                actual
+                    .iter()
+                    .all(|(documents, positions)| documents[0].1 == 3 && positions[0].len() == 3)
+            );
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+    }
+}
+
 #[test]
 fn checked_contexts_match_public_results_with_constant_identity_checks() {
     let (_directory, reader, _) = fixture(2);

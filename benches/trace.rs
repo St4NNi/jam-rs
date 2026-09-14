@@ -911,6 +911,115 @@ fn shared_context_task(criterion: &mut Criterion) {
 #[cfg(not(feature = "bench-internals"))]
 fn shared_context_task(_: &mut Criterion) {}
 
+#[cfg(feature = "bench-internals")]
+fn shared_context_reuse(criterion: &mut Criterion) {
+    let (directory, _, _) = shared_lookup_fixture();
+    let paths = [
+        "reuse-source.shared",
+        "reuse-packed.shared",
+        "reuse-core.shared",
+        "reuse-filter.shared",
+        "reuse-placed.shared",
+    ]
+    .map(|name| directory.path().join(name));
+    SharedReader::benchmark_context_fixture(&directory.path().join("target.jidx"), &paths[0])
+        .unwrap();
+    repack_shared_index(&paths[0], &paths[1]).unwrap();
+    repack_shared_cores(&paths[1], &paths[2]).unwrap();
+    add_shared_core_filter(&paths[2], &paths[3], usize::MAX).unwrap();
+    jam_rs::shared_pack::repack_shared_contexts(&paths[3], &paths[4]).unwrap();
+    let reader = SharedReader::open(&paths[4]).unwrap();
+    let mut group = criterion.benchmark_group("shared_context_reuse");
+    group.sample_size(20);
+    group.nresamples(1_000);
+    group.warm_up_time(Duration::from_millis(250));
+    group.measurement_time(Duration::from_secs(1));
+    for (name, core_key, contexts) in [
+        ("sparse", 1, 1),
+        ("common_sparse", 2, 1),
+        ("common_dense", 2, 64),
+    ] {
+        let keys = std::iter::once(SharedKey {
+            core: core_key,
+            context: 0,
+            length: 21,
+        })
+        .chain((0..contexts).map(|context| SharedKey {
+            core: core_key,
+            context,
+            length: 31,
+        }))
+        .collect::<Vec<_>>();
+        let core = reader.find(SharedKey::core(core_key)).unwrap().unwrap();
+        let mut output = vec![None; keys.len()];
+        let mut members = Vec::with_capacity(keys.len() * core.member_count() as usize);
+        for (phase, fill, resolve) in [
+            ("counts", false, false),
+            ("count_plus_fill", true, false),
+            ("complete_checked_lookup", true, true),
+        ] {
+            let core = (!resolve).then_some(core);
+            let baseline = reader
+                .benchmark_context_reuse(core, &keys, &mut output, &mut members, false, fill)
+                .unwrap();
+            assert_eq!(
+                baseline,
+                reader
+                    .benchmark_context_reuse(core, &keys, &mut output, &mut members, true, fill)
+                    .unwrap()
+            );
+            for (arm, reuse) in [("baseline", false), ("candidate", true)] {
+                group.bench_function(format!("{name}/{phase}/{arm}"), |b| {
+                    b.iter(|| {
+                        reader
+                            .benchmark_context_reuse(
+                                core,
+                                black_box(&keys),
+                                &mut output,
+                                &mut members,
+                                reuse,
+                                fill,
+                            )
+                            .unwrap()
+                    })
+                });
+            }
+        }
+        reader
+            .benchmark_context_reuse(Some(core), &keys, &mut output, &mut members, true, true)
+            .unwrap();
+        for (arm, reuse) in [("baseline", false), ("candidate", true)] {
+            group.bench_function(format!("{name}/members/{arm}"), |b| {
+                b.iter(|| {
+                    if reuse && !members.is_empty() {
+                        black_box(&members)
+                            .iter()
+                            .map(|(_, member)| member.occurrence_count())
+                            .sum::<u64>()
+                    } else {
+                        output
+                            .iter()
+                            .flatten()
+                            .map(|group| {
+                                reader
+                                    .members(*group)
+                                    .unwrap()
+                                    .iter()
+                                    .map(|member| member.occurrence_count())
+                                    .sum::<u64>()
+                            })
+                            .sum()
+                    }
+                })
+            });
+        }
+    }
+    group.finish();
+}
+
+#[cfg(not(feature = "bench-internals"))]
+fn shared_context_reuse(_: &mut Criterion) {}
+
 fn shared_core_filter_open(criterion: &mut Criterion) {
     let fixture = shared_core_absent_fixture();
     let (_, path, resident) = fixture
@@ -1397,6 +1506,7 @@ criterion_group!(
     shared_core_filter,
     shared_core_planning,
     shared_context_task,
+    shared_context_reuse,
     shared_core_filter_open,
     shared_posting_preparation,
     shared_prepare,
