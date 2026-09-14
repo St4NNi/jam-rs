@@ -248,7 +248,7 @@ pub fn run() -> Result<()> {
                     &region,
                     s3_endpoint.as_deref(),
                     s3_path_style,
-                    s3::creds::Credentials::default()?,
+                    range_source::development_credentials()?,
                 )?)
             } else {
                 None

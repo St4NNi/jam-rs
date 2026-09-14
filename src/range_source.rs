@@ -7,6 +7,122 @@ use thiserror::Error;
 
 const S3_BLOCK_BYTES: u64 = 1024 * 1024;
 
+/// Credential selection for the limited-credentials development build.
+pub fn development_credentials() -> Result<Credentials, RangeSourceError> {
+    let present = |name| std::env::var_os(name).is_some();
+    if [
+        "AWS_ROLE_ARN",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+    ]
+    .into_iter()
+    .any(present)
+    {
+        return Err(RangeSourceError::UnsupportedCredentialProvider);
+    }
+    let credentials = if [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_SECURITY_TOKEN",
+    ]
+    .into_iter()
+    .any(present)
+    {
+        // Partial environment credentials must not select another account from a profile.
+        Credentials::from_env().map_err(|_| RangeSourceError::UnsupportedCredentialProvider)?
+    } else {
+        let profile = std::env::var_os("AWS_PROFILE")
+            .or_else(|| std::env::var_os("AWS_DEFAULT_PROFILE"))
+            .map(|value| value.into_string())
+            .transpose()
+            .map_err(|_| RangeSourceError::UnsupportedCredentialProvider)?;
+        if present("AWS_SHARED_CREDENTIALS_FILE")
+            && std::env::var("AWS_SHARED_CREDENTIALS_FILE").is_err()
+        {
+            return Err(RangeSourceError::UnsupportedCredentialProvider);
+        }
+        static_profile_credentials(profile.as_deref().unwrap_or("default"))?
+    };
+    if credentials.access_key.as_deref().is_none_or(str::is_empty)
+        || credentials.secret_key.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(RangeSourceError::UnsupportedCredentialProvider);
+    }
+    Ok(credentials)
+}
+
+fn static_profile_credentials(profile: &str) -> Result<Credentials, RangeSourceError> {
+    let default_path = |name| {
+        home::home_dir()
+            .map(|path| path.join(".aws").join(name))
+            .ok_or(RangeSourceError::UnsupportedCredentialProvider)
+    };
+    let credentials_path = match std::env::var_os("AWS_SHARED_CREDENTIALS_FILE") {
+        Some(path) => path.into(),
+        None => default_path("credentials")?,
+    };
+    let selected_config = std::env::var_os("AWS_CONFIG_FILE");
+    let config_path = match selected_config.as_ref() {
+        Some(path) => std::path::PathBuf::from(path),
+        None => default_path("config")?,
+    };
+    let credentials = ini::Ini::load_from_file(credentials_path)
+        .map_err(|_| RangeSourceError::UnsupportedCredentialProvider)?;
+    let config = match ini::Ini::load_from_file(config_path) {
+        Ok(config) => Some(config),
+        Err(ini::Error::Io(error))
+            if selected_config.is_none() && error.kind() == io::ErrorKind::NotFound =>
+        {
+            None
+        }
+        Err(_) => return Err(RangeSourceError::UnsupportedCredentialProvider),
+    };
+    let config_section = if profile == "default" {
+        profile.to_owned()
+    } else {
+        format!("profile {profile}")
+    };
+    let sections = credentials.section_all(Some(profile)).chain(
+        config
+            .iter()
+            .flat_map(|config| config.section_all(Some(&config_section))),
+    );
+    for section in sections {
+        if section.iter().any(|(key, _)| {
+            matches!(
+                key,
+                "role_arn"
+                    | "source_profile"
+                    | "credential_source"
+                    | "web_identity_token_file"
+                    | "credential_process"
+            ) || key.starts_with("sso_")
+        }) {
+            return Err(RangeSourceError::UnsupportedCredentialProvider);
+        }
+    }
+    let section = credentials
+        .section(Some(profile))
+        .ok_or(RangeSourceError::UnsupportedCredentialProvider)?;
+    let access = section
+        .get("aws_access_key_id")
+        .ok_or(RangeSourceError::UnsupportedCredentialProvider)?;
+    let secret = section
+        .get("aws_secret_access_key")
+        .ok_or(RangeSourceError::UnsupportedCredentialProvider)?;
+    Credentials::new(
+        Some(access),
+        Some(secret),
+        section.get("aws_security_token"),
+        section.get("aws_session_token"),
+        None,
+    )
+    .map_err(|_| RangeSourceError::UnsupportedCredentialProvider)
+}
+
 pub enum RangeSource {
     Local(LocalSource),
     S3(S3Source),
@@ -338,6 +454,10 @@ pub enum RangeSourceError {
     InvalidKey,
     #[error("S3 configuration is required")]
     MissingS3Config,
+    #[error(
+        "unsupported credential provider in this limited-credentials development build: use complete explicit AWS environment or static profile credentials; STS web identity, container endpoints and instance metadata are unavailable"
+    )]
+    UnsupportedCredentialProvider,
     #[error("range source is not a supported local URI")]
     InvalidLocalUri,
 }
@@ -369,6 +489,9 @@ mod tests {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().unwrap();
             let request = read_request(&stream);
+            let headers = request.to_ascii_lowercase();
+            assert!(headers.contains("authorization: aws4-hmac-sha256 "));
+            assert!(headers.contains("x-amz-security-token: fixture-session"));
             if request.starts_with("HEAD ") {
                 write!(
                     stream,
@@ -419,8 +542,14 @@ mod tests {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server_data = data.clone();
         let server = thread::spawn(move || serve(listener, server_data));
-        let credentials =
-            Credentials::new(Some("access"), Some("secret"), None, None, None).unwrap();
+        let credentials = Credentials::new(
+            Some("access"),
+            Some("secret"),
+            None,
+            Some("fixture-session"),
+            None,
+        )
+        .unwrap();
         let config = S3Config::new("test", Some(&endpoint), true, credentials).unwrap();
         let mut source =
             RangeSource::open("s3://bucket/object", data.len() as u64, Some(&config)).unwrap();
@@ -456,5 +585,210 @@ mod tests {
             );
             server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn limited_credentials_child() {
+        let Ok(case) = std::env::var("JAM_CREDENTIAL_TEST") else {
+            return;
+        };
+        let result = development_credentials();
+        if case == "supported" {
+            let credentials = result.unwrap();
+            assert!(credentials.access_key.as_deref() == Some("fixture-access"));
+            assert!(credentials.session_token.as_deref() == Some("fixture-session"));
+        } else {
+            assert!(matches!(
+                result,
+                Err(RangeSourceError::UnsupportedCredentialProvider)
+            ));
+        }
+    }
+
+    #[test]
+    fn limited_credentials_are_explicit_and_never_contact_providers() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("credentials");
+        let config = directory.path().join("config");
+        std::fs::write(&config, "").unwrap();
+        std::fs::write(&profile, "[default]\naws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\naws_session_token=fixture-session\n[named]\naws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\naws_session_token=fixture-session\n[role]\nrole_arn=fixture-role\nsource_profile=default\n").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        for case in [
+            "environment",
+            "profile",
+            "named",
+            "partial",
+            "missing",
+            "role",
+            "AWS_WEB_IDENTITY_TOKEN_FILE",
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "AWS_EC2_METADATA_SERVICE_ENDPOINT",
+        ] {
+            let supported = matches!(case, "environment" | "profile" | "named");
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child
+                .args(["--exact", "range_source::tests::limited_credentials_child"])
+                .env_clear()
+                .env("AWS_SHARED_CREDENTIALS_FILE", &profile)
+                .env("AWS_CONFIG_FILE", &config)
+                .env(
+                    "JAM_CREDENTIAL_TEST",
+                    if supported {
+                        "supported"
+                    } else {
+                        "unsupported"
+                    },
+                );
+            match case {
+                "environment" => {
+                    child
+                        .env("AWS_ACCESS_KEY_ID", "fixture-access")
+                        .env("AWS_SECRET_ACCESS_KEY", "fixture-secret")
+                        .env("AWS_SESSION_TOKEN", "fixture-session");
+                }
+                "named" => {
+                    child.env("AWS_PROFILE", "named");
+                }
+                "partial" => {
+                    child.env("AWS_ACCESS_KEY_ID", "fixture-access");
+                }
+                "missing" | "role" => {
+                    child.env("AWS_PROFILE", case);
+                }
+                "profile" => {}
+                provider => {
+                    child.env(provider, &endpoint);
+                }
+            }
+            assert!(
+                child.output().unwrap().status.success(),
+                "credential case {case}"
+            );
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+            );
+        }
+    }
+
+    #[test]
+    fn limited_credentials_reject_provider_profiles_with_static_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let credentials = directory.path().join("credentials");
+        let config = directory.path().join("config");
+        let keys = "aws_access_key_id=fixture-access\naws_secret_access_key=fixture-secret\naws_session_token=fixture-session\n";
+        for selected in ["default", "named"] {
+            for in_config in [false, true] {
+                for selected_provider in [false, true] {
+                    for provider in [
+                        "role_arn",
+                        "source_profile",
+                        "credential_source",
+                        "web_identity_token_file",
+                        "credential_process",
+                        "sso_start_url",
+                        "sso_session",
+                    ] {
+                        let provider_profile = if selected_provider { selected } else { "other" };
+                        let mut shared = format!("[{selected}]\n{keys}");
+                        let mut settings = String::new();
+                        if in_config {
+                            let section = if provider_profile == "default" {
+                                "default".into()
+                            } else {
+                                format!("profile {provider_profile}")
+                            };
+                            settings = format!("[{section}]\n{provider}=fixture-provider\n");
+                        } else {
+                            if !selected_provider {
+                                shared.push_str("[other]\n");
+                            }
+                            shared.push_str(&format!("{provider}=fixture-provider\n"));
+                        }
+                        std::fs::write(&credentials, shared).unwrap();
+                        std::fs::write(&config, settings).unwrap();
+                        let mut child =
+                            std::process::Command::new(std::env::current_exe().unwrap());
+                        child
+                            .args(["--exact", "range_source::tests::limited_credentials_child"])
+                            .env_clear()
+                            .env("AWS_SHARED_CREDENTIALS_FILE", &credentials)
+                            .env("AWS_CONFIG_FILE", &config)
+                            .env("AWS_PROFILE", selected)
+                            .env(
+                                "JAM_CREDENTIAL_TEST",
+                                if selected_provider {
+                                    "unsupported"
+                                } else {
+                                    "supported"
+                                },
+                            );
+                        assert!(
+                            child.output().unwrap().status.success(),
+                            "provider {provider}, config {in_config}, selected {selected_provider}"
+                        );
+                        // Explicit complete environment credentials keep their documented precedence.
+                        child
+                            .env("AWS_ACCESS_KEY_ID", "fixture-access")
+                            .env("AWS_SECRET_ACCESS_KEY", "fixture-secret")
+                            .env("AWS_SESSION_TOKEN", "fixture-session")
+                            .env("JAM_CREDENTIAL_TEST", "supported");
+                        assert!(child.output().unwrap().status.success());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn s3_xml_shaped_ranges_are_bytes_and_error_bodies_are_redacted() {
+        let data = b"<broken xmlns:a='x' xmlns:a='y' attribute='one' attribute='two'".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server_data = data.clone();
+        let server = thread::spawn(move || serve(listener, server_data));
+        let credentials = Credentials::new(
+            Some("access"),
+            Some("secret"),
+            None,
+            Some("fixture-session"),
+            None,
+        )
+        .unwrap();
+        let config = S3Config::new("test", Some(&endpoint), true, credentials.clone()).unwrap();
+        let mut source =
+            RangeSource::open("s3://bucket/object", data.len() as u64, Some(&config)).unwrap();
+        let mut actual = Vec::new();
+        source.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, data);
+        server.join().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&stream);
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: 34\r\nETag: \"fixture\"\r\nConnection: close\r\n\r\n").unwrap();
+            drop(stream);
+            for _ in 0..=s3::get_retries() {
+                let (mut stream, _) = listener.accept().unwrap();
+                read_request(&stream);
+                let body = "<Error><Message>private</Message>";
+                write!(
+                    stream,
+                    "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let config = S3Config::new("test", Some(&endpoint), true, credentials).unwrap();
+        let mut source = RangeSource::open("s3://bucket/object", 34, Some(&config)).unwrap();
+        assert_eq!(
+            source.read(&mut [0; 34]).unwrap_err().to_string(),
+            "S3 range request failed"
+        );
+        server.join().unwrap();
     }
 }

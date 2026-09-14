@@ -118,8 +118,6 @@ dependencies = [
  "http",
  "log",
  "rustls",
- "serde",
- "serde_json",
  "url",
  "webpki-roots",
 ]
@@ -136,7 +134,6 @@ version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca3b85155d265df828f84e53886ed9e427aed979dd8a39f5b8b2162c77e142d7"
 dependencies = [
- "attohttpc",
  "home",
  "log",
  "quick-xml",
@@ -935,11 +932,13 @@ name = "jam-rs"
 version = "0.9.11"
 dependencies = [
  "anyhow",
+ "attohttpc",
  "bytemuck",
  "clap",
  "criterion",
  "crossfire",
  "dashmap",
+ "home",
  "indicatif",
  "jamhash",
  "libc",
@@ -947,6 +946,7 @@ dependencies = [
  "needletail",
  "noodles-bgzf",
  "rayon",
+ "rust-ini",
  "rust-s3",
  "serde",
  "serde_json",
