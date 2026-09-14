@@ -272,8 +272,8 @@ fn retained_context_batch_postings_do_not_search_members_again() {
             assert_eq!(stats.context_posting_members_reused, 5);
             assert_eq!(stats.context_posting_members_fallback, 0);
             assert_eq!(
-                stats.placement_bound_searches, 24,
-                "three contexts times four members times two bounds, with no posting re-search"
+                stats.placement_bound_searches, 16,
+                "eight parent bounds and eight child bounds, with no posting re-search"
             );
             assert_eq!(
                 lookup
@@ -285,6 +285,79 @@ fn retained_context_batch_postings_do_not_search_members_again() {
                 5
             );
         });
+    }
+}
+
+#[test]
+fn retained_context_requested_parent_ranges_preserve_exact_child_searches() {
+    let (_directory, _, placed, _, _) = context_fixture(false);
+    let reader = SharedReader::open_observed(placed).unwrap();
+    let x = 0x5a5;
+    for (core_key, contexts, searches) in [
+        (
+            TARGET_CORE,
+            vec![(21, x), (31, (x << 20) | 1), (31, (x << 20) | 2)],
+            16,
+        ),
+        (TARGET_CORE, vec![(21, 0x7ff), (31, 0x7ff << 20)], 8),
+        (TARGET_CORE, vec![(21, 0x7ff), (31, (x << 20) | 1)], 16),
+        (
+            TARGET_CORE,
+            vec![(31, (x << 20) | 1), (31, (x << 20) | 2)],
+            16,
+        ),
+        // The narrower parent starts after a different 21-only placement in this resident run.
+        (
+            40,
+            vec![(21, x), (31, (x << 20) | 3), (31, (x << 20) | 4)],
+            6,
+        ),
+        // This parent has only 21-valid placements, which cannot satisfy a 31 request.
+        (40, vec![(21, 0x0c3), (31, 0x0c3 << 20)], 4),
+    ] {
+        let core = reader.find(SharedKey::core(core_key)).unwrap().unwrap();
+        let keys = contexts
+            .into_iter()
+            .map(|(length, context)| SharedKey {
+                core: core_key,
+                context,
+                length,
+            })
+            .collect::<Vec<_>>();
+        let expected = reader.find_in_core(core, &keys).unwrap();
+        let mut output = vec![None; keys.len()];
+        let mut members = Vec::with_capacity(16);
+        let operation = reader.posting_operation().unwrap();
+        let before = reader.stats().placement_bound_searches;
+        assert!(
+            operation
+                .find_in_core_with_members_into(core, &keys, &mut output, &mut members)
+                .unwrap()
+        );
+        operation.finish().unwrap();
+        assert_eq!(reader.stats().placement_bound_searches - before, searches);
+        assert_eq!(output, expected);
+        for (ordinal, group) in output.into_iter().enumerate() {
+            let actual = members
+                .iter()
+                .filter(|(index, _)| *index == ordinal)
+                .map(|(_, member)| *member)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual,
+                group
+                    .map(|group| reader.members(group).unwrap())
+                    .unwrap_or_default()
+            );
+            if let Some(group) = group {
+                for member in actual {
+                    assert_eq!(
+                        reader.member_occurrences(group, member).unwrap().len() as u64,
+                        member.occurrence_count()
+                    );
+                }
+            }
+        }
     }
 }
 

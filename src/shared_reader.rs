@@ -2494,12 +2494,31 @@ impl SharedReader {
             } else {
                 None
             };
+            let mut parent = None;
             for (ordinal, &key) in keys.iter().enumerate() {
                 if ordinal > 0 && key == keys[ordinal - 1] {
                     continue;
                 }
                 let group = output[ordinal].as_mut().unwrap();
-                let (low, high) = self.placed_range_view(*group, start, end, resident)?;
+                let (low, high) = if let Some((_, low, high)) = parent
+                    .filter(|&(context, _, _)| key.length == 31 && key.context >> 20 == context)
+                {
+                    if low == high {
+                        (low, high)
+                    } else {
+                        let narrowed = resident.map(|bytes| {
+                            let first = ((low - u64::from(start)) * placement_width) as usize;
+                            let last = ((high - u64::from(start)) * placement_width) as usize;
+                            &bytes[first..last]
+                        });
+                        self.placed_range_view(*group, low as u32, high as u32, narrowed)?
+                    }
+                } else {
+                    self.placed_range_view(*group, start, end, resident)?
+                };
+                if key.length == 21 {
+                    parent = Some((key.context, low, high));
+                }
                 if low == high {
                     continue;
                 }
