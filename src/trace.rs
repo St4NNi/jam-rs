@@ -3096,6 +3096,11 @@ struct QueryKeyRange {
 /// Owned linear k15 start positions per extraction task of one long query.
 const EXTRACTION_TASK_STARTS: usize = 16_384;
 
+#[cfg(test)]
+thread_local! {
+    static EXTRACTION_ALLOCATION_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// Counts one extraction task writes before they are reduced in start order.
 #[derive(Default)]
 struct ExtractionTask {
@@ -3248,6 +3253,12 @@ impl QueryPositions {
                 let mut token_rest = &mut tokens[..];
                 let mut key_rest = &mut original_keys[..];
                 for task in 0..tasks {
+                    #[cfg(test)]
+                    if EXTRACTION_ALLOCATION_FAILURE.get() == Some(task) {
+                        EXTRACTION_ALLOCATION_FAILURE.set(None);
+                        // A capacity overflow exercises the allocation error path without host pressure.
+                        slices.try_reserve_exact(usize::MAX).ok()?;
+                    }
                     let owned = task_starts.min(token_rest.len());
                     let (task_tokens, rest) = token_rest.split_at_mut(owned);
                     token_rest = rest;
@@ -4599,6 +4610,53 @@ mod tests {
         }
         for operation in operations {
             operation.finish().unwrap();
+        }
+    }
+
+    #[test]
+    fn extraction_task_allocation_failure_restarts_the_complete_query() {
+        let directory = tempfile::tempdir().unwrap();
+        let (shared, _, contigs) = write_range_sources(directory.path(), 1);
+        let packed = directory.path().join("packed.shared");
+        let compact = directory.path().join("compact.shared");
+        crate::shared_pack::repack_shared_index(&shared, &packed).unwrap();
+        crate::shared_pack::repack_shared_cores(&packed, &compact).unwrap();
+        let engine = TraceEngine::open_shared(&compact, None).unwrap();
+        let mut query = vec![b'N'; EXTRACTION_TASK_STARTS * 3 + 14];
+        query[100..1_000].copy_from_slice(&contigs[0][100..1_000]);
+        query[EXTRACTION_TASK_STARTS..EXTRACTION_TASK_STARTS + 900]
+            .copy_from_slice(&contigs[1][100..1_000]);
+        for circular in [false, true] {
+            let config = TraceConfig {
+                circular,
+                use_sketch: false,
+                ..TraceConfig::default()
+            };
+            let expected = engine.search("allocation", &query, config).unwrap();
+            assert!(!expected.metagenomes.is_empty());
+            let expected = serde_json::to_value(expected).unwrap();
+            let associations = engine.prepare("allocation", &query, config).unwrap();
+            for workers in [1, 4, 8, 16] {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(workers)
+                    .build()
+                    .unwrap();
+                for task in [0, 1, 2] {
+                    pool.install(|| {
+                        EXTRACTION_ALLOCATION_FAILURE.set(Some(task));
+                        let fallback = engine.prepare("allocation", &query, config).unwrap();
+                        assert_eq!(EXTRACTION_ALLOCATION_FAILURE.get(), None);
+                        assert_eq!(
+                            fallback.positions_by_key.iter().collect::<Vec<_>>(),
+                            associations.positions_by_key.iter().collect::<Vec<_>>()
+                        );
+                        EXTRACTION_ALLOCATION_FAILURE.set(Some(task));
+                        let actual = engine.search("allocation", &query, config).unwrap();
+                        assert_eq!(EXTRACTION_ALLOCATION_FAILURE.get(), None);
+                        assert_eq!(serde_json::to_value(actual).unwrap(), expected);
+                    });
+                }
+            }
         }
     }
 
