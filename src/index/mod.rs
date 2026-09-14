@@ -4,11 +4,15 @@
 // SPDX-License-Identifier: MIT
 
 mod bits;
+#[allow(dead_code)]
+mod buckets;
 mod build;
 mod color_sets;
 mod index_file;
 mod manifest;
 mod packed;
+#[allow(dead_code)]
+mod pages;
 mod plan;
 mod positions;
 mod reshard;
