@@ -26,6 +26,13 @@ const FILL_BLOCKS: u64 = 16;
 /// blocks cannot make the cache index grow without bound.
 const MIN_CHARGE: usize = 256;
 
+/// Threads that write blocks to the disk level.
+const DISK_WRITERS: usize = 4;
+/// RAM of the write buffers of the disk level.
+const DISK_BUFFER: usize = 128 << 20;
+/// Bytes of blocks that may wait to be written to the disk level; further blocks are not
+/// written. Fetches come in bursts of hundreds of MiB, which a small queue would mostly drop.
+const DISK_QUEUE: usize = 1 << 30;
 /// The file in the disk level directory that one process locks while it uses the directory.
 const LOCK_FILE: &str = "lock";
 
@@ -107,7 +114,12 @@ impl BlockCache {
                 .build()?;
             storage = storage
                 .with_io_engine_config(PsyncIoEngineConfig::new())
-                .with_engine_config(BlockEngineConfig::new(device))
+                .with_engine_config(
+                    BlockEngineConfig::new(device)
+                        .with_flushers(DISK_WRITERS)
+                        .with_buffer_pool_size(DISK_BUFFER)
+                        .with_submit_queue_size_threshold(DISK_QUEUE),
+                )
                 .with_recover_mode(RecoverMode::Quiet);
         }
         let blocks = runtime.block_on(storage.build())?;
