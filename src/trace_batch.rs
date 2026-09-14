@@ -536,6 +536,7 @@ pub(crate) fn lookup_budget(index: &TraceIndex) -> usize {
 
 const QUERY_LOOKUP_ROW_BYTES: usize = std::mem::size_of::<(u64, usize)>()
     + std::mem::size_of::<u64>()
+    + std::mem::size_of::<usize>()
     + std::mem::size_of::<(u64, Option<TraceSeed>)>();
 
 fn lookup_chunk_keys() -> usize {
@@ -546,6 +547,11 @@ fn lookup_chunk_keys() -> usize {
 const CORE_LOOKUP_TASKS: usize = 64;
 /// Smallest exact core lookup task, so small request sets do not pay per-task dispatch.
 const MIN_CORE_LOOKUP_TASK_KEYS: usize = 256;
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CONTEXT_ALLOCATION_FAILURE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 #[cfg(test)]
 pub(crate) fn core_lookup_task_count(keys: &[u32]) -> usize {
@@ -639,6 +645,8 @@ fn lookup_workspace(index: &TraceIndex, requests: usize) -> Option<usize> {
             )?
             .checked_add(tasks.checked_mul(
                 std::mem::size_of::<(u64, &[u64], &mut [(u64, Option<TraceSeed>)])>()
+                    + std::mem::size_of::<usize>()
+                    + std::mem::size_of::<Vec<(usize, crate::shared_reader::SharedMember)>>()
                     + std::mem::size_of::<Result<[u64; 3], TraceError>>(),
             )?)
     } else {
@@ -715,6 +723,7 @@ pub(crate) fn prepare_lookup_with_cores(
         + requests.capacity() * std::mem::size_of::<(u64, usize)>()
         + keys.capacity() * std::mem::size_of::<u64>()
         + entries.capacity() * std::mem::size_of::<(u64, Option<TraceSeed>)>()
+        + keys.len() * std::mem::size_of::<usize>()
         + query_count * std::mem::size_of::<Range<usize>>()
         + workspace;
     if peak_capacity_bound > reservation.bytes {
@@ -737,6 +746,8 @@ pub(crate) fn prepare_lookup_with_cores(
     let mut lookup_compute_ns = 0;
     let mut lookup_reduce_ns = 0;
     let mut lookup_dispatch_to_start_ns = 0;
+    let mut context_members: Vec<Vec<(usize, crate::shared_reader::SharedMember)>> = Vec::new();
+    let mut context_member_bytes = 0;
     if let TraceIndex::Shared(reader) = index {
         let dispatch = observed.then(Instant::now);
         let limit = lookup_chunk_keys();
@@ -747,6 +758,7 @@ pub(crate) fn prepare_lookup_with_cores(
             .try_reserve_exact(keys.len().div_ceil(limit) * 2 + 1)
             .map_err(|_| TraceError::Invalid("lookup task allocation"))?;
         for (range, split) in lookup_ranges(&keys, reader.has_core_prefixes()) {
+            let first_key = range.start;
             split_core_resolutions += u64::from(split);
             let chunk = &keys[range];
             if observed {
@@ -765,21 +777,63 @@ pub(crate) fn prepare_lookup_with_cores(
                 + chunk.len() as u64;
             let (slots, tail) = remaining.split_at_mut(chunk.len());
             remaining = tail;
-            tasks.push((weight, chunk, slots));
+            tasks.push((weight, chunk, slots, first_key));
         }
         tasks.sort_unstable_by_key(|task| std::cmp::Reverse(task.0));
         lookup_tasks = tasks.len();
+        if context_members.try_reserve_exact(tasks.len()).is_err()
+            || context_members.capacity() != tasks.len()
+        {
+            return Ok(None);
+        }
+        context_member_bytes = context_members.capacity()
+            * std::mem::size_of::<Vec<(usize, crate::shared_reader::SharedMember)>>();
+        let context_header_bytes = context_member_bytes;
+        let descriptor_bytes = reservation
+            .bytes
+            .saturating_sub(peak_capacity_bound)
+            .min(16 * 1024 * 1024);
+        let descriptor_count = if cores.is_some() {
+            descriptor_bytes
+                / tasks.len().max(1)
+                / std::mem::size_of::<(usize, crate::shared_reader::SharedMember)>()
+        } else {
+            0
+        };
+        for (_task, _) in tasks.iter().enumerate() {
+            let mut members = Vec::new();
+            #[cfg(test)]
+            let descriptor_count = if CONTEXT_ALLOCATION_FAILURE.get() == Some(_task) {
+                CONTEXT_ALLOCATION_FAILURE.set(None);
+                usize::MAX
+            } else {
+                descriptor_count
+            };
+            if members.try_reserve_exact(descriptor_count).is_err()
+                || members.capacity() != descriptor_count
+            {
+                members = Vec::new();
+            }
+            context_member_bytes += members.capacity()
+                * std::mem::size_of::<(usize, crate::shared_reader::SharedMember)>();
+            context_members.push(members);
+        }
+        peak_capacity_bound += context_member_bytes - context_header_bytes;
+        if peak_capacity_bound > reservation.bytes {
+            return Ok(None);
+        }
         lookup_dispatch_ns = dispatch.map_or(0, |start| start.elapsed().as_nanos() as u64);
         let dispatch = observed.then(Instant::now);
         let timings = tasks
             .into_par_iter()
-            .map(|(_, keys, slots)| {
+            .zip(context_members.par_iter_mut())
+            .map(|((_, keys, slots, first_key), members)| {
                 let start = observed.then(Instant::now);
                 let queued = start.zip(dispatch).map_or(0, |(start, dispatch)| {
                     start.duration_since(dispatch).as_nanos() as u64
                 });
                 let seeds = if let Some(cores) = cores {
-                    index.find_seeds_in_cores(keys, cores)?
+                    index.find_seeds_in_cores_with_members(keys, cores, members)?
                 } else {
                     index.find_seeds_batch(keys)?
                 };
@@ -787,6 +841,9 @@ pub(crate) fn prepare_lookup_with_cores(
                 let start = observed.then(Instant::now);
                 for (slot, seed) in slots.iter_mut().zip(seeds) {
                     slot.1 = seed;
+                }
+                for member in members {
+                    member.0 += first_key;
                 }
                 Ok::<_, TraceError>([
                     queued,
@@ -814,6 +871,29 @@ pub(crate) fn prepare_lookup_with_cores(
         }
         entries[entry].1.is_some()
     });
+    if context_members.iter().any(|members| !members.is_empty()) {
+        let mut ordinals = Vec::new();
+        if ordinals.try_reserve_exact(keys.len()).is_err() || ordinals.capacity() != keys.len() {
+            if let TraceIndex::Shared(reader) = index {
+                reader
+                    .record_context_posting_members(0, context_members.iter().map(Vec::len).sum());
+            }
+            context_members = Vec::new();
+            context_member_bytes = 0;
+        } else {
+            ordinals.extend((0..entries.len()).filter(|&ordinal| entries[ordinal].1.is_some()));
+            ordinals.sort_unstable_by_key(|&ordinal| entries[ordinal].0);
+            for (new, old) in ordinals.into_iter().enumerate() {
+                keys[old] = new as u64;
+            }
+            for members in &mut context_members {
+                for member in members.iter_mut() {
+                    member.0 = keys[member.0] as usize;
+                }
+                members.sort_unstable_by_key(|row| (row.0, row.1.metagenome_id));
+            }
+        }
+    }
     entries.retain(|entry| entry.1.is_some());
     entries.sort_unstable_by_key(|entry| entry.0);
     for request in &mut requests {
@@ -849,7 +929,24 @@ pub(crate) fn prepare_lookup_with_cores(
     let slot_bytes = entries
         .len()
         .checked_mul(std::mem::size_of::<Option<BatchPosting>>());
-    if slot_bytes.is_none_or(|bytes| capacity_bytes.saturating_add(bytes) > reservation.bytes) {
+    if slot_bytes.is_none_or(|bytes| {
+        capacity_bytes
+            .saturating_add(context_member_bytes)
+            .saturating_add(bytes)
+            > reservation.bytes
+    }) {
+        if let TraceIndex::Shared(reader) = index {
+            reader.record_context_posting_members(0, context_members.iter().map(Vec::len).sum());
+        }
+        context_members = Vec::new();
+        context_member_bytes = 0;
+    }
+    if slot_bytes.is_none_or(|bytes| {
+        capacity_bytes
+            .saturating_add(context_member_bytes)
+            .saturating_add(bytes)
+            > reservation.bytes
+    }) {
         return Ok(None);
     }
     let mut postings = Vec::new();
@@ -857,8 +954,19 @@ pub(crate) fn prepare_lookup_with_cores(
         .try_reserve_exact(entries.len())
         .map_err(|_| TraceError::Invalid("posting slots allocation"))?;
     let slot_bytes = postings.capacity() * std::mem::size_of::<Option<BatchPosting>>();
-    if capacity_bytes.saturating_add(slot_bytes) > reservation.bytes {
-        return Ok(None);
+    if capacity_bytes
+        .saturating_add(context_member_bytes)
+        .saturating_add(slot_bytes)
+        > reservation.bytes
+    {
+        if let TraceIndex::Shared(reader) = index {
+            reader.record_context_posting_members(0, context_members.iter().map(Vec::len).sum());
+        }
+        context_members = Vec::new();
+        context_member_bytes = 0;
+        if capacity_bytes.saturating_add(slot_bytes) > reservation.bytes {
+            return Ok(None);
+        }
     }
     capacity_bytes += slot_bytes;
     peak_capacity_bound = peak_capacity_bound.max(capacity_bytes);
@@ -866,12 +974,15 @@ pub(crate) fn prepare_lookup_with_cores(
     let mut postings_complete = true;
     let mut context_occurrence_histogram_log2 = [0; 16];
     let execution = if let TraceIndex::Shared(reader) = index {
-        match crate::trace_postings::prepare_shared_postings(
+        match crate::trace_postings::prepare_shared_postings_with_members(
             reader,
             &entries,
             &mut postings,
-            reservation.bytes - capacity_bytes,
+            reservation
+                .bytes
+                .saturating_sub(capacity_bytes + context_member_bytes),
             observed,
+            &context_members,
         ) {
             Err(TraceError::Shared(crate::shared_format::SharedError::ResourceLimit)) => None,
             result => result?,
@@ -880,7 +991,8 @@ pub(crate) fn prepare_lookup_with_cores(
         None
     };
     let serial_entries = if let Some(execution) = &execution {
-        peak_capacity_bound = peak_capacity_bound.max(capacity_bytes + execution.peak_bytes);
+        peak_capacity_bound =
+            peak_capacity_bound.max(capacity_bytes + context_member_bytes + execution.peak_bytes);
         capacity_bytes += execution.retained_bytes;
         membership_ns = execution.membership_ns;
         position_ns = execution.position_ns;
@@ -888,8 +1000,12 @@ pub(crate) fn prepare_lookup_with_cores(
         context_occurrence_histogram_log2 = execution.histogram;
         &[][..]
     } else {
+        if let TraceIndex::Shared(reader) = index {
+            reader.record_context_posting_members(0, context_members.iter().map(Vec::len).sum());
+        }
         entries.as_slice()
     };
+    drop(context_members);
     for (ordinal, &(_, seed)) in serial_entries.iter().enumerate() {
         let Some(seed) = seed else {
             continue;

@@ -217,6 +217,15 @@ impl TraceIndex {
         keys: &[u64],
         cores: &crate::trace_batch::SharedCoreLookups,
     ) -> Result<Vec<Option<TraceSeed>>, TraceError> {
+        self.find_seeds_in_cores_with_members(keys, cores, &mut Vec::new())
+    }
+
+    pub(crate) fn find_seeds_in_cores_with_members(
+        &self,
+        keys: &[u64],
+        cores: &crate::trace_batch::SharedCoreLookups,
+        retained: &mut Vec<(usize, SharedMember)>,
+    ) -> Result<Vec<Option<TraceSeed>>, TraceError> {
         let Self::Shared(reader) = self else {
             return Err(TraceError::Invalid("resolved core index"));
         };
@@ -278,14 +287,21 @@ impl TraceIndex {
                 }
             }
             groups.resize(contexts.len(), None);
-            operation.find_in_core_into(core, &contexts, &mut groups)?;
+            let first_retained = retained.len();
+            operation.find_in_core_with_members_into(core, &contexts, &mut groups, retained)?;
             if !contexts.is_empty() {
-                for ((ordinal, _), group) in same_core
+                let mut member = first_retained;
+                for (context, ((ordinal, _), group)) in same_core
                     .iter()
                     .filter(|(_, key)| key.length != 15)
                     .zip(groups.iter().copied())
+                    .enumerate()
                 {
                     result[*ordinal] = group.map(TraceSeed::Shared);
+                    while member < retained.len() && retained[member].0 == context {
+                        retained[member].0 = *ordinal;
+                        member += 1;
+                    }
                 }
             }
         }

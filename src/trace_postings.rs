@@ -246,6 +246,7 @@ struct PostingRead<'a> {
     peak: AtomicUsize,
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_shared_postings(
     reader: &SharedReader,
     entries: &[(u64, Option<TraceSeed>)],
@@ -253,7 +254,20 @@ pub(crate) fn prepare_shared_postings(
     available: usize,
     observed: bool,
 ) -> Result<Option<PostingExecution>, TraceError> {
-    prepare_shared_postings_mode(reader, entries, postings, available, observed, None)
+    prepare_shared_postings_mode(reader, entries, postings, available, observed, None, &[])
+}
+
+pub(crate) fn prepare_shared_postings_with_members(
+    reader: &SharedReader,
+    entries: &[(u64, Option<TraceSeed>)],
+    postings: &mut [Option<BatchPosting>],
+    available: usize,
+    observed: bool,
+    retained: &[Vec<(usize, SharedMember)>],
+) -> Result<Option<PostingExecution>, TraceError> {
+    prepare_shared_postings_mode(
+        reader, entries, postings, available, observed, None, retained,
+    )
 }
 
 #[cfg(feature = "bench-internals")]
@@ -272,6 +286,7 @@ pub(crate) fn benchmark_postings(
         available,
         observed,
         Some(parallel),
+        &[],
     )
 }
 
@@ -282,6 +297,7 @@ fn prepare_shared_postings_mode(
     available: usize,
     observed: bool,
     force_parallel: Option<bool>,
+    retained: &[Vec<(usize, SharedMember)>],
 ) -> Result<Option<PostingExecution>, TraceError> {
     if entries.len() != postings.len() || postings.iter().any(Option::is_some) {
         return Err(TraceError::Invalid("posting slots"));
@@ -293,6 +309,7 @@ fn prepare_shared_postings_mode(
         available,
         observed,
         force_parallel,
+        retained,
     );
     if result.is_err() {
         for posting in postings {
@@ -311,6 +328,7 @@ fn prepare_shared_postings_inner(
     available: usize,
     observed: bool,
     force_parallel: Option<bool>,
+    retained: &[Vec<(usize, SharedMember)>],
 ) -> Result<Option<PostingExecution>, TraceError> {
     let planning = observed.then(Instant::now);
     let mut all_members = 0u64;
@@ -407,6 +425,35 @@ fn prepare_shared_postings_inner(
         }
     }
     execution.peak_bytes = workspace + execution.retained_bytes;
+    for members in retained {
+        for rows in members.chunk_by(|left, right| left.0 == right.0) {
+            let ordinal = rows[0].0;
+            let group = posting_group(entries, ordinal);
+            let Some(posting) = postings[ordinal].as_mut() else {
+                reader.record_context_posting_members(0, rows.len());
+                continue;
+            };
+            if !posting.documents.is_empty()
+                || rows.len() != group.member_count() as usize
+                || rows
+                    .windows(2)
+                    .any(|pair| pair[0].1.metagenome_id >= pair[1].1.metagenome_id)
+                || rows.iter().map(|row| row.1.occurrence_count()).sum::<u64>()
+                    != group.occurrence_count()
+            {
+                return Err(posting_shared_error("retained context members"));
+            }
+            posting
+                .documents
+                .extend(rows.iter().map(|row| SeedDocument::Shared(row.1)));
+            execution.member_copies += rows.len() as u64;
+            plans[ordinal].documents = false;
+            reader.record_context_posting_members(rows.len(), 0);
+            if observed {
+                execution.histogram[group.occurrence_count().ilog2().min(15) as usize] += 1;
+            }
+        }
+    }
     let parallel = force_parallel.unwrap_or(
         execution
             .admitted_member_rows

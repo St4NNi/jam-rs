@@ -95,6 +95,200 @@ fn retained_context_members_match_preserved_counts_and_positions() {
 }
 
 #[test]
+fn retained_context_admission_is_complete_and_directory_is_shared() {
+    let (_directory, _, placed, _, _) = context_fixture(false);
+    let reader = SharedReader::open_observed(&placed).unwrap();
+    let core = reader.find(SharedKey::core(TARGET_CORE)).unwrap().unwrap();
+    let operation = reader.posting_operation().unwrap();
+    let before_empty = reader.stats();
+    assert!(
+        !operation
+            .find_in_core_with_members_into(core, &[], &mut [], &mut Vec::new())
+            .unwrap()
+    );
+    assert_eq!(
+        reader.stats().core_descriptor_inspections,
+        before_empty.core_descriptor_inspections
+    );
+    assert_eq!(
+        reader.stats().member_descriptor_inspections,
+        before_empty.member_descriptor_inspections
+    );
+    operation.finish().unwrap();
+    let contexts = [
+        SharedKey {
+            core: TARGET_CORE,
+            context: 0x5a5,
+            length: 21,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: (0x5a5 << 20) | 1,
+            length: 31,
+        },
+        SharedKey {
+            core: TARGET_CORE,
+            context: (0x5a5 << 20) | 2,
+            length: 31,
+        },
+    ];
+    let before = reader.stats();
+    let expected = reader.find_in_core(core, &contexts).unwrap();
+    let baseline =
+        reader.stats().member_descriptor_inspections - before.member_descriptor_inspections;
+    assert_eq!(expected[0].unwrap().member_count(), 2);
+    assert_eq!(expected[0].unwrap().occurrence_count(), 4);
+    assert_eq!(
+        expected[1].unwrap().member_count() + expected[2].unwrap().member_count(),
+        3
+    );
+    for capacity in [0, 1, 3, 5] {
+        let operation = reader.posting_operation().unwrap();
+        let mut members = Vec::with_capacity(capacity);
+        let mut output = [None; 3];
+        let before = reader.stats();
+        let complete = operation
+            .find_in_core_with_members_into(core, &contexts, &mut output, &mut members)
+            .unwrap();
+        operation.finish().unwrap();
+        assert_eq!(output.as_slice(), expected.as_slice());
+        assert_eq!(complete, capacity >= 5);
+        assert_eq!(members.len(), if complete { 5 } else { 0 });
+        let after = reader.stats();
+        assert_eq!(after.context_member_runs - before.context_member_runs, 4);
+        assert_eq!(
+            after.member_descriptor_inspections - before.member_descriptor_inspections,
+            4
+        );
+        assert_eq!(baseline, 12);
+        assert_eq!(
+            after.context_member_fallbacks - before.context_member_fallbacks,
+            u64::from(!complete)
+        );
+    }
+}
+
+#[test]
+fn retained_context_failures_clear_only_unpublished_members() {
+    let (directory, _, placed, _, _) = context_fixture(false);
+    let reader = SharedReader::open(&placed).unwrap();
+    let other = SharedReader::open(&placed).unwrap();
+    let core = reader.find(SharedKey::core(30)).unwrap().unwrap();
+    let foreign = other.find(core.key()).unwrap().unwrap();
+    let key = SharedKey {
+        core: 30,
+        context: 0x5a5,
+        length: 21,
+    };
+    let operation = reader.posting_operation().unwrap();
+    let mut members = Vec::with_capacity(16);
+    let mut output = [None];
+    assert!(
+        operation
+            .find_in_core_with_members_into(core, &[key], &mut output, &mut members)
+            .unwrap()
+    );
+    let prefix = members.clone();
+    assert!(matches!(
+        operation.find_in_core_with_members_into(foreign, &[key], &mut output, &mut members),
+        Err(SharedError::Invalid("group handle"))
+    ));
+    assert_eq!(output, [None]);
+    assert_eq!(members, prefix);
+    assert!(matches!(
+        operation.find_in_core_with_members_into(core, &[], &mut output, &mut members),
+        Err(SharedError::Invalid("context result storage"))
+    ));
+    assert_eq!(members, prefix);
+    operation.finish().unwrap();
+    let path = directory.path().join("retained-corrupt.shared");
+    std::fs::copy(&placed, &path).unwrap();
+    mutate_and_resign(&path, |bytes, header| {
+        let at = header.section(Section::Members).offset as usize;
+        let width = header.row_bytes(Section::Members) as usize;
+        bytes.swap(at, at + width);
+    });
+    let corrupt = SharedReader::open(path).unwrap();
+    let core = corrupt.find(core.key()).unwrap().unwrap();
+    let operation = corrupt.posting_operation().unwrap();
+    members.clear();
+    assert!(matches!(
+        operation.find_in_core_with_members_into(core, &[key], &mut output, &mut members),
+        Err(SharedError::Invalid("member directory"))
+    ));
+    assert_eq!(output, [None]);
+    assert!(members.is_empty());
+}
+
+#[test]
+fn retained_context_batch_postings_do_not_search_members_again() {
+    use crate::trace_batch::{prepare_cores, prepare_lookup_with_cores};
+    use crate::trace_index::TraceIndex;
+    let (_directory, _, placed, _, _) = context_fixture(false);
+    for workers in [1, 4, 8, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(workers)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let index = TraceIndex::Shared(Box::new(SharedReader::open_observed(&placed).unwrap()));
+            let cores = prepare_cores(&index, [TARGET_CORE], 1, true)
+                .unwrap()
+                .unwrap();
+            let contexts = [
+                (21, 0x5a5),
+                (31, (0x5a5 << 20) | 1),
+                (31, (0x5a5 << 20) | 2),
+            ]
+            .map(|(length, context)| {
+                SharedKey {
+                    core: TARGET_CORE,
+                    context,
+                    length,
+                }
+                .packed()
+                .unwrap()
+            });
+            let lookup = prepare_lookup_with_cores(
+                &index,
+                contexts
+                    .into_iter()
+                    .flat_map(|key| [(key, 0), (key, 1)])
+                    .collect(),
+                2,
+                true,
+                Some(&cores),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(lookup.postings_complete);
+            assert_eq!(lookup.entries.len(), 3);
+            assert_eq!(lookup.query_entries.len(), 6);
+            let TraceIndex::Shared(reader) = &index else {
+                unreachable!()
+            };
+            let stats = reader.stats();
+            assert_eq!(stats.retained_context_members, 5);
+            assert_eq!(stats.context_posting_members_reused, 5);
+            assert_eq!(stats.context_posting_members_fallback, 0);
+            assert_eq!(
+                stats.placement_bound_searches, 24,
+                "three contexts times four members times two bounds, with no posting re-search"
+            );
+            assert_eq!(
+                lookup
+                    .postings
+                    .iter()
+                    .flatten()
+                    .map(|posting| posting.documents.len())
+                    .sum::<usize>(),
+                5
+            );
+        });
+    }
+}
+
+#[test]
 fn checked_contexts_match_public_results_with_constant_identity_checks() {
     let (_directory, reader, _) = fixture(2);
     let cores = [0, TARGET_CORE, TARGET_CORE + 1]

@@ -353,6 +353,9 @@ impl SharedPostingOperation<'_> {
         let result = (|| {
             self.validate_context_storage(core, keys, output)?;
             admit_result(members.capacity(), size_of::<(usize, SharedMember)>())?;
+            if keys.is_empty() {
+                return Ok(false);
+            }
             let row = self.reader.core_row(core.core_ordinal)?;
             if row.core != core.key.core {
                 return Err(SharedError::Invalid("core group"));

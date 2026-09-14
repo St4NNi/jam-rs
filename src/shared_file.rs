@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct FileReadStats {
     pub observed: bool,
     pub identity_checks: u64,
+    pub checked_span_calls: u64,
     pub requested_bytes: u64,
     pub requested_pages: u64,
     pub authenticated_pages: u64,
@@ -23,6 +24,7 @@ pub struct FileReadStats {
 pub(crate) struct SharedFile {
     observed: bool,
     identity_checks: AtomicU64,
+    checked_span_calls: AtomicU64,
     file: File,
     mmap: Mmap,
     identity: Option<[u64; 7]>,
@@ -57,6 +59,7 @@ impl SharedFile {
         let reader = Self {
             observed,
             identity_checks: AtomicU64::new(1),
+            checked_span_calls: AtomicU64::new(0),
             file,
             mmap,
             identity,
@@ -129,6 +132,7 @@ impl SharedFile {
         let start = section.offset + offset;
         let end = section.offset + end;
         if self.observed {
+            self.checked_span_calls.fetch_add(1, Ordering::Relaxed);
             self.requested_bytes.fetch_add(length, Ordering::Relaxed);
         }
         if length != 0 {
@@ -235,6 +239,7 @@ impl SharedFile {
         FileReadStats {
             observed: self.observed,
             identity_checks: self.identity_checks.load(Ordering::Relaxed),
+            checked_span_calls: self.checked_span_calls.load(Ordering::Relaxed),
             requested_bytes: self.requested_bytes.load(Ordering::Relaxed),
             requested_pages: self.requested_pages.load(Ordering::Relaxed),
             authenticated_pages: pages,
