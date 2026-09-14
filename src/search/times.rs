@@ -1,8 +1,9 @@
-//! Wall seconds, CPU seconds and major page faults of the parts of one search, so time spent
-//! waiting for storage shows up next to the work.
+//! Wall seconds, CPU seconds, major page faults and storage counts of the parts of one search,
+//! so time spent waiting for storage shows up next to the work.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use crate::storage::StorageCounts;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
@@ -14,6 +15,8 @@ pub struct PartTime {
     pub cpu_seconds: f64,
     /// Page faults that had to read from storage.
     pub major_faults: u64,
+    /// Requests to S3, block cache lookups and pinned reads of the process while the part ran.
+    pub storage: StorageCounts,
 }
 
 /// The cost of the parts of one search, in the order they run.
@@ -34,6 +37,7 @@ pub(super) struct PartStart {
     wall: Instant,
     cpu_seconds: f64,
     major_faults: u64,
+    storage: StorageCounts,
 }
 
 impl PartStart {
@@ -44,6 +48,7 @@ impl PartStart {
             wall: Instant::now(),
             cpu_seconds,
             major_faults,
+            storage: StorageCounts::now(),
         }
     }
 
@@ -54,6 +59,7 @@ impl PartStart {
             wall_seconds: self.wall.elapsed().as_secs_f64(),
             cpu_seconds: (cpu_seconds - self.cpu_seconds).max(0.0),
             major_faults: major_faults.saturating_sub(self.major_faults),
+            storage: StorageCounts::now().since(&self.storage),
         }
     }
 }

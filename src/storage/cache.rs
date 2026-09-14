@@ -2,6 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::counts::count_blocks;
 use super::{ReadAt, StorageError, checked_end, lock};
 use foyer::{
     BlockEngineConfig, Code, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
@@ -181,6 +182,10 @@ impl BlockCache {
     ) -> io::Result<Vec<Block>> {
         let keys: Vec<BlockKey> = (first..=last).map(|block| self.key(file, block)).collect();
         let mut found: Vec<Option<Block>> = keys.iter().map(|key| self.find(*key)).collect();
+        if wait {
+            let hits = found.iter().flatten().count() as u64;
+            count_blocks(hits, keys.len() as u64 - hits);
+        }
         let mut claim = Claim {
             cache: self,
             keys: Vec::new(),

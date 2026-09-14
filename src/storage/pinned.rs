@@ -2,6 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::counts::count_pinned;
 use super::{ReadAt, checked_end};
 use std::io;
 use std::ops::Range;
@@ -43,6 +44,7 @@ impl ReadAt for PinnedSource {
             self.rest.read_exact_at(offset, head)?;
         }
         if !middle.is_empty() {
+            count_pinned();
             self.pinned
                 .read_exact_at(inside.start - self.range.start, middle)?;
         }

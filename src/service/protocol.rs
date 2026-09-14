@@ -56,7 +56,7 @@ pub enum Reply {
     /// An entry of a shard that the search did not finish.
     Unfinished { shard: String, record: Unfinished },
     /// The summary of a shard, its last record.
-    Summary { shard: String, record: Summary },
+    Summary { shard: String, record: Box<Summary> },
     /// The server did not run the search: it is busy, or the settings are invalid.
     Refused { reason: String },
     /// The last message of a search.

@@ -97,7 +97,8 @@ pub enum Record {
     Confirmed(Confirmed),
     Dropped(Dropped),
     Unfinished(Unfinished),
-    Summary(Summary),
+    /// Boxed, as it is much larger than the other records.
+    Summary(Box<Summary>),
 }
 
 /// A record with the shard it comes from, as `jam search` prints it. Entry names may repeat
@@ -163,7 +164,7 @@ impl Record {
 
     /// The summary line of a search that failed before it ran, or whose server failed.
     pub fn failed(query: &str, query_length: u64, error: &dyn std::error::Error) -> Self {
-        Self::Summary(Summary {
+        Self::Summary(Box::new(Summary {
             query: query.to_string(),
             query_length,
             ending: Ending::Failed,
@@ -172,7 +173,7 @@ impl Record {
             locate: LocateWork::default(),
             align: AlignStageWork::default(),
             times: SearchTimes::default(),
-        })
+        }))
     }
 
     /// The summary line of a finished search.
@@ -183,7 +184,7 @@ impl Record {
             Completion::Stopped(Stopped::Asked) => (Ending::Asked, None),
             Completion::Failed(error) => (Ending::Failed, Some(error.to_string())),
         };
-        Self::Summary(Summary {
+        Self::Summary(Box::new(Summary {
             query: query.to_string(),
             query_length: summary.query_length,
             ending,
@@ -192,7 +193,7 @@ impl Record {
             locate: summary.locate,
             align: summary.align,
             times: summary.times,
-        })
+        }))
     }
 }
 

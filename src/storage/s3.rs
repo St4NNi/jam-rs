@@ -2,6 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::counts::count_s3;
 use super::{ReadAt, StorageError, checked_end, lock};
 use opendal::Operator;
 use opendal::layers::{ConcurrentLimitLayer, RetryLayer, TimeoutLayer};
@@ -181,13 +182,12 @@ impl S3Object {
     pub fn read_whole(config: &S3Config, location: &str) -> Result<Vec<u8>, StorageError> {
         let (bucket, key) = split_location(location)?;
         let operator = config.operator(bucket)?;
-        let bytes = config
-            .runtime
-            .block_on(operator.read(key))
-            .map_err(|error| StorageError::Object {
-                location: location.to_string(),
-                source: error.into(),
-            })?;
+        let read = config.runtime.block_on(operator.read(key));
+        let bytes = read.map_err(|error| StorageError::Object {
+            location: location.to_string(),
+            source: error.into(),
+        })?;
+        count_s3(bytes.len() as u64);
         Ok(bytes.to_vec())
     }
 }
@@ -210,6 +210,7 @@ impl ReadAt for S3Object {
         // A range with an end needs no HEAD request for the object size.
         let read = self.operator.read_with(&self.key).range(offset..end);
         let bytes = self.runtime.block_on(read.into_future())?;
+        count_s3(bytes.len() as u64);
         if bytes.len() != buffer.len() {
             return Err(invalid(&format!(
                 "S3 returned {} bytes for a range of {}",

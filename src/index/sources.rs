@@ -195,9 +195,7 @@ impl ShardFiles {
             Place::Ram => Arc::new(MappedFile::read_from(&file)?),
             Place::Ssd => Arc::new(file),
         };
-        if pin.bytes() == record.bytes {
-            return Ok(local);
-        }
+        // A pin of the whole file is wrapped too, so its reads are counted; the rest is unread.
         let rest = self.cached(location.open(&record.path, record.bytes)?, record)?;
         Ok(Arc::new(PinnedSource::new(local, pin.start..pin.end, rest)))
     }
