@@ -87,6 +87,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
     use crate::trace_batch::{phase_cost_enabled, phase_elapsed, phase_stamp};
     let invocation_started = std::time::Instant::now();
     let invocation_phase = phase_stamp();
+    let _ = crate::trace_batch::timeline_tick();
     let shared_input = matches!(&args.input, TraceInput::Shared { .. });
     let query_topology_header = matches!(
         &args.input,
@@ -320,6 +321,7 @@ pub(crate) fn handle_trace_command(args: TraceArgs) -> Result<()> {
                 "format": "jam-shared-read-stats-v1", "index": engine.shared_read_stats(), "batch": engine.batch_stats(),
                 "parsing_ns": parsing_ns, "output_ns": output_ns,
                 "phase_cost_mode": phase_cost_enabled(),
+                "worker_timeline": crate::trace_batch::worker_intervals(),
                 "phase_cost_semantics": "phase arrays are [elapsed_ns, process_cpu_ns] at disjoint batch barriers; core lookup includes token materialization; postings is a nested contiguous subinterval of context lookup and must be subtracted for an exclusive table; downstream includes fallback postings, candidates, regions, sequence access, alignment and results; normalization is in extraction; native mode has no phase samples",
                 "top_level_cpu_ns": { "setup": setup_cpu_ns, "parsing": parsing_cpu_ns, "search": search_cpu_ns, "result_serialization": output_cpu_ns, "finalization_and_other": publication_cpu_ns.saturating_sub(setup_cpu_ns + parsing_cpu_ns + search_cpu_ns + output_cpu_ns), "through_result_publication": publication_cpu_ns },
                 "top_level_ns": { "setup": startup_ns, "parsing": parsing_ns, "search": search_ns, "result_serialization": output_ns, "finalization_and_other": publication_ns.saturating_sub(startup_ns + parsing_ns + search_ns + output_ns), "through_result_publication": publication_ns },

@@ -67,6 +67,126 @@ pub(crate) fn worker_cpu_ns() -> Option<u64> {
     None
 }
 
+#[derive(Clone, Default, serde::Serialize)]
+struct WorkerInterval {
+    stage: &'static str,
+    query_ordinal: Option<usize>,
+    task_ordinal: usize,
+    work: [u64; 2],
+    dispatch_ns: Option<u64>,
+    start_ns: u64,
+    end_ns: u64,
+    worker: Option<usize>,
+    tid: u64,
+    thread_cpu_ns: Option<u64>,
+}
+
+#[derive(Default, serde::Serialize)]
+struct WorkerIntervals {
+    records: Vec<WorkerInterval>,
+    dropped: usize,
+}
+
+impl WorkerIntervals {
+    fn push(&mut self, record: WorkerInterval) {
+        if self.records.len() == self.records.capacity().min(4096) {
+            self.dropped += 1;
+        } else {
+            self.records.push(record);
+        }
+    }
+}
+
+static WORKER_INTERVALS: std::sync::OnceLock<std::sync::Mutex<WorkerIntervals>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn timeline_tick() -> Option<u64> {
+    static START: std::sync::OnceLock<Option<Instant>> = std::sync::OnceLock::new();
+    START
+        .get_or_init(|| {
+            std::env::var_os("JAM_TASK_TIMELINE")
+                .is_some_and(|value| value == "1")
+                .then(Instant::now)
+        })
+        .map(|start| start.elapsed().as_nanos() as u64)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct WorkerStart {
+    time: u64,
+    cpu: Option<u64>,
+    worker: Option<usize>,
+    tid: u64,
+}
+
+pub(crate) fn worker_interval_start() -> Option<WorkerStart> {
+    let time = timeline_tick()?;
+    #[cfg(target_os = "linux")]
+    // SAFETY: gettid has no pointer arguments and only reads the calling thread identity.
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
+    #[cfg(not(target_os = "linux"))]
+    let tid = 0;
+    Some(WorkerStart {
+        time,
+        cpu: worker_cpu_ns(),
+        worker: rayon::current_thread_index(),
+        tid,
+    })
+}
+
+pub(crate) fn record_worker_interval(
+    stage: &'static str,
+    query_ordinal: Option<usize>,
+    task_ordinal: usize,
+    work: [u64; 2],
+    dispatch_ns: Option<u64>,
+    start: Option<WorkerStart>,
+) {
+    let Some(WorkerStart {
+        time: start_ns,
+        cpu,
+        worker,
+        tid,
+    }) = start
+    else {
+        return;
+    };
+    let end_ns = timeline_tick().unwrap();
+    let thread_cpu_ns = cpu.and_then(|before| worker_cpu_ns()?.checked_sub(before));
+    let mut intervals = WORKER_INTERVALS
+        .get_or_init(|| {
+            let mut value = WorkerIntervals::default();
+            let _ = value.records.try_reserve_exact(4096);
+            std::sync::Mutex::new(value)
+        })
+        .lock()
+        .unwrap();
+    intervals.push(WorkerInterval {
+        stage,
+        query_ordinal,
+        task_ordinal,
+        work,
+        dispatch_ns,
+        start_ns,
+        end_ns,
+        worker,
+        tid,
+        thread_cpu_ns,
+    });
+}
+
+pub(crate) fn worker_intervals() -> serde_json::Value {
+    WORKER_INTERVALS.get().map_or(serde_json::Value::Null, |intervals| {
+        let intervals = intervals.lock().unwrap();
+        serde_json::json!({
+            "records": intervals.records,
+            "dropped": intervals.dropped,
+            "capacity_bytes": intervals.records.capacity() * std::mem::size_of::<WorkerInterval>(),
+            "semantics": "monotonic ns from first timeline tick; dispatch is the observed caller boundary, not scheduler readiness; query ordinals are within the caller batch; work is keys/0, merged target bases/0, query/target bases, or workspace bytes/0 by stage; workspace admission records are per map_init creation; synchronous thread CPU excludes waiting; records capped at 4096; failed tasks may exit before recording"
+        })
+    })
+}
+
 pub(crate) struct SharedSeedLookups {
     pub(crate) identity: TraceCacheIdentity,
     pub(crate) entries: Vec<(u64, Option<TraceSeed>)>,
@@ -824,10 +944,12 @@ pub(crate) fn prepare_lookup_with_cores(
         }
         lookup_dispatch_ns = dispatch.map_or(0, |start| start.elapsed().as_nanos() as u64);
         let dispatch = observed.then(Instant::now);
+        let timeline_dispatch = timeline_tick();
         let timings = tasks
             .into_par_iter()
             .zip(context_members.par_iter_mut())
             .map(|((_, keys, slots, first_key), members)| {
+                let timeline_start = worker_interval_start();
                 let start = observed.then(Instant::now);
                 let queued = start.zip(dispatch).map_or(0, |(start, dispatch)| {
                     start.duration_since(dispatch).as_nanos() as u64
@@ -845,6 +967,14 @@ pub(crate) fn prepare_lookup_with_cores(
                 for member in members {
                     member.0 += first_key;
                 }
+                record_worker_interval(
+                    "contexts",
+                    None,
+                    first_key,
+                    [keys.len() as u64, 0],
+                    timeline_dispatch,
+                    timeline_start,
+                );
                 Ok::<_, TraceError>([
                     queued,
                     compute,
@@ -1134,6 +1264,23 @@ pub(crate) fn prepare_lookup_with_cores(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worker_interval_storage_never_grows_or_exceeds_the_record_cap() {
+        for capacity in [0, 1, 4096, 8192] {
+            let mut intervals = super::WorkerIntervals {
+                records: Vec::with_capacity(capacity),
+                dropped: 0,
+            };
+            let admitted = intervals.records.capacity();
+            for _ in 0..5000 {
+                intervals.push(super::WorkerInterval::default());
+            }
+            assert_eq!(intervals.records.capacity(), admitted);
+            assert_eq!(intervals.records.len(), admitted.min(4096));
+            assert_eq!(intervals.records.len() + intervals.dropped, 5000);
+        }
+    }
+
     use super::*;
 
     #[test]

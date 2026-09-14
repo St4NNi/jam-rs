@@ -244,6 +244,7 @@ pub struct TraceBatchStats {
     pub lookup_retained_bytes: usize,
     pub lookup_reserved_bytes: usize,
     pub bgzf_cache_hits: u64,
+    pub bgzf_cache_waits: u64,
     pub bgzf_blocks_decoded: u64,
     pub bgzf_evictions: u64,
     pub bgzf_peak_bytes: usize,
@@ -1343,6 +1344,7 @@ impl TraceEngine {
         stats.batches += 1;
         stats.timings_observed = self.observed;
         stats.bgzf_cache_hits += cache.hits;
+        stats.bgzf_cache_waits += cache.waits;
         stats.bgzf_blocks_decoded += cache.blocks_decoded;
         stats.bgzf_evictions += cache.evictions;
         stats.bgzf_peak_bytes = stats.bgzf_peak_bytes.max(cache.peak_accounted_bytes);
@@ -2063,13 +2065,20 @@ impl TraceEngine {
         drop(metadata_reservation);
         drop(geometries);
         drop(geometry_reservation);
+        self.downstream_cpu(2, task_cpu);
         let (loaded, mut reads) = self.load_ranges(
             &tasks,
             config.verify_resources,
             batch.map(|batch| &batch.sequence),
+            prepared.batch_ordinal,
         )?;
-        self.downstream_cpu(2, task_cpu);
-        let outcomes = self.align_tasks(&prepared.query, &tasks, &loaded, config)?;
+        let outcomes = self.align_tasks(
+            &prepared.query,
+            &tasks,
+            &loaded,
+            config,
+            prepared.batch_ordinal,
+        )?;
         drop(loaded);
         let fragments = if split_parents.is_empty() && region_ledger.is_none() {
             outcomes
@@ -2342,6 +2351,7 @@ impl TraceEngine {
                 &fallback,
                 config.verify_resources,
                 batch.map(|batch| &batch.sequence),
+                prepared.batch_ordinal,
             )?;
             for (metagenome_id, (stats, blocks)) in fallback_reads {
                 let entry = reads.entry(metagenome_id).or_default();
@@ -2355,7 +2365,13 @@ impl TraceEngine {
                 };
                 entry.1 += blocks;
             }
-            self.align_tasks(&prepared.query, &fallback, &loaded, config)?
+            self.align_tasks(
+                &prepared.query,
+                &fallback,
+                &loaded,
+                config,
+                prepared.batch_ordinal,
+            )?
         };
         let query_length = prepared.query_length;
         let mut keyed = Vec::new();
@@ -2469,6 +2485,7 @@ impl TraceEngine {
         tasks: &[AlignmentTask],
         verify: bool,
         cache: Option<&Arc<BgzfBlockCache>>,
+        query_ordinal: usize,
     ) -> Result<LoadedRanges, TraceError> {
         let mut spans = BTreeMap::<(MetagenomeId, ContigId), Vec<(u64, u64)>>::new();
         for task in tasks {
@@ -2487,9 +2504,12 @@ impl TraceEngine {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        let timeline_dispatch = crate::trace_batch::timeline_tick();
         let per_metagenome = metagenomes
             .par_iter()
-            .map(|&metagenome_id| {
+            .enumerate()
+            .map(|(ordinal, &metagenome_id)| {
+                let timeline_start = crate::trace_batch::worker_interval_start();
                 let source = self
                     .index
                     .metagenome(metagenome_id)?
@@ -2531,6 +2551,23 @@ impl TraceEngine {
                     stats.bgzf_decode_and_handling_ns +=
                         reader.decompression_nanoseconds().unwrap_or(0);
                 }
+                let bases = if timeline_start.is_some() {
+                    loaded
+                        .iter()
+                        .flat_map(|(_, ranges)| ranges)
+                        .map(|range| range.end - range.offset)
+                        .sum()
+                } else {
+                    0
+                };
+                crate::trace_batch::record_worker_interval(
+                    "sequence",
+                    Some(query_ordinal),
+                    ordinal,
+                    [bases, 0],
+                    timeline_dispatch,
+                    timeline_start,
+                );
                 Ok((
                     metagenome_id,
                     loaded,
@@ -2557,6 +2594,7 @@ impl TraceEngine {
         tasks: &[AlignmentTask],
         loaded: &BTreeMap<(MetagenomeId, ContigId), Vec<LoadedRange>>,
         config: TraceConfig,
+        query_ordinal: usize,
     ) -> Result<Vec<TaskOutcome>, TraceError> {
         let ledger = self.region_ledger.is_some();
         let mut geometry = [0usize; 4];
@@ -2627,15 +2665,28 @@ impl TraceEngine {
                 stats.task_signature_unavailable_queries += 1;
             }
         }
+        let timeline_dispatch = crate::trace_batch::timeline_tick();
         let workspace = || {
+            let timeline_start = crate::trace_batch::worker_interval_start();
             if self.observed {
                 self.batch_stats.lock().unwrap().alignment_workspaces += 1;
             }
-            workspace_bytes.and_then(TraceAlignmentWorkspace::acquire)
+            let workspace = workspace_bytes.and_then(TraceAlignmentWorkspace::acquire);
+            crate::trace_batch::record_worker_interval(
+                "workspace_admission",
+                Some(query_ordinal),
+                0,
+                [workspace_bytes.unwrap_or(0) as u64, 0],
+                timeline_dispatch,
+                timeline_start,
+            );
+            workspace
         };
         tasks
             .par_iter()
-            .map_init(workspace, |workspace, task| {
+            .enumerate()
+            .map_init(workspace, |workspace, (ordinal, task)| {
+                let timeline_start = crate::trace_batch::worker_interval_start();
                 let workspace = workspace
                     .as_mut()
                     .map_err(|error| TraceError::AlignmentAdmission(error.to_string()))?
@@ -2692,6 +2743,14 @@ impl TraceEngine {
                     config,
                 )?
                 else {
+                    crate::trace_batch::record_worker_interval(
+                        "alignment",
+                        Some(query_ordinal),
+                        ordinal,
+                        [task.query_span, task.target_end - task.target_start],
+                        timeline_dispatch,
+                        timeline_start,
+                    );
                     self.record_alignment_time(started, workspace, before);
                     if self.observed {
                         self.batch_stats.lock().unwrap().rejected_alignments += 1;
@@ -2790,6 +2849,14 @@ impl TraceEngine {
                     };
                 if !alignment_accepted(&alignment, config) {
                     self.record_alignment_time(started, workspace, before);
+                    crate::trace_batch::record_worker_interval(
+                        "alignment",
+                        Some(query_ordinal),
+                        ordinal,
+                        [task.query_span, task.target_end - task.target_start],
+                        timeline_dispatch,
+                        timeline_start,
+                    );
                     if self.observed {
                         self.batch_stats.lock().unwrap().rejected_alignments += 1;
                     }
@@ -2812,6 +2879,14 @@ impl TraceEngine {
                     self.batch_stats.lock().unwrap().returned_alignments += 1;
                 }
                 let ledger = observation(workspace, &alignment);
+                crate::trace_batch::record_worker_interval(
+                    "alignment",
+                    Some(query_ordinal),
+                    ordinal,
+                    [task.query_span, task.target_end - task.target_start],
+                    timeline_dispatch,
+                    timeline_start,
+                );
                 Ok(TaskOutcome {
                     fragment: Some((
                         task.metagenome_id,
@@ -5361,6 +5436,7 @@ mod tests {
                     circular: false,
                     ..config
                 },
+                0,
             )
             .unwrap();
         let fragments = fragments
@@ -7237,7 +7313,7 @@ mod tests {
                     .build()
                     .unwrap();
                 let (loaded, reads) = pool
-                    .install(|| engine.load_ranges(&tasks, true, cache().as_ref()))
+                    .install(|| engine.load_ranges(&tasks, true, cache().as_ref(), 0))
                     .unwrap();
                 assert_eq!(
                     comparable(loaded),
@@ -7265,7 +7341,7 @@ mod tests {
             .build()
             .unwrap();
         let (loaded, _) = pool
-            .install(|| engine.load_ranges(&tasks, true, Some(&cache)))
+            .install(|| engine.load_ranges(&tasks, true, Some(&cache), 0))
             .unwrap();
         assert_eq!(comparable(loaded), expected);
         let stats = cache.stats();
@@ -7334,8 +7410,9 @@ mod tests {
                     )
                 });
                 wait_until(|| cache.stats().loading_blocks == 1);
-                let load = scope
-                    .spawn(move || pool.install(|| engine.load_ranges(tasks, false, Some(cache))));
+                let load = scope.spawn(move || {
+                    pool.install(|| engine.load_ranges(tasks, false, Some(cache), 0))
+                });
                 wait_until(|| cache.stats().waits >= 1);
                 // A worker has opened metagenome 1 long before this; a serial load has not.
                 std::thread::sleep(std::time::Duration::from_millis(200));
