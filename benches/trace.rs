@@ -953,6 +953,7 @@ fn shared_context_reuse(criterion: &mut Criterion) {
         let core = reader.find(SharedKey::core(core_key)).unwrap().unwrap();
         let mut output = vec![None; keys.len()];
         let mut members = Vec::with_capacity(keys.len() * core.member_count() as usize);
+        let mut scratch = Vec::with_capacity(core.member_count() as usize);
         for (phase, fill, resolve) in [
             ("counts", false, false),
             ("count_plus_fill", true, false),
@@ -960,12 +961,28 @@ fn shared_context_reuse(criterion: &mut Criterion) {
         ] {
             let core = (!resolve).then_some(core);
             let baseline = reader
-                .benchmark_context_reuse(core, &keys, &mut output, &mut members, false, fill)
+                .benchmark_context_reuse(
+                    core,
+                    &keys,
+                    &mut output,
+                    &mut members,
+                    &mut scratch,
+                    false,
+                    fill,
+                )
                 .unwrap();
             assert_eq!(
                 baseline,
                 reader
-                    .benchmark_context_reuse(core, &keys, &mut output, &mut members, true, fill)
+                    .benchmark_context_reuse(
+                        core,
+                        &keys,
+                        &mut output,
+                        &mut members,
+                        &mut scratch,
+                        true,
+                        fill
+                    )
                     .unwrap()
             );
             for (arm, reuse) in [("baseline", false), ("candidate", true)] {
@@ -977,6 +994,7 @@ fn shared_context_reuse(criterion: &mut Criterion) {
                                 black_box(&keys),
                                 &mut output,
                                 &mut members,
+                                &mut scratch,
                                 reuse,
                                 fill,
                             )
@@ -986,30 +1004,34 @@ fn shared_context_reuse(criterion: &mut Criterion) {
             }
         }
         reader
-            .benchmark_context_reuse(Some(core), &keys, &mut output, &mut members, true, true)
+            .benchmark_context_reuse(
+                Some(core),
+                &keys,
+                &mut output,
+                &mut members,
+                &mut scratch,
+                true,
+                true,
+            )
             .unwrap();
+        assert_eq!(
+            reader
+                .benchmark_context_member_fill(&output, None, &mut scratch)
+                .unwrap(),
+            reader
+                .benchmark_context_member_fill(&output, Some(&members), &mut scratch)
+                .unwrap(),
+        );
         for (arm, reuse) in [("baseline", false), ("candidate", true)] {
             group.bench_function(format!("{name}/members/{arm}"), |b| {
                 b.iter(|| {
-                    if reuse && !members.is_empty() {
-                        black_box(&members)
-                            .iter()
-                            .map(|(_, member)| member.occurrence_count())
-                            .sum::<u64>()
-                    } else {
-                        output
-                            .iter()
-                            .flatten()
-                            .map(|group| {
-                                reader
-                                    .members(*group)
-                                    .unwrap()
-                                    .iter()
-                                    .map(|member| member.occurrence_count())
-                                    .sum::<u64>()
-                            })
-                            .sum()
-                    }
+                    reader
+                        .benchmark_context_member_fill(
+                            black_box(&output),
+                            (reuse && !members.is_empty()).then_some(black_box(members.as_slice())),
+                            &mut scratch,
+                        )
+                        .unwrap()
                 })
             });
         }

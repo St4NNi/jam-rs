@@ -800,7 +800,7 @@ pub(crate) fn prepare_lookup_with_cores(
         } else {
             0
         };
-        for (_task, _) in tasks.iter().enumerate() {
+        for _task in 0..tasks.len() {
             let mut members = Vec::new();
             #[cfg(test)]
             let descriptor_count = if CONTEXT_ALLOCATION_FAILURE.get() == Some(_task) {

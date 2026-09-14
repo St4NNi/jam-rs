@@ -818,6 +818,7 @@ impl SharedReader {
         keys: &[SharedKey],
         output: &mut [Option<SharedGroup>],
         members: &mut Vec<(usize, SharedMember)>,
+        scratch: &mut Vec<SharedMember>,
         reuse: bool,
         fill: bool,
     ) -> Result<u64, SharedError> {
@@ -840,15 +841,13 @@ impl SharedReader {
                 .map(|group| group.occurrence_count())
                 .sum()
         } else if retained {
-            members
-                .iter()
-                .map(|(_, member)| member.occurrence_count())
-                .sum()
+            self.benchmark_retained_member_fill(members, scratch)?
         } else {
             let mut count = 0;
             for group in output.iter().flatten() {
-                count += self
-                    .members(*group)?
+                scratch.clear();
+                operation.append_member_range(*group, 0, group.member_count() as usize, scratch)?;
+                count += scratch
                     .iter()
                     .map(|member| member.occurrence_count())
                     .sum::<u64>();
@@ -856,6 +855,53 @@ impl SharedReader {
             count
         };
         operation.finish()?;
+        Ok(count)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    pub fn benchmark_context_member_fill(
+        &self,
+        groups: &[Option<SharedGroup>],
+        retained: Option<&[(usize, SharedMember)]>,
+        scratch: &mut Vec<SharedMember>,
+    ) -> Result<u64, SharedError> {
+        let operation = self.posting_operation()?;
+        let count = if let Some(retained) = retained {
+            self.benchmark_retained_member_fill(retained, scratch)?
+        } else {
+            let mut count = 0;
+            for group in groups.iter().flatten() {
+                scratch.clear();
+                operation.append_member_range(*group, 0, group.member_count() as usize, scratch)?;
+                count += scratch
+                    .iter()
+                    .map(|member| member.occurrence_count())
+                    .sum::<u64>();
+            }
+            count
+        };
+        operation.finish()?;
+        Ok(count)
+    }
+
+    #[cfg(feature = "bench-internals")]
+    fn benchmark_retained_member_fill(
+        &self,
+        retained: &[(usize, SharedMember)],
+        scratch: &mut Vec<SharedMember>,
+    ) -> Result<u64, SharedError> {
+        let mut count = 0;
+        for rows in retained.chunk_by(|left, right| left.0 == right.0) {
+            scratch.clear();
+            if rows.len() > scratch.capacity() {
+                return Err(SharedError::ResourceLimit);
+            }
+            scratch.extend(rows.iter().map(|(_, member)| *member));
+            count += scratch
+                .iter()
+                .map(|member| member.occurrence_count())
+                .sum::<u64>();
+        }
         Ok(count)
     }
 
