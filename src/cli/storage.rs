@@ -18,6 +18,8 @@ const DEFAULT_MEMORY: u64 = 1 << 30;
 const MIN_CACHE_RAM: u64 = 64 << 20;
 /// Bytes per block of the block cache, the size of most S3 reads.
 const BLOCK_BYTES: u64 = 64 << 10;
+/// Hinted ranges that the block cache fetches at once, as many as S3 requests may be in flight.
+const READ_AHEAD: usize = 256;
 /// The directory of the block cache's disk level in the cache directory.
 const BLOCKS_DIRECTORY: &str = "blocks";
 
@@ -124,10 +126,13 @@ impl ShardStorage {
             .map(|pin| pin.bytes())
             .sum();
         let disk_pins: u64 = pins.map(|pin| pin.bytes()).sum();
-        let mut config = CacheConfig::new(
-            memory.saturating_sub(ram_pins).max(MIN_CACHE_RAM),
-            BLOCK_BYTES,
-        );
+        let mut config = CacheConfig {
+            read_ahead: READ_AHEAD,
+            ..CacheConfig::new(
+                memory.saturating_sub(ram_pins).max(MIN_CACHE_RAM),
+                BLOCK_BYTES,
+            )
+        };
         let disk = disk.saturating_sub(disk_pins);
         if let Some(directory) = &args.cache
             && disk > 0

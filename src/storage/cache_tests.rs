@@ -6,6 +6,7 @@ use super::*;
 use crate::test_support::{random_bytes, rng, runtime};
 use rand::RngExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 /// The digests the test sources are cached under.
 const DIGEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -15,21 +16,26 @@ fn cache(ram_bytes: u64, block_bytes: u64) -> Arc<BlockCache> {
     BlockCache::open(&CacheConfig::new(ram_bytes, block_bytes), runtime()).unwrap()
 }
 
-/// Bytes in memory that count their reads and remember the largest one.
+/// Bytes in memory that count their reads, remember the largest one and the most at once, and
+/// take `delay` per read.
 struct Watched {
     data: Vec<u8>,
     reads: Arc<AtomicUsize>,
     largest: Arc<AtomicUsize>,
+    delay: Duration,
+    active: AtomicUsize,
+    peak: Arc<AtomicUsize>,
 }
 
 impl Watched {
     fn new(data: Vec<u8>) -> Self {
-        let reads = Arc::new(AtomicUsize::new(0));
-        let largest = Arc::new(AtomicUsize::new(0));
         Self {
             data,
-            reads,
-            largest,
+            reads: Arc::default(),
+            largest: Arc::default(),
+            delay: Duration::ZERO,
+            active: AtomicUsize::new(0),
+            peak: Arc::default(),
         }
     }
 }
@@ -42,6 +48,10 @@ impl ReadAt for Watched {
     fn read_exact_at(&self, at: u64, out: &mut [u8]) -> io::Result<()> {
         self.reads.fetch_add(1, Ordering::SeqCst);
         self.largest.fetch_max(out.len(), Ordering::SeqCst);
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        self.active.fetch_sub(1, Ordering::SeqCst);
         self.data.read_exact_at(at, out)
     }
 }
@@ -103,6 +113,14 @@ fn repeated_read_hits() {
     assert_eq!(reads.load(Ordering::SeqCst), 2);
 }
 
+/// Waits until `count` reaches `wanted`, for at most ten seconds.
+fn wait_until(count: &AtomicUsize, wanted: usize) {
+    let started = std::time::Instant::now();
+    while count.load(Ordering::SeqCst) < wanted && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn read_ahead_fills() {
     let data = random_bytes(&mut rng(9), 1 << 20);
@@ -115,16 +133,36 @@ fn read_ahead_fills() {
     let cache = BlockCache::open(&config, runtime()).unwrap();
     let cached = cache.wrap(Arc::new(source), DIGEST).unwrap();
     cached.will_need(100_000, 50_000);
-    // The read-ahead task holds its place until its blocks are in the cache.
-    let places = runtime()
-        .block_on(cache.read_ahead.acquire_many(2))
-        .unwrap();
-    drop(places);
-    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    wait_until(&reads, 1);
     let mut out = vec![0; 50_000];
     cached.read_exact_at(100_000, &mut out).unwrap();
     assert_eq!(out, data[100_000..150_000]);
     assert_eq!(reads.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn reads_join_fetches() {
+    let data = random_bytes(&mut rng(10), 1 << 20);
+    let config = CacheConfig {
+        read_ahead: 64,
+        // RAM is split over shards of the cache, so it holds far more than the data.
+        ..CacheConfig::new(64 << 20, 4096)
+    };
+    let source = Watched {
+        delay: Duration::from_millis(50),
+        ..Watched::new(data.clone())
+    };
+    let (reads, peak) = (Arc::clone(&source.reads), Arc::clone(&source.peak));
+    let cache = BlockCache::open(&config, runtime()).unwrap();
+    let cached = cache.wrap(Arc::new(source), DIGEST).unwrap();
+    // A long hint is fetched in batches at once; reads of hinted blocks wait for them.
+    cached.will_need(0, 1 << 20);
+    wait_until(&reads, 16);
+    let mut out = vec![0; 1 << 20];
+    cached.read_exact_at(0, &mut out).unwrap();
+    assert_eq!(out, data);
+    assert_eq!(reads.load(Ordering::SeqCst), 16);
+    assert!(peak.load(Ordering::SeqCst) > 1);
 }
 
 fn disk_config(directory: &std::path::Path) -> CacheConfig {

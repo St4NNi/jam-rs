@@ -2,16 +2,18 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{ReadAt, StorageError, checked_end};
+use super::{ReadAt, StorageError, checked_end, lock};
 use foyer::{
     BlockEngineConfig, Code, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCacheEntry, HybridCachePolicy, PsyncIoEngineConfig, RecoverMode, Spawner,
 };
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 
@@ -45,8 +47,8 @@ pub struct CacheConfig {
     pub block_bytes: u64,
     /// The optional disk level.
     pub disk: Option<DiskConfig>,
-    /// Hinted ranges fetched ahead at once; further hints are dropped (0: hints only go to the
-    /// source).
+    /// Hinted ranges fetched ahead at once; further hints wait for a place (0: hints only go
+    /// to the source).
     pub read_ahead: usize,
 }
 
@@ -68,10 +70,15 @@ impl CacheConfig {
 pub struct BlockCache {
     blocks: HybridCache<BlockKey, Vec<u8>>,
     block_bytes: u64,
-    /// The lock of the disk level directory, held while the cache is open.
-    _lock: Option<File>,
-    /// Places for hinted ranges fetched ahead.
-    read_ahead: Arc<Semaphore>,
+    /// The lock of the disk level directory, held while the cache is open; `None` without a
+    /// disk level.
+    disk_lock: Option<File>,
+    /// Places for hinted ranges fetched ahead, if hints fetch at all.
+    read_ahead: Option<Arc<Semaphore>>,
+    /// The number of places for hinted ranges.
+    places: usize,
+    /// Blocks being fetched now, so another read waits for them instead of asking again.
+    in_flight: Mutex<HashMap<BlockKey, Arc<Fetch>>>,
     runtime: Handle,
 }
 
@@ -106,8 +113,11 @@ impl BlockCache {
         Ok(Arc::new(Self {
             blocks,
             block_bytes,
-            _lock: lock,
-            read_ahead: Arc::new(Semaphore::new(config.read_ahead)),
+            disk_lock: lock,
+            read_ahead: (config.read_ahead > 0)
+                .then(|| Arc::new(Semaphore::new(config.read_ahead))),
+            places: config.read_ahead,
+            in_flight: Mutex::default(),
             runtime,
         }))
     }
@@ -129,7 +139,15 @@ impl BlockCache {
     }
 
     /// Writes the blocks still on their way to the disk level, so the next run finds them.
+    /// Hinted ranges not yet fetched are dropped, and the running fetches end first, so none
+    /// runs while the runtime stops.
     pub fn close(&self) -> Result<(), StorageError> {
+        if let Some(places) = &self.read_ahead {
+            places.close();
+            while places.available_permits() < self.places {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
         Ok(self.runtime.block_on(self.blocks.close())?)
     }
 
@@ -145,34 +163,73 @@ impl BlockCache {
         let last = *blocks.end();
         for start in blocks.step_by(FILL_BLOCKS as usize) {
             let end = last.min(start + FILL_BLOCKS - 1);
-            consume(start, &self.fill(inner, file, start, end)?);
+            consume(start, &self.fill(inner, file, start, end, true)?);
         }
         Ok(())
     }
 
-    /// The blocks `first..=last` of a source, fetching each run of missing ones with one request.
+    /// The blocks `first..=last` of a source. Each run of missing blocks that no other read
+    /// fetches is fetched with one request. Blocks that another read fetches are waited for if
+    /// `wait` is set, else left out.
     fn fill(
         &self,
         inner: &dyn ReadAt,
         file: [u8; 32],
         first: u64,
         last: u64,
+        wait: bool,
     ) -> io::Result<Vec<Block>> {
-        let mut found: Vec<Option<Block>> = (first..=last)
-            .map(|block| self.find(self.key(file, block)))
-            .collect();
+        let keys: Vec<BlockKey> = (first..=last).map(|block| self.key(file, block)).collect();
+        let mut found: Vec<Option<Block>> = keys.iter().map(|key| self.find(*key)).collect();
+        let mut claim = Claim {
+            cache: self,
+            keys: Vec::new(),
+            fetch: Arc::default(),
+        };
+        let mut others: Vec<Option<Arc<Fetch>>> = vec![None; keys.len()];
+        {
+            let mut in_flight = lock(&self.in_flight);
+            for (at, key) in keys.iter().enumerate() {
+                if found[at].is_some() {
+                    continue;
+                }
+                match in_flight.entry(*key) {
+                    Entry::Occupied(other) => others[at] = Some(Arc::clone(other.get())),
+                    Entry::Vacant(place) => {
+                        place.insert(Arc::clone(&claim.fetch));
+                        claim.keys.push(*key);
+                    }
+                }
+            }
+        }
         let mut index = 0;
-        while index < found.len() {
-            if found[index].is_some() {
+        while index < keys.len() {
+            if found[index].is_some() || others[index].is_some() {
                 index += 1;
                 continue;
             }
-            let run_end = (index..found.len())
-                .find(|at| found[*at].is_some())
-                .unwrap_or(found.len());
-            let run_first = first + index as u64;
-            self.fetch_run(inner, file, run_first, &mut found[index..run_end])?;
+            let run_end = (index..keys.len())
+                .find(|at| found[*at].is_some() || others[*at].is_some())
+                .unwrap_or(keys.len());
+            self.fetch_run(
+                inner,
+                file,
+                first + index as u64,
+                &mut found[index..run_end],
+            )?;
             index = run_end;
+        }
+        drop(claim);
+        for (at, other) in others.iter().enumerate() {
+            let Some(other) = other.as_ref().filter(|_| wait) else {
+                continue;
+            };
+            other.wait();
+            found[at] = self.find(keys[at]);
+            if found[at].is_none() {
+                // The other fetch failed, or its block already left the cache.
+                self.fetch_run(inner, file, first + at as u64, &mut found[at..=at])?;
+            }
         }
         Ok(found.into_iter().flatten().collect())
     }
@@ -186,8 +243,13 @@ impl BlockCache {
     }
 
     /// A block held in RAM, or else on the disk level. A failed disk read counts as a miss: the
-    /// disk level is best effort.
+    /// disk level is best effort. RAM is looked at alone first, as a lookup of the disk level
+    /// can join an older one that misses a block inserted since.
     fn find(&self, key: BlockKey) -> Option<Block> {
+        if let Some(block) = self.blocks.memory().get(&key) {
+            return Some(block);
+        }
+        self.disk_lock.as_ref()?;
         match self.blocks.get(&key).try_unwrap() {
             Ok(block) => Some(block),
             Err(pending) => self.runtime.block_on(pending.into_future()).ok().flatten(),
@@ -250,24 +312,70 @@ impl ReadAt for CachedSource {
     }
 
     fn will_need(&self, offset: u64, length: u64) {
-        let cache = &self.cache;
-        let length = length.min(FILL_BLOCKS * cache.block_bytes);
         self.inner.will_need(offset, length);
+        let cache = &self.cache;
         let end = offset.saturating_add(length).min(self.inner.size());
+        let Some(places) = &cache.read_ahead else {
+            return;
+        };
         if offset >= end {
             return;
         }
-        // Without a free place the hint is dropped: it never changes what is read.
-        let Ok(permit) = Arc::clone(&cache.read_ahead).try_acquire_owned() else {
-            return;
-        };
-        let blocks = offset / cache.block_bytes..=(end - 1) / cache.block_bytes;
-        let (inner, file, cache) = (Arc::clone(&self.inner), self.file, Arc::clone(cache));
-        cache.runtime.clone().spawn_blocking(move || {
-            let _permit = permit;
-            // A failed hint only means the read fetches the blocks later and reports its error.
-            let _ = cache.fill_batches(inner.as_ref(), file, blocks, |_, _| {});
-        });
+        let last = (end - 1) / cache.block_bytes;
+        // Each batch of blocks is fetched on its own, so long ranges use many requests at once.
+        for start in (offset / cache.block_bytes..=last).step_by(FILL_BLOCKS as usize) {
+            let stop = last.min(start + FILL_BLOCKS - 1);
+            let (inner, file, cache) = (Arc::clone(&self.inner), self.file, Arc::clone(cache));
+            let places = Arc::clone(places);
+            cache.runtime.clone().spawn(async move {
+                let Ok(place) = places.acquire_owned().await else {
+                    return;
+                };
+                let fetch = move || {
+                    let _place = place;
+                    // A failed hint only means the read fetches the blocks and reports the error.
+                    let _ = cache.fill(inner.as_ref(), file, start, stop, false);
+                };
+                let _ = tokio::task::spawn_blocking(fetch).await;
+            });
+        }
+    }
+}
+
+/// One read's fetch of some blocks, which other reads of those blocks wait for.
+#[derive(Default)]
+struct Fetch {
+    done: Mutex<bool>,
+    finished: Condvar,
+}
+
+impl Fetch {
+    /// Waits until the fetch ends, with or without its blocks.
+    fn wait(&self) {
+        let mut done = lock(&self.done);
+        while !*done {
+            done = (self.finished.wait(done)).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// Blocks that one read claimed to fetch. Dropping it, also after an error, releases them and
+/// wakes the reads that wait for them.
+struct Claim<'a> {
+    cache: &'a BlockCache,
+    keys: Vec<BlockKey>,
+    fetch: Arc<Fetch>,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        let mut in_flight = lock(&self.cache.in_flight);
+        for key in &self.keys {
+            in_flight.remove(key);
+        }
+        drop(in_flight);
+        *lock(&self.fetch.done) = true;
+        self.fetch.finished.notify_all();
     }
 }
 

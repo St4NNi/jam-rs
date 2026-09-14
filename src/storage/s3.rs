@@ -32,7 +32,7 @@ impl Default for S3Limits {
             request_timeout: Duration::from_secs(60),
             tries: 4,
             backoff: Duration::from_millis(200),
-            max_in_flight: 64,
+            max_in_flight: 256,
         }
     }
 }
