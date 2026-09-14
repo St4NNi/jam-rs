@@ -26,13 +26,16 @@ const FILL_BLOCKS: u64 = 16;
 /// blocks cannot make the cache index grow without bound.
 const MIN_CHARGE: usize = 256;
 
-/// Threads that write blocks to the disk level.
-const DISK_WRITERS: usize = 4;
-/// RAM of the write buffers of the disk level.
-const DISK_BUFFER: usize = 128 << 20;
-/// Bytes of blocks that may wait to be written to the disk level; further blocks are not
-/// written. Fetches come in bursts of hundreds of MiB, which a small queue would mostly drop.
-const DISK_QUEUE: usize = 1 << 30;
+/// Threads that write blocks to the disk level, one per GiB of it. Each holds a region of the
+/// disk level, so a small one gets one writer.
+const DISK_WRITERS: u64 = 4;
+/// RAM of the write buffers of the disk level, at most a sixteenth of the disk level.
+const DISK_BUFFER: u64 = 128 << 20;
+/// Bytes of blocks that may wait to be written to the disk level, at most a quarter of it;
+/// further blocks are not written. Fetches come in bursts of hundreds of MiB.
+const DISK_QUEUE: u64 = 1 << 30;
+/// The smallest write buffers and queue, the defaults of foyer.
+const DISK_MIN_QUEUE: u64 = 16 << 20;
 /// The file in the disk level directory that one process locks while it uses the directory.
 const LOCK_FILE: &str = "lock";
 
@@ -116,9 +119,9 @@ impl BlockCache {
                 .with_io_engine_config(PsyncIoEngineConfig::new())
                 .with_engine_config(
                     BlockEngineConfig::new(device)
-                        .with_flushers(DISK_WRITERS)
-                        .with_buffer_pool_size(DISK_BUFFER)
-                        .with_submit_queue_size_threshold(DISK_QUEUE),
+                        .with_flushers((disk.bytes >> 30).clamp(1, DISK_WRITERS) as usize)
+                        .with_buffer_pool_size(disk_share(disk.bytes / 16, DISK_BUFFER))
+                        .with_submit_queue_size_threshold(disk_share(disk.bytes / 4, DISK_QUEUE)),
                 )
                 .with_recover_mode(RecoverMode::Quiet);
         }
@@ -394,6 +397,11 @@ impl Drop for Claim<'_> {
         *lock(&self.fetch.done) = true;
         self.fetch.finished.notify_all();
     }
+}
+
+/// `share` bytes of the disk level, at least the foyer default and at most `most`.
+fn disk_share(share: u64, most: u64) -> usize {
+    share.clamp(DISK_MIN_QUEUE, most) as usize
 }
 
 /// Locks the disk level directory for this process, creating it if needed.
