@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::positions::{POSITION_KEY_BITS, Positions, decode_section};
-use super::sketch::{SketchWriter, encode_bucket, encode_color_set};
+use super::seed_file::encode_color_set;
+use super::sketch::{SketchWriter, encode_bucket};
 use super::{AtPath, FINGERPRINT_BITS, IndexError};
 use crate::storage::lock;
 use rayon::prelude::*;

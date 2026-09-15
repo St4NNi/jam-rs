@@ -99,8 +99,6 @@ pub struct Manifest {
     pub parameters: Parameters,
     /// Entries in entry id order.
     pub entries: Vec<EntryRecord>,
-    /// The sketch file.
-    pub sketch: FileRecord,
     /// The positions file.
     pub positions: FileRecord,
     /// The seeds file.
@@ -276,7 +274,6 @@ mod tests {
                 seed_locations: 90,
                 packed: file("entry_1.packed"),
             }],
-            sketch: file("sketch"),
             positions: file("positions"),
             seeds: file("seeds"),
             sketch_part: 4096..8192,
@@ -288,11 +285,11 @@ mod tests {
         manifest.write(directory.path()).unwrap();
         assert_eq!(Manifest::read(directory.path()).unwrap(), manifest);
         assert_eq!(
-            manifest.sketch.sha256,
+            manifest.seeds.sha256,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        verify_source(&b"abc".to_vec(), &manifest.sketch).unwrap();
-        assert!(verify_source(&b"abd".to_vec(), &manifest.sketch).is_err());
+        verify_source(&b"abc".to_vec(), &manifest.seeds).unwrap();
+        assert!(verify_source(&b"abd".to_vec(), &manifest.seeds).is_err());
     }
 
     #[test]

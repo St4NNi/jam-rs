@@ -4,9 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::buckets::{encode_locator_bucket, encode_sketch_bucket};
-use super::seed_file::SEED_KEY_BITS;
+use super::seed_file::{SEED_KEY_BITS, encode_color_set};
 use super::seed_writer::{SeedFileShape, SeedWriter};
-use super::sketch::encode_color_set;
 use super::{AtPath, IndexError};
 use crate::storage::lock;
 use rayon::prelude::*;

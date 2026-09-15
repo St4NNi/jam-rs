@@ -300,7 +300,7 @@ mod tests {
     use super::*;
     use crate::index::buckets::{encode_locator_bucket, encode_sketch_bucket};
     use crate::index::seed_file::SeedFile;
-    use crate::index::sketch::{ColorSetId, encode_color_set};
+    use crate::index::seed_file::{ColorSetId, encode_color_set};
     use crate::storage::ReadAt;
     use crate::test_support::rng;
     use rand::RngExt;

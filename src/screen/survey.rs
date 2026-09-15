@@ -4,7 +4,7 @@
 
 use super::ScreenError;
 use super::batch::Batch;
-use crate::index::{ColorSetId, ReadColorSets as ColorSets, SeedFile};
+use crate::index::{ColorSetId, ColorSets, SeedFile};
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
 use crate::seeds::Seeder;

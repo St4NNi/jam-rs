@@ -7,7 +7,6 @@ use super::IndexError;
 use super::bits::{u32_at, u64_at};
 use super::buckets::{LocatorBucket, SketchBucket};
 use super::pages::PartTable;
-use super::sketch::ColorSetId;
 use super::{MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::storage::{ReadAt, will_need_ranges};
 use integer_encoding::VarInt;
@@ -32,6 +31,10 @@ pub(crate) const SECTIONS: usize = 5;
 const JOIN_GAP: u64 = 8 << 10;
 /// Joined reads stop growing at this size.
 const JOIN_LIMIT: u64 = 1 << 20;
+
+/// The id of a distinct color set; small ids belong to frequent sets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct ColorSetId(pub u32);
 
 /// A stored seed of the sketch part: where its seed locations lie, and its color set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -400,6 +403,22 @@ fn check_sections(
         return Err(IndexError::format("seeds sections"));
     }
     Ok(())
+}
+
+/// Appends a color set (entries ascending and distinct) in its file encoding: the count, then
+/// the gap before each entry, all varints.
+pub(crate) fn encode_color_set(entries: &[u32], out: &mut Vec<u8>) {
+    let mut buffer = [0u8; 10];
+    let mut put = |value: u64| {
+        let used = value.encode_var(&mut buffer);
+        out.extend_from_slice(&buffer[..used]);
+    };
+    put(entries.len() as u64);
+    let mut next = 0u64;
+    for &entry in entries {
+        put(u64::from(entry) - next);
+        next = u64::from(entry) + 1;
+    }
 }
 
 /// Decodes one color set (count, then gaps) of a shard of `entries` entries into `out`.

@@ -5,7 +5,6 @@
 
 //! The output never depends on the thread count, and entries keep the input order.
 
-use super::color_sets::build_sketch;
 use super::manifest::{
     EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters, check_names,
     choose_bucket_bits, packed_file_name, sha256_file, sha256_hex,
@@ -17,7 +16,6 @@ use super::positions::{
 };
 use super::seed_file::{SEEDS_FILE, SeedFile};
 use super::seed_writer::SeedFileShape;
-use super::sketch::SKETCH_FILE;
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError, seed_key};
 use crate::seeds::Seeder;
@@ -193,13 +191,6 @@ pub(crate) fn complete_shard(
         ..parameters
     };
     parameters.validate()?;
-    let sketch_path = directory.join(SKETCH_FILE);
-    build_sketch(
-        &positions,
-        u32::from(parameters.bucket_bits),
-        &sketch_path,
-        temporary_directory,
-    )?;
     let spill = SeedSpill::create(temporary_directory)?;
     (0..positions.entry_count())
         .into_par_iter()
@@ -233,7 +224,6 @@ pub(crate) fn complete_shard(
         format_version: FORMAT_VERSION,
         parameters,
         entries,
-        sketch: record(&sketch_path, SKETCH_FILE)?,
         positions: record(&positions_path, POSITIONS_FILE)?,
         seeds: record(&seeds_path, SEEDS_FILE)?,
         sketch_part: seed_file.sketch_part(),

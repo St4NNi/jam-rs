@@ -64,9 +64,6 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
                     reverse: seed.reverse,
                 };
                 check_seed_file(shard.seed_file(), seed.hash, entry, expected);
-                let id = shard.sketch().color_set(seed.hash).expect("seed in sketch");
-                let set = shard.sketch().color_sets().entries(id).unwrap();
-                assert!(set.collect::<Vec<_>>().contains(&entry));
                 locations.clear();
                 shard
                     .positions()
@@ -124,10 +121,9 @@ fn every_seed_found() {
     assert_eq!(stats.entries, 7);
     assert!(stats.color_sets > 7 && stats.seeds > 1000 && stats.seed_locations >= stats.seeds);
     // Seeds of shared stretches have color sets of several entries.
-    let sets = shard.sketch().color_sets();
-    let largest = (0..stats.color_sets as u32)
-        .map(|id| sets.entries(ColorSetId(id)).unwrap().len())
-        .max();
+    let ids = (0..stats.color_sets as u32).map(ColorSetId);
+    let sets = shard.seed_file().read_color_sets(ids.clone()).unwrap();
+    let largest = ids.map(|id| sets.entries(id).unwrap().len()).max();
     assert!(largest > Some(2));
 }
 
@@ -142,7 +138,7 @@ fn threads_keep_output() {
     build_shard(&inputs, &four, &options(directory.path(), 4)).unwrap();
     for file in [
         manifest::MANIFEST_FILE,
-        sketch::SKETCH_FILE,
+        SEEDS_FILE,
         positions::POSITIONS_FILE,
         "packed/entry3.packed",
     ] {
@@ -160,10 +156,10 @@ fn reshard_options(directory: &Path, split: Split, packed: PackedOutput) -> Resh
     }
 }
 
-/// Checks that two shards hold the same manifest, sketch and positions.
+/// Checks that two shards hold the same manifest, seeds file and positions.
 fn assert_same_shard(one: &Path, other: &Path) {
     assert_eq!(Manifest::read(one).unwrap(), Manifest::read(other).unwrap());
-    for file in [sketch::SKETCH_FILE, positions::POSITIONS_FILE] {
+    for file in [SEEDS_FILE, positions::POSITIONS_FILE] {
         let read = |shard: &Path| std::fs::read(shard.join(file)).unwrap();
         assert!(read(one) == read(other), "{file}");
     }
@@ -279,7 +275,7 @@ fn forced_bucket_bits() {
     let manifest = build_shard(&inputs, &output, &options).unwrap();
     assert_eq!(manifest.parameters.bucket_bits, 12);
     let shard = Shard::open(&output).unwrap();
-    assert_eq!(shard.sketch().bucket_bits(), 12);
+    assert_eq!(shard.seed_file().bucket_bits(), 12);
     check_every_seed(&shard, &entries);
     let options = BuildOptions {
         bucket_bits: Some(29),

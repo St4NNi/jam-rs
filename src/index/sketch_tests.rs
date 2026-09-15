@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::index::seed_file::encode_color_set;
 use crate::test_support::rng;
 use rand::RngExt;
 use std::collections::BTreeMap;

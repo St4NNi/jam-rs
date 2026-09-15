@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 /// Entry events held between the search and their messages.
 const EVENT_QUEUE: usize = 64;
 
-/// An open shard with its name and miss model. The sketch stays in RAM while it is open.
+/// An open shard with its name and miss model.
 pub struct ServedShard {
     name: String,
     shard: Shard,
@@ -27,8 +27,6 @@ impl ServedShard {
     /// not fit the shard's k and minimizer window.
     pub fn new(name: String, shard: Shard, model: MissModel) -> Result<Self, ServiceError> {
         Searcher::new(&shard, &model)?;
-        // A server answers many searches, so it reads the sketch into RAM once at start.
-        shard.sketch().load()?;
         Ok(Self { name, shard, model })
     }
 

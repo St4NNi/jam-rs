@@ -1,4 +1,4 @@
-//! An open shard: its manifest, the sketch in RAM, the positions, and the packed sequences on
+//! An open shard: its manifest, the seeds file, the positions, and the packed sequences on
 //! request, read from a local directory or an S3 prefix.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
@@ -8,7 +8,6 @@ use super::manifest::{EntryRecord, Manifest, verify_source};
 use super::packed::PackedSequence;
 use super::positions::Positions;
 use super::seed_file::SeedFile;
-use super::sketch::Sketch;
 use super::sources::{Location, ShardFiles, ShardOptions};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -29,7 +28,7 @@ pub struct ShardStats {
     pub color_sets: u64,
     /// Seed locations of the positions file.
     pub seed_locations: u64,
-    /// Bytes of the sketch file.
+    /// Bytes of the sketch part of the seeds file.
     pub sketch_bytes: u64,
     /// Bytes of the positions file.
     pub positions_bytes: u64,
@@ -43,7 +42,6 @@ pub struct Shard {
     manifest: Manifest,
     /// The SHA-256 digest of the manifest file, lower case hex.
     digest: String,
-    sketch: Sketch,
     positions: Positions,
     seeds: SeedFile,
     /// Wall seconds that opening took.
@@ -73,9 +71,6 @@ impl Shard {
         let started = Instant::now();
         let (manifest, digest) = location.manifest()?;
         let files = ShardFiles::new(location, options, manifest.entries.len(), &digest)?;
-        let sketch_file = files.open_sketch(&manifest.sketch)?;
-        let sketch_bytes = sketch_file.bytes().len() as u64;
-        let sketch = Sketch::open(sketch_file)?;
         let positions_file = files.open(&manifest.positions)?;
         let positions_bytes = positions_file.size();
         let positions = Positions::open(positions_file)?;
@@ -84,15 +79,12 @@ impl Shard {
         let seeds_file = files.open(&manifest.seeds)?;
         let seeds_bytes = seeds_file.size();
         let seeds = SeedFile::open(seeds_file)?;
-        if sketch.entry_count() != entries
-            || sketch.bucket_bits() != u32::from(parameters.bucket_bits)
-            || seeds.entry_count() != entries
+        if seeds.entry_count() != entries
             || seeds.bucket_bits() != u32::from(parameters.bucket_bits)
             || seeds.seed_count() != manifest.stored_seeds
             || seeds_bytes != manifest.seeds.bytes
             || u64::from(positions.entry_count()) != entries
             || positions.bin_bits() != u32::from(parameters.bin_bits)
-            || sketch_bytes != manifest.sketch.bytes
             || positions_bytes != manifest.positions.bytes
             || (manifest.entries.iter().enumerate()).any(|(entry, record)| {
                 positions
@@ -103,14 +95,13 @@ impl Shard {
             })
         {
             return Err(IndexError::format(
-                "the sketch or positions differ from the manifest",
+                "the seeds file or positions differ from the manifest",
             ));
         }
         Ok(Self {
             files,
             manifest,
             digest,
-            sketch,
             positions,
             seeds,
             open_seconds: started.elapsed().as_secs_f64(),
@@ -130,11 +121,6 @@ impl Shard {
     /// The manifest of the shard.
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
-    }
-
-    /// The sketch (stage 1).
-    pub fn sketch(&self) -> &Sketch {
-        &self.sketch
     }
 
     /// The seeds file (stages 1 and 2).
@@ -177,16 +163,11 @@ impl Shard {
 
     /// Checks the SHA-256 digest of every file and the checksum of every section.
     pub fn verify(&self) -> Result<(), IndexError> {
-        let files = [
-            &self.manifest.sketch,
-            &self.manifest.positions,
-            &self.manifest.seeds,
-        ];
+        let files = [&self.manifest.positions, &self.manifest.seeds];
         for record in files {
             verify_source(self.files.open_uncached(record)?.as_ref(), record)?;
         }
         self.seeds.verify_checksums()?;
-        self.sketch.verify_checksums()?;
         self.positions.verify_checksums()?;
         for record in &self.manifest.entries {
             let source = self.files.open_packed_uncached(&record.packed)?;
@@ -205,7 +186,7 @@ impl Shard {
             seeds: self.manifest.stored_seeds,
             color_sets: self.manifest.color_sets,
             seed_locations: self.manifest.seed_locations,
-            sketch_bytes: self.manifest.sketch.bytes,
+            sketch_bytes: self.manifest.sketch_part.end - self.manifest.sketch_part.start,
             positions_bytes: self.manifest.positions.bytes,
             packed_bytes: entries.iter().map(|entry| entry.packed.bytes).sum(),
         }

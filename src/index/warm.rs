@@ -51,7 +51,7 @@ fn file_record<'a>(manifest: &'a Manifest, file: &str) -> Result<&'a FileRecord,
             .and_then(|rest| rest.strip_prefix('/'))
             == Some(entry.packed.path.as_str())
     };
-    [&manifest.sketch, &manifest.positions]
+    [&manifest.seeds, &manifest.positions]
         .into_iter()
         .find(|record| record.path == file)
         .or_else(|| {

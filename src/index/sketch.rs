@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u16_at, u32_at, u64_at};
+use super::seed_file::ColorSetId;
 use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS, seed_key};
 use crate::storage::{MappedFile, will_need_ranges};
 use integer_encoding::VarInt;
@@ -20,10 +21,6 @@ const VERSION: u32 = 2;
 const HEADER_BYTES: usize = 128;
 const BLOCK_HEADER_BYTES: usize = 8;
 const MAX_ESCAPES: usize = (1 << 24) - 1;
-
-/// The id of a distinct color set; small ids belong to frequent sets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct ColorSetId(pub u32);
 
 /// An open sketch file.
 pub struct Sketch {
@@ -232,21 +229,6 @@ impl Iterator for ColorSetEntries<'_> {
         self.left -= 1;
         self.next = value + 1;
         u32::try_from(value).ok()
-    }
-}
-
-/// Appends a color set (entries ascending and distinct) in its file encoding.
-pub(crate) fn encode_color_set(entries: &[u32], out: &mut Vec<u8>) {
-    let mut buffer = [0u8; 10];
-    let mut put = |value: u64| {
-        let used = value.encode_var(&mut buffer);
-        out.extend_from_slice(&buffer[..used]);
-    };
-    put(entries.len() as u64);
-    let mut next = 0u64;
-    for &entry in entries {
-        put(u64::from(entry) - next);
-        next = u64::from(entry) + 1;
     }
 }
 

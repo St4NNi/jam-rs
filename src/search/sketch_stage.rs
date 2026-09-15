@@ -7,7 +7,7 @@ use super::bound::CoverageBound;
 use super::control::SearchControl;
 use super::error::SearchError;
 use super::query::QueryKmers;
-use crate::index::{ColorSetId, ReadColorSets as ColorSets, SeedFile, StoredSeed};
+use crate::index::{ColorSetId, ColorSets, SeedFile, StoredSeed};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;

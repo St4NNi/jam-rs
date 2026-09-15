@@ -189,7 +189,11 @@ pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<P
         whole(file, &record.packed)
     };
     Ok(match part {
-        Part::Sketch => vec![whole(manifest.sketch.path.clone(), &manifest.sketch)],
+        // The header and the bucket table of the seeds file belong to the sketch part.
+        Part::Sketch => vec![Pin {
+            end: manifest.sketch_part.end,
+            ..whole(manifest.seeds.path.clone(), &manifest.seeds)
+        }],
         Part::Locators => vec![whole(manifest.positions.path.clone(), &manifest.positions)],
         Part::Packed(None) => manifest.entries.iter().map(packed).collect(),
         Part::Packed(Some(names)) => {
@@ -215,7 +219,7 @@ mod tests {
         let entries = vec![vec![vec![b'A'; 2_000]], vec![vec![b'C'; 3_000]]];
         let shard = test_shard(directory.path(), &entries);
         let manifest = shard.manifest();
-        let (sketch, locators) = (manifest.sketch.bytes, manifest.positions.bytes);
+        let (sketch, locators) = (manifest.sketch_part.end, manifest.positions.bytes);
         let places = |memory, disk, parts: &[Part]| {
             let plan = Plan::choose(manifest, "d", memory, disk, parts).unwrap();
             let places: Vec<(String, Place)> = (plan.pins.iter())
@@ -226,7 +230,7 @@ mod tests {
         let total = sketch + locators;
         let (pinned, budget) = places(total, total + 100, &[]);
         let both = vec![
-            ("sketch".to_string(), Place::Ram),
+            ("seeds".to_string(), Place::Ram),
             ("positions".to_string(), Place::Ram),
         ];
         assert_eq!((pinned, budget), (both, (0, 100)));
@@ -234,7 +238,7 @@ mod tests {
         assert_eq!(pinned[1], ("positions".to_string(), Place::Ssd));
         assert_eq!(budget, (0, 0));
         let (pinned, budget) = places(10, sketch, &[]);
-        assert_eq!(pinned, vec![("sketch".to_string(), Place::Ssd)]);
+        assert_eq!(pinned, vec![("seeds".to_string(), Place::Ssd)]);
         assert_eq!(budget, (10, 0));
         assert!(places(0, 0, &[]).0.is_empty());
         let (pinned, _) = places(1 << 30, 1 << 30, &[Part::Packed(None)]);
@@ -261,7 +265,7 @@ mod tests {
         let named = Part::Packed(Some(vec!["entry1".into()]));
         pins.extend(part_pins(manifest, &named, Place::Ssd).unwrap());
         assert_eq!(pins[2].file, "packed/entry1.packed");
-        assert_eq!(pins[0].bytes(), manifest.sketch.bytes);
+        assert_eq!(pins[0].bytes(), manifest.sketch_part.end);
         let missing = Part::Packed(Some(vec!["other".into()]));
         assert!(part_pins(manifest, &missing, Place::Ssd).is_err());
         let cache = directory.path().join("cache");

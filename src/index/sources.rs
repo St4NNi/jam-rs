@@ -158,22 +158,6 @@ impl ShardFiles {
         self.open_at(&self.location, &record.path, record)
     }
 
-    /// The sketch file in memory: mapped when it is local or pinned whole on disk, else read
-    /// whole into RAM.
-    pub(crate) fn open_sketch(&self, record: &FileRecord) -> Result<MappedFile, IndexError> {
-        let path = match self.pins.get(&record.path) {
-            Some((pin, path)) if pin.place == Place::Ssd && pin.bytes() == record.bytes => {
-                Some(path.clone())
-            }
-            Some(_) => None,
-            None => self.location.local_path(&record.path),
-        };
-        match path {
-            Some(path) => Ok(MappedFile::open(&path, false)?),
-            None => Ok(MappedFile::read_from(self.open(record)?.as_ref())?),
-        }
-    }
-
     /// The file `name` (relative to the shard) of `record` at `location`, with its pin.
     fn open_at(
         &self,

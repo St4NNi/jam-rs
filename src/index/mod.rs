@@ -7,11 +7,11 @@ mod bits;
 #[allow(dead_code)]
 mod buckets;
 mod build;
+#[allow(dead_code)]
 mod color_sets;
 mod index_file;
 mod manifest;
 mod packed;
-#[allow(dead_code)]
 mod pages;
 mod plan;
 mod positions;
@@ -19,6 +19,7 @@ mod reshard;
 mod seed_file;
 mod seed_writer;
 mod shard;
+#[allow(dead_code)]
 mod sketch;
 mod sources;
 mod spill;
@@ -37,9 +38,8 @@ pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
-pub use seed_file::{ColorSets as ReadColorSets, SEEDS_FILE, SeedFile, StoredSeed};
+pub use seed_file::{ColorSetId, ColorSets, SEEDS_FILE, SeedFile, StoredSeed};
 pub use shard::{Shard, ShardStats};
-pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 pub use sources::{Location, ShardOptions};
 pub use warm::warm;
 
