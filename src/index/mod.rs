@@ -16,6 +16,8 @@ mod pages;
 mod plan;
 mod positions;
 mod reshard;
+#[allow(dead_code)]
+mod seed_file;
 mod shard;
 mod sketch;
 mod sources;
