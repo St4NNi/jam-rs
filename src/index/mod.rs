@@ -12,6 +12,7 @@ mod manifest;
 mod packed;
 mod pages;
 mod plan;
+#[allow(dead_code)]
 mod positions;
 mod reshard;
 mod seed_file;
@@ -32,9 +33,8 @@ pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
-pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
-pub use seed_file::{ColorSetId, ColorSets, SEEDS_FILE, SeedFile, StoredSeed};
+pub use seed_file::{ColorSetId, ColorSets, SEEDS_FILE, SeedFile, SeedLocation, StoredSeed};
 pub use shard::{Shard, ShardStats};
 pub use sources::{Location, ShardOptions};
 pub use warm::warm;

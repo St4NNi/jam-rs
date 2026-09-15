@@ -47,7 +47,7 @@ pub enum Place {
 pub struct Pin {
     /// The part it belongs to: `sketch`, `locators` or `packed`.
     pub part: String,
-    /// The file, relative to the shard: `sketch`, `positions` or `packed/NAME.packed`.
+    /// The file, relative to the shard: `seeds` or `packed/NAME.packed`.
     pub file: String,
     /// The first byte of the range.
     pub start: u64,
@@ -167,9 +167,9 @@ impl Plan {
         )
     }
 
-    /// The local file of a pin in `cache`.
+    /// The local file of a pin in `cache`, by part, as one file may hold several parts.
     pub fn pin_path(&self, cache: &Path, pin: &Pin) -> PathBuf {
-        cache.join(&self.shard).join(&pin.file)
+        cache.join(&self.shard).join(&pin.part).join(&pin.file)
     }
 }
 
@@ -194,7 +194,13 @@ pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<P
             end: manifest.sketch_part.end,
             ..whole(manifest.seeds.path.clone(), &manifest.seeds)
         }],
-        Part::Locators => vec![whole(manifest.positions.path.clone(), &manifest.positions)],
+        Part::Locators => (manifest.locator_part.iter())
+            .map(|range| Pin {
+                start: range.start,
+                end: range.end,
+                ..whole(manifest.seeds.path.clone(), &manifest.seeds)
+            })
+            .collect(),
         Part::Packed(None) => manifest.entries.iter().map(packed).collect(),
         Part::Packed(Some(names)) => {
             let mut pins = Vec::new();
@@ -219,26 +225,30 @@ mod tests {
         let entries = vec![vec![vec![b'A'; 2_000]], vec![vec![b'C'; 3_000]]];
         let shard = test_shard(directory.path(), &entries);
         let manifest = shard.manifest();
-        let (sketch, locators) = (manifest.sketch_part.end, manifest.positions.bytes);
+        let locator_part = manifest.locator_part.clone().unwrap();
+        let (sketch, locators) = (
+            manifest.sketch_part.end,
+            locator_part.end - locator_part.start,
+        );
         let places = |memory, disk, parts: &[Part]| {
             let plan = Plan::choose(manifest, "d", memory, disk, parts).unwrap();
             let places: Vec<(String, Place)> = (plan.pins.iter())
-                .map(|pin| (pin.file.clone(), pin.place))
+                .map(|pin| (pin.part.clone(), pin.place))
                 .collect();
             (places, plan.cache_budget())
         };
         let total = sketch + locators;
         let (pinned, budget) = places(total, total + 100, &[]);
         let both = vec![
-            ("seeds".to_string(), Place::Ram),
-            ("positions".to_string(), Place::Ram),
+            ("sketch".to_string(), Place::Ram),
+            ("locators".to_string(), Place::Ram),
         ];
         assert_eq!((pinned, budget), (both, (0, 100)));
         let (pinned, budget) = places(sketch, total, &[]);
-        assert_eq!(pinned[1], ("positions".to_string(), Place::Ssd));
+        assert_eq!(pinned[1], ("locators".to_string(), Place::Ssd));
         assert_eq!(budget, (0, 0));
         let (pinned, budget) = places(10, sketch, &[]);
-        assert_eq!(pinned, vec![("seeds".to_string(), Place::Ssd)]);
+        assert_eq!(pinned, vec![("sketch".to_string(), Place::Ssd)]);
         assert_eq!(budget, (10, 0));
         assert!(places(0, 0, &[]).0.is_empty());
         let (pinned, _) = places(1 << 30, 1 << 30, &[Part::Packed(None)]);

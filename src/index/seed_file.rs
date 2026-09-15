@@ -36,6 +36,30 @@ const JOIN_LIMIT: u64 = 1 << 20;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct ColorSetId(pub u32);
 
+/// One stored bin and strand of a seed occurrence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub struct SeedLocation {
+    /// Bin within the entry: the seed starts in bases `bin << bin_bits` onward.
+    pub bin: u32,
+    /// The canonical k-mer is the reverse complement of the contig strand.
+    pub reverse: bool,
+}
+
+impl SeedLocation {
+    /// The stored value: bin shifted left by one, strand in the low bit.
+    pub fn value(self) -> u32 {
+        (self.bin << 1) | u32::from(self.reverse)
+    }
+
+    /// The seed location of a stored value.
+    pub fn from_value(value: u32) -> Self {
+        Self {
+            bin: value >> 1,
+            reverse: value & 1 == 1,
+        }
+    }
+}
+
 /// A stored seed of the sketch part: where its seed locations lie, and its color set.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StoredSeed {

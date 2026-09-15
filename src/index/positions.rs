@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::bits::{BIT_PADDING, BitWriter, bits_needed, read_bits, u32_at, u64_at};
+use super::seed_file::SeedLocation;
 use super::{AtPath, FINGERPRINT_BITS, IndexError, MAX_BUCKET_BITS, seed_key};
 use crate::storage::{ReadAt, will_need_ranges};
 use std::fs::File;
@@ -24,30 +25,6 @@ const HEADER_BYTES: u64 = 128;
 const ROW_BYTES: usize = 40;
 /// Seed locations per slot that the slot bits aim for.
 const SLOT_LOCATIONS: u64 = 16;
-
-/// One stored bin and strand of a seed occurrence.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
-pub struct SeedLocation {
-    /// Bin within the entry: the seed starts in bases `bin << bin_bits` onward.
-    pub bin: u32,
-    /// The canonical k-mer is the reverse complement of the contig strand.
-    pub reverse: bool,
-}
-
-impl SeedLocation {
-    /// The stored value: bin shifted left by one, strand in the low bit.
-    pub fn value(self) -> u32 {
-        (self.bin << 1) | u32::from(self.reverse)
-    }
-
-    /// The seed location of a stored value.
-    pub fn from_value(value: u32) -> Self {
-        Self {
-            bin: value >> 1,
-            reverse: value & 1 == 1,
-        }
-    }
-}
 
 /// The positions of a shard, read by offset from a local file or S3.
 pub struct Positions {

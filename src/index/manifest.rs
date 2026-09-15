@@ -99,8 +99,6 @@ pub struct Manifest {
     pub parameters: Parameters,
     /// Entries in entry id order.
     pub entries: Vec<EntryRecord>,
-    /// The positions file.
-    pub positions: FileRecord,
     /// The seeds file.
     pub seeds: FileRecord,
     /// The bytes of the sketch part in the seeds file.
@@ -274,7 +272,6 @@ mod tests {
                 seed_locations: 90,
                 packed: file("entry_1.packed"),
             }],
-            positions: file("positions"),
             seeds: file("seeds"),
             sketch_part: 4096..8192,
             locator_part: None,

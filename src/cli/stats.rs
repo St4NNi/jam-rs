@@ -57,7 +57,7 @@ fn table(record: &StatsRecord) -> String {
         ("color sets", record.stats.color_sets.to_string()),
         ("seed locations", record.stats.seed_locations.to_string()),
         ("sketch bytes", record.stats.sketch_bytes.to_string()),
-        ("positions bytes", record.stats.positions_bytes.to_string()),
+        ("locator bytes", record.stats.locator_bytes.to_string()),
         ("packed bytes", record.stats.packed_bytes.to_string()),
     ];
     rows.iter()

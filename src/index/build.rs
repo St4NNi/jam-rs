@@ -10,16 +10,12 @@ use super::manifest::{
     choose_bucket_bits, packed_file_name, sha256_file, sha256_hex,
 };
 use super::packed::PackedWriter;
-use super::positions::{
-    POSITION_KEY_BITS, POSITIONS_FILE, Positions, PositionsWriter, Section, SeedLocation,
-    decode_section, encode_section,
-};
-use super::seed_file::{SEEDS_FILE, SeedFile};
+use super::seed_file::{SEED_KEY_BITS, SEEDS_FILE, SeedFile, SeedLocation};
 use super::seed_writer::SeedFileShape;
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError, seed_key};
 use crate::seeds::Seeder;
-use crate::storage::{LocalFile, MappedFile};
+use crate::storage::LocalFile;
 use rayon::prelude::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -90,39 +86,26 @@ pub fn build_shard(
     in_partial_directory(output, |directory| {
         let packed = directory.join(PACKED_DIRECTORY);
         std::fs::create_dir(&packed).at(&packed)?;
-        let temporary = tempfile::Builder::new()
-            .prefix("jam-build")
-            .tempdir_in(&options.temporary_directory)
-            .at(&options.temporary_directory)?;
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
             packed,
-            temporary: temporary.path().to_path_buf(),
+            spill: SeedSpill::create(&options.temporary_directory)?,
         };
         pool.install(|| {
-            let built = if options.entry_per_record {
+            let entries = if options.entry_per_record {
                 index_records(inputs, &context)?
             } else {
                 index_files(inputs, &context)?
             };
-            check_names(built.iter().map(|entry| entry.record.name.as_str()))?;
-            let entries = built.iter().map(|entry| entry.record.clone()).collect();
+            check_names(entries.iter().map(|entry| entry.name.as_str()))?;
+            let parameters = options.parameters;
             complete_shard(
                 directory,
-                options.parameters,
+                parameters,
                 entries,
-                &options.temporary_directory,
+                context.spill,
                 options.bucket_bits,
-                |writer| {
-                    for entry in &built {
-                        let path = &entry.section_path;
-                        let bytes = std::fs::read(path).at(path)?;
-                        writer.push_section(&entry.section, &bytes)?;
-                        std::fs::remove_file(path).at(path)?;
-                    }
-                    Ok(())
-                },
             )
         })
     })
@@ -159,50 +142,26 @@ pub(crate) fn in_partial_directory<T>(
     }
 }
 
-/// Writes the positions (sections given by `write_sections`, in entry order), builds the sketch
-/// from them, and writes the manifest.
+/// Writes the seeds file from the seed records in `spill` and the manifest of a shard with these
+/// entries; the build chooses its bucket bits unless `bucket_bits` is given.
 pub(crate) fn complete_shard(
     directory: &Path,
     parameters: Parameters,
     entries: Vec<EntryRecord>,
-    temporary_directory: &Path,
+    spill: SeedSpill,
     bucket_bits: Option<u8>,
-    write_sections: impl FnOnce(&mut PositionsWriter) -> Result<(), IndexError>,
 ) -> Result<Manifest, IndexError> {
     if u32::try_from(entries.len()).is_err() {
         return Err(IndexError::Input(
             "a shard holds at most 2^32 - 1 entries".into(),
         ));
     }
-    let positions_path = directory.join(POSITIONS_FILE);
-    let mut writer = PositionsWriter::create(
-        &positions_path,
-        u32::from(parameters.bin_bits),
-        entries.len(),
-    )?;
-    write_sections(&mut writer)?;
-    writer.finish()?;
-    let positions = Positions::open(Arc::new(MappedFile::open(&positions_path, false)?))?;
-    let locations = (0..positions.entry_count())
-        .map(|entry| positions.entry_locations(entry))
-        .sum::<Result<u64, IndexError>>()?;
+    let locations = entries.iter().map(|entry| entry.seed_locations).sum();
     let parameters = Parameters {
         bucket_bits: bucket_bits.unwrap_or_else(|| choose_bucket_bits(locations)),
         ..parameters
     };
     parameters.validate()?;
-    let spill = SeedSpill::create(temporary_directory)?;
-    (0..positions.entry_count())
-        .into_par_iter()
-        .with_max_len(1)
-        .try_for_each(|entry| {
-            let bytes = positions.section_bytes(entry)?;
-            let mut records = Vec::new();
-            decode_section(positions.section(entry)?, &bytes, |key, location| {
-                records.push(seed_record(key, entry, location));
-            })?;
-            spill.push(&mut records)
-        })?;
     let seeds_path = directory.join(SEEDS_FILE);
     let shape = SeedFileShape {
         bucket_bits: u32::from(parameters.bucket_bits),
@@ -224,7 +183,6 @@ pub(crate) fn complete_shard(
         format_version: FORMAT_VERSION,
         parameters,
         entries,
-        positions: record(&positions_path, POSITIONS_FILE)?,
         seeds: record(&seeds_path, SEEDS_FILE)?,
         sketch_part: seed_file.sketch_part(),
         locator_part: seed_file.locator_part(),
@@ -241,11 +199,11 @@ struct Context {
     seeder: Seeder,
     parameters: Parameters,
     packed: PathBuf,
-    temporary: PathBuf,
+    spill: SeedSpill,
 }
 
 /// One entry per file: files run in parallel, the largest first.
-fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
+fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryRecord>, IndexError> {
     let mut order: Vec<(u64, usize)> = inputs
         .iter()
         .enumerate()
@@ -269,11 +227,11 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntr
 }
 
 /// One entry per record: records are read in order and indexed in parallel rounds.
-fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
+fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryRecord>, IndexError> {
     let mut built = Vec::new();
     let mut round: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut round_bytes = 0usize;
-    let run_round = |round: &mut Vec<(Vec<u8>, Vec<u8>)>, built: &mut Vec<BuiltEntry>| {
+    let run_round = |round: &mut Vec<(Vec<u8>, Vec<u8>)>, built: &mut Vec<EntryRecord>| {
         let first = built.len();
         let entries = round
             .par_iter()
@@ -307,19 +265,11 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEn
     Ok(built)
 }
 
-/// An indexed entry whose positions section waits in a temporary file.
-struct BuiltEntry {
-    record: EntryRecord,
-    section: Section,
-    section_path: PathBuf,
-}
-
 /// Collects the contigs of one entry: its packed sequence and its seeds as (key, seed location).
 struct EntryBuilder<'a> {
     context: &'a Context,
     packed: PackedWriter,
     seeds: Vec<(u64, u32)>,
-    contig_starts: Vec<u64>,
 }
 
 impl<'a> EntryBuilder<'a> {
@@ -328,14 +278,12 @@ impl<'a> EntryBuilder<'a> {
             context,
             packed: PackedWriter::new(),
             seeds: Vec::new(),
-            contig_starts: Vec::new(),
         }
     }
 
     fn add_contig(&mut self, name: &[u8], sequence: &[u8]) -> Result<(), IndexError> {
         let start = self.packed.bases();
         self.packed.add_contig(name, sequence)?;
-        self.contig_starts.push(start);
         let bin_bits = self.context.parameters.bin_bits;
         if self.packed.bases() >> bin_bits >= 1 << 31 {
             return Err(IndexError::Input(
@@ -349,22 +297,23 @@ impl<'a> EntryBuilder<'a> {
                 bin,
                 reverse: seed.reverse,
             };
-            seeds.push((seed_key(seed.hash, POSITION_KEY_BITS), location.value()));
+            seeds.push((seed_key(seed.hash, SEED_KEY_BITS), location.value()));
         });
         Ok(())
     }
 
-    /// Writes the packed sequence and the section of entry `index`.
-    fn finish(mut self, index: usize, name: String) -> Result<BuiltEntry, IndexError> {
+    /// Writes the packed sequence of entry `index` and spills its seed records.
+    fn finish(mut self, index: usize, name: String) -> Result<EntryRecord, IndexError> {
         self.seeds.sort_unstable();
         self.seeds.dedup();
-        self.contig_starts.push(self.packed.bases());
-        let (section, bytes) = encode_section(&self.seeds, &self.contig_starts)?;
-        drop(self.seeds);
-        let section_path = self.context.temporary.join(format!("section-{index:010}"));
-        std::fs::write(&section_path, &bytes).at(&section_path)?;
+        let seed_locations = self.seeds.len() as u64;
+        let entry = index as u32;
+        let mut records: Vec<u128> = (self.seeds.drain(..))
+            .map(|(key, location)| seed_record(key, entry, location))
+            .collect();
+        self.context.spill.push(&mut records)?;
+        drop(records);
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
-        let seed_locations = section.locations;
         let parts = self.packed.finish();
         let file_name = packed_file_name(&name);
         let path = self.context.packed.join(&file_name);
@@ -380,7 +329,7 @@ impl<'a> EntryBuilder<'a> {
         let (head, packed) = (&parts.header_and_tables, &parts.packed_bases);
         file.write_all(head).at(&path)?;
         file.write_all(packed).at(&path)?;
-        let record = EntryRecord {
+        Ok(EntryRecord {
             name,
             contigs,
             bases,
@@ -390,11 +339,6 @@ impl<'a> EntryBuilder<'a> {
                 bytes: (head.len() + packed.len()) as u64,
                 sha256: sha256_hex(&[head, packed]),
             },
-        };
-        Ok(BuiltEntry {
-            record,
-            section,
-            section_path,
         })
     }
 }

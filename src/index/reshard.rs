@@ -3,17 +3,20 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-//! Entries keep their positions sections and packed sequences; each output shard builds only its
-//! sketch. The groups depend only on the inputs and the split, never on the thread count.
+//! Entries keep their packed sequences; each output shard writes its seeds file from the seed
+//! records of its entries, read from the seeds files of the inputs. The groups depend only on the
+//! inputs and the split, never on the thread count.
 
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
 use super::manifest::{
     MANIFEST_FILE, Manifest, PACKED_DIRECTORY, Parameters, check_names, sha256_file,
 };
-use super::positions::{POSITIONS_FILE, Positions};
+use super::seed_file::{ColorSetId, SEED_KEY_BITS, SEEDS_FILE, SeedFile};
+use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
-use crate::storage::MappedFile;
+use crate::storage::LocalFile;
+use rayon::prelude::*;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -44,7 +47,7 @@ pub struct ReshardOptions {
     pub split: Split,
     /// How the packed sequences reach the output shards.
     pub packed: PackedOutput,
-    /// Threads that build each sketch.
+    /// Threads that write each seeds file.
     pub threads: usize,
     /// Directory for temporary files.
     pub temporary_directory: PathBuf,
@@ -60,13 +63,12 @@ pub fn reshard(
     let shards = open_inputs(inputs)?;
     let mut sources = Vec::new();
     for (shard, input) in shards.iter().enumerate() {
-        let entries = 0..input.positions.entry_count();
+        let entries = 0..input.manifest.entries.len() as u32;
         sources.extend(entries.map(|entry| EntrySource { shard, entry }));
     }
-    let weights = sources
-        .iter()
-        .map(|source| shards[source.shard].positions.entry_locations(source.entry))
-        .collect::<Result<Vec<_>, IndexError>>()?;
+    let weights: Vec<u64> = (sources.iter())
+        .map(|source| shards[source.shard].manifest.entries[source.entry as usize].seed_locations)
+        .collect();
     let groups = split_groups(&weights, options.split)?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(options.threads.max(1))
@@ -95,7 +97,7 @@ pub fn reshard(
 struct InputShard {
     directory: PathBuf,
     manifest: Manifest,
-    positions: Positions,
+    seeds: SeedFile,
 }
 
 /// The entries of one output shard, in index order.
@@ -130,18 +132,18 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
         .into_iter()
         .map(|directory| {
             let manifest = Manifest::read(&directory)?;
-            let file = MappedFile::open(&directory.join(POSITIONS_FILE), false)?;
-            let positions = Positions::open(Arc::new(file))?;
-            if positions.entry_count() as usize != manifest.entries.len() {
+            let file = LocalFile::open(directory.join(SEEDS_FILE))?;
+            let seeds = SeedFile::open(Arc::new(file))?;
+            if seeds.entry_count() != manifest.entries.len() as u64 || !seeds.has_locators() {
                 return Err(IndexError::format(format!(
-                    "the positions of {} differ from its manifest",
+                    "the seeds file of {} differs from its manifest or has no locator part",
                     directory.display()
                 )));
             }
             Ok(InputShard {
                 directory,
                 manifest,
-                positions,
+                seeds,
             })
         })
         .collect::<Result<Vec<_>, IndexError>>()?;
@@ -221,23 +223,65 @@ fn write_shard(
         }
         entries.push(record);
     }
-    let parameters = shards[0].manifest.parameters;
-    complete_shard(
-        directory,
-        parameters,
-        entries,
-        &options.temporary_directory,
-        None,
-        |writer| {
-            for &EntrySource { shard, entry } in part {
-                let positions = &shards[shard].positions;
-                // The section's CRC-32 is checked as it is read, so damage is not copied.
-                let bytes = positions.section_bytes(entry)?;
-                writer.push_section(positions.section(entry)?, &bytes)?;
+    let spill = SeedSpill::create(&options.temporary_directory)?;
+    for (shard, input) in shards.iter().enumerate() {
+        // The new entry of each input entry that this output shard holds.
+        let mut new_entries = vec![u32::MAX; input.manifest.entries.len()];
+        for (new, source) in part.iter().enumerate() {
+            if source.shard == shard {
+                new_entries[source.entry as usize] = new as u32;
             }
-            Ok(())
-        },
-    )
+        }
+        if new_entries.iter().any(|&new| new != u32::MAX) {
+            spill_input(&input.seeds, &new_entries, &spill)?;
+        }
+    }
+    let parameters = shards[0].manifest.parameters;
+    complete_shard(directory, parameters, entries, spill, None)
+}
+
+/// Buckets of an input that one parallel step reads.
+const CHUNK_BUCKETS: u32 = 1 << 12;
+
+/// Spills the seed records of the entries of an input seeds file that `new_entries` maps to an
+/// entry of the output shard (others are `u32::MAX`).
+fn spill_input(file: &SeedFile, new_entries: &[u32], spill: &SeedSpill) -> Result<(), IndexError> {
+    let buckets = 1u32 << file.bucket_bits();
+    let check_bits = SEED_KEY_BITS - file.bucket_bits();
+    (0..buckets.div_ceil(CHUNK_BUCKETS))
+        .into_par_iter()
+        .try_for_each(|chunk| {
+            let first = chunk * CHUNK_BUCKETS;
+            let list: Vec<u32> = (first..buckets.min(first + CHUNK_BUCKETS)).collect();
+            // Every stored seed of the chunk: its bucket, key and color set.
+            let mut seeds: Vec<(u32, u64, ColorSetId)> = Vec::new();
+            file.read_sketch_buckets(&list, |bucket, part| {
+                for place in 0..part.len() {
+                    let key = (u64::from(bucket) << check_bits) | part.check(place);
+                    seeds.push((bucket, key, ColorSetId(part.color_set(place))));
+                }
+                Ok(())
+            })?;
+            let sets = file.read_color_sets(seeds.iter().map(|seed| seed.2))?;
+            let mut records = Vec::new();
+            file.read_locator_buckets(&list, |bucket, part| {
+                let first = seeds.partition_point(|seed| seed.0 < bucket);
+                part.for_each(|place, rank, location| {
+                    let damaged = || IndexError::format("seeds locator bucket");
+                    let (_, key, id) = *seeds.get(first + place as usize).ok_or_else(damaged)?;
+                    let entries = sets.entries(id).ok_or_else(damaged)?;
+                    let entry = *entries.get(rank as usize).ok_or_else(damaged)?;
+                    match new_entries.get(entry as usize) {
+                        Some(&new) if new != u32::MAX => {
+                            records.push(seed_record(key, new, location));
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                })
+            })?;
+            spill.push(&mut records)
+        })
 }
 
 /// Cuts entries with these weights, in order, into contiguous non-empty groups by `split`.

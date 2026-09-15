@@ -113,7 +113,7 @@ pub(crate) struct ShardFiles {
     packed: Location,
     cache: Option<Arc<BlockCache>>,
     /// The pins of the plan with their local files, by file name relative to the shard.
-    pins: HashMap<String, (Pin, PathBuf)>,
+    pins: HashMap<String, Vec<(Pin, PathBuf)>>,
     /// Packed sequences kept open per entry when they are cached or remote; empty otherwise.
     opened: Vec<OnceLock<Arc<dyn ReadAt>>>,
 }
@@ -127,13 +127,15 @@ impl ShardFiles {
         entries: usize,
         digest: &str,
     ) -> Result<Self, IndexError> {
-        let mut pins = HashMap::new();
+        let mut pins: HashMap<String, Vec<(Pin, PathBuf)>> = HashMap::new();
         if let Some(cache) = &options.pins
             && let Some(plan) = Plan::read(cache, digest)?
         {
             for pin in &plan.pins {
                 let path = plan.pin_path(cache, pin);
-                pins.insert(pin.file.clone(), (pin.clone(), path));
+                pins.entry(pin.file.clone())
+                    .or_default()
+                    .push((pin.clone(), path));
             }
         }
         let packed = (options.packed.clone()).unwrap_or_else(|| location.join(PACKED_DIRECTORY));
@@ -158,30 +160,31 @@ impl ShardFiles {
         self.open_at(&self.location, &record.path, record)
     }
 
-    /// The file `name` (relative to the shard) of `record` at `location`, with its pin.
+    /// The file `name` (relative to the shard) of `record` at `location`, with its pins.
     fn open_at(
         &self,
         location: &Location,
         name: &str,
         record: &FileRecord,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        let Some((pin, path)) = self.pins.get(name) else {
-            return self.cached(location.open(&record.path, record.bytes)?, record);
-        };
-        let file = LocalFile::open(path)?;
-        if file.size() != pin.bytes() || pin.end > record.bytes {
-            return Err(IndexError::format(format!(
-                "the pinned file {} differs from its plan",
-                path.display()
-            )));
+        let mut source = self.cached(location.open(&record.path, record.bytes)?, record)?;
+        // Each pin takes its range from the source before it, so several parts of one file can
+        // be pinned. A pin of the whole file is wrapped too, so its reads are counted.
+        for (pin, path) in self.pins.get(name).into_iter().flatten() {
+            let file = LocalFile::open(path)?;
+            if file.size() != pin.bytes() || pin.end > record.bytes {
+                return Err(IndexError::format(format!(
+                    "the pinned file {} differs from its plan",
+                    path.display()
+                )));
+            }
+            let local: Arc<dyn ReadAt> = match pin.place {
+                Place::Ram => Arc::new(MappedFile::read_from(&file)?),
+                Place::Ssd => Arc::new(file),
+            };
+            source = Arc::new(PinnedSource::new(local, pin.start..pin.end, source));
         }
-        let local: Arc<dyn ReadAt> = match pin.place {
-            Place::Ram => Arc::new(MappedFile::read_from(&file)?),
-            Place::Ssd => Arc::new(file),
-        };
-        // A pin of the whole file is wrapped too, so its reads are counted; the rest is unread.
-        let rest = self.cached(location.open(&record.path, record.bytes)?, record)?;
-        Ok(Arc::new(PinnedSource::new(local, pin.start..pin.end, rest)))
+        Ok(source)
     }
 
     /// The source of a shard file without the cache, for example to verify it.

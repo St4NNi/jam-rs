@@ -1,12 +1,11 @@
-//! An open shard: its manifest, the seeds file, the positions, and the packed sequences on
-//! request, read from a local directory or an S3 prefix.
+//! An open shard: its manifest, the seeds file, and the packed sequences on request, read from
+//! a local directory or an S3 prefix.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
 use super::IndexError;
 use super::manifest::{EntryRecord, Manifest, verify_source};
 use super::packed::{PackedSequence, contig_table_bytes, read_contig_starts};
-use super::positions::Positions;
 use super::seed_file::SeedFile;
 use super::sources::{Location, ShardFiles, ShardOptions};
 use serde::Serialize;
@@ -26,12 +25,12 @@ pub struct ShardStats {
     pub seeds: u64,
     /// Distinct color sets of the sketch.
     pub color_sets: u64,
-    /// Seed locations of the positions file.
+    /// Seed locations of all entries.
     pub seed_locations: u64,
     /// Bytes of the sketch part of the seeds file.
     pub sketch_bytes: u64,
-    /// Bytes of the positions file.
-    pub positions_bytes: u64,
+    /// Bytes of the locator part of the seeds file, 0 without it.
+    pub locator_bytes: u64,
     /// Bytes of all packed sequence files.
     pub packed_bytes: u64,
 }
@@ -42,7 +41,6 @@ pub struct Shard {
     manifest: Manifest,
     /// The SHA-256 digest of the manifest file, lower case hex.
     digest: String,
-    positions: Positions,
     seeds: SeedFile,
     /// Wall seconds that opening took.
     open_seconds: f64,
@@ -71,9 +69,6 @@ impl Shard {
         let started = Instant::now();
         let (manifest, digest) = location.manifest()?;
         let files = ShardFiles::new(location, options, manifest.entries.len(), &digest)?;
-        let positions_file = files.open(&manifest.positions)?;
-        let positions_bytes = positions_file.size();
-        let positions = Positions::open(positions_file)?;
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;
         let seeds_file = files.open(&manifest.seeds)?;
@@ -83,26 +78,17 @@ impl Shard {
             || seeds.bucket_bits() != u32::from(parameters.bucket_bits)
             || seeds.seed_count() != manifest.stored_seeds
             || seeds_bytes != manifest.seeds.bytes
-            || u64::from(positions.entry_count()) != entries
-            || positions.bin_bits() != u32::from(parameters.bin_bits)
-            || positions_bytes != manifest.positions.bytes
-            || (manifest.entries.iter().enumerate()).any(|(entry, record)| {
-                positions
-                    .section(entry as u32)
-                    .map(|section| section.contigs)
-                    .ok()
-                    != Some(record.contigs)
-            })
+            || seeds.sketch_part() != manifest.sketch_part
+            || seeds.locator_part() != manifest.locator_part
         {
             return Err(IndexError::format(
-                "the seeds file or positions differ from the manifest",
+                "the seeds file differs from the manifest",
             ));
         }
         Ok(Self {
             files,
             manifest,
             digest,
-            positions,
             seeds,
             open_seconds: started.elapsed().as_secs_f64(),
         })
@@ -126,11 +112,6 @@ impl Shard {
     /// The seeds file (stages 1 and 2).
     pub fn seed_file(&self) -> &SeedFile {
         &self.seeds
-    }
-
-    /// The positions (stage 2).
-    pub fn positions(&self) -> &Positions {
-        &self.positions
     }
 
     /// The local path of an entry's packed sequence; an error when it lies on S3.
@@ -179,12 +160,9 @@ impl Shard {
 
     /// Checks the SHA-256 digest of every file and the checksum of every section.
     pub fn verify(&self) -> Result<(), IndexError> {
-        let files = [&self.manifest.positions, &self.manifest.seeds];
-        for record in files {
-            verify_source(self.files.open_uncached(record)?.as_ref(), record)?;
-        }
+        let seeds = &self.manifest.seeds;
+        verify_source(self.files.open_uncached(seeds)?.as_ref(), seeds)?;
         self.seeds.verify_checksums()?;
-        self.positions.verify_checksums()?;
         for record in &self.manifest.entries {
             let source = self.files.open_packed_uncached(&record.packed)?;
             verify_source(source.as_ref(), &record.packed)?;
@@ -202,8 +180,8 @@ impl Shard {
             seeds: self.manifest.stored_seeds,
             color_sets: self.manifest.color_sets,
             seed_locations: self.manifest.seed_locations,
-            sketch_bytes: self.manifest.sketch_part.end - self.manifest.sketch_part.start,
-            positions_bytes: self.manifest.positions.bytes,
+            sketch_bytes: part_bytes(Some(&self.manifest.sketch_part)),
+            locator_bytes: part_bytes(self.manifest.locator_part.as_ref()),
             packed_bytes: entries.iter().map(|entry| entry.packed.bytes).sum(),
         }
     }
@@ -215,4 +193,9 @@ impl Shard {
             .get(entry as usize)
             .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))
     }
+}
+
+/// Bytes of a part of the seeds file, 0 without it.
+fn part_bytes(part: Option<&std::ops::Range<u64>>) -> u64 {
+    part.map_or(0, |part| part.end - part.start)
 }

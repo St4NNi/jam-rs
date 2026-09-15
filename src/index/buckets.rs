@@ -274,18 +274,19 @@ impl<'a> LocatorBucket<'a> {
         Ok(())
     }
 
-    /// Calls `visit(place, rank, location value)` for every seed location in stored order.
-    pub fn for_each(&self, mut visit: impl FnMut(u32, u32, u32)) {
+    /// Calls `visit(place, rank, location value)` for every seed location in stored order, and
+    /// stops at the first error.
+    pub fn for_each(
+        &self,
+        mut visit: impl FnMut(u32, u32, u32) -> Result<(), IndexError>,
+    ) -> Result<(), IndexError> {
         let (mut place, mut rank) = (0u32, 0u32);
         let mut pair = 0u64;
         let values = self.pairs + self.locations;
+        let width = self.location_bits;
         for index in 0..self.locations {
-            let value = read_bits(
-                self.bits,
-                values + index * u64::from(self.location_bits),
-                self.location_bits,
-            );
-            visit(place, rank, value as u32);
+            let value = read_bits(self.bits, values + index * u64::from(width), width);
+            visit(place, rank, value as u32)?;
             if read_bits(self.bits, self.pairs + index, 1) == 1 {
                 if read_bits(self.bits, pair, 1) == 1 {
                     place += 1;
@@ -296,6 +297,7 @@ impl<'a> LocatorBucket<'a> {
                 pair += 1;
             }
         }
+        Ok(())
     }
 }
 
@@ -380,7 +382,12 @@ mod tests {
         encode_locator_bucket(&seed_pairs, &pair_locations, &locations, &mut bytes);
         let bucket = LocatorBucket::decode(&bytes[3..]).unwrap();
         let mut visited = Vec::new();
-        bucket.for_each(|place, rank, value| visited.push((place, rank, value)));
+        bucket
+            .for_each(|place, rank, value| {
+                visited.push((place, rank, value));
+                Ok(())
+            })
+            .unwrap();
         let mut expected = Vec::new();
         let (mut pair, mut at) = (0usize, 0usize);
         for (place, &count) in seed_pairs.iter().enumerate() {

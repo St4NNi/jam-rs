@@ -40,12 +40,11 @@ fn options(directory: &Path, threads: usize) -> BuildOptions {
     options
 }
 
-/// Checks that every seed of every entry is found through the sketch and the positions, and
+/// Checks that every seed of every entry is found in the seeds file at its seed location, and
 /// that the packed sequences give back the contigs.
 fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
     let parameters = shard.manifest().parameters;
     let seeder = Seeder::new(parameters.scheme).unwrap();
-    let mut locations = Vec::new();
     let mut bases = Vec::new();
     for (entry, contigs) in entries.iter().enumerate() {
         let entry = entry as u32;
@@ -64,16 +63,6 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
                     reverse: seed.reverse,
                 };
                 check_seed_file(shard.seed_file(), seed.hash, entry, expected);
-                locations.clear();
-                shard
-                    .positions()
-                    .locations(entry, seed.hash, &mut locations)
-                    .unwrap();
-                let expected = SeedLocation {
-                    bin: ((start + seed.position) >> parameters.bin_bits) as u32,
-                    reverse: seed.reverse,
-                };
-                assert!(locations.contains(&expected));
             });
             assert!(seeds > 100);
             start += sequence.len() as u64;
@@ -85,7 +74,7 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
                 Some(*end)
             }))
             .collect();
-        assert_eq!(shard.positions().contig_starts(entry).unwrap(), bounds);
+        assert_eq!(shard.contig_starts(entry).unwrap(), bounds);
     }
 }
 
@@ -136,12 +125,7 @@ fn threads_keep_output() {
     let four = directory.path().join("four");
     build_shard(&inputs, &one, &options(directory.path(), 1)).unwrap();
     build_shard(&inputs, &four, &options(directory.path(), 4)).unwrap();
-    for file in [
-        manifest::MANIFEST_FILE,
-        SEEDS_FILE,
-        positions::POSITIONS_FILE,
-        "packed/entry3.packed",
-    ] {
+    for file in [manifest::MANIFEST_FILE, SEEDS_FILE, "packed/entry3.packed"] {
         let read = |shard: &PathBuf| std::fs::read(shard.join(file)).unwrap();
         assert!(read(&one) == read(&four), "{file}");
     }
@@ -156,13 +140,11 @@ fn reshard_options(directory: &Path, split: Split, packed: PackedOutput) -> Resh
     }
 }
 
-/// Checks that two shards hold the same manifest, seeds file and positions.
+/// Checks that two shards hold the same manifest and seeds file.
 fn assert_same_shard(one: &Path, other: &Path) {
     assert_eq!(Manifest::read(one).unwrap(), Manifest::read(other).unwrap());
-    for file in [SEEDS_FILE, positions::POSITIONS_FILE] {
-        let read = |shard: &Path| std::fs::read(shard.join(file)).unwrap();
-        assert!(read(one) == read(other), "{file}");
-    }
+    let read = |shard: &Path| std::fs::read(shard.join(SEEDS_FILE)).unwrap();
+    assert!(read(one) == read(other));
 }
 
 #[test]
@@ -438,7 +420,7 @@ fn pins_read_locally() {
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
-    let pinned = ["shard/positions", "shard/packed/entry1.packed"];
+    let pinned = ["shard/seeds", "shard/packed/entry1.packed"];
     assert!(asked.iter().all(|key| !pinned.contains(&key.as_str())));
 }
 
