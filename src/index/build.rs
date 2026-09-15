@@ -13,12 +13,15 @@ use super::manifest::{
 use super::packed::PackedWriter;
 use super::positions::{
     POSITION_KEY_BITS, POSITIONS_FILE, Positions, PositionsWriter, Section, SeedLocation,
-    encode_section,
+    decode_section, encode_section,
 };
+use super::seed_file::{SEEDS_FILE, SeedFile};
+use super::seed_writer::SeedFileShape;
 use super::sketch::SKETCH_FILE;
+use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError, seed_key};
 use crate::seeds::Seeder;
-use crate::storage::MappedFile;
+use crate::storage::{LocalFile, MappedFile};
 use rayon::prelude::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -191,12 +194,33 @@ pub(crate) fn complete_shard(
     };
     parameters.validate()?;
     let sketch_path = directory.join(SKETCH_FILE);
-    let totals = build_sketch(
+    build_sketch(
         &positions,
         u32::from(parameters.bucket_bits),
         &sketch_path,
         temporary_directory,
     )?;
+    let spill = SeedSpill::create(temporary_directory)?;
+    (0..positions.entry_count())
+        .into_par_iter()
+        .with_max_len(1)
+        .try_for_each(|entry| {
+            let bytes = positions.section_bytes(entry)?;
+            let mut records = Vec::new();
+            decode_section(positions.section(entry)?, &bytes, |key, location| {
+                records.push(seed_record(key, entry, location));
+            })?;
+            spill.push(&mut records)
+        })?;
+    let seeds_path = directory.join(SEEDS_FILE);
+    let shape = SeedFileShape {
+        bucket_bits: u32::from(parameters.bucket_bits),
+        page_bits: u32::from(parameters.page_bits),
+        entries: entries.len() as u64,
+        locators: true,
+    };
+    let totals = spill.write(&seeds_path, shape)?;
+    let seed_file = SeedFile::open(Arc::new(LocalFile::open(&seeds_path)?))?;
     let record = |path: &Path, name: &str| -> Result<FileRecord, IndexError> {
         let digest = sha256_file(path)?;
         Ok(FileRecord {
@@ -211,7 +235,10 @@ pub(crate) fn complete_shard(
         entries,
         sketch: record(&sketch_path, SKETCH_FILE)?,
         positions: record(&positions_path, POSITIONS_FILE)?,
-        seeds: totals.seeds,
+        seeds: record(&seeds_path, SEEDS_FILE)?,
+        sketch_part: seed_file.sketch_part(),
+        locator_part: seed_file.locator_part(),
+        stored_seeds: totals.seeds,
         color_sets: totals.color_sets,
         seed_locations: locations,
     };
@@ -347,6 +374,7 @@ impl<'a> EntryBuilder<'a> {
         let section_path = self.context.temporary.join(format!("section-{index:010}"));
         std::fs::write(&section_path, &bytes).at(&section_path)?;
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
+        let seed_locations = section.locations;
         let parts = self.packed.finish();
         let file_name = packed_file_name(&name);
         let path = self.context.packed.join(&file_name);
@@ -366,6 +394,7 @@ impl<'a> EntryBuilder<'a> {
             name,
             contigs,
             bases,
+            seed_locations,
             packed: FileRecord {
                 path: file_name,
                 bytes: (head.len() + packed.len()) as u64,

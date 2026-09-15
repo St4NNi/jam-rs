@@ -3,12 +3,14 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::seed_file::PAGE_BITS;
 use super::{AtPath, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::seeds::SeedScheme;
 use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use std::ops::Range;
 use std::path::Path;
 
 /// The file name of the manifest in a shard directory.
@@ -16,7 +18,7 @@ pub(crate) const MANIFEST_FILE: &str = "manifest.json";
 /// The directory of the packed sequences in a shard directory.
 pub(crate) const PACKED_DIRECTORY: &str = "packed";
 /// The format version that this code reads and writes.
-pub(crate) const FORMAT_VERSION: u32 = 1;
+pub(crate) const FORMAT_VERSION: u32 = 2;
 
 /// The parameters of a shard.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -28,6 +30,8 @@ pub struct Parameters {
     pub bin_bits: u8,
     /// Sketch buckets, as a power of two; the build chooses them from the shard size.
     pub bucket_bits: u8,
+    /// Bytes of a page of the seeds file, as a power of two; no bucket crosses a page.
+    pub page_bits: u8,
 }
 
 impl Default for Parameters {
@@ -36,6 +40,7 @@ impl Default for Parameters {
             scheme: SeedScheme::default(),
             bin_bits: 10,
             bucket_bits: 24,
+            page_bits: 16,
         }
     }
 }
@@ -51,6 +56,9 @@ impl Parameters {
             return Err(IndexError::Input(format!(
                 "bucket bits must be {MIN_BUCKET_BITS} to {MAX_BUCKET_BITS}"
             )));
+        }
+        if !PAGE_BITS.contains(&u32::from(self.page_bits)) {
+            return Err(IndexError::Input("pages must be 64 bytes to 64 KiB".into()));
         }
         Ok(())
     }
@@ -76,6 +84,8 @@ pub struct EntryRecord {
     pub contigs: u64,
     /// Bases of all contigs.
     pub bases: u64,
+    /// Seed locations of the entry: its distinct pairs of seed and seed location.
+    pub seed_locations: u64,
     /// The packed sequence file.
     pub packed: FileRecord,
 }
@@ -93,8 +103,14 @@ pub struct Manifest {
     pub sketch: FileRecord,
     /// The positions file.
     pub positions: FileRecord,
-    /// Stored seeds of the sketch.
-    pub seeds: u64,
+    /// The seeds file.
+    pub seeds: FileRecord,
+    /// The bytes of the sketch part in the seeds file.
+    pub sketch_part: Range<u64>,
+    /// The bytes of the locator part in the seeds file, if it has one.
+    pub locator_part: Option<Range<u64>>,
+    /// Stored seeds of the seeds file: distinct seed keys.
+    pub stored_seeds: u64,
     /// Distinct color sets of the sketch.
     pub color_sets: u64,
     /// Seed locations of the positions file.
@@ -257,11 +273,15 @@ mod tests {
                 name: "entry_1".into(),
                 contigs: 2,
                 bases: 1000,
+                seed_locations: 90,
                 packed: file("entry_1.packed"),
             }],
             sketch: file("sketch"),
             positions: file("positions"),
-            seeds: 10,
+            seeds: file("seeds"),
+            sketch_part: 4096..8192,
+            locator_part: None,
+            stored_seeds: 10,
             color_sets: 1,
             seed_locations: 11,
         };
@@ -295,6 +315,10 @@ mod tests {
             },
             Parameters {
                 bucket_bits: 29,
+                ..parameters
+            },
+            Parameters {
+                page_bits: 17,
                 ..parameters
             },
             Parameters {

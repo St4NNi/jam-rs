@@ -59,6 +59,11 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
             let mut seeds = 0;
             seeder.seeds(sequence, |seed| {
                 seeds += 1;
+                let expected = SeedLocation {
+                    bin: ((start + seed.position) >> parameters.bin_bits) as u32,
+                    reverse: seed.reverse,
+                };
+                check_seed_file(shard.seed_file(), seed.hash, entry, expected);
                 let id = shard.sketch().color_set(seed.hash).expect("seed in sketch");
                 let set = shard.sketch().color_sets().entries(id).unwrap();
                 assert!(set.collect::<Vec<_>>().contains(&entry));
@@ -85,6 +90,20 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
             .collect();
         assert_eq!(shard.positions().contig_starts(entry).unwrap(), bounds);
     }
+}
+
+/// Checks that the seeds file holds a seed in an entry at a seed location.
+fn check_seed_file(file: &SeedFile, hash: u64, entry: u32, expected: SeedLocation) {
+    let stored = file.find_seeds(&[hash]).unwrap()[0].expect("seed in the seeds file");
+    let sets = file.read_color_sets([stored.color_set]).unwrap();
+    let set = sets.entries(stored.color_set).unwrap();
+    let rank = set.binary_search(&entry).expect("entry in the color set") as u32;
+    let mut values = Vec::new();
+    file.read_locator_buckets(&[stored.bucket], |_, bucket| {
+        bucket.locations(stored.place, rank, &mut values)
+    })
+    .unwrap();
+    assert!(values.contains(&expected.value()));
 }
 
 #[test]

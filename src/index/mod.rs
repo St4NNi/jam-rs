@@ -16,13 +16,12 @@ mod pages;
 mod plan;
 mod positions;
 mod reshard;
-#[allow(dead_code)]
 mod seed_file;
-#[allow(dead_code)]
 mod seed_writer;
 mod shard;
 mod sketch;
 mod sources;
+mod spill;
 mod warm;
 
 use crate::seeds::SeedError;
@@ -38,6 +37,7 @@ pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
+pub use seed_file::{SEEDS_FILE, SeedFile, StoredSeed};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 pub use sources::{Location, ShardOptions};
