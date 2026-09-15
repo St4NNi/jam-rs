@@ -37,7 +37,7 @@ pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use positions::{Positions, SeedLocation};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
-pub use seed_file::{SEEDS_FILE, SeedFile, StoredSeed};
+pub use seed_file::{ColorSets as ReadColorSets, SEEDS_FILE, SeedFile, StoredSeed};
 pub use shard::{Shard, ShardStats};
 pub use sketch::{ColorSetEntries, ColorSetId, ColorSets, Sketch};
 pub use sources::{Location, ShardOptions};

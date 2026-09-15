@@ -1,11 +1,13 @@
-//! Stage 1: seed hits per entry from the sketch, the containment estimate and the coverage bound.
+//! Stage 1: seed hits per entry from the sketch part, the containment estimate and the coverage
+//! bound.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
 use super::bound::CoverageBound;
-use super::control::{SearchControl, Stopped};
+use super::control::SearchControl;
+use super::error::SearchError;
 use super::query::QueryKmers;
-use crate::index::{ColorSetId, Sketch};
+use crate::index::{ColorSetId, ReadColorSets as ColorSets, SeedFile, StoredSeed};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -28,11 +30,11 @@ pub struct PossibleEntry {
     pub entry: u32,
     /// The highest query coverage, in bases, that the entry can still reach.
     pub coverage_bound: u64,
-    /// The containment estimate from the seed hits of the sketch; for an entry in a frequent
-    /// seed's color set, that seed counts as hit. False seed hits are still included.
+    /// The containment estimate from the seed hits of the sketch part; for an entry in a frequent
+    /// seed's color set, that seed counts as hit.
     pub containment_estimate: f64,
-    /// The distinct query k-mers (indices into `QueryKmers::distinct`) that the sketch places in the
-    /// entry, ascending. Frequent seeds are not listed.
+    /// The distinct query k-mers (indices into `QueryKmers::distinct`) that the sketch part places
+    /// in the entry, ascending. Frequent seeds are not listed.
     pub seed_hits: Vec<u32>,
 }
 
@@ -41,9 +43,9 @@ pub struct PossibleEntry {
 pub struct SketchWork {
     /// Query k-mers, counting repeats.
     pub query_kmers: u64,
-    /// Distinct query k-mers looked up in the sketch.
+    /// Distinct query k-mers looked up in the sketch part.
     pub lookups: u64,
-    /// Distinct query k-mers that the sketch holds.
+    /// Distinct query k-mers that the sketch part holds.
     pub seeds_found: u64,
     /// Seeds not expanded, as they are frequent or over the memory limit.
     pub frequent_seeds: u64,
@@ -61,17 +63,45 @@ pub struct SketchWork {
     pub seconds: f64,
 }
 
-/// What stage 1 hands on: the candidate entries, highest coverage bound first, and the seeds that
-/// count as possibly hit in every entry.
+/// What stage 1 hands on: the candidate entries, highest coverage bound first, the seeds that
+/// count as possibly hit in every entry, and where the found seeds lie.
 #[derive(Clone, Debug)]
 pub struct SketchOutcome {
     pub candidates: Vec<PossibleEntry>,
     /// The frequent seeds (indices into `QueryKmers::distinct`), ascending.
     pub frequent_seeds: Vec<u32>,
+    pub found: FoundSeeds,
     pub work: SketchWork,
 }
 
-/// A distinct query k-mer that the sketch holds.
+/// The distinct query k-mers that the sketch part holds, with their stored seeds and color sets.
+#[derive(Clone, Debug, Default)]
+pub struct FoundSeeds {
+    /// Pairs of distinct query k-mer and stored seed, ascending by k-mer.
+    seeds: Vec<(u32, StoredSeed)>,
+    /// The color sets of the stored seeds.
+    pub color_sets: ColorSets,
+}
+
+impl FoundSeeds {
+    /// The stored seed of a distinct query k-mer, if the sketch part holds it.
+    pub fn stored(&self, seed: u32) -> Option<StoredSeed> {
+        let index = self.seeds.binary_search_by_key(&seed, |(seed, _)| *seed);
+        index.ok().map(|index| self.seeds[index].1)
+    }
+
+    /// Distinct query k-mers that the sketch part holds.
+    pub fn len(&self) -> usize {
+        self.seeds.len()
+    }
+
+    /// Whether no query k-mer is held.
+    pub fn is_empty(&self) -> bool {
+        self.seeds.is_empty()
+    }
+}
+
+/// A distinct query k-mer that the sketch part holds.
 #[derive(Clone, Copy, Debug)]
 struct FoundSeed {
     seed: u32,
@@ -79,34 +109,45 @@ struct FoundSeed {
     entries: u64,
 }
 
-/// Runs stage 1 for a query against the sketch of a shard.
+/// Runs stage 1 for a query against the sketch part of a shard.
 pub fn sketch_stage(
-    sketch: &Sketch,
+    seed_file: &SeedFile,
     query: &QueryKmers,
     bound: &CoverageBound,
     limits: SketchLimits,
     control: SearchControl<'_>,
-) -> Result<SketchOutcome, Stopped> {
+) -> Result<SketchOutcome, SearchError> {
     let started = Instant::now();
-    let found = look_up(sketch, query, control)?;
+    let found = find_query_seeds(seed_file, query, control)?;
     let mut work = SketchWork {
         query_kmers: query.kmers(),
         lookups: query.distinct().len() as u64,
         seeds_found: found.len() as u64,
         ..SketchWork::default()
     };
-    let (expanded, frequent) = split_frequent(found, limits);
+    let color_sets = &found.color_sets;
+    let with_sizes = (found.seeds.iter())
+        .map(|&(seed, stored)| {
+            let entries = color_sets.entries(stored.color_set).map_or(0, <[u32]>::len);
+            FoundSeed {
+                seed,
+                color_set: stored.color_set,
+                entries: entries as u64,
+            }
+        })
+        .collect();
+    let (expanded, frequent) = split_frequent(with_sizes, limits);
     let mut frequent_seeds: Vec<u32> = frequent.iter().map(|found| found.seed).collect();
     frequent_seeds.sort_unstable();
     work.frequent_seeds = frequent_seeds.len() as u64;
     work.expanded_seeds = expanded.len() as u64;
-    let seed_hits = expand(sketch, &expanded, control)?;
+    let seed_hits = expand(color_sets, &expanded, control)?;
     work.seed_hits = seed_hits.len() as u64;
     control.check()?;
-    let entries = sketch.entry_count() as u32;
+    let entries = seed_file.entry_count() as u32;
     let frequent = Frequent {
         positions: query.sorted_positions(&frequent_seeds),
-        starts: frequent_starts(sketch, &frequent, query, entries),
+        starts: frequent_starts(color_sets, &frequent, query, entries),
     };
     let mut candidates: Vec<PossibleEntry> = seed_hits
         .par_chunk_by(|a, b| a.0 == b.0)
@@ -138,17 +179,18 @@ pub fn sketch_stage(
     Ok(SketchOutcome {
         candidates,
         frequent_seeds,
+        found,
         work,
     })
 }
 
-/// Looks up every distinct query k-mer in the sketch, in parallel chunks.
-fn look_up(
-    sketch: &Sketch,
+/// Looks up every distinct query k-mer in the sketch part, in parallel chunks of neighbouring
+/// hashes, and reads the color sets of the stored seeds found.
+pub fn find_query_seeds(
+    seed_file: &SeedFile,
     query: &QueryKmers,
     control: SearchControl<'_>,
-) -> Result<Vec<FoundSeed>, Stopped> {
-    let color_sets = sketch.color_sets();
+) -> Result<FoundSeeds, SearchError> {
     let chunks = query
         .distinct()
         .par_chunks(CHUNK_SEEDS)
@@ -156,27 +198,29 @@ fn look_up(
         .map(|(chunk, seeds)| {
             control.check()?;
             let first = (chunk * CHUNK_SEEDS) as u32;
-            sketch.prefetch_lookups(seeds.iter().map(|query_seed| query_seed.hash));
-            let found: Vec<(u32, ColorSetId)> = seeds
-                .iter()
-                .zip(first..)
-                .filter_map(|(query_seed, seed)| Some((seed, sketch.color_set(query_seed.hash)?)))
-                .collect();
-            sketch.prefetch_color_sets(found.iter().map(|&(_, color_set)| color_set));
-            Ok(found
-                .into_iter()
-                .filter_map(|(seed, color_set)| {
-                    let entries = color_sets.entries(color_set)?.len();
-                    Some(FoundSeed {
-                        seed,
-                        color_set,
-                        entries,
-                    })
-                })
+            let hashes: Vec<u64> = seeds.iter().map(|query_seed| query_seed.hash).collect();
+            let stored = seed_file.find_seeds(&hashes)?;
+            Ok((first..)
+                .zip(stored)
+                .filter_map(|(seed, stored)| Some((seed, stored?)))
                 .collect::<Vec<_>>())
         })
-        .collect::<Result<Vec<_>, Stopped>>()?;
-    Ok(chunks.concat())
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    let seeds = chunks.concat();
+    let mut ids: Vec<ColorSetId> = seeds.iter().map(|(_, stored)| stored.color_set).collect();
+    ids.par_sort_unstable();
+    ids.dedup();
+    let parts = ids
+        .par_chunks(CHUNK_SEEDS)
+        .map(|ids| {
+            control.check()?;
+            Ok(seed_file.read_color_sets(ids.iter().copied())?)
+        })
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    Ok(FoundSeeds {
+        seeds,
+        color_sets: ColorSets::concat(parts),
+    })
 }
 
 /// Splits the found seeds into those to expand, rarest first, and the frequent ones: those held
@@ -218,7 +262,7 @@ impl Frequent {
 /// For each entry, the query starts of the frequent seeds whose color sets hold it. Each distinct
 /// color set is read once, so frequent seeds that share a color set cost one pass.
 fn frequent_starts(
-    sketch: &Sketch,
+    color_sets: &ColorSets,
     frequent: &[FoundSeed],
     query: &QueryKmers,
     entries: u32,
@@ -229,10 +273,9 @@ fn frequent_starts(
         .collect();
     by_color_set.sort_unstable_by_key(|&(color_set, _)| color_set);
     let mut starts = vec![0u32; entries as usize];
-    let color_sets = sketch.color_sets();
     for group in by_color_set.chunk_by(|a, b| a.0 == b.0) {
         let count: u32 = group.iter().map(|&(_, count)| count).sum();
-        for entry in color_sets.entries(group[0].0).into_iter().flatten() {
+        for &entry in color_sets.entries(group[0].0).into_iter().flatten() {
             if let Some(entry_starts) = starts.get_mut(entry as usize) {
                 *entry_starts += count;
             }
@@ -243,11 +286,10 @@ fn frequent_starts(
 
 /// Expands the color sets of the seeds into seed hits, sorted by entry and then seed.
 fn expand(
-    sketch: &Sketch,
+    color_sets: &ColorSets,
     seeds: &[FoundSeed],
     control: SearchControl<'_>,
-) -> Result<Vec<(u32, u32)>, Stopped> {
-    let color_sets = sketch.color_sets();
+) -> Result<Vec<(u32, u32)>, SearchError> {
     let chunks = seeds
         .par_chunks(CHUNK_SEEDS)
         .map(|seeds| {
@@ -255,12 +297,12 @@ fn expand(
             let mut hits = Vec::new();
             for found in seeds {
                 if let Some(entries) = color_sets.entries(found.color_set) {
-                    hits.extend(entries.map(|entry| (entry, found.seed)));
+                    hits.extend(entries.iter().map(|&entry| (entry, found.seed)));
                 }
             }
             Ok(hits)
         })
-        .collect::<Result<Vec<_>, Stopped>>()?;
+        .collect::<Result<Vec<_>, SearchError>>()?;
     let mut hits = chunks.concat();
     hits.par_sort_unstable();
     Ok(hits)

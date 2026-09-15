@@ -38,7 +38,7 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
         frequent_seed_entries: 1_000,
         max_seed_hits: 1 << 20,
     };
-    let sketched = sketch_stage(shard.sketch(), &kmers, &bound, limits, control).unwrap();
+    let sketched = sketch_stage(shard.seed_file(), &kmers, &bound, limits, control).unwrap();
     let possible = sketched.candidates.first()?;
     let request = LocateRequest {
         query: &kmers,

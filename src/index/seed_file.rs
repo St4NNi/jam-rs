@@ -54,6 +54,23 @@ pub struct ColorSets {
 }
 
 impl ColorSets {
+    /// Joins color sets read in parts, whose ids ascend from part to part.
+    pub fn concat(parts: Vec<ColorSets>) -> Self {
+        let mut joined = Self {
+            starts: vec![0],
+            ..Self::default()
+        };
+        for part in parts {
+            let offset = joined.entries.len();
+            joined.ids.extend(part.ids);
+            joined
+                .starts
+                .extend(part.starts[1..].iter().map(|start| offset + start));
+            joined.entries.extend(part.entries);
+        }
+        joined
+    }
+
     /// The entries of a color set, ascending, or `None` when it was not read.
     pub fn entries(&self, id: ColorSetId) -> Option<&[u32]> {
         let index = self.ids.binary_search(&id).ok()?;

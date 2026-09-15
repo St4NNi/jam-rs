@@ -4,6 +4,7 @@
 
 use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
+use super::error::SearchError;
 use super::query::QueryKmers;
 use super::sketch_stage::{SketchLimits, sketch_stage};
 use crate::index::{Shard, build_shard};
@@ -75,7 +76,7 @@ fn run_with(
     let seeder = Seeder::new(parameters().scheme).unwrap();
     let kmers = QueryKmers::new(&seeder, query, false);
     let control = no_stop();
-    let outcome = sketch_stage(shard.sketch(), &kmers, bound, limits, control).unwrap();
+    let outcome = sketch_stage(shard.seed_file(), &kmers, bound, limits, control).unwrap();
     assert_eq!(
         outcome.work.possible_entries,
         outcome.candidates.len() as u64
@@ -109,7 +110,7 @@ fn low_bounds_dropped() {
 fn estimates(shard: &Shard, query: &[u8], limits: SketchLimits) -> Vec<f64> {
     let kmers = QueryKmers::new(&Seeder::new(parameters().scheme).unwrap(), query, false);
     let bound = bound(query.len() as u64, 0);
-    let outcome = sketch_stage(shard.sketch(), &kmers, &bound, limits, no_stop()).unwrap();
+    let outcome = sketch_stage(shard.seed_file(), &kmers, &bound, limits, no_stop()).unwrap();
     let mut estimates = vec![0.0; 4];
     for candidate in &outcome.candidates {
         estimates[candidate.entry as usize] = candidate.containment_estimate;
@@ -169,8 +170,14 @@ fn stop_ends_sketch() {
         deadline: None,
         stop: &stop,
     };
-    let outcome = sketch_stage(shard.sketch(), &kmers, &bound(5_000, 0), UNLIMITED, control);
-    assert_eq!(outcome.unwrap_err(), Stopped::Asked);
+    let outcome = sketch_stage(
+        shard.seed_file(),
+        &kmers,
+        &bound(5_000, 0),
+        UNLIMITED,
+        control,
+    );
+    assert!(matches!(outcome, Err(SearchError::Stopped(Stopped::Asked))));
 }
 
 #[test]

@@ -4,10 +4,9 @@
 
 use super::ScreenError;
 use super::batch::Batch;
-use crate::index::{ColorSetId, SeedLocation, Shard, Sketch};
+use crate::index::{ColorSetId, ReadColorSets as ColorSets, SeedFile};
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
-use crate::search::Stopped;
 use crate::seeds::Seeder;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -58,57 +57,61 @@ pub(super) struct SurveyLimits {
     pub closest_margin: Option<f64>,
 }
 
-/// Hashes the k-mers of each piece of a batch and looks them up in the sketch. Returns the
-/// distinct k-mers that the sketch holds, sorted by piece and then color set.
+/// Hashes the k-mers of each piece of a batch and looks them up in the sketch part. Returns the
+/// distinct k-mers that it holds, sorted by piece and then color set, and their color sets.
 pub(super) fn found_seeds(
-    sketch: &Sketch,
+    seed_file: &SeedFile,
     seeder: &Seeder,
     batch: &Batch,
     control: SearchControl<'_>,
-) -> Result<Vec<PieceSeed>, Stopped> {
+) -> Result<(Vec<PieceSeed>, ColorSets), ScreenError> {
     let pieces = batch
         .pieces
         .par_iter()
         .enumerate()
         .map(|(index, piece)| {
             control.check()?;
-            let mut found = Vec::new();
+            let mut hashes = Vec::new();
             let bases = &batch.bases[piece.start as usize..piece.end() as usize];
-            seeder.query_kmers(bases, |kmer| {
-                if let Some(color_set) = sketch.color_set(kmer.hash) {
-                    found.push(PieceSeed {
-                        hash: kmer.hash,
+            seeder.query_kmers(bases, |kmer| hashes.push(kmer.hash));
+            hashes.sort_unstable();
+            hashes.dedup();
+            let stored = seed_file.find_seeds(&hashes)?;
+            let mut found: Vec<PieceSeed> = (hashes.iter().zip(stored))
+                .filter_map(|(&hash, stored)| {
+                    Some(PieceSeed {
+                        hash,
                         piece: index as u32,
-                        color_set,
-                    });
-                }
-            });
+                        color_set: stored?.color_set,
+                    })
+                })
+                .collect();
             found.sort_unstable_by_key(|seed| (seed.color_set.0, seed.hash));
-            found.dedup_by_key(|seed| seed.hash);
             Ok(found)
         })
-        .collect::<Result<Vec<_>, Stopped>>()?;
-    Ok(pieces.concat())
+        .collect::<Result<Vec<_>, ScreenError>>()?;
+    let found = pieces.concat();
+    let color_sets = seed_file.read_color_sets(found.iter().map(|seed| seed.color_set))?;
+    Ok((found, color_sets))
 }
 
 /// The entries that each piece of the batch counts for. A piece counts for an entry only when it
 /// shares enough seeds for the share that the contig rule requires, so a contig that shares a
 /// gene with many entries counts for none of them.
 pub(super) fn survey(
-    shard: &Shard,
     seeder: &Seeder,
     batch: &Batch,
-    found: &[PieceSeed],
+    (found, color_sets): &(Vec<PieceSeed>, ColorSets),
     limits: SurveyLimits,
     control: SearchControl<'_>,
 ) -> Result<Vec<Surveyed>, ScreenError> {
     let pieces: Vec<&[PieceSeed]> = found.chunk_by(|a, b| a.piece == b.piece).collect();
     let surveyed = pieces
         .into_par_iter()
-        .map_init(Vec::new, |locations, found| {
+        .map(|found| {
             control.check()?;
             let piece = found[0].piece;
-            let shared = shared_seeds(shard, found, locations)?;
+            let shared = shared_seeds(color_sets, found);
             let length = batch.pieces[piece as usize].length as f64;
             let counted = counted_entries(seeder, shared, length, limits);
             let contig = batch.pieces[piece as usize].contig;
@@ -126,29 +129,16 @@ pub(super) fn survey(
     Ok(surveyed.concat())
 }
 
-/// The seeds of one piece that each entry holds, by the color sets of the sketch and checked in
-/// the positions, which keep more hash bits than the fingerprint, so false seed hits drop out.
-fn shared_seeds(
-    shard: &Shard,
-    found: &[PieceSeed],
-    locations: &mut Vec<SeedLocation>,
-) -> Result<HashMap<u32, u64>, ScreenError> {
-    let color_sets = shard.sketch().color_sets();
+/// The seeds of one piece that each entry holds, by the color sets of the stored seeds. Their
+/// keys keep enough hash bits that false seed hits are rare.
+fn shared_seeds(color_sets: &ColorSets, found: &[PieceSeed]) -> HashMap<u32, u64> {
     let mut shared: HashMap<u32, u64> = HashMap::new();
     for same in found.chunk_by(|a, b| a.color_set == b.color_set) {
-        for entry in color_sets.entries(same[0].color_set).into_iter().flatten() {
-            let mut held = 0;
-            for seed in same {
-                locations.clear();
-                shard.positions().locations(entry, seed.hash, locations)?;
-                held += u64::from(!locations.is_empty());
-            }
-            if held > 0 {
-                *shared.entry(entry).or_default() += held;
-            }
+        for &entry in color_sets.entries(same[0].color_set).unwrap_or_default() {
+            *shared.entry(entry).or_default() += same.len() as u64;
         }
     }
-    Ok(shared)
+    shared
 }
 
 /// The entries that a piece of `length` bases counts for, from the seeds it shares with each.
@@ -185,12 +175,10 @@ fn counted_entries(
 /// The seed hits (indices into `QueryKmers::distinct` of the batch) of each kept entry, from the
 /// pieces it is kept for. `kept` maps an entry to its kept pieces, ascending.
 pub(super) fn kept_seed_hits(
-    sketch: &Sketch,
     kmers: &QueryKmers,
-    found: &[PieceSeed],
+    (found, color_sets): &(Vec<PieceSeed>, ColorSets),
     kept: &HashMap<u32, Vec<u32>>,
 ) -> Vec<(u32, Vec<u32>)> {
-    let color_sets = sketch.color_sets();
     let seed_of = |hash: u64| {
         kmers
             .distinct()
@@ -204,8 +192,9 @@ pub(super) fn kept_seed_hits(
     for same in by_color_set.chunk_by(|a, b| a.color_set == b.color_set) {
         let entries: Vec<u32> = color_sets
             .entries(same[0].color_set)
-            .into_iter()
-            .flatten()
+            .unwrap_or_default()
+            .iter()
+            .copied()
             .filter(|entry| kept.contains_key(entry))
             .collect();
         for entry in entries {

@@ -142,22 +142,15 @@ impl<'a> Screener<'a> {
             min_contig_coverage: rule.min_contig_coverage,
             closest_margin: self.config.closest_margin,
         };
-        let sketch = self.shard.sketch();
+        let seed_file = self.shard.seed_file();
         let mut surveyed = Vec::new();
         let contigs = read_batches(
             path,
             self.config.batch_bases,
             rule.min_fragment_columns as usize,
             &mut |_, batch| {
-                let found = found_seeds(sketch, &self.seeder, batch, control)?;
-                surveyed.push(survey(
-                    self.shard,
-                    &self.seeder,
-                    batch,
-                    &found,
-                    limits,
-                    control,
-                )?);
+                let found = found_seeds(seed_file, &self.seeder, batch, control)?;
+                surveyed.push(survey(&self.seeder, batch, &found, limits, control)?);
                 Ok(())
             },
             None,
@@ -268,10 +261,10 @@ impl<'a> Screener<'a> {
                 (entry, new)
             })
             .collect();
-        let sketch = self.shard.sketch();
+        let seed_file = self.shard.seed_file();
         let kmers = QueryKmers::new(&self.seeder, &batch.bases, false);
-        let seeds = found_seeds(sketch, &self.seeder, &batch, aligner.control)?;
-        let seed_hits = kept_seed_hits(sketch, &kmers, &seeds, &kept);
+        let seeds = found_seeds(seed_file, &self.seeder, &batch, aligner.control)?;
+        let seed_hits = kept_seed_hits(&kmers, &seeds, &kept);
         let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits)?;
         work.add(&part);
         for turned in turned {

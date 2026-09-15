@@ -74,7 +74,7 @@ fn search(
         frequent_seed_entries: u64::MAX,
         max_seed_hits: u64::MAX,
     };
-    let outcome = sketch_stage(shard.sketch(), &query_kmers, &bound, limits, control).unwrap();
+    let outcome = sketch_stage(shard.seed_file(), &query_kmers, &bound, limits, control).unwrap();
     outcome
         .candidates
         .into_iter()
@@ -97,12 +97,12 @@ fn windows(outcome: &LocateOutcome) -> Vec<(u32, Vec<Range<u64>>)> {
 }
 
 #[test]
-fn false_seed_hits() {
+fn false_hits_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = rng(0xfa15e5);
     let query = random_bases(&mut random, 20_000);
-    // The fewest buckets put many seeds of the large unrelated entry into each bucket, so some
-    // share a fingerprint with a query k-mer.
+    // The fewest buckets put many seeds of the large unrelated entry into each bucket, so a short
+    // fingerprint would match some query k-mers; the full check value matches none.
     let entries = vec![
         vec![random_bases(&mut random, 400_000)],
         vec![query.clone()],
@@ -118,16 +118,8 @@ fn false_seed_hits() {
     .unwrap();
     let shard = Shard::open(&output).unwrap();
     let results = search(&shard, &query, 0);
-    let (possible, outcome, work) = results.iter().find(|(p, ..)| p.entry == 0).unwrap();
-    assert!(
-        !possible.seed_hits.is_empty(),
-        "no false seed hit was forced"
-    );
-    assert_eq!(work.false_seed_hits, possible.seed_hits.len() as u64);
-    assert_eq!(work.seed_locations, 0);
-    assert_eq!(*outcome, LocateOutcome::Dropped(DropReason::NoSeedHits));
-    let (_, outcome, work) = results.iter().find(|(p, ..)| p.entry == 1).unwrap();
-    assert_eq!(work.false_seed_hits, 0);
+    assert!(results.iter().all(|(possible, ..)| possible.entry != 0));
+    let (_, outcome, _) = results.iter().find(|(p, ..)| p.entry == 1).unwrap();
     assert_eq!(
         windows(outcome),
         [(0, std::iter::once(0..20_000).collect())]

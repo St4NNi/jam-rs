@@ -28,7 +28,9 @@ pub use events::{Completion, DropReason, EntryEvent, SearchStage};
 pub use locate_stage::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
 pub use located::{ContigWindows, LocatedEntry};
 pub use query::QueryKmers;
-pub use sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
+pub use sketch_stage::{
+    FoundSeeds, PossibleEntry, SketchLimits, SketchWork, find_query_seeds, sketch_stage,
+};
 pub use times::{PartTime, SearchTimes};
 
 #[cfg(test)]

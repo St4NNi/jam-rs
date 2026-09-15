@@ -226,15 +226,15 @@ impl<'a> Searcher<'a> {
         summary.times.prepare_query = start.finish();
         let start = PartStart::now();
         let sketch = match sketch_stage(
-            self.shard.sketch(),
+            self.shard.seed_file(),
             &query_kmers,
             &bound,
             self.sketch_limits(config),
             control,
         ) {
             Ok(sketch) => sketch,
-            Err(stopped) => {
-                summary.completion = Completion::Stopped(stopped);
+            Err(error) => {
+                summary.completion = error.into();
                 return summary;
             }
         };
