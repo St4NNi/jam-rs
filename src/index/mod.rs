@@ -7,8 +7,6 @@ mod bits;
 #[allow(dead_code)]
 mod buckets;
 mod build;
-#[allow(dead_code)]
-mod color_sets;
 mod index_file;
 mod manifest;
 mod packed;
@@ -19,8 +17,6 @@ mod reshard;
 mod seed_file;
 mod seed_writer;
 mod shard;
-#[allow(dead_code)]
-mod sketch;
 mod sources;
 mod spill;
 mod warm;

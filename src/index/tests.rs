@@ -427,7 +427,8 @@ fn pins_read_locally() {
     for pin in &plan.pins {
         let path = plan.pin_path(&cache, pin);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::copy(directory.path().join("shard").join(&pin.file), path).unwrap();
+        let bytes = std::fs::read(directory.path().join("shard").join(&pin.file)).unwrap();
+        std::fs::write(path, &bytes[pin.start as usize..pin.end as usize]).unwrap();
     }
     let options = ShardOptions {
         pins: Some(cache),
@@ -437,11 +438,7 @@ fn pins_read_locally() {
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
-    let pinned = [
-        "shard/sketch",
-        "shard/positions",
-        "shard/packed/entry1.packed",
-    ];
+    let pinned = ["shard/positions", "shard/packed/entry1.packed"];
     assert!(asked.iter().all(|key| !pinned.contains(&key.as_str())));
 }
 
