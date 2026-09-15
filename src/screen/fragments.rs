@@ -8,7 +8,7 @@ use super::batch::Batch;
 use super::turn::{slice_alignment, swap_roles};
 use crate::align::{Alignment, AlignmentConfig, Interval};
 use crate::decide::{DecisionRule, Fragment};
-use crate::index::Shard;
+use crate::index::{SeedLocation, Shard};
 use crate::loss::{LossBudget, MissModel};
 use crate::search::CoverageBound;
 use crate::search::PossibleEntry;
@@ -18,6 +18,7 @@ use crate::search::{
     AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, entry_fragments,
 };
 use crate::search::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
+use crate::search::{find_query_seeds, read_entry_locations};
 use rayon::prelude::*;
 
 /// An entry contig, the query of the screen: the entry and the contig within it.
@@ -85,22 +86,34 @@ impl BatchAlignment<'_> {
             flank: self.flank,
         };
         let query = PreparedQuery::new(&batch.bases, false, self.align)?;
-        let results = seed_hits
-            .into_par_iter()
+        let candidates: Vec<PossibleEntry> = (seed_hits.into_iter())
+            .map(|(entry, seed_hits)| PossibleEntry {
+                entry,
+                coverage_bound: 0,
+                containment_estimate: 0.0,
+                seed_hits,
+            })
+            .collect();
+        let seed_file = self.shard.seed_file();
+        let found = find_query_seeds(seed_file, kmers, self.control)?;
+        let mut work = FragmentWork::default();
+        let locations = read_entry_locations(
+            seed_file,
+            &request,
+            &found,
+            &candidates,
+            self.control,
+            &mut work.locate,
+        )?;
+        let results = (candidates.par_iter().zip(&locations))
             .map_init(
                 || (LocateWorkspace::default(), AlignStageWorkspace::default()),
-                |(locate, align), (entry, seed_hits)| {
-                    let possible = PossibleEntry {
-                        entry,
-                        coverage_bound: 0,
-                        containment_estimate: 0.0,
-                        seed_hits,
-                    };
-                    self.entry(batch, &request, &query, &possible, locate, align)
+                |(locate, align), (possible, locations)| {
+                    let workspaces = (locate, align);
+                    self.entry(batch, &request, &query, possible, locations, workspaces)
                 },
             )
             .collect::<Result<Vec<_>, ScreenError>>()?;
-        let mut work = FragmentWork::default();
         let mut turned = Vec::new();
         for (fragments, part) in results {
             turned.extend(fragments);
@@ -115,17 +128,17 @@ impl BatchAlignment<'_> {
         request: &LocateRequest<'_>,
         query: &PreparedQuery,
         possible: &PossibleEntry,
-        locate: &mut LocateWorkspace,
-        align: &AlignStageWorkspace,
+        locations: &[(u32, SeedLocation)],
+        (locate, align): (&mut LocateWorkspace, &mut AlignStageWorkspace),
     ) -> Result<(Vec<ScreenFragment>, FragmentWork), ScreenError> {
         let mut work = FragmentWork::default();
         let outcome = locate_entry(
             self.shard,
             request,
             possible,
+            locations,
             locate,
             &mut work.locate,
-            self.control,
         )?;
         let LocateOutcome::Located(located) = outcome else {
             return Ok((Vec::new(), work));

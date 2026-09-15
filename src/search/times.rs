@@ -28,7 +28,8 @@ pub struct SearchTimes {
     pub prepare_query: PartTime,
     /// Stage 1.
     pub sketch: PartTime,
-    /// Stages 2 and 3 together, as each worker takes an entry through both.
+    /// Stages 2 and 3: the seed locations of all candidate entries are read first, then each
+    /// worker takes an entry through the rest of both.
     pub entries: PartTime,
 }
 

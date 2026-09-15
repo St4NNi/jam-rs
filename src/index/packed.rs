@@ -189,36 +189,16 @@ impl ContigNames {
 impl PackedSequence {
     /// Reads and checks the header and tables.
     pub fn open(source: Arc<dyn ReadAt>) -> Result<Self, IndexError> {
-        Self::open_with(source, None)
-    }
-
-    /// Opens a packed sequence whose contig starts are known already (the positions hold them
-    /// too), so they are not read again. Reading the names checks them against the file.
-    pub fn open_with_starts(source: Arc<dyn ReadAt>, starts: Vec<u64>) -> Result<Self, IndexError> {
-        Self::open_with(source, Some(starts))
-    }
-
-    fn open_with(source: Arc<dyn ReadAt>, starts: Option<Vec<u64>>) -> Result<Self, IndexError> {
         let mut header = [0u8; HEADER_BYTES as usize];
         source.read_exact_at(0, &mut header)?;
-        if header[..16] != MAGIC || u32_at(&header, 16) != Some(VERSION) || header[20..24] != [0; 4]
-        {
-            return Err(IndexError::format("not a packed sequence of this version"));
-        }
-        if u32_at(&header, 68) != Some(crc32fast::hash(&header[..68]))
-            || header[72..].iter().any(|b| *b != 0)
-        {
-            return Err(IndexError::Checksum("packed sequence header".into()));
-        }
-        let [contigs, bases, runs, names, packed_offset] =
-            [24, 32, 40, 48, 56].map(|offset| u64_at(&header, offset).unwrap_or_default());
-        let fields = Header {
+        let fields = Header::decode(&header)?;
+        let Header {
             contigs,
             bases,
             runs,
             names,
             packed_offset,
-        };
+        } = fields;
         let blocks = bases.div_ceil(4).div_ceil(BLOCK_BYTES);
         let tables_end = [
             contigs.checked_add(1).and_then(|n| n.checked_mul(8)),
@@ -234,15 +214,10 @@ impl PackedSequence {
         {
             return Err(IndexError::format("packed sequence layout"));
         }
-        let starts = match starts {
-            Some(starts) => starts,
-            None => {
-                let mut bytes = vec![0u8; 8 * (contigs as usize + 1)];
-                source.read_exact_at(HEADER_BYTES, &mut bytes)?;
-                let words = bytes.as_chunks::<8>().0.iter();
-                words.map(|word| u64::from_le_bytes(*word)).collect()
-            }
-        };
+        let mut bytes = vec![0u8; 8 * (contigs as usize + 1)];
+        source.read_exact_at(HEADER_BYTES, &mut bytes)?;
+        let words = bytes.as_chunks::<8>().0.iter();
+        let starts = words.map(|word| u64::from_le_bytes(*word)).collect();
         let names_at = HEADER_BYTES + 8 * (contigs + 1);
         let tail_at = names_at + 8 * contigs + names.next_multiple_of(8);
         let mut tail = vec![0u8; (packed_offset - tail_at) as usize];
@@ -481,12 +456,71 @@ fn hasher_of(bytes: &[u8]) -> crc32fast::Hasher {
 }
 
 /// The counts and the packed offset that the header of a packed sequence holds.
+#[derive(Clone, Copy)]
 struct Header {
     contigs: u64,
     bases: u64,
     runs: u64,
     names: u64,
     packed_offset: u64,
+}
+
+impl Header {
+    /// Checks the magic, version and CRC-32 of a header and reads its fields.
+    fn decode(header: &[u8]) -> Result<Self, IndexError> {
+        if header.len() != HEADER_BYTES as usize
+            || header[..16] != MAGIC
+            || u32_at(header, 16) != Some(VERSION)
+            || header[20..24] != [0; 4]
+        {
+            return Err(IndexError::format("not a packed sequence of this version"));
+        }
+        if u32_at(header, 68) != Some(crc32fast::hash(&header[..68]))
+            || header[72..].iter().any(|b| *b != 0)
+        {
+            return Err(IndexError::Checksum("packed sequence header".into()));
+        }
+        let [contigs, bases, runs, names, packed_offset] =
+            [24, 32, 40, 48, 56].map(|offset| u64_at(header, offset).unwrap_or_default());
+        Ok(Self {
+            contigs,
+            bases,
+            runs,
+            names,
+            packed_offset,
+        })
+    }
+}
+
+/// Bytes at the front of a packed sequence of `contigs` contigs that hold its header and its
+/// contig starts.
+pub(crate) fn contig_table_bytes(contigs: u64) -> u64 {
+    HEADER_BYTES + 8 * (contigs + 1)
+}
+
+/// Reads the contig starts of a packed sequence of `contigs` contigs, followed by its bases, in
+/// one read from the front of the file, so stage 2 can cut windows at contig ends.
+pub(crate) fn read_contig_starts(
+    source: &dyn ReadAt,
+    contigs: u64,
+) -> Result<Vec<u64>, IndexError> {
+    let length = usize::try_from(contig_table_bytes(contigs))
+        .map_err(|_| IndexError::format("packed sequence contigs"))?;
+    let mut bytes = vec![0u8; length];
+    source.read_exact_at(0, &mut bytes)?;
+    let (header, table) = bytes.split_at(HEADER_BYTES as usize);
+    let header = Header::decode(header)?;
+    let starts: Vec<u64> = (table.as_chunks::<8>().0.iter())
+        .map(|word| u64::from_le_bytes(*word))
+        .collect();
+    let valid = header.contigs == contigs
+        && starts.first() == Some(&0)
+        && starts.last() == Some(&header.bases)
+        && starts.is_sorted();
+    if !valid {
+        return Err(IndexError::format("packed sequence contig starts"));
+    }
+    Ok(starts)
 }
 
 /// A run of one byte other than A, C, G or T, at entry coordinates `start..start + length`.

@@ -5,7 +5,7 @@
 
 use super::IndexError;
 use super::manifest::{EntryRecord, Manifest, verify_source};
-use super::packed::PackedSequence;
+use super::packed::{PackedSequence, contig_table_bytes, read_contig_starts};
 use super::positions::Positions;
 use super::seed_file::SeedFile;
 use super::sources::{Location, ShardFiles, ShardOptions};
@@ -141,14 +141,30 @@ impl Shard {
         })
     }
 
-    /// Opens the packed sequence of an entry (stage 3) with the contig starts of the positions,
-    /// and checks it against the manifest. Reading its names checks the starts against the file.
+    /// The start of each contig of an entry in entry coordinates, followed by the entry's bases,
+    /// so contig `i` spans `starts[i]..starts[i + 1]`. One read at the front of its packed file.
+    pub fn contig_starts(&self, entry: u32) -> Result<Vec<u64>, IndexError> {
+        let record = self.entry_record(entry)?;
+        let source = self.files.open_packed(entry as usize, &record.packed)?;
+        read_contig_starts(source.as_ref(), record.contigs)
+    }
+
+    /// Tells the source of an entry's packed file that its contig starts will be read soon.
+    pub fn prefetch_contig_starts(&self, entry: u32) {
+        let Ok(record) = self.entry_record(entry) else {
+            return;
+        };
+        if let Ok(source) = self.files.open_packed(entry as usize, &record.packed) {
+            source.will_need(0, contig_table_bytes(record.contigs));
+        }
+    }
+
+    /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
         let record = self.entry_record(entry)?;
         let source = self.files.open_packed(entry as usize, &record.packed)?;
         let size = source.size();
-        let starts = self.positions.contig_starts(entry)?;
-        let packed = PackedSequence::open_with_starts(source, starts)?;
+        let packed = PackedSequence::open(source)?;
         if size != record.packed.bytes
             || packed.bases() != record.bases
             || packed.contig_count() as u64 != record.contigs

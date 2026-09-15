@@ -5,10 +5,10 @@
 use super::bound::CoverageBound;
 use super::events::DropReason;
 use super::locate_stage::{
-    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
+    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry, read_entry_locations,
 };
 use super::query::QueryKmers;
-use super::sketch_stage::{PossibleEntry, SketchLimits, sketch_stage};
+use super::sketch_stage::{PossibleEntry, SketchLimits, find_query_seeds, sketch_stage};
 use crate::index::{Shard, build_shard};
 use crate::loss::LossBudget;
 use crate::seeds::Seeder;
@@ -49,13 +49,17 @@ fn locate(
         flank: FLANK,
     };
     let mut work = LocateWork::default();
+    let found = find_query_seeds(shard.seed_file(), query, control).unwrap();
+    let candidates = std::slice::from_ref(possible);
+    let file = shard.seed_file();
+    let locations = read_entry_locations(file, &request, &found, candidates, control, &mut work);
     let outcome = locate_entry(
         shard,
         &request,
         possible,
+        &locations.unwrap()[0],
         &mut LocateWorkspace::default(),
         &mut work,
-        control,
     )
     .unwrap();
     (outcome, work)
@@ -143,7 +147,7 @@ fn second_pruning_drops() {
     };
     let (outcome, work) = locate(&shard, &query_kmers, &bound(5_000, 2_500), &possible);
     assert_eq!(outcome, LocateOutcome::Dropped(DropReason::CoverageBound));
-    assert_eq!(work.false_seed_hits, possible.seed_hits.len() as u64);
+    assert_eq!(work.seed_locations, 0);
     assert_eq!(work.dropped_entries, 1);
 }
 

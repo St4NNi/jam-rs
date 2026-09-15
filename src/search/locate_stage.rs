@@ -9,26 +9,33 @@ use super::error::SearchError;
 use super::events::DropReason;
 use super::located::{ContigWindows, LocatedEntry};
 use super::query::QueryKmers;
-use super::sketch_stage::PossibleEntry;
-use crate::index::{SeedLocation, Shard};
+use super::sketch_stage::{FoundSeeds, PossibleEntry};
+use crate::index::{SeedFile, SeedLocation, Shard, StoredSeed};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::time::Instant;
 
-/// Seeds looked up between two checks of the search control.
-const LOOKUPS_PER_CHECK: usize = 1024;
+/// Seeds whose seed locations one parallel step reads.
+const CHUNK_SEEDS: usize = 4096;
+
+/// The seed locations of one candidate entry: pairs of seed (an index into
+/// `QueryKmers::distinct`) and seed location, ascending.
+pub type EntryLocations = Vec<(u32, SeedLocation)>;
+
+/// Seed locations read for several candidate entries: triples of the candidate's place among the
+/// candidates, the seed and the seed location.
+type CandidateLocations = Vec<(u32, u32, SeedLocation)>;
 
 /// The work of stage 2.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct LocateWork {
     /// Candidate entries that stage 2 looked at.
     pub entries: u64,
-    /// Seeds looked up in the positions, over all entries.
+    /// Pairs of seed and candidate entry looked up in the locator part.
     pub lookups: u64,
     /// Seed locations read.
     pub seed_locations: u64,
-    /// Seed hits of the sketch without seed locations.
-    pub false_seed_hits: u64,
     /// Entries dropped by the second pruning or for lack of seed hits.
     pub dropped_entries: u64,
     /// Bins with seed hits, over all located entries.
@@ -45,7 +52,6 @@ impl LocateWork {
         self.entries += other.entries;
         self.lookups += other.lookups;
         self.seed_locations += other.seed_locations;
-        self.false_seed_hits += other.false_seed_hits;
         self.dropped_entries += other.dropped_entries;
         self.candidate_bins += other.candidate_bins;
         self.alignment_windows += other.alignment_windows;
@@ -63,7 +69,6 @@ pub enum LocateOutcome {
 /// Buffers of stage 2, reused across the entries of one thread.
 #[derive(Debug, Default)]
 pub struct LocateWorkspace {
-    locations: Vec<SeedLocation>,
     positions: Vec<u32>,
     bins: Vec<u32>,
 }
@@ -73,24 +78,25 @@ pub struct LocateWorkspace {
 pub struct LocateRequest<'a> {
     pub query: &'a QueryKmers,
     pub bound: &'a CoverageBound<'a>,
-    /// The frequent seeds of stage 1, looked up in every entry.
+    /// The frequent seeds of stage 1, looked up in every candidate entry.
     pub frequent_seeds: &'a [u32],
     /// Bases added on each side of a candidate bin.
     pub flank: u64,
 }
 
-/// Runs stage 2 for one candidate entry. The coverage bound is computed again from the seed hits
-/// with seed locations; the bins of those seed hits, widened by the flank, give the windows.
+/// Runs stage 2 for one candidate entry with its seed locations from `read_entry_locations`. The
+/// coverage bound is computed again from the seed hits with seed locations; the bins of those
+/// seed hits, widened by the flank, give the windows.
 pub fn locate_entry(
     shard: &Shard,
     request: &LocateRequest<'_>,
     possible: &PossibleEntry,
+    locations: &[(u32, SeedLocation)],
     workspace: &mut LocateWorkspace,
     work: &mut LocateWork,
-    control: SearchControl<'_>,
 ) -> Result<LocateOutcome, SearchError> {
     let started = Instant::now();
-    let outcome = locate(shard, request, possible, workspace, work, control);
+    let outcome = locate(shard, request, possible, locations, workspace);
     work.entries += 1;
     work.seconds += started.elapsed().as_secs_f64();
     match &outcome {
@@ -112,14 +118,16 @@ fn locate(
     shard: &Shard,
     request: &LocateRequest<'_>,
     possible: &PossibleEntry,
+    locations: &[(u32, SeedLocation)],
     workspace: &mut LocateWorkspace,
-    work: &mut LocateWork,
-    control: SearchControl<'_>,
 ) -> Result<LocateOutcome, SearchError> {
-    read_seed_hits(shard, request, possible, workspace, work, control)?;
-    let LocateWorkspace {
-        positions, bins, ..
-    } = workspace;
+    let LocateWorkspace { positions, bins } = workspace;
+    positions.clear();
+    bins.clear();
+    for same in locations.chunk_by(|a, b| a.0 == b.0) {
+        positions.extend_from_slice(request.query.positions(same[0].0));
+        bins.extend(same.iter().map(|(_, location)| location.bin));
+    }
     positions.sort_unstable();
     let coverage_bound = request.bound.bound(positions);
     if !request.bound.keeps(coverage_bound) {
@@ -130,8 +138,8 @@ fn locate(
     }
     bins.sort_unstable();
     bins.dedup();
-    let contig_starts = shard.positions().contig_starts(possible.entry)?;
-    let bin_bits = shard.positions().bin_bits();
+    let contig_starts = shard.contig_starts(possible.entry)?;
+    let bin_bits = u32::from(shard.manifest().parameters.bin_bits);
     Ok(LocateOutcome::Located(LocatedEntry {
         entry: possible.entry,
         coverage_bound,
@@ -140,50 +148,95 @@ fn locate(
     }))
 }
 
-/// Reads the seed locations of the entry's seed hits and of the frequent seeds. The positions keep
-/// more hash bits than the fingerprint, so a seed hit without seed locations is a false seed hit.
-/// Fills the workspace with the query starts and the bins of the seed hits that have locations.
-fn read_seed_hits(
-    shard: &Shard,
+/// Reads the seed locations of the seed hits of all candidate entries, and of the frequent seeds
+/// in every candidate entry, at once: each locator bucket is read once. Returns them by candidate.
+pub fn read_entry_locations(
+    seed_file: &SeedFile,
     request: &LocateRequest<'_>,
-    possible: &PossibleEntry,
-    workspace: &mut LocateWorkspace,
-    work: &mut LocateWork,
+    found: &FoundSeeds,
+    candidates: &[PossibleEntry],
     control: SearchControl<'_>,
-) -> Result<(), SearchError> {
-    workspace.positions.clear();
-    workspace.bins.clear();
-    let expanded = possible.seed_hits.iter().map(|&seed| (seed, true));
-    let frequent = request.frequent_seeds.iter().map(|&seed| (seed, false));
-    let hashes = expanded.clone().chain(frequent.clone());
-    let distinct = request.query.distinct();
-    shard.positions().prefetch_seeds(
-        possible.entry,
-        hashes.map(|(seed, _)| distinct[seed as usize].hash),
-    )?;
-    for (index, (seed, from_sketch)) in expanded.chain(frequent).enumerate() {
-        if index % LOOKUPS_PER_CHECK == 0 {
-            control.check()?;
+    work: &mut LocateWork,
+) -> Result<Vec<EntryLocations>, SearchError> {
+    let started = Instant::now();
+    let mut slots = vec![u32::MAX; seed_file.entry_count() as usize];
+    for (slot, possible) in candidates.iter().enumerate() {
+        if let Some(entry_slot) = slots.get_mut(possible.entry as usize) {
+            *entry_slot = slot as u32;
         }
-        let hash = request.query.distinct()[seed as usize].hash;
-        workspace.locations.clear();
-        shard
-            .positions()
-            .locations(possible.entry, hash, &mut workspace.locations)?;
-        work.lookups += 1;
-        work.seed_locations += workspace.locations.len() as u64;
-        if workspace.locations.is_empty() {
-            work.false_seed_hits += u64::from(from_sketch);
-            continue;
-        }
-        workspace
-            .positions
-            .extend_from_slice(request.query.positions(seed));
-        workspace
-            .bins
-            .extend(workspace.locations.iter().map(|location| location.bin));
     }
-    Ok(())
+    let mut seeds: Vec<u32> = candidates
+        .iter()
+        .flat_map(|possible| possible.seed_hits.iter().copied())
+        .chain(request.frequent_seeds.iter().copied())
+        .collect();
+    seeds.par_sort_unstable();
+    seeds.dedup();
+    let mut stored: Vec<(StoredSeed, u32)> = seeds
+        .into_iter()
+        .filter_map(|seed| Some((found.stored(seed)?, seed)))
+        .collect();
+    stored.par_sort_unstable_by_key(|(seed, _)| (seed.bucket, seed.place));
+    let chunks = stored
+        .par_chunks(CHUNK_SEEDS)
+        .map(|chunk| {
+            control.check()?;
+            read_chunk(seed_file, found, chunk, &slots)
+        })
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    let mut read = CandidateLocations::new();
+    for (lookups, part) in chunks {
+        work.lookups += lookups;
+        read.extend(part);
+    }
+    work.seed_locations += read.len() as u64;
+    read.par_sort_unstable();
+    let mut by_candidate = vec![EntryLocations::new(); candidates.len()];
+    for same in read.chunk_by(|a, b| a.0 == b.0) {
+        let pairs = same.iter().map(|&(_, seed, location)| (seed, location));
+        by_candidate[same[0].0 as usize] = pairs.collect();
+    }
+    work.seconds += started.elapsed().as_secs_f64();
+    Ok(by_candidate)
+}
+
+/// Reads the seed locations of a chunk of stored seeds (sorted by bucket) in the candidate
+/// entries, which `slots` maps to their place among the candidates. Returns the pairs of seed
+/// and entry looked up, and (candidate, seed, seed location) triples.
+fn read_chunk(
+    seed_file: &SeedFile,
+    found: &FoundSeeds,
+    chunk: &[(StoredSeed, u32)],
+    slots: &[u32],
+) -> Result<(u64, CandidateLocations), SearchError> {
+    let mut buckets: Vec<u32> = chunk.iter().map(|(seed, _)| seed.bucket).collect();
+    buckets.dedup();
+    let mut read = Vec::new();
+    let mut values = Vec::new();
+    let mut lookups = 0u64;
+    let mut next = 0;
+    seed_file.read_locator_buckets(&buckets, |bucket, part| {
+        while let Some(&(stored, seed)) = chunk.get(next).filter(|(s, _)| s.bucket == bucket) {
+            next += 1;
+            let entries = found
+                .color_sets
+                .entries(stored.color_set)
+                .unwrap_or_default();
+            for (rank, &entry) in entries.iter().enumerate() {
+                let Some(&slot) = slots.get(entry as usize).filter(|&&slot| slot != u32::MAX)
+                else {
+                    continue;
+                };
+                values.clear();
+                part.locations(stored.place, rank as u32, &mut values)?;
+                lookups += 1;
+                let locations = values.iter().map(|&value| SeedLocation::from_value(value));
+                read.extend(locations.map(|location| (slot, seed, location)));
+            }
+        }
+        Ok(())
+    })?;
+    Ok((lookups, read))
 }
 
 /// The alignment windows of an entry: each candidate bin widened by `flank` on both sides, cut

@@ -11,14 +11,14 @@ use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
 use super::locate_stage::{
-    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
+    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry, read_entry_locations,
 };
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
 use crate::decide::DecisionRule;
-use crate::index::Shard;
+use crate::index::{SeedLocation, Shard};
 use crate::loss::{LossBudget, MissModel};
 use crate::seeds::Seeder;
 use rayon::prelude::*;
@@ -260,19 +260,29 @@ impl<'a> Searcher<'a> {
             frequent_seeds: &sketch.frequent_seeds,
             flank: config.flank,
         };
-        let queue = EntryQueue::new(&sketch.candidates, control, events);
-        let finish = |possible: &PossibleEntry, worker: &mut Worker| {
-            self.finish_entry(possible, &locate, request, worker)
-        };
-        let distinct = query_kmers.distinct();
-        let prefetch = |possible: &PossibleEntry| {
-            let seeds = possible.seed_hits.iter().chain(&sketch.frequent_seeds);
-            let hashes = seeds.map(|&seed| distinct[seed as usize].hash);
-            self.shard
-                .positions()
-                .prefetch_slots(possible.entry, hashes);
-        };
         let start = PartStart::now();
+        let locations = read_entry_locations(
+            self.shard.seed_file(),
+            &locate,
+            &sketch.found,
+            &sketch.candidates,
+            control,
+            &mut summary.locate,
+        );
+        let queue = EntryQueue::new(&sketch.candidates, control, events);
+        let locations = match locations {
+            Ok(locations) => locations,
+            Err(error) => {
+                queue.give_up(SearchStage::Locate);
+                summary.completion = error.into();
+                summary.times.entries = start.finish();
+                return summary;
+            }
+        };
+        let finish = |index: usize, possible: &PossibleEntry, worker: &mut Worker| {
+            self.finish_entry(possible, &locations[index], &locate, request, worker)
+        };
+        let prefetch = |possible: &PossibleEntry| self.shard.prefetch_contig_starts(possible.entry);
         queue.run(finish, prefetch, &mut summary);
         summary.times.entries = start.finish();
         summary
@@ -292,6 +302,7 @@ impl<'a> Searcher<'a> {
     fn finish_entry(
         &self,
         possible: &PossibleEntry,
+        locations: &[(u32, SeedLocation)],
         locate: &LocateRequest<'_>,
         request: &Request<'_>,
         worker: &mut Worker,
@@ -302,9 +313,9 @@ impl<'a> Searcher<'a> {
             self.shard,
             locate,
             possible,
+            locations,
             &mut worker.locate_workspace,
             &mut worker.locate,
-            request.control,
         )
         .map_err(|error| Halt {
             stage: SearchStage::Locate,
@@ -444,7 +455,7 @@ impl<'a> EntryQueue<'a> {
     /// entry calls `prefetch` for the entry one worker count later, so its reads start early.
     fn run<F, P>(&self, finish: F, prefetch: P, summary: &mut SearchSummary)
     where
-        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), Halt> + Sync,
+        F: Fn(usize, &PossibleEntry, &mut Worker) -> Result<(), Halt> + Sync,
         P: Fn(&PossibleEntry) + Sync,
     {
         let workers = rayon::current_num_threads().min(self.candidates.len());
@@ -466,7 +477,7 @@ impl<'a> EntryQueue<'a> {
 
     fn work_on<F, P>(&self, finish: &F, prefetch: &P, ahead: usize) -> WorkerEnd
     where
-        F: Fn(&PossibleEntry, &mut Worker) -> Result<(), Halt>,
+        F: Fn(usize, &PossibleEntry, &mut Worker) -> Result<(), Halt>,
         P: Fn(&PossibleEntry),
     {
         let mut worker = Worker::default();
@@ -483,7 +494,7 @@ impl<'a> EntryQueue<'a> {
                     stage: SearchStage::Locate,
                     error: SearchError::Stopped(stopped),
                 }),
-                Ok(()) => finish(possible, &mut worker),
+                Ok(()) => finish(index, possible, &mut worker),
             };
             if let Err(Halt { stage, error }) = result {
                 self.halted.store(true, Ordering::Relaxed);
@@ -500,6 +511,14 @@ impl<'a> EntryQueue<'a> {
         WorkerEnd {
             worker,
             result: Ok(()),
+        }
+    }
+
+    /// Reports every entry of the queue as unfinished in `stage`, when the search ends before
+    /// any entry is taken.
+    fn give_up(&self, stage: SearchStage) {
+        while let Some(rest) = self.take() {
+            self.unfinished(rest.entry, stage);
         }
     }
 

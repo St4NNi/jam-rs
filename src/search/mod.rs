@@ -25,7 +25,10 @@ pub use control::{SearchControl, Stopped};
 pub use driver::{AlignStageWork, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;
 pub use events::{Completion, DropReason, EntryEvent, SearchStage};
-pub use locate_stage::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
+pub use locate_stage::{
+    EntryLocations, LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
+    read_entry_locations,
+};
 pub use located::{ContigWindows, LocatedEntry};
 pub use query::QueryKmers;
 pub use sketch_stage::{

@@ -9,6 +9,7 @@ use crate::index::Shard;
 use crate::loss::LossBudget;
 use crate::search::CoverageBound;
 use crate::search::QueryKmers;
+use crate::search::read_entry_locations;
 use crate::search::{AlignStageWorkspace, PreparedQuery, align_entry};
 use crate::search::{LocateOutcome, LocateRequest, LocateWorkspace, locate_entry};
 use crate::search::{SketchLimits, sketch_stage};
@@ -47,13 +48,17 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
         flank: config.flank,
     };
     let mut work = Default::default();
+    let candidates = std::slice::from_ref(possible);
+    let file = shard.seed_file();
+    let found = &sketched.found;
+    let locations = read_entry_locations(file, &request, found, candidates, control, &mut work);
     let outcome = locate_entry(
         shard,
         &request,
         possible,
+        &locations.unwrap()[0],
         &mut LocateWorkspace::default(),
         &mut work,
-        control,
     )
     .unwrap();
     let LocateOutcome::Located(located) = outcome else {
