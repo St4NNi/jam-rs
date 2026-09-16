@@ -128,9 +128,11 @@ fn remove_unplanned(plan: &Plan, cache: &Path) -> Result<(), IndexError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{Part, Place, Shard, ShardOptions};
+    use crate::index::{BuildOptions, Part, Place, Shard, ShardOptions, build_shard};
     use crate::storage::{S3Config, S3Limits};
-    use crate::test_support::{random_bases, rng, runtime, serve_directory, test_shard};
+    use crate::test_support::{
+        build_options, random_bases, rng, runtime, serve_directory, test_shard, write_entries,
+    };
 
     #[test]
     fn warm_then_read() {
@@ -180,5 +182,44 @@ mod tests {
             .read(0, 0..20_000, &mut bases)
             .unwrap();
         assert_eq!(bases, entries[2][0]);
+    }
+
+    #[test]
+    fn sketch_only_warmed() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut rng = rng(4);
+        let entries: Vec<Vec<Vec<u8>>> = (0..2)
+            .map(|_| vec![random_bases(&mut rng, 20_000)])
+            .collect();
+        let inputs = write_entries(directory.path(), &entries);
+        let options = BuildOptions {
+            sketch_only: true,
+            ..build_options(directory.path(), 2)
+        };
+        build_shard(&inputs, &directory.path().join("shard"), &options).unwrap();
+        let (server, asked) = serve_directory(directory.path());
+        let endpoint = Some(server.address.as_str());
+        let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+        let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        let (manifest, digest) = location.manifest().unwrap();
+        let cache = directory.path().join("cache");
+        // The default plan pins the sketch part alone; there are no locators or packed files.
+        let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &[]).unwrap();
+        let parts: Vec<&str> = plan.pins.iter().map(|pin| pin.part.as_str()).collect();
+        assert_eq!(parts, ["sketch"]);
+        let packed = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &[Part::Packed(None)]);
+        assert!(packed.unwrap().pins.is_empty());
+        warm(&location, &manifest, &plan, &cache).unwrap();
+        let options = ShardOptions {
+            pins: Some(cache),
+            ..ShardOptions::default()
+        };
+        let before = asked.lock().unwrap().len();
+        let shard = Shard::open_with(&location, &options).unwrap();
+        let ids = (0..manifest.color_sets as u32).map(crate::index::ColorSetId);
+        assert!(shard.seed_file().read_color_sets(ids).is_ok());
+        // Opening reads the manifest; the seeds file is read from the pin alone.
+        let asked = asked.lock().unwrap();
+        assert!(asked[before..].iter().all(|key| !key.ends_with("seeds")));
     }
 }
