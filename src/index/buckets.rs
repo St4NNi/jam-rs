@@ -13,7 +13,8 @@ const MAX_ESCAPES: usize = (1 << 24) - 1;
 const SCAN_BITS: u32 = 56;
 
 /// Appends the sketch bucket of `seeds`, as (check value, color set id) with check values of
-/// `check_bits` bits, ascending and distinct. An empty bucket has no bytes.
+/// `check_bits` bits, ascending and distinct. An empty bucket has no bytes. Check values are
+/// stored as Elias-Fano lists: the high part of each in unary, the low part at a fixed width.
 pub(crate) fn encode_sketch_bucket(seeds: &[(u64, u32)], check_bits: u32, out: &mut Vec<u8>) {
     if seeds.is_empty() {
         return;
@@ -34,9 +35,21 @@ pub(crate) fn encode_sketch_bucket(seeds: &[(u64, u32)], check_bits: u32, out: &
             out.extend_from_slice(&id.to_le_bytes());
         }
     }
+    let (high_bits, low_bits) = check_split(seeds.len() as u64, check_bits);
     let mut writer = BitWriter::new(out);
+    let mut group = 0u64;
     for (check, _) in seeds {
-        writer.push(*check, check_bits);
+        while group < check >> low_bits {
+            writer.push(0, 1);
+            group += 1;
+        }
+        writer.push(1, 1);
+    }
+    for _ in group..1 << high_bits {
+        writer.push(0, 1);
+    }
+    for (check, _) in seeds {
+        writer.push(*check, low_bits);
     }
     for value in values {
         writer.push(value, width);
@@ -51,26 +64,37 @@ pub struct SketchBucket<'a> {
     seeds: u32,
     width: u32,
     escapes: u32,
-    check_bits: u32,
+    /// Bits of the low part of a check value.
+    low_bits: u32,
+    /// Bits of the unary high parts: one per seed and one per possible high part.
+    upper_bits: u64,
 }
 
 impl<'a> SketchBucket<'a> {
     /// Checks the header and size of a bucket; empty bytes are an empty bucket.
     pub(crate) fn decode(bytes: &'a [u8], check_bits: u32) -> Result<Self, IndexError> {
-        if bytes.is_empty() {
-            return Ok(Self {
-                bytes,
-                seeds: 0,
-                width: 0,
-                escapes: 0,
-                check_bits,
-            });
-        }
         let damaged = || IndexError::format("seeds sketch bucket");
-        let seeds = u32_at(bytes, 0).ok_or_else(damaged)?;
-        let packed = u32_at(bytes, 4).ok_or_else(damaged)?;
+        let seeds = if bytes.is_empty() {
+            0
+        } else {
+            u32_at(bytes, 0).ok_or_else(damaged)?
+        };
+        let packed = u32_at(bytes, 4).unwrap_or_default();
         let (width, escapes) = (packed >> 24, packed & 0x00ff_ffff);
-        let bits = u64::from(seeds) * u64::from(check_bits + width);
+        let (high_bits, low_bits) = check_split(u64::from(seeds), check_bits);
+        let upper_bits = u64::from(seeds) + (1 << high_bits);
+        let bucket = Self {
+            bytes,
+            seeds,
+            width,
+            escapes,
+            low_bits,
+            upper_bits,
+        };
+        if bytes.is_empty() {
+            return Ok(bucket);
+        }
+        let bits = upper_bits + u64::from(seeds) * u64::from(low_bits + width);
         let expected = (SKETCH_HEADER_BYTES as u64 + 4 * u64::from(escapes)) + bits.div_ceil(8);
         if seeds == 0
             || width > 32
@@ -79,13 +103,7 @@ impl<'a> SketchBucket<'a> {
         {
             return Err(damaged());
         }
-        Ok(Self {
-            bytes,
-            seeds,
-            width,
-            escapes,
-            check_bits,
-        })
+        Ok(bucket)
     }
 
     /// Stored seeds in the bucket.
@@ -102,35 +120,40 @@ impl<'a> SketchBucket<'a> {
     /// set id.
     pub fn find(&self, check: u64) -> Option<(u32, u32)> {
         let bits = self.bits();
-        let (mut low, mut high) = (0u32, self.seeds);
-        while low < high {
-            let middle = low + (high - low) / 2;
-            if read_bits(
-                bits,
-                u64::from(middle) * u64::from(self.check_bits),
-                self.check_bits,
-            ) < check
-            {
-                low = middle + 1;
-            } else {
-                high = middle;
+        let group = check >> self.low_bits;
+        // The seeds of a high part follow the zero that ends the group before it.
+        let mut position = match group.checked_sub(1) {
+            None => 0,
+            Some(before) => select(bits, 0, self.upper_bits, before, false)? + 1,
+        };
+        let mut place = position.checked_sub(group)?;
+        let wanted = check & ((1 << self.low_bits) - 1);
+        while position < self.upper_bits && read_bits(bits, position, 1) == 1 {
+            let low = self.low_part(place);
+            if low >= wanted {
+                let place = place as u32;
+                return (low == wanted).then(|| (place, self.color_set(place)));
             }
+            (place, position) = (place + 1, position + 1);
         }
-        (low < self.seeds && self.check(low) == check).then(|| (low, self.color_set(low)))
+        None
     }
 
     /// The check value of the seed at `place`.
     pub fn check(&self, place: u32) -> u64 {
-        read_bits(
-            self.bits(),
-            u64::from(place) * u64::from(self.check_bits),
-            self.check_bits,
-        )
+        let place = u64::from(place);
+        let position = select(self.bits(), 0, self.upper_bits, place, true).unwrap_or(place);
+        ((position - place) << self.low_bits) | self.low_part(place)
+    }
+
+    fn low_part(&self, place: u64) -> u64 {
+        let bit = self.upper_bits + place * u64::from(self.low_bits);
+        read_bits(self.bits(), bit, self.low_bits)
     }
 
     /// The color set id of the seed at `place`.
     pub fn color_set(&self, place: u32) -> u32 {
-        let start = u64::from(self.seeds) * u64::from(self.check_bits);
+        let start = self.upper_bits + u64::from(self.seeds) * u64::from(self.low_bits);
         let value = read_bits(
             self.bits(),
             start + u64::from(place) * u64::from(self.width),
@@ -149,6 +172,13 @@ impl<'a> SketchBucket<'a> {
         let start = SKETCH_HEADER_BYTES + 4 * self.escapes as usize;
         self.bytes.get(start..).unwrap_or_default()
     }
+}
+
+/// The high and low bits of the check values of a bucket of `seeds` seeds: about log2(seeds)
+/// high bits, so the unary high parts cost at most three bits per seed.
+fn check_split(seeds: u64, check_bits: u32) -> (u32, u32) {
+    let high_bits = bits_needed(seeds).min(check_bits);
+    (high_bits, check_bits - high_bits)
 }
 
 /// The id width and escape count with the fewest bits for these ids.
@@ -250,11 +280,12 @@ impl<'a> LocatorBucket<'a> {
         let first_pair = match place.checked_sub(1) {
             None => 0,
             Some(before) => {
-                select(self.bits, 0, self.pairs, u64::from(before)).ok_or_else(missing)? + 1
+                select(self.bits, 0, self.pairs, u64::from(before), true).ok_or_else(missing)? + 1
             }
         };
         let pair = first_pair + u64::from(rank);
-        let seed_end = select(self.bits, 0, self.pairs, u64::from(place)).ok_or_else(missing)?;
+        let seed_end =
+            select(self.bits, 0, self.pairs, u64::from(place), true).ok_or_else(missing)?;
         if pair > seed_end {
             return Err(missing());
         }
@@ -262,10 +293,10 @@ impl<'a> LocatorBucket<'a> {
         let first = match pair.checked_sub(1) {
             None => 0,
             Some(before) => {
-                select(self.bits, flags, self.locations, before).ok_or_else(missing)? + 1
+                select(self.bits, flags, self.locations, before, true).ok_or_else(missing)? + 1
             }
         };
-        let last = select(self.bits, flags, self.locations, pair).ok_or_else(missing)?;
+        let last = select(self.bits, flags, self.locations, pair, true).ok_or_else(missing)?;
         let values = flags + self.locations;
         for index in first..=last {
             let bit = values + index * u64::from(self.location_bits);
@@ -301,14 +332,17 @@ impl<'a> LocatorBucket<'a> {
     }
 }
 
-/// The offset (from `start`) of the set bit with index `index` among the `count` bits that
-/// start at bit `start`.
-fn select(bits: &[u8], start: u64, count: u64, index: u64) -> Option<u64> {
+/// The offset (from `start`) of the bit with index `index` among the bits equal to `one` in the
+/// `count` bits that start at bit `start`.
+fn select(bits: &[u8], start: u64, count: u64, index: u64, one: bool) -> Option<u64> {
     let mut left = index;
     let mut offset = 0u64;
     while offset < count {
         let width = SCAN_BITS.min((count - offset) as u32);
         let mut word = read_bits(bits, start + offset, width);
+        if !one {
+            word = !word & ((1 << width) - 1);
+        }
         let ones = u64::from(word.count_ones());
         if left < ones {
             for _ in 0..left {
