@@ -7,7 +7,7 @@ use super::bound::CoverageBound;
 use super::control::SearchControl;
 use super::error::SearchError;
 use super::query::QueryKmers;
-use crate::index::{ColorSetId, ColorSets, SeedFile, StoredSeed};
+use crate::index::{ColorSetId, ColorSets, SeedFile, StoredSeed, seed_key};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -185,28 +185,32 @@ pub fn sketch_stage(
 }
 
 /// Looks up every distinct query k-mer in the sketch part, in parallel chunks of neighbouring
-/// hashes, and reads the color sets of the stored seeds found.
+/// seed keys, and reads the color sets of the stored seeds found.
 pub fn find_query_seeds(
     seed_file: &SeedFile,
     query: &QueryKmers,
     control: SearchControl<'_>,
 ) -> Result<FoundSeeds, SearchError> {
-    let chunks = query
-        .distinct()
+    let mut keys: Vec<(u64, u32)> = (query.distinct().iter().zip(0..))
+        .map(|(query_seed, seed)| (seed_key(query_seed.hash), seed))
+        .collect();
+    keys.par_sort_unstable();
+    let chunks = keys
         .par_chunks(CHUNK_SEEDS)
-        .enumerate()
-        .map(|(chunk, seeds)| {
+        .map(|chunk| {
             control.check()?;
-            let first = (chunk * CHUNK_SEEDS) as u32;
-            let hashes: Vec<u64> = seeds.iter().map(|query_seed| query_seed.hash).collect();
-            let stored = seed_file.find_seeds(&hashes)?;
-            Ok((first..)
-                .zip(stored)
-                .filter_map(|(seed, stored)| Some((seed, stored?)))
-                .collect::<Vec<_>>())
+            let mut ascending: Vec<u64> = chunk.iter().map(|&(key, _)| key).collect();
+            ascending.dedup();
+            let stored = seed_file.find_seeds(&ascending)?;
+            let found = chunk.iter().filter_map(|&(key, seed)| {
+                let index = ascending.binary_search(&key).ok()?;
+                Some((seed, stored[index]?))
+            });
+            Ok(found.collect::<Vec<_>>())
         })
         .collect::<Result<Vec<_>, SearchError>>()?;
-    let seeds = chunks.concat();
+    let mut seeds = chunks.concat();
+    seeds.par_sort_unstable_by_key(|(seed, _)| *seed);
     let mut ids: Vec<ColorSetId> = seeds.iter().map(|(_, stored)| stored.color_set).collect();
     ids.par_sort_unstable();
     ids.dedup();

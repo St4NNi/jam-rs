@@ -80,7 +80,7 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
 
 /// Checks that the seeds file holds a seed in an entry at a seed location.
 fn check_seed_file(file: &SeedFile, hash: u64, entry: u32, expected: SeedLocation) {
-    let stored = file.find_seeds(&[hash]).unwrap()[0].expect("seed in the seeds file");
+    let stored = file.find_seeds(&[seed_key(hash)]).unwrap()[0].expect("seed in the seeds file");
     let sets = file.read_color_sets([stored.color_set]).unwrap();
     let set = sets.entries(stored.color_set).unwrap();
     let rank = set.binary_search(&entry).expect("entry in the color set") as u32;

@@ -32,7 +32,9 @@ pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use reshard::{PackedOutput, ReshardOptions, Split, reshard};
-pub use seed_file::{ColorSetId, ColorSets, SEEDS_FILE, SeedFile, SeedLocation, StoredSeed};
+pub use seed_file::{
+    ColorSetId, ColorSets, SEEDS_FILE, SeedFile, SeedLocation, StoredSeed, seed_key,
+};
 pub use shard::{Shard, ShardStats};
 pub use sources::{Location, ShardOptions};
 pub use warm::warm;
@@ -98,11 +100,6 @@ pub const MAX_BUCKET_BITS: u8 = 28;
 
 /// The fewest bucket bits a shard uses.
 pub const MIN_BUCKET_BITS: u8 = 8;
-
-/// The top `key_bits` bits of a hash: the bucket bits followed by the check value.
-pub(crate) fn seed_key(hash: u64, key_bits: u32) -> u64 {
-    hash >> (64 - key_bits)
-}
 
 #[cfg(test)]
 mod tests;

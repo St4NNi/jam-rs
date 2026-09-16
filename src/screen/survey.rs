@@ -4,7 +4,7 @@
 
 use super::ScreenError;
 use super::batch::Batch;
-use crate::index::{ColorSetId, ColorSets, SeedFile};
+use crate::index::{ColorSetId, ColorSets, SeedFile, seed_key};
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
 use crate::seeds::Seeder;
@@ -73,12 +73,13 @@ pub(super) fn found_seeds(
             control.check()?;
             let mut hashes = Vec::new();
             let bases = &batch.bases[piece.start as usize..piece.end() as usize];
-            seeder.query_kmers(bases, |kmer| hashes.push(kmer.hash));
+            seeder.query_kmers(bases, |kmer| hashes.push((seed_key(kmer.hash), kmer.hash)));
             hashes.sort_unstable();
             hashes.dedup();
-            let stored = seed_file.find_seeds(&hashes)?;
+            let keys: Vec<u64> = hashes.iter().map(|&(key, _)| key).collect();
+            let stored = seed_file.find_seeds(&keys)?;
             let mut found: Vec<PieceSeed> = (hashes.iter().zip(stored))
-                .filter_map(|(&hash, stored)| {
+                .filter_map(|(&(_, hash), stored)| {
                     Some(PieceSeed {
                         hash,
                         piece: index as u32,

@@ -392,16 +392,15 @@ mod tests {
             file.verify_checksums().unwrap();
             assert_eq!(file.seed_count(), seeds.len() as u64);
             assert_eq!(file.has_locators(), locators);
-            let mut hashes: Vec<u64> = (seeds.keys())
-                .flat_map(|key| [key << 20 | 0xabcde, (key ^ 1) << 20])
-                .collect();
-            hashes.sort_unstable();
-            let found = file.find_seeds(&hashes).unwrap();
+            let mut keys: Vec<u64> = seeds.keys().flat_map(|key| [*key, key ^ 1]).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let found = file.find_seeds(&keys).unwrap();
             let ids = found.iter().flatten().map(|seed| seed.color_set);
             let read = file.read_color_sets(ids).unwrap();
             let mut wanted = Vec::new();
-            for (hash, seed) in hashes.iter().zip(&found) {
-                let Some((id, lists)) = seeds.get(&(hash >> 20)) else {
+            for (key, seed) in keys.iter().zip(&found) {
+                let Some((id, lists)) = seeds.get(key) else {
                     assert_eq!(*seed, None);
                     continue;
                 };

@@ -10,10 +10,10 @@ use super::manifest::{
     choose_bucket_bits, packed_file_name, sha256_file, sha256_hex,
 };
 use super::packed::PackedWriter;
-use super::seed_file::{SEED_KEY_BITS, SEEDS_FILE, SeedFile, SeedLocation};
+use super::seed_file::{SEEDS_FILE, SeedFile, SeedLocation, seed_key};
 use super::seed_writer::SeedFileShape;
 use super::spill::{SeedSpill, seed_record};
-use super::{AtPath, IndexError, seed_key};
+use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
 use crate::storage::LocalFile;
 use rayon::prelude::*;
@@ -308,7 +308,7 @@ impl<'a> EntryBuilder<'a> {
                 bin,
                 reverse: seed.reverse,
             };
-            seeds.push((seed_key(seed.hash, SEED_KEY_BITS), location.value()));
+            seeds.push((seed_key(seed.hash), location.value()));
         });
         Ok(())
     }

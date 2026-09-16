@@ -19,6 +19,13 @@ pub const SEEDS_FILE: &str = "seeds";
 /// Bits of a seed's hash that the seeds file keeps: the bucket bits, then the check value.
 pub const SEED_KEY_BITS: u32 = 44;
 
+/// The key of a seed or query k-mer: the low `SEED_KEY_BITS` bits of its hash. Seeds are the
+/// smallest hashes of their minimizer windows, so their high bits crowd near zero while the
+/// low bits spread evenly over the buckets.
+pub fn seed_key(hash: u64) -> u64 {
+    hash & ((1 << SEED_KEY_BITS) - 1)
+}
+
 pub(crate) const MAGIC: [u8; 16] = *b"jam seeds\0\0\0\0\0\0\0";
 pub(crate) const VERSION: u32 = 1;
 pub(crate) const HEADER_BYTES: u64 = 256;
@@ -177,19 +184,18 @@ impl SeedFile {
         })
     }
 
-    /// Bits of the hash that select a bucket.
+    /// Bits of the seed key that select a bucket.
     pub fn bucket_bits(&self) -> u32 {
         self.bucket_bits
     }
 
-    /// The bucket of a hash.
-    pub fn bucket(&self, hash: u64) -> u32 {
-        (hash >> (64 - self.bucket_bits)) as u32
+    /// The bucket of a seed key: its top bits.
+    pub fn bucket(&self, key: u64) -> u32 {
+        (key >> (SEED_KEY_BITS - self.bucket_bits)) as u32
     }
 
-    /// The check value of a hash: the key bits after the bucket bits.
-    fn check(&self, hash: u64) -> u64 {
-        let key = hash >> (64 - SEED_KEY_BITS);
+    /// The check value of a seed key: its bits after the bucket bits.
+    fn check(&self, key: u64) -> u64 {
         key & ((1u64 << (SEED_KEY_BITS - self.bucket_bits)) - 1)
     }
 
@@ -228,18 +234,15 @@ impl SeedFile {
         self.locators.as_ref().map(|_| self.sections[4].clone())
     }
 
-    /// Finds the stored seed of each hash; `hashes` must ascend. Every bucket is read once.
-    pub fn find_seeds(&self, hashes: &[u64]) -> Result<Vec<Option<StoredSeed>>, IndexError> {
-        let mut buckets: Vec<u32> = hashes.iter().map(|&hash| self.bucket(hash)).collect();
+    /// Finds the stored seed of each seed key; `keys` must ascend. Every bucket is read once.
+    pub fn find_seeds(&self, keys: &[u64]) -> Result<Vec<Option<StoredSeed>>, IndexError> {
+        let mut buckets: Vec<u32> = keys.iter().map(|&key| self.bucket(key)).collect();
         buckets.dedup();
-        let mut found = Vec::with_capacity(hashes.len());
+        let mut found = Vec::with_capacity(keys.len());
         let mut next = 0;
         self.read_sketch_buckets(&buckets, |bucket, seeds| {
-            while let Some(&hash) = hashes
-                .get(next)
-                .filter(|&&hash| self.bucket(hash) == bucket)
-            {
-                found.push(seeds.find(self.check(hash)).map(|(place, id)| StoredSeed {
+            while let Some(&key) = keys.get(next).filter(|&&key| self.bucket(key) == bucket) {
+                found.push(seeds.find(self.check(key)).map(|(place, id)| StoredSeed {
                     bucket,
                     place,
                     color_set: ColorSetId(id),
@@ -248,8 +251,8 @@ impl SeedFile {
             }
             Ok(())
         })?;
-        if found.len() != hashes.len() {
-            return Err(IndexError::Input("hashes to look up must ascend".into()));
+        if found.len() != keys.len() {
+            return Err(IndexError::Input("seed keys to look up must ascend".into()));
         }
         Ok(found)
     }
