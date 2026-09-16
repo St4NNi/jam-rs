@@ -1,5 +1,5 @@
-//! The on-disk index: per shard its manifest, sketch, positions and packed sequences; building
-//! shards, and resharding them into an index of several shards.
+//! The on-disk index: per shard its manifest, seeds file and packed sequences; building shards,
+//! and resharding them into an index of several shards.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -12,8 +12,6 @@ mod manifest;
 mod packed;
 mod pages;
 mod plan;
-#[allow(dead_code)]
-mod positions;
 mod reshard;
 mod seed_file;
 mod seed_writer;
@@ -95,16 +93,13 @@ impl<T> AtPath<T> for io::Result<T> {
     }
 }
 
-/// Bits of a seed's hash that a sketch bucket stores to tell its seeds apart.
-pub const FINGERPRINT_BITS: u8 = 16;
-
-/// The most bucket bits a shard may use, so a stored seed key fits the build's spill records.
+/// The most bucket bits a shard may use, so a check value keeps at least 16 bits.
 pub const MAX_BUCKET_BITS: u8 = 28;
 
 /// The fewest bucket bits a shard uses.
 pub const MIN_BUCKET_BITS: u8 = 8;
 
-/// The bits of a hash that the index keeps: the bucket bits followed by the fingerprint.
+/// The top `key_bits` bits of a hash: the bucket bits followed by the check value.
 pub(crate) fn seed_key(hash: u64, key_bits: u32) -> u64 {
     hash >> (64 - key_bits)
 }

@@ -2,9 +2,6 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-/// Zero bytes after every bit-packed array, so a value is always read with one 8-byte load.
-pub(crate) const BIT_PADDING: usize = 8;
-
 /// The u64 at `offset`, or `None` past the end.
 pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
     let field = bytes.get(offset..offset.checked_add(8)?)?;
@@ -89,7 +86,7 @@ impl<'a> BitWriter<'a> {
         self.bits = bit;
     }
 
-    /// Ends the array at its last whole byte. A file adds `BIT_PADDING` after its last array.
+    /// Ends the array at its last whole byte.
     pub(crate) fn finish(self) {
         let end = self.start + self.bits.div_ceil(8) as usize;
         self.out.resize(end, 0);
@@ -116,7 +113,6 @@ mod tests {
             }
             writer.finish();
             assert_eq!(out.len(), 1 + (200 * width as usize).div_ceil(8));
-            out.resize(out.len() + BIT_PADDING, 0);
             for (index, value) in values.iter().enumerate() {
                 assert_eq!(
                     read_bits(&out[1..], index as u64 * u64::from(width), width),
