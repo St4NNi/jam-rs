@@ -48,6 +48,10 @@ impl<'a> Screener<'a> {
     /// A screener of `shard` with `config`.
     pub fn new(shard: &'a Shard, config: ScreenConfig) -> Result<Self, ScreenError> {
         config.validate()?;
+        if !shard.seed_file().has_locators() {
+            let message = "the shard was built with the sketch part only and cannot be screened";
+            return Err(crate::index::IndexError::Input(message.into()).into());
+        }
         let scheme = shard.manifest().parameters.scheme;
         let seeder = Seeder::new(scheme).map_err(crate::index::IndexError::from)?;
         let model = MissModel::with_layouts(scheme, 1).map_err(crate::search::SearchError::from)?;

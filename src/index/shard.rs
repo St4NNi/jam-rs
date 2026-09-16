@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::IndexError;
-use super::manifest::{EntryRecord, Manifest, verify_source};
+use super::manifest::{EntryRecord, FileRecord, Manifest, verify_source};
 use super::packed::{PackedSequence, contig_table_bytes, read_contig_starts};
 use super::seed_file::SeedFile;
 use super::sources::{Location, ShardFiles, ShardOptions};
@@ -116,8 +116,8 @@ impl Shard {
 
     /// The local path of an entry's packed sequence; an error when it lies on S3.
     pub fn packed_path(&self, entry: u32) -> Result<PathBuf, IndexError> {
-        let record = self.entry_record(entry)?;
-        self.files.packed_path(&record.packed).ok_or_else(|| {
+        let (record, file) = self.packed_record(entry)?;
+        self.files.packed_path(file).ok_or_else(|| {
             IndexError::Input(format!("the packed sequence of {} is on S3", record.name))
         })
     }
@@ -125,28 +125,28 @@ impl Shard {
     /// The start of each contig of an entry in entry coordinates, followed by the entry's bases,
     /// so contig `i` spans `starts[i]..starts[i + 1]`. One read at the front of its packed file.
     pub fn contig_starts(&self, entry: u32) -> Result<Vec<u64>, IndexError> {
-        let record = self.entry_record(entry)?;
-        let source = self.files.open_packed(entry as usize, &record.packed)?;
+        let (record, file) = self.packed_record(entry)?;
+        let source = self.files.open_packed(entry as usize, file)?;
         read_contig_starts(source.as_ref(), record.contigs)
     }
 
     /// Tells the source of an entry's packed file that its contig starts will be read soon.
     pub fn prefetch_contig_starts(&self, entry: u32) {
-        let Ok(record) = self.entry_record(entry) else {
+        let Ok((record, file)) = self.packed_record(entry) else {
             return;
         };
-        if let Ok(source) = self.files.open_packed(entry as usize, &record.packed) {
+        if let Ok(source) = self.files.open_packed(entry as usize, file) {
             source.will_need(0, contig_table_bytes(record.contigs));
         }
     }
 
     /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
-        let record = self.entry_record(entry)?;
-        let source = self.files.open_packed(entry as usize, &record.packed)?;
+        let (record, file) = self.packed_record(entry)?;
+        let source = self.files.open_packed(entry as usize, file)?;
         let size = source.size();
         let packed = PackedSequence::open(source)?;
-        if size != record.packed.bytes
+        if size != file.bytes
             || packed.bases() != record.bases
             || packed.contig_count() as u64 != record.contigs
         {
@@ -163,9 +163,14 @@ impl Shard {
         let seeds = &self.manifest.seeds;
         verify_source(self.files.open_uncached(seeds)?.as_ref(), seeds)?;
         self.seeds.verify_checksums()?;
-        for record in &self.manifest.entries {
-            let source = self.files.open_packed_uncached(&record.packed)?;
-            verify_source(source.as_ref(), &record.packed)?;
+        for file in self
+            .manifest
+            .entries
+            .iter()
+            .filter_map(|e| e.packed.as_ref())
+        {
+            let source = self.files.open_packed_uncached(file)?;
+            verify_source(source.as_ref(), file)?;
         }
         Ok(())
     }
@@ -182,16 +187,21 @@ impl Shard {
             seed_locations: self.manifest.seed_locations,
             sketch_bytes: part_bytes(Some(&self.manifest.sketch_part)),
             locator_bytes: part_bytes(self.manifest.locator_part.as_ref()),
-            packed_bytes: entries.iter().map(|entry| entry.packed.bytes).sum(),
+            packed_bytes: (entries.iter().filter_map(|entry| entry.packed.as_ref()))
+                .map(|file| file.bytes)
+                .sum(),
         }
     }
 
-    /// The manifest record of an entry.
-    fn entry_record(&self, entry: u32) -> Result<&EntryRecord, IndexError> {
-        self.manifest
-            .entries
-            .get(entry as usize)
-            .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))
+    /// The manifest record of an entry and of its packed file; an error for a shard built with
+    /// the sketch part only.
+    fn packed_record(&self, entry: u32) -> Result<(&EntryRecord, &FileRecord), IndexError> {
+        let record = (self.manifest.entries.get(entry as usize))
+            .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))?;
+        let file = record.packed.as_ref().ok_or_else(|| {
+            IndexError::Input("the shard was built with the sketch part only".into())
+        })?;
+        Ok((record, file))
     }
 }
 

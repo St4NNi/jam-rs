@@ -86,8 +86,8 @@ pub struct EntryRecord {
     pub bases: u64,
     /// Seed locations of the entry: its distinct pairs of seed and seed location.
     pub seed_locations: u64,
-    /// The packed sequence file.
-    pub packed: FileRecord,
+    /// The packed sequence file; none in a shard built with the sketch part only.
+    pub packed: Option<FileRecord>,
 }
 
 /// The manifest of a shard.
@@ -270,7 +270,7 @@ mod tests {
                 contigs: 2,
                 bases: 1000,
                 seed_locations: 90,
-                packed: file("entry_1.packed"),
+                packed: Some(file("entry_1.packed")),
             }],
             seeds: file("seeds"),
             sketch_part: 4096..8192,

@@ -60,6 +60,7 @@ pub(super) fn build(directory: &Path, entries: &[EntryContigs]) -> Shard {
         threads: 2,
         temporary_directory: directory.to_path_buf(),
         entry_per_record: false,
+        sketch_only: false,
     };
     let root = directory.join("shard");
     build_shard(&inputs, &root, &options).unwrap();

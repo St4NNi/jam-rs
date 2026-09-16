@@ -134,9 +134,12 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
             let manifest = Manifest::read(&directory)?;
             let file = LocalFile::open(directory.join(SEEDS_FILE))?;
             let seeds = SeedFile::open(Arc::new(file))?;
-            if seeds.entry_count() != manifest.entries.len() as u64 || !seeds.has_locators() {
+            let packed = manifest.entries.iter().all(|entry| entry.packed.is_some());
+            if seeds.entry_count() != manifest.entries.len() as u64
+                || (seeds.has_locators() && !packed)
+            {
                 return Err(IndexError::format(format!(
-                    "the seeds file of {} differs from its manifest or has no locator part",
+                    "the seeds file of {} differs from its manifest",
                     directory.display()
                 )));
             }
@@ -161,6 +164,15 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
     if shards.iter().any(|shard| !same(&shard.manifest.parameters)) {
         return Err(IndexError::Input(
             "shards with different parameters cannot be resharded together".into(),
+        ));
+    }
+    let locators = first.seeds.has_locators();
+    if shards
+        .iter()
+        .any(|shard| shard.seeds.has_locators() != locators)
+    {
+        return Err(IndexError::Input(
+            "shards built with the sketch part only cannot be resharded with full shards".into(),
         ));
     }
     check_names(shards.iter().flat_map(|shard| {
@@ -201,17 +213,21 @@ fn write_shard(
     directory: &Path,
     options: &ReshardOptions,
 ) -> Result<Manifest, IndexError> {
+    let locators = shards[0].seeds.has_locators();
     let packed = directory.join(PACKED_DIRECTORY);
-    std::fs::create_dir(&packed).at(&packed)?;
+    if locators {
+        std::fs::create_dir(&packed).at(&packed)?;
+    }
     let mut entries = Vec::with_capacity(part.len());
     for &EntrySource { shard, entry } in part {
         let input = &shards[shard];
         let record = input.manifest.entries[entry as usize].clone();
-        let source = input
-            .directory
-            .join(PACKED_DIRECTORY)
-            .join(&record.packed.path);
-        let target = packed.join(&record.packed.path);
+        let Some(file) = &record.packed else {
+            entries.push(record);
+            continue;
+        };
+        let source = input.directory.join(PACKED_DIRECTORY).join(&file.path);
+        let target = packed.join(&file.path);
         match options.packed {
             // Links point at the original file, so they stay valid when the inputs are removed
             // after an earlier reshard that linked them.
@@ -237,7 +253,7 @@ fn write_shard(
         }
     }
     let parameters = shards[0].manifest.parameters;
-    complete_shard(directory, parameters, entries, spill, None)
+    complete_shard(directory, parameters, entries, spill, None, locators)
 }
 
 /// Buckets of an input that one parallel step reads.
@@ -264,6 +280,20 @@ fn spill_input(file: &SeedFile, new_entries: &[u32], spill: &SeedSpill) -> Resul
             })?;
             let sets = file.read_color_sets(seeds.iter().map(|seed| seed.2))?;
             let mut records = Vec::new();
+            if !file.has_locators() {
+                // Without seed locations, each pair of seed and entry is one record.
+                for &(_, key, id) in &seeds {
+                    for &entry in sets.entries(id).unwrap_or_default() {
+                        if let Some(&new) = new_entries
+                            .get(entry as usize)
+                            .filter(|&&new| new != u32::MAX)
+                        {
+                            records.push(seed_record(key, new, 0));
+                        }
+                    }
+                }
+                return spill.push(&mut records);
+            }
             file.read_locator_buckets(&list, |bucket, part| {
                 let first = seeds.partition_point(|seed| seed.0 < bucket);
                 part.for_each(|place, rank, location| {

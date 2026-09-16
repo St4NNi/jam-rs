@@ -153,6 +153,11 @@ impl<'a> Searcher<'a> {
         events: &SyncSender<EntryEvent>,
     ) -> Result<SearchSummary, SearchError> {
         config.validate()?;
+        if config.last_stage != SearchStage::Sketch && !self.shard.seed_file().has_locators() {
+            return Err(SearchError::InvalidConfig(
+                "the shard was built with the sketch part only: search it with --level sketch",
+            ));
+        }
         if query.len() < usize::from(self.seeder.scheme().k) || query.len() >= u32::MAX as usize {
             return Err(SearchError::InvalidQuery(
                 "the query must hold at least k bases and fewer than 2^32",

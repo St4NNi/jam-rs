@@ -46,6 +46,9 @@ struct BuildArgs {
     /// Make each FASTA record an entry instead of each file
     #[arg(long)]
     entry_per_record: bool,
+    /// Write only the sketch part and no packed sequences: the shard answers stage 1 only
+    #[arg(long)]
+    sketch_only: bool,
     #[command(flatten)]
     common: CommonArgs,
     /// Bases per k-mer, 1 to 32 [default: 25]
@@ -253,6 +256,7 @@ fn build_options(args: &BuildArgs, threads: usize, temp_dir: PathBuf) -> BuildOp
         threads,
         temporary_directory: temp_dir,
         entry_per_record: args.entry_per_record,
+        sketch_only: args.sketch_only,
     }
 }
 

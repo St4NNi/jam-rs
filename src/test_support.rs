@@ -109,6 +109,7 @@ pub fn build_options(directory: &Path, threads: usize) -> BuildOptions {
         threads,
         temporary_directory: directory.to_path_buf(),
         entry_per_record: false,
+        sketch_only: false,
     }
 }
 

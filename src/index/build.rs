@@ -65,6 +65,9 @@ pub struct BuildOptions {
     /// Make each FASTA record an entry, named by its first word, instead of each file; the names
     /// of the inputs are then not used.
     pub entry_per_record: bool,
+    /// Write only the sketch part of the seeds file and no packed sequences, so the shard
+    /// answers stage 1 only.
+    pub sketch_only: bool,
 }
 
 /// Builds the shard directory `output` from `inputs` and returns its manifest.
@@ -84,8 +87,10 @@ pub fn build_shard(
         .num_threads(options.threads)
         .build()?;
     in_partial_directory(output, |directory| {
-        let packed = directory.join(PACKED_DIRECTORY);
-        std::fs::create_dir(&packed).at(&packed)?;
+        let packed = (!options.sketch_only).then(|| directory.join(PACKED_DIRECTORY));
+        if let Some(packed) = &packed {
+            std::fs::create_dir(packed).at(packed)?;
+        }
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
@@ -100,12 +105,15 @@ pub fn build_shard(
             };
             check_names(entries.iter().map(|entry| entry.name.as_str()))?;
             let parameters = options.parameters;
+            let spill = context.spill;
+            let locators = !options.sketch_only;
             complete_shard(
                 directory,
                 parameters,
                 entries,
-                context.spill,
+                spill,
                 options.bucket_bits,
+                locators,
             )
         })
     })
@@ -142,14 +150,16 @@ pub(crate) fn in_partial_directory<T>(
     }
 }
 
-/// Writes the seeds file from the seed records in `spill` and the manifest of a shard with these
-/// entries; the build chooses its bucket bits unless `bucket_bits` is given.
+/// Writes the seeds file from the seed records in `spill` (with the locator part when `locators`)
+/// and the manifest of a shard with these entries; the build chooses its bucket bits unless
+/// `bucket_bits` is given.
 pub(crate) fn complete_shard(
     directory: &Path,
     parameters: Parameters,
     entries: Vec<EntryRecord>,
     spill: SeedSpill,
     bucket_bits: Option<u8>,
+    locators: bool,
 ) -> Result<Manifest, IndexError> {
     if u32::try_from(entries.len()).is_err() {
         return Err(IndexError::Input(
@@ -167,7 +177,7 @@ pub(crate) fn complete_shard(
         bucket_bits: u32::from(parameters.bucket_bits),
         page_bits: u32::from(parameters.page_bits),
         entries: entries.len() as u64,
-        locators: true,
+        locators,
     };
     let totals = spill.write(&seeds_path, shape)?;
     let seed_file = SeedFile::open(Arc::new(LocalFile::open(&seeds_path)?))?;
@@ -198,7 +208,8 @@ pub(crate) fn complete_shard(
 struct Context {
     seeder: Seeder,
     parameters: Parameters,
-    packed: PathBuf,
+    /// The directory of the packed sequences; none when they are not written.
+    packed: Option<PathBuf>,
     spill: SeedSpill,
 }
 
@@ -314,33 +325,46 @@ impl<'a> EntryBuilder<'a> {
         self.context.spill.push(&mut records)?;
         drop(records);
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
-        let parts = self.packed.finish();
-        let file_name = packed_file_name(&name);
-        let path = self.context.packed.join(&file_name);
-        let mut file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
-            std::io::ErrorKind::AlreadyExists => {
-                IndexError::Input(format!("the entry name {name} is used twice"))
-            }
-            _ => IndexError::File {
-                path: path.clone(),
-                source: error,
-            },
-        })?;
-        let (head, packed) = (&parts.header_and_tables, &parts.packed_bases);
-        file.write_all(head).at(&path)?;
-        file.write_all(packed).at(&path)?;
+        let packed = match &self.context.packed {
+            Some(directory) => Some(write_packed(self.packed, directory, &name)?),
+            None => None,
+        };
         Ok(EntryRecord {
             name,
             contigs,
             bases,
             seed_locations,
-            packed: FileRecord {
-                path: file_name,
-                bytes: (head.len() + packed.len()) as u64,
-                sha256: sha256_hex(&[head, packed]),
-            },
+            packed,
         })
     }
+}
+
+/// Writes the packed sequence of the entry `name` into `directory` and returns its record.
+fn write_packed(
+    writer: PackedWriter,
+    directory: &Path,
+    name: &str,
+) -> Result<FileRecord, IndexError> {
+    let parts = writer.finish();
+    let file_name = packed_file_name(name);
+    let path = directory.join(&file_name);
+    let mut file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::AlreadyExists => {
+            IndexError::Input(format!("the entry name {name} is used twice"))
+        }
+        _ => IndexError::File {
+            path: path.clone(),
+            source: error,
+        },
+    })?;
+    let (head, packed) = (&parts.header_and_tables, &parts.packed_bases);
+    file.write_all(head).at(&path)?;
+    file.write_all(packed).at(&path)?;
+    Ok(FileRecord {
+        path: file_name,
+        bytes: (head.len() + packed.len()) as u64,
+        sha256: sha256_hex(&[head, packed]),
+    })
 }
 
 /// Calls `visit(name, sequence)` for every record of a FASTA or FASTQ file.

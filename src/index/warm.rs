@@ -49,7 +49,7 @@ fn file_record<'a>(manifest: &'a Manifest, file: &str) -> Result<&'a FileRecord,
     let packed = |entry: &&EntryRecord| {
         file.strip_prefix(PACKED_DIRECTORY)
             .and_then(|rest| rest.strip_prefix('/'))
-            == Some(entry.packed.path.as_str())
+            == entry.packed.as_ref().map(|packed| packed.path.as_str())
     };
     [&manifest.seeds]
         .into_iter()
@@ -59,7 +59,7 @@ fn file_record<'a>(manifest: &'a Manifest, file: &str) -> Result<&'a FileRecord,
                 .entries
                 .iter()
                 .find(packed)
-                .map(|entry| &entry.packed)
+                .and_then(|entry| entry.packed.as_ref())
         })
         .ok_or_else(|| IndexError::Input(format!("the shard has no file {file}")))
 }

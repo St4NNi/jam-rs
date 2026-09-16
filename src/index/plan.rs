@@ -184,9 +184,10 @@ pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<P
         sha256: record.sha256.clone(),
         place,
     };
+    // A shard built with the sketch part only has no packed sequences to pin.
     let packed = |record: &super::EntryRecord| {
-        let file = format!("{PACKED_DIRECTORY}/{}", record.packed.path);
-        whole(file, &record.packed)
+        let packed = record.packed.as_ref()?;
+        Some(whole(format!("{PACKED_DIRECTORY}/{}", packed.path), packed))
     };
     Ok(match part {
         // The header and the bucket table of the seeds file belong to the sketch part.
@@ -201,13 +202,13 @@ pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<P
                 ..whole(manifest.seeds.path.clone(), &manifest.seeds)
             })
             .collect(),
-        Part::Packed(None) => manifest.entries.iter().map(packed).collect(),
+        Part::Packed(None) => manifest.entries.iter().filter_map(packed).collect(),
         Part::Packed(Some(names)) => {
             let mut pins = Vec::new();
             for name in names {
                 let record = (manifest.entries.iter().find(|entry| &entry.name == name))
                     .ok_or_else(|| IndexError::Input(format!("no entry is named {name}")))?;
-                pins.push(packed(record));
+                pins.extend(packed(record));
             }
             pins
         }

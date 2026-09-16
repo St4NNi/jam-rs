@@ -180,6 +180,7 @@ mod tests {
             threads: 1,
             temporary_directory: directory.to_path_buf(),
             entry_per_record: false,
+            sketch_only: false,
         };
         let root = directory.join("shard");
         build_shard(&[EntryInput::from_path(path)], &root, &options).unwrap();

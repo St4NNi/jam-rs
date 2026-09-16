@@ -7,9 +7,11 @@ use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
 use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
-use crate::index::Shard;
+use crate::index::{BuildOptions, EntryInput, Shard, build_shard};
 use crate::seeds::reverse_complement;
-use crate::test_support::{diverged, miss_model, no_stop, random_bases, rng, test_shard};
+use crate::test_support::{
+    build_options, diverged, miss_model, no_stop, random_bases, rng, test_shard,
+};
 use rand::RngExt;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -116,6 +118,33 @@ fn level_ends_search() {
         assert_eq!(located.alignment_windows.len(), 1);
         assert!(located.coverage_bound >= 4_500);
     }
+}
+
+#[test]
+fn sketch_only_answers() {
+    let directory = tempfile::tempdir().unwrap();
+    let (_, query) = small_shard(directory.path());
+    let output = directory.path().join("sketch");
+    let options = BuildOptions {
+        sketch_only: true,
+        ..build_options(directory.path(), 2)
+    };
+    let inputs: Vec<EntryInput> = (0..8)
+        .map(|entry| EntryInput::from_path(directory.path().join(format!("entry{entry}.fa"))))
+        .collect();
+    build_shard(&inputs, &output, &options).unwrap();
+    let shard = Shard::open(&output).unwrap();
+    let (summary, events) = search(&shard, &query, false, &config(SearchStage::Sketch), false);
+    assert!(matches!(summary.completion, Completion::Complete));
+    assert_eq!(events.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3]);
+    let searcher = Searcher::new(&shard, miss_model()).unwrap();
+    let (sender, _receiver) = sync_channel(1);
+    let config = config(SearchStage::Locate);
+    assert!(
+        searcher
+            .search(&query, false, &config, no_stop(), &sender)
+            .is_err()
+    );
 }
 
 #[test]

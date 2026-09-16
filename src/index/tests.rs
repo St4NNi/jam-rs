@@ -452,3 +452,48 @@ fn escaped_sets_found() {
     let shard = Shard::open(&output).unwrap();
     check_every_seed(&shard, &entries);
 }
+
+#[test]
+fn sketch_only_shards() {
+    let directory = tempfile::tempdir().unwrap();
+    let entries = generated_entries(5);
+    let inputs = write_entries(directory.path(), &entries);
+    let sketch_only = |name: &str, range: std::ops::Range<usize>| {
+        let output = directory.path().join(name);
+        let options = BuildOptions {
+            sketch_only: true,
+            ..options(directory.path(), 2)
+        };
+        build_shard(&inputs[range], &output, &options).unwrap();
+        output
+    };
+    let whole = sketch_only("whole", 0..5);
+    assert!(!whole.join("packed").exists());
+    let shard = Shard::open(&whole).unwrap();
+    shard.verify().unwrap();
+    assert!(!shard.seed_file().has_locators());
+    assert_eq!(shard.stats().locator_bytes, 0);
+    assert_eq!(shard.stats().packed_bytes, 0);
+    assert!(shard.packed(0).is_err() && shard.contig_starts(0).is_err());
+    let full = directory.path().join("full");
+    build_shard(&inputs, &full, &options(directory.path(), 2)).unwrap();
+    let full_sketch = Manifest::read(&full).unwrap().sketch_part;
+    let full_bytes = std::fs::read(full.join(SEEDS_FILE)).unwrap();
+    let whole_bytes = std::fs::read(whole.join(SEEDS_FILE)).unwrap();
+    // The sketch part is the same as in a full shard; only the header and table differ.
+    let sketch = shard.manifest().sketch_part.clone();
+    assert_eq!(
+        whole_bytes[sketch.start as usize..sketch.end as usize],
+        full_bytes[full_sketch.start as usize..full_sketch.end as usize]
+    );
+    let output = directory.path().join("split");
+    let options = reshard_options(directory.path(), Split::Shards(2), PackedOutput::Link);
+    let index = reshard(std::slice::from_ref(&whole), &output, &options).unwrap();
+    for record in &index.shards {
+        let range = record.first_entry as usize..(record.first_entry + record.entries) as usize;
+        let direct = sketch_only(&format!("direct-{}", record.directory), range);
+        assert_same_shard(&direct, &output.join(&record.directory));
+    }
+    let mixed = [whole, full];
+    assert!(reshard(&mixed, &directory.path().join("mixed"), &options).is_err());
+}
