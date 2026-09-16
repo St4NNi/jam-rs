@@ -28,7 +28,7 @@ pub(super) fn expected_seeds(seeder: &Seeder, bases: f64, identity: f64) -> f64 
     bases * 2.0 / (f64::from(scheme.w) + 1.0) * identity.powi(i32::from(scheme.k))
 }
 
-/// A distinct k-mer of one piece of a batch that the sketch holds.
+/// A distinct k-mer of one piece of a batch that the sketch part holds.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct PieceSeed {
     pub hash: u64,

@@ -40,7 +40,7 @@ pub enum SearchStage {
 pub enum DropReason {
     /// The coverage bound fell below the requested query coverage.
     CoverageBound,
-    /// The positions hold none of the entry's seed hits, so there is nothing to align.
+    /// The locator part holds none of the entry's seed hits, so there is nothing to align.
     NoSeedHits,
     /// The alignments of the entry do not reach the decision rule.
     Decision,

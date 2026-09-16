@@ -278,9 +278,7 @@ impl SeedFile {
         mut visit: impl FnMut(u32, LocatorBucket<'_>) -> Result<(), IndexError>,
     ) -> Result<(), IndexError> {
         let table = self.locators.as_ref().ok_or_else(|| {
-            IndexError::Input(
-                "the shard has no locator part: it was built with the sketch only".into(),
-            )
+            IndexError::Input("the shard was built with the sketch part only".into())
         })?;
         let ranges = self.bucket_ranges(table, self.sections[4].start, buckets)?;
         self.read_ranges(&ranges, |index, bytes| {

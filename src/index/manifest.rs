@@ -107,9 +107,9 @@ pub struct Manifest {
     pub locator_part: Option<Range<u64>>,
     /// Stored seeds of the seeds file: distinct seed keys.
     pub stored_seeds: u64,
-    /// Distinct color sets of the sketch.
+    /// Distinct color sets of the seeds file.
     pub color_sets: u64,
-    /// Seed locations of the positions file.
+    /// Seed locations of all entries.
     pub seed_locations: u64,
 }
 

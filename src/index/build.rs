@@ -58,7 +58,7 @@ pub struct BuildOptions {
     /// Bucket bits to use instead of the ones chosen from the shard size, so that tests can give a
     /// small shard the buckets of a large one.
     pub bucket_bits: Option<u8>,
-    /// Threads that index entries and build the sketch.
+    /// Threads that index entries and write the seeds file.
     pub threads: usize,
     /// Directory for temporary files.
     pub temporary_directory: PathBuf,

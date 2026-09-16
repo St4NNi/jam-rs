@@ -72,7 +72,7 @@ struct ReshardArgs {
     /// Number of output shards, balanced by seed locations
     #[arg(long, group = "split")]
     shards: Option<usize>,
-    /// Most seed locations per output shard, which bounds each shard's sketch RAM
+    /// Most seed locations per output shard, which bounds the size of each seeds file
     #[arg(long, group = "split")]
     max_seed_locations: Option<u64>,
     /// Copy the packed sequences instead of linking them

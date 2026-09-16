@@ -21,7 +21,7 @@ pub struct ShardRecord {
     pub first_entry: u64,
     /// Entries of the shard.
     pub entries: u64,
-    /// Seed locations of the shard, which its sketch RAM follows.
+    /// Seed locations of the shard, which the size of its seeds file follows.
     pub seed_locations: u64,
     /// SHA-256 digest of the shard's manifest, lower case hex.
     pub manifest_sha256: String,
