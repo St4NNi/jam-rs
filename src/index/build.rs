@@ -226,11 +226,11 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryReco
         .with_max_len(1)
         .map(|&(_, index)| {
             let input = &inputs[index];
-            let mut entry = EntryBuilder::new(context);
+            let mut entry = EntryBuilder::new(context, index);
             for_each_record(&input.path, |name, sequence| {
                 entry.add_contig(name, sequence)
             })?;
-            Ok((index, entry.finish(index, input.name.clone())?))
+            Ok((index, entry.finish(input.name.clone())?))
         })
         .collect::<Result<Vec<_>, IndexError>>()?;
     built.sort_unstable_by_key(|(index, _)| *index);
@@ -249,12 +249,12 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryRe
             .enumerate()
             .with_max_len(1)
             .map(|(offset, (name, sequence))| {
-                let mut entry = EntryBuilder::new(context);
+                let mut entry = EntryBuilder::new(context, first + offset);
                 entry.add_contig(name, sequence)?;
                 // The name becomes a file name, so it is checked before the file is made.
                 let name = String::from_utf8_lossy(name).into_owned();
                 check_names(std::iter::once(name.as_str()))?;
-                entry.finish(first + offset, name)
+                entry.finish(name)
             })
             .collect::<Result<Vec<_>, IndexError>>()?;
         built.extend(entries);
@@ -276,19 +276,21 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryRe
     Ok(built)
 }
 
-/// Collects the contigs of one entry: its packed sequence and its seeds as (key, seed location).
+/// Collects the contigs of one entry: its packed sequence and its seed records.
 struct EntryBuilder<'a> {
     context: &'a Context,
+    entry: u32,
     packed: PackedWriter,
-    seeds: Vec<(u64, u32)>,
+    records: Vec<u128>,
 }
 
 impl<'a> EntryBuilder<'a> {
-    fn new(context: &'a Context) -> Self {
+    fn new(context: &'a Context, entry: usize) -> Self {
         Self {
             context,
+            entry: entry as u32,
             packed: PackedWriter::new(),
-            seeds: Vec::new(),
+            records: Vec::new(),
         }
     }
 
@@ -301,29 +303,25 @@ impl<'a> EntryBuilder<'a> {
                 "an entry has too many bases for its bins".into(),
             ));
         }
-        let seeds = &mut self.seeds;
+        let (records, entry) = (&mut self.records, self.entry);
         self.context.seeder.seeds(sequence, |seed| {
             let bin = ((start + seed.position) >> bin_bits) as u32;
             let location = SeedLocation {
                 bin,
                 reverse: seed.reverse,
             };
-            seeds.push((seed_key(seed.hash), location.value()));
+            records.push(seed_record(seed_key(seed.hash), entry, location.value()));
         });
         Ok(())
     }
 
-    /// Writes the packed sequence of entry `index` and spills its seed records.
-    fn finish(mut self, index: usize, name: String) -> Result<EntryRecord, IndexError> {
-        self.seeds.sort_unstable();
-        self.seeds.dedup();
-        let seed_locations = self.seeds.len() as u64;
-        let entry = index as u32;
-        let mut records: Vec<u128> = (self.seeds.drain(..))
-            .map(|(key, location)| seed_record(key, entry, location))
-            .collect();
-        self.context.spill.push(&mut records)?;
-        drop(records);
+    /// Writes the packed sequence of the entry and spills its seed records.
+    fn finish(mut self, name: String) -> Result<EntryRecord, IndexError> {
+        self.records.sort_unstable();
+        self.records.dedup();
+        let seed_locations = self.records.len() as u64;
+        self.context.spill.push(&mut self.records)?;
+        self.records = Vec::new();
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
         let packed = match &self.context.packed {
             Some(directory) => Some(write_packed(self.packed, directory, &name)?),
