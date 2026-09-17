@@ -90,9 +90,6 @@ pub struct BlockCache {
     /// Room in the write buffer of the disk level, in bytes. A block takes room before it is
     /// inserted and gives it back once written, so foyer never drops a write for a full buffer.
     disk_room: Option<(Arc<Semaphore>, u32)>,
-    /// Held while inserting: foyer numbers blocks before they queue for the disk level, and
-    /// its recovery stops at a number lower than the one before it.
-    insert_order: Mutex<()>,
     /// Places for hinted ranges fetched ahead, if hints fetch at all.
     read_ahead: Option<Arc<Semaphore>>,
     /// Hinted ranges fetched or waiting for a place; each holds one until it ends.
@@ -147,7 +144,6 @@ impl BlockCache {
             block_bytes,
             disk_lock: lock,
             disk_room,
-            insert_order: Mutex::default(),
             read_ahead: (config.read_ahead > 0)
                 .then(|| Arc::new(Semaphore::new(config.read_ahead))),
             hints: Arc::new(Semaphore::new(config.read_ahead * HINTS_PER_PLACE)),
@@ -310,12 +306,10 @@ impl BlockCache {
         let mut bytes = vec![0; (stop - start) as usize];
         inner.read_exact_at(start, &mut bytes)?;
         let room = self.disk_room(bytes.len() as u64 + run.len() as u64 * DISK_OVERHEAD);
-        let order = lock(&self.insert_order);
         for (at, chunk) in bytes.chunks(self.block_bytes as usize).enumerate() {
             let key = self.key(file, first + at as u64);
             run[at] = Some(self.blocks.insert(key, chunk.to_vec()));
         }
-        drop(order);
         if let Some(room) = room {
             // The room comes back once foyer has written everything inserted so far.
             let blocks = self.blocks.clone();
