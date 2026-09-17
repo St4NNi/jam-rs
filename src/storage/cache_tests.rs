@@ -141,6 +141,28 @@ fn read_ahead_fills() {
 }
 
 #[test]
+fn hints_stay_bounded() {
+    let data = random_bytes(&mut rng(11), 1 << 20);
+    let config = CacheConfig {
+        read_ahead: 1,
+        ..CacheConfig::new(1 << 20, 4096)
+    };
+    let mut source = Watched::new(data.clone());
+    source.delay = Duration::from_millis(20);
+    let reads = Arc::clone(&source.reads);
+    let cache = BlockCache::open(&config, runtime()).unwrap();
+    let cached = cache.wrap(Arc::new(source), DIGEST).unwrap();
+    // Each hint is one batch; the fifth waits until the first has been fetched.
+    for batch in 0..5u64 {
+        cached.will_need(batch * FILL_BLOCKS * 4096, 4096);
+    }
+    assert!(reads.load(Ordering::SeqCst) >= 1);
+    wait_until(&reads, 5);
+    cache.close().unwrap();
+    assert_eq!(cache.hints.available_permits(), HINTS_PER_PLACE);
+}
+
+#[test]
 fn reads_join_fetches() {
     let data = random_bytes(&mut rng(10), 1 << 20);
     let config = CacheConfig {

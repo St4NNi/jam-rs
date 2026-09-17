@@ -36,6 +36,9 @@ const DISK_MIN_BUFFER: u64 = 16 << 20;
 /// Bytes that one block takes in a write buffer of the disk level at most, besides its data:
 /// a header and the key, padded to a page.
 const DISK_OVERHEAD: u64 = 4096;
+/// Hinted ranges per place that may be fetched or wait for a place; a further hint waits until
+/// one of them ends, so hints never pile up without bound.
+const HINTS_PER_PLACE: usize = 4;
 /// The file in the disk level directory that one process locks while it uses the directory.
 const LOCK_FILE: &str = "lock";
 
@@ -92,8 +95,10 @@ pub struct BlockCache {
     insert_order: Mutex<()>,
     /// Places for hinted ranges fetched ahead, if hints fetch at all.
     read_ahead: Option<Arc<Semaphore>>,
-    /// The number of places for hinted ranges.
-    places: usize,
+    /// Hinted ranges fetched or waiting for a place; each holds one until it ends.
+    hints: Arc<Semaphore>,
+    /// The most hinted ranges fetched or waiting at once.
+    most_hints: usize,
     /// Blocks being fetched now, so another read waits for them instead of asking again.
     in_flight: Mutex<HashMap<BlockKey, Arc<Fetch>>>,
     runtime: Handle,
@@ -145,7 +150,8 @@ impl BlockCache {
             insert_order: Mutex::default(),
             read_ahead: (config.read_ahead > 0)
                 .then(|| Arc::new(Semaphore::new(config.read_ahead))),
-            places: config.read_ahead,
+            hints: Arc::new(Semaphore::new(config.read_ahead * HINTS_PER_PLACE)),
+            most_hints: config.read_ahead * HINTS_PER_PLACE,
             in_flight: Mutex::default(),
             runtime,
         }))
@@ -173,7 +179,8 @@ impl BlockCache {
     pub fn close(&self) -> Result<(), StorageError> {
         if let Some(places) = &self.read_ahead {
             places.close();
-            while places.available_permits() < self.places {
+            self.hints.close();
+            while self.hints.available_permits() < self.most_hints {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         }
@@ -380,12 +387,16 @@ impl ReadAt for CachedSource {
             let stop = last.min(start + FILL_BLOCKS - 1);
             let (inner, file, cache) = (Arc::clone(&self.inner), self.file, Arc::clone(cache));
             let places = Arc::clone(places);
+            let hints = Arc::clone(&cache.hints);
+            let Ok(hint) = cache.runtime.block_on(hints.acquire_owned()) else {
+                return;
+            };
             cache.runtime.clone().spawn(async move {
                 let Ok(place) = places.acquire_owned().await else {
                     return;
                 };
                 let fetch = move || {
-                    let _place = place;
+                    let _hold = (place, hint);
                     // A failed hint only means the read fetches the blocks and reports the error.
                     let _ = cache.fill(inner.as_ref(), file, start, stop, false);
                 };
