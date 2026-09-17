@@ -240,6 +240,45 @@ fn disk_outlives_process() {
 }
 
 #[test]
+fn burst_reaches_disk() {
+    let data = random_bytes(&mut rng(7), 64 << 20);
+    let directory = tempfile::tempdir().unwrap();
+    // Far more blocks than the write buffer holds arrive at once from many threads.
+    let config = CacheConfig {
+        disk: Some(DiskConfig {
+            directory: directory.path().into(),
+            bytes: 256 << 20,
+        }),
+        ..CacheConfig::new(1 << 20, 64 << 10)
+    };
+    let cache = BlockCache::open(&config, runtime()).unwrap();
+    let cached = cache.wrap(Arc::new(data.clone()), DIGEST).unwrap();
+    let part = data.len() / 8;
+    std::thread::scope(|scope| {
+        for thread in 0..8 {
+            let cached = &cached;
+            scope.spawn(move || {
+                let mut out = vec![0; part];
+                cached
+                    .read_exact_at((thread * part) as u64, &mut out)
+                    .unwrap();
+            });
+        }
+    });
+    cache.close().unwrap();
+    drop((cached, cache));
+    // The next open finds every block on disk.
+    let cache = BlockCache::open(&config, runtime()).unwrap();
+    let source = Watched::new(data.clone());
+    let reads = Arc::clone(&source.reads);
+    let cached = cache.wrap(Arc::new(source), DIGEST).unwrap();
+    let mut out = vec![0; data.len()];
+    cached.read_exact_at(0, &mut out).unwrap();
+    assert!(out == data);
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn parallel_readers_agree() {
     let data = random_bytes(&mut rng(5), 1 << 20);
     let cached = cache(256 << 10, 4096)

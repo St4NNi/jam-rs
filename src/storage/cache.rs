@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use tokio::runtime::Handle;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// The largest block size, so that a fetched run of blocks stays small.
 const MAX_BLOCK_BYTES: u64 = 1 << 20;
@@ -31,11 +31,11 @@ const MIN_CHARGE: usize = 256;
 const DISK_WRITERS: u64 = 4;
 /// RAM of the write buffers of the disk level, at most a sixteenth of the disk level.
 const DISK_BUFFER: u64 = 128 << 20;
-/// Bytes of blocks that may wait to be written to the disk level, at most a quarter of it;
-/// further blocks are not written. Fetches come in bursts of hundreds of MiB.
-const DISK_QUEUE: u64 = 1 << 30;
-/// The smallest write buffers and queue, the defaults of foyer.
-const DISK_MIN_QUEUE: u64 = 16 << 20;
+/// The smallest write buffers, the default of foyer.
+const DISK_MIN_BUFFER: u64 = 16 << 20;
+/// Bytes that one block takes in a write buffer of the disk level at most, besides its data:
+/// a header and the key, padded to a page.
+const DISK_OVERHEAD: u64 = 4096;
 /// The file in the disk level directory that one process locks while it uses the directory.
 const LOCK_FILE: &str = "lock";
 
@@ -84,6 +84,12 @@ pub struct BlockCache {
     /// The lock of the disk level directory, held while the cache is open; `None` without a
     /// disk level.
     disk_lock: Option<File>,
+    /// Room in the write buffer of the disk level, in bytes. A block takes room before it is
+    /// inserted and gives it back once written, so foyer never drops a write for a full buffer.
+    disk_room: Option<(Arc<Semaphore>, u32)>,
+    /// Held while inserting: foyer numbers blocks before they queue for the disk level, and
+    /// its recovery stops at a number lower than the one before it.
+    insert_order: Mutex<()>,
     /// Places for hinted ranges fetched ahead, if hints fetch at all.
     read_ahead: Option<Arc<Semaphore>>,
     /// The number of places for hinted ranges.
@@ -109,19 +115,24 @@ impl BlockCache {
             .with_weighter(|_: &BlockKey, block: &Vec<u8>| block.len().max(MIN_CHARGE))
             .storage()
             .with_spawner(Spawner::from(runtime.clone()));
-        let mut lock = None;
+        let (mut lock, mut disk_room) = (None, None);
         if let Some(disk) = &config.disk {
             lock = Some(lock_directory(disk)?);
             let device = FsDeviceBuilder::new(&disk.directory)
                 .with_capacity(disk.bytes as usize)
                 .build()?;
+            let writers = (disk.bytes >> 30).clamp(1, DISK_WRITERS);
+            let buffers = (disk.bytes / 16).clamp(DISK_MIN_BUFFER, DISK_BUFFER);
+            // Each writer has a buffer of its share; all room fits the buffer of one writer.
+            let room = u32::try_from(buffers / writers).unwrap_or(u32::MAX);
+            disk_room = Some((Arc::new(Semaphore::new(room as usize)), room));
             storage = storage
                 .with_io_engine_config(PsyncIoEngineConfig::new())
                 .with_engine_config(
                     BlockEngineConfig::new(device)
-                        .with_flushers((disk.bytes >> 30).clamp(1, DISK_WRITERS) as usize)
-                        .with_buffer_pool_size(disk_share(disk.bytes / 16, DISK_BUFFER))
-                        .with_submit_queue_size_threshold(disk_share(disk.bytes / 4, DISK_QUEUE)),
+                        .with_flushers(writers as usize)
+                        .with_buffer_pool_size(buffers as usize)
+                        .with_submit_queue_size_threshold(buffers as usize),
                 )
                 .with_recover_mode(RecoverMode::Quiet);
         }
@@ -130,6 +141,8 @@ impl BlockCache {
             blocks,
             block_bytes,
             disk_lock: lock,
+            disk_room,
+            insert_order: Mutex::default(),
             read_ahead: (config.read_ahead > 0)
                 .then(|| Arc::new(Semaphore::new(config.read_ahead))),
             places: config.read_ahead,
@@ -289,11 +302,31 @@ impl BlockCache {
         let stop = ((first + run.len() as u64) * self.block_bytes).min(inner.size());
         let mut bytes = vec![0; (stop - start) as usize];
         inner.read_exact_at(start, &mut bytes)?;
+        let room = self.disk_room(bytes.len() as u64 + run.len() as u64 * DISK_OVERHEAD);
+        let order = lock(&self.insert_order);
         for (at, chunk) in bytes.chunks(self.block_bytes as usize).enumerate() {
             let key = self.key(file, first + at as u64);
             run[at] = Some(self.blocks.insert(key, chunk.to_vec()));
         }
+        drop(order);
+        if let Some(room) = room {
+            // The room comes back once foyer has written everything inserted so far.
+            let blocks = self.blocks.clone();
+            self.runtime.spawn(async move {
+                blocks.storage().wait().await;
+                drop(room);
+            });
+        }
         Ok(())
+    }
+
+    /// Takes `bytes` of room in the write buffer of the disk level, waiting while it is full.
+    /// `None` without a disk level.
+    fn disk_room(&self, bytes: u64) -> Option<OwnedSemaphorePermit> {
+        let (room, most) = self.disk_room.as_ref()?;
+        let bytes = u32::try_from(bytes).unwrap_or(u32::MAX).min(*most);
+        let room = Arc::clone(room);
+        self.runtime.block_on(room.acquire_many_owned(bytes)).ok()
     }
 }
 
@@ -397,11 +430,6 @@ impl Drop for Claim<'_> {
         *lock(&self.fetch.done) = true;
         self.fetch.finished.notify_all();
     }
-}
-
-/// `share` bytes of the disk level, at least the foyer default and at most `most`.
-fn disk_share(share: u64, most: u64) -> usize {
-    share.clamp(DISK_MIN_QUEUE, most) as usize
 }
 
 /// Locks the disk level directory for this process, creating it if needed.
