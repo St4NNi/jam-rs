@@ -96,11 +96,16 @@ struct WarmArgs {
     /// Disk for pins and the block cache, for example 200GiB
     #[arg(long)]
     disk: ByteSize,
-    /// A part to pin instead of the default plan: sketch, locators, packed, or
-    /// packed=NAME,NAME for some entries. Repeat for more parts
-    #[arg(long, value_parser = parse_part)]
-    pin: Vec<Part>,
+    /// Parts to pin instead of the default plan, as a comma list of sketch, locators, packed,
+    /// or packed=NAME,NAME for some entries: every item after packed= is an entry name, so it
+    /// comes last. The flag may repeat
+    #[arg(long, value_parser = parse_parts)]
+    pin: Vec<Parts>,
 }
+
+/// The parts of one `--pin` value.
+#[derive(Clone, Debug, PartialEq)]
+struct Parts(Vec<Part>);
 
 /// Options of the build and reshard subcommands.
 #[derive(Debug, Args)]
@@ -145,7 +150,8 @@ fn run_warm(args: &WarmArgs) -> Result<(), CliError> {
     };
     let (manifest, digest) = location.manifest().map_err(failed)?;
     let (memory, disk) = (args.memory.as_u64(), args.disk.as_u64());
-    let plan = Plan::choose(&manifest, &digest, memory, disk, &args.pin)?;
+    let parts: Vec<Part> = args.pin.iter().flat_map(|parts| parts.0.clone()).collect();
+    let plan = Plan::choose(&manifest, &digest, memory, disk, &parts)?;
     for line in plan_lines(&plan) {
         println!("{line}");
     }
@@ -183,19 +189,33 @@ fn plan_lines(plan: &Plan) -> Vec<String> {
     lines
 }
 
-/// A part of `--pin`: `sketch`, `locators`, `packed` or `packed=NAME,NAME`.
-fn parse_part(text: &str) -> Result<Part, String> {
-    match text.split_once('=') {
-        None if text == "sketch" => Ok(Part::Sketch),
-        None if text == "locators" => Ok(Part::Locators),
-        None if text == "packed" => Ok(Part::Packed(None)),
-        Some(("packed", names)) if !names.is_empty() => Ok(Part::Packed(Some(
-            names.split(',').map(str::to_string).collect(),
-        ))),
-        _ => Err(format!(
-            "{text:?} is not sketch, locators, packed or packed=NAME,NAME"
-        )),
+/// The parts of a `--pin` value: a comma list of `sketch`, `locators` and `packed`, which may
+/// end with `packed=NAME,NAME`; every item after `packed=` is an entry name.
+fn parse_parts(text: &str) -> Result<Parts, String> {
+    let mut parts = Vec::new();
+    let mut items = text.split(',');
+    while let Some(item) = items.next() {
+        parts.push(match item.split_once('=') {
+            None if item == "sketch" => Part::Sketch,
+            None if item == "locators" => Part::Locators,
+            None if item == "packed" => Part::Packed(None),
+            Some(("packed", first)) => {
+                let names: Vec<String> = (std::iter::once(first).chain(items.by_ref()))
+                    .map(str::to_string)
+                    .collect();
+                if names.iter().any(String::is_empty) {
+                    return Err(format!("{text:?} has an empty entry name"));
+                }
+                Part::Packed(Some(names))
+            }
+            _ => {
+                return Err(format!(
+                    "{item:?} is not sketch, locators, packed or packed=NAME,NAME"
+                ));
+            }
+        });
     }
+    Ok(Parts(parts))
 }
 
 fn run_build(args: &BuildArgs) -> Result<(), CliError> {
@@ -283,16 +303,53 @@ fn summary_line(output: &Path, manifest: &Manifest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
 
     #[test]
     fn pin_parts_parsed() {
-        assert_eq!(parse_part("sketch"), Ok(Part::Sketch));
-        assert_eq!(parse_part("locators"), Ok(Part::Locators));
-        assert_eq!(parse_part("packed"), Ok(Part::Packed(None)));
+        let parts = |text| parse_parts(text).map(|parts| parts.0);
+        assert_eq!(parts("sketch"), Ok(vec![Part::Sketch]));
+        assert_eq!(parts("locators"), Ok(vec![Part::Locators]));
+        assert_eq!(parts("packed"), Ok(vec![Part::Packed(None)]));
+        let all = vec![Part::Sketch, Part::Locators, Part::Packed(None)];
+        assert_eq!(parts("sketch,locators,packed"), Ok(all));
         let named = Part::Packed(Some(vec!["a".into(), "b".into()]));
-        assert_eq!(parse_part("packed=a,b"), Ok(named));
-        for bad in ["packed=", "seeds", "sketch=a"] {
-            assert!(parse_part(bad).is_err(), "{bad}");
+        assert_eq!(parts("packed=a,b"), Ok(vec![named.clone()]));
+        assert_eq!(parts("sketch,packed=a,b"), Ok(vec![Part::Sketch, named]));
+        // Items after packed= are entry names, even one named like a part.
+        let named = Part::Packed(Some(vec!["a".into(), "sketch".into()]));
+        assert_eq!(parts("packed=a,sketch"), Ok(vec![named]));
+        for bad in ["packed=", "packed=a,,b", "seeds", "sketch=a", "sketch,", ""] {
+            assert!(parse_parts(bad).is_err(), "{bad}");
         }
+        // The flag repeats, and each value may list several parts.
+        let parsed = Cli::try_parse_from([
+            "jam",
+            "index",
+            "warm",
+            "s3://b/s",
+            "--cache",
+            "c",
+            "--memory",
+            "1GiB",
+            "--disk",
+            "1GiB",
+            "--pin",
+            "sketch,locators",
+            "--pin",
+            "packed=a",
+        ]);
+        let Ok(Cli {
+            command: Command::Index(args),
+        }) = parsed
+        else {
+            panic!("--pin did not parse");
+        };
+        let IndexCommand::Warm(warm) = args.command else {
+            panic!("not warm");
+        };
+        assert_eq!(warm.pin.len(), 2);
+        assert_eq!(warm.pin[0].0, [Part::Sketch, Part::Locators]);
     }
 }
