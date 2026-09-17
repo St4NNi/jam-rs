@@ -416,9 +416,13 @@ fn pins_read_locally() {
         pins: Some(cache),
         ..ShardOptions::default()
     };
-    let shard = Shard::open_with(&location, &options).unwrap();
+    // The manifest read to find the plan also opens the shard: one request for it.
+    let (manifest, digest) = location.manifest().unwrap();
+    let shard = Shard::open_with_manifest(&location, &options, manifest, digest).unwrap();
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
+    let manifests = asked.iter().filter(|key| key.ends_with("manifest.json"));
+    assert_eq!(manifests.count(), 1);
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
     let pinned = ["shard/seeds", "shard/packed/entry1.packed"];
     assert!(asked.iter().all(|key| !pinned.contains(&key.as_str())));

@@ -66,8 +66,19 @@ impl Shard {
     /// Opens the shard at `location` as `options` say. Only headers and sizes are checked;
     /// `verify` reads everything.
     pub fn open_with(location: &Location, options: &ShardOptions) -> Result<Self, IndexError> {
-        let started = Instant::now();
         let (manifest, digest) = location.manifest()?;
+        Self::open_with_manifest(location, options, manifest, digest)
+    }
+
+    /// Opens the shard at `location` as `options` say, with its manifest already read and the
+    /// SHA-256 digest of the manifest file.
+    pub fn open_with_manifest(
+        location: &Location,
+        options: &ShardOptions,
+        manifest: Manifest,
+        digest: String,
+    ) -> Result<Self, IndexError> {
+        let started = Instant::now();
         let files = ShardFiles::new(location, options, manifest.entries.len(), &digest)?;
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;

@@ -77,20 +77,23 @@ impl ShardStorage {
         args: &CacheArgs,
     ) -> Result<Vec<Shard>, CliError> {
         let mut plans = Vec::new();
-        let mut locations = Vec::new();
+        let mut opened = Vec::new();
         for path in paths {
+            let failed = |source| CliError::Shard {
+                path: path.clone(),
+                source,
+            };
             let location = self.location(path)?;
-            if let (Location::S3 { .. }, Some(cache)) = (&location, &args.cache) {
-                let failed = |source| CliError::Shard {
-                    path: path.clone(),
-                    source,
-                };
-                let (_, digest) = location.manifest().map_err(failed)?;
-                plans.extend(Plan::read(cache, &digest).map_err(failed)?);
+            let manifest = match location {
+                Location::S3 { .. } => Some(location.manifest().map_err(failed)?),
+                Location::Directory(_) => None,
+            };
+            if let (Some((_, digest)), Some(cache)) = (&manifest, &args.cache) {
+                plans.extend(Plan::read(cache, digest).map_err(failed)?);
             }
-            locations.push(location);
+            opened.push((path, location, manifest));
         }
-        if locations.iter().any(|at| matches!(at, Location::S3 { .. })) {
+        if opened.iter().any(|(_, _, manifest)| manifest.is_some()) {
             self.cache = Some(self.block_cache(&plans, args)?);
         }
         let options = ShardOptions {
@@ -98,17 +101,19 @@ impl ShardStorage {
             pins: args.cache.clone(),
             ..ShardOptions::default()
         };
-        let open = |(path, location): (&PathBuf, Location)| {
-            let options = match location {
-                Location::Directory(_) => ShardOptions::default(),
-                Location::S3 { .. } => options.clone(),
+        let open = |(path, location, manifest): (&PathBuf, Location, _)| {
+            let shard = match manifest {
+                None => Shard::open_with(&location, &ShardOptions::default()),
+                Some((manifest, digest)) => {
+                    Shard::open_with_manifest(&location, &options, manifest, digest)
+                }
             };
-            Shard::open_with(&location, &options).map_err(|source| CliError::Shard {
+            shard.map_err(|source| CliError::Shard {
                 path: path.clone(),
                 source,
             })
         };
-        paths.iter().zip(locations).map(open).collect()
+        opened.into_iter().map(open).collect()
     }
 
     /// The block cache with the budgets of the command line, else of the plans, less their pins.
