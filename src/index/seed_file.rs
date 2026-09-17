@@ -19,11 +19,16 @@ pub const SEEDS_FILE: &str = "seeds";
 /// Bits of a seed's hash that the seeds file keeps: the bucket bits, then the check value.
 pub const SEED_KEY_BITS: u32 = 44;
 
-/// The key of a seed or query k-mer: the low `SEED_KEY_BITS` bits of its hash. Seeds are the
-/// smallest hashes of their minimizer windows, so their high bits crowd near zero while the
-/// low bits spread evenly over the buckets.
+/// Bits of the top `SEED_KEY_BITS` bits of a hash that move to the end of the key.
+const KEY_TAIL_BITS: u32 = SEED_KEY_BITS - MAX_BUCKET_BITS as u32;
+
+/// The key of a seed or query k-mer: the top `SEED_KEY_BITS` bits of its hash, with their first
+/// `KEY_TAIL_BITS` bits moved to the end. Seeds are the smallest hashes of their minimizer
+/// windows, so the first bits crowd near zero; the bits after them select even buckets.
 pub fn seed_key(hash: u64) -> u64 {
-    hash & ((1 << SEED_KEY_BITS) - 1)
+    let top = hash >> (64 - SEED_KEY_BITS);
+    let tail = top >> (SEED_KEY_BITS - KEY_TAIL_BITS);
+    ((top << KEY_TAIL_BITS) & ((1 << SEED_KEY_BITS) - 1)) | tail
 }
 
 pub(crate) const MAGIC: [u8; 16] = *b"jam seeds\0\0\0\0\0\0\0";
