@@ -68,10 +68,9 @@ impl ShardStorage {
         })
     }
 
-    /// Opens the shards at `paths`. Shards on S3 read the pins of their plans in the cache
-    /// directory and everything else through one block cache, which gets the budgets that the
-    /// pins of all plans leave. With `warm_unplanned` set, a shard without a plan is first
-    /// warmed with the default plan when `--disk` is given, as a server answers many searches.
+    /// Opens the shards at `paths`: pins of their plans from the cache directory, the rest
+    /// through one block cache with the budgets the pins leave. With `warm_unplanned`, a shard
+    /// without a plan first gets the default plan if `--disk` is given (for a server).
     pub(super) fn open_all(
         &mut self,
         paths: &[PathBuf],
