@@ -40,13 +40,17 @@ struct Prepared {
     support: Vec<Interval>,
     support_bases: u64,
     counts: EditCounts,
+    /// Whether the fragment reaches the identity limit of the rule.
+    reaches_identity: bool,
 }
 
-/// Builds the mosaic of `fragments`, best score first: a fragment is primary when it covers a
-/// query base no earlier fragment covers. The input order does not matter; duplicates count once.
+/// Builds the mosaic of `fragments`: a fragment is primary when it covers a query base no earlier
+/// fragment covers. Fragments at `min_identity` come first, so a conserved copy wins over a
+/// diverged one; then the best score. The input order does not matter; duplicates count once.
 pub(super) fn build_mosaic(
     query_length: u64,
     fragments: &[Fragment],
+    min_identity: f64,
 ) -> Result<Mosaic, DecideError> {
     if query_length == 0 {
         return Err(DecideError::EmptyQuery);
@@ -55,11 +59,13 @@ pub(super) fn build_mosaic(
         .iter()
         .map(|fragment| {
             let support = covered_intervals(query_length, fragment)?;
+            let counts = fragment.alignment.counts();
             Ok(Prepared {
                 fragment: fragment.clone(),
                 support_bases: Interval::total_length(&support),
                 support,
-                counts: fragment.alignment.counts(),
+                counts,
+                reaches_identity: counts.reaches_identity(min_identity),
             })
         })
         .collect::<Result<Vec<_>, DecideError>>()?;
@@ -92,14 +98,15 @@ pub(super) fn build_mosaic(
     })
 }
 
-/// Best first: higher score, more support, more matches, fewer edits. The remaining fields only
-/// break ties, so that the mosaic does not depend on the input order.
+/// Best first: at the identity limit, higher score, more support, more matches, fewer edits. The
+/// remaining fields only break ties, so that the mosaic does not depend on the input order.
 fn compare_fragments(left: &Prepared, right: &Prepared) -> Ordering {
     let (a, b) = (&left.fragment, &right.fragment);
     let edits = |counts: EditCounts| counts.substitutions + counts.insertions + counts.deletions;
-    b.alignment
-        .score
-        .cmp(&a.alignment.score)
+    right
+        .reaches_identity
+        .cmp(&left.reaches_identity)
+        .then_with(|| b.alignment.score.cmp(&a.alignment.score))
         .then_with(|| right.support_bases.cmp(&left.support_bases))
         .then_with(|| right.counts.matches.cmp(&left.counts.matches))
         .then_with(|| edits(left.counts).cmp(&edits(right.counts)))
@@ -246,14 +253,14 @@ mod tests {
     #[test]
     fn insertions_leave_gaps() {
         // 2= 1I 2=: the middle query base has no contig base.
-        let mosaic = build_mosaic(5, &[scored(0, 7, &[(0, 5)], "2=1I2=")]).unwrap();
+        let mosaic = build_mosaic(5, &[scored(0, 7, &[(0, 5)], "2=1I2=")], 0.0).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert_eq!(mosaic.gaps, [interval(2, 3)]);
     }
 
     #[test]
     fn deletions_take_nothing() {
-        let mosaic = build_mosaic(4, &[scored(0, 7, &[(0, 4)], "2=3D2=")]).unwrap();
+        let mosaic = build_mosaic(4, &[scored(0, 7, &[(0, 4)], "2=3D2=")], 0.0).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert!(mosaic.gaps.is_empty());
     }
@@ -265,7 +272,7 @@ mod tests {
             equal_fragment(1, 8, 4, 10),
             equal_fragment(0, 10, 0, 6),
         ];
-        let mosaic = build_mosaic(10, &input).unwrap();
+        let mosaic = build_mosaic(10, &input, 0.0).unwrap();
         assert_eq!(mosaic.covered_bases, 10);
         assert_eq!(mosaic.primary.len(), 2);
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
@@ -273,7 +280,21 @@ mod tests {
         assert_eq!(mosaic.alternatives.len(), 1);
         let mut reversed = input.to_vec();
         reversed.reverse();
-        assert_eq!(build_mosaic(10, &reversed).unwrap(), mosaic);
+        assert_eq!(build_mosaic(10, &reversed, 0.0).unwrap(), mosaic);
+    }
+
+    #[test]
+    fn conserved_copy_primary() {
+        let conserved = scored(0, 100, &[(0, 1000)], "1000=");
+        let diverged = scored(1, 200, &[(0, 1000)], "900=100X");
+        let input = [diverged, conserved];
+        let mosaic = build_mosaic(1000, &input, 0.95).unwrap();
+        assert_eq!(mosaic.primary.len(), 1);
+        assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
+        assert_eq!(mosaic.alternatives[0].contig_index, 1);
+        // Without a limit the higher score wins.
+        let mosaic = build_mosaic(1000, &input, 0.0).unwrap();
+        assert_eq!(mosaic.primary[0].fragment.contig_index, 1);
     }
 
     #[test]
@@ -281,20 +302,20 @@ mod tests {
         let mut a = equal_fragment(0, 100, 0, 30);
         let mut b = equal_fragment(1, 100, 30, 60);
         b.alignment.strand = Strand::Reverse;
-        let combined = build_mosaic(101, &[a.clone(), b.clone(), a.clone(), b]).unwrap();
+        let combined = build_mosaic(101, &[a.clone(), b.clone(), a.clone(), b], 0.0).unwrap();
         assert_eq!(combined.covered_bases, 60);
         assert_eq!(combined.primary.len(), 2);
         assert!(combined.alternatives.is_empty());
         assert_eq!(combined.query_length, 101);
         a.contig_index = 5;
-        let one = build_mosaic(101, &[a]).unwrap();
+        let one = build_mosaic(101, &[a], 0.0).unwrap();
         assert_eq!(one.covered_bases, 30);
     }
 
     #[test]
     fn wrap_covers_ends() {
         let wrapped = scored(0, 8, &[(8, 10), (0, 2)], "4=");
-        let mosaic = build_mosaic(10, &[wrapped]).unwrap();
+        let mosaic = build_mosaic(10, &[wrapped], 0.0).unwrap();
         assert_eq!(mosaic.covered_intervals, [interval(0, 2), interval(8, 10)]);
         assert_eq!(mosaic.gaps, [interval(2, 8)]);
     }
@@ -302,7 +323,7 @@ mod tests {
     #[test]
     fn wrap_insertions_uncovered() {
         let wrapped = scored(0, 8, &[(8, 10), (0, 3)], "1=1I1=1I1=");
-        let mosaic = build_mosaic(10, &[wrapped]).unwrap();
+        let mosaic = build_mosaic(10, &[wrapped], 0.0).unwrap();
         assert_eq!(
             mosaic.covered_intervals,
             [interval(0, 1), interval(2, 3), interval(8, 9)]
@@ -311,20 +332,20 @@ mod tests {
 
     #[test]
     fn bad_fragments_fail() {
-        assert_eq!(build_mosaic(0, &[]), Err(DecideError::EmptyQuery));
+        assert_eq!(build_mosaic(0, &[], 0.0), Err(DecideError::EmptyQuery));
         let outside = scored(0, 1, &[(5, 12)], "7=");
         assert_eq!(
-            build_mosaic(10, &[outside]),
+            build_mosaic(10, &[outside], 0.0),
             Err(DecideError::InvalidQuerySegments)
         );
         let overlap = scored(0, 1, &[(0, 4), (3, 6)], "7=");
         assert_eq!(
-            build_mosaic(10, &[overlap]),
+            build_mosaic(10, &[overlap], 0.0),
             Err(DecideError::InvalidQuerySegments)
         );
         let short = scored(0, 1, &[(0, 4)], "5=");
         assert_eq!(
-            build_mosaic(10, &[short]),
+            build_mosaic(10, &[short], 0.0),
             Err(DecideError::QuerySpanMismatch)
         );
     }

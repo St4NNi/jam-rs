@@ -22,7 +22,7 @@ pub struct ScreenEntry {
     /// Bases of the entry contig covered by the mosaic, and their share of it.
     pub covered_bases: u64,
     pub query_coverage: f64,
-    /// Matches over alignment columns of the counted fragments together.
+    /// Matches over alignment columns of the primary fragments together.
     pub identity: f64,
     pub matches: u64,
     pub substitutions: u64,
