@@ -82,3 +82,11 @@ panic = "abort"
 
 [dev-dependencies]
 rand = "0.10.3"
+
+# foyer with a fix for its disk level recovery, which lost blocks inserted from parallel threads.
+[patch.crates-io]
+foyer = { git = "https://github.com/St4NNi/foyer", rev = "e4e6c37cd009381aecc233b395b6db9780f5461b" }
+foyer-common = { git = "https://github.com/St4NNi/foyer", rev = "e4e6c37cd009381aecc233b395b6db9780f5461b" }
+foyer-memory = { git = "https://github.com/St4NNi/foyer", rev = "e4e6c37cd009381aecc233b395b6db9780f5461b" }
+foyer-storage = { git = "https://github.com/St4NNi/foyer", rev = "e4e6c37cd009381aecc233b395b6db9780f5461b" }
+foyer-tokio = { git = "https://github.com/St4NNi/foyer", rev = "e4e6c37cd009381aecc233b395b6db9780f5461b" }

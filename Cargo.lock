@@ -994,8 +994,7 @@ dependencies = [
 [[package]]
 name = "foyer"
 version = "0.22.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a59f42276891c0a4ce683fcda1aa1b4fd1065d68116c264e4bf49b9d318a0ed"
+source = "git+https://github.com/St4NNi/foyer?rev=e4e6c37cd009381aecc233b395b6db9780f5461b#e4e6c37cd009381aecc233b395b6db9780f5461b"
 dependencies = [
  "anyhow",
  "asyncband",
@@ -1014,8 +1013,7 @@ dependencies = [
 [[package]]
 name = "foyer-common"
 version = "0.22.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "643b47d510032a01e5af70dca288b0c5ec531646c1a8392e793fb5b0c13bef30"
+source = "git+https://github.com/St4NNi/foyer?rev=e4e6c37cd009381aecc233b395b6db9780f5461b#e4e6c37cd009381aecc233b395b6db9780f5461b"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1039,8 +1037,7 @@ dependencies = [
 [[package]]
 name = "foyer-memory"
 version = "0.22.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae51f5089f3d9025ae77f17ea66d2489ac0f82fbb1d91462807bea174d486d82"
+source = "git+https://github.com/St4NNi/foyer?rev=e4e6c37cd009381aecc233b395b6db9780f5461b#e4e6c37cd009381aecc233b395b6db9780f5461b"
 dependencies = [
  "anyhow",
  "asyncband",
@@ -1064,8 +1061,7 @@ dependencies = [
 [[package]]
 name = "foyer-storage"
 version = "0.22.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "118192f532ba013f0cdc607efc22324b9ed855baed185608af0daa986e835c6b"
+source = "git+https://github.com/St4NNi/foyer?rev=e4e6c37cd009381aecc233b395b6db9780f5461b#e4e6c37cd009381aecc233b395b6db9780f5461b"
 dependencies = [
  "allocator-api2",
  "anyhow",
@@ -1096,8 +1092,7 @@ dependencies = [
 [[package]]
 name = "foyer-tokio"
 version = "0.22.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6741d1133dfaab64d3f8a9290bbfed3685084add28f8b6ee7a6264aa4dc26918"
+source = "git+https://github.com/St4NNi/foyer?rev=e4e6c37cd009381aecc233b395b6db9780f5461b#e4e6c37cd009381aecc233b395b6db9780f5461b"
 dependencies = [
  "tokio",
 ]
