@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::rule::RuleArgs;
+use super::storage::{CacheArgs, ShardStorage};
 use super::{CliError, output_writer, read_list};
-use crate::index::Shard;
 use crate::screen::{AssemblyFailure, AssemblySummary, ScreenConfig, ScreenEntry, Screener};
 use crate::search::{SearchControl, Stopped};
 use clap::Args;
@@ -19,7 +19,7 @@ const RECORD_QUEUE: usize = 64;
 /// The options of `jam screen`.
 #[derive(Debug, Args)]
 pub struct ScreenArgs {
-    /// The shard of the small sequences to look for
+    /// The shard of the small sequences to look for: a directory or s3://bucket/prefix
     index: PathBuf,
     /// A file with one assembly path per line (plain or gzip FASTA); the file name names the
     /// assembly
@@ -66,10 +66,13 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
         survey_only: args.survey_only,
         ..ScreenConfig::new(args.rule.rule())
     };
-    let shard = Shard::open(&args.index).map_err(|source| CliError::Shard {
-        path: args.index.clone(),
-        source,
-    })?;
+    // A shard on S3 is read through a block cache in RAM.
+    let mut storage = ShardStorage::new()?;
+    let paths = std::slice::from_ref(&args.index);
+    let mut shards = storage.open_all(paths, &CacheArgs::default(), false)?;
+    let shard = shards
+        .pop()
+        .ok_or_else(|| CliError::Usage("no shard".into()))?;
     let screener = Screener::new(&shard, config)?;
     let assemblies = read_list(&args.assemblies)?;
     let threads = match args.threads {

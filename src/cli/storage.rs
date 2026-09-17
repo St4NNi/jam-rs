@@ -24,7 +24,7 @@ const READ_AHEAD: usize = 256;
 const BLOCKS_DIRECTORY: &str = "blocks";
 
 /// Where shards on S3 keep parts locally.
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub(super) struct CacheArgs {
     /// A cache directory, warmed by `jam index warm`: shards on S3 read their pinned parts from
     /// there, and the block cache keeps blocks there for later runs

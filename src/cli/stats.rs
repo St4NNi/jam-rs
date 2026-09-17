@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use crate::index::{Parameters, Shard, ShardStats};
+use super::storage::ShardStorage;
+use crate::index::{Parameters, Shard, ShardOptions, ShardStats};
 use clap::Args;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 /// The options of `jam stats`.
 #[derive(Debug, Args)]
 pub struct StatsArgs {
-    /// The shard directory
+    /// The shard: a directory or s3://bucket/prefix
     shard: PathBuf,
     /// Print JSON instead of a short table
     #[arg(long)]
@@ -28,7 +29,10 @@ struct StatsRecord {
 
 /// Prints the stats of the shard.
 pub fn run(args: &StatsArgs) -> Result<(), CliError> {
-    let shard = Shard::open(&args.shard).map_err(|source| CliError::Shard {
+    let storage = ShardStorage::new()?;
+    let location = storage.location(&args.shard)?;
+    let options = ShardOptions::default();
+    let shard = Shard::open_with(&location, &options).map_err(|source| CliError::Shard {
         path: args.shard.clone(),
         source,
     })?;
