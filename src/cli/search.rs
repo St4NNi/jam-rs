@@ -122,7 +122,7 @@ fn open_shards(
         }
         names.push(name);
     }
-    let shards = storage.open_all(directories, cache)?;
+    let shards = storage.open_all(directories, cache, false)?;
     let named = names.into_iter().zip(shards);
     Ok(named
         .map(|(name, shard)| NamedShard { name, shard })

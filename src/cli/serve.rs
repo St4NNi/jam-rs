@@ -54,7 +54,7 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
     }
     let key = secret_key(&args.key)?;
     let mut storage = ShardStorage::new()?;
-    let mut shards = storage.open_all(std::slice::from_ref(&args.shard), &args.cache)?;
+    let mut shards = storage.open_all(std::slice::from_ref(&args.shard), &args.cache, true)?;
     let shard = shards
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;

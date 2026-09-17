@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use crate::index::{Location, Place, Plan, Shard, ShardOptions};
+use crate::index::{Location, Place, Plan, Shard, ShardOptions, warm};
 use crate::storage::{BlockCache, CacheConfig, DiskConfig, S3Config, S3Limits};
 use bytesize::ByteSize;
 use clap::Args;
@@ -70,11 +70,13 @@ impl ShardStorage {
 
     /// Opens the shards at `paths`. Shards on S3 read the pins of their plans in the cache
     /// directory and everything else through one block cache, which gets the budgets that the
-    /// pins of all plans leave.
+    /// pins of all plans leave. With `warm_unplanned` set, a shard without a plan is first
+    /// warmed with the default plan when `--disk` is given, as a server answers many searches.
     pub(super) fn open_all(
         &mut self,
         paths: &[PathBuf],
         args: &CacheArgs,
+        warm_unplanned: bool,
     ) -> Result<Vec<Shard>, CliError> {
         let mut plans = Vec::new();
         let mut opened = Vec::new();
@@ -88,8 +90,15 @@ impl ShardStorage {
                 Location::S3 { .. } => Some(location.manifest().map_err(failed)?),
                 Location::Directory(_) => None,
             };
-            if let (Some((_, digest)), Some(cache)) = (&manifest, &args.cache) {
-                plans.extend(Plan::read(cache, digest).map_err(failed)?);
+            if let (Some((manifest, digest)), Some(cache)) = (&manifest, &args.cache) {
+                let mut plan = Plan::read(cache, digest).map_err(failed)?;
+                if let (None, true, Some(disk)) = (&plan, warm_unplanned, args.disk) {
+                    let memory = args.memory.map_or(DEFAULT_MEMORY, |size| size.as_u64());
+                    let chosen = Plan::choose(manifest, digest, memory, disk.as_u64(), &[])?;
+                    warm(&location, manifest, &chosen, cache).map_err(failed)?;
+                    plan = Some(chosen);
+                }
+                plans.extend(plan);
             }
             opened.push((path, location, manifest));
         }
@@ -167,5 +176,51 @@ impl Drop for ShardStorage {
         if let Some(cache) = &self.cache {
             let _ = cache.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{random_bases, rng, runtime, serve_directory, test_shard};
+
+    #[test]
+    fn serve_warms_unplanned() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut rng = rng(9);
+        let entries: Vec<Vec<Vec<u8>>> = (0..2)
+            .map(|_| vec![random_bases(&mut rng, 20_000)])
+            .collect();
+        let local = test_shard(directory.path(), &entries);
+        let (server, asked) = serve_directory(directory.path());
+        let endpoint = Some(server.address.as_str());
+        let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+        let config = config.unwrap().unsigned();
+        let cache = directory.path().join("cache");
+        let args = CacheArgs {
+            cache: Some(cache.clone()),
+            memory: Some(ByteSize::gib(1)),
+            disk: Some(ByteSize::gib(1)),
+        };
+        let paths = [PathBuf::from("s3://bucket/shard")];
+        let open = |warm_unplanned| {
+            let mut storage = ShardStorage::new().unwrap();
+            assert!(storage.s3.set(config.clone()).is_ok());
+            storage.open_all(&paths, &args, warm_unplanned).unwrap();
+        };
+        // A search reads through the block cache alone; a server warms the default plan.
+        open(false);
+        assert_eq!(Plan::read(&cache, local.digest()).unwrap(), None);
+        open(true);
+        let plan = Plan::read(&cache, local.digest()).unwrap().unwrap();
+        let parts: Vec<(&str, Place)> = (plan.pins.iter())
+            .map(|pin| (pin.part.as_str(), pin.place))
+            .collect();
+        assert_eq!(parts, [("sketch", Place::Ram), ("locators", Place::Ram)]);
+        // The next start finds the plan and reads the seeds file from the pins alone.
+        let before = asked.lock().unwrap().len();
+        open(true);
+        let asked = asked.lock().unwrap();
+        assert!(asked[before..].iter().all(|key| !key.ends_with("seeds")));
     }
 }
