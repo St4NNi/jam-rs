@@ -20,8 +20,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// The largest block size, so that a fetched run of blocks stays small.
 const MAX_BLOCK_BYTES: u64 = 1 << 20;
-/// Most blocks fetched with one request.
-const FILL_BLOCKS: u64 = 16;
+/// Most bytes of blocks fetched with one request.
+const FILL_BYTES: u64 = 1 << 20;
 /// Every block counts at least this many bytes against the RAM budget, so that many tiny final
 /// blocks cannot make the cache index grow without bound.
 const MIN_CHARGE: usize = 256;
@@ -153,18 +153,29 @@ impl BlockCache {
         }))
     }
 
-    /// Wraps a source whose bytes have the SHA-256 digest `digest` (lower case hex).
+    /// Wraps a source whose bytes have the SHA-256 digest `digest` (lower case hex), read in
+    /// blocks of `block_bytes` (at most 1 MiB), or of the cache's block size.
     pub fn wrap(
         self: &Arc<Self>,
         inner: Arc<dyn ReadAt>,
         digest: &str,
+        block_bytes: Option<u64>,
     ) -> Result<CachedSource, StorageError> {
         let mut file = [0u8; 32];
         hex::decode_to_slice(digest, &mut file)
             .map_err(|_| StorageError::Config(format!("{digest:?} is not a SHA-256 digest")))?;
+        let block_bytes = block_bytes.unwrap_or(self.block_bytes);
+        if block_bytes == 0 || block_bytes > MAX_BLOCK_BYTES {
+            return Err(StorageError::Config(format!(
+                "cache block size {block_bytes} is not between 1 and {MAX_BLOCK_BYTES} bytes"
+            )));
+        }
         Ok(CachedSource {
             inner,
-            file,
+            file: FileKey {
+                digest: file,
+                block_bytes,
+            },
             cache: Arc::clone(self),
         })
     }
@@ -184,17 +195,17 @@ impl BlockCache {
     }
 
     /// Calls `consume(first, batch)` for the `blocks` of a source, at most
-    /// `FILL_BLOCKS` at a time, each batch after the fetch of its missing blocks.
+    /// `FILL_BYTES` at a time, each batch after the fetch of its missing blocks.
     fn fill_batches(
         &self,
         inner: &dyn ReadAt,
-        file: [u8; 32],
+        file: FileKey,
         blocks: RangeInclusive<u64>,
         mut consume: impl FnMut(u64, &[Block]),
     ) -> io::Result<()> {
         let last = *blocks.end();
-        for start in blocks.step_by(FILL_BLOCKS as usize) {
-            let end = last.min(start + FILL_BLOCKS - 1);
+        for start in blocks.step_by(file.batch() as usize) {
+            let end = last.min(start + file.batch() - 1);
             consume(start, &self.fill(inner, file, start, end, true)?);
         }
         Ok(())
@@ -206,12 +217,12 @@ impl BlockCache {
     fn fill(
         &self,
         inner: &dyn ReadAt,
-        file: [u8; 32],
+        file: FileKey,
         first: u64,
         last: u64,
         wait: bool,
     ) -> io::Result<Vec<Block>> {
-        let keys: Vec<BlockKey> = (first..=last).map(|block| self.key(file, block)).collect();
+        let keys: Vec<BlockKey> = (first..=last).map(|block| file.block(block)).collect();
         let mut found: Vec<Option<Block>> = keys.iter().map(|key| self.find(*key)).collect();
         if wait {
             let hits = found.iter().flatten().count() as u64;
@@ -270,14 +281,6 @@ impl BlockCache {
         Ok(found.into_iter().flatten().collect())
     }
 
-    fn key(&self, file: [u8; 32], block: u64) -> BlockKey {
-        BlockKey {
-            file,
-            block_bytes: self.block_bytes,
-            block,
-        }
-    }
-
     /// A block held in RAM, or else on the disk level. A failed disk read counts as a miss: the
     /// disk level is best effort. RAM is looked at alone first, as a lookup of the disk level
     /// can join an older one that misses a block inserted since.
@@ -297,17 +300,17 @@ impl BlockCache {
     fn fetch_run(
         &self,
         inner: &dyn ReadAt,
-        file: [u8; 32],
+        file: FileKey,
         first: u64,
         run: &mut [Option<Block>],
     ) -> io::Result<()> {
-        let start = first * self.block_bytes;
-        let stop = ((first + run.len() as u64) * self.block_bytes).min(inner.size());
+        let start = first * file.block_bytes;
+        let stop = ((first + run.len() as u64) * file.block_bytes).min(inner.size());
         let mut bytes = vec![0; (stop - start) as usize];
         inner.read_exact_at(start, &mut bytes)?;
         let room = self.disk_room(bytes.len() as u64 + run.len() as u64 * DISK_OVERHEAD);
-        for (at, chunk) in bytes.chunks(self.block_bytes as usize).enumerate() {
-            let key = self.key(file, first + at as u64);
+        for (at, chunk) in bytes.chunks(file.block_bytes as usize).enumerate() {
+            let key = file.block(first + at as u64);
             run[at] = Some(self.blocks.insert(key, chunk.to_vec()));
         }
         if let Some(room) = room {
@@ -334,8 +337,7 @@ impl BlockCache {
 /// A source read through a [`BlockCache`].
 pub struct CachedSource {
     inner: Arc<dyn ReadAt>,
-    /// The SHA-256 digest of the source's bytes.
-    file: [u8; 32],
+    file: FileKey,
     cache: Arc<BlockCache>,
 }
 
@@ -345,7 +347,7 @@ impl ReadAt for CachedSource {
         if buffer.is_empty() {
             return Ok(());
         }
-        let block_bytes = self.cache.block_bytes;
+        let block_bytes = self.file.block_bytes;
         let blocks = offset / block_bytes..=(end - 1) / block_bytes;
         let mut written = 0;
         let inner = self.inner.as_ref();
@@ -375,10 +377,11 @@ impl ReadAt for CachedSource {
         if offset >= end {
             return;
         }
-        let last = (end - 1) / cache.block_bytes;
+        let (block_bytes, batch) = (self.file.block_bytes, self.file.batch());
+        let last = (end - 1) / block_bytes;
         // Each batch of blocks is fetched on its own, so long ranges use many requests at once.
-        for start in (offset / cache.block_bytes..=last).step_by(FILL_BLOCKS as usize) {
-            let stop = last.min(start + FILL_BLOCKS - 1);
+        for start in (offset / block_bytes..=last).step_by(batch as usize) {
+            let stop = last.min(start + batch - 1);
             let (inner, file, cache) = (Arc::clone(&self.inner), self.file, Arc::clone(cache));
             let places = Arc::clone(places);
             let hints = Arc::clone(&cache.hints);
@@ -448,6 +451,29 @@ fn lock_directory(disk: &DiskConfig) -> Result<File, StorageError> {
     lock.try_lock()
         .map_err(|_| StorageError::Busy(disk.directory.clone()))?;
     Ok(lock)
+}
+
+/// A file read through the cache: its SHA-256 digest and the size of its blocks.
+#[derive(Clone, Copy)]
+struct FileKey {
+    digest: [u8; 32],
+    block_bytes: u64,
+}
+
+impl FileKey {
+    /// The key of block `block` of the file.
+    fn block(self, block: u64) -> BlockKey {
+        BlockKey {
+            file: self.digest,
+            block_bytes: self.block_bytes,
+            block,
+        }
+    }
+
+    /// Most blocks fetched with one request.
+    fn batch(self) -> u64 {
+        (FILL_BYTES / self.block_bytes).max(1)
+    }
 }
 
 /// A block of a file, known by the file's SHA-256 digest, the block size and its number.

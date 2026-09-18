@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::manifest::{FileRecord, MANIFEST_FILE, Manifest, PACKED_DIRECTORY, sha256_hex};
+use super::packed::BLOCK_BYTES;
 use super::plan::{Pin, Place, Plan};
 use super::{AtPath, IndexError};
 use crate::storage::{BlockCache, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config, S3Object};
@@ -157,17 +158,20 @@ impl ShardFiles {
     /// The source of a shard file: its pinned range locally, the rest through the cache if
     /// there is one.
     pub(crate) fn open(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.open_at(&self.location, &record.path, record)
+        self.open_at(&self.location, &record.path, record, None)
     }
 
-    /// The file `name` (relative to the shard) of `record` at `location`, with its pins.
+    /// The file `name` (relative to the shard) of `record` at `location`, with its pins; cached
+    /// in blocks of `block_bytes`, or of the cache's block size.
     fn open_at(
         &self,
         location: &Location,
         name: &str,
         record: &FileRecord,
+        block_bytes: Option<u64>,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        let mut source = self.cached(location.open(&record.path, record.bytes)?, record)?;
+        let source = location.open(&record.path, record.bytes)?;
+        let mut source = self.cached(source, record, block_bytes)?;
         // Each pin takes its range from the source before it, so several parts of one file can
         // be pinned. A pin of the whole file is wrapped too, so its reads are counted.
         for (pin, path) in self.pins.get(name).into_iter().flatten() {
@@ -204,13 +208,15 @@ impl ShardFiles {
         record: &FileRecord,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
         let name = format!("{PACKED_DIRECTORY}/{}", record.path);
+        // Packed files are cached in their checked blocks, so a window reads few bytes.
+        let blocks = Some(BLOCK_BYTES);
         let Some(slot) = self.opened.get(entry) else {
-            return self.open_at(&self.packed, &name, record);
+            return self.open_at(&self.packed, &name, record, blocks);
         };
         if let Some(source) = slot.get() {
             return Ok(Arc::clone(source));
         }
-        let source = self.open_at(&self.packed, &name, record)?;
+        let source = self.open_at(&self.packed, &name, record, blocks)?;
         // Two threads may open the same entry at once; both get the source that was kept.
         Ok(Arc::clone(slot.get_or_init(|| source)))
     }
@@ -228,9 +234,10 @@ impl ShardFiles {
         &self,
         source: Arc<dyn ReadAt>,
         record: &FileRecord,
+        block_bytes: Option<u64>,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
         Ok(match &self.cache {
-            Some(cache) => Arc::new(cache.wrap(source, &record.sha256)?),
+            Some(cache) => Arc::new(cache.wrap(source, &record.sha256, block_bytes)?),
             None => source,
         })
     }
