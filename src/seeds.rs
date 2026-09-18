@@ -162,17 +162,37 @@ impl Seeder {
     /// Calls `emit` for every k-mer of a query, in order. A k-mer below the entropy limit gets the
     /// salted hash, as the seeds of low-complexity runs do.
     pub fn query_kmers(&self, query: &[u8], mut emit: impl FnMut(Kmer)) {
+        kmers(query, self.scheme.k, |code| emit(self.query_kmer(code)));
+    }
+
+    /// Calls `emit` for every k-mer with one substitution against a k-mer of the query (3 k per
+    /// query k-mer), at the start of the query k-mer, so a seed with one mismatch is found too.
+    pub fn query_neighbours(&self, query: &[u8], mut emit: impl FnMut(Kmer)) {
+        let k = usize::from(self.scheme.k);
         kmers(query, self.scheme.k, |code| {
-            let mut hash = jamhash::jamhash_u64(code.canonical());
-            if !self.passes_entropy(code.canonical()) {
-                hash ^= LOW_COMPLEXITY_SALT;
+            for base in 0..k {
+                for change in 1..4u64 {
+                    emit(self.query_kmer(KmerCode {
+                        forward: code.forward ^ (change << (2 * (k - 1 - base))),
+                        reverse: code.reverse ^ (change << (2 * base)),
+                        ..code
+                    }));
+                }
             }
-            emit(Kmer {
-                hash,
-                position: code.position as u64,
-                reverse: code.reverse < code.forward,
-            });
         });
+    }
+
+    /// The hash and strand of one query k-mer, salted below the entropy limit.
+    fn query_kmer(&self, code: KmerCode) -> Kmer {
+        let mut hash = jamhash::jamhash_u64(code.canonical());
+        if !self.passes_entropy(code.canonical()) {
+            hash ^= LOW_COMPLEXITY_SALT;
+        }
+        Kmer {
+            hash,
+            position: code.position as u64,
+            reverse: code.reverse < code.forward,
+        }
     }
 }
 

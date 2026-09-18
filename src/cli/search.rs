@@ -54,6 +54,10 @@ pub struct SearchArgs {
     /// Largest chance of missing a qualifying entry
     #[arg(long, default_value_t = LossBudget::default().chance())]
     loss_budget: f64,
+    /// Mismatches a query k-mer may have against a seed (0 or 1); 1 also looks up every k-mer
+    /// one substitution away, which finds more diverged matches at more lookups
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=1))]
+    seed_mismatches: u8,
     /// The last stage that runs
     #[arg(long, value_enum, default_value = "align")]
     level: SearchStage,
@@ -152,7 +156,10 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
             "the shards differ in k or minimizer window".into(),
         ));
     }
-    let model = MissModel::new(parameters.scheme)?;
+    let model = match args.seed_mismatches {
+        0 => MissModel::new(parameters.scheme)?,
+        _ => MissModel::one_mismatch(parameters.scheme)?,
+    };
     let searchers = shards
         .iter()
         .map(|open| Searcher::new(&open.shard, &model))

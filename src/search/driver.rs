@@ -206,7 +206,11 @@ impl<'a> Searcher<'a> {
             events,
             ..
         } = *request;
-        let query_kmers = QueryKmers::new(&self.seeder, query, circular);
+        let query_kmers = if self.model.mismatches() > 0 {
+            QueryKmers::with_neighbours(&self.seeder, query, circular)
+        } else {
+            QueryKmers::new(&self.seeder, query, circular)
+        };
         let length = query.len() as u64;
         let rule = &config.rule;
         let bound = CoverageBound::new(

@@ -31,6 +31,16 @@ impl QueryKmers {
     /// Hashes every k-mer of `query` with the seed scheme of the shard. The query must have at
     /// least k bases and fewer than 2^32.
     pub fn new(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
+        Self::hashed(seeder, query, circular, false)
+    }
+
+    /// As `new`, adding every k-mer one substitution away from a query k-mer at its start, so
+    /// seeds with one mismatch are found too.
+    pub fn with_neighbours(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
+        Self::hashed(seeder, query, circular, true)
+    }
+
+    fn hashed(seeder: &Seeder, query: &[u8], circular: bool, neighbours: bool) -> Self {
         let k = usize::from(seeder.scheme().k);
         let mut scanned = query.to_vec();
         if circular {
@@ -42,6 +52,14 @@ impl QueryKmers {
                 kmers.push((kmer.hash, kmer.position as u32));
             }
         });
+        let exact = kmers.len() as u64;
+        if neighbours {
+            seeder.query_neighbours(&scanned, |kmer| {
+                if kmer.position < query.len() as u64 {
+                    kmers.push((kmer.hash, kmer.position as u32));
+                }
+            });
+        }
         kmers.par_sort_unstable();
         let mut distinct: Vec<DistinctKmer> = Vec::new();
         for (index, &(hash, _)) in kmers.iter().enumerate() {
@@ -56,7 +74,7 @@ impl QueryKmers {
         Self {
             length: query.len() as u64,
             window: u64::from(seeder.scheme().w),
-            kmers: kmers.len() as u64,
+            kmers: exact,
             distinct,
             positions: kmers.into_iter().map(|(_, position)| position).collect(),
         }

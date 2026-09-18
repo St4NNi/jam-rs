@@ -313,6 +313,34 @@ fn query_kmers_complete() {
 }
 
 #[test]
+fn neighbours_cover_substitutions() {
+    let query = random_bases(&mut rng(12), 60);
+    let seeder = Seeder::new(scheme(15, 10, 1.0)).unwrap();
+    let mut neighbours = std::collections::HashSet::new();
+    let mut count = 0;
+    seeder.query_neighbours(&query, |kmer| {
+        neighbours.insert((kmer.position, kmer.hash, kmer.reverse));
+        count += 1;
+    });
+    assert_eq!(count, (60 - 15 + 1) * 15 * 3);
+    for at in 0..60 {
+        for base in *b"ACGT" {
+            if base == query[at] {
+                continue;
+            }
+            let mut changed = query.clone();
+            changed[at] = base;
+            seeder.query_kmers(&changed, |kmer| {
+                let start = kmer.position as usize;
+                if (start..start + 15).contains(&at) {
+                    assert!(neighbours.contains(&(kmer.position, kmer.hash, kmer.reverse)));
+                }
+            });
+        }
+    }
+}
+
+#[test]
 fn entropy_counts_match() {
     let sequence = random_bases(&mut rng(13), 2000);
     for k in [1u8, 7, 25, 32] {
