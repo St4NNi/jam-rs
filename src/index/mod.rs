@@ -7,6 +7,7 @@ mod bits;
 #[allow(dead_code)]
 mod buckets;
 mod build;
+mod contig_table;
 mod index_file;
 mod manifest;
 mod packed;
@@ -27,6 +28,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 pub use build::{BuildOptions, EntryInput, build_shard};
+pub use contig_table::ContigTable;
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
 pub use packed::{Contig, PackedSequence};

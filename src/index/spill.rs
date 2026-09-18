@@ -85,7 +85,12 @@ impl SeedSpill {
     }
 
     /// Writes the seeds file at `path` from the records, and returns its totals.
-    pub(crate) fn write(self, path: &Path, shape: SeedFileShape) -> Result<SeedTotals, IndexError> {
+    pub(crate) fn write(
+        self,
+        path: &Path,
+        shape: SeedFileShape,
+        contig_tables: &[Vec<u8>],
+    ) -> Result<SeedTotals, IndexError> {
         for (writer, path) in self.writers.into_iter().zip(&self.paths) {
             let writer = writer.into_inner().unwrap_or_else(PoisonError::into_inner);
             writer
@@ -115,7 +120,7 @@ impl SeedSpill {
                 }
             }
         }
-        writer.finish(&ranked)?;
+        writer.finish(&ranked, contig_tables)?;
         Ok(SeedTotals {
             seeds,
             color_sets: ranked.len() as u64,

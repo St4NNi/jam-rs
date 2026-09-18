@@ -107,14 +107,6 @@ fn damage_is_detected() {
         std::fs::write(&damaged, &bytes).unwrap();
         assert!(open(&damaged).is_err(), "byte {at}");
     }
-    // The contig starts alone come from one read at the front.
-    let source: Arc<dyn ReadAt> = Arc::new(original.clone());
-    let starts = PackedSequence::open(Arc::clone(&source))
-        .unwrap()
-        .starts
-        .clone();
-    assert_eq!(read_contig_starts(source.as_ref(), 5).unwrap(), starts);
-    assert!(read_contig_starts(source.as_ref(), 4).is_err());
     // Damage in the names is found when they are read.
     let mut bytes = original.clone();
     bytes[200] ^= 1;

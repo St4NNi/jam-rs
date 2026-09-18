@@ -1,11 +1,12 @@
-//! The seeds file (stages 1 and 2): a bucket table kept in RAM, the sketch part with the color set
-//! of every stored seed, and the optional locator part with its seed locations per entry.
+//! The seeds file (stages 1 and 2): a bucket table in RAM, the sketch part with color sets, and
+//! the optional locator part with seed locations and the contig table of every entry.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
 use super::IndexError;
 use super::bits::{u32_at, u64_at};
 use super::buckets::{LocatorBucket, SketchBucket};
+use super::contig_table::ContigTable;
 use super::pages::PartTable;
 use super::{MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::storage::{ReadAt, will_need_ranges};
@@ -32,13 +33,15 @@ pub fn seed_key(hash: u64) -> u64 {
 }
 
 pub(crate) const MAGIC: [u8; 16] = *b"jam seeds\0\0\0\0\0\0\0";
-pub(crate) const VERSION: u32 = 1;
+pub(crate) const VERSION: u32 = 2;
 pub(crate) const HEADER_BYTES: u64 = 256;
 /// Pages from 64 bytes (for tests) to 64 KiB, so a start within a page fits 16 bits.
 pub(crate) const PAGE_BITS: Range<u32> = 6..17;
 /// The sections in file order: bucket table, sketch buckets, color set offsets, color sets,
-/// locator buckets. The sketch part is sections 1 to 3, the locator part section 4.
-pub(crate) const SECTIONS: usize = 5;
+/// locator buckets, contig tables. The sketch part is sections 1 to 3, the locator part 4 and 5.
+pub(crate) const SECTIONS: usize = 6;
+/// Where the CRC-32 of each section lies in the header.
+pub(crate) const CRCS_AT: usize = 72 + 16 * SECTIONS;
 /// Ranges closer than this are read as one.
 const JOIN_GAP: u64 = 8 << 10;
 /// Joined reads stop growing at this size.
@@ -129,6 +132,9 @@ pub struct SeedFile {
     crcs: [u32; SECTIONS],
     sketch: PartTable,
     locators: Option<PartTable>,
+    /// Where the contig table of each entry starts in the file, then where the last one ends;
+    /// empty without the locator part.
+    table_starts: Vec<u64>,
 }
 
 impl SeedFile {
@@ -155,7 +161,7 @@ impl SeedFile {
             let start = field(72 + 16 * index);
             start..start.saturating_add(field(80 + 16 * index))
         });
-        let crcs = std::array::from_fn(|index| u32_at(&header, 152 + 4 * index).unwrap_or(0));
+        let crcs = std::array::from_fn(|index| u32_at(&header, CRCS_AT + 4 * index).unwrap_or(0));
         check_sections(&sections, page_bits, source.size())?;
         let mut table = vec![0u8; (sections[0].end - sections[0].start) as usize];
         source.read_exact_at(sections[0].start, &mut table)?;
@@ -175,6 +181,10 @@ impl SeedFile {
                 Some(PartTable::decode(rest, page_bits, buckets, pages, bytes)?)
             }
         };
+        let table_starts = match locators {
+            Some(_) => read_table_starts(source.as_ref(), &sections[5], field(24))?,
+            None => Vec::new(),
+        };
         Ok(Self {
             source,
             bucket_bits,
@@ -186,6 +196,7 @@ impl SeedFile {
             crcs,
             sketch,
             locators,
+            table_starts,
         })
     }
 
@@ -236,7 +247,40 @@ impl SeedFile {
 
     /// The bytes of the locator part in the file, if it has one.
     pub fn locator_part(&self) -> Option<Range<u64>> {
-        self.locators.as_ref().map(|_| self.sections[4].clone())
+        (self.locators.as_ref()).map(|_| self.sections[4].start..self.sections[5].end)
+    }
+
+    /// The contig table of an entry; an error without the locator part.
+    pub fn contig_table(&self, entry: u32) -> Result<ContigTable, IndexError> {
+        ContigTable::decode(&self.contig_table_bytes(entry)?)
+    }
+
+    /// The encoded contig table of an entry, as a reshard copies it.
+    pub(crate) fn contig_table_bytes(&self, entry: u32) -> Result<Vec<u8>, IndexError> {
+        let range = self.contig_table_range(entry)?;
+        let mut bytes = vec![0u8; (range.end - range.start) as usize];
+        self.source.read_exact_at(range.start, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Tells the source that the contig table of an entry will be read soon.
+    pub fn hint_contig_table(&self, entry: u32) {
+        if let Ok(range) = self.contig_table_range(entry) {
+            self.source.will_need(range.start, range.end - range.start);
+        }
+    }
+
+    fn contig_table_range(&self, entry: u32) -> Result<Range<u64>, IndexError> {
+        let starts = &self.table_starts;
+        match (starts.get(entry as usize), starts.get(entry as usize + 1)) {
+            (Some(&start), Some(&end)) => Ok(start..end),
+            _ if starts.is_empty() => Err(IndexError::Input(
+                "the shard was built with the sketch part only".into(),
+            )),
+            _ => Err(IndexError::Input(format!(
+                "entry {entry} is not in this shard"
+            ))),
+        }
     }
 
     /// Finds the stored seed of each seed key; `keys` must ascend. Every bucket is read once.
@@ -407,6 +451,31 @@ impl SeedFile {
         }
         Ok(())
     }
+}
+
+/// Reads where the contig table of each of `entries` entries starts, from the front of the
+/// contig tables section, and checks that they ascend to the section end.
+fn read_table_starts(
+    source: &dyn ReadAt,
+    section: &Range<u64>,
+    entries: u64,
+) -> Result<Vec<u64>, IndexError> {
+    let count = usize::try_from(entries + 1).map_err(|_| IndexError::format("seeds entries"))?;
+    let mut bytes = vec![0u8; 8 * count];
+    if 8 * count as u64 > section.end - section.start {
+        return Err(IndexError::format("seeds contig tables"));
+    }
+    source.read_exact_at(section.start, &mut bytes)?;
+    let starts: Vec<u64> = (bytes.as_chunks::<8>().0.iter())
+        .map(|word| section.start.saturating_add(u64::from_le_bytes(*word)))
+        .collect();
+    let valid = starts.first() == Some(&(section.start + 8 * count as u64))
+        && starts.last() == Some(&section.end)
+        && starts.is_sorted();
+    if !valid {
+        return Err(IndexError::format("seeds contig tables"));
+    }
+    Ok(starts)
 }
 
 /// Checks that the sections follow each other in order within `size` bytes, with the table

@@ -74,7 +74,7 @@ fn check_every_seed(shard: &Shard, entries: &[Vec<Vec<u8>>]) {
                 Some(*end)
             }))
             .collect();
-        assert_eq!(shard.contig_starts(entry).unwrap(), bounds);
+        assert_eq!(shard.contig_table(entry).unwrap().starts(), bounds);
     }
 }
 
@@ -478,7 +478,7 @@ fn sketch_only_shards() {
     assert!(!shard.seed_file().has_locators());
     assert_eq!(shard.stats().locator_bytes, 0);
     assert_eq!(shard.stats().packed_bytes, 0);
-    assert!(shard.packed(0).is_err() && shard.contig_starts(0).is_err());
+    assert!(shard.packed(0).is_err() && shard.contig_table(0).is_err());
     let full = directory.path().join("full");
     build_shard(&inputs, &full, &options(directory.path(), 2)).unwrap();
     let full_sketch = Manifest::read(&full).unwrap().sketch_part;

@@ -138,13 +138,13 @@ fn locate(
     }
     bins.sort_unstable();
     bins.dedup();
-    let contig_starts = shard.contig_starts(possible.entry)?;
+    let contig_table = shard.contig_table(possible.entry)?;
     let bin_bits = u32::from(shard.manifest().parameters.bin_bits);
     Ok(LocateOutcome::Located(LocatedEntry {
         entry: possible.entry,
         coverage_bound,
         containment_estimate: request.query.containment_estimate(positions.len() as u64),
-        alignment_windows: alignment_windows(&contig_starts, bins, bin_bits, request.flank),
+        alignment_windows: alignment_windows(contig_table.starts(), bins, bin_bits, request.flank),
     }))
 }
 

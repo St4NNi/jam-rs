@@ -287,7 +287,8 @@ impl<'a> Searcher<'a> {
         let finish = |index: usize, possible: &PossibleEntry, worker: &mut Worker| {
             self.finish_entry(possible, &locations[index], &locate, request, worker)
         };
-        let prefetch = |possible: &PossibleEntry| self.shard.prefetch_contig_starts(possible.entry);
+        let seeds = self.shard.seed_file();
+        let prefetch = |possible: &PossibleEntry| seeds.hint_contig_table(possible.entry);
         queue.run(finish, prefetch, &mut summary);
         summary.times.entries = start.finish();
         summary

@@ -5,6 +5,7 @@
 
 use super::IndexError;
 use super::bits::{u32_at, u64_at};
+use super::contig_table::{ContigTable, Run};
 use crate::seeds::base_code;
 use crate::storage::ReadAt;
 use std::collections::BTreeMap;
@@ -73,6 +74,13 @@ impl PackedWriter {
     /// Contigs added so far.
     pub fn contig_count(&self) -> u64 {
         self.name_ends.len() as u64
+    }
+
+    /// The contig table of the contigs added so far.
+    pub(crate) fn contig_table(&self) -> ContigTable {
+        let ends = self.starts.iter().skip(1).chain([&self.bases]);
+        let lengths = self.starts.iter().zip(ends).map(|(start, end)| end - start);
+        ContigTable::new(lengths, self.runs.clone())
     }
 
     /// The file in two parts, so a caller can write both without copying the bases.
@@ -490,45 +498,6 @@ impl Header {
             packed_offset,
         })
     }
-}
-
-/// Bytes at the front of a packed sequence of `contigs` contigs that hold its header and its
-/// contig starts.
-pub(crate) fn contig_table_bytes(contigs: u64) -> u64 {
-    HEADER_BYTES + 8 * (contigs + 1)
-}
-
-/// Reads the contig starts of a packed sequence of `contigs` contigs, followed by its bases, in
-/// one read from the front of the file, so stage 2 can cut windows at contig ends.
-pub(crate) fn read_contig_starts(
-    source: &dyn ReadAt,
-    contigs: u64,
-) -> Result<Vec<u64>, IndexError> {
-    let length = usize::try_from(contig_table_bytes(contigs))
-        .map_err(|_| IndexError::format("packed sequence contigs"))?;
-    let mut bytes = vec![0u8; length];
-    source.read_exact_at(0, &mut bytes)?;
-    let (header, table) = bytes.split_at(HEADER_BYTES as usize);
-    let header = Header::decode(header)?;
-    let starts: Vec<u64> = (table.as_chunks::<8>().0.iter())
-        .map(|word| u64::from_le_bytes(*word))
-        .collect();
-    let valid = header.contigs == contigs
-        && starts.first() == Some(&0)
-        && starts.last() == Some(&header.bases)
-        && starts.is_sorted();
-    if !valid {
-        return Err(IndexError::format("packed sequence contig starts"));
-    }
-    Ok(starts)
-}
-
-/// A run of one byte other than A, C, G or T, at entry coordinates `start..start + length`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Run {
-    start: u64,
-    length: u32,
-    byte: u8,
 }
 
 /// A contig name is one word.

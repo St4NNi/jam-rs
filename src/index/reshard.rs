@@ -219,9 +219,13 @@ fn write_shard(
         std::fs::create_dir(&packed).at(&packed)?;
     }
     let mut entries = Vec::with_capacity(part.len());
+    let mut tables = Vec::with_capacity(part.len());
     for &EntrySource { shard, entry } in part {
         let input = &shards[shard];
         let record = input.manifest.entries[entry as usize].clone();
+        if locators {
+            tables.push(input.seeds.contig_table_bytes(entry)?);
+        }
         let Some(file) = &record.packed else {
             entries.push(record);
             continue;
@@ -253,7 +257,8 @@ fn write_shard(
         }
     }
     let parameters = shards[0].manifest.parameters;
-    complete_shard(directory, parameters, entries, spill, None, locators)
+    let tables = locators.then_some(tables);
+    complete_shard(directory, parameters, entries, spill, None, tables)
 }
 
 /// Buckets of an input that one parallel step reads.

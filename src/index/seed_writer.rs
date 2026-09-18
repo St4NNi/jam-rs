@@ -5,7 +5,7 @@
 
 use super::bits::u32_at;
 use super::pages::{PartLayout, PartTable};
-use super::seed_file::{HEADER_BYTES, MAGIC, PAGE_BITS, SECTIONS, SEED_KEY_BITS, VERSION};
+use super::seed_file::{CRCS_AT, HEADER_BYTES, MAGIC, PAGE_BITS, SECTIONS, SEED_KEY_BITS, VERSION};
 use super::{AtPath, IndexError};
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -138,9 +138,14 @@ impl SeedWriter {
         Ok(())
     }
 
-    /// Writes the color sets (encoded, in id order), the header and the table, and joins the
-    /// parts into the file.
-    pub(crate) fn finish(mut self, color_sets: &[impl AsRef<[u8]>]) -> Result<(), IndexError> {
+    /// Writes the color sets (encoded, in id order), the contig tables (encoded, in entry order;
+    /// ignored without a locator part), the header and the table, and joins the parts into the
+    /// file.
+    pub(crate) fn finish(
+        mut self,
+        color_sets: &[impl AsRef<[u8]>],
+        contig_tables: &[Vec<u8>],
+    ) -> Result<(), IndexError> {
         while self.next_bucket < 1 << self.shape.bucket_bits {
             self.push_one(&[], &[])?;
         }
@@ -181,12 +186,22 @@ impl SeedWriter {
             Some(part) => (sets_end.next_multiple_of(page), part.bytes),
             None => (sets_end, 0),
         };
+        let tables = match &locators {
+            Some(_) => encode_tables(contig_tables, self.shape.entries)?,
+            None => Vec::new(),
+        };
+        let locators_end = sections[4].0 + sections[4].1;
+        sections[5] = (locators_end.next_multiple_of(8), tables.len() as u64);
+        if locators.is_none() {
+            sections[5].0 = locators_end;
+        }
         let crcs = [
             crc32fast::hash(&table),
             sketch.crc,
             crc32fast::hash(&offsets),
             set_crc.finalize(),
             locators.as_ref().map_or(0, |part| part.crc),
+            crc32fast::hash(&tables),
         ];
         let pages = [
             sketch.table.page_count() as u64,
@@ -209,12 +224,32 @@ impl SeedWriter {
         }
         if let Some(part) = locators {
             out.copy(sections[4].0, part).at(path)?;
+            out.put(sections[5].0, &tables).at(path)?;
         }
         let file = (out.file.into_inner())
             .map_err(|error| error.into_error())
             .at(path)?;
         file.sync_all().at(path)
     }
+}
+
+/// The contig tables section: where each table starts within it, then where the last ends
+/// (u64 each), then the tables.
+fn encode_tables(tables: &[Vec<u8>], entries: u64) -> Result<Vec<u8>, IndexError> {
+    if tables.len() as u64 != entries {
+        return Err(IndexError::format("a contig table for every entry"));
+    }
+    let mut section = Vec::new();
+    let mut at = 8 * (tables.len() as u64 + 1);
+    section.extend_from_slice(&at.to_le_bytes());
+    for table in tables {
+        at += table.len() as u64;
+        section.extend_from_slice(&at.to_le_bytes());
+    }
+    for table in tables {
+        section.extend_from_slice(table);
+    }
+    Ok(section)
 }
 
 /// A finished part: its table, bytes and CRC-32, and its file ready to be read from the start.
@@ -287,7 +322,8 @@ impl HeaderFields {
             header[24 + 8 * index..32 + 8 * index].copy_from_slice(&value.to_le_bytes());
         }
         for (index, crc) in crcs.iter().enumerate() {
-            header[152 + 4 * index..156 + 4 * index].copy_from_slice(&crc.to_le_bytes());
+            let at = CRCS_AT + 4 * index;
+            header[at..at + 4].copy_from_slice(&crc.to_le_bytes());
         }
         let header_crc = crc32fast::hash(&header[..252]);
         header[252..].copy_from_slice(&header_crc.to_le_bytes());
@@ -299,6 +335,7 @@ impl HeaderFields {
 mod tests {
     use super::*;
     use crate::index::buckets::{encode_locator_bucket, encode_sketch_bucket};
+    use crate::index::contig_table::ContigTable;
     use crate::index::seed_file::SeedFile;
     use crate::index::seed_file::{ColorSetId, encode_color_set};
     use crate::storage::ReadAt;
@@ -344,6 +381,17 @@ mod tests {
         (seeds, sets)
     }
 
+    /// A contig table per entry, with contigs of the entry number plus one and seven bases.
+    fn contig_tables(entries: u64) -> Vec<Vec<u8>> {
+        (0..entries)
+            .map(|entry| {
+                let mut bytes = Vec::new();
+                ContigTable::new([entry + 1, 7], Vec::new()).encode(&mut bytes);
+                bytes
+            })
+            .collect()
+    }
+
     /// Writes the seeds into a file in `directory` and opens it from RAM.
     fn write(directory: &Path, seeds: &Seeds, sets: &[Vec<u32>], shape: SeedFileShape) -> SeedFile {
         let path = directory.join(format!("seeds-{}", shape.page_bits));
@@ -373,7 +421,9 @@ mod tests {
                 bytes
             })
             .collect();
-        writer.finish(&encoded).unwrap();
+        writer
+            .finish(&encoded, &contig_tables(shape.entries))
+            .unwrap();
         SeedFile::open(Arc::new(std::fs::read(&path).unwrap())).unwrap()
     }
 
@@ -411,8 +461,17 @@ mod tests {
             }
             if !locators {
                 assert!(file.read_locator_buckets(&[0], |_, _| Ok(())).is_err());
+                assert!(file.contig_table(0).is_err());
                 continue;
             }
+            for entry in [0, 17, 4999] {
+                let table = file.contig_table(entry).unwrap();
+                assert_eq!(
+                    table.starts(),
+                    &[0, u64::from(entry) + 1, u64::from(entry) + 8]
+                );
+            }
+            assert!(file.contig_table(5000).is_err());
             let mut buckets: Vec<u32> = wanted.iter().map(|(seed, _)| seed.bucket).collect();
             buckets.dedup();
             let mut next = 0;

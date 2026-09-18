@@ -98,22 +98,23 @@ pub fn build_shard(
             spill: SeedSpill::create(&options.temporary_directory)?,
         };
         pool.install(|| {
-            let entries = if options.entry_per_record {
+            let built = if options.entry_per_record {
                 index_records(inputs, &context)?
             } else {
                 index_files(inputs, &context)?
             };
+            let (entries, tables): (Vec<_>, Vec<_>) = built.into_iter().unzip();
             check_names(entries.iter().map(|entry| entry.name.as_str()))?;
             let parameters = options.parameters;
             let spill = context.spill;
-            let locators = !options.sketch_only;
+            let tables = (!options.sketch_only).then_some(tables);
             complete_shard(
                 directory,
                 parameters,
                 entries,
                 spill,
                 options.bucket_bits,
-                locators,
+                tables,
             )
         })
     })
@@ -159,7 +160,7 @@ pub(crate) fn complete_shard(
     entries: Vec<EntryRecord>,
     spill: SeedSpill,
     bucket_bits: Option<u8>,
-    locators: bool,
+    contig_tables: Option<Vec<Vec<u8>>>,
 ) -> Result<Manifest, IndexError> {
     if u32::try_from(entries.len()).is_err() {
         return Err(IndexError::Input(
@@ -177,9 +178,10 @@ pub(crate) fn complete_shard(
         bucket_bits: u32::from(parameters.bucket_bits),
         page_bits: u32::from(parameters.page_bits),
         entries: entries.len() as u64,
-        locators,
+        locators: contig_tables.is_some(),
     };
-    let totals = spill.write(&seeds_path, shape)?;
+    let tables = contig_tables.unwrap_or_default();
+    let totals = spill.write(&seeds_path, shape, &tables)?;
     let seed_file = SeedFile::open(Arc::new(LocalFile::open(&seeds_path)?))?;
     let record = |path: &Path, name: &str| -> Result<FileRecord, IndexError> {
         let digest = sha256_file(path)?;
@@ -213,8 +215,11 @@ struct Context {
     spill: SeedSpill,
 }
 
+/// An entry's record and its encoded contig table.
+type BuiltEntry = (EntryRecord, Vec<u8>);
+
 /// One entry per file: files run in parallel, the largest first.
-fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryRecord>, IndexError> {
+fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
     let mut order: Vec<(u64, usize)> = inputs
         .iter()
         .enumerate()
@@ -238,11 +243,11 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryReco
 }
 
 /// One entry per record: records are read in order and indexed in parallel rounds.
-fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<EntryRecord>, IndexError> {
+fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
     let mut built = Vec::new();
     let mut round: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut round_bytes = 0usize;
-    let run_round = |round: &mut Vec<(Vec<u8>, Vec<u8>)>, built: &mut Vec<EntryRecord>| {
+    let run_round = |round: &mut Vec<(Vec<u8>, Vec<u8>)>, built: &mut Vec<BuiltEntry>| {
         let first = built.len();
         let entries = round
             .par_iter()
@@ -315,25 +320,29 @@ impl<'a> EntryBuilder<'a> {
         Ok(())
     }
 
-    /// Writes the packed sequence of the entry and spills its seed records.
-    fn finish(mut self, name: String) -> Result<EntryRecord, IndexError> {
+    /// Writes the packed sequence of the entry and spills its seed records; returns its record
+    /// and its encoded contig table.
+    fn finish(mut self, name: String) -> Result<BuiltEntry, IndexError> {
         self.records.sort_unstable();
         self.records.dedup();
         let seed_locations = self.records.len() as u64;
         self.context.spill.push(&mut self.records)?;
         self.records = Vec::new();
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
+        let mut table = Vec::new();
+        self.packed.contig_table().encode(&mut table);
         let packed = match &self.context.packed {
             Some(directory) => Some(write_packed(self.packed, directory, &name)?),
             None => None,
         };
-        Ok(EntryRecord {
+        let record = EntryRecord {
             name,
             contigs,
             bases,
             seed_locations,
             packed,
-        })
+        };
+        Ok((record, table))
     }
 }
 

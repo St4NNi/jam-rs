@@ -4,8 +4,9 @@
 // SPDX-License-Identifier: MIT
 
 use super::IndexError;
+use super::contig_table::ContigTable;
 use super::manifest::{EntryRecord, FileRecord, Manifest, verify_source};
-use super::packed::{PackedSequence, contig_table_bytes, read_contig_starts};
+use super::packed::PackedSequence;
 use super::seed_file::SeedFile;
 use super::sources::{Location, ShardFiles, ShardOptions};
 use serde::Serialize;
@@ -133,22 +134,18 @@ impl Shard {
         })
     }
 
-    /// The start of each contig of an entry in entry coordinates, followed by the entry's bases,
-    /// so contig `i` spans `starts[i]..starts[i + 1]`. One read at the front of its packed file.
-    pub fn contig_starts(&self, entry: u32) -> Result<Vec<u64>, IndexError> {
-        let (record, file) = self.packed_record(entry)?;
-        let source = self.files.open_packed(entry as usize, file)?;
-        read_contig_starts(source.as_ref(), record.contigs)
-    }
-
-    /// Tells the source of an entry's packed file that its contig starts will be read soon.
-    pub fn prefetch_contig_starts(&self, entry: u32) {
-        let Ok((record, file)) = self.packed_record(entry) else {
-            return;
-        };
-        if let Ok(source) = self.files.open_packed(entry as usize, file) {
-            source.will_need(0, contig_table_bytes(record.contigs));
+    /// The contig table of an entry from the locator part of the seeds file, checked against
+    /// the manifest.
+    pub fn contig_table(&self, entry: u32) -> Result<ContigTable, IndexError> {
+        let (record, _) = self.packed_record(entry)?;
+        let table = self.seeds.contig_table(entry)?;
+        if table.contig_count() as u64 != record.contigs || table.bases() != record.bases {
+            return Err(IndexError::format(format!(
+                "the contig table of {} differs from the manifest",
+                record.name
+            )));
         }
+        Ok(table)
     }
 
     /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
