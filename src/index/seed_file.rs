@@ -33,7 +33,7 @@ pub fn seed_key(hash: u64) -> u64 {
 }
 
 pub(crate) const MAGIC: [u8; 16] = *b"jam seeds\0\0\0\0\0\0\0";
-pub(crate) const VERSION: u32 = 2;
+pub(crate) const VERSION: u32 = 1;
 pub(crate) const HEADER_BYTES: u64 = 256;
 /// Pages from 64 bytes (for tests) to 64 KiB, so a start within a page fits 16 bits.
 pub(crate) const PAGE_BITS: Range<u32> = 6..17;

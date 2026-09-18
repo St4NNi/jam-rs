@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 const MAGIC: [u8; 16] = *b"jam-rs 2bit seq\0";
-const VERSION: u32 = 2;
+const VERSION: u32 = 1;
 /// Bytes of the header fields at the front of the header page.
 const HEADER_BYTES: u64 = 64;
 /// The packed bases start after a page that holds the header, so blocks line up with pages.
