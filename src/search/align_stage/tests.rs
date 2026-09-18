@@ -599,7 +599,8 @@ fn stop_between_windows() {
         stop: stop.clone(),
         reads: AtomicUsize::new(0),
     });
-    let packed = PackedSequence::open(source.clone()).unwrap();
+    let table = fixture.shard.contig_table(s3).unwrap();
+    let packed = PackedSequence::open(source.clone(), table).unwrap();
     source.armed.store(true, Ordering::Relaxed);
     let config = AlignStageConfig::default();
     let query = PreparedQuery::new(&fixture.query, false, &config).unwrap();

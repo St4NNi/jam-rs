@@ -68,6 +68,15 @@ impl ContigTable {
         Some(self.starts.partition_point(|start| *start <= position) - 1)
     }
 
+    /// The runs that overlap bases `range` in entry coordinates.
+    pub(crate) fn runs_in(&self, range: Range<u64>) -> impl Iterator<Item = &Run> {
+        let first =
+            (self.runs).partition_point(|run| run.start + u64::from(run.length) <= range.start);
+        self.runs[first..]
+            .iter()
+            .take_while(move |run| run.start < range.end)
+    }
+
     /// Appends the table in its file encoding, all varints: the contig count and each contig
     /// length, then the run count and per run its gap after the last run, length and byte.
     pub(crate) fn encode(&self, out: &mut Vec<u8>) {
@@ -166,6 +175,9 @@ mod tests {
         assert!(table.contig_range(3).is_err());
         assert_eq!(table.contig_at(10), Some(2));
         assert_eq!(table.contig_at(1_000_010), None);
+        let runs: Vec<u64> = table.runs_in(4..301).map(|run| run.start).collect();
+        assert_eq!(runs, [3, 300]);
+        assert_eq!(table.runs_in(5..300).count(), 0);
     }
 
     #[test]

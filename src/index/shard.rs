@@ -148,22 +148,19 @@ impl Shard {
         Ok(table)
     }
 
-    /// Opens the packed sequence of an entry (stage 3) and checks it against the manifest.
+    /// Opens the packed sequence of an entry (stage 3) with its contig table, and checks it
+    /// against the manifest.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
+        let table = self.contig_table(entry)?;
         let (record, file) = self.packed_record(entry)?;
         let source = self.files.open_packed(entry as usize, file)?;
-        let size = source.size();
-        let packed = PackedSequence::open(source)?;
-        if size != file.bytes
-            || packed.bases() != record.bases
-            || packed.contig_count() as u64 != record.contigs
-        {
+        if source.size() != file.bytes {
             return Err(IndexError::format(format!(
                 "the packed sequence of {} differs from the manifest",
                 record.name
             )));
         }
-        Ok(packed)
+        PackedSequence::open(source, table)
     }
 
     /// Checks the SHA-256 digest of every file and the checksum of every section.

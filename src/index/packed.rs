@@ -1,5 +1,5 @@
-//! The packed sequence of one entry (stage 3): contigs at 2 bits per base with their names and the
-//! runs of other bytes.
+//! The packed sequence of one entry (stage 3): contigs at 2 bits per base with their names. The
+//! contig starts and runs of other bytes lie in the contig table of the seeds file.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -13,11 +13,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 const MAGIC: [u8; 16] = *b"jam-rs 2bit seq\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER_BYTES: u64 = 128;
 /// Packed bytes per checksum block, so 16,384 bases.
 const BLOCK_BYTES: u64 = 4096;
-const RUN_BYTES: u64 = 16;
 
 /// Collects the contigs of one entry and encodes its packed sequence file.
 #[derive(Default)]
@@ -84,20 +83,14 @@ impl PackedWriter {
     }
 
     /// The file in two parts, so a caller can write both without copying the bases.
-    pub fn finish(mut self) -> PackedFile {
+    pub fn finish(self) -> PackedFile {
         let contigs = self.name_ends.len() as u64;
-        self.starts.push(self.bases);
         let mut file = vec![0u8; HEADER_BYTES as usize];
-        for value in self.starts.iter().chain(&self.name_ends) {
+        for value in &self.name_ends {
             file.extend_from_slice(&value.to_le_bytes());
         }
         file.extend_from_slice(&self.names);
         file.resize(file.len().next_multiple_of(8), 0);
-        for run in &self.runs {
-            file.extend_from_slice(&run.start.to_le_bytes());
-            file.extend_from_slice(&run.length.to_le_bytes());
-            file.extend_from_slice(&[run.byte, 0, 0, 0]);
-        }
         for block in self.packed.chunks(BLOCK_BYTES as usize) {
             file.extend_from_slice(&crc32fast::hash(block).to_le_bytes());
         }
@@ -105,13 +98,7 @@ impl PackedWriter {
         let tables_crc = crc32fast::hash(&file[HEADER_BYTES as usize..]);
         file[..16].copy_from_slice(&MAGIC);
         file[16..20].copy_from_slice(&VERSION.to_le_bytes());
-        let fields = [
-            contigs,
-            self.bases,
-            self.runs.len() as u64,
-            self.names.len() as u64,
-            packed_offset,
-        ];
+        let fields = [contigs, self.bases, self.names.len() as u64, packed_offset];
         for (index, value) in fields.into_iter().enumerate() {
             file[24 + 8 * index..32 + 8 * index].copy_from_slice(&value.to_le_bytes());
         }
@@ -157,21 +144,18 @@ pub struct Contig {
     pub length: u64,
 }
 
-/// An open packed sequence. Contig starts, runs and block checksums stay in memory; names and
-/// bases are read on request, so an entry that is never reported never reads its names.
+/// An open packed sequence with the contig table of its entry. Block checksums stay in memory;
+/// names and bases are read on request, so an entry that is never reported never reads names.
 pub struct PackedSequence {
     source: Arc<dyn ReadAt>,
-    starts: Vec<u64>,
-    runs: Vec<Run>,
+    table: ContigTable,
     block_crcs: Vec<u32>,
     packed_offset: u64,
-    /// Where the name ends and the names lie, and their byte count without padding.
-    names_at: u64,
+    /// The byte count of the names without padding.
     names_bytes: u64,
-    /// The CRC-32 of all tables and the running CRC-32 of the parts before and after the names,
+    /// The CRC-32 of all tables and the running CRC-32 of the block checksums after the names,
     /// so the names complete the check of the tables when they are read.
     tables_crc: u32,
-    before_names: crc32fast::Hasher,
     after_names: crc32fast::Hasher,
 }
 
@@ -195,53 +179,54 @@ impl ContigNames {
 }
 
 impl PackedSequence {
-    /// Reads and checks the header and tables.
-    pub fn open(source: Arc<dyn ReadAt>) -> Result<Self, IndexError> {
+    /// Reads and checks the header and the block checksums, against the contig table of the
+    /// entry.
+    pub fn open(source: Arc<dyn ReadAt>, table: ContigTable) -> Result<Self, IndexError> {
         let mut header = [0u8; HEADER_BYTES as usize];
         source.read_exact_at(0, &mut header)?;
-        let fields = Header::decode(&header)?;
         let Header {
             contigs,
             bases,
-            runs,
             names,
             packed_offset,
-        } = fields;
+        } = Header::decode(&header)?;
         let blocks = bases.div_ceil(4).div_ceil(BLOCK_BYTES);
-        let tables_end = [
-            contigs.checked_add(1).and_then(|n| n.checked_mul(8)),
-            contigs.checked_mul(8),
-            names.checked_next_multiple_of(8),
-            runs.checked_mul(RUN_BYTES),
-            blocks.checked_mul(4),
-        ]
-        .into_iter()
-        .try_fold(HEADER_BYTES, |total, part| total.checked_add(part?));
+        let tail_at = [contigs.checked_mul(8), names.checked_next_multiple_of(8)]
+            .into_iter()
+            .try_fold(HEADER_BYTES, |total, part| total.checked_add(part?));
+        let tables_end = tail_at.and_then(|at| at.checked_add(blocks.checked_mul(4)?));
         if tables_end != Some(packed_offset)
             || packed_offset.checked_add(bases.div_ceil(4)) != Some(source.size())
+            || contigs != table.contig_count() as u64
+            || bases != table.bases()
         {
             return Err(IndexError::format("packed sequence layout"));
         }
-        let mut bytes = vec![0u8; 8 * (contigs as usize + 1)];
-        source.read_exact_at(HEADER_BYTES, &mut bytes)?;
-        let words = bytes.as_chunks::<8>().0.iter();
-        let starts = words.map(|word| u64::from_le_bytes(*word)).collect();
-        let names_at = HEADER_BYTES + 8 * (contigs + 1);
-        let tail_at = names_at + 8 * contigs + names.next_multiple_of(8);
+        let tail_at = tail_at.unwrap_or_default();
         let mut tail = vec![0u8; (packed_offset - tail_at) as usize];
         source.read_exact_at(tail_at, &mut tail)?;
-        let tables_crc = u32_at(&header, 64).unwrap_or_default();
-        Self::from_tables(source, starts, &tail, fields, tables_crc)
+        let block_crcs = (0..tail.len() / 4)
+            .map(|i| u32_at(&tail, 4 * i).unwrap_or_default())
+            .collect();
+        Ok(Self {
+            source,
+            table,
+            block_crcs,
+            packed_offset,
+            names_bytes: names,
+            tables_crc: u32_at(&header, 64).unwrap_or_default(),
+            after_names: hasher_of(&tail),
+        })
     }
 
     /// Bases of all contigs.
     pub fn bases(&self) -> u64 {
-        self.starts.last().copied().unwrap_or(0)
+        self.table.bases()
     }
 
     /// Contigs of the entry.
     pub fn contig_count(&self) -> usize {
-        self.starts.len() - 1
+        self.table.contig_count()
     }
 
     /// The name of a contig, read with all names of the entry.
@@ -273,8 +258,8 @@ impl PackedSequence {
     fn names(&self) -> Result<ContigNames, IndexError> {
         let contigs = self.contig_count();
         let mut bytes = vec![0u8; 8 * contigs + self.names_bytes.next_multiple_of(8) as usize];
-        self.source.read_exact_at(self.names_at, &mut bytes)?;
-        let mut crc = self.before_names.clone();
+        self.source.read_exact_at(HEADER_BYTES, &mut bytes)?;
+        let mut crc = crc32fast::Hasher::new();
         crc.update(&bytes);
         crc.combine(&self.after_names);
         if crc.finalize() != self.tables_crc {
@@ -312,18 +297,7 @@ impl PackedSequence {
 
     /// Entry coordinates of a contig.
     pub fn contig_range(&self, contig: usize) -> Result<Range<u64>, IndexError> {
-        match (self.starts.get(contig), self.starts.get(contig + 1)) {
-            (Some(start), Some(end)) => Ok(*start..*end),
-            _ => Err(no_contig(contig)),
-        }
-    }
-
-    /// The contig that holds the base at an entry coordinate.
-    pub fn contig_at(&self, position: u64) -> Option<usize> {
-        if position >= self.bases() {
-            return None;
-        }
-        Some(self.starts.partition_point(|start| *start <= position) - 1)
+        self.table.contig_range(contig)
     }
 
     /// Replaces `out` with bases `range` of a contig (contig coordinates) as upper case ASCII.
@@ -374,86 +348,12 @@ impl PackedSequence {
             let byte = packed[(position / 4 - read_start) as usize];
             out.push(b"ACGT"[usize::from((byte >> (2 * (position % 4))) & 3)]);
         }
-        let first = self
-            .runs
-            .partition_point(|run| run.start + u64::from(run.length) <= range.start);
-        for run in self.runs[first..]
-            .iter()
-            .take_while(|run| run.start < range.end)
-        {
+        for run in self.table.runs_in(range.clone()) {
             let from = run.start.max(range.start) - range.start;
             let to = (run.start + u64::from(run.length)).min(range.end) - range.start;
             out[from as usize..to as usize].fill(run.byte);
         }
         Ok(())
-    }
-
-    /// Reads the contig starts and the tables after the names (`tail`: runs and block checksums)
-    /// after a checked header, and checks their order.
-    fn from_tables(
-        source: Arc<dyn ReadAt>,
-        starts: Vec<u64>,
-        tail: &[u8],
-        header: Header,
-        tables_crc: u32,
-    ) -> Result<Self, IndexError> {
-        let Header {
-            contigs,
-            bases,
-            runs,
-            names,
-            packed_offset,
-        } = header;
-        let start_bytes: Vec<u8> = starts
-            .iter()
-            .flat_map(|start| start.to_le_bytes())
-            .collect();
-        let before_names = hasher_of(&start_bytes);
-        let after_names = hasher_of(tail);
-        let runs: Vec<Run> = (0..runs as usize)
-            .map(|i| {
-                let at = i * RUN_BYTES as usize;
-                Run {
-                    start: u64_at(tail, at).unwrap_or_default(),
-                    length: u32_at(tail, at + 8).unwrap_or_default(),
-                    byte: tail[at + 12],
-                }
-            })
-            .collect();
-        let crcs_at = runs.len() * RUN_BYTES as usize;
-        let block_crcs = (0..(tail.len() - crcs_at) / 4)
-            .map(|i| u32_at(tail, crcs_at + 4 * i).unwrap_or_default())
-            .collect();
-        let ordered = starts.len() as u64 == contigs + 1
-            && starts.first() == Some(&0)
-            && starts.last() == Some(&bases)
-            && starts.is_sorted();
-        let mut previous_end = 0;
-        let runs_valid = runs.iter().all(|run| {
-            let end = run.start + u64::from(run.length);
-            let valid = run.length > 0
-                && run.start >= previous_end
-                && end <= bases
-                && base_code(run.byte).is_none()
-                && !run.byte.is_ascii_lowercase();
-            previous_end = end;
-            valid
-        });
-        if !ordered || !runs_valid {
-            return Err(IndexError::format("packed sequence tables"));
-        }
-        Ok(Self {
-            source,
-            names_at: HEADER_BYTES + 8 * (contigs + 1),
-            names_bytes: names,
-            starts,
-            runs,
-            block_crcs,
-            packed_offset,
-            tables_crc,
-            before_names,
-            after_names,
-        })
     }
 }
 
@@ -468,7 +368,6 @@ fn hasher_of(bytes: &[u8]) -> crc32fast::Hasher {
 struct Header {
     contigs: u64,
     bases: u64,
-    runs: u64,
     names: u64,
     packed_offset: u64,
 }
@@ -488,12 +387,11 @@ impl Header {
         {
             return Err(IndexError::Checksum("packed sequence header".into()));
         }
-        let [contigs, bases, runs, names, packed_offset] =
-            [24, 32, 40, 48, 56].map(|offset| u64_at(header, offset).unwrap_or_default());
+        let [contigs, bases, names, packed_offset] =
+            [24, 32, 40, 48].map(|offset| u64_at(header, offset).unwrap_or_default());
         Ok(Self {
             contigs,
             bases,
-            runs,
             names,
             packed_offset,
         })

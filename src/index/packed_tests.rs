@@ -28,17 +28,20 @@ fn contigs(seed: u64) -> Vec<(Vec<u8>, Vec<u8>)> {
         .collect()
 }
 
-fn write(path: &Path, contigs: &[(Vec<u8>, Vec<u8>)]) {
+/// Writes the packed file of the contigs and returns their contig table.
+fn write(path: &Path, contigs: &[(Vec<u8>, Vec<u8>)]) -> ContigTable {
     let mut writer = PackedWriter::new();
     for (name, sequence) in contigs {
         writer.add_contig(name, sequence).unwrap();
     }
+    let table = writer.contig_table();
     let file = writer.finish();
     std::fs::write(path, [file.header_and_tables, file.packed_bases].concat()).unwrap();
+    table
 }
 
-fn open(path: &Path) -> Result<PackedSequence, IndexError> {
-    PackedSequence::open(Arc::new(MappedFile::open(path, false)?))
+fn open(path: &Path, table: &ContigTable) -> Result<PackedSequence, IndexError> {
+    PackedSequence::open(Arc::new(MappedFile::open(path, false)?), table.clone())
 }
 
 #[test]
@@ -46,8 +49,8 @@ fn packed_round_trip() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("entry.packed");
     let contigs = contigs(3);
-    write(&path, &contigs);
-    let packed = open(&path).unwrap();
+    let table = write(&path, &contigs);
+    let packed = open(&path, &table).unwrap();
     assert_eq!(packed.contig_count(), contigs.len());
     let total: usize = contigs.iter().map(|(_, sequence)| sequence.len()).sum();
     assert_eq!(packed.bases(), total as u64);
@@ -65,11 +68,9 @@ fn packed_round_trip() {
             assert_eq!(out, expected[16_383..16_390]);
             packed.read(index, 350..402, &mut out).unwrap();
             assert_eq!(out, expected[350..402]);
-            assert_eq!(packed.contig_at(start + 17), Some(index));
         }
         start += length;
     }
-    assert_eq!(packed.contig_at(total as u64), None);
     let table = packed.contigs([1, 0]).unwrap();
     assert_eq!(table.len(), 2);
     assert_eq!(table[&1].length, contigs[1].1.len() as u64);
@@ -85,8 +86,8 @@ fn packed_round_trip() {
 fn empty_bad_names() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("empty.packed");
-    write(&path, &[]);
-    let packed = open(&path).unwrap();
+    let table = write(&path, &[]);
+    let packed = open(&path, &table).unwrap();
     assert_eq!((packed.contig_count(), packed.bases()), (0, 0));
     let mut writer = PackedWriter::new();
     assert!(writer.add_contig(b"", b"ACGT").is_err());
@@ -97,7 +98,7 @@ fn empty_bad_names() {
 fn damage_is_detected() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("entry.packed");
-    write(&path, &contigs(5));
+    let table = write(&path, &contigs(5));
     let original = std::fs::read(&path).unwrap();
     let damaged = directory.path().join("damaged.packed");
     for at in [0, 30, 70] {
@@ -105,14 +106,14 @@ fn damage_is_detected() {
         bytes[at] ^= 1;
         std::fs::remove_file(&damaged).ok();
         std::fs::write(&damaged, &bytes).unwrap();
-        assert!(open(&damaged).is_err(), "byte {at}");
+        assert!(open(&damaged, &table).is_err(), "byte {at}");
     }
     // Damage in the names is found when they are read.
     let mut bytes = original.clone();
-    bytes[200] ^= 1;
+    bytes[140] ^= 1;
     std::fs::remove_file(&damaged).ok();
     std::fs::write(&damaged, &bytes).unwrap();
-    let packed = open(&damaged).unwrap();
+    let packed = open(&damaged, &table).unwrap();
     assert!(packed.contig_name(0).is_err());
     assert!(packed.contigs([0]).is_err());
     let mut bytes = original.clone();
@@ -120,10 +121,11 @@ fn damage_is_detected() {
     bytes[last] ^= 1;
     std::fs::remove_file(&damaged).ok();
     std::fs::write(&damaged, &bytes).unwrap();
-    let packed = open(&damaged).unwrap();
+    let packed = open(&damaged, &table).unwrap();
     let mut out = Vec::new();
     assert!(packed.read_bases(0..10, &mut out).is_ok());
     assert!(packed.read_bases(0..packed.bases(), &mut out).is_err());
     std::fs::write(&damaged, &original[..original.len() - 1]).unwrap();
-    assert!(open(&damaged).is_err());
+    assert!(open(&damaged, &table).is_err());
+    assert!(open(&path, &ContigTable::new([1, 2], Vec::new())).is_err());
 }
