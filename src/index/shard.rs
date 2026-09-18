@@ -148,8 +148,8 @@ impl Shard {
         Ok(table)
     }
 
-    /// Opens the packed sequence of an entry (stage 3) with its contig table, and checks it
-    /// against the manifest.
+    /// Opens the packed sequence of an entry (stage 3) with its contig table. Its header is
+    /// checked by the first read.
     pub fn packed(&self, entry: u32) -> Result<PackedSequence, IndexError> {
         let table = self.contig_table(entry)?;
         let (record, file) = self.packed_record(entry)?;
@@ -160,7 +160,7 @@ impl Shard {
                 record.name
             )));
         }
-        PackedSequence::open(source, table)
+        Ok(PackedSequence::open(source, table))
     }
 
     /// Checks the SHA-256 digest of every file and the checksum of every section.

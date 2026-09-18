@@ -35,13 +35,15 @@ fn write(path: &Path, contigs: &[(Vec<u8>, Vec<u8>)]) -> ContigTable {
         writer.add_contig(name, sequence).unwrap();
     }
     let table = writer.contig_table();
-    let file = writer.finish();
-    std::fs::write(path, [file.header_and_tables, file.packed_bases].concat()).unwrap();
+    std::fs::write(path, writer.finish().parts().concat()).unwrap();
     table
 }
 
-fn open(path: &Path, table: &ContigTable) -> Result<PackedSequence, IndexError> {
-    PackedSequence::open(Arc::new(MappedFile::open(path, false)?), table.clone())
+fn open(path: &Path, table: &ContigTable) -> PackedSequence {
+    PackedSequence::open(
+        Arc::new(MappedFile::open(path, false).unwrap()),
+        table.clone(),
+    )
 }
 
 #[test]
@@ -50,7 +52,7 @@ fn packed_round_trip() {
     let path = directory.path().join("entry.packed");
     let contigs = contigs(3);
     let table = write(&path, &contigs);
-    let packed = open(&path, &table).unwrap();
+    let packed = open(&path, &table);
     assert_eq!(packed.contig_count(), contigs.len());
     let total: usize = contigs.iter().map(|(_, sequence)| sequence.len()).sum();
     assert_eq!(packed.bases(), total as u64);
@@ -76,8 +78,7 @@ fn packed_round_trip() {
     assert_eq!(table[&1].length, contigs[1].1.len() as u64);
     assert_eq!(table[&1].name.as_bytes(), contigs[1].0);
     assert!(packed.contigs([5]).is_err());
-    packed.will_need(1, 0..10);
-    packed.will_need(9, 0..10);
+    packed.will_need([(1, &(0..10)), (9, &(0..10))]);
     assert!(packed.read(2, 0..70_001, &mut out).is_err());
     assert!(packed.contig_name(5).is_err());
 }
@@ -87,8 +88,9 @@ fn empty_bad_names() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("empty.packed");
     let table = write(&path, &[]);
-    let packed = open(&path, &table).unwrap();
+    let packed = open(&path, &table);
     assert_eq!((packed.contig_count(), packed.bases()), (0, 0));
+    assert!(packed.contigs([]).unwrap().is_empty());
     let mut writer = PackedWriter::new();
     assert!(writer.add_contig(b"", b"ACGT").is_err());
     assert!(writer.add_contig(b"two words", b"ACGT").is_err());
@@ -101,31 +103,33 @@ fn damage_is_detected() {
     let table = write(&path, &contigs(5));
     let original = std::fs::read(&path).unwrap();
     let damaged = directory.path().join("damaged.packed");
-    for at in [0, 30, 70] {
+    let mut out = Vec::new();
+    for at in [0, 30, 50] {
         let mut bytes = original.clone();
         bytes[at] ^= 1;
-        std::fs::remove_file(&damaged).ok();
         std::fs::write(&damaged, &bytes).unwrap();
-        assert!(open(&damaged, &table).is_err(), "byte {at}");
+        let packed = open(&damaged, &table);
+        assert!(packed.read_bases(0..10, &mut out).is_err(), "byte {at}");
+        assert!(packed.contigs([0]).is_err(), "byte {at}");
     }
-    // Damage in the names is found when they are read.
+    // Damage in the names is found when their block is read.
     let mut bytes = original.clone();
-    bytes[140] ^= 1;
-    std::fs::remove_file(&damaged).ok();
-    std::fs::write(&damaged, &bytes).unwrap();
-    let packed = open(&damaged, &table).unwrap();
-    assert!(packed.contig_name(0).is_err());
-    assert!(packed.contigs([0]).is_err());
-    let mut bytes = original.clone();
-    let last = bytes.len() - 3;
+    let last = bytes.len() - 6;
     bytes[last] ^= 1;
-    std::fs::remove_file(&damaged).ok();
     std::fs::write(&damaged, &bytes).unwrap();
-    let packed = open(&damaged, &table).unwrap();
-    let mut out = Vec::new();
+    let packed = open(&damaged, &table);
+    assert!(packed.contig_name(0).is_err());
+    assert!(packed.read_bases(0..10, &mut out).is_ok());
+    // Damage in a block of bases is found when that block is read.
+    let mut bytes = original.clone();
+    bytes[BASES_AT as usize + BLOCK_BYTES as usize + 10] ^= 1;
+    std::fs::write(&damaged, &bytes).unwrap();
+    let packed = open(&damaged, &table);
     assert!(packed.read_bases(0..10, &mut out).is_ok());
     assert!(packed.read_bases(0..packed.bases(), &mut out).is_err());
+    // A file of another size, or a table of another entry, fails at the first read.
     std::fs::write(&damaged, &original[..original.len() - 1]).unwrap();
-    assert!(open(&damaged, &table).is_err());
-    assert!(open(&path, &ContigTable::new([1, 2], Vec::new())).is_err());
+    assert!(open(&damaged, &table).read_bases(0..10, &mut out).is_err());
+    let other = ContigTable::new([1, 2], Vec::new());
+    assert!(open(&path, &other).read_bases(0..1, &mut out).is_err());
 }

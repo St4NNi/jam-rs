@@ -367,11 +367,8 @@ impl<'a> Searcher<'a> {
         worker: &mut Worker,
     ) -> Result<EntryEvent, SearchError> {
         let packed = self.shard.packed(located.entry)?;
-        for windows in &located.alignment_windows {
-            for range in &windows.ranges {
-                packed.will_need(windows.contig as usize, range.clone());
-            }
-        }
+        let windows = located.alignment_windows.iter();
+        packed.will_need(windows.flat_map(|w| w.ranges.iter().map(|r| (w.contig as usize, r))));
         let aligned = align_packed_entry(
             &packed,
             prepared,

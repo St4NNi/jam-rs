@@ -355,7 +355,7 @@ fn write_packed(
     let parts = writer.finish();
     let file_name = packed_file_name(name);
     let path = directory.join(&file_name);
-    let mut file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
+    let file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
         std::io::ErrorKind::AlreadyExists => {
             IndexError::Input(format!("the entry name {name} is used twice"))
         }
@@ -364,13 +364,16 @@ fn write_packed(
             source: error,
         },
     })?;
-    let (head, packed) = (&parts.header_and_tables, &parts.packed_bases);
-    file.write_all(head).at(&path)?;
-    file.write_all(packed).at(&path)?;
+    let parts = parts.parts();
+    let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
+    for part in &parts {
+        out.write_all(part).at(&path)?;
+    }
+    out.flush().at(&path)?;
     Ok(FileRecord {
         path: file_name,
-        bytes: (head.len() + packed.len()) as u64,
-        sha256: sha256_hex(&[head, packed]),
+        bytes: parts.iter().map(|part| part.len() as u64).sum(),
+        sha256: sha256_hex(&parts),
     })
 }
 

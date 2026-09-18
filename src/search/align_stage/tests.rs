@@ -599,8 +599,9 @@ fn stop_between_windows() {
         stop: stop.clone(),
         reads: AtomicUsize::new(0),
     });
-    let table = fixture.shard.contig_table(s3).unwrap();
-    let packed = PackedSequence::open(source.clone(), table).unwrap();
+    let packed = PackedSequence::open(source.clone(), fixture.shard.contig_table(s3).unwrap());
+    // The first read checks the header; it happens before the source is armed.
+    packed.read_bases(0..1, &mut Vec::new()).unwrap();
     source.armed.store(true, Ordering::Relaxed);
     let config = AlignStageConfig::default();
     let query = PreparedQuery::new(&fixture.query, false, &config).unwrap();
