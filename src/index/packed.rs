@@ -22,8 +22,10 @@ pub(crate) const BASES_AT: u64 = 4096;
 pub(crate) const BLOCK_BYTES: u64 = 4096;
 /// Packed bases of one block, so 16,368 bases.
 const BLOCK_DATA: u64 = BLOCK_BYTES - 4;
-/// Contigs whose names form one name block.
+/// Fewest contigs whose names form one name block.
 const NAME_BLOCK: u64 = 256;
+/// Name blocks whose ends fit the header page after the header fields.
+const INDEX_SLOTS: u64 = (BASES_AT - HEADER_BYTES) / 8;
 /// The zstd level of name blocks: they are written once and read rarely.
 const NAME_LEVEL: i32 = 19;
 
@@ -96,7 +98,8 @@ impl PackedWriter {
         let mut index = Vec::new();
         let mut names = Vec::new();
         let lines: Vec<&[u8]> = self.names.split_inclusive(|b| *b == b'\n').collect();
-        for block in lines.chunks(NAME_BLOCK as usize) {
+        let block_contigs = name_block(lines.len() as u64) as usize;
+        for block in lines.chunks(block_contigs) {
             let start = names.len();
             names.extend(zstd::bulk::compress(&block.concat(), NAME_LEVEL)?);
             let crc = crc32fast::hash(&names[start..]);
@@ -104,23 +107,23 @@ impl PackedWriter {
             index.extend_from_slice(&(names.len() as u64).to_le_bytes());
         }
         let mut header = vec![0u8; BASES_AT as usize];
+        header[HEADER_BYTES as usize..][..index.len()].copy_from_slice(&index);
         header[..16].copy_from_slice(&MAGIC);
         header[16..20].copy_from_slice(&VERSION.to_le_bytes());
         let fields = [self.starts.len() as u64, self.bases, names.len() as u64];
         for (at, value) in fields.into_iter().enumerate() {
             header[24 + 8 * at..32 + 8 * at].copy_from_slice(&value.to_le_bytes());
         }
-        let header_crc = crc32fast::hash(&header[..48]);
+        let header_crc = page_crc(&header);
         header[48..52].copy_from_slice(&header_crc.to_le_bytes());
         let block_crcs = (self.packed.chunks(BLOCK_DATA as usize))
             .map(|block| crc32fast::hash(block).to_le_bytes())
             .collect();
-        index.extend_from_slice(&names);
         Ok(PackedFile {
             header,
             packed: self.packed,
             block_crcs,
-            names: index,
+            names,
         })
     }
 
@@ -147,7 +150,7 @@ pub struct PackedFile {
     header: Vec<u8>,
     packed: Vec<u8>,
     block_crcs: Vec<[u8; 4]>,
-    /// The name index and the name blocks.
+    /// The name blocks.
     names: Vec<u8>,
 }
 
@@ -177,18 +180,18 @@ pub struct Contig {
 pub struct PackedSequence {
     source: Arc<dyn ReadAt>,
     table: ContigTable,
-    /// Set once the header has been read and checked.
-    checked: OnceLock<()>,
+    /// The end of each name block, set once the header page has been read and checked.
+    name_ends: OnceLock<Vec<u64>>,
 }
 
 impl PackedSequence {
     /// Opens a packed sequence with the contig table of its entry, and hints its header.
     pub fn open(source: Arc<dyn ReadAt>, table: ContigTable) -> Self {
-        source.will_need(0, HEADER_BYTES);
+        source.will_need(0, BASES_AT);
         Self {
             source,
             table,
-            checked: OnceLock::new(),
+            name_ends: OnceLock::new(),
         }
     }
 
@@ -308,90 +311,70 @@ impl PackedSequence {
         }
         let first = range.start / 4 / BLOCK_DATA;
         let last = (range.end - 1) / 4 / BLOCK_DATA;
-        let end = (BASES_AT + (last + 1) * BLOCK_BYTES).min(self.layout().index_at);
+        let end = (BASES_AT + (last + 1) * BLOCK_BYTES).min(self.names_at());
         Some(BASES_AT + first * BLOCK_BYTES..end)
     }
 
-    /// Where the parts of the file lie, from the contig table.
-    fn layout(&self) -> Layout {
+    /// Where the name blocks start, after the bases, from the contig table.
+    fn names_at(&self) -> u64 {
         let data = self.bases().div_ceil(4);
-        let index_at = BASES_AT + data + 4 * data.div_ceil(BLOCK_DATA);
-        let blocks = (self.contig_count() as u64).div_ceil(NAME_BLOCK);
-        let names_at = index_at + 8 * blocks;
-        Layout {
-            index_at,
-            names_at,
-            name_bytes: self.source.size().saturating_sub(names_at),
-        }
+        BASES_AT + data + 4 * data.div_ceil(BLOCK_DATA)
     }
 
-    /// Reads and checks the header once: its CRC-32, and that it fits the contig table and the
-    /// file size.
-    fn check_header(&self) -> Result<(), IndexError> {
-        if self.checked.get().is_some() {
-            return Ok(());
+    /// Reads and checks the header page once: its CRC-32, and that it fits the contig table and
+    /// the file size. Returns the end of each name block within the name blocks.
+    fn check_header(&self) -> Result<&[u64], IndexError> {
+        if let Some(ends) = self.name_ends.get() {
+            return Ok(ends);
         }
-        let mut header = [0u8; HEADER_BYTES as usize];
+        let mut header = vec![0u8; BASES_AT as usize];
         self.source.read_exact_at(0, &mut header)?;
         if header[..16] != MAGIC || u32_at(&header, 16) != Some(VERSION) {
             return Err(IndexError::format("not a packed sequence of this version"));
         }
-        if u32_at(&header, 48) != Some(crc32fast::hash(&header[..48]))
-            || header[20..24] != [0; 4]
-            || header[52..].iter().any(|b| *b != 0)
-        {
+        if u32_at(&header, 48) != Some(page_crc(&header)) || header[20..24] != [0; 4] {
             return Err(IndexError::Checksum("packed sequence header".into()));
         }
         let [contigs, bases, names] = [24, 32, 40].map(|at| u64_at(&header, at).unwrap_or(0));
-        let layout = self.layout();
+        let blocks = contigs.div_ceil(name_block(contigs)) as usize;
+        let ends: Vec<u64> = (0..blocks)
+            .map(|block| u64_at(&header, HEADER_BYTES as usize + 8 * block).unwrap_or(0))
+            .collect();
         if contigs != self.contig_count() as u64
             || bases != self.bases()
-            || layout.names_at.checked_add(names) != Some(self.source.size())
+            || self.names_at().checked_add(names) != Some(self.source.size())
+            || !ends.is_sorted()
+            || ends.last().is_some_and(|&end| end != names)
         {
             return Err(IndexError::format("packed sequence layout"));
         }
-        let _ = self.checked.set(());
-        Ok(())
+        Ok(self.name_ends.get_or_init(|| ends))
     }
 
-    /// The names of the given contigs. Only the name blocks that hold them are read: first
-    /// their bounds in the name index, then the blocks, each step at once.
+    /// The names of the given contigs. Only the name blocks that hold them are read, at once;
+    /// their bounds come from the header page.
     fn read_names(&self, mut wanted: Vec<u32>) -> Result<BTreeMap<u32, Vec<u8>>, IndexError> {
         wanted.sort_unstable();
         wanted.dedup();
         if let Some(&last) = wanted.last() {
             self.contig_range(last as usize)?;
         }
-        self.check_header()?;
-        let mut blocks: Vec<u64> = (wanted.iter())
-            .map(|&c| u64::from(c) / NAME_BLOCK)
-            .collect();
+        let ends = self.check_header()?;
+        let size = name_block(self.contig_count() as u64);
+        let mut blocks: Vec<u64> = wanted.iter().map(|&c| u64::from(c) / size).collect();
         blocks.dedup();
-        let layout = self.layout();
-        // The index entry before a block holds its start; the first block starts at 0.
-        let bounds = |block: u64| {
-            layout.index_at + 8 * block.saturating_sub(1)..layout.index_at + 8 * (block + 1)
-        };
-        let ends = self.read_ranges(blocks.iter().map(|&block| bounds(block)))?;
-        let ranges = blocks.iter().zip(&ends).map(|(&block, bytes)| {
-            let end = u64_at(bytes, bytes.len() - 8).unwrap_or(0);
-            let start = if block == 0 {
-                0
-            } else {
-                u64_at(bytes, 0).unwrap_or(0)
-            };
-            let end = end.min(layout.name_bytes);
-            layout.names_at + start.min(end)..layout.names_at + end
+        let names_at = self.names_at();
+        let ranges = blocks.iter().map(|&block| {
+            let start = (block.checked_sub(1)).map_or(0, |before| ends[before as usize]);
+            names_at + start..names_at + ends[block as usize]
         });
         let read = self.read_ranges(ranges)?;
         let mut found = BTreeMap::new();
         for (&block, bytes) in blocks.iter().zip(&read) {
-            let names = self.block_names(block, bytes)?;
-            let inside = wanted
-                .iter()
-                .filter(|&&c| u64::from(c) / NAME_BLOCK == block);
+            let names = self.block_names(block, size, bytes)?;
+            let inside = wanted.iter().filter(|&&c| u64::from(c) / size == block);
             for &contig in inside {
-                let name = &names[(u64::from(contig) - block * NAME_BLOCK) as usize];
+                let name = &names[(u64::from(contig) - block * size) as usize];
                 found.insert(contig, name.clone());
             }
         }
@@ -416,9 +399,9 @@ impl PackedSequence {
             .collect()
     }
 
-    /// Checks a name block against its CRC-32, unpacks it and splits it into the names of its
-    /// contigs.
-    fn block_names(&self, block: u64, bytes: &[u8]) -> Result<Vec<Vec<u8>>, IndexError> {
+    /// Checks a name block of `size` contigs against its CRC-32, unpacks it and splits it into
+    /// the names of its contigs.
+    fn block_names(&self, block: u64, size: u64, bytes: &[u8]) -> Result<Vec<Vec<u8>>, IndexError> {
         let damaged = || IndexError::Checksum("packed sequence names".into());
         let (packed, crc) = bytes.split_at(bytes.len().checked_sub(4).ok_or_else(damaged)?);
         if u32_at(crc, 0) != Some(crc32fast::hash(packed)) {
@@ -428,7 +411,7 @@ impl PackedSequence {
         let lines = zstd::stream::decode_all(packed).map_err(|_| wrong())?;
         let lines = lines.strip_suffix(b"\n").ok_or_else(wrong)?;
         let names: Vec<Vec<u8>> = lines.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
-        let count = (self.contig_count() as u64 - block * NAME_BLOCK).min(NAME_BLOCK);
+        let count = (self.contig_count() as u64 - block * size).min(size);
         if names.len() as u64 != count || !names.iter().all(|name| valid_name(name)) {
             return Err(wrong());
         }
@@ -436,11 +419,21 @@ impl PackedSequence {
     }
 }
 
-/// Where the name index and the name blocks of a packed sequence lie.
-struct Layout {
-    index_at: u64,
-    names_at: u64,
-    name_bytes: u64,
+/// Contigs per name block for an entry of `contigs` contigs: a power of two of at least
+/// `NAME_BLOCK`, so the end of every block fits the header page.
+fn name_block(contigs: u64) -> u64 {
+    contigs
+        .div_ceil(INDEX_SLOTS)
+        .next_power_of_two()
+        .max(NAME_BLOCK)
+}
+
+/// The CRC-32 of a header page without its CRC field.
+fn page_crc(page: &[u8]) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&page[..48]);
+    hasher.update(&page[52..]);
+    hasher.finalize()
 }
 
 /// A contig name is one word.

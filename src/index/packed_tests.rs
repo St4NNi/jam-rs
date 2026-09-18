@@ -115,6 +115,22 @@ fn names_in_blocks() {
     assert!(packed.contig_name(600).is_err());
 }
 
+/// An entry with more contigs than the header page indexes in blocks of 256 uses larger blocks.
+#[test]
+fn larger_name_blocks() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("larger.packed");
+    let contigs: Vec<(Vec<u8>, Vec<u8>)> = (0..200_000)
+        .map(|index| (format!("n{index}").into_bytes(), b"C".to_vec()))
+        .collect();
+    let table = write(&path, &contigs);
+    assert_eq!(name_block(200_000), 512);
+    let packed = open(&path, &table);
+    for index in [0, 511, 512, 199_999] {
+        assert_eq!(packed.contig_name(index).unwrap(), contigs[index].0);
+    }
+}
+
 #[test]
 fn damage_is_detected() {
     let directory = tempfile::tempdir().unwrap();
