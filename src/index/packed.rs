@@ -24,10 +24,12 @@ pub(crate) const BLOCK_BYTES: u64 = 4096;
 const BLOCK_DATA: u64 = BLOCK_BYTES - 4;
 /// Fewest contigs whose names form one name block.
 const NAME_BLOCK: u64 = 256;
+/// Name blocks of at most this many bytes in all are asked for with the windows.
+const SMALL_NAMES: u64 = 16 << 10;
 /// Name blocks whose ends fit the header page after the header fields.
 const INDEX_SLOTS: u64 = (BASES_AT - HEADER_BYTES) / 8;
 /// The zstd level of name blocks: they are written once and read rarely.
-const NAME_LEVEL: i32 = 19;
+const NAME_LEVEL: i32 = 12;
 
 /// Collects the contigs of one entry and encodes its packed sequence file.
 #[derive(Default)]
@@ -234,9 +236,13 @@ impl PackedSequence {
     }
 
     /// Asks the source for the stored blocks that hold these ranges of contigs (contig
-    /// coordinates) at once, joining close ones, so later reads find them.
+    /// coordinates) at once, joining close ones, so later reads find them. Small name blocks
+    /// are asked for too, so a report needs no further round trip.
     pub fn will_need<'a>(&self, ranges: impl IntoIterator<Item = (usize, &'a Range<u64>)>) {
         let mut stored: Vec<(u64, u64)> = Vec::new();
+        if self.source.size().saturating_sub(self.names_at()) <= SMALL_NAMES {
+            stored.push((self.names_at(), self.source.size()));
+        }
         for (contig, range) in ranges {
             let Ok(contig_range) = self.contig_range(contig) else {
                 continue;
