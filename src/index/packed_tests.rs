@@ -96,6 +96,25 @@ fn empty_bad_names() {
     assert!(writer.add_contig(b"two words", b"ACGT").is_err());
 }
 
+/// Many contigs fill several name blocks; a read of some names reads only their blocks.
+#[test]
+fn names_in_blocks() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("many.packed");
+    let contigs: Vec<(Vec<u8>, Vec<u8>)> = (0..600)
+        .map(|index| (format!("c{index}").into_bytes(), vec![b'A'; index % 7 + 1]))
+        .collect();
+    let table = write(&path, &contigs);
+    let packed = open(&path, &table);
+    for index in [0, 255, 256, 511, 599] {
+        assert_eq!(packed.contig_name(index).unwrap(), contigs[index].0);
+    }
+    let found = packed.contigs([599, 3, 300]).unwrap();
+    assert_eq!(found.keys().copied().collect::<Vec<_>>(), [3, 300, 599]);
+    assert_eq!(found[&300].length, 300 % 7 + 1);
+    assert!(packed.contig_name(600).is_err());
+}
+
 #[test]
 fn damage_is_detected() {
     let directory = tempfile::tempdir().unwrap();

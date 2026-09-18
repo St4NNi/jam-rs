@@ -319,6 +319,7 @@ impl PackedSequence {
         Layout {
             index_at,
             names_at,
+            name_bytes: self.source.size().saturating_sub(names_at),
         }
     }
 
@@ -351,7 +352,8 @@ impl PackedSequence {
         Ok(())
     }
 
-    /// The names of the given contigs, from one read of the name index and all name blocks.
+    /// The names of the given contigs. Only the name blocks that hold them are read: first
+    /// their bounds in the name index, then the blocks, each step at once.
     fn read_names(&self, mut wanted: Vec<u32>) -> Result<BTreeMap<u32, Vec<u8>>, IndexError> {
         wanted.sort_unstable();
         wanted.dedup();
@@ -359,22 +361,57 @@ impl PackedSequence {
             self.contig_range(last as usize)?;
         }
         self.check_header()?;
+        let mut blocks: Vec<u64> = (wanted.iter())
+            .map(|&c| u64::from(c) / NAME_BLOCK)
+            .collect();
+        blocks.dedup();
         let layout = self.layout();
-        let mut bytes = vec![0u8; (self.source.size() - layout.index_at) as usize];
-        self.source.read_exact_at(layout.index_at, &mut bytes)?;
-        let (index, blocks) = bytes.split_at((layout.names_at - layout.index_at) as usize);
+        // The index entry before a block holds its start; the first block starts at 0.
+        let bounds = |block: u64| {
+            layout.index_at + 8 * block.saturating_sub(1)..layout.index_at + 8 * (block + 1)
+        };
+        let ends = self.read_ranges(blocks.iter().map(|&block| bounds(block)))?;
+        let ranges = blocks.iter().zip(&ends).map(|(&block, bytes)| {
+            let end = u64_at(bytes, bytes.len() - 8).unwrap_or(0);
+            let start = if block == 0 {
+                0
+            } else {
+                u64_at(bytes, 0).unwrap_or(0)
+            };
+            let end = end.min(layout.name_bytes);
+            layout.names_at + start.min(end)..layout.names_at + end
+        });
+        let read = self.read_ranges(ranges)?;
         let mut found = BTreeMap::new();
-        for contig in wanted {
-            let block = u64::from(contig) / NAME_BLOCK;
-            let end = u64_at(index, 8 * block as usize).unwrap_or(0);
-            let start =
-                (block.checked_sub(1)).map_or(0, |b| u64_at(index, 8 * b as usize).unwrap_or(0));
-            let range = start.min(end) as usize..(end as usize).min(blocks.len());
-            let names = self.block_names(block, blocks.get(range).unwrap_or_default())?;
-            let name = names[(u64::from(contig) - block * NAME_BLOCK) as usize];
-            found.insert(contig, name.to_vec());
+        for (&block, bytes) in blocks.iter().zip(&read) {
+            let names = self.block_names(block, bytes)?;
+            let inside = wanted
+                .iter()
+                .filter(|&&c| u64::from(c) / NAME_BLOCK == block);
+            for &contig in inside {
+                let name = names[(u64::from(contig) - block * NAME_BLOCK) as usize];
+                found.insert(contig, name.to_vec());
+            }
         }
         Ok(found)
+    }
+
+    /// Reads byte ranges, hinting all of them before the first read.
+    fn read_ranges(
+        &self,
+        ranges: impl Iterator<Item = Range<u64>>,
+    ) -> Result<Vec<Vec<u8>>, IndexError> {
+        let ranges: Vec<Range<u64>> = ranges.collect();
+        let mut hints: Vec<(u64, u64)> = ranges.iter().map(|r| (r.start, r.end)).collect();
+        will_need_ranges(self.source.as_ref(), &mut hints);
+        ranges
+            .into_iter()
+            .map(|range| {
+                let mut bytes = vec![0u8; (range.end - range.start) as usize];
+                self.source.read_exact_at(range.start, &mut bytes)?;
+                Ok(bytes)
+            })
+            .collect()
     }
 
     /// Checks a name block against its CRC-32 and splits it into the names of its contigs.
@@ -397,6 +434,7 @@ impl PackedSequence {
 struct Layout {
     index_at: u64,
     names_at: u64,
+    name_bytes: u64,
 }
 
 /// A contig name is one word.
