@@ -33,6 +33,8 @@ pub struct MissModel {
     w: usize,
     lengths: Vec<f64>,
     identities: Vec<f64>,
+    /// Mismatches a query k-mer may have against a seed and still hit it (0 or 1).
+    mismatches: usize,
     /// Natural logarithm of the chance, row by length, column by identity.
     ln_miss: Vec<f64>,
 }
@@ -56,12 +58,25 @@ impl MissModel {
             w: usize::from(scheme.w),
             lengths: table_lengths(usize::from(scheme.k)),
             identities: identity_grid(),
+            mismatches: 0,
             ln_miss,
         })
     }
 
+    /// The model for queries that also look up every k-mer with one substitution: a seed is hit
+    /// when the query holds it with at most one mismatch.
+    pub fn one_mismatch(scheme: SeedScheme) -> Result<Self, LossError> {
+        Self::averaged(scheme, LAYOUTS, 1)
+    }
+
     /// As `new`, averaging over `layouts` random layouts per stretch length.
     pub fn with_layouts(scheme: SeedScheme, layouts: usize) -> Result<Self, LossError> {
+        Self::averaged(scheme, layouts, 0)
+    }
+
+    /// The table averaged over `layouts` random layouts per length, for seeds hit with at most
+    /// `mismatches` mismatches (0 or 1).
+    fn averaged(scheme: SeedScheme, layouts: usize, mismatches: usize) -> Result<Self, LossError> {
         scheme.validate()?;
         if layouts == 0 {
             return Err(LossError::NoLayouts);
@@ -71,7 +86,7 @@ impl MissModel {
         let identities = identity_grid();
         let rows: Vec<Vec<f64>> = lengths
             .par_iter()
-            .map(|&length| average_row(length as usize, k, w, layouts, &identities))
+            .map(|&length| average_row(length as usize, k, w, layouts, mismatches, &identities))
             .collect();
         let ln_miss = rows
             .into_iter()
@@ -83,8 +98,14 @@ impl MissModel {
             w,
             lengths,
             identities,
+            mismatches,
             ln_miss,
         })
+    }
+
+    /// Mismatches a query k-mer may have against a seed and still hit it.
+    pub fn mismatches(&self) -> usize {
+        self.mismatches
     }
 
     /// The chance that a stretch of `stretch_bases` bases present at `identity` shows no seed hit,
@@ -184,14 +205,25 @@ const DEFAULT_LN_MISS: &[u8] = include_bytes!("loss_default_table.bin");
 const MAX_K: usize = 32;
 
 /// The average miss chance over random layouts of one stretch length, for every identity.
-fn average_row(length: usize, k: usize, w: usize, layouts: usize, identities: &[f64]) -> Vec<f64> {
+fn average_row(
+    length: usize,
+    k: usize,
+    w: usize,
+    layouts: usize,
+    mismatches: usize,
+    identities: &[f64],
+) -> Vec<f64> {
     // PCG gives the same numbers in every version, so the table never changes between builds.
     let mut random = Pcg64Mcg::seed_from_u64(0x6A09_E667_F3BC_C908 ^ length as u64);
     let mut sums = vec![0.0f64; identities.len()];
     for _ in 0..layouts {
         let seeds = random_layout(length, k, w, &mut random);
         for (sum, &identity) in sums.iter_mut().zip(identities) {
-            *sum += layout_miss_chance(&seeds, k, identity);
+            *sum += if mismatches == 0 {
+                layout_miss_chance(&seeds, k, identity)
+            } else {
+                one_mismatch_chance(&seeds, k, identity)
+            };
         }
     }
     sums.iter().map(|sum| sum / layouts as f64).collect()
@@ -256,6 +288,59 @@ fn layout_miss_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
         previous_end = end as i64;
     }
     state[..k].iter().sum()
+}
+
+/// The exact chance that every seed, ending at `seed_ends`, has two or more mutated bases. State
+/// (a, b): unmutated bases after the last mutation and bases after the second-last one; only
+/// b < k misses a seed, so only those are kept, and `free` holds the mass with no mutation yet.
+fn one_mismatch_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
+    let (p, q) = (identity, 1.0 - identity);
+    let mut powers = [1.0f64; MAX_K + 1];
+    for t in 1..=k {
+        powers[t] = powers[t - 1] * p;
+    }
+    let at = |a: usize, b: usize| a * MAX_K + b;
+    let mut state = vec![0.0f64; MAX_K * MAX_K];
+    let mut free = 1.0f64;
+    let mut previous_end = -1i64;
+    for &end in seed_ends {
+        let gap = (end as i64 - previous_end) as usize;
+        let total = free + state.iter().sum::<f64>();
+        let mut next = vec![0.0f64; MAX_K * MAX_K];
+        // Two or more mutations in the gap: the last two alone set the state.
+        for t in 0..k {
+            for b in t + 1..k {
+                let u = b - t - 1;
+                if t + u + 2 <= gap {
+                    next[at(t, b)] += total * q * q * powers[t + u];
+                }
+            }
+        }
+        if gap < k {
+            for a in 0..k {
+                for b in a + 1..k {
+                    let mass = state[at(a, b)];
+                    if mass == 0.0 {
+                        continue;
+                    }
+                    // Exactly one mutation: the old last mutation becomes the second-last.
+                    if a + gap < k {
+                        for t in 0..gap {
+                            next[at(t, a + gap)] += mass * q * powers[gap - 1];
+                        }
+                    }
+                    // No mutation: both distances grow.
+                    if b + gap < k {
+                        next[at(a + gap, b + gap)] += mass * powers[gap];
+                    }
+                }
+            }
+        }
+        free = 0.0;
+        state = next;
+        previous_end = end as i64;
+    }
+    free + state.iter().sum::<f64>()
 }
 
 /// The index of the grid point at or below `value` and the share of the way to the next point.

@@ -44,6 +44,44 @@ fn layout_chance_exact() {
     }
 }
 
+/// As `brute_force`, for seeds hit with at most one mismatch.
+fn brute_force_one(length: usize, k: usize, seed_ends: &[usize], identity: f64) -> f64 {
+    let mut total = 0.0;
+    for mask in 0u32..(1 << length) {
+        let mutated = mask.count_ones() as i32;
+        let weight = identity.powi(length as i32 - mutated) * (1.0 - identity).powi(mutated);
+        let every_seed_missed = seed_ends.iter().all(|&end| {
+            let seed_mask = ((1u32 << k) - 1) << (end + 1 - k);
+            (mask & seed_mask).count_ones() >= 2
+        });
+        if every_seed_missed {
+            total += weight;
+        }
+    }
+    total
+}
+
+#[test]
+fn one_mismatch_exact() {
+    for (length, k, seeds) in [
+        (12, 3, vec![2, 5, 6, 11]),
+        (10, 4, vec![3, 9]),
+        (14, 5, vec![4, 7, 8, 13]),
+        (16, 6, vec![5, 6, 12, 15]),
+        (9, 3, vec![8]),
+    ] {
+        for identity in [0.5, 0.8, 0.95] {
+            let exact = one_mismatch_chance(&seeds, k, identity);
+            let brute = brute_force_one(length, k, &seeds, identity);
+            assert!(
+                (exact - brute).abs() < 1e-12,
+                "{seeds:?} {identity} {exact} {brute}"
+            );
+            assert!(exact <= layout_miss_chance(&seeds, k, identity) + 1e-15);
+        }
+    }
+}
+
 #[test]
 fn layouts_follow_windows() {
     let mut random = Pcg64Mcg::seed_from_u64(7);
@@ -78,7 +116,7 @@ fn simulation_agrees() {
             .filter(|point| point.0 == length)
             .collect();
         let identities: Vec<f64> = points.iter().map(|point| point.1).collect();
-        let row = average_row(length, 25, 100, LAYOUTS, &identities);
+        let row = average_row(length, 25, 100, LAYOUTS, 0, &identities);
         for (&&(_, identity, chance, error), mine) in points.iter().zip(row) {
             // Both sides are sample means: allow three times their combined standard error.
             let model_error = layout_spread(length, identity) / (LAYOUTS as f64).sqrt();
@@ -111,11 +149,11 @@ fn table_interpolation_holds() {
     let model = model();
     assert_eq!((model.k(), model.w()), (25, 100));
     // A point of the table is returned as stored.
-    let on_grid = average_row(1000, 25, 100, 100, &[0.95])[0];
+    let on_grid = average_row(1000, 25, 100, 100, 0, &[0.95])[0];
     assert!((model.miss_chance(1000, 0.95) / on_grid - 1.0).abs() < 1e-9);
     // Between points the interpolation stays near a direct average; 100 layouts leave some noise.
     for (length, identity) in [(1100, 0.953), (700, 0.912), (2200, 0.9)] {
-        let direct = average_row(length, 25, 100, 100, &[identity])[0];
+        let direct = average_row(length, 25, 100, 100, 0, &[identity])[0];
         let ratio = model.miss_chance(length as u64, identity) / direct;
         assert!(
             (0.75..1.33).contains(&ratio),
