@@ -9,7 +9,7 @@ use super::chains::ChainConfig;
 use super::{AlignmentError, Strand};
 use crate::seeds::{base_code, complement, kmers};
 use jamhash::jamhash_u64;
-use rayon::slice::ParallelSliceMut;
+use rayon::prelude::*;
 
 /// How anchors are found.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,10 +116,14 @@ impl QueryTable {
             None => b'N',
         };
         let passes = EntropyLimit::new(anchors);
-        let (mut kept, mut low): (Vec<KmerPair>, Vec<KmerPair>) = (Vec::new(), Vec::new());
-        kmers(&scanned, anchors.a, |kmer| {
-            let (start, forward, reverse) = (kmer.position, kmer.forward, kmer.reverse);
-            if start < query.len() {
+        // The query is scanned in pieces on all threads; the tables sort the pairs anyway.
+        let scan_piece = |from: usize| {
+            let (mut kept, mut low): (Vec<KmerPair>, Vec<KmerPair>) = (Vec::new(), Vec::new());
+            let to = (from + SCAN_PIECE).min(query.len());
+            let piece = &scanned[from..(to + a - 1).min(scanned.len())];
+            kmers(piece, anchors.a, |kmer| {
+                let start = from + kmer.position;
+                let (forward, reverse) = (kmer.forward, kmer.reverse);
                 let pairs = if passes.holds(forward) {
                     &mut kept
                 } else {
@@ -128,8 +132,22 @@ impl QueryTable {
                 let left = base_code(before(start)).unwrap_or(4);
                 pairs.push((jamhash_u64(forward), forward, left, start as u32));
                 pairs.push((jamhash_u64(reverse), reverse, 5, start as u32 | REVERSE));
-            }
-        });
+            });
+            (kept, low)
+        };
+        let pieces: Vec<(Vec<KmerPair>, Vec<KmerPair>)> = (0..query.len())
+            .into_par_iter()
+            .step_by(SCAN_PIECE)
+            .map(scan_piece)
+            .collect();
+        let kept = pieces
+            .par_iter()
+            .flat_map_iter(|piece| piece.0.iter().copied());
+        let low = pieces
+            .par_iter()
+            .flat_map_iter(|piece| piece.1.iter().copied());
+        let (kept, low): (Vec<KmerPair>, Vec<KmerPair>) = (kept.collect(), low.collect());
+        drop(pieces);
         let shape = TableShape {
             anchors,
             chains,
@@ -390,6 +408,9 @@ pub(super) struct Phase {
 /// of a k-mer first, by left code, and its reverse ones (code 5) last.
 type KmerPair = (u64, u64, u8, u32);
 
+/// Query positions that one thread scans for k-mers at a time.
+const SCAN_PIECE: usize = 1 << 16;
+
 /// What the two tables of one query share.
 #[derive(Clone, Copy)]
 struct TableShape {
@@ -413,11 +434,14 @@ impl TableShape {
             start: 0,
             count: 0,
         };
-        let mut table = vec![empty; slots];
+        let mut table = Vec::new();
+        (0..slots)
+            .into_par_iter()
+            .map(|_| empty)
+            .collect_into_vec(&mut table);
         let mut filter = vec![0u64; ((distinct * 8).next_power_of_two().max(1024)) / 64];
-        let mut occurrences = Vec::with_capacity(pairs.len());
-        let mut left = Vec::with_capacity(pairs.len());
         // In slot order the inserts walk through the table instead of jumping around in it.
+        let mut start = 0u32;
         for group in pairs.chunk_by(same_kmer) {
             let hash = group[0].0;
             let mut slot = home_slot(hash, slots);
@@ -426,14 +450,15 @@ impl TableShape {
             }
             table[slot] = Slot {
                 key: group[0].1,
-                start: occurrences.len() as u32,
+                start,
                 count: group.len() as u32,
             };
             let bit = filter_bit(hash, filter.len());
             filter[bit / 64] |= 1 << (bit % 64);
-            occurrences.extend(group.iter().map(|pair| pair.3));
-            left.extend(group.iter().map(|pair| pair.2));
+            start += group.len() as u32;
         }
+        let occurrences = pairs.par_iter().map(|pair| pair.3).collect();
+        let left = pairs.par_iter().map(|pair| pair.2).collect();
         QueryTable {
             anchors: self.anchors,
             chains: self.chains,
