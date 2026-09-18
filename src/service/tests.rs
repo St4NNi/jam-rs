@@ -61,6 +61,7 @@ fn config() -> SearchConfig {
         ..SearchConfig::default()
     };
     config.rule.min_identity = 0.95;
+    config.rule.min_fragment_identity = 0.0;
     config.rule.min_query_coverage = QueryCoverage::Share {
         numerator: 9,
         decimal_places: 1,

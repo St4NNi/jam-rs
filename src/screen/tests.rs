@@ -89,6 +89,7 @@ pub(super) fn screen(
 fn close_lineage() -> ScreenConfig {
     ScreenConfig::new(DecisionRule {
         min_identity: 0.99,
+        min_fragment_identity: 0.0,
         min_query_coverage: "0.8".parse().unwrap(),
         min_contig_coverage: 0.9,
         min_contig_identity: 0.99,
@@ -505,6 +506,7 @@ fn contig_rule_limits() {
         ]
     );
     let strict = ScreenConfig::new(DecisionRule {
+        min_fragment_identity: 0.0,
         min_contig_coverage: 0.5,
         ..DecisionRule::default()
     });

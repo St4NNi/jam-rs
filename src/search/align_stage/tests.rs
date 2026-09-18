@@ -121,6 +121,7 @@ pub(super) fn rule(coverage: &str) -> DecisionRule {
     DecisionRule {
         min_query_coverage: coverage.parse::<QueryCoverage>().unwrap(),
         min_identity: 0.8,
+        min_fragment_identity: 0.0,
         ..DecisionRule::default()
     }
 }

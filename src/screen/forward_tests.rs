@@ -118,6 +118,7 @@ fn screen_matches_search() {
         ScreenConfig::default(),
         ScreenConfig::new(DecisionRule {
             min_identity: 0.95,
+            min_fragment_identity: 0.0,
             min_contig_coverage: 0.5,
             min_contig_identity: 0.95,
             ..DecisionRule::default()

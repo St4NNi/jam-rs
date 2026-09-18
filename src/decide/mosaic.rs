@@ -204,7 +204,7 @@ fn covered_intervals(query_length: u64, fragment: &Fragment) -> Result<Vec<Inter
 }
 
 /// Maps `length` fragment query positions from `offset` on to intervals of the query segments.
-fn project_segments(
+pub(super) fn project_segments(
     segments: &[Interval],
     mut offset: u64,
     mut length: u64,

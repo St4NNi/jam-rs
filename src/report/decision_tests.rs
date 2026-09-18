@@ -33,6 +33,7 @@ fn fragment(strand: Strand, cigar: &str) -> Fragment {
 fn decision(fragment: Fragment) -> Decision {
     let rule = DecisionRule {
         min_fragment_columns: 1,
+        min_fragment_identity: 0.0,
         ..DecisionRule::default()
     };
     rule.decide(8, vec![fragment], |_| 5_000).unwrap()

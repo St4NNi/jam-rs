@@ -7,6 +7,7 @@ mod coverage;
 mod fragment;
 mod mosaic;
 mod rule;
+mod segments;
 
 pub use coverage::QueryCoverage;
 pub use fragment::Fragment;

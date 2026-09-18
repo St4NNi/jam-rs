@@ -14,9 +14,9 @@ pub(super) struct RuleArgs {
     /// Least identity over the covered query bases, each counted in the fragment that adds it
     #[arg(short, long, default_value_t = DecisionRule::default().min_identity)]
     identity: f64,
-    /// Least identity of one fragment to count
-    #[arg(long, default_value_t = DecisionRule::default().min_fragment_identity)]
-    fragment_identity: f64,
+    /// Least identity of a stretch of a fragment to count (the --identity value unless given)
+    #[arg(long)]
+    fragment_identity: Option<f64>,
     /// Least alignment columns of one fragment to count
     #[arg(long, default_value_t = DecisionRule::default().min_fragment_columns)]
     fragment_columns: u64,
@@ -34,7 +34,7 @@ impl RuleArgs {
         DecisionRule {
             min_query_coverage: self.coverage,
             min_identity: self.identity,
-            min_fragment_identity: self.fragment_identity,
+            min_fragment_identity: self.fragment_identity.unwrap_or(self.identity),
             min_fragment_columns: self.fragment_columns,
             min_contig_coverage: self.contig_coverage,
             min_contig_identity: self.contig_identity,
