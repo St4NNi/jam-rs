@@ -492,7 +492,10 @@ fn repeat_contig_excluded() {
     let counted = align(&shard, 0, &query, false, &strict);
     assert!(counted.decision.qualifies);
     assert!(fragments(&counted).iter().all(|f| f.contig_index == 0));
-    assert!(counted.decision.identity() > all.decision.identity());
+    // The repeat copy is only an alternative, so it does not change the identity.
+    let alternatives = &all.decision.mosaic.alternatives;
+    assert!(alternatives.iter().any(|f| f.contig_index == 1));
+    assert_eq!(counted.decision.identity(), all.decision.identity());
 }
 
 #[test]
