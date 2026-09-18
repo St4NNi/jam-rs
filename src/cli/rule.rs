@@ -11,7 +11,7 @@ pub(super) struct RuleArgs {
     /// Least query coverage: a share such as 0.5, or a base count such as 800bp
     #[arg(short, long, default_value_t = DecisionRule::default().min_query_coverage)]
     coverage: QueryCoverage,
-    /// Least identity over the primary fragments together, those that give the coverage
+    /// Least identity over the covered query bases, each counted in the fragment that adds it
     #[arg(short, long, default_value_t = DecisionRule::default().min_identity)]
     identity: f64,
     /// Least identity of one fragment to count

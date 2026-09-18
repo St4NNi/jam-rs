@@ -31,6 +31,9 @@ pub struct Mosaic {
     pub primary: Vec<SelectedFragment>,
     /// Fragments that add nothing new, such as other copies of the same region.
     pub alternatives: Vec<Fragment>,
+    /// Base counts of the primary fragments, each query base counted once: in the first primary
+    /// fragment that spans it.
+    pub counts: EditCounts,
 }
 
 /// A fragment with the query bases it pairs and its base counts, kept for sorting.
@@ -75,11 +78,17 @@ pub(super) fn build_mosaic(
     let mut covered = Vec::new();
     let mut primary = Vec::new();
     let mut alternatives = Vec::new();
+    // The query bases that earlier primary fragments span, insertions too, for the counts.
+    let mut spanned = Vec::new();
+    let mut counts = EditCounts::default();
     for item in prepared {
         let new_bases = item.support_bases - overlap(&covered, &item.support);
         if new_bases == 0 {
             alternatives.push(item.fragment);
         } else {
+            counts += new_counts(&item.fragment, &spanned)?;
+            spanned.extend_from_slice(&item.fragment.query_segments);
+            spanned = Interval::union(spanned);
             covered.extend_from_slice(&item.support);
             covered = Interval::union(covered);
             primary.push(SelectedFragment {
@@ -95,7 +104,38 @@ pub(super) fn build_mosaic(
         covered_intervals: covered,
         primary,
         alternatives,
+        counts,
     })
+}
+
+/// The base counts of `fragment` over the query bases outside `spanned`, from its CIGAR. A
+/// match, substitution or insertion counts at its own query base; a deletion counts at the query
+/// base before it, or after it at the fragment start.
+fn new_counts(fragment: &Fragment, spanned: &[Interval]) -> Result<EditCounts, DecideError> {
+    let segments = &fragment.query_segments;
+    let new_in = |offset: u64, length: u64| -> Result<u64, DecideError> {
+        let mut bases = Vec::new();
+        project_segments(segments, offset, length, &mut bases)?;
+        Ok(length - overlap(spanned, &bases))
+    };
+    let mut counts = EditCounts::default();
+    let mut offset = 0u64;
+    for run in &fragment.alignment.runs {
+        let length = u64::from(run.length);
+        match run.operation {
+            EditOperation::Match => counts.matches += new_in(offset, length)?,
+            EditOperation::Substitution => counts.substitutions += new_in(offset, length)?,
+            EditOperation::Insertion => counts.insertions += new_in(offset, length)?,
+            EditOperation::Deletion => {
+                if new_in(offset.saturating_sub(1), 1)? == 1 {
+                    counts.deletions += length;
+                }
+                continue;
+            }
+        }
+        offset += length;
+    }
+    Ok(counts)
 }
 
 /// Best first: at the identity limit, higher score, more support, more matches, fewer edits. The
@@ -298,6 +338,29 @@ mod tests {
     }
 
     #[test]
+    fn counts_new_bases() {
+        let first = scored(0, 2000, &[(0, 500)], "500=");
+        let count = |cigar: &str| {
+            let second = scored(1, 1000, &[(0, 1000)], cigar);
+            build_mosaic(1000, &[first.clone(), second], 0.0)
+                .unwrap()
+                .counts
+        };
+        // Bases 0 to 500 count in the first fragment, with the gaps of the second there.
+        let counts = count("498=2I3D500=");
+        assert_eq!(
+            (counts.matches, counts.insertions, counts.deletions),
+            (1000, 0, 0)
+        );
+        let counts = count("600=4D400=");
+        assert_eq!((counts.matches, counts.deletions), (1000, 4));
+        let counts = count("600=5I395=");
+        assert_eq!((counts.matches, counts.insertions), (995, 5));
+        let counts = count("450=50X450=50X");
+        assert_eq!((counts.matches, counts.substitutions), (950, 50));
+    }
+
+    #[test]
     fn duplicates_count_once() {
         let mut a = equal_fragment(0, 100, 0, 30);
         let mut b = equal_fragment(1, 100, 30, 60);
@@ -328,6 +391,7 @@ mod tests {
             mosaic.covered_intervals,
             [interval(0, 1), interval(2, 3), interval(8, 9)]
         );
+        assert_eq!((mosaic.counts.matches, mosaic.counts.insertions), (3, 2));
     }
 
     #[test]

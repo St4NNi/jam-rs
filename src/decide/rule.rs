@@ -14,7 +14,8 @@ pub struct DecisionRule {
     /// The least query coverage of the mosaic. A share must be at least 0.05, as a large plasmid
     /// can show as a few small pieces.
     pub min_query_coverage: QueryCoverage,
-    /// The least identity over the primary fragments of the mosaic together.
+    /// The least identity over the query bases the mosaic covers, each fragment counted only
+    /// over the query bases it adds.
     pub min_identity: f64,
     /// The least identity of one fragment to count. 0 lets every fragment count.
     pub min_fragment_identity: f64,
@@ -49,7 +50,7 @@ impl Default for DecisionRule {
 pub struct Decision {
     /// The mosaic of the counted fragments.
     pub mosaic: Mosaic,
-    /// Base counts summed over the primary fragments of the mosaic.
+    /// Base counts over the query bases the mosaic covers, as in `Mosaic::counts`.
     pub counts: EditCounts,
     /// Fragments left out by the contig rule or the fragment limits.
     pub dropped_fragments: usize,
@@ -58,7 +59,7 @@ pub struct Decision {
 }
 
 impl Decision {
-    /// Matches over columns of the primary fragments; 0 when none counts.
+    /// Matches over columns of the covered query bases; 0 when none counts.
     pub fn identity(&self) -> f64 {
         self.counts.identity()
     }
@@ -94,9 +95,9 @@ impl DecisionRule {
             && counts.reaches_identity(self.min_fragment_identity)
     }
 
-    /// Builds the mosaic of the counted fragments of one entry and decides. The identity sums
-    /// matches and columns over the primary fragments, which give the coverage; alternatives do
-    /// not count. `contig_length` gives a contig length for the contig rule.
+    /// Builds the mosaic of the counted fragments of one entry and decides. Each primary fragment
+    /// counts only over the query bases it adds, so a copy that adds few bases does not lower the
+    /// identity. `contig_length` gives a contig length for the contig rule.
     pub fn decide(
         &self,
         query_length: u64,
@@ -120,10 +121,7 @@ impl DecisionRule {
             .collect();
         let dropped_fragments = before - counted.len();
         let mosaic = build_mosaic(query_length, &counted, self.min_identity)?;
-        let mut counts = EditCounts::default();
-        for selected in &mosaic.primary {
-            counts += selected.fragment.alignment.counts();
-        }
+        let counts = mosaic.counts;
         let qualifies = counts.columns() > 0
             && counts.reaches_identity(self.min_identity)
             && self
@@ -260,7 +258,7 @@ mod tests {
     fn conserved_copy_primary() {
         // The diverged copy is longer and scores higher, but the conserved one comes first.
         let conserved = fragment(0, &[(0, 1000)], "1000=");
-        let diverged = fragment(1, &[(0, 1500)], "1400=100X");
+        let diverged = fragment(1, &[(0, 1500)], "700=50X700=50X");
         assert!(diverged.alignment.score > conserved.alignment.score);
         let decision = DecisionRule::default()
             .decide(2000, vec![diverged, conserved], |_| 0)
@@ -269,7 +267,21 @@ mod tests {
         assert_eq!(decision.mosaic.primary[0].fragment.contig_index, 0);
         assert_eq!(decision.mosaic.primary[1].new_bases, 500);
         assert_eq!(decision.mosaic.covered_bases, 1500);
-        assert_eq!(matches_and_columns(&decision), (2400, 2500));
+        // The diverged copy counts only over query bases 1000 to 1500.
+        assert_eq!(matches_and_columns(&decision), (1450, 1500));
+    }
+
+    #[test]
+    fn paralog_counted_little() {
+        // A 76 percent paralog that adds 10 query bases counts only over those 10 bases.
+        let source = fragment(0, &[(0, 1000)], "1000=");
+        let paralog = fragment(1, &[(0, 1010)], "250X760=");
+        let decision = DecisionRule::default()
+            .decide(1010, vec![paralog, source], |_| 0)
+            .unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(decision.mosaic.primary.len(), 2);
+        assert_eq!(matches_and_columns(&decision), (1010, 1010));
     }
 
     #[test]
