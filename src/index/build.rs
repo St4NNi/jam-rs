@@ -352,7 +352,7 @@ fn write_packed(
     directory: &Path,
     name: &str,
 ) -> Result<FileRecord, IndexError> {
-    let parts = writer.finish();
+    let parts = writer.finish()?;
     let file_name = packed_file_name(name);
     let path = directory.join(&file_name);
     let file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {

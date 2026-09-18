@@ -1,5 +1,5 @@
 //! The packed sequence of one entry (stage 3): contigs at 2 bits per base in checked blocks, and
-//! the contig names in checked blocks, so a read fetches only the blocks it needs.
+//! the contig names in checked zstd blocks, so a read fetches only the blocks it needs.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -24,6 +24,8 @@ pub(crate) const BLOCK_BYTES: u64 = 4096;
 const BLOCK_DATA: u64 = BLOCK_BYTES - 4;
 /// Contigs whose names form one name block.
 const NAME_BLOCK: u64 = 256;
+/// The zstd level of name blocks: they are written once and read rarely.
+const NAME_LEVEL: i32 = 19;
 
 /// Collects the contigs of one entry and encodes its packed sequence file.
 #[derive(Default)]
@@ -90,13 +92,13 @@ impl PackedWriter {
     }
 
     /// The file in parts, so a caller can write them without copying the bases.
-    pub fn finish(self) -> PackedFile {
+    pub fn finish(self) -> Result<PackedFile, IndexError> {
         let mut index = Vec::new();
         let mut names = Vec::new();
         let lines: Vec<&[u8]> = self.names.split_inclusive(|b| *b == b'\n').collect();
         for block in lines.chunks(NAME_BLOCK as usize) {
             let start = names.len();
-            names.extend(block.iter().copied().flatten());
+            names.extend(zstd::bulk::compress(&block.concat(), NAME_LEVEL)?);
             let crc = crc32fast::hash(&names[start..]);
             names.extend_from_slice(&crc.to_le_bytes());
             index.extend_from_slice(&(names.len() as u64).to_le_bytes());
@@ -114,12 +116,12 @@ impl PackedWriter {
             .map(|block| crc32fast::hash(block).to_le_bytes())
             .collect();
         index.extend_from_slice(&names);
-        PackedFile {
+        Ok(PackedFile {
             header,
             packed: self.packed,
             block_crcs,
             names: index,
-        }
+        })
     }
 
     /// Adds one byte other than A, C, G or T, extending the last run when it continues it.
@@ -170,8 +172,8 @@ pub struct Contig {
     pub length: u64,
 }
 
-/// An open packed sequence with the contig table of its entry. Opening sends no read; the
-/// header is checked by the first read, and names are read only for the contigs asked for.
+/// An open packed sequence with the contig table of its entry. Opening only hints the header,
+/// which the first read checks; names are read only for the contigs asked for.
 pub struct PackedSequence {
     source: Arc<dyn ReadAt>,
     table: ContigTable,
@@ -389,8 +391,8 @@ impl PackedSequence {
                 .iter()
                 .filter(|&&c| u64::from(c) / NAME_BLOCK == block);
             for &contig in inside {
-                let name = names[(u64::from(contig) - block * NAME_BLOCK) as usize];
-                found.insert(contig, name.to_vec());
+                let name = &names[(u64::from(contig) - block * NAME_BLOCK) as usize];
+                found.insert(contig, name.clone());
             }
         }
         Ok(found)
@@ -414,17 +416,21 @@ impl PackedSequence {
             .collect()
     }
 
-    /// Checks a name block against its CRC-32 and splits it into the names of its contigs.
-    fn block_names<'a>(&self, block: u64, bytes: &'a [u8]) -> Result<Vec<&'a [u8]>, IndexError> {
+    /// Checks a name block against its CRC-32, unpacks it and splits it into the names of its
+    /// contigs.
+    fn block_names(&self, block: u64, bytes: &[u8]) -> Result<Vec<Vec<u8>>, IndexError> {
         let damaged = || IndexError::Checksum("packed sequence names".into());
-        let (lines, crc) = bytes.split_at(bytes.len().checked_sub(4).ok_or_else(damaged)?);
-        if u32_at(crc, 0) != Some(crc32fast::hash(lines)) || lines.last() != Some(&b'\n') {
+        let (packed, crc) = bytes.split_at(bytes.len().checked_sub(4).ok_or_else(damaged)?);
+        if u32_at(crc, 0) != Some(crc32fast::hash(packed)) {
             return Err(damaged());
         }
-        let names: Vec<&[u8]> = lines[..lines.len() - 1].split(|b| *b == b'\n').collect();
+        let wrong = || IndexError::format("packed sequence names");
+        let lines = zstd::stream::decode_all(packed).map_err(|_| wrong())?;
+        let lines = lines.strip_suffix(b"\n").ok_or_else(wrong)?;
+        let names: Vec<Vec<u8>> = lines.split(|b| *b == b'\n').map(<[u8]>::to_vec).collect();
         let count = (self.contig_count() as u64 - block * NAME_BLOCK).min(NAME_BLOCK);
         if names.len() as u64 != count || !names.iter().all(|name| valid_name(name)) {
-            return Err(IndexError::format("packed sequence names"));
+            return Err(wrong());
         }
         Ok(names)
     }

@@ -35,7 +35,7 @@ fn write(path: &Path, contigs: &[(Vec<u8>, Vec<u8>)]) -> ContigTable {
         writer.add_contig(name, sequence).unwrap();
     }
     let table = writer.contig_table();
-    std::fs::write(path, writer.finish().parts().concat()).unwrap();
+    std::fs::write(path, writer.finish().unwrap().parts().concat()).unwrap();
     table
 }
 
