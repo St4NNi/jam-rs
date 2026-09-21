@@ -447,6 +447,27 @@ fn decision_drops_entry() {
     assert_eq!(summary.align.confirmed_entries, 0);
 }
 
+/// An entry whose fragments pass the memory limit is dropped; the search still completes.
+#[test]
+fn memory_limit_drops_entry() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = planted_shard(directory.path());
+    let mut config = config(SearchStage::Align);
+    config.align.max_fragment_bytes = 1;
+    let (summary, events) = search(&shard, &query, false, &config, false);
+    assert!(matches!(summary.completion, Completion::Complete));
+    for entry in [0, 1] {
+        assert_eq!(
+            *last_event(&events, entry),
+            EntryEvent::Dropped {
+                entry,
+                stage: SearchStage::Align,
+                reason: DropReason::MemoryLimit,
+            }
+        );
+    }
+}
+
 #[test]
 fn circular_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();

@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::align_stage::{
-    AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, align_packed_entry,
+    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
+    align_packed_entry,
 };
 use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
@@ -414,14 +415,20 @@ impl<'a> Searcher<'a> {
             &request.config.rule,
             request.workspace,
             request.control,
-        )?;
+        );
+        let dropped = |reason| EntryEvent::Dropped {
+            entry: located.entry,
+            stage: SearchStage::Align,
+            reason,
+        };
+        let aligned = match aligned {
+            Ok(aligned) => aligned,
+            Err(AlignStageError::TooLarge { .. }) => return Ok(dropped(DropReason::MemoryLimit)),
+            Err(error) => return Err(error.into()),
+        };
         worker.align.counts.add(&aligned.work);
         if !aligned.decision.qualifies {
-            return Ok(EntryEvent::Dropped {
-                entry: located.entry,
-                stage: SearchStage::Align,
-                reason: DropReason::Decision,
-            });
+            return Ok(dropped(DropReason::Decision));
         }
         worker.align.confirmed_entries += 1;
         let mosaic = &aligned.decision.mosaic;

@@ -44,6 +44,9 @@ pub enum DropReason {
     NoSeedHits,
     /// The alignments of the entry do not reach the decision rule.
     Decision,
+    /// Aligning the entry needs more memory than a limit of stage 3 allows, as when a periodic
+    /// query meets many periodic regions.
+    MemoryLimit,
 }
 
 /// A change of one entry's state; the events of an entry arrive in order. Past stage 1, every
