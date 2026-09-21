@@ -300,3 +300,17 @@ fn split_by_entropy() {
     });
     assert!(low_kmers > 100);
 }
+
+#[test]
+fn copy_across_scan_pieces() {
+    // The query is scanned in pieces of 65,536 bases; a copy across the first border chains
+    // as one, with anchors on both sides and in the last a - 1 bases before it.
+    let query = random_bases(&mut rng(11), 150_000);
+    let found = chains(&query, false, &query[60_000..72_000]);
+    assert_eq!(found.len(), 1);
+    let queries: Vec<u32> = found[0].anchors.iter().map(|anchor| anchor.query).collect();
+    assert!(queries.iter().any(|&at| at < 65_000));
+    assert!(queries.iter().any(|&at| (65_522..65_536).contains(&at)));
+    assert!(queries.iter().any(|&at| at > 66_000));
+    assert!(queries.len() > 2_000);
+}
