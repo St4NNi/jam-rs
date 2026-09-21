@@ -449,7 +449,7 @@ fn decision_drops_entry() {
 
 /// An entry whose fragments pass the memory limit is dropped; the search still completes.
 #[test]
-fn memory_limit_drops_entry() {
+fn oversized_entry_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
     let mut config = config(SearchStage::Align);
