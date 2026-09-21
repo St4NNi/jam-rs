@@ -10,7 +10,7 @@ use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Shard, build_shard};
 use crate::seeds::reverse_complement;
 use crate::test_support::{
-    build_options, diverged, miss_model, no_stop, random_bases, rng, test_shard,
+    build_options, diverged, miss_model, no_stop, one_mismatch_model, random_bases, rng, test_shard,
 };
 use rand::RngExt;
 use std::collections::BTreeMap;
@@ -45,7 +45,7 @@ fn search(
     config: &SearchConfig,
     stop_early: bool,
 ) -> (SearchSummary, BTreeMap<u32, Vec<EntryEvent>>) {
-    let searcher = Searcher::new(shard, miss_model()).unwrap();
+    let searcher = Searcher::new(shard, miss_model(), one_mismatch_model()).unwrap();
     let stop = AtomicBool::new(false);
     let control = SearchControl {
         deadline: None,
@@ -138,7 +138,7 @@ fn sketch_only_answers() {
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Sketch), false);
     assert!(matches!(summary.completion, Completion::Complete));
     assert_eq!(events.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3]);
-    let searcher = Searcher::new(&shard, miss_model()).unwrap();
+    let searcher = Searcher::new(&shard, miss_model(), one_mismatch_model()).unwrap();
     let (sender, _receiver) = sync_channel(1);
     let config = config(SearchStage::Locate);
     assert!(
@@ -175,7 +175,7 @@ fn stop_marks_unfinished() {
 fn bad_input_fails() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, _) = small_shard(directory.path());
-    let searcher = Searcher::new(&shard, miss_model()).unwrap();
+    let searcher = Searcher::new(&shard, miss_model(), one_mismatch_model()).unwrap();
     let control = no_stop();
     let config = config(SearchStage::Locate);
     let (sender, _receiver) = sync_channel(1);
@@ -198,7 +198,7 @@ fn bad_input_fails() {
 fn dropped_receiver_stops() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = small_shard(directory.path());
-    let searcher = Searcher::new(&shard, miss_model()).unwrap();
+    let searcher = Searcher::new(&shard, miss_model(), one_mismatch_model()).unwrap();
     let control = no_stop();
     let (sender, receiver) = sync_channel(1);
     drop(receiver);

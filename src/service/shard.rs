@@ -15,19 +15,24 @@ use tokio::sync::mpsc;
 /// Entry events held between the search and their messages.
 const EVENT_QUEUE: usize = 64;
 
-/// An open shard with its name and miss model.
+/// An open shard with its name and miss models.
 pub struct ServedShard {
     name: String,
     shard: Shard,
-    model: MissModel,
+    /// The miss models for seeds hit exactly and for seeds hit with one mismatch.
+    models: [MissModel; 2],
 }
 
 impl ServedShard {
-    /// Serves `shard` under `name`, the name its records carry. Fails when the miss model does
-    /// not fit the shard's k and minimizer window.
-    pub fn new(name: String, shard: Shard, model: MissModel) -> Result<Self, ServiceError> {
-        Searcher::new(&shard, &model)?;
-        Ok(Self { name, shard, model })
+    /// Serves `shard` under `name`, the name its records carry. Fails when the miss models
+    /// (exact, then one mismatch) do not fit the shard's k and minimizer window.
+    pub fn new(name: String, shard: Shard, models: [MissModel; 2]) -> Result<Self, ServiceError> {
+        Searcher::new(&shard, &models[0], &models[1])?;
+        Ok(Self {
+            name,
+            shard,
+            models,
+        })
     }
 
     /// The name the records of this shard carry.
@@ -64,7 +69,7 @@ impl ServedShard {
         replies: &mpsc::Sender<Reply>,
     ) -> Result<Record, ServiceError> {
         // A searcher borrows the shard, so each search builds its own; that is cheap.
-        let searcher = Searcher::new(&self.shard, &self.model)?;
+        let searcher = Searcher::new(&self.shard, &self.models[0], &self.models[1])?;
         let (events, received) = sync_channel(EVENT_QUEUE);
         let query = &request.query_name;
         std::thread::scope(|scope| {

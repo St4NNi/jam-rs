@@ -81,6 +81,7 @@ fn shard_record_flat() {
 fn summary_names_ending() {
     let summary = SearchSummary {
         query_length: 5_000,
+        seed_mismatches: 1,
         completion: Completion::Stopped(Stopped::Deadline),
         sketch: Default::default(),
         locate: Default::default(),
@@ -92,4 +93,5 @@ fn summary_names_ending() {
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["kind"], "summary");
     assert_eq!(json["ending"], "deadline");
+    assert_eq!(json["seed_mismatches"], 1);
 }

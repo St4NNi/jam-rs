@@ -7,8 +7,10 @@ use crate::decide::QueryCoverage;
 use crate::index::{EntryInput, Shard, build_shard};
 use crate::loss::MissModel;
 use crate::report::{Dropped, Record, ShardRecord, Unfinished};
-use crate::search::{DropReason, SearchConfig, SearchControl, SearchStage};
-use crate::test_support::{build_options, random_bases, rng, with_substitutions};
+use crate::search::{DropReason, SearchConfig, SearchControl, SearchStage, SeedMismatches};
+use crate::test_support::{
+    build_options, one_mismatch_model, random_bases, rng, with_substitutions,
+};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::path::Path;
@@ -51,7 +53,8 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
     let scheme = options.parameters.scheme;
     let model = MODEL.get_or_init(|| MissModel::with_layouts(scheme, 200, 0).unwrap());
-    ServedShard::new(name.into(), Shard::open(&output).unwrap(), model.clone()).unwrap()
+    let models = [model.clone(), one_mismatch_model().clone()];
+    ServedShard::new(name.into(), Shard::open(&output).unwrap(), models).unwrap()
 }
 
 /// 90% query coverage at 95% identity, on two threads.
@@ -158,6 +161,25 @@ async fn remote_matches_local() {
         remote_lines(&client, &router, &request(None)).await,
         expected
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_sets_mismatches() {
+    let directory = tempfile::tempdir().unwrap();
+    let shard = build(directory.path(), "alpha", 11);
+    let router = serve(shard, Vec::new(), ServerLimits::default()).await;
+    let client = endpoint().await;
+    for (mode, mismatches) in [(SeedMismatches::Zero, 0), (SeedMismatches::One, 1)] {
+        let mut request = request(None);
+        request.settings.seed_mismatches = mode;
+        let lines = remote_lines(&client, &router, &request).await;
+        assert!(confirms(&lines, "alpha"), "{lines:?}");
+        let summary = lines
+            .iter()
+            .find(|line| line.contains("\"kind\":\"summary\""));
+        let summary: serde_json::Value = serde_json::from_str(summary.unwrap()).unwrap();
+        assert_eq!(summary["seed_mismatches"], mismatches);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

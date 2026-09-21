@@ -11,6 +11,7 @@ mod events;
 mod locate_stage;
 mod located;
 mod query;
+mod seed_mismatches;
 mod sketch_stage;
 mod times;
 
@@ -31,6 +32,7 @@ pub use locate_stage::{
 };
 pub use located::{ContigWindows, LocatedEntry};
 pub use query::QueryKmers;
+pub use seed_mismatches::SeedMismatches;
 pub use sketch_stage::{
     FoundSeeds, PossibleEntry, SketchLimits, SketchWork, find_query_seeds, sketch_stage,
 };

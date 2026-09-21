@@ -11,6 +11,7 @@ use crate::loss::{LossBudget, MissModel};
 use crate::report::{Ending, Record, ReportError, ShardRecord, paf_lines};
 use crate::search::{
     Completion, EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
+    SeedMismatches,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
@@ -23,6 +24,15 @@ use std::time::{Duration, Instant};
 
 /// Events held between the search and the writer.
 const EVENT_QUEUE: usize = 64;
+
+/// The long help of `--seed-mismatches`.
+const SEED_MISMATCHES_HELP: &str = "Mismatches a query k-mer may have against a seed. 1 also \
+looks up every k-mer one substitution away (3 k lookups per k-mer), which finds entries at lower \
+identity. auto takes 1 for a query when both hold: (a) the exact seeds miss a present piece of \
+the required query coverage, at the --identity value, more often than the loss budget allows, \
+and one mismatch lowers that chance; (b) the extra CPU, estimated as 1 ms per query k-mer, stays \
+within 10 CPU seconds. With the default coverage this takes 1 at 80% identity for queries up to \
+about 10 kb, and at 95% only for queries below about 3.3 kb.";
 
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -54,10 +64,9 @@ pub struct SearchArgs {
     /// Largest chance of missing a qualifying entry
     #[arg(long, default_value_t = LossBudget::default().chance())]
     loss_budget: f64,
-    /// Mismatches a query k-mer may have against a seed (0 or 1); 1 also looks up every k-mer
-    /// one substitution away, which finds more diverged matches at more lookups
-    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=1))]
-    seed_mismatches: u8,
+    /// Mismatches a query k-mer may have against a seed: auto, 0 or 1
+    #[arg(long, value_enum, default_value = "auto", long_help = SEED_MISMATCHES_HELP)]
+    seed_mismatches: SeedMismatches,
     /// The last stage that runs
     #[arg(long, value_enum, default_value = "align")]
     level: SearchStage,
@@ -156,13 +165,11 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
             "the shards differ in k or minimizer window".into(),
         ));
     }
-    let model = match args.seed_mismatches {
-        0 => MissModel::new(parameters.scheme)?,
-        _ => MissModel::one_mismatch(parameters.scheme)?,
-    };
+    let exact = MissModel::new(parameters.scheme)?;
+    let one_mismatch = MissModel::one_mismatch(parameters.scheme)?;
     let searchers = shards
         .iter()
-        .map(|open| Searcher::new(&open.shard, &model))
+        .map(|open| Searcher::new(&open.shard, &exact, &one_mismatch))
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = Sink::new(args)?;
     let incomplete = each_query(inputs.query, |name, sequence| {
@@ -323,6 +330,7 @@ fn settings_of(args: &SearchArgs) -> Result<SearchSettings, CliError> {
     settings.last_stage = args.level;
     settings.rule = args.rule.rule();
     settings.loss_budget = args.loss_budget;
+    settings.seed_mismatches = args.seed_mismatches;
     settings.apply(&SearchConfig::default())?;
     Ok(settings)
 }
@@ -406,4 +414,40 @@ fn json_line(shard: &str, record: Record) -> Result<String, CliError> {
         record,
     };
     Ok(serde_json::to_string(&record)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
+
+    /// The seed mismatches of a search command line with `extra` flags, or `None` if it fails.
+    fn parsed(extra: &[&str]) -> Option<SeedMismatches> {
+        let line = ["jam", "search", "shard", "query.fa"].iter().chain(extra);
+        match Cli::try_parse_from(line).ok()?.command {
+            Command::Search(args) => Some(settings_of(&args).ok()?.seed_mismatches),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn seed_mismatches_parsed() {
+        assert_eq!(parsed(&[]), Some(SeedMismatches::Auto));
+        assert_eq!(
+            parsed(&["--seed-mismatches", "auto"]),
+            Some(SeedMismatches::Auto)
+        );
+        assert_eq!(
+            parsed(&["--seed-mismatches", "0"]),
+            Some(SeedMismatches::Zero)
+        );
+        assert_eq!(
+            parsed(&["--seed-mismatches", "1"]),
+            Some(SeedMismatches::One)
+        );
+        for bad in ["2", "one", ""] {
+            assert_eq!(parsed(&["--seed-mismatches", bad]), None, "{bad}");
+        }
+    }
 }

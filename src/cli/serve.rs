@@ -59,12 +59,15 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
     let parameters = shard.manifest().parameters;
-    let model = MissModel::new(parameters.scheme)?;
+    let models = [
+        MissModel::new(parameters.scheme)?,
+        MissModel::one_mismatch(parameters.scheme)?,
+    ];
     let name = args.shard.file_name().map_or_else(
         || args.shard.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let shard = ServedShard::new(name, shard, model)?;
+    let shard = ServedShard::new(name, shard, models)?;
     let config = SearchConfig {
         threads: args.threads.unwrap_or(0),
         ..SearchConfig::default()

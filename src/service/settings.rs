@@ -6,7 +6,7 @@
 use super::ServiceError;
 use crate::decide::DecisionRule;
 use crate::loss::LossBudget;
-use crate::search::{SearchConfig, SearchStage};
+use crate::search::{SearchConfig, SearchStage, SeedMismatches};
 use serde::{Deserialize, Serialize};
 
 /// The settings of one search that a client may choose.
@@ -20,6 +20,8 @@ pub struct SearchSettings {
     pub min_chain_identity: f64,
     /// The largest accepted chance of missing a qualifying entry.
     pub loss_budget: f64,
+    /// Whether query k-mers one substitution away are looked up too.
+    pub seed_mismatches: SeedMismatches,
     /// The alignment score of a match.
     pub match_score: i32,
     /// The alignment score of a mismatch.
@@ -39,6 +41,7 @@ impl SearchSettings {
             rule: *rule,
             min_chain_identity: config.align.min_chain_identity,
             loss_budget: config.loss_budget.chance(),
+            seed_mismatches: config.seed_mismatches,
             match_score: scores.match_score,
             mismatch_score: scores.mismatch_score,
             gap_open_score: scores.gap_open_score,
@@ -53,6 +56,7 @@ impl SearchSettings {
         config.rule = self.rule;
         config.align.min_chain_identity = self.min_chain_identity;
         config.loss_budget = LossBudget::new(self.loss_budget)?;
+        config.seed_mismatches = self.seed_mismatches;
         let scores = &mut config.align.band.alignment;
         scores.match_score = self.match_score;
         scores.mismatch_score = self.mismatch_score;
@@ -77,6 +81,7 @@ mod tests {
         client.rule.min_query_coverage = "0.7".parse().unwrap();
         client.rule.min_identity = 0.9;
         client.loss_budget = LossBudget::new(0.001).unwrap();
+        client.seed_mismatches = SeedMismatches::One;
         client.align.band.alignment.mismatch_score = -4;
         let settings = SearchSettings::of(&client);
         let text = serde_json::to_string(&settings).unwrap();
@@ -92,6 +97,7 @@ mod tests {
         assert_eq!(applied.last_stage, SearchStage::Locate);
         assert_eq!(applied.rule, client.rule);
         assert_eq!(applied.loss_budget, client.loss_budget);
+        assert_eq!(applied.seed_mismatches, SeedMismatches::One);
         assert_eq!(applied.align.band.alignment, client.align.band.alignment);
     }
 

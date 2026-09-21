@@ -15,6 +15,7 @@ use super::locate_stage::{
 };
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
+use super::seed_mismatches::SeedMismatches;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
 use crate::decide::DecisionRule;
@@ -36,6 +37,8 @@ pub struct SearchConfig {
     pub rule: DecisionRule,
     /// The chance of missing a qualifying entry that stages 1 and 2 may spend, half each.
     pub loss_budget: LossBudget,
+    /// Whether query k-mers one substitution away are looked up too.
+    pub seed_mismatches: SeedMismatches,
     /// A seed held by more entries is not expanded in stage 1. `None` takes 1% of the shard's
     /// entries, at least `MIN_FREQUENT_LIMIT`.
     pub frequent_seed_entries: Option<u64>,
@@ -58,6 +61,7 @@ impl Default for SearchConfig {
             last_stage: SearchStage::Align,
             rule: DecisionRule::default(),
             loss_budget: LossBudget::default(),
+            seed_mismatches: SeedMismatches::Auto,
             frequent_seed_entries: None,
             // 32 Mi pairs of entry and query k-mer, 256 MiB.
             max_seed_hits: 1 << 25,
@@ -84,6 +88,8 @@ impl SearchConfig {
 #[derive(Debug)]
 pub struct SearchSummary {
     pub query_length: u64,
+    /// The mismatches a query k-mer could have against a seed (0 or 1).
+    pub seed_mismatches: u8,
     pub completion: Completion,
     pub sketch: SketchWork,
     pub locate: LocateWork,
@@ -115,28 +121,36 @@ impl AlignStageWork {
     }
 }
 
-/// Searches one shard. The miss model depends only on k and w, so shards share it.
+/// Searches one shard. The miss models depend only on k and w, so shards share them.
 pub struct Searcher<'a> {
     shard: &'a Shard,
-    model: &'a MissModel,
+    /// The miss models for seeds hit exactly and for seeds hit with one mismatch.
+    models: [&'a MissModel; 2],
     seeder: Seeder,
 }
 
 impl<'a> Searcher<'a> {
-    /// A searcher of `shard`, with a miss model of the shard's k and minimizer window.
-    pub fn new(shard: &'a Shard, model: &'a MissModel) -> Result<Self, SearchError> {
-        let parameters = shard.manifest().parameters;
-        if model.k() != usize::from(parameters.scheme.k)
-            || model.w() != usize::from(parameters.scheme.w)
-        {
+    /// A searcher of `shard`, with the miss models of the shard's k and minimizer window for
+    /// seeds hit exactly and for seeds hit with one mismatch.
+    pub fn new(
+        shard: &'a Shard,
+        exact: &'a MissModel,
+        one_mismatch: &'a MissModel,
+    ) -> Result<Self, SearchError> {
+        let scheme = shard.manifest().parameters.scheme;
+        let fits = |model: &MissModel, mismatches: usize| {
+            (model.k(), model.w()) == (usize::from(scheme.k), usize::from(scheme.w))
+                && model.mismatches() == mismatches
+        };
+        if !fits(exact, 0) || !fits(one_mismatch, 1) {
             return Err(SearchError::InvalidConfig(
-                "the miss model has another k or minimizer window than the shard",
+                "the miss models do not fit the k and minimizer window of the shard",
             ));
         }
-        let seeder = Seeder::new(parameters.scheme)?;
+        let seeder = Seeder::new(scheme)?;
         Ok(Self {
             shard,
-            model,
+            models: [exact, one_mismatch],
             seeder,
         })
     }
@@ -164,6 +178,15 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = LossBudget::new(config.loss_budget.chance() / 2.0)?;
+        let [exact, one_mismatch] = self.models;
+        let mismatches = config.seed_mismatches.resolve(
+            exact,
+            one_mismatch,
+            &config.rule,
+            config.loss_budget,
+            query.len() as u64,
+            circular,
+        );
         // The query tables are built on the threads of the search too.
         let search = || {
             let start = PartStart::now();
@@ -175,7 +198,7 @@ impl<'a> Searcher<'a> {
                     _ => Ok(None),
                 },
                 || {
-                    if self.model.mismatches() > 0 {
+                    if mismatches > 0 {
                         QueryKmers::with_neighbours(&self.seeder, query, circular)
                     } else {
                         QueryKmers::new(&self.seeder, query, circular)
@@ -191,7 +214,8 @@ impl<'a> Searcher<'a> {
                 control,
                 events,
             };
-            Ok(self.run(&query_kmers, circular, budget, &request, start))
+            let model = self.models[mismatches];
+            Ok(self.run(&query_kmers, circular, model, budget, &request, start))
         };
         if config.threads == 0 {
             return search();
@@ -208,6 +232,7 @@ impl<'a> Searcher<'a> {
         &self,
         query_kmers: &QueryKmers,
         circular: bool,
+        model: &MissModel,
         budget: LossBudget,
         request: &Request<'_>,
         start: PartStart,
@@ -221,7 +246,7 @@ impl<'a> Searcher<'a> {
         let length = query_kmers.length();
         let rule = &config.rule;
         let bound = CoverageBound::new(
-            self.model,
+            model,
             budget,
             rule.min_identity,
             length,
@@ -230,6 +255,7 @@ impl<'a> Searcher<'a> {
         );
         let mut summary = SearchSummary {
             query_length: length,
+            seed_mismatches: model.mismatches() as u8,
             completion: Completion::Complete,
             sketch: SketchWork::default(),
             locate: LocateWork::default(),

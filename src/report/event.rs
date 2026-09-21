@@ -78,6 +78,9 @@ pub struct Unfinished {
 pub struct Summary {
     pub query: String,
     pub query_length: u64,
+    /// The mismatches a query k-mer could have against a seed: 1 when the k-mers one
+    /// substitution away were looked up too.
+    pub seed_mismatches: u8,
     pub ending: Ending,
     /// The cause when the ending is `failed`.
     pub error: Option<String>,
@@ -167,6 +170,7 @@ impl Record {
         Self::Summary(Box::new(Summary {
             query: query.to_string(),
             query_length,
+            seed_mismatches: 0,
             ending: Ending::Failed,
             error: Some(error.to_string()),
             sketch: SketchWork::default(),
@@ -187,6 +191,7 @@ impl Record {
         Self::Summary(Box::new(Summary {
             query: query.to_string(),
             query_length: summary.query_length,
+            seed_mismatches: summary.seed_mismatches,
             ending,
             error,
             sketch: summary.sketch,
