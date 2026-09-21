@@ -167,10 +167,22 @@ impl<'a> Searcher<'a> {
         // The query tables are built on the threads of the search too.
         let search = || {
             let start = PartStart::now();
-            let prepared = match config.last_stage {
-                SearchStage::Align => Some(PreparedQuery::new(query, circular, &config.align)?),
-                _ => None,
-            };
+            let (prepared, query_kmers) = rayon::join(
+                || match config.last_stage {
+                    SearchStage::Align => {
+                        PreparedQuery::new(query, circular, &config.align).map(Some)
+                    }
+                    _ => Ok(None),
+                },
+                || {
+                    if self.model.mismatches() > 0 {
+                        QueryKmers::with_neighbours(&self.seeder, query, circular)
+                    } else {
+                        QueryKmers::new(&self.seeder, query, circular)
+                    }
+                },
+            );
+            let prepared = prepared?;
             let workspace = AlignStageWorkspace::default();
             let request = Request {
                 config,
@@ -179,7 +191,7 @@ impl<'a> Searcher<'a> {
                 control,
                 events,
             };
-            Ok(self.run(query, circular, budget, &request, start))
+            Ok(self.run(&query_kmers, circular, budget, &request, start))
         };
         if config.threads == 0 {
             return search();
@@ -194,7 +206,7 @@ impl<'a> Searcher<'a> {
     /// coverage bound first, through stages 2 and 3, so the events of an entry come in order.
     fn run(
         &self,
-        query: &[u8],
+        query_kmers: &QueryKmers,
         circular: bool,
         budget: LossBudget,
         request: &Request<'_>,
@@ -206,12 +218,7 @@ impl<'a> Searcher<'a> {
             events,
             ..
         } = *request;
-        let query_kmers = if self.model.mismatches() > 0 {
-            QueryKmers::with_neighbours(&self.seeder, query, circular)
-        } else {
-            QueryKmers::new(&self.seeder, query, circular)
-        };
-        let length = query.len() as u64;
+        let length = query_kmers.length();
         let rule = &config.rule;
         let bound = CoverageBound::new(
             self.model,
@@ -236,7 +243,7 @@ impl<'a> Searcher<'a> {
         let start = PartStart::now();
         let sketch = match sketch_stage(
             self.shard.seed_file(),
-            &query_kmers,
+            query_kmers,
             &bound,
             self.sketch_limits(config),
             control,
@@ -264,7 +271,7 @@ impl<'a> Searcher<'a> {
             return summary;
         }
         let locate = LocateRequest {
-            query: &query_kmers,
+            query: query_kmers,
             bound: &bound,
             frequent_seeds: &sketch.frequent_seeds,
             flank: config.flank,
