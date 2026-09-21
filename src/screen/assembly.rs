@@ -54,7 +54,8 @@ impl<'a> Screener<'a> {
         }
         let scheme = shard.manifest().parameters.scheme;
         let seeder = Seeder::new(scheme).map_err(crate::index::IndexError::from)?;
-        let model = MissModel::with_layouts(scheme, 1).map_err(crate::search::SearchError::from)?;
+        let model =
+            MissModel::with_layouts(scheme, 1, 0).map_err(crate::search::SearchError::from)?;
         Ok(Self {
             shard,
             config,

@@ -50,7 +50,7 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
     build_shard(&inputs, &output, &options).unwrap();
     static MODEL: OnceLock<MissModel> = OnceLock::new();
     let scheme = options.parameters.scheme;
-    let model = MODEL.get_or_init(|| MissModel::with_layouts(scheme, 200).unwrap());
+    let model = MODEL.get_or_init(|| MissModel::with_layouts(scheme, 200, 0).unwrap());
     ServedShard::new(name.into(), Shard::open(&output).unwrap(), model.clone()).unwrap()
 }
 

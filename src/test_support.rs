@@ -139,7 +139,7 @@ pub fn diverged(rng: &mut StdRng, bases: &[u8], identity: f64) -> Vec<u8> {
 /// the build short and are enough for tests.
 pub fn miss_model() -> &'static MissModel {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(parameters().scheme, 50).unwrap())
+    MODEL.get_or_init(|| MissModel::with_layouts(parameters().scheme, 50, 0).unwrap())
 }
 
 /// A search control without a deadline whose stop flag is never set.

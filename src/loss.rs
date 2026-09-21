@@ -43,40 +43,22 @@ impl MissModel {
     /// The model for the k and w of a seed scheme, with the table averaged over 1,000 layouts
     /// per length. The table of the default k and w is stored, so it is read, not averaged.
     pub fn new(scheme: SeedScheme) -> Result<Self, LossError> {
-        let default = SeedScheme::default();
-        if (scheme.k, scheme.w) != (default.k, default.w) {
-            return Self::with_layouts(scheme, LAYOUTS);
-        }
-        scheme.validate()?;
-        let (values, _) = DEFAULT_LN_MISS.as_chunks::<{ size_of::<f64>() }>();
-        let ln_miss = values
-            .iter()
-            .map(|&bytes| f64::from_le_bytes(bytes))
-            .collect();
-        Ok(Self {
-            k: usize::from(scheme.k),
-            w: usize::from(scheme.w),
-            lengths: table_lengths(usize::from(scheme.k)),
-            identities: identity_grid(),
-            mismatches: 0,
-            ln_miss,
-        })
+        Self::stored_or_averaged(scheme, 0)
     }
 
-    /// The model for queries that also look up every k-mer with one substitution: a seed is hit
+    /// As `new`, for queries that also look up every k-mer with one substitution: a seed is hit
     /// when the query holds it with at most one mismatch.
     pub fn one_mismatch(scheme: SeedScheme) -> Result<Self, LossError> {
-        Self::averaged(scheme, LAYOUTS, 1)
+        Self::stored_or_averaged(scheme, 1)
     }
 
-    /// As `new`, averaging over `layouts` random layouts per stretch length.
-    pub fn with_layouts(scheme: SeedScheme, layouts: usize) -> Result<Self, LossError> {
-        Self::averaged(scheme, layouts, 0)
-    }
-
-    /// The table averaged over `layouts` random layouts per length, for seeds hit with at most
-    /// `mismatches` mismatches (0 or 1).
-    fn averaged(scheme: SeedScheme, layouts: usize, mismatches: usize) -> Result<Self, LossError> {
+    /// As `new`, averaging over `layouts` random layouts per stretch length, for seeds hit with
+    /// at most `mismatches` mismatches (0 or 1).
+    pub fn with_layouts(
+        scheme: SeedScheme,
+        layouts: usize,
+        mismatches: usize,
+    ) -> Result<Self, LossError> {
         scheme.validate()?;
         if layouts == 0 {
             return Err(LossError::NoLayouts);
@@ -98,7 +80,33 @@ impl MissModel {
             w,
             lengths,
             identities,
-            mismatches,
+            mismatches: mismatches.min(1),
+            ln_miss,
+        })
+    }
+
+    /// The stored table for the default k and w, else a new average over `LAYOUTS` layouts.
+    fn stored_or_averaged(scheme: SeedScheme, mismatches: usize) -> Result<Self, LossError> {
+        let default = SeedScheme::default();
+        if (scheme.k, scheme.w) != (default.k, default.w) {
+            return Self::with_layouts(scheme, LAYOUTS, mismatches);
+        }
+        scheme.validate()?;
+        let stored = match mismatches {
+            0 => DEFAULT_LN_MISS,
+            _ => ONE_MISMATCH_TABLE,
+        };
+        let (values, _) = stored.as_chunks::<{ size_of::<f64>() }>();
+        let ln_miss = values
+            .iter()
+            .map(|&bytes| f64::from_le_bytes(bytes))
+            .collect();
+        Ok(Self {
+            k: usize::from(scheme.k),
+            w: usize::from(scheme.w),
+            lengths: table_lengths(usize::from(scheme.k)),
+            identities: identity_grid(),
+            mismatches: mismatches.min(1),
             ln_miss,
         })
     }
@@ -200,6 +208,9 @@ const LAYOUTS: usize = 1000;
 /// The table of the default k and w, averaged over `LAYOUTS` layouts per length, as
 /// little-endian f64 values row by row; a test checks it against a new average.
 const DEFAULT_LN_MISS: &[u8] = include_bytes!("loss_default_table.bin");
+
+/// As `DEFAULT_LN_MISS`, for seeds hit with at most one mismatch.
+const ONE_MISMATCH_TABLE: &[u8] = include_bytes!("loss_one_mismatch_table.bin");
 
 /// The largest k the model supports, as the seed scheme does.
 const MAX_K: usize = 32;

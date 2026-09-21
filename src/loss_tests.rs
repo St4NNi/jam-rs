@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 /// The model of these tests, built once from 100 layouts per length.
 fn model() -> &'static MissModel {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(SeedScheme::default(), 100).unwrap())
+    MODEL.get_or_init(|| MissModel::with_layouts(SeedScheme::default(), 100, 0).unwrap())
 }
 
 /// The chance that all seeds are mutated, by trying every pattern of mutated bases.
@@ -193,7 +193,7 @@ fn bad_seeding_rejected() {
         let error = MissModel::new(scheme).unwrap_err();
         assert!(matches!(error, LossError::Seeds(_)), "{k} {w}");
     }
-    let error = MissModel::with_layouts(SeedScheme::default(), 0);
+    let error = MissModel::with_layouts(SeedScheme::default(), 0, 0);
     assert_eq!(error.unwrap_err(), LossError::NoLayouts);
 }
 
@@ -214,10 +214,40 @@ fn default_table_stored() {
     let scheme = SeedScheme::default();
     let (stored, built) = (
         MissModel::new(scheme).unwrap(),
-        MissModel::with_layouts(scheme, LAYOUTS).unwrap(),
+        MissModel::with_layouts(scheme, LAYOUTS, 0).unwrap(),
     );
     assert_eq!((stored.k, stored.w), (built.k, built.w));
     assert_eq!(stored.lengths, built.lengths);
     assert_eq!(stored.identities, built.identities);
+    assert_eq!(stored.ln_miss, built.ln_miss);
+}
+
+/// The stored rows of the one-mismatch table for some lengths, against a new average.
+#[test]
+fn mismatch_rows_stored() {
+    let stored = MissModel::one_mismatch(SeedScheme::default()).unwrap();
+    assert_eq!(stored.mismatches(), 1);
+    let width = stored.identities.len();
+    for length in [25, 280, 1000] {
+        let row = stored
+            .lengths
+            .iter()
+            .position(|&l| l == length as f64)
+            .unwrap();
+        let built = average_row(length, 25, 100, LAYOUTS, 1, &stored.identities);
+        let built: Vec<f64> = built.iter().map(|chance| chance.max(1e-300).ln()).collect();
+        assert_eq!(stored.ln_miss[row * width..(row + 1) * width], built[..]);
+    }
+}
+
+/// The whole stored one-mismatch table against a new average. It takes minutes, so it runs
+/// only on request (`--ignored`).
+#[test]
+#[ignore]
+fn mismatch_table_stored() {
+    let scheme = SeedScheme::default();
+    let stored = MissModel::one_mismatch(scheme).unwrap();
+    let built = MissModel::with_layouts(scheme, LAYOUTS, 1).unwrap();
+    assert_eq!(stored.lengths, built.lengths);
     assert_eq!(stored.ln_miss, built.ln_miss);
 }
