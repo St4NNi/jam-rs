@@ -62,7 +62,7 @@ pub enum EntryEvent {
     /// Stage 3 aligned the entry and it qualifies; the decision holds its mosaic, and `contigs`
     /// the contigs that its fragments refer to, by contig index.
     Confirmed {
-        aligned: AlignedEntry,
+        aligned: Box<AlignedEntry>,
         contigs: BTreeMap<u32, Contig>,
     },
     /// The entry left the search at `stage`.

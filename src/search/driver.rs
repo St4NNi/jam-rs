@@ -428,7 +428,10 @@ impl<'a> Searcher<'a> {
         let primary = mosaic.primary.iter().map(|selected| &selected.fragment);
         let fragments = primary.chain(&mosaic.alternatives);
         let contigs = packed.contigs(fragments.map(|fragment| fragment.contig_index))?;
-        Ok(EntryEvent::Confirmed { aligned, contigs })
+        Ok(EntryEvent::Confirmed {
+            aligned: Box::new(aligned),
+            contigs,
+        })
     }
 }
 
