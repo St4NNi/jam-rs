@@ -219,6 +219,7 @@ fn parse_parts(text: &str) -> Result<Parts, String> {
 }
 
 fn run_build(args: &BuildArgs) -> Result<(), CliError> {
+    raise_open_files()?;
     let mut inputs = args.inputs.clone();
     if let Some(list) = &args.list {
         inputs.extend(read_list(list)?);
@@ -236,6 +237,7 @@ fn run_build(args: &BuildArgs) -> Result<(), CliError> {
 }
 
 fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
+    raise_open_files()?;
     let (threads, temp_dir) = args.common.resolve(&args.output)?;
     let split = match (args.shards, args.max_seed_locations) {
         (Some(shards), _) => Split::Shards(shards),
@@ -263,6 +265,23 @@ fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
         index.entries(),
         index.shards.len()
     );
+    Ok(())
+}
+
+/// Open files a build or reshard needs: its 4,096 spill files, plus the files that its threads
+/// read and write at the same time.
+const MIN_OPEN_FILES: u64 = 8192;
+
+/// Raises the soft limit of open files to the hard limit, and fails when it stays below
+/// `MIN_OPEN_FILES`.
+fn raise_open_files() -> Result<(), CliError> {
+    let limit = rlimit::increase_nofile_limit(u64::MAX).map_err(CliError::FileLimit)?;
+    if limit < MIN_OPEN_FILES {
+        return Err(CliError::OpenFiles {
+            limit,
+            needed: MIN_OPEN_FILES,
+        });
+    }
     Ok(())
 }
 

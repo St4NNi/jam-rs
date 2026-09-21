@@ -75,6 +75,15 @@ pub enum CliError {
     /// Serving or a remote search failed.
     #[error(transparent)]
     Service(#[from] ServiceError),
+    /// The limit of open files cannot be raised to what a build needs.
+    #[error(
+        "the limit of open files is {limit}, but building a shard needs {needed}: raise the hard \
+         limit (ulimit -Hn) and try again"
+    )]
+    OpenFiles { limit: u64, needed: u64 },
+    /// The limit of open files cannot be read or raised.
+    #[error("cannot raise the limit of open files: {0}")]
+    FileLimit(std::io::Error),
     /// The search thread panicked.
     #[error("the search thread panicked")]
     Panic,
