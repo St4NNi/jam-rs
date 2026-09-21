@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::ops::Range;
 use thiserror::Error;
 
 /// Errors of the seeds module.
@@ -253,6 +254,50 @@ pub fn complement(base: u8) -> u8 {
 pub fn reverse_complement(bases: &[u8]) -> Vec<u8> {
     bases.iter().rev().map(|&base| complement(base)).collect()
 }
+
+/// The low-complexity stretches of `sequence`, ascending and disjoint: the union of the DUST
+/// windows whose triplet score passes `DUST_LIMIT`. A window holds `DUST_WINDOW` bases, or the
+/// whole sequence when it is shorter; triplets with other bytes than A, C, G and T add no pairs.
+pub fn low_complexity_mask(sequence: &[u8]) -> Vec<Range<usize>> {
+    let window = DUST_WINDOW.min(sequence.len());
+    let mut masked: Vec<Range<usize>> = Vec::new();
+    if window < 3 {
+        return masked;
+    }
+    let triplet = |at: usize| -> Option<usize> {
+        let mut codes = sequence[at..at + 3].iter().map(|byte| base_code(*byte));
+        codes.try_fold(0, |value, code| Some(value * 4 + usize::from(code?)))
+    };
+    let per_window = window - 2;
+    let pairs_limit = DUST_LIMIT * (per_window as u64 - 1);
+    let (mut counts, mut score) = ([0u64; 64], 0u64);
+    for end in 0..sequence.len() - 2 {
+        if let Some(code) = triplet(end) {
+            score += counts[code];
+            counts[code] += 1;
+        }
+        if end >= per_window
+            && let Some(code) = triplet(end - per_window)
+        {
+            counts[code] -= 1;
+            score -= counts[code];
+        }
+        // The score pairs equal triplets: sum of c (c - 1) / 2 over the triplet counts c.
+        if end + 1 >= per_window && score * 10 > pairs_limit {
+            let start = end + 1 - per_window;
+            match masked.last_mut() {
+                Some(last) if last.end >= start => last.end = start + window,
+                _ => masked.push(start..start + window),
+            }
+        }
+    }
+    masked
+}
+
+/// Bases in one DUST window, as in BLAST and minimap2 (sdust).
+const DUST_WINDOW: usize = 64;
+/// The DUST score limit, ten times the mean pairs of equal triplets per triplet (sdust `-t`).
+const DUST_LIMIT: u64 = 20;
 
 /// Mixed into the hash of a seed of a low-complexity run, so it differs from the hash of the same
 /// k-mer as an ordinary seed.

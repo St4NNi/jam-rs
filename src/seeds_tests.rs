@@ -371,3 +371,48 @@ fn base_helpers_agree() {
     );
     assert_eq!(found[0].canonical(), 0b00_01_10);
 }
+
+#[test]
+fn repeats_masked() {
+    let mut random = rng(0xd05);
+    for period in [&b"A"[..], b"AT", b"ACG", b"AAGT", b"ACGTTG"] {
+        let mut repeat: Vec<u8> = period.iter().copied().cycle().take(2_000).collect();
+        // Scattered substitutions, about one in 60 bases, leave the repeat masked.
+        for at in (30..2_000).step_by(60) {
+            repeat[at] = if repeat[at] == b'C' { b'G' } else { b'C' };
+        }
+        assert_eq!(
+            low_complexity_mask(&repeat),
+            vec![0..2_000],
+            "period {period:?}"
+        );
+        let flanked = [
+            random_bases(&mut random, 500),
+            repeat[..300].to_vec(),
+            random_bases(&mut random, 500),
+        ]
+        .concat();
+        let masked = low_complexity_mask(&flanked);
+        assert_eq!(masked.len(), 1, "period {period:?}");
+        assert!(masked[0].start <= 520 && masked[0].end >= 780, "{masked:?}");
+        assert!(masked[0].start >= 440 && masked[0].end <= 860, "{masked:?}");
+    }
+}
+
+#[test]
+fn ordinary_unmasked() {
+    let mut random = rng(0xd06);
+    let bases = random_bases(&mut random, 100_000);
+    assert!(low_complexity_mask(&bases).is_empty());
+    // A short run inside random bases and unknown bases do not make a window simple.
+    let run = [
+        &bases[..500],
+        &[b'A'; 12][..],
+        &[b'N'; 40][..],
+        &bases[500..1_000],
+    ]
+    .concat();
+    assert!(low_complexity_mask(&run).is_empty());
+    assert!(low_complexity_mask(b"AA").is_empty());
+    assert_eq!(low_complexity_mask(&[b'T'; 30]), vec![0..30]);
+}
