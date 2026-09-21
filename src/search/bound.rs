@@ -16,10 +16,14 @@ pub struct CoverageBound<'a> {
     circular: bool,
     /// The query coverage, in bases, that an entry must reach.
     required_bases: u64,
+    /// Query starts that count as possibly hit for every entry, ascending.
+    masked_starts: &'a [u32],
 }
 
 impl<'a> CoverageBound<'a> {
-    /// A bound for a query of `query_length` bases, spending `budget` per entry.
+    /// A bound for a query of `query_length` bases, spending `budget` per entry. The ascending
+    /// `masked_starts` count as possibly hit in every entry, as low-complexity stretches have no
+    /// query k-mers.
     pub fn new(
         model: &'a MissModel,
         budget: LossBudget,
@@ -27,6 +31,7 @@ impl<'a> CoverageBound<'a> {
         query_length: u64,
         circular: bool,
         required_bases: u64,
+        masked_starts: &'a [u32],
     ) -> Self {
         Self {
             model,
@@ -35,6 +40,7 @@ impl<'a> CoverageBound<'a> {
             query_length,
             circular,
             required_bases,
+            masked_starts,
         }
     }
 
@@ -44,7 +50,13 @@ impl<'a> CoverageBound<'a> {
     pub fn bound(&self, positions: &[u32]) -> u64 {
         // Assumes a stretch holds at most one present piece: the decision counts only long
         // fragments, and the part of an entry that matches a stretch aligns as one piece.
-        let stretches = self.stretches(positions);
+        let stretches = if self.masked_starts.is_empty() {
+            self.stretches(positions)
+        } else {
+            let mut all = [positions, self.masked_starts].concat();
+            all.sort_unstable();
+            self.stretches(&all)
+        };
         let allowance = self.allowance(stretches.len() as u64);
         let left_out: u64 = stretches
             .iter()
@@ -111,7 +123,15 @@ mod tests {
     use crate::test_support::miss_model as model;
 
     fn bound(length: u64, circular: bool) -> CoverageBound<'static> {
-        CoverageBound::new(model(), LossBudget::default(), 0.95, length, circular, 0)
+        CoverageBound::new(
+            model(),
+            LossBudget::default(),
+            0.95,
+            length,
+            circular,
+            0,
+            &[],
+        )
     }
 
     #[test]
@@ -169,5 +189,27 @@ mod tests {
         let allowance = circular.allowance(1);
         assert!(allowance < 550);
         assert_eq!(circular.bound(&positions), 6_000 - 550 + allowance);
+    }
+
+    #[test]
+    fn masked_starts_count() {
+        let positions: Vec<u32> = (0..40).map(|i| 61 * i).collect();
+        let plain = bound(10_000, false);
+        let masked_starts: Vec<u32> = (2_400..10_000).step_by(21).chain([9_979]).collect();
+        let masked = CoverageBound::new(
+            model(),
+            LossBudget::default(),
+            0.95,
+            10_000,
+            false,
+            0,
+            &masked_starts,
+        );
+        assert!(plain.bound(&positions) < 10_000);
+        assert_eq!(masked.bound(&positions), 10_000);
+        assert_eq!(
+            masked.bound(&[]),
+            10_000 - 2_400u64.saturating_sub(masked.allowance(1))
+        );
     }
 }

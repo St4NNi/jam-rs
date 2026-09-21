@@ -25,7 +25,7 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
     let model = miss_model();
     let rule = &config.rule;
     let length = query.len() as u64;
-    let kmers = QueryKmers::new(&seeder, query, false);
+    let kmers = QueryKmers::new(&seeder, query, false, &[]);
     let required = rule.min_query_coverage.required_bases(length);
     let bound = CoverageBound::new(
         model,
@@ -34,6 +34,7 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
         length,
         false,
         required,
+        &[],
     );
     let limits = SketchLimits {
         frequent_seed_entries: 1_000,

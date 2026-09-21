@@ -22,7 +22,7 @@ use super::times::{PartStart, SearchTimes};
 use crate::decide::DecisionRule;
 use crate::index::{SeedLocation, Shard};
 use crate::loss::{LossBudget, MissModel};
-use crate::seeds::Seeder;
+use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -199,10 +199,11 @@ impl<'a> Searcher<'a> {
                     _ => Ok(None),
                 },
                 || {
+                    let masked = low_complexity_mask(query);
                     if mismatches > 0 {
-                        QueryKmers::with_neighbours(&self.seeder, query, circular)
+                        QueryKmers::with_neighbours(&self.seeder, query, circular, &masked)
                     } else {
-                        QueryKmers::new(&self.seeder, query, circular)
+                        QueryKmers::new(&self.seeder, query, circular, &masked)
                     }
                 },
             );
@@ -253,6 +254,7 @@ impl<'a> Searcher<'a> {
             length,
             circular,
             rule.min_query_coverage.required_bases(length),
+            query_kmers.masked_starts(),
         );
         let mut summary = SearchSummary {
             query_length: length,

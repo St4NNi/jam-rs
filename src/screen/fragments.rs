@@ -78,6 +78,7 @@ impl BatchAlignment<'_> {
             kmers.length(),
             false,
             0,
+            &[],
         );
         let request = LocateRequest {
             query: kmers,
