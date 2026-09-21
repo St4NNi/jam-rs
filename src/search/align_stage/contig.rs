@@ -240,6 +240,7 @@ impl<'a> ContigJob<'a> {
         mut output: WindowOutput,
         workspace: &mut WindowWorkspace,
     ) -> Result<WindowOutput, AlignStageError> {
+        self.control.check()?;
         chains::align_chains(self, window, &mut output, &mut workspace.alignment)?;
         walks::align_walks(self, window, &mut output, workspace)?;
         Ok(output)
