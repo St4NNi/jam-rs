@@ -302,7 +302,7 @@ fn split_by_entropy() {
 }
 
 #[test]
-fn copy_across_scan_pieces() {
+fn copy_across_pieces() {
     // The query is scanned in pieces of 65,536 bases; a copy across the first border chains
     // as one, with anchors on both sides and in the last a - 1 bases before it.
     let query = random_bases(&mut rng(11), 150_000);
