@@ -227,12 +227,15 @@ pub(super) fn join_short_walks(
                 )
         })
     };
-    let mut short: Vec<usize> = (0..walks.len())
-        .filter(|&index| {
-            u64::from(walks[index].length) < rule.min_fragment_columns
-                && !held(&joined, &walks[index])
-        })
-        .collect();
+    // `held` looks at every fragment of the window, so a window with many walks takes long here
+    // and the deadline is checked for each walk.
+    let mut short: Vec<usize> = Vec::new();
+    for (index, walk) in walks.iter().enumerate() {
+        job.control.check()?;
+        if u64::from(walk.length) < rule.min_fragment_columns && !held(&joined, walk) {
+            short.push(index);
+        }
+    }
     if short.is_empty() {
         return Ok(joined);
     }
