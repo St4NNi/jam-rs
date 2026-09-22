@@ -41,7 +41,7 @@ impl Default for DecisionRule {
             },
             min_identity: 0.95,
             min_fragment_identity: 0.95,
-            min_fragment_columns: 100,
+            min_fragment_columns: 40,
             min_contig_coverage: 0.0,
             min_contig_identity: 0.0,
         }
@@ -498,8 +498,8 @@ mod tests {
         let counts = |cigar: &str, length| {
             rule.counts_fragment(&fragment(0, &[(0, length)], cigar).alignment)
         };
-        assert!(!counts("99=", 99));
-        assert!(counts("100=", 100));
+        assert!(!counts("39=", 39));
+        assert!(counts("40=", 40));
         assert!(counts("70=30X", 100));
         assert!(counts("65=35X", 100));
         let strict = DecisionRule {

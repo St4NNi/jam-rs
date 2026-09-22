@@ -15,6 +15,10 @@ use crate::decide::Fragment;
 use crate::seeds::base_code;
 use std::cmp::Reverse;
 
+/// Walks shorter than this are joined with their neighbours; it is kept apart from the rule's
+/// fragment minimum so that a lower minimum does not add joins.
+const JOIN_MIN_COLUMNS: u64 = 100;
+
 /// Aligns the walks of `window`: every long walk is an ungapped fragment, and long walks with
 /// changes are also aligned with gaps (kept once per copy). Short walks are joined later, by
 /// `join_short_walks`.
@@ -232,7 +236,7 @@ pub(super) fn join_short_walks(
     let mut short: Vec<usize> = Vec::new();
     for (index, walk) in walks.iter().enumerate() {
         job.control.check()?;
-        if u64::from(walk.length) < rule.min_fragment_columns && !held(&joined, walk) {
+        if u64::from(walk.length) < JOIN_MIN_COLUMNS && !held(&joined, walk) {
             short.push(index);
         }
     }
@@ -243,7 +247,7 @@ pub(super) fn join_short_walks(
         table: &query.table,
         band: job.config.band,
         limits: JoinLimits {
-            min_columns: rule.min_fragment_columns,
+            min_columns: JOIN_MIN_COLUMNS,
             min_identity: rule.min_fragment_identity,
         },
     };
