@@ -468,26 +468,6 @@ fn oversized_entry_dropped() {
     }
 }
 
-/// A query made of a repeat has no query k-mers, so no entry with the same repeat is possible.
-#[test]
-fn repeat_query_unmatched() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut random = rng(0x1c);
-    let mut repeat: Vec<u8> = b"ACG".iter().copied().cycle().take(6_000).collect();
-    for at in (40..6_000).step_by(70) {
-        repeat[at] = b'T';
-    }
-    let entries = vec![vec![
-        [random_bases(&mut random, 5_000), repeat.clone()].concat(),
-    ]];
-    let shard = test_shard(directory.path(), &entries);
-    let query = &repeat[1_000..5_000];
-    let (summary, events) = search(&shard, query, false, &config(SearchStage::Align), false);
-    assert!(matches!(summary.completion, Completion::Complete));
-    assert_eq!(summary.sketch.query_kmers, 0);
-    assert!(events.is_empty(), "{events:?}");
-}
-
 #[test]
 fn circular_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();

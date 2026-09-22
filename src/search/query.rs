@@ -25,59 +25,37 @@ pub struct QueryKmers {
     kmers: u64,
     distinct: Vec<DistinctKmer>,
     positions: Vec<u32>,
-    /// Starts whose k-mers cover the masked stretches, at most k apart.
-    masked_starts: Vec<u32>,
 }
 
 impl QueryKmers {
-    /// Hashes every k-mer of `query` with the seed scheme of the shard, leaving out those that
-    /// touch a `masked` stretch (ascending, disjoint). The query must have at least k bases and
-    /// fewer than 2^32.
-    pub fn new(seeder: &Seeder, query: &[u8], circular: bool, masked: &[Range<usize>]) -> Self {
-        Self::hashed(seeder, query, circular, false, masked)
+    /// Hashes every k-mer of `query` with the seed scheme of the shard. The query must have at
+    /// least k bases and fewer than 2^32.
+    pub fn new(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
+        Self::hashed(seeder, query, circular, false)
     }
 
     /// As `new`, adding every k-mer one substitution away from a query k-mer at its start, so
     /// seeds with one mismatch are found too.
-    pub fn with_neighbours(
-        seeder: &Seeder,
-        query: &[u8],
-        circular: bool,
-        masked: &[Range<usize>],
-    ) -> Self {
-        Self::hashed(seeder, query, circular, true, masked)
+    pub fn with_neighbours(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
+        Self::hashed(seeder, query, circular, true)
     }
 
-    fn hashed(
-        seeder: &Seeder,
-        query: &[u8],
-        circular: bool,
-        neighbours: bool,
-        masked: &[Range<usize>],
-    ) -> Self {
+    fn hashed(seeder: &Seeder, query: &[u8], circular: bool, neighbours: bool) -> Self {
         let k = usize::from(seeder.scheme().k);
-        let touches = |start: usize| {
-            let (end, length) = (start + k, query.len());
-            let hit = |from: usize, to: usize| {
-                let first = masked.partition_point(|range| range.end <= from);
-                masked.get(first).is_some_and(|range| range.start < to)
-            };
-            hit(start, end.min(length)) || (end > length && hit(0, end - length))
-        };
         let mut scanned = query.to_vec();
         if circular {
             scanned.extend_from_slice(&query[..(k - 1).min(query.len())]);
         }
         let mut kmers: Vec<(u64, u32)> = Vec::with_capacity(query.len());
         seeder.query_kmers(&scanned, |kmer| {
-            if kmer.position < query.len() as u64 && !touches(kmer.position as usize) {
+            if kmer.position < query.len() as u64 {
                 kmers.push((kmer.hash, kmer.position as u32));
             }
         });
         let exact = kmers.len() as u64;
         if neighbours {
             seeder.query_neighbours(&scanned, |kmer| {
-                if kmer.position < query.len() as u64 && !touches(kmer.position as usize) {
+                if kmer.position < query.len() as u64 {
                     kmers.push((kmer.hash, kmer.position as u32));
                 }
             });
@@ -99,14 +77,6 @@ impl QueryKmers {
             kmers: exact,
             distinct,
             positions: kmers.into_iter().map(|(_, position)| position).collect(),
-            masked_starts: masked
-                .iter()
-                .flat_map(|range| {
-                    let last = range.end.saturating_sub(k).max(range.start);
-                    (range.start..last).step_by(k).chain([last])
-                })
-                .map(|start| start as u32)
-                .collect(),
         }
     }
 
@@ -118,12 +88,6 @@ impl QueryKmers {
     /// The number of query k-mers, counting repeats.
     pub fn kmers(&self) -> u64 {
         self.kmers
-    }
-
-    /// Query starts that count as possibly hit for every entry with a seed hit: their k-mers
-    /// cover the masked stretches, which have no query k-mers.
-    pub fn masked_starts(&self) -> &[u32] {
-        &self.masked_starts
     }
 
     /// The distinct query k-mers, by ascending hash.
@@ -177,7 +141,7 @@ mod tests {
     #[test]
     fn repeats_share_kmer() {
         let query = b"ACGTTGCAACGTTGCA";
-        let kmers = QueryKmers::new(&seeder(), query, false, &[]);
+        let kmers = QueryKmers::new(&seeder(), query, false);
         assert_eq!(kmers.kmers(), 12);
         let all: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
         assert_eq!(kmers.sorted_positions(&all), (0..12).collect::<Vec<_>>());
@@ -190,8 +154,8 @@ mod tests {
     #[test]
     fn circular_kmers_wrap() {
         let query = b"ACGTTGCAAGGT";
-        let linear = QueryKmers::new(&seeder(), query, false, &[]);
-        let circular = QueryKmers::new(&seeder(), query, true, &[]);
+        let linear = QueryKmers::new(&seeder(), query, false);
+        let circular = QueryKmers::new(&seeder(), query, true);
         assert_eq!(linear.kmers(), 8);
         assert_eq!(circular.kmers(), 12);
         let all: Vec<u32> = (0..circular.distinct().len() as u32).collect();
@@ -201,27 +165,8 @@ mod tests {
     #[test]
     fn unknown_bases_skipped() {
         let query = b"ACGTTNGCAAGGT";
-        let kmers = QueryKmers::new(&seeder(), query, false, &[]);
+        let kmers = QueryKmers::new(&seeder(), query, false);
         let all: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
         assert_eq!(kmers.sorted_positions(&all), vec![0, 6, 7, 8]);
-    }
-
-    #[test]
-    fn masked_kmers_skipped() {
-        let query = b"ACGTTGCAAGGTCATGACCA";
-        let all = QueryKmers::new(&seeder(), query, true, &[]);
-        let masked = QueryKmers::new(&seeder(), query, true, &[0..3, 10..13]);
-        let starts = |kmers: &QueryKmers| {
-            let seeds: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
-            kmers.sorted_positions(&seeds)
-        };
-        assert_eq!(starts(&all), (0..20).collect::<Vec<_>>());
-        // Starts 6 to 12 touch 10..13; 16 to 19 run over the end into 0..3.
-        assert_eq!(starts(&masked), vec![3, 4, 5, 13, 14, 15]);
-        assert_eq!(masked.kmers(), 6);
-        assert_eq!(masked.masked_starts(), &[0, 10]);
-        let stretch = 2..14;
-        let long = QueryKmers::new(&seeder(), query, false, std::slice::from_ref(&stretch));
-        assert_eq!(long.masked_starts(), &[2, 7, 9]);
     }
 }

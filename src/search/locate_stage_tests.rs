@@ -20,12 +20,7 @@ use std::ops::Range;
 const FLANK: u64 = 1_000;
 
 fn kmers(query: &[u8]) -> QueryKmers {
-    QueryKmers::new(
-        &Seeder::new(parameters().scheme).unwrap(),
-        query,
-        false,
-        &[],
-    )
+    QueryKmers::new(&Seeder::new(parameters().scheme).unwrap(), query, false)
 }
 
 fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
@@ -36,7 +31,6 @@ fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
         length,
         false,
         required_bases,
-        &[],
     )
 }
 

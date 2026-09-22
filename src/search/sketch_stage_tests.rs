@@ -58,7 +58,6 @@ fn bound_at(length: u64, required_bases: u64, identity: f64) -> CoverageBound<'s
         length,
         false,
         required_bases,
-        &[],
     )
 }
 
@@ -75,7 +74,7 @@ fn run_with(
     limits: SketchLimits,
 ) -> (Vec<(u32, u64)>, u64) {
     let seeder = Seeder::new(parameters().scheme).unwrap();
-    let kmers = QueryKmers::new(&seeder, query, false, &[]);
+    let kmers = QueryKmers::new(&seeder, query, false);
     let control = no_stop();
     let outcome = sketch_stage(shard.seed_file(), &kmers, bound, limits, control).unwrap();
     assert_eq!(
@@ -109,12 +108,7 @@ fn low_bounds_dropped() {
 
 /// The containment estimate of each entry of the 4 entry shard; 0 when it is not a candidate.
 fn estimates(shard: &Shard, query: &[u8], limits: SketchLimits) -> Vec<f64> {
-    let kmers = QueryKmers::new(
-        &Seeder::new(parameters().scheme).unwrap(),
-        query,
-        false,
-        &[],
-    );
+    let kmers = QueryKmers::new(&Seeder::new(parameters().scheme).unwrap(), query, false);
     let bound = bound(query.len() as u64, 0);
     let outcome = sketch_stage(shard.seed_file(), &kmers, &bound, limits, no_stop()).unwrap();
     let mut estimates = vec![0.0; 4];
@@ -170,7 +164,7 @@ fn stop_ends_sketch() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
     let seeder = Seeder::new(parameters().scheme).unwrap();
-    let kmers = QueryKmers::new(&seeder, &query, false, &[]);
+    let kmers = QueryKmers::new(&seeder, &query, false);
     let stop = AtomicBool::new(true);
     let control = SearchControl {
         deadline: None,

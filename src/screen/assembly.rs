@@ -267,7 +267,7 @@ impl<'a> Screener<'a> {
             })
             .collect();
         let seed_file = self.shard.seed_file();
-        let kmers = QueryKmers::new(&self.seeder, &batch.bases, false, &[]);
+        let kmers = QueryKmers::new(&self.seeder, &batch.bases, false);
         let seeds = found_seeds(seed_file, &self.seeder, &batch, aligner.control)?;
         let seed_hits = kept_seed_hits(&kmers, &seeds, &kept);
         let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits)?;
