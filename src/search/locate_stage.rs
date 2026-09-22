@@ -129,6 +129,7 @@ fn locate(
         bins.extend(same.iter().map(|(_, location)| location.bin));
     }
     positions.sort_unstable();
+    positions.dedup();
     let coverage_bound = request.bound.bound(positions);
     if !request.bound.keeps(coverage_bound) {
         return Ok(LocateOutcome::Dropped(DropReason::CoverageBound));

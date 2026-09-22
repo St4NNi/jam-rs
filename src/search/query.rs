@@ -112,7 +112,8 @@ impl QueryKmers {
         (hit_positions as f64 / expected).min(1.0)
     }
 
-    /// The query starts of all the given distinct k-mers, ascending.
+    /// The query starts of all the given distinct k-mers, ascending. A start that several
+    /// k-mers share (a k-mer and its one-substitution neighbours) is listed once.
     pub fn sorted_positions(&self, seeds: &[u32]) -> Vec<u32> {
         let mut positions: Vec<u32> = seeds
             .iter()
@@ -120,6 +121,7 @@ impl QueryKmers {
             .copied()
             .collect();
         positions.sort_unstable();
+        positions.dedup();
         positions
     }
 }
@@ -168,5 +170,15 @@ mod tests {
         let kmers = QueryKmers::new(&seeder(), query, false);
         let all: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
         assert_eq!(kmers.sorted_positions(&all), vec![0, 6, 7, 8]);
+    }
+
+    #[test]
+    fn shared_starts_once() {
+        let query = b"ACGTTGCAAGGTCATG";
+        let kmers = QueryKmers::with_neighbours(&seeder(), query, false);
+        let all: Vec<u32> = (0..kmers.distinct().len() as u32).collect();
+        let total: usize = all.iter().map(|&seed| kmers.positions(seed).len()).sum();
+        assert!(total > kmers.kmers() as usize);
+        assert_eq!(kmers.sorted_positions(&all), (0..12).collect::<Vec<_>>());
     }
 }

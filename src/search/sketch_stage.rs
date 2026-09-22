@@ -10,6 +10,7 @@ use super::query::QueryKmers;
 use crate::index::{ColorSetId, ColorSets, SeedFile, StoredSeed, seed_key};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// Distinct query k-mers that one parallel step looks up or expands.
@@ -147,9 +148,11 @@ pub fn sketch_stage(
     work.seed_hits = seed_hits.len() as u64;
     control.check()?;
     let entries = seed_file.entry_count() as u32;
+    let (held, held_starts) = frequent_starts(color_sets, &frequent, query, entries);
     let frequent = Frequent {
         positions: query.sorted_positions(&frequent_seeds),
-        starts: frequent_starts(color_sets, &frequent, query, entries),
+        held,
+        held_starts,
     };
     let mut candidates: Vec<PossibleEntry> = seed_hits
         .par_chunk_by(|a, b| a.0 == b.0)
@@ -253,41 +256,76 @@ struct Frequent {
     /// The query starts of all frequent seeds, ascending; an entry in any frequent color set
     /// counts them all as possibly hit, which can only raise its bound.
     positions: Vec<u32>,
-    /// For each entry, the query starts of the frequent seeds whose color sets hold it.
-    starts: Vec<u32>,
+    /// For each entry, the index in `held_starts` of the query starts of the frequent seeds
+    /// whose color sets hold it, or `NOT_HELD`.
+    held: Vec<u32>,
+    /// The distinct lists of query starts that entries hold, each ascending without repeats.
+    held_starts: Vec<Vec<u32>>,
 }
+
+/// The `held` value of an entry that no frequent color set holds.
+const NOT_HELD: u32 = u32::MAX;
 
 impl Frequent {
     fn holds(&self, entry: u32) -> bool {
-        self.starts
+        self.held
             .get(entry as usize)
-            .is_some_and(|&starts| starts > 0)
+            .is_some_and(|&held| held != NOT_HELD)
+    }
+
+    /// The query starts of the frequent seeds that hold `entry`.
+    fn starts(&self, entry: u32) -> &[u32] {
+        self.held
+            .get(entry as usize)
+            .and_then(|&held| self.held_starts.get(held as usize))
+            .map_or(&[], Vec::as_slice)
     }
 }
 
 /// For each entry, the query starts of the frequent seeds whose color sets hold it. Each distinct
-/// color set is read once, so frequent seeds that share a color set cost one pass.
+/// color set is read once, and a query start that several frequent seeds share is listed once.
 fn frequent_starts(
     color_sets: &ColorSets,
     frequent: &[FoundSeed],
     query: &QueryKmers,
     entries: u32,
-) -> Vec<u32> {
+) -> (Vec<u32>, Vec<Vec<u32>>) {
     let mut by_color_set: Vec<(ColorSetId, u32)> = frequent
         .iter()
-        .map(|found| (found.color_set, query.positions(found.seed).len() as u32))
+        .map(|found| (found.color_set, found.seed))
         .collect();
-    by_color_set.sort_unstable_by_key(|&(color_set, _)| color_set);
-    let mut starts = vec![0u32; entries as usize];
-    for group in by_color_set.chunk_by(|a, b| a.0 == b.0) {
-        let count: u32 = group.iter().map(|&(_, count)| count).sum();
+    by_color_set.sort_unstable();
+    let mut sets: Vec<Vec<u32>> = vec![Vec::new(); entries as usize];
+    let mut starts_of_set: Vec<Vec<u32>> = Vec::new();
+    for (index, group) in by_color_set.chunk_by(|a, b| a.0 == b.0).enumerate() {
+        let seeds: Vec<u32> = group.iter().map(|&(_, seed)| seed).collect();
+        starts_of_set.push(query.sorted_positions(&seeds));
         for &entry in color_sets.entries(group[0].0).into_iter().flatten() {
-            if let Some(entry_starts) = starts.get_mut(entry as usize) {
-                *entry_starts += count;
+            if let Some(held) = sets.get_mut(entry as usize) {
+                held.push(index as u32);
             }
         }
     }
-    starts
+    let mut ids: HashMap<Vec<u32>, u32> = HashMap::new();
+    let mut held_starts: Vec<Vec<u32>> = Vec::new();
+    let held = sets
+        .into_iter()
+        .map(|members| {
+            if members.is_empty() {
+                return NOT_HELD;
+            }
+            *ids.entry(members).or_insert_with_key(|members| {
+                let mut starts: Vec<u32> = (members.iter())
+                    .flat_map(|&member| starts_of_set[member as usize].iter().copied())
+                    .collect();
+                starts.sort_unstable();
+                starts.dedup();
+                held_starts.push(starts);
+                held_starts.len() as u32 - 1
+            })
+        })
+        .collect();
+    (held, held_starts)
 }
 
 /// Expands the color sets of the seeds into seed hits, sorted by entry and then seed.
@@ -331,7 +369,10 @@ fn possible_entry(
     let mut positions = query.sorted_positions(&seeds);
     let mut hit_starts = positions.len() as u64;
     if in_frequent {
-        hit_starts += u64::from(frequent.starts[entry as usize]);
+        positions.extend_from_slice(frequent.starts(entry));
+        positions.sort_unstable();
+        positions.dedup();
+        hit_starts = positions.len() as u64;
         positions.extend_from_slice(&frequent.positions);
         positions.sort_unstable();
     }
