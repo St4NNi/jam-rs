@@ -468,6 +468,34 @@ fn oversized_entry_dropped() {
     }
 }
 
+/// A query made of a repeat cannot reach the coverage with its other bases, so it has no
+/// answer; with a unique part long enough it is searched as usual.
+#[test]
+fn repeat_query_unanswered() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0x1c);
+    let mut repeat: Vec<u8> = b"ACG".iter().copied().cycle().take(6_000).collect();
+    for at in (40..6_000).step_by(70) {
+        repeat[at] = b'T';
+    }
+    let unique = random_bases(&mut random, 5_000);
+    let entries = vec![vec![[unique.clone(), repeat.clone()].concat()]];
+    let shard = test_shard(directory.path(), &entries);
+    let config = config(SearchStage::Align);
+    let (summary, events) = search(&shard, &repeat[1_000..5_000], false, &config, false);
+    assert!(matches!(summary.completion, Completion::Complete));
+    assert_eq!(summary.sketch.low_complexity_bases, 4_000);
+    assert!(events.is_empty(), "{events:?}");
+    let mixed = [&unique[1_000..], &repeat[..300]].concat();
+    let (summary, events) = search(&shard, &mixed, false, &config, false);
+    // A DUST window that reaches over the border is masked whole.
+    assert!((300..364).contains(&summary.sketch.low_complexity_bases));
+    assert!(matches!(
+        last_event(&events, 0),
+        EntryEvent::Confirmed { .. }
+    ));
+}
+
 #[test]
 fn circular_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();

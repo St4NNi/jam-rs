@@ -22,7 +22,7 @@ use super::times::{PartStart, SearchTimes};
 use crate::decide::DecisionRule;
 use crate::index::{SeedLocation, Shard};
 use crate::loss::{LossBudget, MissModel};
-use crate::seeds::Seeder;
+use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -188,6 +188,9 @@ impl<'a> Searcher<'a> {
             query.len() as u64,
             circular,
         );
+        let low_complexity: u64 = (low_complexity_mask(query).iter())
+            .map(|stretch| stretch.len() as u64)
+            .sum();
         // The query tables are built on the threads of the search too.
         let search = || {
             let start = PartStart::now();
@@ -214,6 +217,7 @@ impl<'a> Searcher<'a> {
                 workspace: &workspace,
                 control,
                 events,
+                low_complexity,
             };
             let model = self.models[mismatches];
             Ok(self.run(&query_kmers, circular, model, budget, &request, start))
@@ -242,6 +246,7 @@ impl<'a> Searcher<'a> {
             config,
             control,
             events,
+            low_complexity,
             ..
         } = *request;
         let length = query_kmers.length();
@@ -267,6 +272,12 @@ impl<'a> Searcher<'a> {
             },
         };
         summary.times.prepare_query = start.finish();
+        summary.sketch.low_complexity_bases = low_complexity;
+        // As BLAST's DUST masking, low-complexity bases count toward no coverage, so a query whose
+        // other bases cannot reach the required coverage has no answer, and nothing is looked up.
+        if length - low_complexity < rule.min_query_coverage.required_bases(length) {
+            return summary;
+        }
         let start = PartStart::now();
         let sketch = match sketch_stage(
             self.shard.seed_file(),
@@ -281,7 +292,10 @@ impl<'a> Searcher<'a> {
                 return summary;
             }
         };
-        summary.sketch = sketch.work;
+        summary.sketch = SketchWork {
+            low_complexity_bases: low_complexity,
+            ..sketch.work
+        };
         summary.times.sketch = start.finish();
         for candidate in &sketch.candidates {
             let possible = EntryEvent::Possible {
@@ -452,6 +466,8 @@ struct Request<'a> {
     workspace: &'a AlignStageWorkspace,
     control: SearchControl<'a>,
     events: &'a SyncSender<EntryEvent>,
+    /// Query bases in low-complexity stretches.
+    low_complexity: u64,
 }
 
 /// What one worker thread keeps across entries: its buffers and its share of the work.

@@ -41,6 +41,8 @@ pub struct PossibleEntry {
 /// The work of stage 1.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SketchWork {
+    /// Query bases in low-complexity stretches, which count toward no query coverage.
+    pub low_complexity_bases: u64,
     /// Query k-mers, counting repeats.
     pub query_kmers: u64,
     /// Distinct query k-mers looked up in the sketch part.
