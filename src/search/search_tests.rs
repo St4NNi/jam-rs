@@ -447,7 +447,8 @@ fn decision_drops_entry() {
     assert_eq!(summary.align.confirmed_entries, 0);
 }
 
-/// An entry whose fragments pass the memory limit is dropped; the search still completes.
+/// An entry whose fragments pass the memory limit is dropped; the other entries go on, but the
+/// search is not complete, since a qualifying entry may be missing.
 #[test]
 fn oversized_entry_dropped() {
     let directory = tempfile::tempdir().unwrap();
@@ -455,14 +456,15 @@ fn oversized_entry_dropped() {
     let mut config = config(SearchStage::Align);
     config.align.max_fragment_bytes = 1;
     let (summary, events) = search(&shard, &query, false, &config, false);
-    assert!(matches!(summary.completion, Completion::Complete));
+    assert!(matches!(summary.completion, Completion::ResourceIncomplete));
+    assert_eq!(summary.align.limited_entries, 2);
     for entry in [0, 1] {
         assert_eq!(
             *last_event(&events, entry),
             EntryEvent::Dropped {
                 entry,
                 stage: SearchStage::Align,
-                reason: DropReason::MemoryLimit,
+                reason: DropReason::ResourceLimit,
             }
         );
     }

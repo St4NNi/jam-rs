@@ -44,9 +44,10 @@ pub enum DropReason {
     NoSeedHits,
     /// The alignments of the entry do not reach the decision rule.
     Decision,
-    /// Aligning the entry needs more memory than a limit of stage 3 allows, as when a periodic
-    /// query meets many periodic regions.
-    MemoryLimit,
+    /// Aligning the entry needs more memory or work than a limit of stage 3 allows, as when a
+    /// periodic query meets many periodic regions. The entry is not decided, so the search ends
+    /// `ResourceIncomplete`.
+    ResourceLimit,
 }
 
 /// A change of one entry's state; the events of an entry arrive in order. Past stage 1, every
@@ -95,6 +96,9 @@ impl EntryEvent {
 #[derive(Debug)]
 pub enum Completion {
     Complete,
+    /// Every other entry was decided, but at least one was dropped for a resource limit, so a
+    /// qualifying entry may be missing.
+    ResourceIncomplete,
     Stopped(Stopped),
     /// A stage failed for one entry, for example reading the index or aligning; the entries not
     /// yet decided are unfinished.

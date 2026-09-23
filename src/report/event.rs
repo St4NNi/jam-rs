@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 pub enum Ending {
     /// Every possible entry was decided.
     Complete,
+    /// Every other entry was decided, but at least one was dropped for a resource limit
+    /// (`align.limited_entries`), so a qualifying entry may be missing.
+    ResourceIncomplete,
     /// The search passed its deadline.
     Deadline,
     /// The search was asked to stop.
@@ -184,6 +187,7 @@ impl Record {
     pub fn summary(query: &str, summary: &SearchSummary) -> Self {
         let (ending, error) = match &summary.completion {
             Completion::Complete => (Ending::Complete, None),
+            Completion::ResourceIncomplete => (Ending::ResourceIncomplete, None),
             Completion::Stopped(Stopped::Deadline) => (Ending::Deadline, None),
             Completion::Stopped(Stopped::Asked) => (Ending::Asked, None),
             Completion::Failed(error) => (Ending::Failed, Some(error.to_string())),

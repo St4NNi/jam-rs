@@ -95,3 +95,21 @@ fn summary_names_ending() {
     assert_eq!(json["ending"], "deadline");
     assert_eq!(json["seed_mismatches"], 1);
 }
+
+/// A resource drop ends the search as resource-incomplete, never complete.
+#[test]
+fn resource_drop_named() {
+    let summary = SearchSummary {
+        query_length: 1_000,
+        seed_mismatches: 0,
+        completion: Completion::ResourceIncomplete,
+        sketch: Default::default(),
+        locate: Default::default(),
+        align: Default::default(),
+        times: Default::default(),
+    };
+    let record = Record::summary("q1", &summary);
+    round_trip(&record);
+    let json = serde_json::to_value(&record).unwrap();
+    assert_eq!(json["ending"], "resource_incomplete");
+}

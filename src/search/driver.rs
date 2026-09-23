@@ -19,6 +19,7 @@ use super::query::QueryKmers;
 use super::seed_mismatches::SeedMismatches;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
+use crate::align::AlignmentError;
 use crate::decide::DecisionRule;
 use crate::index::{SeedLocation, Shard};
 use crate::loss::{LossBudget, MissModel};
@@ -106,6 +107,8 @@ pub struct AlignStageWork {
     pub entries: u64,
     /// Entries that qualify.
     pub confirmed_entries: u64,
+    /// Entries dropped for a resource limit, and so not decided.
+    pub limited_entries: u64,
     /// Windows, bases read, anchors, chains and alignments.
     pub counts: AlignWork,
     /// Seconds spent in the stage, summed over threads.
@@ -117,6 +120,7 @@ impl AlignStageWork {
     pub fn add(&mut self, other: &Self) {
         self.entries += other.entries;
         self.confirmed_entries += other.confirmed_entries;
+        self.limited_entries += other.limited_entries;
         self.counts.add(&other.counts);
         self.seconds += other.seconds;
     }
@@ -437,7 +441,10 @@ impl<'a> Searcher<'a> {
         };
         let aligned = match aligned {
             Ok(aligned) => aligned,
-            Err(AlignStageError::TooLarge { .. }) => return Ok(dropped(DropReason::MemoryLimit)),
+            Err(error) if is_resource_limit(&error) => {
+                worker.align.limited_entries += 1;
+                return Ok(dropped(DropReason::ResourceLimit));
+            }
             Err(error) => return Err(error.into()),
         };
         worker.align.counts.add(&aligned.work);
@@ -539,6 +546,10 @@ impl<'a> EntryQueue<'a> {
                 summary.completion = error.into();
             }
         }
+        // A stop or a failure says more than a resource drop, so it takes precedence.
+        if matches!(summary.completion, Completion::Complete) && summary.align.limited_entries > 0 {
+            summary.completion = Completion::ResourceIncomplete;
+        }
     }
 
     fn work_on<F, P>(&self, finish: &F, prefetch: &P, ahead: usize) -> WorkerEnd
@@ -602,6 +613,18 @@ impl<'a> EntryQueue<'a> {
         // A dropped receiver means nobody listens any more.
         let _ = self.events.send(EntryEvent::Unfinished { entry, stage });
     }
+}
+
+/// Whether stage 3 gave up on an entry for a memory or work limit rather than for an error;
+/// such an entry is dropped, the other entries go on, and the search ends `ResourceIncomplete`.
+fn is_resource_limit(error: &AlignStageError) -> bool {
+    matches!(
+        error,
+        AlignStageError::TooLarge { .. }
+            | AlignStageError::Alignment(
+                AlignmentError::MatrixTooLarge { .. } | AlignmentError::ChainingBudget(_)
+            )
+    )
 }
 
 /// Sends one event; a dropped receiver stops the search as if asked.
