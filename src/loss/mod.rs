@@ -207,10 +207,10 @@ const LAYOUTS: usize = 1000;
 
 /// The table of the default k and w, averaged over `LAYOUTS` layouts per length, as
 /// little-endian f64 values row by row; a test checks it against a new average.
-const DEFAULT_LN_MISS: &[u8] = include_bytes!("loss_default_table.bin");
+const DEFAULT_LN_MISS: &[u8] = include_bytes!("default_table.bin");
 
 /// As `DEFAULT_LN_MISS`, for seeds hit with at most one mismatch.
-const ONE_MISMATCH_TABLE: &[u8] = include_bytes!("loss_one_mismatch_table.bin");
+const ONE_MISMATCH_TABLE: &[u8] = include_bytes!("one_mismatch_table.bin");
 
 /// The largest k the model supports, as the seed scheme does.
 const MAX_K: usize = 32;
@@ -369,5 +369,4 @@ fn locate(grid: &[f64], value: f64) -> (usize, f64) {
 }
 
 #[cfg(test)]
-#[path = "loss_tests.rs"]
 mod tests;
