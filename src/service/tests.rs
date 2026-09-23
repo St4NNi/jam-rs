@@ -280,6 +280,21 @@ async fn disconnect_frees_place() {
     }
 }
 
+/// A search that waits for a place is refused at its deadline instead of waiting on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_search_expires() {
+    let directory = tempfile::tempdir().unwrap();
+    let router = full_server(directory.path()).await;
+    let client = endpoint().await;
+    let mut answer =
+        (search(&client, address(router.endpoint()), &request(Some(200))).await).unwrap();
+    let next = tokio::time::timeout(WAIT, answer.next()).await;
+    assert!(
+        matches!(next, Ok(Err(ServiceError::Refused(ref reason))) if reason == server::EXPIRED),
+        "{next:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deadline_ends_search() {
     let directory = tempfile::tempdir().unwrap();

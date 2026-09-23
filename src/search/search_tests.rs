@@ -211,6 +211,31 @@ fn dropped_receiver_stops() {
     ));
 }
 
+/// A search whose deadline passed before it began builds no query tables and sends no event.
+#[test]
+fn late_search_skipped() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = small_shard(directory.path());
+    let searcher = Searcher::new(&shard, miss_model(), one_mismatch_model()).unwrap();
+    let stop = AtomicBool::new(false);
+    let control = SearchControl {
+        deadline: Some(std::time::Instant::now()),
+        stop: &stop,
+    };
+    let (sender, receiver) = sync_channel(16);
+    let config = config(SearchStage::Align);
+    let summary = searcher
+        .search(&query, false, &config, control, &sender)
+        .unwrap();
+    drop(sender);
+    assert!(matches!(
+        summary.completion,
+        Completion::Stopped(Stopped::Deadline)
+    ));
+    assert_eq!(summary.times.prepare_query.wall_seconds, 0.0);
+    assert_eq!(receiver.iter().count(), 0);
+}
+
 /// Every entry holds the query at exactly the accepted identity, linear or rotated; none may be
 /// dropped by stages 1 and 2, while unrelated entries are.
 #[test]

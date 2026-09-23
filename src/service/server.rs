@@ -25,6 +25,9 @@ const QUEUED_REPLIES: usize = 256;
 /// The refusal of a search over the limits.
 pub const BUSY: &str = "the server is busy";
 
+/// The refusal of a search whose deadline passed while it waited for a running place.
+pub const EXPIRED: &str = "the deadline passed while the search waited for a place";
+
 /// How much work a server takes at once.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerLimits {
@@ -127,13 +130,26 @@ impl Server {
         outcome
     }
 
-    /// Waits for a running place, starts the search on every shard and writes its messages.
+    /// Waits for a running place until the deadline, starts the search on every shard and
+    /// writes its messages. A search still waiting at its deadline is refused as expired.
     async fn run(
         &self,
         search: &Arc<ShardSearch>,
         writer: &mut MessageWriter,
     ) -> Result<(), ServiceError> {
-        let running = self.running.clone().acquire_owned().await?;
+        let place = self.running.clone().acquire_owned();
+        let running = match search.deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline.into(), place).await {
+                Ok(running) => running?,
+                Err(_) => {
+                    let reason = EXPIRED.to_string();
+                    send(writer, &Reply::Refused { reason }).await?;
+                    writer.get_mut().finish()?;
+                    return Ok(());
+                }
+            },
+            None => place.await?,
+        };
         let (replies, mut received) = mpsc::channel(QUEUED_REPLIES);
         let shards = Shards {
             endpoint: &self.endpoint,

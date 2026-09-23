@@ -195,6 +195,12 @@ impl<'a> Searcher<'a> {
         let low_complexity: u64 = (low_complexity_mask(query).iter())
             .map(|stretch| stretch.len() as u64)
             .sum();
+        // A search that waited past its deadline, or was stopped meanwhile, builds no tables.
+        if let Err(stopped) = control.check() {
+            let mut summary = self.empty_summary(query.len() as u64, mismatches);
+            summary.completion = Completion::Stopped(stopped);
+            return Ok(summary);
+        }
         // The query tables are built on the threads of the search too.
         let search = || {
             let start = PartStart::now();
@@ -263,18 +269,7 @@ impl<'a> Searcher<'a> {
             circular,
             rule.min_query_coverage.required_bases(length),
         );
-        let mut summary = SearchSummary {
-            query_length: length,
-            seed_mismatches: model.mismatches() as u8,
-            completion: Completion::Complete,
-            sketch: SketchWork::default(),
-            locate: LocateWork::default(),
-            align: AlignStageWork::default(),
-            times: SearchTimes {
-                open_shard_seconds: self.shard.open_seconds(),
-                ..SearchTimes::default()
-            },
-        };
+        let mut summary = self.empty_summary(length, model.mismatches());
         summary.times.prepare_query = start.finish();
         summary.sketch.low_complexity_bases = low_complexity;
         // As BLAST's DUST masking, low-complexity bases count toward no coverage, so a query whose
@@ -348,6 +343,22 @@ impl<'a> Searcher<'a> {
         queue.run(finish, prefetch, &mut summary);
         summary.times.entries = start.finish();
         summary
+    }
+
+    /// The summary of a complete search of a query of `length` bases that did no work yet.
+    fn empty_summary(&self, length: u64, mismatches: usize) -> SearchSummary {
+        SearchSummary {
+            query_length: length,
+            seed_mismatches: mismatches as u8,
+            completion: Completion::Complete,
+            sketch: SketchWork::default(),
+            locate: LocateWork::default(),
+            align: AlignStageWork::default(),
+            times: SearchTimes {
+                open_shard_seconds: self.shard.open_seconds(),
+                ..SearchTimes::default()
+            },
+        }
     }
 
     fn sketch_limits(&self, config: &SearchConfig) -> SketchLimits {
