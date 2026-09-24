@@ -2,10 +2,10 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::counts::count_s3;
+use super::counts::{count_failed, count_s3};
 use super::{ReadAt, StorageError, checked_end, lock};
 use opendal::Operator;
-use opendal::layers::{ConcurrentLimitLayer, RetryLayer, TimeoutLayer};
+use opendal::layers::{ConcurrentLimitLayer, RetryEvent, RetryLayer, TimeoutLayer};
 use opendal::services::S3;
 use std::collections::HashMap;
 use std::io;
@@ -142,7 +142,9 @@ impl S3Config {
             .with_min_delay(limits.backoff)
             .with_factor(3.0)
             .with_max_delay(Duration::from_secs(60))
-            .with_jitter();
+            .with_jitter()
+            // Each retry follows one failed attempt; the last attempt is counted by the reader.
+            .with_notify(|_: RetryEvent<'_>| count_failed());
         let timeout = TimeoutLayer::new()
             .with_timeout(limits.request_timeout)
             .with_io_timeout(limits.request_timeout);
@@ -183,9 +185,12 @@ impl S3Object {
         let (bucket, key) = split_location(location)?;
         let operator = config.operator(bucket)?;
         let read = config.runtime.block_on(operator.read(key));
-        let bytes = read.map_err(|error| StorageError::Object {
-            location: location.to_string(),
-            source: error.into(),
+        let bytes = read.map_err(|error| {
+            count_failed();
+            StorageError::Object {
+                location: location.to_string(),
+                source: error.into(),
+            }
         })?;
         count_s3(bytes.len() as u64);
         Ok(bytes.to_vec())
@@ -209,7 +214,10 @@ impl ReadAt for S3Object {
         }
         // A range with an end needs no HEAD request for the object size.
         let read = self.operator.read_with(&self.key).range(offset..end);
-        let bytes = self.runtime.block_on(read.into_future())?;
+        let bytes = self
+            .runtime
+            .block_on(read.into_future())
+            .inspect_err(|_| count_failed())?;
         count_s3(bytes.len() as u64);
         if bytes.len() != buffer.len() {
             return Err(invalid(&format!(

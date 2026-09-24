@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
-use crate::storage::{BlockCache, CacheConfig};
+use crate::storage::{BlockCache, CacheConfig, StorageCounts};
 use crate::test_support::{Reply, Server, runtime, serve};
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -106,6 +106,32 @@ fn forbidden_not_repeated() {
     assert!(S3Object::read_whole(&config, "s3://bucket/key").is_err());
     // A final answer is not repeated.
     assert_eq!(forbidden.requests.load(Ordering::SeqCst), 2);
+}
+
+/// Every attempt counts as a request, retried, failed or not.
+#[test]
+fn retries_counted() {
+    let data = pattern(1000);
+    // Two server errors, then the object; then errors only.
+    let server = serve(move |index, request| match index {
+        2 => Reply::object(&data, request),
+        _ => Reply::status(503),
+    });
+    let limits = S3Limits {
+        tries: 3,
+        ..quick()
+    };
+    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", 1000).unwrap();
+    let before = StorageCounts::now();
+    object.read_exact_at(0, &mut [0; 10]).unwrap();
+    assert!(object.read_exact_at(0, &mut [0; 10]).is_err());
+    assert_eq!(server.requests.load(Ordering::SeqCst), 6);
+    // Other tests of this process may count at the same time.
+    let counted = StorageCounts::now().since(&before);
+    assert!(
+        counted.s3_requests >= 6 && counted.s3_bytes >= 10,
+        "{counted:?}"
+    );
 }
 
 #[test]

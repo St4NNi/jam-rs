@@ -15,9 +15,9 @@ static PINNED_READS: AtomicU64 = AtomicU64::new(0);
 /// Storage work of the process: all threads, hinted fetches included.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct StorageCounts {
-    /// GET requests sent to S3.
+    /// GET attempts sent to S3: retries and failed attempts included.
     pub s3_requests: u64,
-    /// Bytes received from S3.
+    /// Bytes of the successful GET answers; what failed attempts received is not known.
     pub s3_bytes: u64,
     /// Blocks that reads found in the block cache.
     pub cache_hits: u64,
@@ -52,10 +52,15 @@ impl StorageCounts {
     }
 }
 
-/// Counts one GET of `bytes` bytes.
+/// Counts one successful GET of `bytes` bytes.
 pub(crate) fn count_s3(bytes: u64) {
     S3_REQUESTS.fetch_add(1, Ordering::Relaxed);
     S3_BYTES.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Counts one failed GET attempt, retried or not.
+pub(crate) fn count_failed() {
+    S3_REQUESTS.fetch_add(1, Ordering::Relaxed);
 }
 
 /// Counts the blocks of one read: found in the cache, and not found.
