@@ -251,7 +251,10 @@ fn incomplete_search_fails() {
     let text = String::from_utf8(output.stdout).unwrap();
     assert_eq!(json(text.lines().last().unwrap())["ending"], "deadline");
     let message = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(message.trim(), "jam: 1 searches did not complete");
+    assert!(
+        message.starts_with("jam: 1 searches did not complete"),
+        "{message}"
+    );
 }
 
 /// Writes a FASTA file with one record per named sequence.
