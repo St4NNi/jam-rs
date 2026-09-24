@@ -5,6 +5,7 @@
 
 use super::manifest::{EntryRecord, FileRecord, Manifest, PACKED_DIRECTORY, verify_source};
 use super::plan::{PLAN_FILE, Pin, Plan};
+use super::seed_file::{HEADER_BYTES, verify_part};
 use super::sources::Location;
 use super::{AtPath, IndexError};
 use crate::storage::{LocalFile, ReadAt};
@@ -18,10 +19,9 @@ const DOWNLOAD_CHUNK: usize = 8 << 20;
 /// Ranged reads in flight while downloading.
 const DOWNLOAD_THREADS: usize = 64;
 
-/// Downloads every pin of `plan` from the shard at `location` into `cache`, checks the digest of
-/// each pin that covers a whole file, and writes the plan. First it removes the plan in place
-/// and the pins that only it holds, so the disk budget also holds while the new pins arrive.
-/// Pins already in place with the right digest are kept.
+/// Downloads every pin of `plan` from the shard at `location` into `cache`, checks each, and
+/// writes the plan. The old plan and its pins that `plan` lacks go first, so the disk budget
+/// holds while new pins arrive; pins already in place and intact are kept.
 pub fn warm(
     location: &Location,
     manifest: &Manifest,
@@ -36,7 +36,7 @@ pub fn warm(
         (plan.pins.par_iter()).try_for_each(|pin| {
             let record = file_record(manifest, &pin.file)?;
             let path = plan.pin_path(cache, pin);
-            if is_complete(&path, pin, record)? {
+            if is_complete(location, &path, pin, record) {
                 return Ok(());
             }
             download(location, record, pin, &path)
@@ -65,15 +65,35 @@ fn file_record<'a>(manifest: &'a Manifest, file: &str) -> Result<&'a FileRecord,
         .ok_or_else(|| IndexError::Input(format!("the shard has no file {file}")))
 }
 
-/// Whether the pin file at `path` is there with its size and, for a whole file, its digest.
-fn is_complete(path: &Path, pin: &Pin, record: &FileRecord) -> Result<bool, IndexError> {
-    let Ok(file) = LocalFile::open(path) else {
-        return Ok(false);
-    };
+/// Whether the pin file at `path` is there and intact, as `verify_pin` checks it.
+fn is_complete(location: &Location, path: &Path, pin: &Pin, record: &FileRecord) -> bool {
+    LocalFile::open(path).is_ok_and(|file| verify_pin(location, &file, pin, record).is_ok())
+}
+
+/// Checks a pin file: its size, and the digest of a whole file or else the CRC-32 of every
+/// section of the seeds file that the range holds. The header of the seeds file comes from the
+/// pin when it starts the file, else from `location`.
+fn verify_pin(
+    location: &Location,
+    file: &LocalFile,
+    pin: &Pin,
+    record: &FileRecord,
+) -> Result<(), IndexError> {
     if file.size() != pin.bytes() {
-        return Ok(false);
+        return Err(IndexError::format(format!(
+            "the pin of {} is cut",
+            pin.file
+        )));
     }
-    Ok(pin.bytes() != record.bytes || verify_source(&file, record).is_ok())
+    if pin.bytes() == record.bytes {
+        return verify_source(file, record);
+    }
+    let mut header = [0u8; HEADER_BYTES as usize];
+    match pin.start {
+        0 => file.read_exact_at(0, &mut header)?,
+        _ => (location.open(&pin.file, record.bytes)?).read_exact_at(0, &mut header)?,
+    }
+    verify_part(&header, file, pin.start..pin.end)
 }
 
 /// Downloads the range of `pin` into a partial file, checks it, and moves it to `path`.
@@ -97,9 +117,7 @@ fn download(
         file.write_all_at(&buffer, at).at(&partial)
     })?;
     file.sync_all().at(&partial)?;
-    if pin.bytes() == record.bytes {
-        verify_source(&LocalFile::open(&partial)?, record)?;
-    }
+    verify_pin(location, &LocalFile::open(&partial)?, pin, record)?;
     std::fs::rename(&partial, path).at(path)
 }
 
@@ -162,13 +180,18 @@ mod tests {
         let before = asked.lock().unwrap().len();
         warm(&location, &manifest, &plan, &cache).unwrap();
         assert_eq!(asked.lock().unwrap().len(), before);
-        // A damaged pin is downloaded again.
-        let pinned = plan.pin_path(&cache, &plan.pins[1]);
-        let mut bytes = std::fs::read(&pinned).unwrap();
-        bytes[100] ^= 1;
-        std::fs::write(&pinned, bytes).unwrap();
-        warm(&location, &manifest, &plan, &cache).unwrap();
-        assert!(asked.lock().unwrap().len() > before);
+        // A damaged pin is downloaded again, also a pin of part of the seeds file.
+        for pin in &plan.pins[..2] {
+            let pinned = plan.pin_path(&cache, pin);
+            let mut bytes = std::fs::read(&pinned).unwrap();
+            let at = bytes.len() - 100;
+            bytes[at] ^= 1;
+            std::fs::write(&pinned, &bytes).unwrap();
+            let before = asked.lock().unwrap().len();
+            warm(&location, &manifest, &plan, &cache).unwrap();
+            assert!(asked.lock().unwrap().len() > before, "{}", pin.file);
+            assert_ne!(std::fs::read(&pinned).unwrap(), bytes);
+        }
         let options = ShardOptions {
             pins: Some(cache),
             ..ShardOptions::default()

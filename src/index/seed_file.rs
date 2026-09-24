@@ -46,6 +46,9 @@ pub(crate) const CRCS_AT: usize = 72 + 16 * SECTIONS;
 const JOIN_GAP: u64 = 8 << 10;
 /// Joined reads stop growing at this size.
 const JOIN_LIMIT: u64 = 1 << 20;
+/// Bytes of the CRC-32 that ends every non-empty bucket, color set and contig table, so each
+/// read checks what it uses. It covers the unit's index, then its bytes.
+pub(crate) const UNIT_CHECK_BYTES: usize = 4;
 
 /// The id of a distinct color set; small ids belong to frequent sets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -142,12 +145,7 @@ impl SeedFile {
     pub fn open(source: Arc<dyn ReadAt>) -> Result<Self, IndexError> {
         let mut header = [0u8; HEADER_BYTES as usize];
         source.read_exact_at(0, &mut header)?;
-        if header[..16] != MAGIC || u32_at(&header, 16) != Some(VERSION) {
-            return Err(IndexError::format("not a seeds file of this version"));
-        }
-        if u32_at(&header, 252) != Some(crc32fast::hash(&header[..252])) {
-            return Err(IndexError::Checksum("seeds header".into()));
-        }
+        let (sections, crcs) = header_sections(&header)?;
         let field = |at: usize| u64_at(&header, at).unwrap_or_default();
         let (bucket_bits, page_bits) = (u32::from(header[20]), u32::from(header[22]));
         let bucket_range = u32::from(MIN_BUCKET_BITS)..=u32::from(MAX_BUCKET_BITS);
@@ -157,11 +155,6 @@ impl SeedFile {
         {
             return Err(IndexError::format("seeds file parameters"));
         }
-        let sections: [Range<u64>; SECTIONS] = std::array::from_fn(|index| {
-            let start = field(72 + 16 * index);
-            start..start.saturating_add(field(80 + 16 * index))
-        });
-        let crcs = std::array::from_fn(|index| u32_at(&header, CRCS_AT + 4 * index).unwrap_or(0));
         check_sections(&sections, page_bits, source.size())?;
         let mut table = vec![0u8; (sections[0].end - sections[0].start) as usize];
         source.read_exact_at(sections[0].start, &mut table)?;
@@ -260,6 +253,8 @@ impl SeedFile {
         let range = self.contig_table_range(entry)?;
         let mut bytes = vec![0u8; (range.end - range.start) as usize];
         self.source.read_exact_at(range.start, &mut bytes)?;
+        let length = checked_unit(&bytes, entry, "contig table")?.len();
+        bytes.truncate(length);
         Ok(bytes)
     }
 
@@ -315,6 +310,7 @@ impl SeedFile {
         let check_bits = SEED_KEY_BITS - self.bucket_bits;
         let ranges = self.bucket_ranges(&self.sketch, self.sections[1].start, buckets)?;
         self.read_ranges(&ranges, |index, bytes| {
+            let bytes = checked_unit(bytes, buckets[index], "sketch bucket")?;
             visit(buckets[index], SketchBucket::decode(bytes, check_bits)?)
         })
     }
@@ -331,6 +327,7 @@ impl SeedFile {
         })?;
         let ranges = self.bucket_ranges(table, self.sections[4].start, buckets)?;
         self.read_ranges(&ranges, |index, bytes| {
+            let bytes = checked_unit(bytes, buckets[index], "locator bucket")?;
             visit(buckets[index], LocatorBucket::decode(bytes)?)
         })
     }
@@ -369,7 +366,8 @@ impl SeedFile {
             starts: vec![0],
             entries: Vec::new(),
         };
-        self.read_ranges(&set_ranges, |_, bytes| {
+        self.read_ranges(&set_ranges, |index, bytes| {
+            let bytes = checked_unit(bytes, read.ids[index].0, "color set")?;
             decode_color_set(bytes, self.entries, &mut read.entries)
                 .ok_or_else(|| IndexError::format("color set"))?;
             read.starts.push(read.entries.len());
@@ -380,17 +378,8 @@ impl SeedFile {
 
     /// Checks the CRC-32 of every section.
     pub fn verify_checksums(&self) -> Result<(), IndexError> {
-        let mut buffer = vec![0u8; 1 << 20];
         for (section, crc) in self.sections.iter().zip(self.crcs) {
-            let mut hasher = crc32fast::Hasher::new();
-            let mut offset = section.start;
-            while offset < section.end {
-                let length = (section.end - offset).min(buffer.len() as u64) as usize;
-                self.source.read_exact_at(offset, &mut buffer[..length])?;
-                hasher.update(&buffer[..length]);
-                offset += length as u64;
-            }
-            if hasher.finalize() != crc {
+            if crc_of(self.source.as_ref(), section.clone())? != crc {
                 return Err(IndexError::Checksum("seeds section".into()));
             }
         }
@@ -451,6 +440,81 @@ impl SeedFile {
         }
         Ok(())
     }
+}
+
+/// The byte range and the CRC-32 of each section, from a seeds file header. Fails on another
+/// format or a damaged header.
+pub(crate) fn header_sections(
+    header: &[u8; HEADER_BYTES as usize],
+) -> Result<([Range<u64>; SECTIONS], [u32; SECTIONS]), IndexError> {
+    if header[..16] != MAGIC || u32_at(header, 16) != Some(VERSION) {
+        return Err(IndexError::format("not a seeds file of this version"));
+    }
+    if u32_at(header, 252) != Some(crc32fast::hash(&header[..252])) {
+        return Err(IndexError::Checksum("seeds header".into()));
+    }
+    let field = |at: usize| u64_at(header, at).unwrap_or_default();
+    let sections = std::array::from_fn(|index| {
+        let start = field(72 + 16 * index);
+        start..start.saturating_add(field(80 + 16 * index))
+    });
+    let crcs = std::array::from_fn(|index| u32_at(header, CRCS_AT + 4 * index).unwrap_or(0));
+    Ok((sections, crcs))
+}
+
+/// Checks the CRC-32 of every section of a seeds file with `header` that lies within `range`.
+/// `part` holds the bytes of `range`, from its offset 0, as a pinned range does.
+pub(crate) fn verify_part(
+    header: &[u8; HEADER_BYTES as usize],
+    part: &dyn ReadAt,
+    range: Range<u64>,
+) -> Result<(), IndexError> {
+    let (sections, crcs) = header_sections(header)?;
+    let inside = |section: &Range<u64>| range.start <= section.start && section.end <= range.end;
+    for (section, crc) in sections.iter().zip(crcs).filter(|(s, _)| inside(s)) {
+        let local = section.start - range.start..section.end - range.start;
+        if crc_of(part, local)? != crc {
+            return Err(IndexError::Checksum("seeds section".into()));
+        }
+    }
+    Ok(())
+}
+
+/// The CRC-32 of the bytes `range` of `source`, read in parts of 1 MiB.
+fn crc_of(source: &dyn ReadAt, range: Range<u64>) -> Result<u32, IndexError> {
+    let mut buffer = vec![0u8; (range.end - range.start).min(1 << 20) as usize];
+    let mut hasher = crc32fast::Hasher::new();
+    let mut offset = range.start;
+    while offset < range.end {
+        let length = (range.end - offset).min(buffer.len() as u64) as usize;
+        source.read_exact_at(offset, &mut buffer[..length])?;
+        hasher.update(&buffer[..length]);
+        offset += length as u64;
+    }
+    Ok(hasher.finalize())
+}
+
+/// The CRC-32 that follows the stored unit `bytes` with index `index`.
+pub(crate) fn unit_check(index: u32, bytes: &[u8]) -> [u8; UNIT_CHECK_BYTES] {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&index.to_le_bytes());
+    hasher.update(bytes);
+    hasher.finalize().to_le_bytes()
+}
+
+/// The bytes of the stored unit `what` with index `index`, without its CRC-32, once that
+/// matches. An empty unit has no CRC-32.
+fn checked_unit<'a>(stored: &'a [u8], index: u32, what: &str) -> Result<&'a [u8], IndexError> {
+    if stored.is_empty() {
+        return Ok(stored);
+    }
+    let damaged = || IndexError::Checksum(format!("seeds {what} {index}"));
+    let split = (stored.len().checked_sub(UNIT_CHECK_BYTES)).ok_or_else(damaged)?;
+    let (bytes, check) = stored.split_at(split);
+    if unit_check(index, bytes) != check {
+        return Err(damaged());
+    }
+    Ok(bytes)
 }
 
 /// Reads where the contig table of each of `entries` entries starts, from the front of the

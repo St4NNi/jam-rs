@@ -5,7 +5,10 @@
 
 use super::bits::u32_at;
 use super::pages::{PartLayout, PartTable};
-use super::seed_file::{CRCS_AT, HEADER_BYTES, MAGIC, PAGE_BITS, SECTIONS, SEED_KEY_BITS, VERSION};
+use super::seed_file::{
+    CRCS_AT, HEADER_BYTES, MAGIC, PAGE_BITS, SECTIONS, SEED_KEY_BITS, UNIT_CHECK_BYTES, VERSION,
+    unit_check,
+};
 use super::{AtPath, IndexError};
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -41,10 +44,13 @@ impl PartFile {
         })
     }
 
-    /// Appends one bucket, after the padding that keeps it within a page.
-    fn push(&mut self, bucket: &[u8]) -> Result<(), IndexError> {
-        let padding = vec![0u8; self.layout.place(bucket.len() as u64) as usize];
-        for bytes in [&padding[..], bucket] {
+    /// Appends bucket `index` and its CRC-32, after the padding that keeps it within a page.
+    fn push(&mut self, bucket: &[u8], index: u32) -> Result<(), IndexError> {
+        let check = (!bucket.is_empty()).then(|| unit_check(index, bucket));
+        let check = check.as_ref().map_or(&[][..], |check| &check[..]);
+        let length = (bucket.len() + check.len()) as u64;
+        let padding = vec![0u8; self.layout.place(length) as usize];
+        for bytes in [&padding[..], bucket, check] {
             self.file.write_all(bytes).at(&self.path)?;
             self.crc.update(bytes);
         }
@@ -129,10 +135,11 @@ impl SeedWriter {
 
     fn push_one(&mut self, sketch: &[u8], locators: &[u8]) -> Result<(), IndexError> {
         self.seeds += u64::from(u32_at(sketch, 0).unwrap_or_default());
-        self.sketch.push(sketch)?;
+        let index = self.next_bucket as u32;
+        self.sketch.push(sketch, index)?;
         if let Some(part) = &mut self.locators {
             self.locations += u64::from(u32_at(locators, 4).unwrap_or_default());
-            part.push(locators)?;
+            part.push(locators, index)?;
         }
         self.next_bucket += 1;
         Ok(())
@@ -166,9 +173,13 @@ impl SeedWriter {
         let mut set_bytes = 0u64;
         offsets.extend_from_slice(&0u64.to_le_bytes());
         let mut set_crc = crc32fast::Hasher::new();
-        for set in color_sets {
-            set_bytes += set.as_ref().len() as u64;
+        let checks: Vec<_> = (color_sets.iter().enumerate())
+            .map(|(id, set)| unit_check(id as u32, set.as_ref()))
+            .collect();
+        for (set, check) in color_sets.iter().zip(&checks) {
+            set_bytes += (set.as_ref().len() + UNIT_CHECK_BYTES) as u64;
             set_crc.update(set.as_ref());
+            set_crc.update(check);
             offsets.extend_from_slice(&set_bytes.to_le_bytes());
         }
         let page = 1u64 << self.shape.page_bits;
@@ -219,8 +230,9 @@ impl SeedWriter {
         out.put(sections[0].0, &table).at(path)?;
         out.copy(sections[1].0, sketch).at(path)?;
         out.put(sections[2].0, &offsets).at(path)?;
-        for set in color_sets {
+        for (set, check) in color_sets.iter().zip(&checks) {
             out.put(out.written, set.as_ref()).at(path)?;
+            out.put(out.written, check).at(path)?;
         }
         if let Some(part) = locators {
             out.copy(sections[4].0, part).at(path)?;
@@ -234,7 +246,7 @@ impl SeedWriter {
 }
 
 /// The contig tables section: where each table starts within it, then where the last ends
-/// (u64 each), then the tables.
+/// (u64 each), then the tables, each with its CRC-32.
 fn encode_tables(tables: &[Vec<u8>], entries: u64) -> Result<Vec<u8>, IndexError> {
     if tables.len() as u64 != entries {
         return Err(IndexError::format("a contig table for every entry"));
@@ -243,11 +255,12 @@ fn encode_tables(tables: &[Vec<u8>], entries: u64) -> Result<Vec<u8>, IndexError
     let mut at = 8 * (tables.len() as u64 + 1);
     section.extend_from_slice(&at.to_le_bytes());
     for table in tables {
-        at += table.len() as u64;
+        at += (table.len() + UNIT_CHECK_BYTES) as u64;
         section.extend_from_slice(&at.to_le_bytes());
     }
-    for table in tables {
+    for (entry, table) in tables.iter().enumerate() {
         section.extend_from_slice(table);
+        section.extend_from_slice(&unit_check(entry as u32, table));
     }
     Ok(section)
 }
@@ -489,6 +502,37 @@ mod tests {
             .unwrap();
             assert_eq!(next, wanted.len());
         }
+    }
+
+    /// A flipped check-value bit in a singleton sketch bucket fails the lookup; without the
+    /// bucket's CRC-32 it would only miss the seed.
+    #[test]
+    fn bucket_damage_found() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = 0x0aa_5555_1234;
+        let seeds: Seeds = [(key, (0, vec![vec![5]]))].into();
+        let shape = SeedFileShape {
+            bucket_bits: 8,
+            page_bits: 10,
+            entries: 2,
+            locators: true,
+        };
+        let file = write(directory.path(), &seeds, &[vec![1]], shape);
+        assert!(file.find_seeds(&[key]).unwrap()[0].is_some());
+        let check_bits = SEED_KEY_BITS - 8;
+        let mut bucket = Vec::new();
+        encode_sketch_bucket(
+            &[(key & ((1 << check_bits) - 1), 0)],
+            check_bits,
+            &mut bucket,
+        );
+        let mut bytes = std::fs::read(directory.path().join("seeds-10")).unwrap();
+        bytes[(file.sketch_part().start as usize) + bucket.len() - 1] ^= 1;
+        let damaged = SeedFile::open(Arc::new(bytes)).unwrap();
+        assert!(matches!(
+            damaged.find_seeds(&[key]),
+            Err(IndexError::Checksum(_))
+        ));
     }
 
     #[test]
