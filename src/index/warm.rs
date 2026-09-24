@@ -19,14 +19,16 @@ const DOWNLOAD_CHUNK: usize = 8 << 20;
 const DOWNLOAD_THREADS: usize = 64;
 
 /// Downloads every pin of `plan` from the shard at `location` into `cache`, checks the digest of
-/// each pin that covers a whole file, writes the plan, and removes files of older plans of the
-/// shard. Pins already in place with the right digest are kept.
+/// each pin that covers a whole file, and writes the plan. First it removes the plan in place
+/// and the pins that only it holds, so the disk budget also holds while the new pins arrive.
+/// Pins already in place with the right digest are kept.
 pub fn warm(
     location: &Location,
     manifest: &Manifest,
     plan: &Plan,
     cache: &Path,
 ) -> Result<(), IndexError> {
+    remove_obsolete(plan, cache)?;
     let threads = rayon::ThreadPoolBuilder::new()
         .num_threads(DOWNLOAD_THREADS)
         .build()?;
@@ -40,8 +42,7 @@ pub fn warm(
             download(location, record, pin, &path)
         })
     })?;
-    plan.write(cache)?;
-    remove_unplanned(plan, cache)
+    plan.write(cache)
 }
 
 /// The manifest record of a shard file named relative to the shard.
@@ -102,24 +103,27 @@ fn download(
     std::fs::rename(&partial, path).at(path)
 }
 
-/// Removes the files in the shard's cache directory that the plan does not pin.
-fn remove_unplanned(plan: &Plan, cache: &Path) -> Result<(), IndexError> {
+/// Removes the plan of the shard in `cache`, then every pin of it that `plan` does not hold, by
+/// its exact path. A plan that cannot be read names no pins to remove.
+fn remove_obsolete(plan: &Plan, cache: &Path) -> Result<(), IndexError> {
+    let Ok(Some(previous)) = Plan::read(cache, &plan.shard) else {
+        return Ok(());
+    };
+    let path = cache.join(&plan.shard).join(PLAN_FILE);
+    std::fs::remove_file(&path).at(&path)?;
     let planned: HashSet<PathBuf> = (plan.pins.iter())
         .map(|pin| plan.pin_path(cache, pin))
         .collect();
-    let directory = cache.join(&plan.shard);
-    for directory in [directory.clone(), directory.join(PACKED_DIRECTORY)] {
-        let Ok(listing) = std::fs::read_dir(&directory) else {
+    for pin in &previous.pins {
+        let path = previous.pin_path(cache, pin);
+        if planned.contains(&path) {
             continue;
-        };
-        for item in listing {
-            let path = item.at(&directory)?.path();
-            if path.is_file()
-                && !planned.contains(&path)
-                && path.file_name() != Some(PLAN_FILE.as_ref())
-            {
-                std::fs::remove_file(&path).at(&path)?;
+        }
+        match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).at(&path);
             }
+            _ => {}
         }
     }
     Ok(())
@@ -152,11 +156,7 @@ mod tests {
         let parts = [Part::Sketch, Part::Packed(Some(vec!["entry2".into()]))];
         let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &parts).unwrap();
         assert_eq!(plan.pins[0].place, Place::Ram);
-        let stale = cache.join(&digest).join("positions");
-        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
-        std::fs::write(&stale, b"old").unwrap();
         warm(&location, &manifest, &plan, &cache).unwrap();
-        assert!(!stale.exists());
         assert_eq!(Plan::read(&cache, &digest).unwrap(), Some(plan.clone()));
         // A second warm finds every pin in place and downloads nothing.
         let before = asked.lock().unwrap().len();
@@ -182,6 +182,47 @@ mod tests {
             .read(0, 0..20_000, &mut bases)
             .unwrap();
         assert_eq!(bases, entries[2][0]);
+    }
+
+    /// Bytes of all files below `directory`.
+    fn disk_bytes(directory: &Path) -> u64 {
+        let listing = std::fs::read_dir(directory).unwrap();
+        (listing.map(|item| item.unwrap().path()))
+            .map(|path| match path.is_dir() {
+                true => disk_bytes(&path),
+                false => std::fs::metadata(&path).unwrap().len(),
+            })
+            .sum()
+    }
+
+    /// Rewarming with fewer parts removes the pins of the parts left out, so the cache holds
+    /// only the pins of the new plan.
+    #[test]
+    fn rewarm_removes_pins() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut rng = rng(5);
+        let entries: Vec<Vec<Vec<u8>>> = (0..2)
+            .map(|_| vec![random_bases(&mut rng, 20_000)])
+            .collect();
+        test_shard(directory.path(), &entries);
+        let (server, _) = serve_directory(directory.path());
+        let endpoint = Some(server.address.as_str());
+        let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+        let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        let (manifest, digest) = location.manifest().unwrap();
+        let cache = directory.path().join("cache");
+        let all = [Part::Sketch, Part::Locators, Part::Packed(None)];
+        let wide = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &all).unwrap();
+        warm(&location, &manifest, &wide, &cache).unwrap();
+        let narrow = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &[Part::Sketch]).unwrap();
+        warm(&location, &manifest, &narrow, &cache).unwrap();
+        for pin in &wide.pins[1..] {
+            assert!(!wide.pin_path(&cache, pin).exists(), "{}", pin.file);
+        }
+        assert!(narrow.pin_path(&cache, &narrow.pins[0]).exists());
+        let plan_bytes = std::fs::metadata(cache.join(&digest).join(PLAN_FILE)).unwrap();
+        let pinned: u64 = narrow.pins.iter().map(Pin::bytes).sum();
+        assert_eq!(disk_bytes(&cache), pinned + plan_bytes.len());
     }
 
     #[test]
