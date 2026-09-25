@@ -152,6 +152,7 @@ impl<'a> Screener<'a> {
         let contigs = read_batches(
             path,
             self.config.batch_bases,
+            self.config.overlap(),
             rule.min_fragment_columns as usize,
             &mut |_, batch| {
                 let found = found_seeds(seed_file, &self.seeder, batch, control)?;
@@ -226,6 +227,7 @@ impl<'a> Screener<'a> {
         read_batches(
             path,
             self.config.batch_bases,
+            self.config.overlap(),
             self.config.rule.min_fragment_columns as usize,
             &mut |index, batch| {
                 let Some(kept) = pieces.get(index).filter(|kept| !kept.is_empty()) else {

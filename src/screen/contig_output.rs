@@ -46,6 +46,7 @@ pub(super) fn write_contigs(
     read_batches(
         path,
         config.batch_bases,
+        config.overlap(),
         config.rule.min_fragment_columns as usize,
         &mut |_, _| Ok(()),
         Some(&mut sink),

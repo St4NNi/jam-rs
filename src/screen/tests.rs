@@ -333,18 +333,22 @@ fn batch_border_whole() {
     let (reported, summary) = screen(&shard, directory.path(), &contigs, &config);
     assert!(summary.batches >= 3, "{summary:?}");
     assert_eq!(reported.len(), 1);
-    let placed = placed(&reported[0]);
-    let on_long: Vec<_> = placed.iter().filter(|p| p.2 == "long").collect();
-    assert_eq!(on_long.len(), 2, "{placed:?}");
-    assert_eq!(
-        (on_long[0].0, on_long[0].1, on_long[0].3),
-        (0, 2_000, 3_000)
-    );
-    assert_eq!(
-        (on_long[1].0, on_long[1].1, on_long[1].3),
-        (2_000, 4_000, 5_000)
-    );
-    assert_eq!(reported[0].covered_bases, 4_000);
+    // The pieces overlap by 1,250 bases; each keeps its part up to the middle of the overlap.
+    let report = &reported[0];
+    let long = report.contigs.iter().find(|c| c.name == "long").unwrap().id;
+    let fragments =
+        (report.primary.iter().map(|selected| &selected.fragment)).chain(&report.alternatives);
+    let mut on_long: Vec<(u64, u64, u64)> = fragments
+        .filter(|fragment| fragment.contig_index == long)
+        .map(|fragment| {
+            let alignment = &fragment.alignment;
+            let entry = alignment.query_interval;
+            (entry.start, entry.end, alignment.contig_interval.start)
+        })
+        .collect();
+    on_long.sort_unstable();
+    assert_eq!(on_long, [(0, 1_375, 3_000), (1_375, 4_000, 4_375)]);
+    assert_eq!(report.covered_bases, 4_000);
 }
 
 #[test]
@@ -635,4 +639,27 @@ fn records_plain_json() {
         (summary["type"].clone(), summary["reported_entries"].clone()),
         ("assembly".into(), 1.into())
     );
+}
+
+/// Half of an entry lies across the cut of the first two pieces of a long contig (20 bases
+/// before it, 480 after), and another entry lies whole in the overlap of the pieces. The
+/// overlap keeps the first match whole, and the second is kept once.
+#[test]
+fn cut_matches_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let half = random_bases(&mut rng(0x19), 1_000);
+    let whole = random_bases(&mut rng(0x20), 3_000);
+    let shard = plasmids(directory.path(), &[("half", &half), ("whole", &whole)]);
+    let mut contig = vec![b'N'; 1_000_000];
+    contig[499_980..500_480].copy_from_slice(&half[..500]);
+    contig[490_000..493_000].copy_from_slice(&whole);
+    let config = ScreenConfig::default();
+    let (reported, _) = screen(&shard, directory.path(), &[("long", contig)], &config);
+    assert_eq!(names(&reported), ["half", "whole"]);
+    let (half, whole) = (&reported[0], &reported[1]);
+    assert_eq!(half.covered_bases, 500);
+    assert_eq!(placed(half)[0].3..placed(half)[0].4, 499_980..500_480);
+    assert_eq!((whole.covered_bases, whole.matches), (3_000, 3_000));
+    assert_eq!(whole.primary.len() + whole.alternatives.len(), 1);
+    assert_eq!(whole.contigs[0].aligned, 3_000);
 }

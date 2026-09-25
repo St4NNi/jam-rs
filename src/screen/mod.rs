@@ -76,6 +76,12 @@ pub struct ScreenConfig {
 }
 
 impl ScreenConfig {
+    /// Bases by which the pieces of a long contig overlap: a flank on each side of a cut, so
+    /// that a match near the cut is seeded and aligned as without the cut.
+    fn overlap(&self) -> usize {
+        (2 * self.flank as usize).min(self.batch_bases / 4)
+    }
+
     /// The settings for `rule`. Chains with anchors too sparse for the identity asked for, with
     /// room for the noise of the estimate, are not aligned.
     pub fn new(rule: DecisionRule) -> Self {

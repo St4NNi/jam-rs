@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::ScreenError;
-use super::batch::Batch;
+use super::batch::{Batch, Piece};
 use super::turn::{slice_alignment, swap_roles};
 use crate::align::{Alignment, AlignmentConfig, Interval};
 use crate::decide::{DecisionRule, Fragment};
@@ -176,7 +176,7 @@ impl BatchAlignment<'_> {
 
 /// The parts of a batch alignment on each piece of the batch, in the coordinates of the assembly
 /// contig, turned around so that the entry contig is the query. Returns the assembly contig of
-/// each part.
+/// each part. Of an alignment that overlapping pieces both hold, only one copy is kept.
 pub(super) fn cut_at_contigs(
     batch: &Batch,
     alignment: &Alignment,
@@ -191,11 +191,17 @@ pub(super) fn cut_at_contigs(
         .iter()
         .take_while(|piece| piece.start < interval.end)
     {
-        let inside = interval.start >= piece.start && interval.end <= piece.end();
-        let part = if inside {
+        let (start, end) = (
+            interval.start.max(piece.start),
+            interval.end.min(piece.end()),
+        );
+        let Some((from, to)) = owned_part(piece, start, end) else {
+            continue;
+        };
+        let part = if (from, to) == (interval.start, interval.end) {
             Some(alignment.clone())
         } else {
-            slice_alignment(alignment, piece.start, piece.end(), scores)?
+            slice_alignment(alignment, from, to, scores)?
         };
         let Some(mut part) = part else {
             continue;
@@ -208,4 +214,26 @@ pub(super) fn cut_at_contigs(
         parts.push((piece.contig, swap_roles(&part)));
     }
     Ok(parts)
+}
+
+/// The part of an alignment at batch positions `start..end` of `piece` that the piece keeps. A
+/// part starting in the owned positions is kept whole, unless the piece cuts it before the
+/// contig end; one starting before them is kept from there, unless the previous piece holds it.
+fn owned_part(piece: &Piece, start: u64, end: u64) -> Option<(u64, u64)> {
+    let to_contig = |position: u64| position - piece.start + piece.offset;
+    let to_batch = |position: u64| position - piece.offset + piece.start;
+    let (start, end) = (to_contig(start), to_contig(end));
+    let (owned_start, owned_end) = piece.owned;
+    let piece_end = piece.offset + piece.length;
+    let kept_end = match end == piece_end && owned_end < piece_end {
+        true => owned_end,
+        false => end,
+    };
+    let kept_start = match start {
+        _ if start >= owned_end => return None,
+        _ if start >= owned_start => start,
+        _ if end < piece.previous_end => return None,
+        _ => owned_start,
+    };
+    (kept_start < kept_end).then(|| (to_batch(kept_start), to_batch(kept_end)))
 }

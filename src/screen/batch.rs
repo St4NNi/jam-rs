@@ -14,13 +14,18 @@ pub(super) const SPACER: usize = 64;
 const READ_BUFFER: usize = 1 << 20;
 
 /// One piece of a contig inside a batch: its start in the batch, its length, the contig and the
-/// position of the piece in the contig.
+/// position of the piece in the contig. Pieces of a long contig overlap; each owns the positions
+/// from the middle of one overlap to the middle of the next, so each alignment is kept once.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Piece {
     pub start: u64,
     pub length: u64,
     pub contig: u32,
     pub offset: u64,
+    /// The contig positions the piece owns.
+    pub owned: (u64, u64),
+    /// Where the previous piece of the contig ends in the contig, or `offset` for the first.
+    pub previous_end: u64,
 }
 
 impl Piece {
@@ -38,15 +43,15 @@ pub(super) struct Batch {
 }
 
 impl Batch {
-    fn add(&mut self, contig: u32, offset: u64, sequence: &[u8]) {
+    /// Adds `piece` with the bases `sequence`; its start becomes the end of the batch.
+    fn add(&mut self, piece: Piece, sequence: &[u8]) {
         if !self.bases.is_empty() {
             self.bases.extend(std::iter::repeat_n(b'N', SPACER));
         }
         self.pieces.push(Piece {
             start: self.bases.len() as u64,
             length: sequence.len() as u64,
-            contig,
-            offset,
+            ..piece
         });
         self.bases.extend_from_slice(sequence);
     }
@@ -56,10 +61,42 @@ impl Batch {
         let mut subset = Batch::default();
         for &index in pieces {
             let piece = self.pieces[index as usize];
-            let bases = &self.bases[piece.start as usize..piece.end() as usize];
-            subset.add(piece.contig, piece.offset, bases);
+            subset.add(
+                piece,
+                &self.bases[piece.start as usize..piece.end() as usize],
+            );
         }
         subset
+    }
+}
+
+/// The pieces of a contig of `length` bases: at most `batch_bases` long, each overlapping the
+/// next by `overlap` bases, so that seeds and alignments near a cut have context on both sides.
+fn cut_contig(contig: u32, length: u64, batch_bases: u64, overlap: u64) -> Vec<Piece> {
+    let overlap = overlap.min(batch_bases / 2);
+    let mut pieces = Vec::new();
+    let (mut offset, mut previous_end) = (0, 0);
+    loop {
+        let end = (offset + batch_bases).min(length);
+        let owned_start = if offset == 0 { 0 } else { offset + overlap / 2 };
+        let owned_end = if end == length {
+            length
+        } else {
+            end - overlap + overlap / 2
+        };
+        pieces.push(Piece {
+            start: 0,
+            length: end - offset,
+            contig,
+            offset,
+            owned: (owned_start, owned_end),
+            previous_end: if offset == 0 { 0 } else { previous_end },
+        });
+        if end == length {
+            return pieces;
+        }
+        previous_end = end;
+        offset = end - overlap;
     }
 }
 
@@ -85,12 +122,13 @@ pub(super) type ContigSink<'a> = dyn FnMut(u32, &[u8], &[u8]) -> Result<(), Scre
 /// Receives every batch with its index.
 pub(super) type BatchVisit<'a> = dyn FnMut(usize, &Batch) -> Result<(), ScreenError> + 'a;
 
-/// Reads an assembly (plain or gzip FASTA) and passes its contigs to `visit` in batches of at
-/// most `batch_bases` bases, the same on every read; a longer contig goes in pieces. Contigs of
-/// fewer than `min_bases` known bases are skipped, as they cannot hold a fragment; `None` if empty.
+/// Passes the contigs of an assembly (plain or gzip FASTA) to `visit` in batches of at most
+/// `batch_bases` bases, the same on every read, cutting longer ones in pieces overlapping by
+/// `overlap`; skips contigs of fewer than `min_bases` known bases. `None` for an empty file.
 pub(super) fn read_batches(
     path: &Path,
     batch_bases: usize,
+    overlap: usize,
     min_bases: usize,
     visit: &mut BatchVisit<'_>,
     mut sink: Option<&mut ContigSink<'_>>,
@@ -126,13 +164,15 @@ pub(super) fn read_batches(
             length: sequence.len() as u64,
         });
         contigs.bases += sequence.len() as u64;
-        for (part, piece) in sequence.chunks(batch_bases).enumerate() {
-            if !batch.bases.is_empty() && batch.bases.len() + SPACER + piece.len() > batch_bases {
+        let length = sequence.len() as u64;
+        for piece in cut_contig(contig, length, batch_bases as u64, overlap as u64) {
+            let bases = &sequence[piece.offset as usize..(piece.offset + piece.length) as usize];
+            if !batch.bases.is_empty() && batch.bases.len() + SPACER + bases.len() > batch_bases {
                 visit(index, &batch)?;
                 index += 1;
                 batch = Batch::default();
             }
-            batch.add(contig, (part * batch_bases) as u64, piece);
+            batch.add(piece, bases);
         }
     }
     if !batch.bases.is_empty() {
@@ -182,6 +222,7 @@ mod tests {
         let contigs = read_batches(
             &path,
             batch_bases,
+            0,
             4,
             &mut |index, batch| {
                 assert_eq!(index, seen.len());
@@ -216,7 +257,9 @@ mod tests {
                 start: 0,
                 length: 88,
                 contig: 2,
-                offset: 0
+                offset: 0,
+                owned: (0, 88),
+                previous_end: 0,
             }]
         );
         let (seen, _) = batches(&fasta, 50);
@@ -230,12 +273,41 @@ mod tests {
         );
     }
 
+    /// Pieces overlap, and the parts they own join without a gap or a double.
+    #[test]
+    fn pieces_overlap() {
+        let pieces = cut_contig(3, 1_000_000, 500_000, 16_384);
+        let spans: Vec<(u64, u64)> = pieces.iter().map(|p| (p.offset, p.length)).collect();
+        assert_eq!(spans, [(0, 500_000), (483_616, 500_000), (967_232, 32_768)]);
+        let owned: Vec<(u64, u64)> = pieces.iter().map(|p| p.owned).collect();
+        let middle = [491_808, 975_424];
+        assert_eq!(
+            owned,
+            [
+                (0, middle[0]),
+                (middle[0], middle[1]),
+                (middle[1], 1_000_000)
+            ]
+        );
+        let ends: Vec<u64> = pieces.iter().map(|p| p.previous_end).collect();
+        assert_eq!(ends, [0, 500_000, 983_616]);
+        assert_eq!(cut_contig(0, 100, 500_000, 16_384)[0].owned, (0, 100));
+    }
+
     #[test]
     fn subset_keeps_offsets() {
         let mut batch = Batch::default();
-        batch.add(0, 0, b"ACGT");
-        batch.add(1, 0, b"ACGT");
-        batch.add(2, 7, b"GGCC");
+        let piece = |contig, offset| Piece {
+            start: 0,
+            length: 0,
+            contig,
+            offset,
+            owned: (offset, offset + 4),
+            previous_end: offset,
+        };
+        batch.add(piece(0, 0), b"ACGT");
+        batch.add(piece(1, 0), b"ACGT");
+        batch.add(piece(2, 7), b"GGCC");
         let subset = batch.subset(&[0, 2]);
         assert_eq!(subset.bases.len(), 8 + SPACER);
         assert_eq!(&subset.bases[4 + SPACER..], b"GGCC");
