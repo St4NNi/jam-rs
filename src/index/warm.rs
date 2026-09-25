@@ -91,7 +91,7 @@ fn verify_pin(
     let mut header = [0u8; HEADER_BYTES as usize];
     match pin.start {
         0 => file.read_exact_at(0, &mut header)?,
-        _ => (location.open(&pin.file, record.bytes)?).read_exact_at(0, &mut header)?,
+        _ => (location.open(&pin.file, record)?).read_exact_at(0, &mut header)?,
     }
     verify_part(&header, file, pin.start..pin.end)
 }
@@ -103,7 +103,7 @@ fn download(
     pin: &Pin,
     path: &Path,
 ) -> Result<(), IndexError> {
-    let source = location.open(&pin.file, record.bytes)?;
+    let source = location.open(&pin.file, record)?;
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).at(parent)?;
     let partial = PathBuf::from(format!("{}.partial", path.display()));
@@ -150,7 +150,7 @@ fn remove_obsolete(plan: &Plan, cache: &Path) -> Result<(), IndexError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::{BuildOptions, Part, Place, Shard, ShardOptions, build_shard};
+    use crate::index::{BuildOptions, Part, Place, Shard, ShardOptions, build_shard, record_etags};
     use crate::storage::{S3Config, S3Limits};
     use crate::test_support::{
         build_options, random_bases, rng, runtime, serve_directory, test_shard, write_entries,
@@ -163,11 +163,13 @@ mod tests {
         let entries: Vec<Vec<Vec<u8>>> = (0..3)
             .map(|_| vec![random_bases(&mut rng, 20_000)])
             .collect();
-        let local = test_shard(directory.path(), &entries);
+        test_shard(directory.path(), &entries);
         let (server, asked) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        record_etags(&directory.path().join("shard"), &location).unwrap();
+        let local = Shard::open(&directory.path().join("shard")).unwrap();
         let (manifest, digest) = location.manifest().unwrap();
         assert_eq!(digest, local.digest());
         let cache = directory.path().join("cache");
@@ -232,6 +234,7 @@ mod tests {
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        record_etags(&directory.path().join("shard"), &location).unwrap();
         let (manifest, digest) = location.manifest().unwrap();
         let cache = directory.path().join("cache");
         let all = [Part::Sketch, Part::Locators, Part::Packed(None)];
@@ -265,6 +268,7 @@ mod tests {
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        record_etags(&directory.path().join("shard"), &location).unwrap();
         let (manifest, digest) = location.manifest().unwrap();
         let cache = directory.path().join("cache");
         // The default plan pins the sketch part alone; there are no locators or packed files.

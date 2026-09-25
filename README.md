@@ -152,6 +152,14 @@ screen`, `jam serve`, `jam stats` and `jam index warm`. Credentials come from th
 environment variables, and the endpoint from `AWS_ENDPOINT_URL`. jam never sends HEAD requests:
 it takes object sizes from the manifest.
 
+Every S3 read is bound to the ETag that the manifest records for the file, so a replaced object
+fails the read instead of mixing two versions. Record the ETags after the upload, then upload
+the manifest again:
+
+    rclone copy shard remote:bucket/plasmids
+    jam index etags shard s3://bucket/plasmids
+    rclone copy shard/manifest.json remote:bucket/plasmids
+
 Reading from S3 is slow for the first requests. Two caches help:
 
 - **Pins.** `jam index warm` copies parts of a shard into a local cache directory. A search or

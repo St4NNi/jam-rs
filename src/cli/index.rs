@@ -7,7 +7,7 @@ use super::storage::ShardStorage;
 use super::{CliError, read_list};
 use crate::index::{
     BuildOptions, EntryInput, Manifest, PackedOutput, Parameters, Part, Place, Plan,
-    ReshardOptions, Split, build_shard, reshard, warm,
+    ReshardOptions, Split, build_shard, record_etags, reshard, warm,
 };
 use bytesize::ByteSize;
 use clap::{Args, Subcommand};
@@ -30,6 +30,18 @@ enum IndexCommand {
     Reshard(ReshardArgs),
     /// Pin parts of a shard in a local cache directory, within RAM and disk budgets
     Warm(WarmArgs),
+    /// Record the ETags of an uploaded shard in its local manifest, which binds every S3 read
+    /// to them; then upload the manifest again
+    Etags(EtagsArgs),
+}
+
+/// The options of `jam index etags`.
+#[derive(Debug, Args)]
+struct EtagsArgs {
+    /// The local shard directory whose files were just uploaded
+    shard: PathBuf,
+    /// Where they were uploaded: s3://bucket/prefix
+    uploaded: PathBuf,
 }
 
 /// The options of `jam index build`.
@@ -137,7 +149,27 @@ pub fn run(args: &IndexArgs) -> Result<(), CliError> {
         IndexCommand::Build(args) => run_build(args),
         IndexCommand::Reshard(args) => run_reshard(args),
         IndexCommand::Warm(args) => run_warm(args),
+        IndexCommand::Etags(args) => run_etags(args),
     }
+}
+
+fn run_etags(args: &EtagsArgs) -> Result<(), CliError> {
+    let storage = ShardStorage::new()?;
+    let uploaded = storage.location(&args.uploaded)?;
+    let manifest = record_etags(&args.shard, &uploaded).map_err(|source| CliError::Shard {
+        path: args.shard.clone(),
+        source,
+    })?;
+    let files = 1 + manifest
+        .entries
+        .iter()
+        .filter(|e| e.packed.is_some())
+        .count();
+    println!(
+        "recorded {files} ETags in {}; upload its manifest.json again",
+        args.shard.display()
+    );
+    Ok(())
 }
 
 fn run_warm(args: &WarmArgs) -> Result<(), CliError> {

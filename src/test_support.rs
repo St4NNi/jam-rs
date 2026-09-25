@@ -195,32 +195,42 @@ impl Reply {
         }
     }
 
-    /// The answer of a store that holds `data`: the requested range, or all of it. HEAD is
-    /// refused with 403, as some stores do.
+    /// The answer of a store that holds `data`: the requested range, or all of it, with the
+    /// ETag of `data`; a GET whose If-Match names another ETag gets 412. HEAD is refused with
+    /// 403, as some stores do.
     pub fn object(data: &[u8], request: &Request) -> Self {
         if request.method != "GET" {
             return Self::status(403);
         }
-        let Some((start, last)) = request.range() else {
-            let body = data.to_vec();
-            let headers = vec![("ETag".into(), "\"fixture\"".into())];
-            let declared = body.len();
-            return Self {
-                status: 200,
-                headers,
-                declared,
-                body,
-            };
+        let etag = etag_of(data);
+        if request
+            .headers
+            .get("if-match")
+            .is_some_and(|wanted| *wanted != etag)
+        {
+            return Self::status(412);
+        }
+        let (status, body, mut headers) = match request.range() {
+            None => (200, data.to_vec(), Vec::new()),
+            Some((start, last)) => {
+                let range = format!("bytes {start}-{last}/{}", data.len());
+                let headers = vec![("Content-Range".into(), range)];
+                (206, data[start..=last].to_vec(), headers)
+            }
         };
-        let body = data[start..=last].to_vec();
-        let range = format!("bytes {start}-{last}/{}", data.len());
+        headers.push(("ETag".into(), etag));
         Self {
-            status: 206,
-            headers: vec![("Content-Range".into(), range)],
+            status,
+            headers,
             declared: body.len(),
             body,
         }
     }
+}
+
+/// The ETag that the test store gives `data`: a quoted digest of its bytes.
+pub fn etag_of(data: &[u8]) -> String {
+    format!("\"{:08x}\"", crc32fast::hash(data))
 }
 
 /// A store whose bucket `bucket` holds the files under `root`, keyed by their relative paths,
