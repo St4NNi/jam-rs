@@ -71,6 +71,12 @@ Each query record is searched on its own, in every shard you name. Write to a fi
 
 Entries without any seed hit are counted in the summary, not listed.
 
+The `ending` of the summary is `complete` only when every possible entry was decided. It is
+`resource_incomplete` when an entry was dropped for a memory or work limit (reason
+`resource_limit`), `deadline` or `asked` after a stop, and `failed` after an error. Whenever a
+search does not end `complete`, jam exits with an error after writing all lines, also with
+`--format paf`, which has no summary line.
+
 `--format paf` writes one PAF line per fragment of a confirmed entry instead. The query is the
 PAF query and the contig is the PAF target. Columns 1 to 12 are standard, followed by `tp:A:P`
 (`S` for an alternative fragment), `NM:i:` and `cg:Z:`. The CIGAR uses `=`, `X`, `I` and `D`
