@@ -139,7 +139,8 @@ pub struct AlignmentWorkspace {
     operations: Vec<EditOperation>,
     /// The reverse complement of the contig window for the reverse strand.
     reverse: Vec<u8>,
-    /// The query then the contig in ASCII lowercase, for the rebased kernel's byte compare.
+    /// The query then the contig as compared bytes: known bases in lowercase, unknown ones as a
+    /// code of their side.
     folded: Vec<u8>,
     endpoint: endpoints::EndpointWorkspace,
 }

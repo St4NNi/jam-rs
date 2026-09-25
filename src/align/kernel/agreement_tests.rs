@@ -85,6 +85,47 @@ fn avx2_matches_scalar() {
 }
 
 #[test]
+fn unknown_bases_unmatched() {
+    // N and IUPAC codes on both sides, in either case, are substitution columns on every path.
+    let mut rng = rng(0x5eed_0f00_0000_0015);
+    for case in 0..40u64 {
+        let mut query = random_bases(&mut rng, 80 + case as usize * 9);
+        let codes = b"NnRy-";
+        for at in (case as usize % 7..query.len()).step_by(11) {
+            query[at] = codes[at % codes.len()];
+        }
+        let contig = mutate(&mut rng, &query, 20 + case % 4 * 30, case % 2 == 0);
+        let config = AlignmentConfig {
+            band_width: [3, 16, 128][case as usize % 3],
+            ..AlignmentConfig::default()
+        };
+        for strand in [Strand::Forward, Strand::Reverse] {
+            let contig = match strand {
+                Strand::Forward => contig.clone(),
+                Strand::Reverse => crate::seeds::reverse_complement(&contig),
+            };
+            if let Ok(alignment) = assert_paths_agree(&query, &contig, strand, config) {
+                let query_bases = &query[alignment.query_interval.start as usize - 3..]
+                    [..alignment.query_interval.len() as usize];
+                let known = query_bases
+                    .iter()
+                    .filter(|base| b"ACGTacgt".contains(base))
+                    .count() as u64;
+                assert!(alignment.counts().matches <= known, "case {case}");
+            }
+        }
+    }
+    let unknown = vec![b'N'; 200];
+    let result = assert_paths_agree(
+        &unknown,
+        &unknown,
+        Strand::Forward,
+        AlignmentConfig::default(),
+    );
+    assert_eq!(result, Err(AlignmentError::NoAlignment));
+}
+
+#[test]
 fn checkpoints_match_resident() {
     let mut rng = rng(0x1234_5678_9abc_def1);
     for case in 0..48u64 {

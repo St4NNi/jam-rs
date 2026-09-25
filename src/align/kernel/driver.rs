@@ -14,6 +14,25 @@ use super::waves::{WAVE_PAD, prepare_wave};
 use super::{AlignmentConfig, AlignmentWorkspace, RawAlignment};
 use crate::align::AlignmentError;
 
+/// The folded byte of an unknown query base and of an unknown contig base. They differ, so an
+/// unknown base never matches, not even the same code on the other side.
+const QUERY_UNKNOWN: u8 = 0;
+const CONTIG_UNKNOWN: u8 = 1;
+
+/// Writes the query then the contig into `output`: A, C, G and T in lowercase, every other byte
+/// as the unknown code of its side.
+fn fold_bases(query: &[u8], contig: &[u8], output: &mut Vec<u8>) {
+    let fold = |unknown: u8| {
+        move |&base: &u8| match base.to_ascii_lowercase() {
+            known @ (b'a' | b'c' | b'g' | b't') => known,
+            _ => unknown,
+        }
+    };
+    output.clear();
+    output.extend(query.iter().map(fold(QUERY_UNKNOWN)));
+    output.extend(contig.iter().map(fold(CONTIG_UNKNOWN)));
+}
+
 /// Vector passes above `max_cells` fill all waves once without traceback, then fill each chunk
 /// of this many cells again for the traceback. That is faster than filling the chunks with
 /// traceback twice; passes within `max_cells` keep their traceback resident in one pass.
@@ -91,25 +110,25 @@ impl AlignmentWorkspace {
         let force_i32 = TEST_HOOKS.get().force_i32;
         #[cfg(not(test))]
         let force_i32 = false;
+        // Every pass compares bytes directly, so it reads folded copies of both.
+        let mut folded = std::mem::take(&mut self.folded);
+        fold_bases(query, contig, &mut folded);
+        let (query, contig) = folded.split_at(query.len());
+        let mut result = Err(PassStop::Rebase);
         if VECTOR && !force_i32 && rebased_local_scores(config) {
-            // The i16 kernel compares bytes directly, so it reads lowercase copies of both.
-            let mut folded = std::mem::take(&mut self.folded);
-            folded.clear();
-            folded.extend(query.iter().chain(contig).map(u8::to_ascii_lowercase));
-            let (query, contig) = folded.split_at(query.len());
             // SAFETY: forwarded from this function's contract.
-            let result = unsafe { self.run_pass::<VECTOR>(query, contig, config, ScoreWidth::I16) };
-            self.folded = folded;
-            match result {
-                Ok(raw) => return Ok(raw),
-                Err(PassStop::Failed(error)) => return Err(error),
-                Err(PassStop::Rebase) => {}
-            }
+            result = unsafe { self.run_pass::<VECTOR>(query, contig, config, ScoreWidth::I16) };
             #[cfg(test)]
-            update_hooks(|hooks| hooks.reruns += 1);
+            if matches!(result, Err(PassStop::Rebase)) {
+                update_hooks(|hooks| hooks.reruns += 1);
+            }
         }
-        // SAFETY: forwarded from this function's contract.
-        match unsafe { self.run_pass::<VECTOR>(query, contig, config, ScoreWidth::I32) } {
+        if matches!(result, Err(PassStop::Rebase)) {
+            // SAFETY: forwarded from this function's contract.
+            result = unsafe { self.run_pass::<VECTOR>(query, contig, config, ScoreWidth::I32) };
+        }
+        self.folded = folded;
+        match result {
             Ok(raw) => Ok(raw),
             Err(PassStop::Failed(error)) => Err(error),
             // i32 scores hold every value, so this pass cannot stop for a rebase.

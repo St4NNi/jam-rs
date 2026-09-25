@@ -11,7 +11,7 @@ use crate::align::BandConfig;
 use crate::align::anchors::QueryTable;
 use crate::align::cigar::{append_runs, counts};
 use crate::align::kernel::{EndpointWorkspace, PathEnd, affine_path};
-use crate::align::{Alignment, AlignmentError, EditCounts, EditOperation, EditRun};
+use crate::align::{Alignment, AlignmentError, EditCounts, EditOperation, EditRun, bases_match};
 use std::mem::size_of;
 
 /// The least columns and identity a join must reach to be kept.
@@ -212,8 +212,10 @@ impl JoinScratch {
             let walk = walks[self.linked[position] as usize];
             let mut part = Part::default();
             for step in 0..walk.length as usize {
-                let same = oriented[walk.contig as usize + step]
-                    == query[(walk.query as usize + step) % query.len()];
+                let same = bases_match(
+                    query[(walk.query as usize + step) % query.len()],
+                    oriented[walk.contig as usize + step],
+                );
                 part.score += i64::from(if same {
                     context.band.alignment.match_score
                 } else {

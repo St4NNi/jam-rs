@@ -7,7 +7,7 @@
 
 use crate::align::BandConfig;
 use crate::align::anchors::QueryTable;
-use crate::align::{AlignmentError, Budgeted, Strand};
+use crate::align::{AlignmentError, Budgeted, Strand, bases_match, known_bases};
 use crate::seeds::{base_code, kmers, reverse_complement};
 use std::mem::size_of;
 
@@ -303,6 +303,7 @@ impl Extension {
         let bases = BLOCK as i64;
         if self.score + bases * self.matched > self.best
             || self.best - self.score - bases * self.mismatched > self.drop
+            || !known_bases(query)
         {
             return false;
         }
@@ -319,6 +320,7 @@ impl Extension {
             if at + BLOCK <= contig.len()
                 && self.score >= self.best
                 && contig[at..at + BLOCK] == query[at..at + BLOCK]
+                && known_bases(&query[at..at + BLOCK])
             {
                 self.equal_block(BLOCK);
                 at += BLOCK;
@@ -326,7 +328,7 @@ impl Extension {
                 && self.far_block(&contig[at..at + BLOCK], &query[at..at + BLOCK])
             {
                 at += BLOCK;
-            } else if self.step(contig[at] == query[at]) {
+            } else if self.step(bases_match(contig[at], query[at])) {
                 at += 1;
             } else {
                 return false;
@@ -343,12 +345,13 @@ impl Extension {
             if at >= BLOCK
                 && self.score >= self.best
                 && contig[block.clone()] == query[block.clone()]
+                && known_bases(&query[block.clone()])
             {
                 self.equal_block(BLOCK);
                 at -= BLOCK;
             } else if at >= BLOCK && self.far_block(&contig[block.clone()], &query[block]) {
                 at -= BLOCK;
-            } else if self.step(contig[at - 1] == query[at - 1]) {
+            } else if self.step(bases_match(contig[at - 1], query[at - 1])) {
                 at -= 1;
             } else {
                 return false;

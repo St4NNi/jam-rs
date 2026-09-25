@@ -197,7 +197,7 @@ pub(super) fn fill_wave_scalar<S: WaveScore, const TRACEBACK: bool>(
         && let Some(previous) = older.and_then(|wave| wave.cell(row - 1, base))
     {
         let (score, state) = best_score(previous);
-        let substitution = if query[row - 1].eq_ignore_ascii_case(&contig[contig_index - 1]) {
+        let substitution = if query[row - 1] == contig[contig_index - 1] {
             config.match_score
         } else {
             config.mismatch_score

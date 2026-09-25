@@ -35,7 +35,7 @@ fn linear(query: &[u8]) -> QueryTable {
 #[test]
 fn periodic_diagonals_once() {
     // 10 kb of ACGT with one N, against itself: every diagonal a multiple of four apart is one
-    // ungapped alignment across both N positions, on both strands.
+    // ungapped alignment across both N positions, on both strands. N never matches, not even N.
     let mut query = b"ACGT".repeat(2500);
     query[5000] = b'N';
     let (walks, reverse, table) = walks_of(&query, &query, false);
@@ -61,7 +61,7 @@ fn periodic_diagonals_once() {
         let cigar = format_cigar(&alignment.runs);
         assert!(cigar.ends_with('=') && !cigar.starts_with("1X"), "{cigar}");
         if (walk.strand, diagonal) == (Strand::Forward, 0) {
-            assert_eq!(cigar, "10000=");
+            assert_eq!(cigar, "5000=1X4999=");
         }
     }
     let chained = walks.iter().filter(|walk| walk.length >= 40).count();

@@ -28,6 +28,21 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
+/// Whether a query base and a contig base match: the same A, C, G or T in either case. Unknown
+/// bases (N and IUPAC codes) never match, not even themselves.
+pub(crate) fn bases_match(query: u8, contig: u8) -> bool {
+    query.eq_ignore_ascii_case(&contig)
+        && matches!(query.to_ascii_uppercase(), b'A' | b'C' | b'G' | b'T')
+}
+
+/// Whether every byte is an upper-case A, C, G or T, so equal blocks of such bytes match base
+/// by base. Other blocks are compared base by base with `bases_match`.
+pub(crate) fn known_bases(bases: &[u8]) -> bool {
+    bases
+        .iter()
+        .all(|base| matches!(base, b'A' | b'C' | b'G' | b'T'))
+}
+
 /// A half-open range of positions, `start..end`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct Interval {

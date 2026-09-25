@@ -60,22 +60,6 @@ fn saturating_add_avx2(left: __m256i, right: __m256i) -> __m256i {
     _mm256_blendv_epi8(sum, saturation, overflow)
 }
 
-/// Lanes where two bytes are equal, ignoring the case of letters.
-#[target_feature(enable = "avx2")]
-fn equal_ascii_case(left: __m128i, right: __m128i) -> __m128i {
-    let case_bit = _mm_set1_epi8(0x20);
-    let lower = _mm_or_si128(left, case_bit);
-    let letter = _mm_and_si128(
-        _mm_cmpgt_epi8(lower, _mm_set1_epi8((b'a' - 1) as i8)),
-        _mm_cmpgt_epi8(_mm_set1_epi8((b'z' + 1) as i8), lower),
-    );
-    let case_pair = _mm_cmpeq_epi8(_mm_xor_si128(left, right), case_bit);
-    _mm_or_si128(
-        _mm_cmpeq_epi8(left, right),
-        _mm_and_si128(case_pair, letter),
-    )
-}
-
 /// AVX2 recurrence for eight cells. Inlined into its single AVX2-enabled caller, the vector
 /// instantiation of `fill_waves`. Callers must enable AVX2 and prove that rows `row..row + 8`
 /// lie in the current wave, that `row > 0`, and that `row + 7 < wave`.
@@ -111,7 +95,7 @@ pub(super) unsafe fn fill_wave_avx2<const TRACEBACK: bool>(
         let contig_bytes = _mm_loadl_epi64(contig.as_ptr().add(first_contig - 8).cast());
         let reverse = _mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, -1, -1, -1, -1, -1, -1, -1, -1);
         let contig_bytes = _mm_shuffle_epi8(contig_bytes, reverse);
-        let equal = _mm256_cvtepi8_epi32(equal_ascii_case(query_bytes, contig_bytes));
+        let equal = _mm256_cvtepi8_epi32(_mm_cmpeq_epi8(query_bytes, contig_bytes));
         let substitution = _mm256_blendv_epi8(
             _mm256_set1_epi32(config.mismatch_score),
             _mm256_set1_epi32(config.match_score),

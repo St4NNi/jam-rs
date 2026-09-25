@@ -6,7 +6,9 @@ use super::dense::Walk;
 use crate::align::BandConfig;
 use crate::align::anchors::QueryTable;
 use crate::align::cigar::{append_runs, counts};
-use crate::align::{Alignment, AlignmentError, EditOperation, EditRun, Interval};
+use crate::align::{
+    Alignment, AlignmentError, EditOperation, EditRun, Interval, bases_match, known_bases,
+};
 use crate::seeds::kmers;
 use rustc_hash::FxHashMap;
 
@@ -36,10 +38,12 @@ pub fn walk_alignment(
         while step < piece {
             let equal = step;
             loop {
-                if step + 8 <= piece && contig_piece[step..step + 8] == query_piece[step..step + 8]
+                if step + 8 <= piece
+                    && contig_piece[step..step + 8] == query_piece[step..step + 8]
+                    && known_bases(&query_piece[step..step + 8])
                 {
                     step += 8;
-                } else if step < piece && contig_piece[step] == query_piece[step] {
+                } else if step < piece && bases_match(contig_piece[step], query_piece[step]) {
                     step += 1;
                 } else {
                     break;
@@ -111,9 +115,11 @@ pub fn gap_continuation(
         };
         let distance = |at: usize, bases: usize| if right { at } else { bases - a - at };
         // The end continues on its own diagonal, as at a circular query's whole length.
-        if query_side[distance(0, query_bases)..][..a]
-            == contig_side[distance(0, contig_bases)..][..a]
-        {
+        let (query_end, contig_end) = (
+            &query_side[distance(0, query_bases)..][..a],
+            &contig_side[distance(0, contig_bases)..][..a],
+        );
+        if query_end == contig_end && known_bases(query_end) {
             continue;
         }
         distances.clear();

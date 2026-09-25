@@ -264,7 +264,7 @@ fn reference_score(query: &[u8], contig: &[u8], config: AlignmentConfig) -> i32 
         let mut current = vec![[0i32; 3]; columns];
         for column in 1..columns {
             let diagonal = previous[column - 1].into_iter().max().unwrap_or(0);
-            let same = query[row - 1].eq_ignore_ascii_case(&contig[column - 1]);
+            let same = crate::align::bases_match(query[row - 1], contig[column - 1]);
             let pair = if same {
                 config.match_score
             } else {

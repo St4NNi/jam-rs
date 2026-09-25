@@ -11,7 +11,7 @@ use super::chains::Chain;
 use super::kernel::AlignmentInput;
 use super::{
     Alignment, AlignmentConfig, AlignmentError, AlignmentWorkspace, EditOperation, EditRun,
-    Interval,
+    Interval, bases_match,
 };
 use crate::seeds::complement;
 
@@ -167,7 +167,7 @@ fn exact_alignment(
         } else {
             window[contig_start as usize + at]
         };
-        query[query_start as usize + at].eq_ignore_ascii_case(&contig)
+        bases_match(query[query_start as usize + at], contig)
     }) || table.periodic_pair(window).is_some();
     if paired == 0 || !equal {
         return Ok(None);

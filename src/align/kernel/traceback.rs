@@ -114,13 +114,12 @@ impl AlignmentWorkspace {
             let previous = traceback_previous(traceback, state);
             match state {
                 MATCH if query_index > 0 && contig_index > 0 => {
-                    self.operations.push(
-                        if query[query_index - 1].eq_ignore_ascii_case(&contig[contig_index - 1]) {
+                    self.operations
+                        .push(if query[query_index - 1] == contig[contig_index - 1] {
                             EditOperation::Match
                         } else {
                             EditOperation::Substitution
-                        },
-                    );
+                        });
                     query_index -= 1;
                     contig_index -= 1;
                 }

@@ -377,7 +377,7 @@ fn fill_endpoint_row(
         let left = current[column - 1];
         let cell = &mut current[column];
         cell[MATCH as usize] = score.saturating_add(
-            if query[row - 1].eq_ignore_ascii_case(&contig[column - 1]) {
+            if crate::align::bases_match(query[row - 1], contig[column - 1]) {
                 config.match_score
             } else {
                 config.mismatch_score
@@ -421,7 +421,7 @@ fn trace_endpoint(
         match state {
             MATCH if row > 0 && column > 0 => {
                 operations.push(
-                    if query[row - 1].eq_ignore_ascii_case(&contig[column - 1]) {
+                    if crate::align::bases_match(query[row - 1], contig[column - 1]) {
                         EditOperation::Match
                     } else {
                         EditOperation::Substitution

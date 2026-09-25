@@ -72,7 +72,7 @@ fn costly_gap_split() {
 }
 
 #[test]
-fn ambiguity_codes_align() {
+fn ambiguity_codes_unmatched() {
     let directory = tempfile::tempdir().unwrap();
     let query = [
         random_bases(&mut rng(51), 1000),
@@ -86,12 +86,27 @@ fn ambiguity_codes_align() {
     for circular in [false, true] {
         for entry in [0, 1] {
             let lower = query.to_ascii_lowercase();
-            let aligned = align(&shard, entry, &lower, circular, &rule("1"));
+            // The run of R pairs only unknown bases, so it adds no covered base or match.
+            let aligned = align(&shard, entry, &lower, circular, &rule("0.6"));
             assert!(aligned.decision.qualifies, "circular {circular}");
-            assert_eq!(aligned.decision.mosaic.covered_bases, 3000);
-            assert_eq!(aligned.decision.counts.matches, 3000);
+            assert_eq!(aligned.decision.mosaic.covered_bases, 2000);
+            assert_eq!(aligned.decision.counts.matches, 2000);
         }
     }
+}
+
+#[test]
+fn unknown_prefix_unsupported() {
+    // Query and contig are 4,000 N and the same 1,000 bases: only those bases are covered.
+    let directory = tempfile::tempdir().unwrap();
+    let query = [vec![b'N'; 4000], random_bases(&mut rng(53), 1000)].concat();
+    let shard = build(directory.path(), &single_contig_entries(&[("n", &query)]));
+    let located = whole_contigs(&shard, 0, query.len() as u64);
+    let aligned = align_located(&shard, &query, false, &located, &rule("0.5"));
+    assert!(!aligned.decision.qualifies);
+    assert_eq!(aligned.decision.mosaic.covered_bases, 1000);
+    assert_eq!(aligned.decision.counts.matches, 1000);
+    assert_eq!(cigars(&aligned), ["1000="]);
 }
 
 #[test]
