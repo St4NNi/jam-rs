@@ -25,7 +25,8 @@ pub struct ChainConfig {
     pub max_gap: u32,
     /// The fewest anchors of a chain.
     pub min_anchors: u32,
-    /// The lowest chain score.
+    /// The shortest exact stretch a chain must reach. Its score may fall 2 (stride - 1) below,
+    /// as the anchors of such a stretch can miss bases at both ends.
     pub min_score: i64,
 }
 
@@ -277,12 +278,15 @@ fn periodic_chains(
 /// never covers more than the query length.
 pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
     let config = table.chains();
+    // Lookups every `stride` positions can miss up to stride - 1 bases at each end of an exact
+    // stretch, so a stretch of `min_score` bases may score 2 (stride - 1) less.
+    let lowest = config.min_score - 2 * (i64::from(table.anchors().stride) - 1);
     let links = chain_links(table, anchors);
     let mut order: Vec<usize> = (0..anchors.len()).collect();
     order.sort_unstable_by_key(|&index| (std::cmp::Reverse(links[index].score), index));
     let mut used = vec![false; anchors.len()];
     for end in order {
-        if used[end] || links[end].score < config.min_score {
+        if used[end] || links[end].score < lowest {
             continue;
         }
         let (mut path, mut base, mut at) = (Vec::new(), 0, end);
@@ -298,7 +302,7 @@ pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Ve
             }
             at = links[at].previous;
         }
-        if path.len() < config.min_anchors as usize || links[end].score - base < config.min_score {
+        if path.len() < config.min_anchors as usize || links[end].score - base < lowest {
             continue;
         }
         path.reverse();

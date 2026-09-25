@@ -501,6 +501,27 @@ fn repeat_contig_excluded() {
 }
 
 #[test]
+fn exact_pieces_chained() {
+    // Thirteen contigs of 40 query bases each: the anchors of each start at window positions
+    // 0, 4, ..., 24 and score 39, below the chain minimum of 40 bases.
+    let directory = tempfile::tempdir().unwrap();
+    let query = random_bases(&mut rng(20261023), 1000);
+    let contigs = (0..13)
+        .map(|i| (format!("c{i}"), query[80 * i..80 * i + 40].to_vec()))
+        .collect();
+    let shard = build(directory.path(), &[("pieces".to_string(), contigs)]);
+    let rule = DecisionRule {
+        min_query_coverage: "0.5".parse::<QueryCoverage>().unwrap(),
+        min_identity: 0.95,
+        ..DecisionRule::default()
+    };
+    let aligned = align(&shard, 0, &query, false, &rule);
+    assert!(aligned.decision.qualifies);
+    assert_eq!(aligned.decision.mosaic.covered_bases, 520);
+    assert_eq!(fragments(&aligned).len(), 13);
+}
+
+#[test]
 fn window_widens_edge() {
     let directory = tempfile::tempdir().unwrap();
     let query = random_bases(&mut rng(42), 20_000);
