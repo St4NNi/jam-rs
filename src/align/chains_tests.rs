@@ -314,3 +314,25 @@ fn copy_across_pieces() {
     assert!(queries.iter().any(|&at| at > 66_000));
     assert!(queries.len() > 2_000);
 }
+
+#[test]
+fn retained_capacity_ignored() {
+    // A buffer kept from an earlier, larger window must not change which anchors this window
+    // takes: a capacity that alone fills the budget used to send every k-mer to dense walks.
+    let query = random_bases(&mut rng(17), 2000);
+    let window = [&random_bases(&mut rng(18), 500)[..], &query[200..1800]].concat();
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
+    let fresh = window_chains(&table, &window, &mut Vec::new()).unwrap();
+    let mut retained = Vec::with_capacity(CHAINING_BYTES / std::mem::size_of::<Anchor>());
+    let reused = window_chains(&table, &window, &mut retained).unwrap();
+    assert_eq!(fresh.dense_above, None);
+    assert_eq!(reused.dense_above, fresh.dense_above);
+    assert_eq!(reused.chains, fresh.chains);
+    assert!(retained.capacity() < CHAINING_BYTES / std::mem::size_of::<Anchor>());
+}

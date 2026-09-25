@@ -89,7 +89,10 @@ pub fn window_chains(
             dense_above: None,
         });
     }
-    let budget = anchor_budget(table, window, scratch.capacity());
+    // The cut depends on this window alone; a larger buffer kept from an earlier window is
+    // shrunk, so it neither changes the cut nor holds memory beyond the budget.
+    let budget = anchor_budget(table, window);
+    scratch.shrink_to(budget.expected);
     find_anchors(table, window, scratch, budget.above, budget.expected);
     let mut chains = Vec::new();
     let split = scratch.partition_point(|anchor| anchor.strand == Strand::Forward);
@@ -148,8 +151,8 @@ pub fn split_by_drift(chain: &Chain, max_drift: u32, min_anchors: u32) -> Vec<Ch
 /// The anchors a window may give within `CHAINING_BYTES` and the query occurrence count above
 /// which k-mers give none (`None`: all fit). When all anchors would not fit, only k-mers with the
 /// fewest occurrences give anchors, those that fit half of the budget.
-fn anchor_budget(table: &QueryTable, window: &[u8], capacity: usize) -> AnchorBudget {
-    let price = |count: usize| anchor_bytes(capacity, count, table);
+fn anchor_budget(table: &QueryTable, window: &[u8]) -> AnchorBudget {
+    let price = |count: usize| anchor_bytes(count, table);
     // The most anchors a window can give, before its k-mers are looked up.
     let stride = usize::from(table.anchors().stride);
     let bound = (window.len() / stride + 1).saturating_mul(table.max_occurrences());
@@ -190,18 +193,16 @@ struct AnchorBudget {
 
 /// Bytes of `count` anchors and of the chaining arrays, traceback and chain headers that can
 /// coexist with them.
-fn anchor_bytes(capacity: usize, count: usize, table: &QueryTable) -> usize {
+fn anchor_bytes(count: usize, table: &QueryTable) -> usize {
     use std::mem::size_of;
-    capacity
-        .max(count)
-        .saturating_mul(size_of::<Anchor>())
-        .saturating_add(count.saturating_mul(
-            2 * size_of::<i64>()
+    count
+        .saturating_mul(
+            2 * size_of::<Anchor>()
+                + 2 * size_of::<i64>()
                 + 4 * size_of::<usize>()
                 + size_of::<bool>()
-                + size_of::<Anchor>()
                 + size_of::<u32>(),
-        ))
+        )
         .saturating_add(
             (2 * count / table.chains().min_anchors as usize + 4)
                 .saturating_mul(size_of::<Chain>()),
