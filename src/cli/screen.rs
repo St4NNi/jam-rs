@@ -9,6 +9,7 @@ use crate::screen::{AssemblyFailure, AssemblySummary, ScreenConfig, ScreenEntry,
 use crate::search::{SearchControl, Stopped};
 use clap::Args;
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{SyncSender, sync_channel};
@@ -75,6 +76,7 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
     let screener = Screener::new(&shard, config)?;
     let assemblies = read_list(&args.assemblies)?;
+    check_names(&assemblies, args.contig_dir.is_some())?;
     let threads = match args.threads {
         Some(0) => return Err(CliError::Usage("--threads must be at least 1".into())),
         Some(threads) => threads,
@@ -114,12 +116,38 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     }
 }
 
-/// Screens one assembly and sends its entry records and its summary, or its failure record.
-fn screen_one(screener: &Screener<'_>, path: &Path, lines: &SyncSender<Line>) {
-    let name = path.file_name().map_or_else(
+/// The name of an assembly in the records: its file name.
+fn assembly_name(path: &Path) -> String {
+    path.file_name().map_or_else(
         || path.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
-    );
+    )
+}
+
+/// Fails when two assemblies have the same name, or, with a contig folder, the same contig
+/// file there (`x.fa` and `x.fa.gz` both write `x.fa.gz`), as one would replace the other.
+fn check_names(assemblies: &[PathBuf], contig_dir: bool) -> Result<(), CliError> {
+    let mut seen: HashMap<String, &Path> = HashMap::new();
+    for path in assemblies {
+        let name = assembly_name(path);
+        let key = match name.strip_suffix(".gz") {
+            Some(stem) if contig_dir => stem.to_string(),
+            _ => name,
+        };
+        if let Some(other) = seen.insert(key, path) {
+            return Err(CliError::Usage(format!(
+                "assemblies {} and {} have the same name or contig file",
+                other.display(),
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Screens one assembly and sends its entry records and its summary, or its failure record.
+fn screen_one(screener: &Screener<'_>, path: &Path, lines: &SyncSender<Line>) {
+    let name = assembly_name(path);
     let stop = AtomicBool::new(false);
     let control = SearchControl {
         deadline: None,
@@ -132,4 +160,20 @@ fn screen_one(screener: &Screener<'_>, path: &Path, lines: &SyncSender<Line>) {
     };
     // A dropped receiver means the writer failed and returns its own error.
     let _ = lines.send(line);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colliding_names_refused() {
+        let paths = |names: &[&str]| names.iter().map(PathBuf::from).collect::<Vec<_>>();
+        let same = paths(&["/sample-a/assembly.fa", "/sample-b/assembly.fa"]);
+        assert!(check_names(&same, false).is_err());
+        let gzip = paths(&["/a/x.fa", "/b/x.fa.gz"]);
+        assert!(check_names(&gzip, false).is_ok());
+        assert!(check_names(&gzip, true).is_err());
+        assert!(check_names(&paths(&["/a/x.fa", "/a/y.fa"]), true).is_ok());
+    }
 }
