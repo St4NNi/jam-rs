@@ -21,7 +21,7 @@ pub use align_stage::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, PreparedQuery,
     entry_fragments,
 };
-pub use bound::CoverageBound;
+pub use bound::{CoverageBound, MissBound};
 pub use control::{SearchControl, Stopped};
 pub use driver::{AlignStageWork, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;

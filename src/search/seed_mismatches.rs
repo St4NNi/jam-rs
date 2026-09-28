@@ -30,9 +30,9 @@ const SECONDS_PER_KMER: f64 = 0.001;
 const MAX_EXTRA_SECONDS: f64 = 10.0;
 
 impl SeedMismatches {
-    /// The mismatches (0 or 1) for a query of `length` bases. `Auto` takes 1 when the exact seeds
-    /// miss a piece of the required coverage more often than the budget allows, one mismatch
-    /// lowers that chance, and query k-mers times `SECONDS_PER_KMER` fit `MAX_EXTRA_SECONDS`.
+    /// The mismatches (0 or 1) for a query of `length` bases. `Auto` takes 1 when the proven miss
+    /// bound of exact seeds for the required coverage exceeds the budget, one mismatch lowers it,
+    /// and query k-mers times `SECONDS_PER_KMER` fit `MAX_EXTRA_SECONDS`.
     pub fn resolve(
         self,
         exact: &MissModel,
@@ -49,8 +49,8 @@ impl SeedMismatches {
         }
         let required = rule.min_query_coverage.required_bases(length).min(length);
         let identity = rule.min_identity;
-        let missed = exact.miss_chance(required, identity);
-        let lowered = one_mismatch.miss_chance(required, identity) < missed;
+        let missed = exact.miss_upper_bound(required, identity);
+        let lowered = one_mismatch.miss_upper_bound(required, identity) < missed;
         let kmers = if circular {
             length
         } else {
@@ -85,13 +85,37 @@ mod tests {
         assert_eq!(choice(0.8, 5_000), 1);
         assert_eq!(choice(0.8, 20_000), 0);
         assert_eq!(choice(0.8, 100_000), 0);
-        // At 95% the exact seeds of a 1 kb query miss a 500-base piece with chance 0.1, while
-        // those of a 5 kb or longer query already fit the loss budget.
+        // At 95% the proven bound of exact seeds reaches the budget from 29 blocks of 124 bases,
+        // a required piece of 3,596 bases, so a query of 7,192 bases.
         assert_eq!(choice(0.95, 1_000), 1);
-        assert_eq!(choice(0.95, 5_000), 0);
+        assert_eq!(choice(0.95, 7_190), 1);
+        assert_eq!(choice(0.95, 7_192), 0);
         assert_eq!(choice(0.95, 100_000), 0);
-        // Below the identities of the model no seeding helps.
-        assert_eq!(choice(0.6, 1_000), 0);
+        // Below the identities where seeds can be hit at all, no seeding helps.
+        assert_eq!(choice(0.0, 1_000), 0);
+    }
+
+    /// Where the CPU limit allows one mismatch, auto takes the mode with the lower proven bound,
+    /// so that bound fits the budget whenever either mode's bound does.
+    #[test]
+    fn auto_takes_lower() {
+        let scheme = SeedScheme::default();
+        let (exact, one) = (
+            MissModel::new(scheme).unwrap(),
+            MissModel::one_mismatch(scheme).unwrap(),
+        );
+        let budget = LossBudget::default().chance();
+        for identity in [0.8, 0.85, 0.9, 0.95, 0.98, 0.99] {
+            for length in (200u64..=10_000).step_by(97) {
+                let required = length.div_ceil(2);
+                let bounds = [&exact, &one].map(|model| model.miss_upper_bound(required, identity));
+                let chosen = bounds[choice(identity, length)];
+                assert!(
+                    chosen <= bounds[0].min(bounds[1]).max(budget),
+                    "{identity} {length}"
+                );
+            }
+        }
     }
 
     #[test]

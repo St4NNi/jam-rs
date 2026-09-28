@@ -64,6 +64,15 @@ pub struct SketchWork {
     pub possible_entries: u64,
     /// Wall seconds of the stage.
     pub seconds: f64,
+    /// The estimated chance that a present piece of the required coverage shows no seed hit,
+    /// from the miss table (independent substitutions, random seed layouts); a model estimate.
+    pub miss_estimate: f64,
+    /// A proven upper bound on that chance, under independent substitutions, for a piece that
+    /// is one coherent copy without indels in one clean run. With the loss budget added, it
+    /// bounds the chance to drop such an entry before stage 3.
+    pub miss_upper_bound: f64,
+    /// Whether `miss_upper_bound` exceeds the loss budget.
+    pub miss_over_budget: bool,
 }
 
 /// What stage 1 hands on: the candidate entries, highest coverage bound first, the seeds that

@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::bound::CoverageBound;
+use super::bound::{CoverageBound, MissBound};
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::query::QueryKmers;
@@ -54,6 +54,7 @@ fn bound_at(length: u64, required_bases: u64, identity: f64) -> CoverageBound<'s
     CoverageBound::new(
         miss_model(),
         LossBudget::default(),
+        MissBound::Estimate,
         identity,
         length,
         false,
