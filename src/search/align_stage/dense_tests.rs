@@ -460,3 +460,39 @@ fn short_joins_count() {
         |alignment| format_cigar(&alignment.runs) == "17=100D18=" && alignment.score == -35,
     );
 }
+
+#[test]
+fn repeat_join_kept() {
+    // The second contig is (AC)10 G (AC)10 against (AC)20 of the query: 20=1D20=, 41 columns at
+    // 97.6% identity, made only from walks shorter than a chain.
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(20261023);
+    let (before, after) = (
+        random_bases(&mut random, 480),
+        random_bases(&mut random, 480),
+    );
+    let repeat = b"AC".repeat(20);
+    let query = [&before[..], &repeat, &after].concat();
+    let contig = [&b"AC".repeat(10)[..], b"G", &b"AC".repeat(10)].concat();
+    let shard = build(
+        directory.path(),
+        &[(
+            "pieces".to_string(),
+            vec![
+                ("c0".to_string(), before.clone()),
+                ("c1".to_string(), contig),
+            ],
+        )],
+    );
+    let rule = DecisionRule {
+        min_query_coverage: "0.5".parse::<crate::decide::QueryCoverage>().unwrap(),
+        min_identity: 0.95,
+        ..DecisionRule::default()
+    };
+    let located = whole_contigs(&shard, 0, query.len() as u64);
+    let aligned = align_located(&shard, &query, false, &located, &rule);
+    assert!(aligned.decision.qualifies);
+    // A copy shifted by one period may also take the first base after the repeat.
+    assert!(aligned.decision.mosaic.covered_bases >= 520);
+    assert!(cigars(&aligned).contains(&"20=1D20=".to_string()));
+}
