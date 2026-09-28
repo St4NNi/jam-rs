@@ -7,6 +7,8 @@ mod chains;
 mod config;
 mod contig;
 #[cfg(test)]
+mod copy_tests;
+#[cfg(test)]
 mod dense_tests;
 mod paths;
 mod place;
