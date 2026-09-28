@@ -85,9 +85,12 @@ fn one_mismatch_exact() {
 #[test]
 fn layouts_follow_windows() {
     let mut random = Pcg64Mcg::seed_from_u64(7);
-    let short = random_layout(60, 25, 100, &mut random);
-    assert_eq!(short.len(), 1);
-    assert!((24..60).contains(&short[0]));
+    // A stretch shorter than one window may lie between two seeds; one window long, never.
+    let empty = (0..1000)
+        .filter(|_| random_layout(60, 25, 100, &mut random).is_empty())
+        .count();
+    assert!((100..900).contains(&empty), "{empty}");
+    assert!((0..1000).all(|_| !random_layout(124, 25, 100, &mut random).is_empty()));
     let long = random_layout(20_000, 25, 100, &mut random);
     assert!(long.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(long.iter().all(|&end| (24..20_000).contains(&end)));
@@ -95,16 +98,15 @@ fn layouts_follow_windows() {
     assert!((density - 2.0 / 101.0).abs() < 0.004, "{density}");
 }
 
-/// Values of an independent simulation that mutates random sequences (k 25, w 100): length,
-/// identity, chance, standard error.
-const SIMULATION: [(usize, f64, f64, f64); 7] = [
-    (1000, 0.93, 5.19e-2, 1.1e-4),
-    (1000, 0.95, 5.08e-3, 3.6e-5),
-    (1000, 0.96, 7.80e-4, 1.4e-5),
-    (1000, 0.97, 5.62e-5, 3.7e-6),
-    (1000, 0.98, 1.25e-6, 5.6e-7),
-    (2000, 0.93, 2.16e-3, 3.3e-5),
-    (2000, 0.95, 2.20e-5, 3.3e-6),
+/// Values of an independent simulation that mutates random stretches inside longer random
+/// contigs and seeds them with the seeder (k 25, w 100, 400,000 trials each,
+/// `search::miss_simulation::stretch_miss_shares`): length, identity, chance, standard error.
+const SIMULATION: [(usize, f64, f64, f64); 5] = [
+    (1000, 0.93, 4.489e-2, 3.3e-4),
+    (1000, 0.95, 4.000e-3, 1.0e-4),
+    (1000, 0.96, 5.975e-4, 3.9e-5),
+    (2000, 0.93, 1.925e-3, 6.9e-5),
+    (2000, 0.95, 2.250e-5, 7.5e-6),
 ];
 
 #[test]
@@ -117,7 +119,7 @@ fn simulation_agrees() {
             .collect();
         let identities: Vec<f64> = points.iter().map(|point| point.1).collect();
         let row = average_row(length, 25, 100, LAYOUTS, 0, &identities);
-        for (&&(_, identity, chance, error), mine) in points.iter().zip(row) {
+        for (&&(_, identity, chance, error), (mine, _)) in points.iter().zip(row) {
             // Both sides are sample means: allow three times their combined standard error.
             let model_error = layout_spread(length, identity) / (LAYOUTS as f64).sqrt();
             let tolerance = 3.0 * (error.powi(2) + model_error.powi(2)).sqrt();
@@ -145,21 +147,43 @@ fn layout_spread(length: usize, identity: f64) -> f64 {
 }
 
 #[test]
-fn table_interpolation_holds() {
+fn lookups_round_down() {
     let model = model();
     assert_eq!((model.k(), model.w()), (25, 100));
-    // A point of the table is returned as stored.
-    let on_grid = average_row(1000, 25, 100, 100, 0, &[0.95])[0];
-    assert!((model.miss_chance(1000, 0.95) / on_grid - 1.0).abs() < 1e-9);
-    // Between points the interpolation stays near a direct average; 100 layouts leave some noise.
-    for (length, identity) in [(1100, 0.953), (700, 0.912), (2200, 0.9)] {
-        let direct = average_row(length, 25, 100, 100, 0, &[identity])[0];
-        let ratio = model.miss_chance(length as u64, identity) / direct;
-        assert!(
-            (0.75..1.33).contains(&ratio),
-            "{length} {identity}: {ratio}"
-        );
+    // A point of the table holds its upper value; between points the lower length and the lower
+    // identity hold, so a lookup is never below the value of the table at the point itself.
+    let (mean, error) = average_row(1029, 25, 100, 100, 0, &[0.95])[0];
+    let ratio = model.miss_chance(1029, 0.95) / upper_value(mean, error);
+    assert!((0.5..=1.0 + 1e-9).contains(&ratio), "{ratio}");
+    assert_eq!(
+        model.miss_chance(1130, 0.9549),
+        model.miss_chance(1029, 0.95)
+    );
+    for length in [200, 1000, 3000] {
+        assert!(model.miss_chance(length, 0.95) >= model.miss_chance(length + 1, 0.95));
+        assert!(model.miss_chance(length, 0.95) >= model.miss_chance(length, 0.96));
     }
+}
+
+/// A single seed at identity 0.9525 misses with 1 - 0.9525^25 = 0.703773; interpolating the
+/// logarithm between the columns 0.95 and 0.955 gave 0.702892, below it.
+#[test]
+fn single_seed_covered() {
+    let identities = identity_grid();
+    let ln_miss = (identities.iter())
+        .map(|&identity| layout_miss_chance(&[24], 25, identity).ln())
+        .collect();
+    let single = MissModel {
+        k: 25,
+        w: 100,
+        lengths: vec![25.0],
+        identities,
+        mismatches: 0,
+        ln_miss,
+    };
+    let exact = 1.0 - 0.9525f64.powi(25);
+    assert!((layout_miss_chance(&[24], 25, 0.9525) - exact).abs() < 1e-12);
+    assert!(single.miss_chance(25, 0.9525) >= exact);
 }
 
 #[test]
@@ -169,17 +193,42 @@ fn edges_are_safe() {
     assert!(model.miss_chance(1000, 0.95) > model.miss_chance(1000, 0.97));
     assert_eq!(model.miss_chance(24, 0.99), 1.0);
     assert_eq!(model.miss_chance(1000, 0.5), 1.0);
-    assert_eq!(model.miss_chance(1000, 1.0), 0.0);
+    // At identity 1 only a stretch of a whole window (w + k - 1 = 124 bases) surely has a seed.
+    assert_eq!(model.miss_chance(124, 1.0), 0.0);
+    assert_eq!(model.miss_chance(123, 1.0), 1.0);
+    // A shorter stretch inside a contig may lie between two seeds.
+    assert!(model.miss_chance(100, 0.999) > 0.1);
     assert_eq!(model.miss_chance(1000, f64::NAN), 1.0);
     // Beyond the table the chance of its last point is kept.
     assert_eq!(
         model.miss_chance(100_000, 0.95),
-        model.miss_chance(8000, 0.95)
+        model.miss_chance(7612, 0.95)
     );
     assert_eq!(
         model.miss_chance(1000, 0.9995),
         model.miss_chance(1000, 0.999)
     );
+}
+
+/// The proven bound: q^floor(L / 124), q the chance that one seed has more mismatches than the
+/// lookups allow.
+#[test]
+fn block_upper_bound() {
+    let scheme = SeedScheme::default();
+    let (exact, one) = (model(), MissModel::one_mismatch(scheme).unwrap());
+    let q0 = 1.0 - 0.95f64.powi(25);
+    let q1 = q0 - 25.0 * 0.05 * 0.95f64.powi(24);
+    assert_eq!(exact.miss_upper_bound(123, 0.95), 1.0);
+    assert!((exact.miss_upper_bound(750, 0.95) - q0.powi(6)).abs() < 1e-12);
+    assert!((one.miss_upper_bound(750, 0.95) - q1.powi(6)).abs() < 1e-12);
+    // The values of the review at L = 750.
+    assert!((exact.miss_upper_bound(750, 0.95) - 0.142_372_25).abs() < 1e-8);
+    assert!((one.miss_upper_bound(750, 0.95) - 0.002_092_00).abs() < 1e-8);
+    assert_eq!(exact.miss_upper_bound(124, 1.0), 0.0);
+    // The bound is never below the table's estimate where both apply.
+    for length in [500, 1000, 2000, 5000] {
+        assert!(exact.miss_upper_bound(length, 0.95) >= exact.miss_chance(length, 0.95));
+    }
 }
 
 #[test]
@@ -228,15 +277,29 @@ fn mismatch_rows_stored() {
     let stored = MissModel::one_mismatch(SeedScheme::default()).unwrap();
     assert_eq!(stored.mismatches(), 1);
     let width = stored.identities.len();
-    for length in [25, 280, 1000] {
+    for length in [25, 271, 1029] {
         let row = stored
             .lengths
             .iter()
             .position(|&l| l == length as f64)
             .unwrap();
         let built = average_row(length, 25, 100, LAYOUTS, 1, &stored.identities);
-        let built: Vec<f64> = built.iter().map(|chance| chance.max(1e-300).ln()).collect();
-        assert_eq!(stored.ln_miss[row * width..(row + 1) * width], built[..]);
+        let built: Vec<f64> = (built.iter())
+            .map(|&(mean, error)| upper_value(mean, error).max(1e-300).ln())
+            .collect();
+        // A stored value is the computed one, or lower when a shorter length or a lower
+        // identity had a lower one.
+        let row = &stored.ln_miss[row * width..(row + 1) * width];
+        assert!(
+            row.iter()
+                .zip(&built)
+                .all(|(stored, built)| stored <= built)
+        );
+        let equal = row
+            .iter()
+            .zip(&built)
+            .filter(|(stored, built)| stored == built);
+        assert!(equal.count() > width / 2, "{length}");
     }
 }
 
@@ -250,4 +313,17 @@ fn mismatch_table_stored() {
     let built = MissModel::with_layouts(scheme, LAYOUTS, 1).unwrap();
     assert_eq!(stored.lengths, built.lengths);
     assert_eq!(stored.ln_miss, built.ln_miss);
+}
+
+/// Writes both stored tables of the default k and w anew (`--ignored`, takes minutes).
+#[test]
+#[ignore]
+fn write_stored_tables() {
+    let scheme = SeedScheme::default();
+    let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/loss");
+    for (mismatches, name) in [(0, "default_table.bin"), (1, "one_mismatch_table.bin")] {
+        let built = MissModel::with_layouts(scheme, LAYOUTS, mismatches).unwrap();
+        let bytes: Vec<u8> = built.ln_miss.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(folder.join(name), bytes).unwrap();
+    }
 }

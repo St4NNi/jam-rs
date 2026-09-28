@@ -1,10 +1,11 @@
-//! The chance that a query stretch present in an entry shows no seed hit, and the loss budget that
-//! bounds every shortcut of a search.
+//! The modeled chance that a query stretch present in an entry shows no seed hit, and the loss
+//! budget that the shortcuts of a search aim to stay within.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-//! The chance is exact for one seed layout under independent substitutions at rate `1 - identity`;
-//! the model averages it over the layouts of random sequences in a table over length and identity.
+//! The chance is exact for one seed layout under independent substitutions at rate `1 - identity`
+//! and no indels. The table holds an upper value of its mean over the layouts of random sequences,
+//! so it is a model estimate: repeats, indels or clustered changes can miss more often.
 
 use crate::seeds::{SeedError, SeedScheme};
 use rand_core::{Rng, SeedableRng};
@@ -26,7 +27,7 @@ pub enum LossError {
     InvalidBudget,
 }
 
-/// The chance that a stretch of a given length and identity shows no seed hit.
+/// The modeled chance that a stretch of a given length and identity shows no seed hit.
 #[derive(Clone, Debug)]
 pub struct MissModel {
     k: usize,
@@ -35,13 +36,14 @@ pub struct MissModel {
     identities: Vec<f64>,
     /// Mismatches a query k-mer may have against a seed and still hit it (0 or 1).
     mismatches: usize,
-    /// Natural logarithm of the chance, row by length, column by identity.
+    /// Natural logarithm of the chance, row by length, column by identity, never rising along
+    /// either.
     ln_miss: Vec<f64>,
 }
 
 impl MissModel {
-    /// The model for the k and w of a seed scheme, with the table averaged over 1,000 layouts
-    /// per length. The table of the default k and w is stored, so it is read, not averaged.
+    /// The model for the k and w of a seed scheme, with the table taken over 1,000 layouts per
+    /// length. The table of the default k and w is stored, so it is read, not computed.
     pub fn new(scheme: SeedScheme) -> Result<Self, LossError> {
         Self::stored_or_averaged(scheme, 0)
     }
@@ -52,8 +54,8 @@ impl MissModel {
         Self::stored_or_averaged(scheme, 1)
     }
 
-    /// As `new`, averaging over `layouts` random layouts per stretch length, for seeds hit with
-    /// at most `mismatches` mismatches (0 or 1).
+    /// As `new`, taking `layouts` random layouts per stretch length, for seeds hit with at most
+    /// `mismatches` mismatches (0 or 1).
     pub fn with_layouts(
         scheme: SeedScheme,
         layouts: usize,
@@ -68,13 +70,14 @@ impl MissModel {
         let identities = identity_grid();
         let rows: Vec<Vec<f64>> = lengths
             .par_iter()
-            .map(|&length| average_row(length as usize, k, w, layouts, mismatches, &identities))
+            .map(|&length| {
+                let row = average_row(length as usize, k, w, layouts, mismatches, &identities);
+                row.iter()
+                    .map(|&(mean, error)| upper_value(mean, error))
+                    .collect()
+            })
             .collect();
-        let ln_miss = rows
-            .into_iter()
-            .flatten()
-            .map(|chance| chance.max(1e-300).ln())
-            .collect();
+        let ln_miss = never_rising(rows, identities.len());
         Ok(Self {
             k,
             w,
@@ -116,27 +119,44 @@ impl MissModel {
         self.mismatches
     }
 
-    /// The chance that a stretch of `stretch_bases` bases present at `identity` shows no seed hit,
-    /// interpolated in the logarithm between table points. Beyond the table the answer errs on the
-    /// safe side: the longest length and highest identity hold, and a lower identity gives 1.
+    /// The modeled chance that a stretch of `stretch_bases` bases present at `identity` shows no
+    /// seed hit: the table point at or below both values, as the chance falls with each of them.
+    /// At identity 1 a stretch holding a whole minimizer window always has a seed.
     pub fn miss_chance(&self, stretch_bases: u64, identity: f64) -> f64 {
-        if stretch_bases < self.k as u64 || identity.is_nan() || identity < self.identities[0] {
+        let length = stretch_bases as f64;
+        if identity.is_nan() || identity < self.identities[0] || length < self.lengths[0] {
             return 1.0;
         }
         if identity >= 1.0 {
-            return 0.0;
+            let window_bases = (self.w + self.k - 1) as u64;
+            return if stretch_bases >= window_bases {
+                0.0
+            } else {
+                1.0
+            };
         }
-        let (row, row_weight) = locate(&self.lengths, stretch_bases as f64);
-        let (column, column_weight) = locate(&self.identities, identity);
-        let width = self.identities.len();
-        let at = |r: usize, c: usize| self.ln_miss[r * width + c];
-        let along = |r: usize| {
-            at(r, column) * (1.0 - column_weight)
-                + at(r, (column + 1).min(width - 1)) * column_weight
-        };
-        let next_row = (row + 1).min(self.lengths.len() - 1);
-        let ln = along(row) * (1.0 - row_weight) + along(next_row) * row_weight;
-        ln.exp().min(1.0)
+        let at_or_below = |grid: &[f64], value: f64| grid.partition_point(|&p| p <= value) - 1;
+        let row = at_or_below(&self.lengths, length);
+        let column = at_or_below(&self.identities, identity);
+        self.ln_miss[row * self.identities.len() + column]
+            .exp()
+            .min(1.0)
+    }
+
+    /// A proven upper bound on the chance that a stretch present at `identity` shows no seed hit,
+    /// under independent substitutions: each disjoint block of w + k - 1 bases holds a whole window,
+    /// so a seed (if it passes the entropy limit), and these seeds are missed independently.
+    pub fn miss_upper_bound(&self, stretch_bases: u64, identity: f64) -> f64 {
+        if identity.is_nan() || identity <= 0.0 {
+            return 1.0;
+        }
+        let (k, p) = (self.k as i32, identity.min(1.0));
+        let mut missed = 1.0 - p.powi(k);
+        if self.mismatches > 0 {
+            missed -= f64::from(k) * (1.0 - p) * p.powi(k - 1);
+        }
+        let blocks = stretch_bases / (self.w + self.k - 1) as u64;
+        missed.clamp(0.0, 1.0).powf(blocks as f64)
     }
 
     /// The k-mer size of the model.
@@ -150,7 +170,8 @@ impl MissModel {
     }
 }
 
-/// The largest chance of missing a qualifying entry that all shortcuts of one search may add up to.
+/// The modeled chance of losing a qualifying entry that the coverage bounds of one search may
+/// spend. It holds under the assumptions of `MissModel` only, so it is an estimate, not a limit.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LossBudget {
     chance: f64,
@@ -178,18 +199,13 @@ impl LossBudget {
     }
 }
 
-/// The stretch lengths of the table, in bases. Lengths below the k-mer size are left out.
-const LENGTHS: [u64; 21] = [
-    25, 35, 50, 70, 100, 140, 200, 280, 400, 560, 800, 1000, 1250, 1600, 2000, 2500, 3200, 4000,
-    5000, 6500, 8000,
-];
-
-/// The lengths of the table for k-mers of `k` bases.
+/// The lengths of the table for k-mers of `k` bases: 25 bases, then 10% longer each step up to
+/// 8,000 (61 lengths), rounded. Lengths below the k-mer size are left out.
 fn table_lengths(k: usize) -> Vec<f64> {
-    LENGTHS
-        .into_iter()
-        .filter(|&length| length >= k as u64)
-        .map(|length| length as f64)
+    std::iter::successors(Some(25.0f64), |length| Some(length * 1.1))
+        .map(f64::round)
+        .take_while(|&length| length <= 8000.0)
+        .filter(|&length| length >= k as f64)
         .collect()
 }
 
@@ -202,11 +218,11 @@ fn identity_grid() -> Vec<f64> {
     grid
 }
 
-/// The layouts a table averages over per stretch length.
+/// The layouts a table takes per stretch length.
 const LAYOUTS: usize = 1000;
 
-/// The table of the default k and w, averaged over `LAYOUTS` layouts per length, as
-/// little-endian f64 values row by row; a test checks it against a new average.
+/// The table of the default k and w, taken over `LAYOUTS` layouts per length, as little-endian
+/// f64 values row by row; a test checks it against a new computation.
 const DEFAULT_LN_MISS: &[u8] = include_bytes!("default_table.bin");
 
 /// As `DEFAULT_LN_MISS`, for seeds hit with at most one mismatch.
@@ -215,7 +231,30 @@ const ONE_MISMATCH_TABLE: &[u8] = include_bytes!("one_mismatch_table.bin");
 /// The largest k the model supports, as the seed scheme does.
 const MAX_K: usize = 32;
 
-/// The average miss chance over random layouts of one stretch length, for every identity.
+/// The upper value of a sample mean: three standard errors above it, at most 1.
+fn upper_value(mean: f64, error: f64) -> f64 {
+    (mean + 3.0 * error).min(1.0)
+}
+
+/// The logarithms of the rows, each value lowered to the least value at a shorter length or a
+/// lower identity. The true chance never rises along either, so these stay upper values.
+fn never_rising(rows: Vec<Vec<f64>>, width: usize) -> Vec<f64> {
+    let mut ln_miss: Vec<f64> = (rows.into_iter().flatten())
+        .map(|chance| chance.max(1e-300).ln())
+        .collect();
+    for at in width..ln_miss.len() {
+        ln_miss[at] = ln_miss[at].min(ln_miss[at - width]);
+    }
+    for at in 1..ln_miss.len() {
+        if at % width != 0 {
+            ln_miss[at] = ln_miss[at].min(ln_miss[at - 1]);
+        }
+    }
+    ln_miss
+}
+
+/// The mean miss chance over random layouts of one stretch length and its standard error, for
+/// every identity. A single layout gives no error.
 fn average_row(
     length: usize,
     k: usize,
@@ -223,34 +262,40 @@ fn average_row(
     layouts: usize,
     mismatches: usize,
     identities: &[f64],
-) -> Vec<f64> {
+) -> Vec<(f64, f64)> {
     // PCG gives the same numbers in every version, so the table never changes between builds.
     let mut random = Pcg64Mcg::seed_from_u64(0x6A09_E667_F3BC_C908 ^ length as u64);
-    let mut sums = vec![0.0f64; identities.len()];
+    let mut sums = vec![(0.0f64, 0.0f64); identities.len()];
     for _ in 0..layouts {
         let seeds = random_layout(length, k, w, &mut random);
-        for (sum, &identity) in sums.iter_mut().zip(identities) {
-            *sum += if mismatches == 0 {
+        for ((sum, squares), &identity) in sums.iter_mut().zip(identities) {
+            let chance = if mismatches == 0 {
                 layout_miss_chance(&seeds, k, identity)
             } else {
                 one_mismatch_chance(&seeds, k, identity)
             };
+            *sum += chance;
+            *squares += chance * chance;
         }
     }
-    sums.iter().map(|sum| sum / layouts as f64).collect()
+    let n = layouts as f64;
+    (sums.iter())
+        .map(|&(sum, squares)| {
+            let mean = sum / n;
+            let variance = (squares - n * mean * mean).max(0.0) / (n - 1.0).max(1.0);
+            (mean, (variance / n).sqrt())
+        })
+        .collect()
 }
 
-/// The base positions where the seeds of a random stretch end (the last base of the seed k-mer),
-/// in increasing order. The hashes of the k-mers of a random sequence are independent and uniform.
+/// The ascending last bases of the seeds of a random stretch inside a longer random contig: its
+/// k-mers and `w - 1` on each side get independent uniform hashes, and seeds count only if their
+/// k-mer lies inside. So a stretch shorter than one window may have no seed.
 fn random_layout(length: usize, k: usize, w: usize, random: &mut Pcg64Mcg) -> Vec<usize> {
-    let kmers = length + 1 - k;
+    let inside = length + 1 - k;
+    let kmers = inside + 2 * (w - 1);
     let hashes: Vec<u64> = (0..kmers).map(|_| random.next_u64()).collect();
-    let mut seeds = Vec::new();
-    if kmers < w {
-        let smallest = (0..kmers).min_by_key(|&i| hashes[i]).unwrap_or(0);
-        seeds.push(smallest + k - 1);
-        return seeds;
-    }
+    let mut seeds: Vec<usize> = Vec::new();
     // A monotone queue of k-mer positions with rising hashes gives the minimum of each minimizer window.
     let mut queue = std::collections::VecDeque::new();
     for position in 0..kmers {
@@ -264,8 +309,13 @@ fn random_layout(length: usize, k: usize, w: usize, random: &mut Pcg64Mcg) -> Ve
         if queue[0] + w <= position {
             queue.pop_front();
         }
-        if position + 1 >= w && seeds.last() != Some(&(queue[0] + k - 1)) {
-            seeds.push(queue[0] + k - 1);
+        // The seed's k-mer start inside the stretch, if it lies there.
+        let start = queue[0].checked_sub(w - 1).filter(|&start| start < inside);
+        if let Some(end) = start.map(|start| start + k - 1)
+            && position + 1 >= w
+            && seeds.last() != Some(&end)
+        {
+            seeds.push(end);
         }
     }
     seeds
@@ -352,20 +402,6 @@ fn one_mismatch_chance(seed_ends: &[usize], k: usize, identity: f64) -> f64 {
         previous_end = end as i64;
     }
     free + state.iter().sum::<f64>()
-}
-
-/// The index of the grid point at or below `value` and the share of the way to the next point.
-/// Values beyond the grid end stay on its last point.
-fn locate(grid: &[f64], value: f64) -> (usize, f64) {
-    let last = grid.len() - 1;
-    if value >= grid[last] {
-        return (last, 0.0);
-    }
-    let below = grid
-        .partition_point(|&point| point <= value)
-        .saturating_sub(1);
-    let weight = (value - grid[below]) / (grid[below + 1] - grid[below]);
-    (below, weight)
 }
 
 #[cfg(test)]
