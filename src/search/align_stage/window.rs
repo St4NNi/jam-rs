@@ -2,9 +2,10 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{AlignStageConfig, AlignStageError, AlignWork, PreparedQuery};
+use super::{AlignStageConfig, AlignStageError, AlignWork, PreparedQuery, SearchControl};
 use crate::align::{
-    Anchor, CHAINING_BYTES, Chain, DenseWalks, Walk, dense_walks, forward_extent, window_chains,
+    AlignmentError, Anchor, CHAINING_BYTES, Chain, DenseWalks, Walk, dense_walks, forward_extent,
+    window_chains,
 };
 use crate::index::PackedSequence;
 use std::mem::size_of;
@@ -90,6 +91,7 @@ pub(super) fn walk_extent(walk: &Walk, window_length: u64) -> (u64, u64) {
 }
 
 /// Reads bases `range` of a contig and finds their chains and dense walks.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn prepare_window(
     packed: &PackedSequence,
     contig: u32,
@@ -98,12 +100,21 @@ pub(super) fn prepare_window(
     config: &AlignStageConfig,
     buffers: &mut WindowBuffers,
     work: &mut AlignWork,
+    control: SearchControl<'_>,
 ) -> Result<PreparedWindow, AlignStageError> {
     let mut bases = Vec::new();
     packed.read(contig as usize, range.clone(), &mut bases)?;
     work.windows += 1;
     work.bases_read += bases.len() as u64;
-    let found = window_chains(&query.table, &bases, &mut buffers.anchors)?;
+    let stopped = || control.check().is_err();
+    let found = match window_chains(&query.table, &bases, &mut buffers.anchors, &stopped) {
+        // A stop flag stays set and a deadline stays passed, so the check fails again.
+        Err(AlignmentError::Stopped) => {
+            control.check()?;
+            return Err(AlignmentError::Stopped.into());
+        }
+        found => found?,
+    };
     let chains = found.chains;
     work.anchors += buffers.anchors.len() as u64;
     // K-mers too frequent for anchors, and those of low-complexity runs: their copies are
@@ -198,7 +209,11 @@ mod tests {
         let query = PreparedQuery::new(&bases, false, &config).unwrap();
         let (mut buffers, mut work) = (WindowBuffers::default(), AlignWork::default());
         let mut read = |range: Range<u64>, buffers: &mut WindowBuffers| {
-            prepare_window(&packed, 0, range, &query, &config, buffers, &mut work).unwrap()
+            let control = crate::test_support::no_stop();
+            prepare_window(
+                &packed, 0, range, &query, &config, buffers, &mut work, control,
+            )
+            .unwrap()
         };
         let copy = read(900..2100, &mut buffers);
         assert_eq!(copy.range(), 900..2100);

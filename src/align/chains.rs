@@ -69,11 +69,13 @@ pub struct WindowChains {
     pub dense_above: Option<usize>,
 }
 
-/// The chains of a window within the chaining budget.
+/// The chains of a window within the chaining budget. `stopped` is asked now and then while
+/// chaining; when it says yes, chaining ends with `AlignmentError::Stopped`.
 pub fn window_chains(
     table: &QueryTable,
     window: &[u8],
     scratch: &mut Vec<Anchor>,
+    stopped: &dyn Fn() -> bool,
 ) -> Result<WindowChains, AlignmentError> {
     scratch.clear();
     // Every copy of a circular repeat is on many diagonals at once; dense walks take them all.
@@ -97,8 +99,9 @@ pub fn window_chains(
     find_anchors(table, window, scratch, budget.above, budget.expected);
     let mut chains = Vec::new();
     let split = scratch.partition_point(|anchor| anchor.strand == Strand::Forward);
+    let mut examined = Examined::new(MAX_EXAMINED, stopped);
     for strand in [&scratch[..split], &scratch[split..]] {
-        chain_anchors(table, strand, &mut chains);
+        chain_anchors(table, strand, &mut chains, &mut examined)?;
     }
     Ok(WindowChains {
         chains,
@@ -276,12 +279,17 @@ fn periodic_chains(
 /// Chains the anchors of one strand (sorted by contig, then query position), best score first.
 /// Every anchor joins at most one chain. A chain of a circular query may cross the origin but
 /// never covers more than the query length.
-pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Vec<Chain>) {
+pub(super) fn chain_anchors(
+    table: &QueryTable,
+    anchors: &[Anchor],
+    out: &mut Vec<Chain>,
+    examined: &mut Examined<'_>,
+) -> Result<(), AlignmentError> {
     let config = table.chains();
     // Lookups every `stride` positions can miss up to stride - 1 bases at each end of an exact
     // stretch, so a stretch of `min_score` bases may score 2 (stride - 1) less.
     let lowest = config.min_score - 2 * (i64::from(table.anchors().stride) - 1);
-    let links = chain_links(table, anchors);
+    let links = chain_links(table, anchors, examined)?;
     let mut order: Vec<usize> = (0..anchors.len()).collect();
     order.sort_unstable_by_key(|&index| (std::cmp::Reverse(links[index].score), index));
     let mut used = vec![false; anchors.len()];
@@ -317,10 +325,48 @@ pub(super) fn chain_anchors(table: &QueryTable, anchors: &[Anchor], out: &mut Ve
             score: links[end].score - base,
         });
     }
+    Ok(())
 }
 
 /// Predecessors with a valid link that one anchor considers at most.
 const LOOKBACK: usize = 64;
+
+/// Predecessors that the chaining of one window may examine, valid or not: seconds of work. A
+/// window past it fails with `ChainingBudget` rather than chaining fewer anchors.
+const MAX_EXAMINED: u64 = 1 << 32;
+
+/// Predecessors examined between two questions whether to stop.
+const STOP_CHECK: u64 = 1 << 20;
+
+/// The predecessors examined so far in one window, their limit and the stop question.
+pub(super) struct Examined<'a> {
+    count: u64,
+    limit: u64,
+    stopped: &'a dyn Fn() -> bool,
+}
+
+impl<'a> Examined<'a> {
+    pub(super) fn new(limit: u64, stopped: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            count: 0,
+            limit,
+            stopped,
+        }
+    }
+
+    /// Adds `more` examined predecessors; fails past the limit or when asked to stop.
+    fn add(&mut self, more: u64) -> Result<(), AlignmentError> {
+        let before = self.count;
+        self.count = self.count.saturating_add(more);
+        if self.count > self.limit {
+            return Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork));
+        }
+        if before / STOP_CHECK != self.count / STOP_CHECK && (self.stopped)() {
+            return Err(AlignmentError::Stopped);
+        }
+        Ok(())
+    }
+}
 
 /// A link may leave the diagonal by this many bases plus one part in `DRIFT_SHARE` of its length.
 const DRIFT_BASES: i64 = 50;
@@ -340,7 +386,11 @@ struct Link {
 }
 
 /// The best link of every anchor.
-fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
+fn chain_links(
+    table: &QueryTable,
+    anchors: &[Anchor],
+    examined: &mut Examined<'_>,
+) -> Result<Vec<Link>, AlignmentError> {
     let a = i64::from(table.anchors().a);
     let max_gap = i64::from(table.chains().max_gap);
     let length = i64::from(table.query_length());
@@ -348,8 +398,9 @@ fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
     for (current, anchor) in anchors.iter().enumerate() {
         let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
         let end = anchors[..current].partition_point(|earlier| earlier.contig < anchor.contig);
-        let mut eligible = 0;
+        let (mut eligible, mut scanned) = (0, 0u64);
         for earlier in (0..end).rev() {
+            scanned += 1;
             let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
             if contig_step > max_gap {
                 break;
@@ -383,13 +434,14 @@ fn chain_links(table: &QueryTable, anchors: &[Anchor]) -> Vec<Link> {
                 break;
             }
         }
+        examined.add(scanned)?;
         links.push(Link {
             score: best,
             previous: from,
             span: best_span,
         });
     }
-    links
+    Ok(links)
 }
 
 #[cfg(test)]

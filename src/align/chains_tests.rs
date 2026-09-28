@@ -15,7 +15,7 @@ fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
         ChainConfig::default(),
     )
     .unwrap();
-    window_chains(&table, window, &mut Vec::new())
+    window_chains(&table, window, &mut Vec::new(), &|| false)
         .unwrap()
         .chains
 }
@@ -103,7 +103,7 @@ fn dense_product_walked() {
     let mut scratch = Vec::new();
     // Every k-mer occurs about 25,000 times per strand: none gives anchors, all are left to
     // dense walks, and nothing of the 1.25 billion anchor product is held.
-    let found = window_chains(&table, &query, &mut scratch).unwrap();
+    let found = window_chains(&table, &query, &mut scratch, &|| false).unwrap();
     let (chains, above) = (found.chains, found.dense_above);
     assert!(chains.is_empty());
     assert_eq!(above, Some(0));
@@ -121,7 +121,7 @@ fn periodic_chains_enumerated() {
     )
     .unwrap();
     let mut scratch = Vec::new();
-    let found = window_chains(&table, &query, &mut scratch).unwrap();
+    let found = window_chains(&table, &query, &mut scratch, &|| false).unwrap();
     assert!(found.chains.len() > 99_000);
     assert_eq!(found.dense_above, None);
     assert_eq!(scratch.capacity(), 0);
@@ -328,11 +328,48 @@ fn retained_capacity_ignored() {
         ChainConfig::default(),
     )
     .unwrap();
-    let fresh = window_chains(&table, &window, &mut Vec::new()).unwrap();
+    let fresh = window_chains(&table, &window, &mut Vec::new(), &|| false).unwrap();
     let mut retained = Vec::with_capacity(CHAINING_BYTES / std::mem::size_of::<Anchor>());
-    let reused = window_chains(&table, &window, &mut retained).unwrap();
+    let reused = window_chains(&table, &window, &mut retained, &|| false).unwrap();
     assert_eq!(fresh.dense_above, None);
     assert_eq!(reused.dense_above, fresh.dense_above);
     assert_eq!(reused.chains, fresh.chains);
     assert!(retained.capacity() < CHAINING_BYTES / std::mem::size_of::<Anchor>());
+}
+
+#[test]
+fn chaining_work_bounded() {
+    // One 15-mer at 40 query positions 6,000 apart and 50 window positions 20 apart: no
+    // predecessor is valid, as the query steps are 0 or above the largest gap, yet each anchor
+    // examines all copies before it. The work ends in an error, never in fewer chains.
+    let query = random_bases(&mut rng(10), 240_000);
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
+    let anchors: Vec<Anchor> = (0..50u32)
+        .flat_map(|j| {
+            (0..40u32).map(move |i| Anchor {
+                strand: Strand::Forward,
+                contig: 20 * j,
+                query: 6000 * i,
+            })
+        })
+        .collect();
+    let run = |limit: u64, stop: bool| {
+        let stopped = move || stop;
+        let mut examined = Examined::new(limit, &stopped);
+        let mut chains = Vec::new();
+        chain_anchors(&table, &anchors, &mut chains, &mut examined).map(|()| chains)
+    };
+    // 40^2 x 50 x 49 / 2 = 1,960,000 predecessors are examined.
+    assert_eq!(run(1_960_000, false), Ok(Vec::new()));
+    assert_eq!(
+        run(1_959_999, false),
+        Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork))
+    );
+    assert_eq!(run(u64::MAX, true), Err(AlignmentError::Stopped));
 }

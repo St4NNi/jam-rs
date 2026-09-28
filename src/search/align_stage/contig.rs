@@ -144,6 +144,7 @@ impl<'a> ContigJob<'a> {
                     config,
                     &mut buffers.windows,
                     &mut read_work,
+                    self.control,
                 )
             })?;
             Ok((window, read_work))

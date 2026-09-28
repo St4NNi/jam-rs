@@ -276,6 +276,8 @@ pub enum AlignmentError {
     QueryTooLong,
     #[error("{0} exceed the chaining budget")]
     ChainingBudget(Budgeted),
+    #[error("alignment work was asked to stop")]
+    Stopped,
 }
 
 /// What exceeded the chaining budget of an alignment window.
@@ -284,6 +286,7 @@ pub enum Budgeted {
     PeriodicChains,
     MatchStarts,
     PeriodicWalks,
+    ChainingWork,
 }
 
 impl std::fmt::Display for Budgeted {
@@ -292,6 +295,7 @@ impl std::fmt::Display for Budgeted {
             Self::PeriodicChains => "periodic chains",
             Self::MatchStarts => "dense match starts",
             Self::PeriodicWalks => "circular periodic walks",
+            Self::ChainingWork => "predecessors examined in chaining",
         })
     }
 }

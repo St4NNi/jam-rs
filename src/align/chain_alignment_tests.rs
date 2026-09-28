@@ -22,7 +22,7 @@ fn alignments(query: &[u8], window: &[u8], circular: bool) -> Vec<Alignment> {
     )
     .unwrap();
     let mut workspace = AlignmentWorkspace::default();
-    let chains = window_chains(&table, window, &mut Vec::new())
+    let chains = window_chains(&table, window, &mut Vec::new(), &|| false)
         .unwrap()
         .chains;
     let mut found = Vec::new();
