@@ -11,12 +11,14 @@ use crate::align::{
 };
 use std::ops::Range;
 
-/// A walk alignment proven to be the best for its query window and contig range, so the next
-/// walk with the same inputs and its diagonals inside its band need not be aligned again.
+/// A walk alignment proven to be the best for its query range and contig range, so the next
+/// walk with the same inputs and its diagonals inside its band need not be aligned again. Only
+/// alignments a walk returns are saved, never those of a range it widens.
 #[derive(Clone, Copy, Debug)]
 struct DenseOptimum {
     strand: Strand,
-    query_start: u64,
+    /// The query range `start..end` that was aligned.
+    query: (u64, u64),
     /// The oriented window range `low..high` that was aligned.
     contig: (u64, u64),
     /// The lowest and highest diagonal of the alignment path.
@@ -62,21 +64,20 @@ pub fn align_dense_walk(
     let mut extension = 2 * margin;
     loop {
         let range = query_range(input.walk, table, extension);
-        let Some(alignment) = align_query_range(input, extension, config, workspace, results)?
+        let Some((alignment, proof)) =
+            align_query_range(input, extension, config, workspace, results)?
         else {
             return Ok(None);
         };
-        if table.circular() {
-            return Ok(Some(alignment));
-        }
         let (start, end) = (range.start, range.end);
-        let (aligned_start, aligned_end) = (
-            alignment.query_interval.start - start,
-            alignment.query_interval.end - start,
-        );
-        let runs_into_edge = (start > 0 && aligned_start <= margin)
-            || (end < length && end - start - aligned_end <= margin);
+        let runs_into_edge = !table.circular() && {
+            let aligned_start = alignment.query_interval.start - start;
+            let aligned_end = alignment.query_interval.end - start;
+            (start > 0 && aligned_start <= margin)
+                || (end < length && end - start - aligned_end <= margin)
+        };
         if !runs_into_edge {
+            results.optimum = proof.or(results.optimum);
             return Ok(Some(alignment));
         }
         extension = extension.saturating_mul(4);
@@ -93,14 +94,15 @@ fn query_range(walk: &Walk, table: &QueryTable, extension: u64) -> Range<u64> {
     start.saturating_sub(extension)..(start + u64::from(walk.length) + extension).min(length)
 }
 
-/// Aligns a dense walk over the query positions of `extension`.
+/// Aligns a dense walk over the query positions of `extension`, with the proof that the result is
+/// the best of its inputs when there is one.
 fn align_query_range(
     input: DenseWalk<'_>,
     extension: u64,
     config: BandConfig,
     workspace: &mut AlignmentWorkspace,
     results: &mut DenseResults,
-) -> Result<Option<Alignment>, AlignmentError> {
+) -> Result<Option<(Alignment, Option<DenseOptimum>)>, AlignmentError> {
     let DenseWalk {
         walk,
         window,
@@ -110,7 +112,8 @@ fn align_query_range(
     } = input;
     let range = query_range(walk, table, extension);
     let (query_start, span) = (range.start, range.end - range.start);
-    let Some(cells) = KernelBox::around(walk, range, config, table, window.len() as u64) else {
+    let Some(cells) = KernelBox::around(walk, range.clone(), config, table, window.len() as u64)
+    else {
         return Ok(None);
     };
     let diagonal = walk_diagonal(walk) + query_start as i64;
@@ -118,7 +121,7 @@ fn align_query_range(
     let band = i64::from(config.max_band());
     if results.optimum.as_ref().is_some_and(|saved| {
         saved.strand == walk.strand
-            && saved.query_start == query_start
+            && saved.query == (range.start, range.end)
             && saved.contig == (low, high)
             && saved.diagonals.0 >= diagonal - band
             && saved.diagonals.1 <= diagonal + band
@@ -161,15 +164,14 @@ fn align_query_range(
         band,
     );
     let outside = outside * i64::from(config.alignment.match_score);
-    if alignment.score >= kernel_score && i64::from(alignment.score) > outside {
-        results.optimum = Some(DenseOptimum {
-            strand: walk.strand,
-            query_start,
-            contig: (low, high),
-            diagonals,
-        });
-    }
-    Ok(Some(alignment))
+    let proven = alignment.score >= kernel_score && i64::from(alignment.score) > outside;
+    let proof = proven.then_some(DenseOptimum {
+        strand: walk.strand,
+        query: (range.start, range.end),
+        contig: (low, high),
+        diagonals,
+    });
+    Ok(Some((alignment, proof)))
 }
 
 /// The best local alignment of a kernel input, `None` when no cell scores positive.

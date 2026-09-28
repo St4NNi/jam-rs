@@ -321,3 +321,36 @@ fn short_blocks_join() {
     assert_eq!(joined.contig_interval.start, 1_000);
     assert!(JoinScratch::bytes(2, &context) > 0);
 }
+
+#[test]
+fn widened_result_kept() {
+    // The first range [0, 3176) ends 176 bases after the path 1000=1D2000=, so the walk widens
+    // to [0, 9704) with the same query start and contig columns. A proof over the first range
+    // must not answer the second.
+    let query = random_bases(&mut rng(9), 10_000);
+    let window = [
+        &query[..1000],
+        b"T",
+        &query[1000..3000],
+        &random_bases(&mut rng(10), 999),
+    ]
+    .concat();
+    let table = linear(&query);
+    let walk = Walk {
+        strand: Strand::Forward,
+        contig: 0,
+        query: 0,
+        length: 1000,
+    };
+    let input = DenseWalk {
+        walk: &walk,
+        later: &[],
+        window: &window,
+        offset: 0,
+        table: &table,
+    };
+    let (mut workspace, mut results) = (AlignmentWorkspace::default(), DenseResults::default());
+    let config = BandConfig::default();
+    let found = align_dense_walk(input, config, &mut workspace, &mut results).unwrap();
+    assert_eq!(format_cigar(&found.unwrap().runs), "1000=1D2000=");
+}
