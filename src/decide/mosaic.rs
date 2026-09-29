@@ -6,6 +6,7 @@ use super::{DecideError, Fragment};
 use crate::align::{EditCounts, EditOperation, Interval};
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 /// A fragment of the mosaic with the query bases it alone adds.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -43,13 +44,18 @@ struct Prepared {
     support: Vec<Interval>,
     support_bases: u64,
     counts: EditCounts,
-    /// Whether the fragment reaches the identity limit of the rule.
-    reaches_identity: bool,
 }
 
-/// Builds the mosaic of `fragments`: a fragment is primary when it covers a query base no earlier
-/// fragment covers. Fragments at `min_identity` come first, so a conserved copy wins over a
-/// diverged one; then the best score. The input order does not matter; duplicates count once.
+/// A primary fragment with the covered query bases it adds and its counts over them.
+struct Added {
+    fragment: Fragment,
+    bases: Vec<Interval>,
+    counts: EditCounts,
+}
+
+/// Builds the mosaic of `fragments`, highest identity first: a fragment counts over the query
+/// bases it adds. When all together are below `min_identity`, those whose added bases are below
+/// it are left out, so the rest reach it.
 pub(super) fn build_mosaic(
     query_length: u64,
     fragments: &[Fragment],
@@ -62,42 +68,68 @@ pub(super) fn build_mosaic(
         .iter()
         .map(|fragment| {
             let support = covered_intervals(query_length, fragment)?;
-            let counts = fragment.alignment.counts();
             Ok(Prepared {
                 fragment: fragment.clone(),
                 support_bases: Interval::total_length(&support),
                 support,
-                counts,
-                reaches_identity: counts.reaches_identity(min_identity),
+                counts: fragment.alignment.counts(),
             })
         })
         .collect::<Result<Vec<_>, DecideError>>()?;
     prepared.sort_by(compare_fragments);
     prepared.dedup_by(|left, right| left.fragment == right.fragment);
 
-    let mut covered = Vec::new();
-    let mut primary = Vec::new();
-    let mut alternatives = Vec::new();
+    let mut covered = IntervalSet::default();
     // The query bases that earlier primary fragments span, insertions too, for the counts.
-    let mut spanned = Vec::new();
-    let mut counts = EditCounts::default();
+    let mut spanned = IntervalSet::default();
+    let mut added = Vec::new();
+    let mut alternatives = Vec::new();
     for item in prepared {
-        let new_bases = item.support_bases - overlap(&covered, &item.support);
-        if new_bases == 0 {
-            alternatives.push(item.fragment);
-        } else {
-            counts += new_counts(&item.fragment, &spanned)?;
-            spanned.extend_from_slice(&item.fragment.query_segments);
-            spanned = Interval::union(spanned);
-            covered.extend_from_slice(&item.support);
-            covered = Interval::union(covered);
-            primary.push(SelectedFragment {
-                new_bases,
-                fragment: item.fragment,
-            });
+        let mut bases = Vec::new();
+        for &piece in &item.support {
+            covered.outside(piece, &mut bases);
         }
+        if bases.is_empty() {
+            alternatives.push(item.fragment);
+            continue;
+        }
+        let counts = new_counts(&item.fragment, &spanned)?;
+        item.fragment
+            .query_segments
+            .iter()
+            .for_each(|&piece| spanned.insert(piece));
+        bases.iter().for_each(|&piece| covered.insert(piece));
+        added.push(Added {
+            fragment: item.fragment,
+            bases,
+            counts,
+        });
     }
-    Ok(Mosaic {
+    let total = added.iter().fold(EditCounts::default(), |mut total, part| {
+        total += part.counts;
+        total
+    });
+    if !total.reaches_identity(min_identity) {
+        added.retain(|part| part.counts.reaches_identity(min_identity));
+    }
+    Ok(finish_mosaic(query_length, added, alternatives))
+}
+
+/// The mosaic of the primary fragments in `added`, whose added bases are disjoint.
+fn finish_mosaic(query_length: u64, added: Vec<Added>, alternatives: Vec<Fragment>) -> Mosaic {
+    let mut counts = EditCounts::default();
+    let mut covered = Vec::new();
+    let mut primary = Vec::with_capacity(added.len());
+    for part in added {
+        counts += part.counts;
+        covered.extend_from_slice(&part.bases);
+        primary.push(SelectedFragment {
+            new_bases: Interval::total_length(&part.bases),
+            fragment: part.fragment,
+        });
+    }
+    let covered = Interval::union(covered);
+    Mosaic {
         query_length,
         covered_bases: Interval::total_length(&covered),
         gaps: gaps_between(&covered, query_length),
@@ -105,18 +137,83 @@ pub(super) fn build_mosaic(
         primary,
         alternatives,
         counts,
-    })
+    }
+}
+
+/// Sorted, disjoint query intervals in a map from start to end, so that adding an interval and
+/// finding the parts of one inside take logarithmic time.
+#[derive(Default)]
+struct IntervalSet(BTreeMap<u64, u64>);
+
+impl IntervalSet {
+    /// Adds `piece`, joined with the intervals it overlaps or touches.
+    fn insert(&mut self, piece: Interval) {
+        if piece.is_empty() {
+            return;
+        }
+        let (mut start, mut end) = (piece.start, piece.end);
+        if let Some((&left, &left_end)) = self.0.range(..start).next_back()
+            && left_end >= start
+        {
+            (start, end) = (left, end.max(left_end));
+        }
+        let joined: Vec<u64> = self.0.range(start..=end).map(|(&key, _)| key).collect();
+        for key in joined {
+            end = end.max(self.0.remove(&key).unwrap_or(end));
+        }
+        self.0.insert(start, end);
+    }
+
+    /// The parts of `piece` inside the set, in order.
+    fn inside(&self, piece: Interval) -> impl Iterator<Item = Interval> + '_ {
+        let left = self.0.range(..piece.start).next_back();
+        let left = left.filter(|&(_, &end)| end > piece.start);
+        let rest = self.0.range(piece.start..piece.end.max(piece.start));
+        left.into_iter()
+            .chain(rest)
+            .map(move |(&start, &end)| Interval {
+                start: start.max(piece.start),
+                end: end.min(piece.end),
+            })
+    }
+
+    /// The bases of `piece` inside the set.
+    fn overlap(&self, piece: Interval) -> u64 {
+        self.inside(piece).map(Interval::len).sum()
+    }
+
+    /// Adds the parts of `piece` outside the set to `output`, in order.
+    fn outside(&self, piece: Interval, output: &mut Vec<Interval>) {
+        let mut start = piece.start;
+        for part in self.inside(piece) {
+            if start < part.start {
+                output.push(Interval {
+                    start,
+                    end: part.start,
+                });
+            }
+            start = part.end;
+        }
+        if start < piece.end {
+            output.push(Interval {
+                start,
+                end: piece.end,
+            });
+        }
+    }
 }
 
 /// The base counts of `fragment` over the query bases outside `spanned`, from its CIGAR. A
 /// match, substitution or insertion counts at its own query base; a deletion counts at the query
 /// base before it, or after it at the fragment start.
-fn new_counts(fragment: &Fragment, spanned: &[Interval]) -> Result<EditCounts, DecideError> {
+fn new_counts(fragment: &Fragment, spanned: &IntervalSet) -> Result<EditCounts, DecideError> {
     let segments = &fragment.query_segments;
-    let new_in = |offset: u64, length: u64| -> Result<u64, DecideError> {
-        let mut bases = Vec::new();
+    let mut bases = Vec::new();
+    let mut new_in = |offset: u64, length: u64| -> Result<u64, DecideError> {
+        bases.clear();
         project_segments(segments, offset, length, &mut bases)?;
-        Ok(length - overlap(spanned, &bases))
+        let old: u64 = bases.iter().map(|&piece| spanned.overlap(piece)).sum();
+        Ok(length - old)
     };
     let mut counts = EditCounts::default();
     let mut offset = 0u64;
@@ -138,14 +235,16 @@ fn new_counts(fragment: &Fragment, spanned: &[Interval]) -> Result<EditCounts, D
     Ok(counts)
 }
 
-/// Best first: at the identity limit, higher score, more support, more matches, fewer edits. The
+/// Best first: higher identity, higher score, more support, more matches, fewer edits. The
 /// remaining fields only break ties, so that the mosaic does not depend on the input order.
 fn compare_fragments(left: &Prepared, right: &Prepared) -> Ordering {
     let (a, b) = (&left.fragment, &right.fragment);
     let edits = |counts: EditCounts| counts.substitutions + counts.insertions + counts.deletions;
-    right
-        .reaches_identity
-        .cmp(&left.reaches_identity)
+    // Identities compared exactly, as matches times the other's columns.
+    let identity =
+        |one: EditCounts, other: EditCounts| u128::from(one.matches) * u128::from(other.columns());
+    identity(right.counts, left.counts)
+        .cmp(&identity(left.counts, right.counts))
         .then_with(|| b.alignment.score.cmp(&a.alignment.score))
         .then_with(|| right.support_bases.cmp(&left.support_bases))
         .then_with(|| right.counts.matches.cmp(&left.counts.matches))
@@ -225,21 +324,6 @@ pub(super) fn project_segments(
         }
     }
     Err(DecideError::QuerySpanMismatch)
-}
-
-/// The bases of the sorted, disjoint `support` that `covered`, also sorted and disjoint, holds.
-fn overlap(covered: &[Interval], support: &[Interval]) -> u64 {
-    let mut bases = 0;
-    for piece in support {
-        let first = covered.partition_point(|interval| interval.end <= piece.start);
-        for interval in covered[first..]
-            .iter()
-            .take_while(|interval| interval.start < piece.end)
-        {
-            bases += interval.end.min(piece.end) - interval.start.max(piece.start);
-        }
-    }
-    bases
 }
 
 /// The query bases outside the sorted, disjoint `covered` intervals.
@@ -327,14 +411,18 @@ mod tests {
     fn conserved_copy_primary() {
         let conserved = scored(0, 100, &[(0, 1000)], "1000=");
         let diverged = scored(1, 200, &[(0, 1000)], "900=100X");
-        let input = [diverged, conserved];
+        let input = [diverged, conserved.clone()];
         let mosaic = build_mosaic(1000, &input, 0.95).unwrap();
         assert_eq!(mosaic.primary.len(), 1);
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
         assert_eq!(mosaic.alternatives[0].contig_index, 1);
-        // Without a limit the higher score wins.
+        // Without a limit the higher identity still comes first.
         let mosaic = build_mosaic(1000, &input, 0.0).unwrap();
-        assert_eq!(mosaic.primary[0].fragment.contig_index, 1);
+        assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
+        // At equal identity the higher score wins.
+        let longer = scored(2, 300, &[(0, 1000)], "1000=");
+        let mosaic = build_mosaic(1000, &[conserved, longer], 0.0).unwrap();
+        assert_eq!(mosaic.primary[0].fragment.contig_index, 2);
     }
 
     #[test]

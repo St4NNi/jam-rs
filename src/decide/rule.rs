@@ -150,12 +150,8 @@ impl DecisionRule {
         let dropped_fragments = before - kept;
         let mosaic = build_mosaic(query_length, &counted, self.min_identity)?;
         let counts = mosaic.counts;
-        // Counted fragments that each reach the limit meet it by construction, so the recount
-        // of the mosaic must not fail an entry at fragment edges.
-        let identity_met = self.min_fragment_identity >= self.min_identity
-            || counts.reaches_identity(self.min_identity);
         let qualifies = counts.columns() > 0
-            && identity_met
+            && counts.reaches_identity(self.min_identity)
             && self
                 .min_query_coverage
                 .accepts(mosaic.covered_bases, query_length);
@@ -297,6 +293,85 @@ mod tests {
         assert_eq!(matches_and_columns(&decision), (539, 542));
     }
 
+    /// 19 matches and 1 mismatch, `blocks` times, then 20 matches.
+    fn spread_mismatches(blocks: usize) -> String {
+        format!("{}20=", "19=1X".repeat(blocks))
+    }
+
+    #[test]
+    fn mosaic_identity_checked() {
+        // Each fragment is above 0.95, but B adds bases 5,000 to 6,000 at 0.9 when it comes
+        // after A1 and A2. Counted first, B gives 10,546 matches over 11,000 bases.
+        let a1 = fragment(0, &[(0, 5000)], &spread_mismatches(249));
+        let a2 = fragment(1, &[(6000, 11_000)], &spread_mismatches(249));
+        let b = fragment(2, &[(4000, 7900)], "1900=100X1900=");
+        assert!(a1.alignment.score > b.alignment.score);
+        let rule = DecisionRule::default();
+        let decision = rule
+            .decide(22_000, vec![a1.clone(), a2.clone(), b.clone()], |_| 0)
+            .unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(decision.mosaic.covered_bases, 11_000);
+        assert_eq!(decision.mosaic.primary[0].fragment.contig_index, 2);
+        assert!(decision.counts.reaches_identity(0.95));
+        // At 0.959 the counts fall short; leaving out the pieces below the limit then loses
+        // coverage, so the entry fails.
+        let strict = DecisionRule {
+            min_identity: 0.959,
+            min_fragment_identity: 0.95,
+            ..rule
+        };
+        let decision = strict.decide(22_000, vec![a1, a2, b], |_| 0).unwrap();
+        assert!(!decision.qualifies);
+        assert!(decision.counts.reaches_identity(0.959));
+    }
+
+    #[test]
+    fn weak_addition_dropped() {
+        // The 0.86 fragment adds 600 bases at 0.75 to an exact one, 0.906 in all; without it
+        // the identity holds and 1,000 of 1,600 bases are still covered.
+        let exact = fragment(0, &[(0, 1000)], "1000=");
+        let weak = fragment(1, &[(500, 1600)], "500=150X450=");
+        let rule = DecisionRule {
+            min_query_coverage: "0.6".parse().unwrap(),
+            min_identity: 0.95,
+            min_fragment_identity: 0.8,
+            ..DecisionRule::default()
+        };
+        let decision = rule
+            .decide(1600, vec![exact.clone(), weak.clone()], |_| 0)
+            .unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(decision.mosaic.covered_bases, 1000);
+        assert_eq!(decision.mosaic.primary.len(), 1);
+        assert_eq!(matches_and_columns(&decision), (1000, 1000));
+        let more = DecisionRule {
+            min_query_coverage: "0.7".parse().unwrap(),
+            ..rule
+        };
+        assert!(
+            !more
+                .decide(1600, vec![exact, weak], |_| 0)
+                .unwrap()
+                .qualifies
+        );
+    }
+
+    #[test]
+    fn many_segments_fast() {
+        // 116,279 blocks of 40= 3X: each 40= counts alone, as 116,279 primary fragments.
+        let blocks = 116_279;
+        let long = fragment(0, &[(0, 43 * blocks)], &"40=3X".repeat(blocks as usize));
+        let start = std::time::Instant::now();
+        let decision = DecisionRule::default()
+            .decide(43 * blocks, vec![long], |_| 0)
+            .unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(decision.mosaic.primary.len(), blocks as usize);
+        assert_eq!(decision.mosaic.covered_bases, 40 * blocks);
+        assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+    }
+
     #[test]
     fn fragment_below_limit() {
         let weak = fragment(0, &[(0, 902)], &format!("{}3X", spread(17, 50)));
@@ -318,7 +393,8 @@ mod tests {
         let decision = rule("1")
             .decide(2000, vec![below, low.clone()], |_| 0)
             .unwrap();
-        assert_eq!(matches_and_columns(&decision), (1599, 2000));
+        // 1,599 of 2,000 is below 0.8, and without the 0.7 fragment half the query is left.
+        assert_eq!(matches_and_columns(&decision), (899, 1000));
         assert!(!decision.qualifies);
         let exact = fragment(0, &[(0, 1000)], "900=100X");
         assert!(
@@ -334,11 +410,14 @@ mod tests {
         let short = fragment(1, &[(9000, 10_000)], "990=10X");
         // 75 and 99 percent average 87, but 7,740 of 10,000 columns match.
         let long = fragment(0, &[(0, 9000)], "6750=2250X");
-        let decision = rule("1")
-            .decide(10_000, vec![long, short.clone()], |_| 0)
+        let decision = rule("0.5")
+            .decide(10_000, vec![long.clone(), short.clone()], |_| 0)
             .unwrap();
         assert!(!decision.qualifies);
-        assert!((decision.identity() - 0.774).abs() < 1e-12);
+        // The long fragment is left out as it is below the limit; the short one alone remains.
+        assert_eq!(matches_and_columns(&decision), (990, 1000));
+        let decision = rule("0.1").decide(10_000, vec![long, short.clone()], |_| 0);
+        assert!(decision.unwrap().qualifies);
         let long = fragment(0, &[(0, 9000)], "7020=1980X");
         assert!(
             rule("1")
@@ -511,9 +590,10 @@ mod tests {
         assert!(!strict.counts_fragment(&fragment(0, &[(0, 100)], "69=31X").alignment));
         // Four decimals would print 0.79996 as 0.8000, but the limit is compared exactly.
         let rounded = fragment(0, &[(0, 100_000)], "79996=20004X");
+        assert_eq!(format!("{:.4}", rounded.alignment.identity()), "0.8000");
         let decision = rule.decide(100_000, vec![rounded], |_| 0).unwrap();
-        assert_eq!(format!("{:.4}", decision.identity()), "0.8000");
         assert!(!decision.qualifies);
+        assert_eq!(decision.mosaic.covered_bases, 0);
     }
 
     #[test]
@@ -539,12 +619,10 @@ mod tests {
             min_contig_coverage: 0.0,
             ..by_contig
         };
-        assert!(
-            !without
-                .decide(3400, fragments(), lengths)
-                .unwrap()
-                .qualifies
-        );
+        // Without it, the shared part is left out as its bases are below the identity limit.
+        let decision = without.decide(3400, fragments(), lengths).unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(matches_and_columns(&decision), (2970, 3000));
         let by_identity = DecisionRule {
             min_contig_identity: 0.9,
             ..without
