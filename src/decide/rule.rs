@@ -429,7 +429,8 @@ mod tests {
             .unwrap();
         assert!(!decision.qualifies);
         assert!(decision.mosaic.covered_bases < 1000);
-        assert_eq!(decision.counts.columns(), decision.mosaic.covered_bases);
+        // Masked bases count toward identity, as in the fragment limits.
+        assert_eq!(decision.counts.columns(), 5000);
     }
 
     #[test]

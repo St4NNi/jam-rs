@@ -544,7 +544,7 @@ fn repeat_bases_uncovered() {
     };
     let decision = &aligned.decision;
     assert_eq!(decision.mosaic.covered_bases, 10_000 - masked);
-    assert_eq!(decision.counts.columns(), 10_000 - masked);
+    assert_eq!(decision.counts.columns(), 10_000);
 }
 
 #[test]

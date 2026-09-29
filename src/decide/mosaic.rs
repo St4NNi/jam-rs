@@ -56,8 +56,8 @@ struct Added {
 }
 
 /// Builds the mosaic of `fragments` from the first of three selections (see the steps below) that
-/// meets `min_identity` over `required_bases` covered bases outside `low_complexity`. Fails when
-/// `stopped` returns true.
+/// covers `required_bases` outside `low_complexity` at `min_identity`. Masked bases count toward
+/// no coverage, but toward identity as in the fragment limits. Fails when `stopped` returns true.
 pub(super) fn build_mosaic(
     query_length: u64,
     fragments: Vec<Fragment>,
@@ -117,17 +117,17 @@ pub(super) fn build_mosaic(
 }
 
 /// Adds the fragments in order: one is primary when it covers a query base outside `masked`
-/// that no earlier one covers, and counts over the bases no earlier one spans; else it is an
-/// alternative.
+/// that no earlier one covers, and counts over the bases no earlier one spans (masked ones too);
+/// else it is an alternative.
 fn add_in_order(
     prepared: &[Prepared],
     masked: &IntervalSet,
     stopped: &dyn Fn() -> bool,
 ) -> Result<(Vec<Added>, Vec<usize>), DecideError> {
-    // Masked bases start as taken, so no fragment adds them or counts over them.
+    // Masked bases start as taken, so no fragment adds them to the coverage.
     let mut covered = IntervalSet(masked.0.clone());
     // The query bases that earlier primary fragments span, insertions too, for the counts.
-    let mut spanned = IntervalSet(masked.0.clone());
+    let mut spanned = IntervalSet::default();
     let mut added = Vec::new();
     let mut alternatives = Vec::new();
     for (index, item) in prepared.iter().enumerate() {
@@ -158,7 +158,7 @@ fn add_in_order(
 }
 
 /// The fragment that alone covers the most query bases outside `masked` with identity at least
-/// `min_identity` over them; the first in order on ties.
+/// `min_identity`; the first in order on ties.
 fn best_single(
     prepared: &[Prepared],
     masked: &IntervalSet,
@@ -170,7 +170,7 @@ fn best_single(
         if stopped() {
             return Err(DecideError::Stopped);
         }
-        let counts = new_counts(&item.fragment, masked)?;
+        let counts = item.counts;
         if !reaches(counts, min_identity) {
             continue;
         }
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn low_complexity_uncounted() {
+    fn low_complexity_uncovered() {
         let masked = [interval(20, 50)];
         let whole = scored(0, 100, &[(0, 100)], "60=1X39=");
         let inside = scored(1, 300, &[(25, 45)], "20=");
@@ -602,7 +602,7 @@ mod tests {
         );
         assert_eq!(
             (mosaic.counts.matches, mosaic.counts.substitutions),
-            (69, 1)
+            (99, 1)
         );
         assert_eq!(mosaic.alternatives.len(), 1);
     }

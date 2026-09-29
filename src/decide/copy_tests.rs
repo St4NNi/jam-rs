@@ -141,7 +141,8 @@ fn exact_limits() {
 
 #[test]
 fn masked_better_fragment() {
-    // The other fragment ranks first by its exact masked part, and adds the copy's bases at 0.9.
+    // The other fragment ranks first by its exact masked part (masked columns count toward
+    // identity, as in the fragment limits), and covers the copy's bases.
     let masked = [Interval::new(0, 3000).unwrap()];
     let other = copy(1, 0, 4000, &(3000..3100).collect::<Vec<_>>());
     let rule = DecisionRule {
@@ -153,8 +154,21 @@ fn masked_better_fragment() {
         .decide(4000, fragments, &masked, || false, |_| 0)
         .unwrap();
     assert!(decision.qualifies);
-    assert_eq!(decision.mosaic.primary[0].fragment.contig_index, 0);
     assert_eq!(decision.mosaic.covered_bases, 1000);
+}
+
+#[test]
+fn masked_matches_count() {
+    // A copy exactly at the limit stays confirmed when the mask holds only its matches.
+    let rule = half_rule();
+    let changes: Vec<u64> = (0..50).map(|at| 100 + at * 18).collect();
+    let masked = [Interval::new(0, 100).unwrap()];
+    assert!(confirmed(
+        &rule,
+        1800,
+        vec![copy(0, 0, 1000, &changes)],
+        &masked
+    ));
 }
 
 /// Random substitution places: `count` of `columns`, sorted.
