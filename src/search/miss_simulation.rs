@@ -1,6 +1,5 @@
-//! Simulations that measure how often seeding and the coverage bound lose an entry whose match
-//! breaks the assumptions of the miss model: indels, clustered or evenly spread changes, repeats
-//! and fragmented matches. They take minutes, so they run only on request (`--ignored`).
+//! Simulated losses of seeding and the coverage bound for matches outside the miss model.
+//! They take minutes, so they run only on request (`--ignored`).
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
