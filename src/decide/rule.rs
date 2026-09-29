@@ -6,7 +6,7 @@ use super::contigs::counted_contig_fragments;
 use super::mosaic::build_mosaic;
 use super::segments::{RunOffsets, maximal_segments, slice_fragment};
 use super::{DecideError, Fragment, Mosaic, QueryCoverage};
-use crate::align::{Alignment, EditCounts};
+use crate::align::{Alignment, EditCounts, Interval};
 use serde::{Deserialize, Serialize};
 
 /// The limits that decide whether an entry is reported.
@@ -120,13 +120,14 @@ impl DecisionRule {
         Ok(())
     }
 
-    /// Builds the mosaic of the counted fragments of one entry and decides. Each primary fragment
-    /// counts only over the query bases it adds, so a copy that adds few bases does not lower the
-    /// identity. `contig_length` gives a contig length for the contig rule.
+    /// Builds the mosaic of the counted fragments of one entry and decides. Bases in the sorted,
+    /// disjoint `low_complexity` query intervals count toward no coverage and no identity.
+    /// `contig_length` gives a contig length for the contig rule.
     pub fn decide(
         &self,
         query_length: u64,
         fragments: Vec<Fragment>,
+        low_complexity: &[Interval],
         contig_length: impl Fn(u32) -> u64,
     ) -> Result<Decision, DecideError> {
         let before = fragments.len();
@@ -148,7 +149,7 @@ impl DecisionRule {
             kept += usize::from(counted.len() > found);
         }
         let dropped_fragments = before - kept;
-        let mosaic = build_mosaic(query_length, &counted, self.min_identity)?;
+        let mosaic = build_mosaic(query_length, &counted, low_complexity, self.min_identity)?;
         let counts = mosaic.counts;
         let qualifies = counts.columns() > 0
             && counts.reaches_identity(self.min_identity)
@@ -168,6 +169,8 @@ impl DecisionRule {
 mod tests {
     use super::*;
     use crate::decide::fragment::tests::fragment;
+    use crate::seeds::low_complexity_mask;
+    use crate::test_support::{random_bases, rng};
 
     fn rule(coverage: &str) -> DecisionRule {
         DecisionRule {
@@ -187,7 +190,12 @@ mod tests {
         let conserved = fragment(0, &[(0, 3000)], "1425=150X1425=");
         let diverged = fragment(1, &[(3000, 5000)], &"36=14X".repeat(40));
         let both = rule("0.5")
-            .decide(10_000, vec![conserved.clone(), diverged.clone()], |_| 0)
+            .decide(
+                10_000,
+                vec![conserved.clone(), diverged.clone()],
+                &[],
+                |_| 0,
+            )
             .unwrap();
         assert!(both.qualifies);
         assert_eq!(matches_and_columns(&both), (2850 + 1440, 5000));
@@ -195,7 +203,7 @@ mod tests {
         for alone in [conserved.clone(), diverged.clone()] {
             assert!(
                 !rule("0.5")
-                    .decide(10_000, vec![alone], |_| 0)
+                    .decide(10_000, vec![alone], &[], |_| 0)
                     .unwrap()
                     .qualifies
             );
@@ -206,7 +214,7 @@ mod tests {
             ..rule("0.5")
         };
         let decision = strict
-            .decide(10_000, vec![conserved, diverged], |_| 0)
+            .decide(10_000, vec![conserved, diverged], &[], |_| 0)
             .unwrap();
         assert!(!decision.qualifies);
         assert_eq!(decision.dropped_fragments, 1);
@@ -228,7 +236,7 @@ mod tests {
         };
         assert_eq!(default.min_fragment_identity, default.min_identity);
         let decision = default
-            .decide(2000, vec![good.clone(), weak.clone()], |_| 0)
+            .decide(2000, vec![good.clone(), weak.clone()], &[], |_| 0)
             .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.dropped_fragments, 1);
@@ -240,7 +248,7 @@ mod tests {
         };
         assert!(
             !more
-                .decide(2000, vec![good, weak], |_| 0)
+                .decide(2000, vec![good, weak], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -256,7 +264,7 @@ mod tests {
             min_fragment_identity: 0.8,
             ..DecisionRule::default()
         };
-        let decision = lower.decide(2000, vec![good, weak], |_| 0).unwrap();
+        let decision = lower.decide(2000, vec![good, weak], &[], |_| 0).unwrap();
         assert_eq!(decision.dropped_fragments, 0);
         assert_eq!(decision.mosaic.covered_bases, 999 + 899);
         assert!(decision.qualifies);
@@ -273,7 +281,7 @@ mod tests {
             min_query_coverage: "0.5".parse().unwrap(),
             ..DecisionRule::default()
         }
-        .decide(1859, vec![mixed], |_| 0)
+        .decide(1859, vec![mixed], &[], |_| 0)
         .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.dropped_fragments, 0);
@@ -286,7 +294,7 @@ mod tests {
         // 539 of 542 columns match (99.4 percent) over exactly half of the query.
         let fragment = fragment(0, &[(0, 542)], "39=3X500=");
         let decision = DecisionRule::default()
-            .decide(1084, vec![fragment], |_| 0)
+            .decide(1084, vec![fragment], &[], |_| 0)
             .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.covered_bases, 542);
@@ -308,7 +316,7 @@ mod tests {
         assert!(a1.alignment.score > b.alignment.score);
         let rule = DecisionRule::default();
         let decision = rule
-            .decide(22_000, vec![a1.clone(), a2.clone(), b.clone()], |_| 0)
+            .decide(22_000, vec![a1.clone(), a2.clone(), b.clone()], &[], |_| 0)
             .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.covered_bases, 11_000);
@@ -321,7 +329,7 @@ mod tests {
             min_fragment_identity: 0.95,
             ..rule
         };
-        let decision = strict.decide(22_000, vec![a1, a2, b], |_| 0).unwrap();
+        let decision = strict.decide(22_000, vec![a1, a2, b], &[], |_| 0).unwrap();
         assert!(!decision.qualifies);
         assert!(decision.counts.reaches_identity(0.959));
     }
@@ -339,7 +347,7 @@ mod tests {
             ..DecisionRule::default()
         };
         let decision = rule
-            .decide(1600, vec![exact.clone(), weak.clone()], |_| 0)
+            .decide(1600, vec![exact.clone(), weak.clone()], &[], |_| 0)
             .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.covered_bases, 1000);
@@ -351,7 +359,7 @@ mod tests {
         };
         assert!(
             !more
-                .decide(1600, vec![exact, weak], |_| 0)
+                .decide(1600, vec![exact, weak], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -364,12 +372,32 @@ mod tests {
         let long = fragment(0, &[(0, 43 * blocks)], &"40=3X".repeat(blocks as usize));
         let start = std::time::Instant::now();
         let decision = DecisionRule::default()
-            .decide(43 * blocks, vec![long], |_| 0)
+            .decide(43 * blocks, vec![long], &[], |_| 0)
             .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.primary.len(), blocks as usize);
         assert_eq!(decision.mosaic.covered_bases, 40 * blocks);
         assert!(start.elapsed().as_secs() < 20, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn repeat_support_masked() {
+        // 4,500 bases of ACGT repeats, then 5,500 random bases; a contig holds the first half.
+        let mut query = b"ACGT".repeat(1125);
+        query.extend(random_bases(&mut rng(23), 5500));
+        let masked: Vec<Interval> = low_complexity_mask(&query)
+            .into_iter()
+            .map(|stretch| Interval::new(stretch.start as u64, stretch.end as u64).unwrap())
+            .collect();
+        assert!(Interval::total_length(&masked) > 4000);
+        let half = fragment(0, &[(0, 5000)], "5000=");
+        let rule = DecisionRule::default();
+        let decision = rule.decide(10_000, vec![half.clone()], &[], |_| 0).unwrap();
+        assert!(decision.qualifies);
+        let decision = rule.decide(10_000, vec![half], &masked, |_| 0).unwrap();
+        assert!(!decision.qualifies);
+        assert!(decision.mosaic.covered_bases < 1000);
+        assert_eq!(decision.counts.columns(), decision.mosaic.covered_bases);
     }
 
     #[test]
@@ -379,7 +407,7 @@ mod tests {
             min_query_coverage: "0.5".parse().unwrap(),
             ..DecisionRule::default()
         }
-        .decide(902, vec![weak], |_| 0)
+        .decide(902, vec![weak], &[], |_| 0)
         .unwrap();
         assert!(!decision.qualifies);
         assert_eq!(decision.dropped_fragments, 1);
@@ -391,7 +419,7 @@ mod tests {
         let low = fragment(1, &[(1000, 2000)], "700=300X");
         let below = fragment(0, &[(0, 1000)], "899=101X");
         let decision = rule("1")
-            .decide(2000, vec![below, low.clone()], |_| 0)
+            .decide(2000, vec![below, low.clone()], &[], |_| 0)
             .unwrap();
         // 1,599 of 2,000 is below 0.8, and without the 0.7 fragment half the query is left.
         assert_eq!(matches_and_columns(&decision), (899, 1000));
@@ -399,7 +427,7 @@ mod tests {
         let exact = fragment(0, &[(0, 1000)], "900=100X");
         assert!(
             rule("1")
-                .decide(2000, vec![exact, low], |_| 0)
+                .decide(2000, vec![exact, low], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -411,17 +439,17 @@ mod tests {
         // 75 and 99 percent average 87, but 7,740 of 10,000 columns match.
         let long = fragment(0, &[(0, 9000)], "6750=2250X");
         let decision = rule("0.5")
-            .decide(10_000, vec![long.clone(), short.clone()], |_| 0)
+            .decide(10_000, vec![long.clone(), short.clone()], &[], |_| 0)
             .unwrap();
         assert!(!decision.qualifies);
         // The long fragment is left out as it is below the limit; the short one alone remains.
         assert_eq!(matches_and_columns(&decision), (990, 1000));
-        let decision = rule("0.1").decide(10_000, vec![long, short.clone()], |_| 0);
+        let decision = rule("0.1").decide(10_000, vec![long, short.clone()], &[], |_| 0);
         assert!(decision.unwrap().qualifies);
         let long = fragment(0, &[(0, 9000)], "7020=1980X");
         assert!(
             rule("1")
-                .decide(10_000, vec![long, short], |_| 0)
+                .decide(10_000, vec![long, short], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -432,7 +460,7 @@ mod tests {
         let first = fragment(0, &[(0, 5000)], "4500=500X");
         let copy = fragment(1, &[(0, 5000)], "3600=1400X");
         let decision = rule("0.5")
-            .decide(10_000, vec![first.clone(), copy, first.clone()], |_| 0)
+            .decide(10_000, vec![first.clone(), copy, first.clone()], &[], |_| 0)
             .unwrap();
         assert_eq!(matches_and_columns(&decision), (4500, 5000));
         assert_eq!(decision.mosaic.covered_bases, 5000);
@@ -442,7 +470,7 @@ mod tests {
         // A 65 percent copy is an alternative, so it does not lower the identity.
         let weak = fragment(1, &[(0, 5000)], "3250=1750X");
         let decision = rule("0.5")
-            .decide(10_000, vec![first, weak], |_| 0)
+            .decide(10_000, vec![first, weak], &[], |_| 0)
             .unwrap();
         assert!(decision.qualifies);
         assert!((decision.identity() - 0.9).abs() < 1e-12);
@@ -457,7 +485,7 @@ mod tests {
             min_fragment_identity: 0.0,
             ..DecisionRule::default()
         }
-        .decide(1000, vec![perfect, weak], |_| 0)
+        .decide(1000, vec![perfect, weak], &[], |_| 0)
         .unwrap();
         assert!(decision.qualifies);
         assert_eq!(matches_and_columns(&decision), (1000, 1000));
@@ -474,7 +502,7 @@ mod tests {
             min_fragment_identity: 0.0,
             ..DecisionRule::default()
         }
-        .decide(2000, vec![diverged, conserved], |_| 0)
+        .decide(2000, vec![diverged, conserved], &[], |_| 0)
         .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.primary[0].fragment.contig_index, 0);
@@ -493,7 +521,7 @@ mod tests {
             min_fragment_identity: 0.0,
             ..DecisionRule::default()
         }
-        .decide(1010, vec![paralog, source], |_| 0)
+        .decide(1010, vec![paralog, source], &[], |_| 0)
         .unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.primary.len(), 2);
@@ -506,7 +534,7 @@ mod tests {
         let divergent = fragment(1, &[(4000, 5000)], "650=350X");
         for coverage in ["0.5", "1"] {
             let decision = rule(coverage)
-                .decide(5000, vec![conserved.clone(), divergent.clone()], |_| 0)
+                .decide(5000, vec![conserved.clone(), divergent.clone()], &[], |_| 0)
                 .unwrap();
             assert!(decision.qualifies);
             assert_eq!(decision.dropped_fragments, 0);
@@ -519,7 +547,7 @@ mod tests {
         };
         assert!(
             !strict
-                .decide(10_000, vec![conserved, divergent], |_| 0)
+                .decide(10_000, vec![conserved, divergent], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -528,14 +556,16 @@ mod tests {
     #[test]
     fn indels_count_columns() {
         let gapped = fragment(0, &[(0, 1000)], "800=50I100=50D50=");
-        let decision = rule("1").decide(1000, vec![gapped.clone()], |_| 0).unwrap();
+        let decision = rule("1")
+            .decide(1000, vec![gapped.clone()], &[], |_| 0)
+            .unwrap();
         assert_eq!(matches_and_columns(&decision), (950, 1050));
         // The 50 query-only bases are not covered, and the 50 contig-only bases use no query base.
         assert_eq!(decision.mosaic.covered_bases, 950);
         assert!(!decision.qualifies);
         assert!(
             rule("0.95")
-                .decide(1000, vec![gapped], |_| 0)
+                .decide(1000, vec![gapped], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -546,12 +576,12 @@ mod tests {
         for (limit, required) in [("0.50", 501), ("0.75", 751), ("0.90", 901), ("1.00", 1001)] {
             for (bases, expected) in [(required, true), (required - 1, false)] {
                 let exact = fragment(0, &[(0, bases)], &format!("{bases}="));
-                let decision = rule(limit).decide(1001, vec![exact], |_| 0).unwrap();
+                let decision = rule(limit).decide(1001, vec![exact], &[], |_| 0).unwrap();
                 assert_eq!(decision.qualifies, expected, "{limit} {bases}");
             }
         }
         let wrapped = fragment(0, &[(900, 1001), (0, 400)], "501=");
-        let decision = rule("0.5").decide(1001, vec![wrapped], |_| 0).unwrap();
+        let decision = rule("0.5").decide(1001, vec![wrapped], &[], |_| 0).unwrap();
         assert!(decision.qualifies);
         assert_eq!(decision.mosaic.covered_bases, 501);
     }
@@ -561,13 +591,13 @@ mod tests {
         let piece = fragment(0, &[(0, 800)], "800=");
         assert!(
             rule("800bp")
-                .decide(100_000, vec![piece.clone()], |_| 0)
+                .decide(100_000, vec![piece.clone()], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
         assert!(
             !rule("801bp")
-                .decide(100_000, vec![piece], |_| 0)
+                .decide(100_000, vec![piece], &[], |_| 0)
                 .unwrap()
                 .qualifies
         );
@@ -591,7 +621,7 @@ mod tests {
         // Four decimals would print 0.79996 as 0.8000, but the limit is compared exactly.
         let rounded = fragment(0, &[(0, 100_000)], "79996=20004X");
         assert_eq!(format!("{:.4}", rounded.alignment.identity()), "0.8000");
-        let decision = rule.decide(100_000, vec![rounded], |_| 0).unwrap();
+        let decision = rule.decide(100_000, vec![rounded], &[], |_| 0).unwrap();
         assert!(!decision.qualifies);
         assert_eq!(decision.mosaic.covered_bases, 0);
     }
@@ -604,14 +634,14 @@ mod tests {
         let lengths = |contig: u32| [3000, 10_000][contig as usize];
         let fragments = || vec![query_copy.clone(), shared_part.clone()];
         let open = rule("0.5");
-        let decision = open.decide(3400, fragments(), lengths).unwrap();
+        let decision = open.decide(3400, fragments(), &[], lengths).unwrap();
         assert_eq!(matches_and_columns(&decision), (3270, 3400));
         let by_contig = DecisionRule {
             min_contig_coverage: 0.5,
             min_identity: 0.98,
             ..open
         };
-        let decision = by_contig.decide(3400, fragments(), lengths).unwrap();
+        let decision = by_contig.decide(3400, fragments(), &[], lengths).unwrap();
         assert!(decision.qualifies);
         assert_eq!(matches_and_columns(&decision), (2970, 3000));
         assert_eq!(decision.dropped_fragments, 1);
@@ -620,14 +650,14 @@ mod tests {
             ..by_contig
         };
         // Without it, the shared part is left out as its bases are below the identity limit.
-        let decision = without.decide(3400, fragments(), lengths).unwrap();
+        let decision = without.decide(3400, fragments(), &[], lengths).unwrap();
         assert!(decision.qualifies);
         assert_eq!(matches_and_columns(&decision), (2970, 3000));
         let by_identity = DecisionRule {
             min_contig_identity: 0.9,
             ..without
         };
-        let decision = by_identity.decide(3400, fragments(), lengths).unwrap();
+        let decision = by_identity.decide(3400, fragments(), &[], lengths).unwrap();
         assert_eq!(decision.dropped_fragments, 1);
     }
 

@@ -523,6 +523,30 @@ fn repeat_query_unanswered() {
     ));
 }
 
+/// Low-complexity query bases count toward no coverage and no identity of a confirmed entry.
+#[test]
+fn repeat_bases_uncovered() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0x1d);
+    let mut query = b"ACGT".repeat(250);
+    query.extend(random_bases(&mut random, 9_000));
+    let entries = vec![vec![
+        [random_bases(&mut random, 1_000), query.clone()].concat(),
+    ]];
+    let shard = test_shard(directory.path(), &entries);
+    let mut config = config(SearchStage::Align);
+    config.rule.min_query_coverage = "0.5".parse().unwrap();
+    let (summary, events) = search(&shard, &query, false, &config, false);
+    let masked = summary.sketch.low_complexity_bases;
+    assert!((1_000..1_064).contains(&masked), "{masked}");
+    let EntryEvent::Confirmed { aligned, .. } = last_event(&events, 0) else {
+        panic!("not confirmed: {events:?}");
+    };
+    let decision = &aligned.decision;
+    assert_eq!(decision.mosaic.covered_bases, 10_000 - masked);
+    assert_eq!(decision.counts.columns(), 10_000 - masked);
+}
+
 #[test]
 fn circular_query_confirmed() {
     let directory = tempfile::tempdir().unwrap();

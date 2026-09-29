@@ -164,7 +164,12 @@ pub fn align_packed_entry(
             .contig_range(contig as usize)
             .map_or(0, |range| range.end - range.start)
     };
-    let decision = rule.decide(query.length(), fragments, contig_length)?;
+    let decision = rule.decide(
+        query.length(),
+        fragments,
+        &query.low_complexity,
+        contig_length,
+    )?;
     Ok(AlignedEntry {
         entry: located.entry,
         decision,

@@ -54,11 +54,12 @@ struct Added {
 }
 
 /// Builds the mosaic of `fragments`, highest identity first: a fragment counts over the query
-/// bases it adds. When all together are below `min_identity`, those whose added bases are below
-/// it are left out, so the rest reach it.
+/// bases it adds outside `low_complexity`. When all are below `min_identity`, those whose added
+/// bases are below it are left out, so the rest reach it.
 pub(super) fn build_mosaic(
     query_length: u64,
     fragments: &[Fragment],
+    low_complexity: &[Interval],
     min_identity: f64,
 ) -> Result<Mosaic, DecideError> {
     if query_length == 0 {
@@ -79,9 +80,13 @@ pub(super) fn build_mosaic(
     prepared.sort_by(compare_fragments);
     prepared.dedup_by(|left, right| left.fragment == right.fragment);
 
+    // Low-complexity bases start as taken, so no fragment adds them or counts over them.
     let mut covered = IntervalSet::default();
+    low_complexity
+        .iter()
+        .for_each(|&piece| covered.insert(piece));
     // The query bases that earlier primary fragments span, insertions too, for the counts.
-    let mut spanned = IntervalSet::default();
+    let mut spanned = IntervalSet(covered.0.clone());
     let mut added = Vec::new();
     let mut alternatives = Vec::new();
     for item in prepared {
@@ -377,14 +382,14 @@ mod tests {
     #[test]
     fn insertions_leave_gaps() {
         // 2= 1I 2=: the middle query base has no contig base.
-        let mosaic = build_mosaic(5, &[scored(0, 7, &[(0, 5)], "2=1I2=")], 0.0).unwrap();
+        let mosaic = build_mosaic(5, &[scored(0, 7, &[(0, 5)], "2=1I2=")], &[], 0.0).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert_eq!(mosaic.gaps, [interval(2, 3)]);
     }
 
     #[test]
     fn deletions_take_nothing() {
-        let mosaic = build_mosaic(4, &[scored(0, 7, &[(0, 4)], "2=3D2=")], 0.0).unwrap();
+        let mosaic = build_mosaic(4, &[scored(0, 7, &[(0, 4)], "2=3D2=")], &[], 0.0).unwrap();
         assert_eq!(mosaic.covered_bases, 4);
         assert!(mosaic.gaps.is_empty());
     }
@@ -396,7 +401,7 @@ mod tests {
             equal_fragment(1, 8, 4, 10),
             equal_fragment(0, 10, 0, 6),
         ];
-        let mosaic = build_mosaic(10, &input, 0.0).unwrap();
+        let mosaic = build_mosaic(10, &input, &[], 0.0).unwrap();
         assert_eq!(mosaic.covered_bases, 10);
         assert_eq!(mosaic.primary.len(), 2);
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
@@ -404,7 +409,7 @@ mod tests {
         assert_eq!(mosaic.alternatives.len(), 1);
         let mut reversed = input.to_vec();
         reversed.reverse();
-        assert_eq!(build_mosaic(10, &reversed, 0.0).unwrap(), mosaic);
+        assert_eq!(build_mosaic(10, &reversed, &[], 0.0).unwrap(), mosaic);
     }
 
     #[test]
@@ -412,16 +417,16 @@ mod tests {
         let conserved = scored(0, 100, &[(0, 1000)], "1000=");
         let diverged = scored(1, 200, &[(0, 1000)], "900=100X");
         let input = [diverged, conserved.clone()];
-        let mosaic = build_mosaic(1000, &input, 0.95).unwrap();
+        let mosaic = build_mosaic(1000, &input, &[], 0.95).unwrap();
         assert_eq!(mosaic.primary.len(), 1);
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
         assert_eq!(mosaic.alternatives[0].contig_index, 1);
         // Without a limit the higher identity still comes first.
-        let mosaic = build_mosaic(1000, &input, 0.0).unwrap();
+        let mosaic = build_mosaic(1000, &input, &[], 0.0).unwrap();
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
         // At equal identity the higher score wins.
         let longer = scored(2, 300, &[(0, 1000)], "1000=");
-        let mosaic = build_mosaic(1000, &[conserved, longer], 0.0).unwrap();
+        let mosaic = build_mosaic(1000, &[conserved, longer], &[], 0.0).unwrap();
         assert_eq!(mosaic.primary[0].fragment.contig_index, 2);
     }
 
@@ -430,7 +435,7 @@ mod tests {
         let first = scored(0, 2000, &[(0, 500)], "500=");
         let count = |cigar: &str| {
             let second = scored(1, 1000, &[(0, 1000)], cigar);
-            build_mosaic(1000, &[first.clone(), second], 0.0)
+            build_mosaic(1000, &[first.clone(), second], &[], 0.0)
                 .unwrap()
                 .counts
         };
@@ -453,20 +458,38 @@ mod tests {
         let mut a = equal_fragment(0, 100, 0, 30);
         let mut b = equal_fragment(1, 100, 30, 60);
         b.alignment.strand = Strand::Reverse;
-        let combined = build_mosaic(101, &[a.clone(), b.clone(), a.clone(), b], 0.0).unwrap();
+        let combined = build_mosaic(101, &[a.clone(), b.clone(), a.clone(), b], &[], 0.0).unwrap();
         assert_eq!(combined.covered_bases, 60);
         assert_eq!(combined.primary.len(), 2);
         assert!(combined.alternatives.is_empty());
         assert_eq!(combined.query_length, 101);
         a.contig_index = 5;
-        let one = build_mosaic(101, &[a], 0.0).unwrap();
+        let one = build_mosaic(101, &[a], &[], 0.0).unwrap();
         assert_eq!(one.covered_bases, 30);
+    }
+
+    #[test]
+    fn low_complexity_uncounted() {
+        let masked = [interval(20, 50)];
+        let whole = scored(0, 100, &[(0, 100)], "60=1X39=");
+        let inside = scored(1, 300, &[(25, 45)], "20=");
+        let mosaic = build_mosaic(100, &[whole, inside], &masked, 0.0).unwrap();
+        assert_eq!(mosaic.covered_bases, 70);
+        assert_eq!(
+            mosaic.covered_intervals,
+            [interval(0, 20), interval(50, 100)]
+        );
+        assert_eq!(
+            (mosaic.counts.matches, mosaic.counts.substitutions),
+            (69, 1)
+        );
+        assert_eq!(mosaic.alternatives.len(), 1);
     }
 
     #[test]
     fn wrap_covers_ends() {
         let wrapped = scored(0, 8, &[(8, 10), (0, 2)], "4=");
-        let mosaic = build_mosaic(10, &[wrapped], 0.0).unwrap();
+        let mosaic = build_mosaic(10, &[wrapped], &[], 0.0).unwrap();
         assert_eq!(mosaic.covered_intervals, [interval(0, 2), interval(8, 10)]);
         assert_eq!(mosaic.gaps, [interval(2, 8)]);
     }
@@ -474,7 +497,7 @@ mod tests {
     #[test]
     fn wrap_insertions_uncovered() {
         let wrapped = scored(0, 8, &[(8, 10), (0, 3)], "1=1I1=1I1=");
-        let mosaic = build_mosaic(10, &[wrapped], 0.0).unwrap();
+        let mosaic = build_mosaic(10, &[wrapped], &[], 0.0).unwrap();
         assert_eq!(
             mosaic.covered_intervals,
             [interval(0, 1), interval(2, 3), interval(8, 9)]
@@ -484,20 +507,20 @@ mod tests {
 
     #[test]
     fn bad_fragments_fail() {
-        assert_eq!(build_mosaic(0, &[], 0.0), Err(DecideError::EmptyQuery));
+        assert_eq!(build_mosaic(0, &[], &[], 0.0), Err(DecideError::EmptyQuery));
         let outside = scored(0, 1, &[(5, 12)], "7=");
         assert_eq!(
-            build_mosaic(10, &[outside], 0.0),
+            build_mosaic(10, &[outside], &[], 0.0),
             Err(DecideError::InvalidQuerySegments)
         );
         let overlap = scored(0, 1, &[(0, 4), (3, 6)], "7=");
         assert_eq!(
-            build_mosaic(10, &[overlap], 0.0),
+            build_mosaic(10, &[overlap], &[], 0.0),
             Err(DecideError::InvalidQuerySegments)
         );
         let short = scored(0, 1, &[(0, 4)], "5=");
         assert_eq!(
-            build_mosaic(10, &[short], 0.0),
+            build_mosaic(10, &[short], &[], 0.0),
             Err(DecideError::QuerySpanMismatch)
         );
     }

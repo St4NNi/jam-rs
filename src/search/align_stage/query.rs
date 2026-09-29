@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::{AlignStageConfig, AlignStageError};
-use crate::align::QueryTable;
+use crate::align::{Interval, QueryTable};
 
 /// The query bases in upper case and the tables of its k-mers. Built once per query; all
 /// workers share it.
@@ -13,6 +13,9 @@ pub struct PreparedQuery {
     pub(super) table: QueryTable,
     /// The low-complexity k-mers, left to dense walks; `None` when the query has none.
     pub(super) low: Option<QueryTable>,
+    /// Low-complexity query stretches, sorted and disjoint; they count toward no coverage in the
+    /// decision. Empty from `new`; the search sets them.
+    pub low_complexity: Vec<Interval>,
 }
 
 impl PreparedQuery {
@@ -32,6 +35,7 @@ impl PreparedQuery {
         Ok(Self {
             table,
             low: (low.max_occurrences() > 0).then_some(low),
+            low_complexity: Vec::new(),
         })
     }
 

@@ -19,7 +19,7 @@ use super::query::QueryKmers;
 use super::seed_mismatches::SeedMismatches;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
-use crate::align::AlignmentError;
+use crate::align::{AlignmentError, Interval};
 use crate::decide::DecisionRule;
 use crate::index::{SeedLocation, Shard};
 use crate::loss::{LossBudget, MissModel};
@@ -196,9 +196,13 @@ impl<'a> Searcher<'a> {
             query.len() as u64,
             circular,
         );
-        let low_complexity: u64 = (low_complexity_mask(query).iter())
-            .map(|stretch| stretch.len() as u64)
-            .sum();
+        let masked: Vec<Interval> = (low_complexity_mask(query).into_iter())
+            .map(|stretch| Interval {
+                start: stretch.start as u64,
+                end: stretch.end as u64,
+            })
+            .collect();
+        let low_complexity = Interval::total_length(&masked);
         // A search that waited past its deadline, or was stopped meanwhile, builds no tables.
         if let Err(stopped) = control.check() {
             let mut summary = self.empty_summary(query.len() as u64, mismatches);
@@ -211,7 +215,11 @@ impl<'a> Searcher<'a> {
             let (prepared, query_kmers) = rayon::join(
                 || match config.last_stage {
                     SearchStage::Align => {
-                        PreparedQuery::new(query, circular, &config.align).map(Some)
+                        let prepared = PreparedQuery::new(query, circular, &config.align);
+                        prepared.map(|mut prepared| {
+                            prepared.low_complexity = masked.clone();
+                            Some(prepared)
+                        })
                     }
                     _ => Ok(None),
                 },
