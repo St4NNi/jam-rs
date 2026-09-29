@@ -4,7 +4,7 @@
 
 use super::contigs::counted_contig_fragments;
 use super::mosaic::build_mosaic;
-use super::segments::{maximal_segments, slice_fragment};
+use super::segments::{RunOffsets, maximal_segments, slice_fragment};
 use super::{DecideError, Fragment, Mosaic, QueryCoverage};
 use crate::align::{Alignment, EditCounts};
 use serde::{Deserialize, Serialize};
@@ -98,33 +98,23 @@ impl DecisionRule {
             && counts.reaches_identity(self.min_fragment_identity)
     }
 
-    /// Adds the counted parts of a fragment to `output`. With a fragment limit these are its
-    /// maximal segments at that identity that have `min_fragment_columns` columns; without one,
-    /// the whole fragment if it has enough columns.
+    /// Adds the counted stretches of a fragment to `output`: the whole fragment when it meets the
+    /// fragment limits, else its maximal segments at the fragment identity with enough columns.
     fn counted_parts(
         &self,
         fragment: &Fragment,
         output: &mut Vec<Fragment>,
     ) -> Result<(), DecideError> {
-        let runs = &fragment.alignment.runs;
-        if self.min_fragment_identity <= 0.0 {
-            if self.counts_fragment(&fragment.alignment) {
-                output.push(fragment.clone());
-            }
+        if self.counts_fragment(&fragment.alignment) {
+            output.push(fragment.clone());
             return Ok(());
         }
-        for (first, last) in maximal_segments(runs, self.min_fragment_identity) {
-            let columns: u64 = runs[first..last]
-                .iter()
-                .map(|run| u64::from(run.length))
-                .sum();
-            if columns < self.min_fragment_columns {
-                continue;
-            }
-            if (first, last) == (0, runs.len()) {
-                output.push(fragment.clone());
-            } else {
-                output.push(slice_fragment(fragment, first, last)?);
+        let runs = &fragment.alignment.runs;
+        let offsets = RunOffsets::new(runs, self.min_fragment_identity);
+        for (first, last) in maximal_segments(runs, &offsets) {
+            let part = slice_fragment(fragment, &offsets, first, last)?;
+            if part.alignment.counts().columns() >= self.min_fragment_columns {
+                output.push(part);
             }
         }
         Ok(())
@@ -293,6 +283,18 @@ mod tests {
         assert_eq!(decision.dropped_fragments, 0);
         assert_eq!(decision.mosaic.covered_bases, 1319);
         assert_eq!(matches_and_columns(&decision), (1280, 1319));
+    }
+
+    #[test]
+    fn whole_fragment_kept() {
+        // 539 of 542 columns match (99.4 percent) over exactly half of the query.
+        let fragment = fragment(0, &[(0, 542)], "39=3X500=");
+        let decision = DecisionRule::default()
+            .decide(1084, vec![fragment], |_| 0)
+            .unwrap();
+        assert!(decision.qualifies);
+        assert_eq!(decision.mosaic.covered_bases, 542);
+        assert_eq!(matches_and_columns(&decision), (539, 542));
     }
 
     #[test]

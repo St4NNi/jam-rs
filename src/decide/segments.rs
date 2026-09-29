@@ -6,55 +6,96 @@ use super::mosaic::project_segments;
 use super::{DecideError, Fragment};
 use crate::align::{Alignment, EditOperation, EditRun, Interval, Strand};
 
-/// The limit is turned into whole numbers with this many steps, so that a segment is tested
+/// The limit is turned into whole numbers with this many steps, so that a stretch is tested
 /// exactly: matches * (SCALE - step) >= (columns - matches) * step.
 const SCALE: i128 = 1_000_000_000;
 
-/// A candidate of the scan: runs `first..last`, with the score total before and after them.
+/// Totals of a fragment before one of its runs: score at the limit, columns, and the query and
+/// contig bases spanned.
+#[derive(Clone, Copy, Default)]
+struct Totals {
+    score: i128,
+    columns: u64,
+    query: u64,
+    contig: u64,
+}
+
+/// The run totals of a fragment, one entry before each run and one after the last.
+pub(super) struct RunOffsets(Vec<Totals>);
+
+impl RunOffsets {
+    /// Sums the runs once, with a match scoring 1 - `limit` per column and any other column
+    /// -`limit`, as whole numbers.
+    pub(super) fn new(runs: &[EditRun], limit: f64) -> Self {
+        let step = (limit.clamp(0.0, 1.0) * SCALE as f64).round() as i128;
+        let mut totals = Vec::with_capacity(runs.len() + 1);
+        let mut total = Totals::default();
+        totals.push(total);
+        for run in runs {
+            let length = u64::from(run.length);
+            let (query, contig) = match run.operation {
+                EditOperation::Match | EditOperation::Substitution => (true, true),
+                EditOperation::Insertion => (true, false),
+                EditOperation::Deletion => (false, true),
+            };
+            total.score += match run.operation {
+                EditOperation::Match => (SCALE - step) * i128::from(run.length),
+                _ => -step * i128::from(run.length),
+            };
+            total.columns += length;
+            total.query += if query { length } else { 0 };
+            total.contig += if contig { length } else { 0 };
+            totals.push(total);
+        }
+        Self(totals)
+    }
+}
+
+/// A candidate of the scan: runs `first..last`, with the score total before and after them, and
+/// the earlier candidate that the search for a join jumps to.
 struct Candidate {
     first: usize,
     last: usize,
     before: i128,
     after: i128,
+    /// The rightmost earlier candidate whose "before" is at most this one's.
+    left: Option<usize>,
 }
 
-/// The maximal segments of `runs` with identity at least `limit`, as ranges of runs (Ruzzo and
-/// Tompa 1999; ties in score are joined). A match scores 1 - limit per column and any other
-/// column -limit, so a segment scores 0 or more when matches / columns >= limit.
-pub(super) fn maximal_segments(runs: &[EditRun], limit: f64) -> Vec<(usize, usize)> {
-    let step = (limit.clamp(0.0, 1.0) * SCALE as f64).round() as i128;
-    if step >= SCALE {
-        // Only exact stretches reach a limit of 1.
-        let matches = runs.iter().enumerate();
-        let matches = matches.filter(|(_, run)| run.operation == EditOperation::Match);
-        return matches.map(|(index, _)| (index, index + 1)).collect();
-    }
+/// The maximal segments of `runs` with identity at least the limit of `offsets`, as ranges of
+/// runs (Ruzzo and Tompa 1999; ties in score are joined). The jumps along `left` make the scan
+/// linear in the number of runs.
+pub(super) fn maximal_segments(runs: &[EditRun], offsets: &RunOffsets) -> Vec<(usize, usize)> {
+    let totals = &offsets.0;
     let mut list: Vec<Candidate> = Vec::new();
-    let mut total = 0i128;
     for (index, run) in runs.iter().enumerate() {
-        let length = i128::from(run.length);
         if run.operation != EditOperation::Match {
-            total -= step * length;
             continue;
         }
         let mut item = Candidate {
             first: index,
             last: index + 1,
-            before: total,
-            after: total + (SCALE - step) * length,
+            before: totals[index].score,
+            after: totals[index + 1].score,
+            left: None,
         };
-        total = item.after;
+        let mut at = list.len().checked_sub(1);
         loop {
-            let left = list.iter().rposition(|other| other.before <= item.before);
-            match left {
-                Some(at) if list[at].after <= item.after => {
-                    item.first = list[at].first;
-                    item.before = list[at].before;
-                    list.truncate(at);
+            // Candidates skipped by a jump all have a higher "before" than the one jumped from.
+            while let Some(other) = at.filter(|&other| list[other].before > item.before) {
+                at = list[other].left;
+            }
+            match at {
+                Some(other) if list[other].after <= item.after => {
+                    item.first = list[other].first;
+                    item.before = list[other].before;
+                    at = list[other].left;
+                    list.truncate(other);
                 }
                 _ => break,
             }
         }
+        item.left = at;
         list.push(item);
     }
     list.iter().map(|item| (item.first, item.last)).collect()
@@ -63,25 +104,18 @@ pub(super) fn maximal_segments(runs: &[EditRun], limit: f64) -> Vec<(usize, usiz
 /// The part of `fragment` made of runs `first..last`, with intervals and score cut to it.
 pub(super) fn slice_fragment(
     fragment: &Fragment,
+    offsets: &RunOffsets,
     first: usize,
     last: usize,
 ) -> Result<Fragment, DecideError> {
     let alignment = &fragment.alignment;
-    let bases = |runs: &[EditRun], query: bool| -> u64 {
-        let mut total = 0;
-        for run in runs {
-            let length = u64::from(run.length);
-            total += match (run.operation, query) {
-                (EditOperation::Match | EditOperation::Substitution, _) => length,
-                (EditOperation::Insertion, true) | (EditOperation::Deletion, false) => length,
-                _ => 0,
-            };
-        }
-        total
-    };
-    let (head, body) = (&alignment.runs[..first], &alignment.runs[first..last]);
-    let (query_start, query_length) = (bases(head, true), bases(body, true));
-    let (contig_start, contig_length) = (bases(head, false), bases(body, false));
+    let (head, tail, whole) = (
+        offsets.0[first],
+        offsets.0[last],
+        offsets.0[alignment.runs.len()],
+    );
+    let (query_start, query_length) = (head.query, tail.query - head.query);
+    let (contig_start, contig_length) = (head.contig, tail.contig - head.contig);
     let query = alignment.query_interval.start + query_start;
     let contig = alignment.contig_interval;
     let contig_interval = match alignment.strand {
@@ -101,19 +135,17 @@ pub(super) fn slice_fragment(
         query_length,
         &mut query_segments,
     )?;
-    let columns: u64 = alignment.runs.iter().map(|run| u64::from(run.length)).sum();
-    let part: u64 = body.iter().map(|run| u64::from(run.length)).sum();
-    let score =
-        (i128::from(alignment.score) * i128::from(part) / i128::from(columns.max(1))) as i32;
+    let part = tail.columns - head.columns;
+    let score = i128::from(alignment.score) * i128::from(part) / i128::from(whole.columns.max(1));
     Ok(Fragment {
         contig_index: fragment.contig_index,
         query_segments,
         alignment: Alignment {
-            score,
+            score: score as i32,
             strand: alignment.strand,
             query_interval: Interval::new(query, query + query_length)?,
             contig_interval,
-            runs: body.to_vec(),
+            runs: alignment.runs[first..last].to_vec(),
         },
     })
 }
@@ -123,9 +155,11 @@ mod tests {
     use super::*;
     use crate::align::parse_cigar;
     use crate::decide::fragment::tests::fragment;
+    use rand::RngExt;
 
     fn segments(cigar: &str, limit: f64) -> Vec<(usize, usize)> {
-        maximal_segments(&parse_cigar(cigar).unwrap(), limit)
+        let runs = parse_cigar(cigar).unwrap();
+        maximal_segments(&runs, &RunOffsets::new(&runs, limit))
     }
 
     #[test]
@@ -142,22 +176,74 @@ mod tests {
         assert_eq!(segments("50=3X50=", 0.9), [(0, 3)]);
         // Too many mismatches in between keep the two stretches apart.
         assert_eq!(segments("20=30X20=", 0.9), [(0, 1), (2, 3)]);
+        // The last stretch joins the first by a jump over the middle one.
+        assert_eq!(segments("50=2X10=2X100=", 0.9), [(0, 5)]);
     }
 
     #[test]
     fn break_even_counts() {
         // Each 9 matches and 1 mismatch are exactly 0.9, so the whole stretch counts.
-        let runs = parse_cigar("9=1X9=1X9=").unwrap();
-        let found = maximal_segments(&runs, 0.9);
-        assert_eq!(found, [(0, 5)]);
+        assert_eq!(segments("9=1X9=1X9=", 0.9), [(0, 5)]);
         // A limit of 1 takes every exact run and nothing else.
         assert_eq!(segments("9=1X9=", 1.0), [(0, 1), (2, 3)]);
     }
 
     #[test]
+    fn many_runs_linear() {
+        // 116,279 blocks of 40= 3X: each block scores below 0, so no two join, and each new
+        // candidate starts below all earlier ones.
+        let runs = parse_cigar(&"40=3X".repeat(116_279)).unwrap();
+        let found = maximal_segments(&runs, &RunOffsets::new(&runs, 0.95));
+        assert_eq!(found.len(), 116_279);
+        assert!(found.iter().all(|&(first, last)| last == first + 1));
+    }
+
+    /// The scan without jumps: each new candidate searches all earlier ones.
+    fn plain_scan(runs: &[EditRun], offsets: &RunOffsets) -> Vec<(usize, usize)> {
+        let mut list: Vec<(usize, usize, i128, i128)> = Vec::new();
+        for (index, run) in runs.iter().enumerate() {
+            if run.operation != EditOperation::Match {
+                continue;
+            }
+            let (before, after) = (offsets.0[index].score, offsets.0[index + 1].score);
+            let mut item = (index, index + 1, before, after);
+            while let Some(at) = list.iter().rposition(|other| other.2 <= item.2) {
+                if list[at].3 > item.3 {
+                    break;
+                }
+                (item.0, item.2) = (list[at].0, list[at].2);
+                list.truncate(at);
+            }
+            list.push(item);
+        }
+        list.iter().map(|item| (item.0, item.1)).collect()
+    }
+
+    #[test]
+    fn jumps_match_plain() {
+        let mut rng = crate::test_support::rng(11);
+        for _ in 0..2000 {
+            let mut cigar = String::new();
+            for _ in 0..rng.random_range(1..30) {
+                let other = ["X", "I", "D"][rng.random_range(0..3)];
+                let (matches, edits) = (rng.random_range(1..40), rng.random_range(1..6));
+                cigar += &format!("{matches}={edits}{other}");
+            }
+            let runs = parse_cigar(&cigar).unwrap();
+            let limit = [0.0, 0.8, 0.9, 0.95, 1.0][rng.random_range(0..5)];
+            let offsets = RunOffsets::new(&runs, limit);
+            assert_eq!(
+                maximal_segments(&runs, &offsets),
+                plain_scan(&runs, &offsets)
+            );
+        }
+    }
+
+    #[test]
     fn slice_cuts_intervals() {
         let whole = fragment(2, &[(0, 12)], "4=2X6=");
-        let part = slice_fragment(&whole, 2, 3).unwrap();
+        let offsets = RunOffsets::new(&whole.alignment.runs, 0.9);
+        let part = slice_fragment(&whole, &offsets, 2, 3).unwrap();
         assert_eq!(part.query_segments, [Interval::new(6, 12).unwrap()]);
         assert_eq!(part.alignment.query_interval, Interval::new(6, 12).unwrap());
         assert_eq!(
@@ -168,7 +254,7 @@ mod tests {
         assert!(part.alignment.validate().is_ok());
         let mut reverse = whole.clone();
         reverse.alignment.strand = Strand::Reverse;
-        let part = slice_fragment(&reverse, 0, 1).unwrap();
+        let part = slice_fragment(&reverse, &offsets, 0, 1).unwrap();
         assert_eq!(
             part.alignment.contig_interval,
             Interval::new(8, 12).unwrap()
