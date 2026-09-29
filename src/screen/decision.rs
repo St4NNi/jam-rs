@@ -138,9 +138,13 @@ pub(super) fn decide_entries(
             }
         }
         let (name, length) = entry_contig(key)?;
-        let decision = rule.decide(length, fragments, &[], |contig| {
-            contigs[contig as usize].length
-        })?;
+        let decision = rule.decide(
+            length,
+            fragments,
+            &[],
+            || false,
+            |contig| contigs[contig as usize].length,
+        )?;
         if !decision.qualifies {
             continue;
         }

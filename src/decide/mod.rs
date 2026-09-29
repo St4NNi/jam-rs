@@ -32,6 +32,8 @@ pub enum DecideError {
     LengthOverflow,
     #[error("the query coverage is invalid: {0}")]
     InvalidCoverage(&'static str),
+    #[error("the decision was stopped")]
+    Stopped,
     #[error("the decision rule is invalid: {0}")]
     InvalidRule(&'static str),
     #[error(transparent)]

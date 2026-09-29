@@ -164,12 +164,17 @@ pub fn align_packed_entry(
             .contig_range(contig as usize)
             .map_or(0, |range| range.end - range.start)
     };
-    let decision = rule.decide(
+    let stopped = || control.check().is_err();
+    let decided = rule.decide(
         query.length(),
         fragments,
         &query.low_complexity,
+        stopped,
         contig_length,
-    )?;
+    );
+    // A stop inside the decision shows here as `Stopped`.
+    control.check()?;
+    let decision = decided?;
     Ok(AlignedEntry {
         entry: located.entry,
         decision,

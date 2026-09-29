@@ -37,7 +37,8 @@ fn decision(fragment: Fragment) -> Decision {
         min_fragment_identity: 0.0,
         ..DecisionRule::default()
     };
-    rule.decide(8, vec![fragment], &[], |_| 5_000).unwrap()
+    rule.decide(8, vec![fragment], &[], || false, |_| 5_000)
+        .unwrap()
 }
 
 #[test]
