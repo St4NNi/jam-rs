@@ -4,11 +4,22 @@
 
 use super::mosaic::project_segments;
 use super::{DecideError, Fragment};
-use crate::align::{Alignment, EditOperation, EditRun, Interval, Strand};
+use crate::align::{Alignment, EditCounts, EditOperation, EditRun, Interval, Strand};
 
 /// The limit is turned into whole numbers with this many steps, so that a stretch is tested
 /// exactly: matches * (SCALE - step) >= (columns - matches) * step.
 const SCALE: i128 = 1_000_000_000;
+
+/// The limit in steps of 1 / `SCALE`.
+fn limit_steps(limit: f64) -> i128 {
+    (limit.clamp(0.0, 1.0) * SCALE as f64).round() as i128
+}
+
+/// Whether `counts` reach the identity `limit`, taken to nine decimals and compared exactly, as
+/// the segments are.
+pub(super) fn reaches(counts: EditCounts, limit: f64) -> bool {
+    i128::from(counts.matches) * SCALE >= limit_steps(limit) * i128::from(counts.columns())
+}
 
 /// Totals of a fragment before one of its runs: score at the limit, columns, and the query and
 /// contig bases spanned.
@@ -27,7 +38,7 @@ impl RunOffsets {
     /// Sums the runs once, with a match scoring 1 - `limit` per column and any other column
     /// -`limit`, as whole numbers.
     pub(super) fn new(runs: &[EditRun], limit: f64) -> Self {
-        let step = (limit.clamp(0.0, 1.0) * SCALE as f64).round() as i128;
+        let step = limit_steps(limit);
         let mut totals = Vec::with_capacity(runs.len() + 1);
         let mut total = Totals::default();
         totals.push(total);

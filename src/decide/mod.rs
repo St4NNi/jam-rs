@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 mod contigs;
+#[cfg(test)]
+mod copy_tests;
 mod coverage;
 mod fragment;
 mod mosaic;

@@ -4,7 +4,7 @@
 
 use super::contigs::counted_contig_fragments;
 use super::mosaic::build_mosaic;
-use super::segments::{RunOffsets, maximal_segments, slice_fragment};
+use super::segments::{RunOffsets, maximal_segments, reaches, slice_fragment};
 use super::{DecideError, Fragment, Mosaic, QueryCoverage};
 use crate::align::{Alignment, EditCounts, Interval};
 use serde::{Deserialize, Serialize};
@@ -91,11 +91,10 @@ impl DecisionRule {
     }
 
     /// Whether a fragment with this alignment counts: it needs `min_fragment_columns` columns
-    /// and `min_fragment_identity`, compared exactly as `matches >= limit * columns`.
+    /// and `min_fragment_identity`, the limit taken to nine decimals and compared exactly.
     pub fn counts_fragment(&self, alignment: &Alignment) -> bool {
         let counts = alignment.counts();
-        counts.columns() >= self.min_fragment_columns
-            && counts.reaches_identity(self.min_fragment_identity)
+        counts.columns() >= self.min_fragment_columns && reaches(counts, self.min_fragment_identity)
     }
 
     /// Adds the counted stretches of a fragment to `output`: the whole fragment when it meets the
@@ -120,10 +119,9 @@ impl DecisionRule {
         Ok(())
     }
 
-    /// Builds the mosaic of the counted fragments of one entry and decides. Bases in the sorted,
-    /// disjoint `low_complexity` query intervals count toward no coverage and no identity.
-    /// `contig_length` gives a contig length for the contig rule. Fails with `Stopped` when
-    /// `stopped`, asked between fragments, returns true.
+    /// Builds the mosaic of the counted fragments of one entry and decides; `low_complexity` bases
+    /// count toward no coverage and identity. `contig_length` serves the contig rule; `Stopped`
+    /// when `stopped`, asked between fragments, returns true.
     pub fn decide(
         &self,
         query_length: u64,
@@ -154,16 +152,18 @@ impl DecisionRule {
             kept += usize::from(counted.len() > found);
         }
         let dropped_fragments = before - kept;
+        let required = self.min_query_coverage.required_bases(query_length);
         let mosaic = build_mosaic(
             query_length,
             counted,
             low_complexity,
             self.min_identity,
+            required,
             &stopped,
         )?;
         let counts = mosaic.counts;
         let qualifies = counts.columns() > 0
-            && counts.reaches_identity(self.min_identity)
+            && reaches(counts, self.min_identity)
             && self
                 .min_query_coverage
                 .accepts(mosaic.covered_bases, query_length);
