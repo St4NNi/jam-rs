@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::storage::is_changed;
 use crate::storage::{BlockCache, CacheConfig, StorageCounts};
 use crate::test_support::{Reply, Server, etag_of, runtime, serve};
 use std::sync::Barrier;
@@ -135,6 +136,33 @@ fn replaced_object_refused() {
     object.read_exact_at(20_000, &mut buffer).unwrap();
     assert_eq!(buffer, new[20_000..20_100]);
     assert_eq!(config.changes(), 1);
+}
+
+/// The reads that learn an ETag and check one count as requests, a refused check too.
+#[test]
+fn check_reads_counted() {
+    let data = pattern(1000);
+    let replaced = Arc::new(AtomicBool::new(false));
+    let server = serve({
+        let (old, replaced) = (data.clone(), Arc::clone(&replaced));
+        move |_, request| match replaced.load(Ordering::SeqCst) {
+            true => Reply::object(&old[1..], request),
+            false => Reply::object(&old, request),
+        }
+    });
+    let config = config(&server, quick());
+    let object = S3Object::open(&config, "s3://bucket/key", 1000).unwrap();
+    let before = StorageCounts::now();
+    let etag = object.refresh().unwrap().unwrap();
+    object.verify(&etag).unwrap();
+    replaced.store(true, Ordering::SeqCst);
+    assert!(is_changed(&object.verify(&etag).unwrap_err()));
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
+    let counted = StorageCounts::now().since(&before);
+    assert!(
+        counted.s3_requests >= 3 && counted.s3_bytes >= 2,
+        "{counted:?}"
+    );
 }
 
 #[test]
