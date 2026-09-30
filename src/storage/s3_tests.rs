@@ -72,8 +72,8 @@ fn cache_merges_runs() {
         assert_eq!(buffer, data[20_000..23_000]);
         cached.read_exact_at(40_000, &mut buffer[..100]).unwrap();
     }
-    // One fetch per missing run.
-    assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+    // One byte to learn the ETag, then one fetch per missing run.
+    assert_eq!(server.requests.load(Ordering::SeqCst), 3);
 }
 
 /// The first read learns the ETag and sends no If-Match; later reads send it. No HEAD is sent.

@@ -36,28 +36,42 @@ pub(crate) struct EtagBook {
 
 #[derive(Default)]
 struct Inner {
-    etags: HashMap<String, String>,
+    /// Each ETag with its version number.
+    etags: HashMap<String, (String, u64)>,
     log: Option<(PathBuf, File)>,
 }
 
 impl EtagBook {
     /// The ETag of `location`, if it is known.
     pub(crate) fn get(&self, location: &str) -> Option<String> {
-        lock(&self.inner).etags.get(location).cloned()
+        lock(&self.inner)
+            .etags
+            .get(location)
+            .map(|(etag, _)| etag.clone())
+    }
+
+    /// The version number of the ETag of `location`, if it is known.
+    pub(crate) fn version(&self, location: &str) -> Option<u64> {
+        lock(&self.inner)
+            .etags
+            .get(location)
+            .map(|(_, version)| *version)
     }
 
     /// Records `seen` as the ETag of `location` if none is known. Fails with the known ETag
     /// when it differs.
     pub(crate) fn settle(&self, location: &str, seen: &str) -> Result<(), String> {
         let mut inner = lock(&self.inner);
-        if let Some(known) = inner.etags.get(location) {
+        if let Some((known, _)) = inner.etags.get(location) {
             return if known == seen {
                 Ok(())
             } else {
                 Err(known.clone())
             };
         }
-        inner.etags.insert(location.to_string(), seen.to_string());
+        inner
+            .etags
+            .insert(location.to_string(), (seen.to_string(), version_of(seen)));
         inner.append(location, seen);
         Ok(())
     }
@@ -65,7 +79,7 @@ impl EtagBook {
     /// Forgets the ETag of `location`, if it is still `old`, and counts the change.
     pub(crate) fn changed(&self, location: &str, old: Option<&str>) {
         let mut inner = lock(&self.inner);
-        if inner.etags.get(location).map(String::as_str) == old {
+        if inner.etags.get(location).map(|(etag, _)| etag.as_str()) == old {
             inner.etags.remove(location);
             inner.append(location, "");
             self.changes.fetch_add(1, Ordering::Relaxed);
@@ -97,7 +111,8 @@ impl EtagBook {
             };
         }
         for (location, etag) in loaded {
-            inner.etags.entry(location).or_insert(etag);
+            let version = version_of(&etag);
+            inner.etags.entry(location).or_insert((etag, version));
         }
         inner.log = Some((path, file));
         Ok(())

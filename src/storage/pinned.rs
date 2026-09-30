@@ -58,6 +58,10 @@ impl ReadAt for PinnedSource {
         self.rest.size()
     }
 
+    fn version(&self) -> io::Result<u64> {
+        self.rest.version()
+    }
+
     fn will_need(&self, offset: u64, length: u64) {
         let end = offset.saturating_add(length);
         let inside = self.inside(offset, end);

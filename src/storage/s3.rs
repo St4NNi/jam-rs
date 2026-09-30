@@ -314,14 +314,11 @@ impl ReadAt for S3Object {
             return Ok(0);
         }
         // The first byte teaches the ETag if no read has yet.
-        let known = match self.etags.get(&self.location) {
-            Some(etag) => etag,
-            None => {
-                self.get(0..1)?;
-                (self.etags.get(&self.location)).ok_or_else(changed_error)?
-            }
-        };
-        Ok(version_of(&known))
+        if let Some(version) = self.etags.version(&self.location) {
+            return Ok(version);
+        }
+        self.get(0..1)?;
+        (self.etags.version(&self.location)).ok_or_else(changed_error)
     }
 }
 

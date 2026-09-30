@@ -5,7 +5,7 @@
 use super::*;
 use crate::test_support::{random_bytes, rng, runtime};
 use rand::RngExt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// The digests the test sources are cached under.
@@ -54,6 +54,53 @@ impl ReadAt for Watched {
         self.active.fetch_sub(1, Ordering::SeqCst);
         self.data.read_exact_at(at, out)
     }
+}
+
+/// A source whose bytes and version a test replaces.
+struct Replaced {
+    data: Mutex<Vec<u8>>,
+    version: AtomicU64,
+}
+
+impl ReadAt for Replaced {
+    fn size(&self) -> u64 {
+        lock(&self.data).len() as u64
+    }
+
+    fn read_exact_at(&self, at: u64, out: &mut [u8]) -> io::Result<()> {
+        lock(&self.data).read_exact_at(at, out)
+    }
+
+    fn version(&self) -> io::Result<u64> {
+        Ok(self.version.load(Ordering::SeqCst))
+    }
+}
+
+/// Blocks of an old version are not served for a new one, and `forget` drops them.
+#[test]
+fn versions_keep_blocks_apart() {
+    let old = random_bytes(&mut rng(3), 20_000);
+    let new = random_bytes(&mut rng(4), 20_000);
+    let source = Arc::new(Replaced {
+        data: Mutex::new(old.clone()),
+        version: AtomicU64::new(1),
+    });
+    let cache = cache(1 << 20, 4096);
+    let cached = cache.wrap(source.clone(), DIGEST, None).unwrap();
+    let mut out = vec![0; 20_000];
+    cached.read_exact_at(0, &mut out).unwrap();
+    assert_eq!(out, old);
+    *lock(&source.data) = new.clone();
+    source.version.store(2, Ordering::SeqCst);
+    cached.read_exact_at(0, &mut out).unwrap();
+    assert_eq!(out, new);
+    // Back at version 1 the old blocks are still there, until they are forgotten.
+    source.version.store(1, Ordering::SeqCst);
+    cached.read_exact_at(0, &mut out).unwrap();
+    assert_eq!(out, old);
+    cache.forget(DIGEST, None, 20_000, 1);
+    cached.read_exact_at(0, &mut out).unwrap();
+    assert_eq!(out, new);
 }
 
 #[test]

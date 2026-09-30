@@ -174,6 +174,7 @@ impl BlockCache {
             inner,
             file: FileKey {
                 digest: file,
+                version: 0,
                 block_bytes,
             },
             cache: Arc::clone(self),
@@ -334,6 +335,26 @@ impl BlockCache {
     }
 }
 
+impl BlockCache {
+    /// Drops the blocks of the file with SHA-256 digest `digest` and ETag version `version`,
+    /// for a file of `size` bytes in blocks of `block_bytes` (the cache's size if `None`).
+    pub fn forget(&self, digest: &str, block_bytes: Option<u64>, size: u64, version: u64) {
+        let mut file = [0u8; 32];
+        if hex::decode_to_slice(digest, &mut file).is_err() {
+            return;
+        }
+        let block_bytes = block_bytes.unwrap_or(self.block_bytes).max(1);
+        let file = FileKey {
+            digest: file,
+            version,
+            block_bytes,
+        };
+        for block in 0..size.div_ceil(block_bytes) {
+            self.blocks.remove(&file.block(block));
+        }
+    }
+}
+
 /// A source read through a [`BlockCache`].
 pub struct CachedSource {
     inner: Arc<dyn ReadAt>,
@@ -347,12 +368,13 @@ impl ReadAt for CachedSource {
         if buffer.is_empty() {
             return Ok(());
         }
-        let block_bytes = self.file.block_bytes;
+        let file = self.versioned()?;
+        let block_bytes = file.block_bytes;
         let blocks = offset / block_bytes..=(end - 1) / block_bytes;
         let mut written = 0;
         let inner = self.inner.as_ref();
         self.cache
-            .fill_batches(inner, self.file, blocks, |first, batch| {
+            .fill_batches(inner, file, blocks, |first, batch| {
                 for (at, block) in batch.iter().enumerate() {
                     let block_start = (first + at as u64) * block_bytes;
                     let from = (offset.max(block_start) - block_start) as usize;
@@ -367,6 +389,10 @@ impl ReadAt for CachedSource {
         self.inner.size()
     }
 
+    fn version(&self) -> io::Result<u64> {
+        self.inner.version()
+    }
+
     fn will_need(&self, offset: u64, length: u64) {
         self.inner.will_need(offset, length);
         let cache = &self.cache;
@@ -374,15 +400,18 @@ impl ReadAt for CachedSource {
         let Some(places) = &cache.read_ahead else {
             return;
         };
+        let Ok(file) = self.versioned() else {
+            return;
+        };
         if offset >= end {
             return;
         }
-        let (block_bytes, batch) = (self.file.block_bytes, self.file.batch());
+        let (block_bytes, batch) = (file.block_bytes, file.batch());
         let last = (end - 1) / block_bytes;
         // Each batch of blocks is fetched on its own, so long ranges use many requests at once.
         for start in (offset / block_bytes..=last).step_by(batch as usize) {
             let stop = last.min(start + batch - 1);
-            let (inner, file, cache) = (Arc::clone(&self.inner), self.file, Arc::clone(cache));
+            let (inner, cache) = (Arc::clone(&self.inner), Arc::clone(cache));
             let places = Arc::clone(places);
             let hints = Arc::clone(&cache.hints);
             let Ok(hint) = cache.runtime.block_on(hints.acquire_owned()) else {
@@ -400,6 +429,17 @@ impl ReadAt for CachedSource {
                 let _ = tokio::task::spawn_blocking(fetch).await;
             });
         }
+    }
+}
+
+impl CachedSource {
+    /// The key of the file with the version that the source has now.
+    fn versioned(&self) -> io::Result<FileKey> {
+        let version = self.inner.version()?;
+        Ok(FileKey {
+            version,
+            ..self.file
+        })
     }
 }
 
@@ -453,10 +493,12 @@ fn lock_directory(disk: &DiskConfig) -> Result<File, StorageError> {
     Ok(lock)
 }
 
-/// A file read through the cache: its SHA-256 digest and the size of its blocks.
+/// A file read through the cache: its SHA-256 digest, the version of its bytes (a number for
+/// their ETag) and the size of its blocks.
 #[derive(Clone, Copy)]
 struct FileKey {
     digest: [u8; 32],
+    version: u64,
     block_bytes: u64,
 }
 
@@ -465,6 +507,7 @@ impl FileKey {
     fn block(self, block: u64) -> BlockKey {
         BlockKey {
             file: self.digest,
+            version: self.version,
             block_bytes: self.block_bytes,
             block,
         }
@@ -476,10 +519,12 @@ impl FileKey {
     }
 }
 
-/// A block of a file, known by the file's SHA-256 digest, the block size and its number.
+/// A block of a file, known by the file's SHA-256 digest, its version, the block size and its
+/// number. Blocks of an older version are never found for a newer one.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 struct BlockKey {
     file: [u8; 32],
+    version: u64,
     block_bytes: u64,
     block: u64,
 }
@@ -488,6 +533,9 @@ impl Code for BlockKey {
     fn encode(&self, writer: &mut impl Write) -> foyer::Result<()> {
         writer
             .write_all(&self.file)
+            .map_err(foyer::Error::io_error)?;
+        writer
+            .write_all(&self.version.to_le_bytes())
             .map_err(foyer::Error::io_error)?;
         writer
             .write_all(&self.block_bytes.to_le_bytes())
@@ -511,13 +559,14 @@ impl Code for BlockKey {
         };
         Ok(Self {
             file,
+            version: number()?,
             block_bytes: number()?,
             block: number()?,
         })
     }
 
     fn estimated_size(&self) -> usize {
-        48
+        56
     }
 }
 
