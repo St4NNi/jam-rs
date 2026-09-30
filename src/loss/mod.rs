@@ -34,7 +34,8 @@ pub struct MissModel {
     w: usize,
     lengths: Vec<f64>,
     identities: Vec<f64>,
-    /// Mismatches a query k-mer may have against a seed and still hit it (0 or 1).
+    /// Mismatches a query k-mer may have against a seed and still hit it (0, 1 or 2). The model
+    /// of 2 has no table: its chance is the proven bound.
     mismatches: usize,
     /// Natural logarithm of the chance, row by length, column by identity, never rising along
     /// either.
@@ -52,6 +53,20 @@ impl MissModel {
     /// when the query holds it with at most one mismatch.
     pub fn one_mismatch(scheme: SeedScheme) -> Result<Self, LossError> {
         Self::stored_or_averaged(scheme, 1)
+    }
+
+    /// As `new`, for queries that also look up every k-mer with two substitutions. There is no
+    /// table for two mismatches, so `miss_chance` returns the proven bound.
+    pub fn two_mismatch(scheme: SeedScheme) -> Result<Self, LossError> {
+        scheme.validate()?;
+        Ok(Self {
+            k: usize::from(scheme.k),
+            w: usize::from(scheme.w),
+            lengths: Vec::new(),
+            identities: Vec::new(),
+            mismatches: 2,
+            ln_miss: Vec::new(),
+        })
     }
 
     /// As `new`, taking `layouts` random layouts per stretch length, for seeds hit with at most
@@ -114,7 +129,7 @@ impl MissModel {
         })
     }
 
-    /// Mismatches a query k-mer may have against a seed and still hit it.
+    /// Mismatches a query k-mer may have against a seed and still hit it (0, 1 or 2).
     pub fn mismatches(&self) -> usize {
         self.mismatches
     }
@@ -123,6 +138,9 @@ impl MissModel {
     /// seed hit: the table point at or below both values, as the chance falls with each of them.
     /// At identity 1 a stretch holding a whole minimizer window always has a seed.
     pub fn miss_chance(&self, stretch_bases: u64, identity: f64) -> f64 {
+        if self.mismatches == 2 {
+            return self.miss_upper_bound(stretch_bases, identity);
+        }
         let length = stretch_bases as f64;
         if identity.is_nan() || identity < self.identities[0] || length < self.lengths[0] {
             return 1.0;
@@ -154,6 +172,9 @@ impl MissModel {
         let mut missed = 1.0 - p.powi(k);
         if self.mismatches > 0 {
             missed -= f64::from(k) * (1.0 - p) * p.powi(k - 1);
+        }
+        if self.mismatches > 1 {
+            missed -= f64::from(k * (k - 1) / 2) * (1.0 - p).powi(2) * p.powi(k - 2);
         }
         let blocks = stretch_bases / (self.w + self.k - 1) as u64;
         missed.clamp(0.0, 1.0).powf(blocks as f64)

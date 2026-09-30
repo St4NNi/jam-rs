@@ -135,6 +135,8 @@ pub struct Searcher<'a> {
     shard: &'a Shard,
     /// The miss models for seeds hit exactly and for seeds hit with one mismatch.
     models: [&'a MissModel; 2],
+    /// The model for seeds hit with two mismatches, built from the k and w of the shard.
+    two_mismatch: MissModel,
     seeder: Seeder,
 }
 
@@ -157,9 +159,12 @@ impl<'a> Searcher<'a> {
             ));
         }
         let seeder = Seeder::new(scheme)?;
+        let two_mismatch = MissModel::two_mismatch(scheme)
+            .map_err(|_| SearchError::InvalidConfig("the seed scheme of the shard is invalid"))?;
         Ok(Self {
             shard,
             models: [exact, one_mismatch],
+            two_mismatch,
             seeder,
         })
     }
@@ -189,8 +194,7 @@ impl<'a> Searcher<'a> {
         let budget = config.loss_budget;
         let [exact, one_mismatch] = self.models;
         let mismatches = config.seed_mismatches.resolve(
-            exact,
-            one_mismatch,
+            [exact, one_mismatch, &self.two_mismatch],
             &config.rule,
             config.loss_budget,
             query.len() as u64,
@@ -224,7 +228,9 @@ impl<'a> Searcher<'a> {
                     _ => Ok(None),
                 },
                 || {
-                    if mismatches > 0 {
+                    if mismatches == 2 {
+                        QueryKmers::with_two_neighbours(&self.seeder, query, circular)
+                    } else if mismatches == 1 {
                         QueryKmers::with_neighbours(&self.seeder, query, circular)
                     } else {
                         QueryKmers::new(&self.seeder, query, circular)
@@ -241,7 +247,10 @@ impl<'a> Searcher<'a> {
                 events,
                 low_complexity,
             };
-            let model = self.models[mismatches];
+            let model = match mismatches {
+                2 => &self.two_mismatch,
+                _ => self.models[mismatches],
+            };
             Ok(self.run(&query_kmers, circular, model, budget, &request, start))
         };
         if config.threads == 0 {

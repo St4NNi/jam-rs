@@ -183,6 +183,30 @@ impl Seeder {
         });
     }
 
+    /// Calls `emit` for every k-mer with two substitutions against a k-mer of the query (9 k (k - 1)
+    /// / 2 per query k-mer), at the start of the query k-mer, so a seed with two mismatches is found.
+    pub fn query_neighbours_two(&self, query: &[u8], mut emit: impl FnMut(Kmer)) {
+        let k = usize::from(self.scheme.k);
+        kmers(query, self.scheme.k, |code| {
+            for first in 0..k {
+                for second in first + 1..k {
+                    for a in 1..4u64 {
+                        for b in 1..4u64 {
+                            let forward =
+                                (a << (2 * (k - 1 - first))) ^ (b << (2 * (k - 1 - second)));
+                            let reverse = (a << (2 * first)) ^ (b << (2 * second));
+                            emit(self.query_kmer(KmerCode {
+                                forward: code.forward ^ forward,
+                                reverse: code.reverse ^ reverse,
+                                ..code
+                            }));
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     /// The hash and strand of one query k-mer, salted below the entropy limit.
     fn query_kmer(&self, code: KmerCode) -> Kmer {
         let mut hash = jamhash::jamhash_u64(code.canonical());

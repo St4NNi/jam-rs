@@ -5,6 +5,7 @@
 use super::control::{SearchControl, Stopped};
 use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
+use super::seed_mismatches::SeedMismatches;
 use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Shard, build_shard};
@@ -70,6 +71,49 @@ fn search(
         search.join().unwrap().unwrap()
     });
     (summary, events)
+}
+
+/// A query whose every 21-mer differs from the entry in exactly two bases is found with two
+/// mismatches and not with one (the test seeds have k = 21).
+#[test]
+fn two_seeds_found() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0x2a);
+    let piece = random_bases(&mut random, 1_500);
+    let mut entries = vec![vec![
+        [
+            random_bases(&mut random, 2_000),
+            piece.clone(),
+            random_bases(&mut random, 2_000),
+        ]
+        .concat(),
+    ]];
+    entries.push(vec![random_bases(&mut random, 5_500)]);
+    let shard = test_shard(directory.path(), &entries);
+    // Changes 10 and 11 bases apart: every window of 21 bases holds exactly two.
+    let mut query = piece;
+    for at in (0..query.len()).step_by(21) {
+        for place in [at, at + 10] {
+            if place < query.len() {
+                query[place] = if query[place] == b'A' { b'C' } else { b'A' };
+            }
+        }
+    }
+    let mut base = config(SearchStage::Sketch);
+    base.rule.min_identity = 0.8;
+    base.rule.min_query_coverage = QueryCoverage::Share {
+        numerator: 5,
+        decimal_places: 1,
+    };
+    let mut found = |mismatches: SeedMismatches, expected: u8| {
+        base.seed_mismatches = mismatches;
+        let (summary, events) = search(&shard, &query, false, &base, false);
+        assert_eq!(summary.seed_mismatches, expected);
+        events.contains_key(&0)
+    };
+    assert!(!found(SeedMismatches::Zero, 0));
+    assert!(!found(SeedMismatches::One, 1));
+    assert!(found(SeedMismatches::Two, 2));
 }
 
 /// Entries 0 to 3 hold the query at 97% identity, entries 4 to 7 are unrelated.

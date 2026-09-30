@@ -31,16 +31,21 @@ impl QueryKmers {
     /// Hashes every k-mer of `query` with the seed scheme of the shard. The query must have at
     /// least k bases and fewer than 2^32.
     pub fn new(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
-        Self::hashed(seeder, query, circular, false)
+        Self::hashed(seeder, query, circular, 0)
     }
 
     /// As `new`, adding every k-mer one substitution away from a query k-mer at its start, so
     /// seeds with one mismatch are found too.
     pub fn with_neighbours(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
-        Self::hashed(seeder, query, circular, true)
+        Self::hashed(seeder, query, circular, 1)
     }
 
-    fn hashed(seeder: &Seeder, query: &[u8], circular: bool, neighbours: bool) -> Self {
+    /// As `with_neighbours`, adding every k-mer two substitutions away too.
+    pub fn with_two_neighbours(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
+        Self::hashed(seeder, query, circular, 2)
+    }
+
+    fn hashed(seeder: &Seeder, query: &[u8], circular: bool, neighbours: u8) -> Self {
         let k = usize::from(seeder.scheme().k);
         let mut scanned = query.to_vec();
         if circular {
@@ -53,8 +58,15 @@ impl QueryKmers {
             }
         });
         let exact = kmers.len() as u64;
-        if neighbours {
+        if neighbours >= 1 {
             seeder.query_neighbours(&scanned, |kmer| {
+                if kmer.position < query.len() as u64 {
+                    kmers.push((kmer.hash, kmer.position as u32));
+                }
+            });
+        }
+        if neighbours >= 2 {
+            seeder.query_neighbours_two(&scanned, |kmer| {
                 if kmer.position < query.len() as u64 {
                     kmers.push((kmer.hash, kmer.position as u32));
                 }

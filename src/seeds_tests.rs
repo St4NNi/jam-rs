@@ -341,6 +341,34 @@ fn neighbours_cover_substitutions() {
 }
 
 #[test]
+fn two_neighbours_cover() {
+    let query = random_bases(&mut rng(14), 40);
+    let seeder = Seeder::new(scheme(15, 10, 1.0)).unwrap();
+    let mut neighbours = std::collections::HashSet::new();
+    let mut count = 0;
+    seeder.query_neighbours_two(&query, |kmer| {
+        neighbours.insert((kmer.position, kmer.hash, kmer.reverse));
+        count += 1;
+    });
+    // 9 * C(15, 2) per k-mer, all different.
+    assert_eq!(count, (40 - 15 + 1) * 945);
+    assert_eq!(neighbours.len(), count);
+    for (first, second) in [(0, 1), (3, 17), (20, 39), (5, 6), (10, 24)] {
+        let mut changed = query.clone();
+        for at in [first, second] {
+            changed[at] = if changed[at] == b'A' { b'C' } else { b'A' };
+        }
+        seeder.query_kmers(&changed, |kmer| {
+            let start = kmer.position as usize;
+            let range = start..start + 15;
+            if range.contains(&first) && range.contains(&second) {
+                assert!(neighbours.contains(&(kmer.position, kmer.hash, kmer.reverse)));
+            }
+        });
+    }
+}
+
+#[test]
 fn entropy_counts_match() {
     let sequence = random_bases(&mut rng(13), 2000);
     for k in [1u8, 7, 25, 32] {

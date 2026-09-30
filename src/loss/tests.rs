@@ -231,6 +231,30 @@ fn block_upper_bound() {
     }
 }
 
+/// The bound for two mismatches: q_2 = 1 - sum over j <= 2 of C(25, j) (1 - p)^j p^(25 - j), and
+/// it serves as the chance too, as there is no table.
+#[test]
+fn two_mismatch_bound() {
+    let two = MissModel::two_mismatch(SeedScheme::default()).unwrap();
+    assert_eq!(two.mismatches(), 2);
+    for p in [0.8f64, 0.85, 0.95] {
+        let hit: f64 = [(1.0, 0), (25.0, 1), (300.0, 2)]
+            .iter()
+            .map(|&(ways, j)| ways * (1.0 - p).powi(j) * p.powi(25 - j))
+            .sum();
+        let q2 = 1.0 - hit;
+        assert!(
+            (two.miss_upper_bound(750, p) - q2.powi(6)).abs() < 1e-12,
+            "{p}"
+        );
+        assert!((two.miss_chance(750, p) - two.miss_upper_bound(750, p)).abs() < 1e-12);
+    }
+    assert_eq!(two.miss_upper_bound(123, 0.8), 1.0);
+    assert_eq!(two.miss_upper_bound(124, 1.0), 0.0);
+    let one = MissModel::one_mismatch(SeedScheme::default()).unwrap();
+    assert!(two.miss_upper_bound(750, 0.8) < one.miss_upper_bound(750, 0.8));
+}
+
 #[test]
 fn bad_seeding_rejected() {
     for (k, w) in [(0, 100), (33, 100), (25, 0)] {

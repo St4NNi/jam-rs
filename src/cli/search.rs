@@ -32,7 +32,11 @@ identity. auto takes 1 for a query when both hold: (a) the proven upper bound on
 exact seeds miss a present piece of the required query coverage, at the --identity value, is \
 above the loss budget, and one mismatch lowers it; (b) the extra CPU, estimated as 1 ms per query \
 k-mer, stays within 10 CPU seconds. With the default coverage this takes 1 at 80% identity for \
-queries up to about 10 kb, and at 95% for queries below about 7.2 kb.";
+queries up to about 10 kb, and at 95% for queries below about 7.2 kb. 2 also looks up every k-mer \
+two substitutions away (2,700 more lookups per k-mer). auto takes 2 instead of 1 when also: the \
+identity is below 0.9; the query has at most 1,800 k-mers; the proven bound with one mismatch is \
+above the loss budget; and two mismatches lower it. There is no stored estimate table for two \
+mismatches, so with 2 both --miss-bound modes use the proven bound.";
 
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -67,7 +71,7 @@ pub struct SearchArgs {
     /// How the coverage bound allows for stretches without a seed hit: estimate or proven
     #[arg(long, value_enum, default_value = "estimate")]
     miss_bound: MissBound,
-    /// Mismatches a query k-mer may have against a seed: auto, 0 or 1
+    /// Mismatches a query k-mer may have against a seed: auto, 0, 1 or 2
     #[arg(long, value_enum, default_value = "auto", long_help = SEED_MISMATCHES_HELP)]
     seed_mismatches: SeedMismatches,
     /// The last stage that runs
@@ -450,7 +454,11 @@ mod tests {
             parsed(&["--seed-mismatches", "1"]),
             Some(SeedMismatches::One)
         );
-        for bad in ["2", "one", ""] {
+        assert_eq!(
+            parsed(&["--seed-mismatches", "2"]),
+            Some(SeedMismatches::Two)
+        );
+        for bad in ["3", "one", ""] {
             assert_eq!(parsed(&["--seed-mismatches", bad]), None, "{bad}");
         }
     }
