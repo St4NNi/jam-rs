@@ -12,6 +12,7 @@ mod mapped;
 mod pinned;
 mod readahead;
 mod s3;
+mod slice;
 
 pub use cache::{BlockCache, CacheConfig, CachedSource, DiskConfig};
 pub use checked::Checked;
@@ -22,6 +23,7 @@ pub use local::LocalFile;
 pub use mapped::MappedFile;
 pub use pinned::PinnedSource;
 pub use s3::{ChangeHook, S3Config, S3Limits, S3Object};
+pub use slice::SliceSource;
 
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
