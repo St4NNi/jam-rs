@@ -4,9 +4,9 @@
 
 use super::*;
 use crate::storage::{BlockCache, CacheConfig, StorageCounts};
-use crate::test_support::{Reply, Server, runtime, serve};
+use crate::test_support::{Reply, Server, etag_of, runtime, serve};
 use std::sync::Barrier;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// The digest the test object is cached under.
 const DIGEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -74,6 +74,67 @@ fn cache_merges_runs() {
     }
     // One fetch per missing run.
     assert_eq!(server.requests.load(Ordering::SeqCst), 2);
+}
+
+/// The first read learns the ETag and sends no If-Match; later reads send it. No HEAD is sent.
+#[test]
+fn first_read_learns() {
+    let data = pattern(50_000);
+    let matches = Arc::new(Mutex::new(Vec::new()));
+    let server = serve({
+        let (data, matches) = (data.clone(), Arc::clone(&matches));
+        move |_, request| {
+            assert_eq!(request.method, "GET");
+            lock(&matches).push(request.headers.get("if-match").cloned());
+            Reply::object(&data, request)
+        }
+    });
+    let config = config(&server, quick());
+    let object = S3Object::open(&config, "s3://bucket/entry.packed", 50_000).unwrap();
+    object.read_exact_at(0, &mut [0; 10]).unwrap();
+    object.read_exact_at(100, &mut [0; 10]).unwrap();
+    let other = S3Object::open(&config, "s3://bucket/entry.packed", 50_000).unwrap();
+    other.read_exact_at(200, &mut [0; 10]).unwrap();
+    let etag = Some(etag_of(&data));
+    assert_eq!(*lock(&matches), vec![None, etag.clone(), etag]);
+}
+
+/// A replaced object fails one read with the retryable error; the next read learns the new
+/// ETag and gives the new bytes. The hook gets the version of the old ETag.
+#[test]
+fn replaced_object_refused() {
+    let old = pattern(50_000);
+    let new: Vec<u8> = old.iter().map(|byte| byte ^ 1).collect();
+    let replaced = Arc::new(AtomicBool::new(false));
+    let server = serve({
+        let (old, new, replaced) = (old.clone(), new.clone(), Arc::clone(&replaced));
+        move |_, request| match replaced.load(Ordering::SeqCst) {
+            true => Reply::object(&new, request),
+            false => Reply::object(&old, request),
+        }
+    });
+    let config = config(&server, quick());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let hook: ChangeHook = {
+        let seen = Arc::clone(&seen);
+        Arc::new(move |version| lock(&seen).push(version))
+    };
+    let location = "s3://bucket/entry.packed";
+    let object = S3Object::open(&config, location, 50_000)
+        .unwrap()
+        .on_change(hook);
+    let mut buffer = vec![0; 100];
+    object.read_exact_at(0, &mut buffer).unwrap();
+    assert_eq!(buffer, old[..100]);
+    replaced.store(true, Ordering::SeqCst);
+    let error = object.read_exact_at(20_000, &mut buffer).unwrap_err();
+    assert!(error.to_string().contains("changed in S3"), "{error}");
+    assert!(error.to_string().contains("retry"), "{error}");
+    assert_eq!(config.changes(), 1);
+    assert_eq!(*lock(&seen), vec![version_of(&etag_of(&old))]);
+    object.read_exact_at(20_000, &mut buffer).unwrap();
+    assert_eq!(buffer, new[20_000..20_100]);
+    assert_eq!(config.changes(), 1);
 }
 
 #[test]

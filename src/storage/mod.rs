@@ -5,6 +5,7 @@
 mod cache;
 mod counts;
 mod error;
+mod etags;
 mod local;
 mod mapped;
 mod pinned;
@@ -17,7 +18,7 @@ pub use error::StorageError;
 pub use local::LocalFile;
 pub use mapped::MappedFile;
 pub use pinned::PinnedSource;
-pub use s3::{S3Config, S3Limits, S3Object};
+pub use s3::{ChangeHook, S3Config, S3Limits, S3Object};
 
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -32,6 +33,12 @@ pub trait ReadAt: Send + Sync {
 
     /// Tells the source that a range will be read soon. It never changes what is read.
     fn will_need(&self, _offset: u64, _length: u64) {}
+
+    /// A number that names the version of the bytes; it differs when the object was replaced.
+    /// A source that never changes gives 0.
+    fn version(&self) -> io::Result<u64> {
+        Ok(0)
+    }
 }
 
 impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
@@ -45,6 +52,9 @@ impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
 
     fn will_need(&self, offset: u64, length: u64) {
         (**self).will_need(offset, length)
+    }
+    fn version(&self) -> io::Result<u64> {
+        (**self).version()
     }
 }
 

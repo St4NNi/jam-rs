@@ -3,12 +3,15 @@
 // SPDX-License-Identifier: MIT
 
 use super::counts::{count_failed, count_s3};
+use super::etags::{EtagBook, changed_error, version_of};
 use super::{ReadAt, StorageError, checked_end, lock};
 use opendal::Operator;
 use opendal::layers::{ConcurrentLimitLayer, RetryEvent, RetryLayer, TimeoutLayer};
 use opendal::services::S3;
 use std::collections::HashMap;
 use std::io;
+use std::ops::Range;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::runtime::Handle;
@@ -50,6 +53,8 @@ pub struct S3Config {
     runtime: Handle,
     /// One operator per bucket, built at the first open.
     operators: Arc<Mutex<HashMap<String, Operator>>>,
+    /// The ETags of the objects read so far.
+    etags: Arc<EtagBook>,
     /// Sends requests without signing them (tests against a local store).
     #[cfg(test)]
     unsigned: bool,
@@ -89,6 +94,7 @@ impl S3Config {
             in_flight: ConcurrentLimitLayer::new(limits.max_in_flight.max(1)),
             runtime,
             operators: Arc::default(),
+            etags: Arc::default(),
             #[cfg(test)]
             unsigned: false,
         })
@@ -107,6 +113,22 @@ impl S3Config {
             limits,
             runtime,
         )
+    }
+
+    /// Keeps the ETags of the objects in `directory` as well, so a later run knows which version
+    /// its cached blocks belong to. Call it before the first read.
+    pub fn keep_etags(&self, directory: &Path) -> Result<(), StorageError> {
+        self.etags
+            .keep(directory)
+            .map_err(|source| StorageError::File {
+                path: directory.to_path_buf(),
+                source,
+            })
+    }
+
+    /// How often an object was found replaced while it was read.
+    pub fn changes(&self) -> u64 {
+        self.etags.changes()
     }
 
     /// The same config, sending requests without signatures.
@@ -159,14 +181,22 @@ impl S3Config {
     }
 }
 
-/// An object `s3://bucket/key` of a known size. Every read is one ranged GET; opening sends no
-/// request, as the size comes from the manifest and some stores refuse HEAD.
+/// An object `s3://bucket/key` of a known size. Every read is one ranged GET; the first learns
+/// the ETag and later ones only succeed while the object has it. Opening sends no request, as
+/// the size comes from the manifest and some stores refuse HEAD.
 pub struct S3Object {
     operator: Operator,
     runtime: Handle,
+    etags: Arc<EtagBook>,
+    location: String,
     key: String,
     size: u64,
+    /// Called with the version of the old ETag when the object was found replaced.
+    on_change: Option<ChangeHook>,
 }
+
+/// What to do when an object is found replaced.
+pub type ChangeHook = Arc<dyn Fn(u64) + Send + Sync>;
 
 impl S3Object {
     /// Opens `s3://bucket/key`, an object of `size` bytes.
@@ -175,9 +205,59 @@ impl S3Object {
         Ok(Self {
             operator: config.operator(bucket)?,
             runtime: config.runtime.clone(),
+            etags: Arc::clone(&config.etags),
+            location: location.to_string(),
             key: key.to_string(),
             size,
+            on_change: None,
         })
+    }
+
+    /// The same object, calling `hook` when it is found replaced.
+    pub fn on_change(mut self, hook: ChangeHook) -> Self {
+        self.on_change = Some(hook);
+        self
+    }
+
+    /// One GET of `range`. It sends the known ETag as `If-Match`; without one it learns the ETag
+    /// from the answer.
+    fn get(&self, range: Range<u64>) -> io::Result<Vec<u8>> {
+        let known = self.etags.get(&self.location);
+        let key = &self.key;
+        let read = async {
+            if let Some(etag) = &known {
+                let read = (self.operator.read_with(key)).range(range).if_match(etag);
+                return Ok((read.await?.to_vec(), None));
+            }
+            let reader = self.operator.reader(key).await?;
+            let bytes = reader.read(range).await?.to_vec();
+            let etag = (reader.metadata()).and_then(|meta| meta.etag().map(str::to_string));
+            Ok::<_, opendal::Error>((bytes, etag))
+        };
+        let (bytes, seen) = self.runtime.block_on(read).map_err(|error| {
+            count_failed();
+            match error.kind() {
+                opendal::ErrorKind::ConditionNotMatch => self.changed(known.as_deref()),
+                _ => error.into(),
+            }
+        })?;
+        count_s3(bytes.len() as u64);
+        if known.is_none() {
+            let seen = seen.ok_or_else(|| invalid(&format!("{} has no ETag", self.location)))?;
+            if let Err(old) = self.etags.settle(&self.location, &seen) {
+                return Err(self.changed(Some(&old)));
+            }
+        }
+        Ok(bytes)
+    }
+
+    /// Forgets the ETag `old` of the object and gives the error of a replaced object.
+    fn changed(&self, old: Option<&str>) -> io::Error {
+        self.etags.changed(&self.location, old);
+        if let (Some(hook), Some(old)) = (&self.on_change, old) {
+            hook(version_of(old));
+        }
+        changed_error()
     }
 
     /// All bytes of the small object `s3://bucket/key`, read with one GET.
@@ -213,12 +293,7 @@ impl ReadAt for S3Object {
             return Ok(());
         }
         // A range with an end needs no HEAD request for the object size.
-        let read = self.operator.read_with(&self.key).range(offset..end);
-        let bytes = self
-            .runtime
-            .block_on(read.into_future())
-            .inspect_err(|_| count_failed())?;
-        count_s3(bytes.len() as u64);
+        let bytes = self.get(offset..end)?;
         if bytes.len() != buffer.len() {
             return Err(invalid(&format!(
                 "S3 returned {} bytes for a range of {}",
@@ -226,12 +301,27 @@ impl ReadAt for S3Object {
                 buffer.len()
             )));
         }
-        buffer.copy_from_slice(&bytes.to_bytes());
+        buffer.copy_from_slice(&bytes);
         Ok(())
     }
 
     fn size(&self) -> u64 {
         self.size
+    }
+
+    fn version(&self) -> io::Result<u64> {
+        if self.size == 0 {
+            return Ok(0);
+        }
+        // The first byte teaches the ETag if no read has yet.
+        let known = match self.etags.get(&self.location) {
+            Some(etag) => etag,
+            None => {
+                self.get(0..1)?;
+                (self.etags.get(&self.location)).ok_or_else(changed_error)?
+            }
+        };
+        Ok(version_of(&known))
     }
 }
 
