@@ -173,6 +173,15 @@ impl EtagBook {
         latch.done.notify_all();
     }
 
+    /// Forgets the ETag of `location` without counting a change.
+    pub(crate) fn forget(&self, location: &str) {
+        let mut inner = lock(&self.inner);
+        if inner.etags.remove(location).is_some() {
+            inner.checks.remove(location);
+            inner.append(location, "");
+        }
+    }
+
     /// How often an object was found replaced.
     pub(crate) fn changes(&self) -> u64 {
         self.changes.load(Ordering::Relaxed)

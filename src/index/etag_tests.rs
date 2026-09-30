@@ -4,8 +4,9 @@
 
 use super::*;
 use crate::storage::{BlockCache, CacheConfig, S3Config, S3Limits};
-use crate::test_support::{Seen, random_bases, rng, runtime, serve_seen, test_shard};
+use crate::test_support::{Reply, Seen, random_bases, rng, runtime, serve_seen, test_shard};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Bases per entry, about a dozen blocks of a packed file.
@@ -182,4 +183,91 @@ fn log_keeps_etags() {
             .count()
             <= 3
     );
+}
+
+/// A store over `root` whose objects all carry the ETag `"g{n}"`, where `n` is the generation
+/// that a test raises to re-upload the objects with the same bytes.
+fn serve_generations(root: &Path) -> (crate::test_support::Server, Arc<AtomicUsize>) {
+    let root = root.to_path_buf();
+    let generation = Arc::new(AtomicUsize::new(0));
+    let current = Arc::clone(&generation);
+    let server = crate::test_support::serve(move |_, request| {
+        let key = request.path.strip_prefix("/bucket/").unwrap_or_default();
+        let etag = format!("\"g{}\"", current.load(Ordering::SeqCst));
+        match std::fs::read(root.join(key)) {
+            Ok(data) => Reply::object_tagged(&data, request, etag),
+            Err(_) => Reply::status(404),
+        }
+    });
+    (server, generation)
+}
+
+fn config_for(server: &crate::test_support::Server) -> S3Config {
+    let endpoint = Some(server.address.as_str());
+    let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+    config.unwrap().unsigned()
+}
+
+/// `warm` stores the ETag a pin was downloaded under. After the object is uploaded again, the
+/// next warm finds the pin stale and downloads it again.
+#[test]
+fn warm_redownloads_pin() {
+    let directory = tempfile::tempdir().unwrap();
+    test_shard(directory.path(), &entries_of(1));
+    let (server, generation) = serve_generations(directory.path());
+    let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
+    let (manifest, digest) = location.manifest().unwrap();
+    let cache = directory.path().join("cache");
+    let parts = [Part::Packed(Some(vec!["entry1".into()]))];
+    let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &parts).unwrap();
+    warm(&location, &manifest, &plan, &cache).unwrap();
+    let etag_path = plan.etag_path(&cache, &plan.pins[0]);
+    assert_eq!(std::fs::read_to_string(&etag_path).unwrap(), "\"g0\"");
+    let pinned = std::fs::metadata(plan.pin_path(&cache, &plan.pins[0])).unwrap();
+    let before = server.requests.load(Ordering::SeqCst);
+    warm(&location, &manifest, &plan, &cache).unwrap();
+    assert_eq!(server.requests.load(Ordering::SeqCst), before + 1);
+    generation.store(1, Ordering::SeqCst);
+    warm(&location, &manifest, &plan, &cache).unwrap();
+    assert_eq!(std::fs::read_to_string(&etag_path).unwrap(), "\"g1\"");
+    assert_eq!(
+        std::fs::metadata(plan.pin_path(&cache, &plan.pins[0]))
+            .unwrap()
+            .len(),
+        pinned.len()
+    );
+}
+
+/// A pin of an object that was uploaded again is not served: the first read finds the change,
+/// the pin goes by its exact path, and the next open reads the object from S3.
+#[test]
+fn stale_pin_removed() {
+    let directory = tempfile::tempdir().unwrap();
+    let entries = entries_of(1);
+    test_shard(directory.path(), &entries);
+    let (server, generation) = serve_generations(directory.path());
+    let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
+    let (manifest, digest) = location.manifest().unwrap();
+    let cache = directory.path().join("cache");
+    let parts = [Part::Packed(Some(vec!["entry1".into()]))];
+    let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &parts).unwrap();
+    warm(&location, &manifest, &plan, &cache).unwrap();
+    let pin_path = plan.pin_path(&cache, &plan.pins[0]);
+    let options = ShardOptions {
+        pins: Some(cache.clone()),
+        ..ShardOptions::default()
+    };
+    generation.store(1, Ordering::SeqCst);
+    // A new process: it knows no ETag but the one of the pin.
+    let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
+    let open = |location: &Location| {
+        let (manifest, digest) = location.manifest().unwrap();
+        Shard::open_with_manifest(location, &options, manifest, digest)
+    };
+    let shard = open(&location).unwrap();
+    let error = read_all(&shard, &entries).unwrap_err();
+    assert!(error.to_string().contains("retry"), "{error}");
+    assert!(!pin_path.exists());
+    let shard = open(&location).unwrap();
+    read_all(&shard, &entries).unwrap();
 }

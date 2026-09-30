@@ -171,6 +171,16 @@ impl Plan {
     pub fn pin_path(&self, cache: &Path, pin: &Pin) -> PathBuf {
         cache.join(&self.shard).join(&pin.part).join(&pin.file)
     }
+
+    /// The file next to a pin that holds the ETag its bytes were downloaded under.
+    pub fn etag_path(&self, cache: &Path, pin: &Pin) -> PathBuf {
+        etag_file(&self.pin_path(cache, pin))
+    }
+}
+
+/// The file next to the pin file `path` that holds the ETag of its bytes.
+pub(crate) fn etag_file(path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.etag", path.display()))
 }
 
 /// The byte ranges that hold `part`, as pins in `place`. This is the one place that maps part

@@ -5,14 +5,14 @@
 
 use super::manifest::{FileRecord, MANIFEST_FILE, Manifest, PACKED_DIRECTORY, sha256_hex};
 use super::packed::BLOCK_BYTES;
-use super::plan::{Pin, Place, Plan};
+use super::plan::{Pin, Place, Plan, etag_file};
 use super::{AtPath, IndexError};
 use crate::storage::{
     BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config,
     S3Object,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 /// Where files lie: a local directory or an S3 prefix.
@@ -97,6 +97,42 @@ impl Location {
         })
     }
 
+    /// Keeps the ETags of S3 objects in `directory` too, so a later run finds them.
+    pub(crate) fn keep_etags(&self, directory: &Path) -> Result<(), IndexError> {
+        if let Self::S3 { config, .. } = self {
+            config.keep_etags(directory)?;
+        }
+        Ok(())
+    }
+
+    /// The ETag that the file `name` has on S3 now, learned with one byte; `None` in a
+    /// directory.
+    pub(crate) fn refresh_etag(
+        &self,
+        name: &str,
+        bytes: u64,
+    ) -> Result<Option<String>, IndexError> {
+        match self.object(name, bytes)? {
+            Some(object) => Ok(object.refresh().at(Path::new(name))?),
+            None => Ok(None),
+        }
+    }
+
+    /// Fails if the file `name` no longer has `etag` on S3, with one conditional byte; a missing
+    /// ETag fails too. Nothing is checked in a directory.
+    pub(crate) fn verify_etag(
+        &self,
+        name: &str,
+        bytes: u64,
+        etag: Option<&str>,
+    ) -> Result<(), IndexError> {
+        match (self.object(name, bytes)?, etag) {
+            (Some(object), Some(etag)) => Ok(object.verify(etag).at(Path::new(name))?),
+            (Some(_), None) => Err(IndexError::Input(format!("{name} has no ETag"))),
+            (None, _) => Ok(()),
+        }
+    }
+
     /// Opens the file `name` of `bytes` bytes. On S3 nothing is sent, as the size is known.
     pub(crate) fn open(&self, name: &str, bytes: u64) -> Result<Arc<dyn ReadAt>, IndexError> {
         Ok(match self {
@@ -105,6 +141,13 @@ impl Location {
                 Arc::new(S3Object::open(config, &format!("{prefix}{name}"), bytes)?)
             }
         })
+    }
+}
+
+/// Removes the pin file at `path` and its ETag file. Open sources keep reading what they mapped.
+pub(crate) fn remove_pin(path: &Path) {
+    for file in [path.to_path_buf(), etag_file(path)] {
+        let _ = std::fs::remove_file(file);
     }
 }
 
@@ -185,8 +228,8 @@ impl ShardFiles {
         block_bytes: Option<u64>,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
         let object = location.object(&record.path, record.bytes)?;
-        let object =
-            object.map(|object| Arc::new(object.on_change(self.forget(record, block_bytes))));
+        let hook = self.forget(name, record, block_bytes);
+        let object = object.map(|object| Arc::new(object.on_change(hook)));
         let source: Arc<dyn ReadAt> = match &object {
             Some(object) => object.clone(),
             None => location.open(&record.path, record.bytes)?,
@@ -195,6 +238,9 @@ impl ShardFiles {
         // Each pin takes its range from the source before it, so several parts of one file can
         // be pinned. A pin of the whole file is wrapped too, so its reads are counted.
         for (pin, path) in self.pins.get(name).into_iter().flatten() {
+            if !path.exists() || !self.pin_current(object.as_deref(), path) {
+                continue;
+            }
             let file = LocalFile::open(path)?;
             if file.size() != pin.bytes() || pin.end > record.bytes {
                 return Err(IndexError::format(format!(
@@ -214,11 +260,31 @@ impl ShardFiles {
         })
     }
 
-    /// What to do when the file of `record` is found replaced: drop its blocks of the old version.
-    fn forget(&self, record: &FileRecord, block_bytes: Option<u64>) -> ChangeHook {
+    /// Whether the pin file at `path` holds bytes of the version that `object` has. Its ETag is
+    /// taken as the known one if none is known. A pin without an ETag, or of another version, is
+    /// not used and removed. Pins of a directory have no ETag.
+    fn pin_current(&self, object: Option<&S3Object>, path: &Path) -> bool {
+        let Some(object) = object else {
+            return true;
+        };
+        let etag = std::fs::read_to_string(etag_file(path)).ok();
+        if etag.is_some_and(|etag| object.adopt(&etag)) {
+            return true;
+        }
+        remove_pin(path);
+        false
+    }
+
+    /// What to do when the file `name` of `record` is found replaced: drop its pins by their
+    /// exact paths, and its blocks of the old version.
+    fn forget(&self, name: &str, record: &FileRecord, block_bytes: Option<u64>) -> ChangeHook {
         let cache = self.cache.clone();
         let (digest, size) = (record.sha256.clone(), record.bytes);
+        let pins: Vec<PathBuf> = (self.pins.get(name).into_iter().flatten())
+            .map(|(_, path)| path.clone())
+            .collect();
         Arc::new(move |version| {
+            pins.iter().for_each(|path| remove_pin(path));
             if let Some(cache) = &cache {
                 cache.forget(&digest, block_bytes, size, version);
             }

@@ -251,6 +251,30 @@ impl S3Object {
         Ok(bytes)
     }
 
+    /// Takes `etag`, the ETag that a local copy of the object was read under, as the known one
+    /// if none is known. Whether it is the known one.
+    pub fn adopt(&self, etag: &str) -> bool {
+        self.etags.settle(&self.location, etag).is_ok()
+    }
+
+    /// Forgets the known ETag and learns the one that the object has now, with a GET of its
+    /// first byte.
+    pub fn refresh(&self) -> io::Result<Option<String>> {
+        self.etags.forget(&self.location);
+        if self.size > 0 {
+            self.get(0..1)?;
+        }
+        Ok(self.etags.get(&self.location))
+    }
+
+    /// Fails if the object no longer has `etag`, with a GET of its first byte that must match.
+    pub fn verify(&self, etag: &str) -> io::Result<()> {
+        if !self.adopt(etag) {
+            return Err(self.changed(self.etags.get(&self.location).as_deref()));
+        }
+        self.get(0..1).map(drop)
+    }
+
     /// Asks for the check of this object.
     pub(crate) fn begin_check(&self) -> Start {
         self.etags.begin_check(&self.location)

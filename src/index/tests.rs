@@ -410,7 +410,9 @@ fn pins_read_locally() {
         let path = plan.pin_path(&cache, pin);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let bytes = std::fs::read(directory.path().join("shard").join(&pin.file)).unwrap();
-        std::fs::write(path, &bytes[pin.start as usize..pin.end as usize]).unwrap();
+        std::fs::write(&path, &bytes[pin.start as usize..pin.end as usize]).unwrap();
+        let etag = crate::test_support::etag_of(&bytes);
+        std::fs::write(super::plan::etag_file(&path), etag).unwrap();
     }
     let options = ShardOptions {
         pins: Some(cache),

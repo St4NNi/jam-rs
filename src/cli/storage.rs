@@ -85,6 +85,9 @@ impl ShardStorage {
                 source,
             };
             let location = self.location(path)?;
+            if let Some(cache) = &args.cache {
+                location.keep_etags(cache).map_err(failed)?;
+            }
             let manifest = match location {
                 Location::S3 { .. } => Some(location.manifest().map_err(failed)?),
                 Location::Directory(_) => None,

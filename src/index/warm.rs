@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::manifest::{EntryRecord, FileRecord, Manifest, PACKED_DIRECTORY, verify_source};
-use super::plan::{PLAN_FILE, Pin, Plan};
+use super::plan::{PLAN_FILE, Pin, Plan, etag_file};
 use super::seed_file::{HEADER_BYTES, verify_part};
 use super::sources::Location;
 use super::{AtPath, IndexError};
@@ -28,6 +28,7 @@ pub fn warm(
     plan: &Plan,
     cache: &Path,
 ) -> Result<(), IndexError> {
+    location.keep_etags(cache)?;
     remove_obsolete(plan, cache)?;
     let threads = rayon::ThreadPoolBuilder::new()
         .num_threads(DOWNLOAD_THREADS)
@@ -65,9 +66,12 @@ fn file_record<'a>(manifest: &'a Manifest, file: &str) -> Result<&'a FileRecord,
         .ok_or_else(|| IndexError::Input(format!("the shard has no file {file}")))
 }
 
-/// Whether the pin file at `path` is there and intact, as `verify_pin` checks it.
+/// Whether the pin file at `path` is there and intact, as `verify_pin` checks it, and its
+/// object on S3 still has the ETag that the pin was downloaded under.
 fn is_complete(location: &Location, path: &Path, pin: &Pin, record: &FileRecord) -> bool {
-    LocalFile::open(path).is_ok_and(|file| verify_pin(location, &file, pin, record).is_ok())
+    let intact = LocalFile::open(path).is_ok_and(|f| verify_pin(location, &f, pin, record).is_ok());
+    let etag = std::fs::read_to_string(etag_file(path)).ok();
+    intact && (location.verify_etag(&pin.file, record.bytes, etag.as_deref())).is_ok()
 }
 
 /// Checks a pin file: its size, and the digest of a whole file or else the CRC-32 of every
@@ -103,6 +107,9 @@ fn download(
     pin: &Pin,
     path: &Path,
 ) -> Result<(), IndexError> {
+    let etag_path = etag_file(path);
+    let _ = std::fs::remove_file(&etag_path);
+    let etag = location.refresh_etag(&pin.file, record.bytes)?;
     let source = location.open(&pin.file, record.bytes)?;
     let parent = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent).at(parent)?;
@@ -118,7 +125,11 @@ fn download(
     })?;
     file.sync_all().at(&partial)?;
     verify_pin(location, &LocalFile::open(&partial)?, pin, record)?;
-    std::fs::rename(&partial, path).at(path)
+    std::fs::rename(&partial, path).at(path)?;
+    match etag {
+        Some(etag) => std::fs::write(&etag_path, etag).at(&etag_path),
+        None => Ok(()),
+    }
 }
 
 /// Removes the plan of the shard in `cache`, then every pin of it that `plan` does not hold, by
@@ -137,6 +148,7 @@ fn remove_obsolete(plan: &Plan, cache: &Path) -> Result<(), IndexError> {
         if planned.contains(&path) {
             continue;
         }
+        let _ = std::fs::remove_file(etag_file(&path));
         match std::fs::remove_file(&path) {
             Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
                 return Err(error).at(&path);
@@ -176,10 +188,11 @@ mod tests {
         assert_eq!(plan.pins[0].place, Place::Ram);
         warm(&location, &manifest, &plan, &cache).unwrap();
         assert_eq!(Plan::read(&cache, &digest).unwrap(), Some(plan.clone()));
-        // A second warm finds every pin in place and downloads nothing.
+        // A second warm finds every pin in place and downloads nothing; each pin only costs its
+        // check read.
         let before = asked.lock().unwrap().len();
         warm(&location, &manifest, &plan, &cache).unwrap();
-        assert_eq!(asked.lock().unwrap().len(), before);
+        assert_eq!(asked.lock().unwrap().len(), before + plan.pins.len());
         // A damaged pin is downloaded again, also a pin of part of the seeds file.
         for pin in &plan.pins[..2] {
             let pinned = plan.pin_path(&cache, pin);
@@ -207,10 +220,13 @@ mod tests {
         assert_eq!(bases, entries[2][0]);
     }
 
-    /// Bytes of all files below `directory`.
+    /// Bytes of all files below `directory`, except the ETag files.
     fn disk_bytes(directory: &Path) -> u64 {
         let listing = std::fs::read_dir(directory).unwrap();
         (listing.map(|item| item.unwrap().path()))
+            .filter(|path| {
+                !path.to_string_lossy().contains(".etag") && !path.ends_with("etags.log")
+            })
             .map(|path| match path.is_dir() {
                 true => disk_bytes(&path),
                 false => std::fs::metadata(&path).unwrap().len(),

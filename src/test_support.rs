@@ -199,10 +199,14 @@ impl Reply {
     /// ETag of `data`; a GET whose If-Match names another ETag gets 412. HEAD is refused with
     /// 403, as some stores do.
     pub fn object(data: &[u8], request: &Request) -> Self {
+        Self::object_tagged(data, request, etag_of(data))
+    }
+
+    /// Like [`Reply::object`], with the ETag `etag` for the object.
+    pub fn object_tagged(data: &[u8], request: &Request, etag: String) -> Self {
         if request.method != "GET" {
             return Self::status(403);
         }
-        let etag = etag_of(data);
         if request
             .headers
             .get("if-match")
