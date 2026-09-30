@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::counts::{count_failed, count_s3};
-use super::etags::{EtagBook, changed_error, version_of};
+use super::etags::{EtagBook, Latch, Start, changed_error, version_of};
 use super::{ReadAt, StorageError, checked_end, lock};
 use opendal::Operator;
 use opendal::layers::{ConcurrentLimitLayer, RetryEvent, RetryLayer, TimeoutLayer};
@@ -249,6 +249,38 @@ impl S3Object {
             }
         }
         Ok(bytes)
+    }
+
+    /// Asks for the check of this object.
+    pub(crate) fn begin_check(&self) -> Start {
+        self.etags.begin_check(&self.location)
+    }
+
+    /// Whether the ETag of the object is known.
+    pub(crate) fn is_known(&self) -> bool {
+        self.etags.version(&self.location).is_some()
+    }
+
+    /// How often an object of the config was found replaced.
+    pub(crate) fn changes(&self) -> u64 {
+        self.etags.changes()
+    }
+
+    /// Runs the check that `latch` waits for: a GET of the first byte. With a known ETag it runs
+    /// beside the caller; else the caller waits, as the GET teaches the ETag.
+    pub(crate) fn run_check(self: &Arc<Self>, latch: &Arc<Latch>) {
+        let (this, latch) = (Arc::clone(self), Arc::clone(latch));
+        let check = move || {
+            let result = match this.size {
+                0 => Ok(()),
+                _ => this.get(0..1).map(drop),
+            };
+            this.etags.end_check(&this.location, &latch, &result);
+        };
+        match self.is_known() {
+            true => drop(self.runtime.spawn_blocking(check)),
+            false => check(),
+        }
     }
 
     /// Forgets the ETag `old` of the object and gives the error of a replaced object.

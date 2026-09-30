@@ -78,7 +78,7 @@ impl ReadAt for Replaced {
 
 /// Blocks of an old version are not served for a new one, and `forget` drops them.
 #[test]
-fn versions_keep_blocks_apart() {
+fn versions_stay_apart() {
     let old = random_bytes(&mut rng(3), 20_000);
     let new = random_bytes(&mut rng(4), 20_000);
     let source = Arc::new(Replaced {

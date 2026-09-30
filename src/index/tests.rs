@@ -424,8 +424,10 @@ fn pins_read_locally() {
     let manifests = asked.iter().filter(|key| key.ends_with("manifest.json"));
     assert_eq!(manifests.count(), 1);
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
-    let pinned = ["shard/seeds", "shard/packed/entry1.packed"];
-    assert!(asked.iter().all(|key| !pinned.contains(&key.as_str())));
+    // A pinned file gets nothing but the check read of its first use.
+    for pinned in ["shard/seeds", "shard/packed/entry1.packed"] {
+        assert!(asked.iter().filter(|key| *key == pinned).count() <= 1);
+    }
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its

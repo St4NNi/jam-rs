@@ -228,9 +228,11 @@ impl Reply {
     }
 }
 
-/// The ETag that the test store gives `data`: a quoted digest of its bytes.
+/// The ETag that the test store gives `data`: a quoted digest of its bytes. (A CRC would not
+/// do: files that end each block with its CRC-32 all have the same one.)
 pub fn etag_of(data: &[u8]) -> String {
-    format!("\"{:08x}\"", crc32fast::hash(data))
+    use sha2::{Digest, Sha256};
+    format!("\"{}\"", hex::encode(&Sha256::digest(data)[..8]))
 }
 
 /// A store whose bucket `bucket` holds the files under `root`, keyed by their relative paths,
@@ -248,6 +250,34 @@ pub fn serve_directory(root: &Path) -> (Server, Arc<Mutex<Vec<String>>>) {
         }
     });
     (server, asked)
+}
+
+/// A request a store saw: its method, the key, and the If-Match it sent.
+#[derive(Clone, Debug)]
+pub struct Seen {
+    pub method: String,
+    pub key: String,
+    pub if_match: Option<String>,
+}
+
+/// Like [`serve_directory`], but the list holds every request with its method and If-Match.
+pub fn serve_seen(root: &Path) -> (Server, Arc<Mutex<Vec<Seen>>>) {
+    let root = root.to_path_buf();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let server = serve(move |_, request| {
+        let key = request.path.strip_prefix("/bucket/").unwrap_or_default();
+        log.lock().unwrap().push(Seen {
+            method: request.method.clone(),
+            key: key.to_string(),
+            if_match: request.headers.get("if-match").cloned(),
+        });
+        match std::fs::read(root.join(key)) {
+            Ok(data) => Reply::object(&data, request),
+            Err(_) => Reply::status(404),
+        }
+    });
+    (server, seen)
 }
 
 /// A server that answers each request with `handler(index, request)`, where `index` counts

@@ -282,8 +282,15 @@ mod tests {
         let shard = Shard::open_with(&location, &options).unwrap();
         let ids = (0..manifest.color_sets as u32).map(crate::index::ColorSetId);
         assert!(shard.seed_file().read_color_sets(ids).is_ok());
-        // Opening reads the manifest; the seeds file is read from the pin alone.
+        // Opening reads the manifest; the seeds file is read from the pin, and S3 only gets the
+        // one check read of its first use.
         let asked = asked.lock().unwrap();
-        assert!(asked[before..].iter().all(|key| !key.ends_with("seeds")));
+        assert!(
+            asked[before..]
+                .iter()
+                .filter(|key| key.ends_with("seeds"))
+                .count()
+                <= 1
+        );
     }
 }

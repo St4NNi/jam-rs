@@ -9,15 +9,26 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 /// The name of the log file in the cache directory.
 const LOG_FILE: &str = "etags.log";
 
 /// The error of a read that found its object replaced.
+#[derive(Debug, thiserror::Error)]
+#[error("the index changed in S3 while it was read; retry")]
+pub struct ChangedError;
+
 pub(crate) fn changed_error() -> io::Error {
-    io::Error::other("the index changed in S3 while it was read; retry")
+    io::Error::other(ChangedError)
+}
+
+/// Whether `error` says that an object was replaced.
+pub fn is_changed(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|inner| inner.is::<ChangedError>())
 }
 
 /// A number that names an ETag, for block keys.
@@ -34,8 +45,48 @@ pub(crate) struct EtagBook {
     changes: AtomicU64,
 }
 
+/// The check of one object, once per process: a read of its first byte that the known ETag must
+/// match.
+#[derive(Default)]
+pub(crate) struct Latch {
+    /// `None` while the check runs; then its outcome, with the reason of a failure.
+    outcome: Mutex<Option<Result<(), (bool, String)>>>,
+    done: Condvar,
+}
+
+impl Latch {
+    /// Waits for the end of the check.
+    pub(crate) fn wait(&self) -> io::Result<()> {
+        let mut outcome = lock(&self.outcome);
+        while outcome.is_none() {
+            outcome = (self.done.wait(outcome)).unwrap_or_else(PoisonError::into_inner);
+        }
+        match outcome.as_ref() {
+            Some(Err((true, _))) => Err(changed_error()),
+            Some(Err((false, reason))) => Err(io::Error::other(reason.clone())),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What a read finds when it asks for the check of its object.
+pub(crate) enum Start {
+    /// The check passed.
+    Passed,
+    /// Another read started the check; wait for its latch.
+    Wait(Arc<Latch>),
+    /// This read starts the check and must end the latch.
+    Run(Arc<Latch>),
+}
+
+enum Check {
+    Running(Arc<Latch>),
+    Passed,
+}
+
 #[derive(Default)]
 struct Inner {
+    checks: HashMap<String, Check>,
     /// Each ETag with its version number.
     etags: HashMap<String, (String, u64)>,
     log: Option<(PathBuf, File)>,
@@ -81,9 +132,45 @@ impl EtagBook {
         let mut inner = lock(&self.inner);
         if inner.etags.get(location).map(|(etag, _)| etag.as_str()) == old {
             inner.etags.remove(location);
+            inner.checks.remove(location);
             inner.append(location, "");
             self.changes.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Asks for the check of `location`.
+    pub(crate) fn begin_check(&self, location: &str) -> Start {
+        let mut inner = lock(&self.inner);
+        match inner.checks.get(location) {
+            Some(Check::Passed) => Start::Passed,
+            Some(Check::Running(latch)) => Start::Wait(Arc::clone(latch)),
+            None => {
+                let latch = Arc::<Latch>::default();
+                inner
+                    .checks
+                    .insert(location.to_string(), Check::Running(Arc::clone(&latch)));
+                Start::Run(latch)
+            }
+        }
+    }
+
+    /// Ends the check of `location` that `latch` belongs to. A passed check is not run again; a
+    /// failed one is run again by the next read.
+    pub(crate) fn end_check(&self, location: &str, latch: &Latch, result: &io::Result<()>) {
+        let mut inner = lock(&self.inner);
+        let running = matches!(inner.checks.get(location), Some(Check::Running(l)) if std::ptr::eq(&**l, latch));
+        if running {
+            match result {
+                Ok(()) => inner.checks.insert(location.to_string(), Check::Passed),
+                Err(_) => inner.checks.remove(location),
+            };
+        }
+        let failure = result
+            .as_ref()
+            .err()
+            .map(|e| (is_changed(e), e.to_string()));
+        *lock(&latch.outcome) = Some(failure.map_or(Ok(()), Err));
+        latch.done.notify_all();
     }
 
     /// How often an object was found replaced.

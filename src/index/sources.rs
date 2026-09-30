@@ -7,7 +7,10 @@ use super::manifest::{FileRecord, MANIFEST_FILE, Manifest, PACKED_DIRECTORY, sha
 use super::packed::BLOCK_BYTES;
 use super::plan::{Pin, Place, Plan};
 use super::{AtPath, IndexError};
-use crate::storage::{BlockCache, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config, S3Object};
+use crate::storage::{
+    BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config,
+    S3Object,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -81,6 +84,17 @@ impl Location {
     pub fn manifest(&self) -> Result<(Manifest, String), IndexError> {
         let bytes = self.read_whole(MANIFEST_FILE)?;
         Ok((Manifest::parse(&bytes)?, sha256_hex(&[&bytes])))
+    }
+
+    /// The S3 object of the file `name` of `bytes` bytes, or `None` in a directory. Nothing is
+    /// sent, as the size is known.
+    fn object(&self, name: &str, bytes: u64) -> Result<Option<S3Object>, IndexError> {
+        Ok(match self {
+            Self::Directory(_) => None,
+            Self::S3 { prefix, config } => {
+                Some(S3Object::open(config, &format!("{prefix}{name}"), bytes)?)
+            }
+        })
     }
 
     /// Opens the file `name` of `bytes` bytes. On S3 nothing is sent, as the size is known.
@@ -170,7 +184,13 @@ impl ShardFiles {
         record: &FileRecord,
         block_bytes: Option<u64>,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        let source = location.open(&record.path, record.bytes)?;
+        let object = location.object(&record.path, record.bytes)?;
+        let object =
+            object.map(|object| Arc::new(object.on_change(self.forget(record, block_bytes))));
+        let source: Arc<dyn ReadAt> = match &object {
+            Some(object) => object.clone(),
+            None => location.open(&record.path, record.bytes)?,
+        };
         let mut source = self.cached(source, record, block_bytes)?;
         // Each pin takes its range from the source before it, so several parts of one file can
         // be pinned. A pin of the whole file is wrapped too, so its reads are counted.
@@ -188,7 +208,21 @@ impl ShardFiles {
             };
             source = Arc::new(PinnedSource::new(local, pin.start..pin.end, source));
         }
-        Ok(source)
+        Ok(match object {
+            Some(object) => Arc::new(Checked::new(source, object)),
+            None => source,
+        })
+    }
+
+    /// What to do when the file of `record` is found replaced: drop its blocks of the old version.
+    fn forget(&self, record: &FileRecord, block_bytes: Option<u64>) -> ChangeHook {
+        let cache = self.cache.clone();
+        let (digest, size) = (record.sha256.clone(), record.bytes);
+        Arc::new(move |version| {
+            if let Some(cache) = &cache {
+                cache.forget(&digest, block_bytes, size, version);
+            }
+        })
     }
 
     /// The source of a shard file without the cache, for example to verify it.

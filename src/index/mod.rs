@@ -105,3 +105,6 @@ pub const MIN_BUCKET_BITS: u8 = 8;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod etag_tests;

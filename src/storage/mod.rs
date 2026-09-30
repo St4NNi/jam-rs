@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 mod cache;
+mod checked;
 mod counts;
 mod error;
 mod etags;
@@ -13,8 +14,10 @@ mod readahead;
 mod s3;
 
 pub use cache::{BlockCache, CacheConfig, CachedSource, DiskConfig};
+pub use checked::Checked;
 pub use counts::StorageCounts;
 pub use error::StorageError;
+pub use etags::{ChangedError, is_changed};
 pub use local::LocalFile;
 pub use mapped::MappedFile;
 pub use pinned::PinnedSource;
