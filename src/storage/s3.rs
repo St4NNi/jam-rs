@@ -159,57 +159,24 @@ impl S3Config {
     }
 }
 
-/// An object `s3://bucket/key` of a known size and ETag. Every read is one ranged GET that only
-/// succeeds while the object has that ETag, so bytes of a replaced object are never returned.
-/// Opening sends no request, as size and ETag come from the manifest and some stores refuse HEAD.
+/// An object `s3://bucket/key` of a known size. Every read is one ranged GET; opening sends no
+/// request, as the size comes from the manifest and some stores refuse HEAD.
 pub struct S3Object {
     operator: Operator,
     runtime: Handle,
-    location: String,
     key: String,
     size: u64,
-    etag: String,
 }
 
 impl S3Object {
-    /// Opens `s3://bucket/key`, an object of `size` bytes with ETag `etag`.
-    pub fn open(
-        config: &S3Config,
-        location: &str,
-        size: u64,
-        etag: &str,
-    ) -> Result<Self, StorageError> {
+    /// Opens `s3://bucket/key`, an object of `size` bytes.
+    pub fn open(config: &S3Config, location: &str, size: u64) -> Result<Self, StorageError> {
         let (bucket, key) = split_location(location)?;
         Ok(Self {
             operator: config.operator(bucket)?,
             runtime: config.runtime.clone(),
-            location: location.to_string(),
             key: key.to_string(),
             size,
-            etag: etag.to_string(),
-        })
-    }
-
-    /// The ETag of `s3://bucket/key` now, from a GET of its first byte.
-    pub fn etag(config: &S3Config, location: &str) -> Result<String, StorageError> {
-        let (bucket, key) = split_location(location)?;
-        let operator = config.operator(bucket)?;
-        let failed = |source: opendal::Error| StorageError::Object {
-            location: location.to_string(),
-            source: source.into(),
-        };
-        let etag = config.runtime.block_on(async {
-            let reader = operator.reader(key).await?;
-            let first = reader.read(0..1).await.inspect_err(|_| count_failed())?;
-            count_s3(first.len() as u64);
-            Ok(reader
-                .metadata()
-                .and_then(|metadata| metadata.etag())
-                .map(str::to_string))
-        });
-        etag.map_err(failed)?.ok_or_else(|| StorageError::Object {
-            location: location.to_string(),
-            source: io::Error::other("the store sent no ETag"),
         })
     }
 
@@ -246,19 +213,11 @@ impl ReadAt for S3Object {
             return Ok(());
         }
         // A range with an end needs no HEAD request for the object size.
-        let read = (self.operator.read_with(&self.key))
-            .range(offset..end)
-            .if_match(&self.etag);
-        let bytes = self.runtime.block_on(read.into_future()).map_err(|error| {
-            count_failed();
-            match error.kind() {
-                opendal::ErrorKind::ConditionNotMatch => invalid(&format!(
-                    "{} no longer has the ETag {} of its manifest",
-                    self.location, self.etag
-                )),
-                _ => error.into(),
-            }
-        })?;
+        let read = self.operator.read_with(&self.key).range(offset..end);
+        let bytes = self
+            .runtime
+            .block_on(read.into_future())
+            .inspect_err(|_| count_failed())?;
         count_s3(bytes.len() as u64);
         if bytes.len() != buffer.len() {
             return Err(invalid(&format!(

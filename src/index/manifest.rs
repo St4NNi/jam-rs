@@ -73,10 +73,6 @@ pub struct FileRecord {
     pub bytes: u64,
     /// SHA-256 digest, lower case hex.
     pub sha256: String,
-    /// The ETag of the uploaded object on S3, recorded by `jam index etags` after the upload;
-    /// every S3 read of the file is bound to it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub etag: Option<String>,
 }
 
 /// One entry of a shard.
@@ -254,7 +250,6 @@ mod tests {
             path: path.into(),
             bytes: 3,
             sha256: sha256_hex(&[b"abc"]),
-            etag: None,
         }
     }
 

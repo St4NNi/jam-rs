@@ -4,9 +4,9 @@
 
 use super::*;
 use crate::storage::{BlockCache, CacheConfig, StorageCounts};
-use crate::test_support::{Reply, Server, etag_of, runtime, serve};
+use crate::test_support::{Reply, Server, runtime, serve};
 use std::sync::Barrier;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The digest the test object is cached under.
 const DIGEST: &str = "1111111111111111111111111111111111111111111111111111111111111111";
@@ -43,8 +43,7 @@ fn exact_ranges_read() {
     let data = pattern(50_000);
     let server = store(data.clone());
     let location = "s3://bucket/entry.packed";
-    let etag = etag_of(&data);
-    let object = S3Object::open(&config(&server, quick()), location, 50_000, &etag).unwrap();
+    let object = S3Object::open(&config(&server, quick()), location, 50_000).unwrap();
     assert_eq!(object.size(), 50_000);
     for (offset, length) in [(0usize, 10usize), (49_990, 10), (12_345, 1000)] {
         let mut buffer = vec![0; length];
@@ -64,8 +63,7 @@ fn cache_merges_runs() {
     let data = pattern(50_000);
     let server = store(data.clone());
     let location = "s3://bucket/entry.packed";
-    let etag = etag_of(&data);
-    let object = S3Object::open(&config(&server, quick()), location, 50_000, &etag).unwrap();
+    let object = S3Object::open(&config(&server, quick()), location, 50_000).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let cached = cache.wrap(Arc::new(object), DIGEST, None).unwrap();
     let mut buffer = vec![0; 3000];
@@ -76,37 +74,6 @@ fn cache_merges_runs() {
     }
     // One fetch per missing run.
     assert_eq!(server.requests.load(Ordering::SeqCst), 2);
-}
-
-/// Reads of a replaced object fail, so its bytes never enter the block cache under the digest of
-/// the old one; once the old object is back, reads give its bytes again.
-#[test]
-fn replaced_object_refused() {
-    let old = pattern(50_000);
-    let new: Vec<u8> = old.iter().map(|byte| byte ^ 1).collect();
-    let replaced = Arc::new(AtomicBool::new(false));
-    let server = serve({
-        let (old, replaced) = (old.clone(), Arc::clone(&replaced));
-        move |_, request| match replaced.load(Ordering::SeqCst) {
-            true => Reply::object(&new, request),
-            false => Reply::object(&old, request),
-        }
-    });
-    let config = config(&server, quick());
-    let location = "s3://bucket/entry.packed";
-    let etag = S3Object::etag(&config, location).unwrap();
-    assert_eq!(etag, etag_of(&old));
-    let object = S3Object::open(&config, location, 50_000, &etag).unwrap();
-    let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
-    let cached = cache.wrap(Arc::new(object), DIGEST, None).unwrap();
-    let mut buffer = vec![0; 100];
-    cached.read_exact_at(0, &mut buffer).unwrap();
-    replaced.store(true, Ordering::SeqCst);
-    let error = cached.read_exact_at(20_000, &mut buffer).unwrap_err();
-    assert!(error.to_string().contains("ETag"), "{error}");
-    replaced.store(false, Ordering::SeqCst);
-    cached.read_exact_at(20_000, &mut buffer).unwrap();
-    assert_eq!(buffer, old[20_000..20_100]);
 }
 
 #[test]
@@ -120,7 +87,7 @@ fn bad_locations_refused() {
         "s3:///key",
         "b/key",
     ] {
-        let opened = S3Object::open(&config, location, 1, "\"e\"");
+        let opened = S3Object::open(&config, location, 1);
         assert!(
             matches!(opened, Err(StorageError::Location(_))),
             "{location}"
@@ -134,7 +101,7 @@ fn bad_locations_refused() {
 fn forbidden_not_repeated() {
     let forbidden = serve(|_, _| Reply::status(403));
     let config = config(&forbidden, quick());
-    let object = S3Object::open(&config, "s3://bucket/key", 10, "\"e\"").unwrap();
+    let object = S3Object::open(&config, "s3://bucket/key", 10).unwrap();
     assert!(object.read_exact_at(0, &mut [0; 4]).is_err());
     assert!(S3Object::read_whole(&config, "s3://bucket/key").is_err());
     // A final answer is not repeated.
@@ -154,8 +121,7 @@ fn retries_counted() {
         tries: 3,
         ..quick()
     };
-    let etag = etag_of(&pattern(1000));
-    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", 1000, &etag).unwrap();
+    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", 1000).unwrap();
     let before = StorageCounts::now();
     object.read_exact_at(0, &mut [0; 10]).unwrap();
     assert!(object.read_exact_at(0, &mut [0; 10]).is_err());
@@ -183,8 +149,7 @@ fn short_body_fails() {
         tries: 1,
         ..quick()
     };
-    let etag = etag_of(&pattern(1000));
-    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", 1000, &etag).unwrap();
+    let object = S3Object::open(&config(&server, limits), "s3://bucket/key", 1000).unwrap();
     object.read_exact_at(0, &mut [0; 10]).unwrap();
     assert!(object.read_exact_at(0, &mut [0; 10]).is_err());
 }
@@ -210,8 +175,7 @@ fn in_flight_limited() {
         ..quick()
     };
     let location = "s3://bucket/entry.packed";
-    let etag = etag_of(&data);
-    let object = S3Object::open(&config(&server, limits), location, 100_000, &etag).unwrap();
+    let object = S3Object::open(&config(&server, limits), location, 100_000).unwrap();
     std::thread::scope(|scope| {
         for thread in 0..12usize {
             let (object, data) = (&object, &data);

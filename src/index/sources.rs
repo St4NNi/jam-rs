@@ -8,9 +8,8 @@ use super::packed::BLOCK_BYTES;
 use super::plan::{Pin, Place, Plan};
 use super::{AtPath, IndexError};
 use crate::storage::{BlockCache, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config, S3Object};
-use rayon::prelude::*;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 /// Where files lie: a local directory or an S3 prefix.
@@ -84,52 +83,15 @@ impl Location {
         Ok((Manifest::parse(&bytes)?, sha256_hex(&[&bytes])))
     }
 
-    /// Opens the file of `record` under `name`. On S3 nothing is sent, as size and ETag come
-    /// from the record; a record without an ETag cannot be read from S3, since its reads could
-    /// not be bound to the object that the manifest describes.
-    pub(crate) fn open(
-        &self,
-        name: &str,
-        record: &FileRecord,
-    ) -> Result<Arc<dyn ReadAt>, IndexError> {
+    /// Opens the file `name` of `bytes` bytes. On S3 nothing is sent, as the size is known.
+    pub(crate) fn open(&self, name: &str, bytes: u64) -> Result<Arc<dyn ReadAt>, IndexError> {
         Ok(match self {
             Self::Directory(path) => Arc::new(LocalFile::open(path.join(name))?),
             Self::S3 { prefix, config } => {
-                let etag = record.etag.as_deref().ok_or_else(|| {
-                    IndexError::Input(format!(
-                        "the manifest has no ETag for {name}: run jam index etags after the upload"
-                    ))
-                })?;
-                let location = format!("{prefix}{name}");
-                Arc::new(S3Object::open(config, &location, record.bytes, etag)?)
+                Arc::new(S3Object::open(config, &format!("{prefix}{name}"), bytes)?)
             }
         })
     }
-}
-
-/// Records in the manifest of the local shard `directory` the ETag that each of its files has
-/// now under the S3 prefix `uploaded`, and rewrites the manifest. Run it right after the upload:
-/// it trusts that the objects are the uploaded files. Reads one byte of each object.
-pub fn record_etags(directory: &Path, uploaded: &Location) -> Result<Manifest, IndexError> {
-    let Location::S3 { prefix, config } = uploaded else {
-        return Err(IndexError::Input("ETags come from an s3:// prefix".into()));
-    };
-    let mut manifest = Manifest::read(directory)?;
-    let etag = |name: &str| S3Object::etag(config, &format!("{prefix}{name}"));
-    manifest.seeds.etag = Some(etag(&manifest.seeds.path)?);
-    (manifest.entries.par_iter_mut())
-        .filter_map(|entry| entry.packed.as_mut())
-        .try_for_each(|packed| {
-            packed.etag = Some(etag(&format!("{PACKED_DIRECTORY}/{}", packed.path))?);
-            Ok::<_, IndexError>(())
-        })?;
-    let bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| IndexError::format(format!("manifest: {error}")))?;
-    let path = directory.join(MANIFEST_FILE);
-    let partial = directory.join(format!("{MANIFEST_FILE}.partial"));
-    std::fs::write(&partial, bytes).at(&partial)?;
-    std::fs::rename(&partial, &path).at(&path)?;
-    Ok(manifest)
 }
 
 /// How a shard opens its files.
@@ -208,7 +170,7 @@ impl ShardFiles {
         record: &FileRecord,
         block_bytes: Option<u64>,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        let source = location.open(&record.path, record)?;
+        let source = location.open(&record.path, record.bytes)?;
         let mut source = self.cached(source, record, block_bytes)?;
         // Each pin takes its range from the source before it, so several parts of one file can
         // be pinned. A pin of the whole file is wrapped too, so its reads are counted.
@@ -231,7 +193,7 @@ impl ShardFiles {
 
     /// The source of a shard file without the cache, for example to verify it.
     pub(crate) fn open_uncached(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.location.open(&record.path, record)
+        self.location.open(&record.path, record.bytes)
     }
 
     /// The local path of a packed sequence file, or `None` when it lies on S3.
@@ -264,7 +226,7 @@ impl ShardFiles {
         &self,
         record: &FileRecord,
     ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.packed.open(&record.path, record)
+        self.packed.open(&record.path, record.bytes)
     }
 
     /// `source` read through the cache, if there is one, under the digest of its record.

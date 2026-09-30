@@ -189,7 +189,6 @@ pub(crate) fn complete_shard(
             path: name.to_string(),
             bytes: digest.bytes,
             sha256: digest.sha256,
-            etag: None,
         })
     };
     let manifest = Manifest {
@@ -375,7 +374,6 @@ fn write_packed(
         path: file_name,
         bytes: parts.iter().map(|part| part.len() as u64).sum(),
         sha256: sha256_hex(&parts),
-        etag: None,
     })
 }
 

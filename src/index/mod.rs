@@ -38,7 +38,7 @@ pub use seed_file::{
     ColorSetId, ColorSets, SEEDS_FILE, SeedFile, SeedLocation, StoredSeed, seed_key,
 };
 pub use shard::{Shard, ShardStats};
-pub use sources::{Location, ShardOptions, record_etags};
+pub use sources::{Location, ShardOptions};
 pub use warm::warm;
 
 /// Errors of the index module.

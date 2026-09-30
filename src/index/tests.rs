@@ -365,9 +365,6 @@ fn shard_on_s3() {
     assert!(Location::s3("s3:///shard", &config).is_err());
     assert!(Location::s3("/local/shard", &config).is_err());
     let location = Location::s3("s3://bucket/shard", &config).unwrap();
-    // Without recorded ETags, reads could not be bound to the uploaded objects.
-    assert!(Shard::open_with(&location, &ShardOptions::default()).is_err());
-    record_etags(&directory.path().join("shard"), &location).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let shard = Shard::open_with(&location, &ShardOptions::default()).unwrap();
     assert!(shard.packed_path(0).is_err());
@@ -391,14 +388,11 @@ fn pins_read_locally() {
     use crate::test_support::serve_directory;
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(3);
-    test_shard(directory.path(), &entries);
+    let local = test_shard(directory.path(), &entries);
     let (server, asked) = serve_directory(directory.path());
     let endpoint = Some(server.address.as_str());
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
     let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
-    record_etags(&directory.path().join("shard"), &location).unwrap();
-    let local = Shard::open(&directory.path().join("shard")).unwrap();
-    asked.lock().unwrap().clear();
     let manifest = local.manifest();
     let mut pins = part_pins(manifest, &Part::Sketch, Place::Ram).unwrap();
     pins.extend(part_pins(manifest, &Part::Locators, Place::Ssd).unwrap());

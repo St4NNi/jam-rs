@@ -181,7 +181,6 @@ impl Drop for ShardStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::record_etags;
     use crate::test_support::{random_bases, rng, runtime, serve_directory, test_shard};
 
     #[test]
@@ -191,14 +190,11 @@ mod tests {
         let entries: Vec<Vec<Vec<u8>>> = (0..2)
             .map(|_| vec![random_bases(&mut rng, 20_000)])
             .collect();
-        test_shard(directory.path(), &entries);
+        let local = test_shard(directory.path(), &entries);
         let (server, asked) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let config = config.unwrap().unsigned();
-        let shard = directory.path().join("shard");
-        record_etags(&shard, &Location::s3("s3://bucket/shard", &config).unwrap()).unwrap();
-        let local = Shard::open(&shard).unwrap();
         let cache = directory.path().join("cache");
         let args = CacheArgs {
             cache: Some(cache.clone()),
