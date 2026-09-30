@@ -21,7 +21,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Sequence bytes collected before a parallel round, in one-entry-per-record mode.
+/// Sequence bytes collected before a parallel round, in singleton mode.
 const RECORD_ROUND_BYTES: usize = 256 << 20;
 
 /// One input file and the name of its entry.
@@ -64,7 +64,7 @@ pub struct BuildOptions {
     pub temporary_directory: PathBuf,
     /// Make each FASTA record an entry, named by its first word, instead of each file; the names
     /// of the inputs are then not used.
-    pub entry_per_record: bool,
+    pub singleton: bool,
     /// Write only the sketch part of the seeds file and no packed sequences, so the shard
     /// answers stage 1 only.
     pub sketch_only: bool,
@@ -80,7 +80,7 @@ pub fn build_shard(
     if options.threads == 0 {
         return Err(IndexError::Input("at least one thread is needed".into()));
     }
-    if !options.entry_per_record {
+    if !options.singleton {
         check_names(inputs.iter().map(|input| input.name.as_str()))?;
     }
     let pool = rayon::ThreadPoolBuilder::new()
@@ -98,7 +98,7 @@ pub fn build_shard(
             spill: SeedSpill::create(&options.temporary_directory)?,
         };
         pool.install(|| {
-            let built = if options.entry_per_record {
+            let built = if options.singleton {
                 index_records(inputs, &context)?
             } else {
                 index_files(inputs, &context)?

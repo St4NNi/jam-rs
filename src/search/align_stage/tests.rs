@@ -59,7 +59,7 @@ pub(super) fn build(directory: &Path, entries: &[EntryContigs]) -> Shard {
         bucket_bits: Some(8),
         threads: 2,
         temporary_directory: directory.to_path_buf(),
-        entry_per_record: false,
+        singleton: false,
         sketch_only: false,
     };
     let root = directory.join("shard");

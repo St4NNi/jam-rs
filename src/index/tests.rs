@@ -283,7 +283,7 @@ fn records_as_entries() {
     std::fs::write(&path, text.collect::<Vec<_>>().concat()).unwrap();
     let output = directory.path().join("shard");
     let options = BuildOptions {
-        entry_per_record: true,
+        singleton: true,
         ..options(directory.path(), 3)
     };
     let manifest = build_shard(&[EntryInput::from_path(path)], &output, &options).unwrap();

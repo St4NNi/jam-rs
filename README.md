@@ -47,7 +47,7 @@ Build an index from FASTA files (plain or compressed). Each file becomes one ent
     jam index build -o plasmids.shard -t 8 plasmids/*.fa
 
 The output directory must not exist yet. Use `-l LIST` for a file with one FASTA path per line,
-or `--entry-per-record` to make each FASTA record its own entry.
+or `--singleton` to make each FASTA record its own entry.
 
 Search it with the records of a query file:
 

@@ -190,7 +190,7 @@ mod tests {
             bucket_bits: Some(8),
             threads: 1,
             temporary_directory: directory.to_path_buf(),
-            entry_per_record: false,
+            singleton: false,
             sketch_only: false,
         };
         let root = directory.join("shard");
