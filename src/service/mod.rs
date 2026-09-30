@@ -25,7 +25,7 @@ pub use endpoint::{bind, parse_address};
 pub use protocol::{ALPN, MAX_MESSAGE_BYTES, Reply, SearchRequest};
 pub use server::{Server, ServerLimits};
 pub use settings::SearchSettings;
-pub use shard::ServedShard;
+pub use shard::{Reopen, ServedShard};
 
 /// Errors of serving and of remote searches.
 #[derive(Debug, Error)]

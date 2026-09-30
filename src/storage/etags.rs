@@ -182,6 +182,21 @@ impl EtagBook {
         }
     }
 
+    /// Forgets the ETags of all objects whose location starts with `prefix`, without counting a
+    /// change.
+    pub(crate) fn forget_prefix(&self, prefix: &str) {
+        let mut inner = lock(&self.inner);
+        let found: Vec<String> = (inner.etags.keys())
+            .filter(|location| location.starts_with(prefix))
+            .cloned()
+            .collect();
+        for location in found {
+            inner.etags.remove(&location);
+            inner.checks.remove(&location);
+            inner.append(&location, "");
+        }
+    }
+
     /// How often an object was found replaced.
     pub(crate) fn changes(&self) -> u64 {
         self.changes.load(Ordering::Relaxed)

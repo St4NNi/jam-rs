@@ -24,7 +24,7 @@ const READ_AHEAD: usize = 256;
 const BLOCKS_DIRECTORY: &str = "blocks";
 
 /// Where shards on S3 keep parts locally.
-#[derive(Debug, Default, Args)]
+#[derive(Clone, Debug, Default, Args)]
 pub(super) struct CacheArgs {
     /// A cache directory, warmed by `jam index warm`: shards on S3 read their pinned parts from
     /// there, and the block cache keeps blocks there for later runs
@@ -104,7 +104,8 @@ impl ShardStorage {
             }
             opened.push((path, location, manifest));
         }
-        if opened.iter().any(|(_, _, manifest)| manifest.is_some()) {
+        // A shard opened again, for example after its upload changed, keeps the block cache.
+        if self.cache.is_none() && opened.iter().any(|(_, _, manifest)| manifest.is_some()) {
             self.cache = Some(self.block_cache(&plans, args)?);
         }
         let options = ShardOptions {
@@ -224,5 +225,27 @@ mod tests {
         open(true);
         let asked = asked.lock().unwrap();
         assert!(asked[before..].iter().all(|key| !key.ends_with("seeds")));
+    }
+
+    /// A server opens its shard again with the same storage, so with the same block cache.
+    #[test]
+    fn shard_opened_twice() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut rng = rng(10);
+        let entries = vec![vec![random_bases(&mut rng, 20_000)]];
+        test_shard(directory.path(), &entries);
+        let (server, _) = serve_directory(directory.path());
+        let endpoint = Some(server.address.as_str());
+        let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+        let args = CacheArgs {
+            cache: Some(directory.path().join("cache")),
+            memory: Some(ByteSize::gib(1)),
+            disk: Some(ByteSize::gib(1)),
+        };
+        let mut storage = ShardStorage::new().unwrap();
+        assert!(storage.s3.set(config.unwrap().unsigned()).is_ok());
+        let paths = [PathBuf::from("s3://bucket/shard")];
+        assert_eq!(storage.open_all(&paths, &args, true).unwrap().len(), 1);
+        assert_eq!(storage.open_all(&paths, &args, true).unwrap().len(), 1);
     }
 }

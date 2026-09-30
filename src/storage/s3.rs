@@ -126,6 +126,12 @@ impl S3Config {
             })
     }
 
+    /// Forgets the ETags of all objects below the prefix `s3://bucket/key/`. They are learned
+    /// again at the next read.
+    pub fn forget_etags(&self, prefix: &str) {
+        self.etags.forget_prefix(prefix);
+    }
+
     /// How often an object was found replaced while it was read.
     pub fn changes(&self) -> u64 {
         self.etags.changes()

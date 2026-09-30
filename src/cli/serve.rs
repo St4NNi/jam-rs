@@ -7,7 +7,9 @@ use super::CliError;
 use super::storage::{CacheArgs, ShardStorage};
 use crate::loss::MissModel;
 use crate::search::SearchConfig;
-use crate::service::{ServedShard, Server, ServerLimits, ServiceError, bind, parse_address};
+use crate::service::{
+    Reopen, ServedShard, Server, ServerLimits, ServiceError, bind, parse_address,
+};
 use clap::Args;
 use iroh::{EndpointAddr, SecretKey};
 use std::fs::OpenOptions;
@@ -15,6 +17,7 @@ use std::io::{ErrorKind, Write};
 use std::net::SocketAddr;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::signal::unix::{SignalKind, signal};
 
 /// The options of `jam serve`.
@@ -53,8 +56,9 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         ));
     }
     let key = secret_key(&args.key)?;
-    let mut storage = ShardStorage::new()?;
-    let mut shards = storage.open_all(std::slice::from_ref(&args.shard), &args.cache, true)?;
+    let storage = Arc::new(Mutex::new(ShardStorage::new()?));
+    let mut shards =
+        lock(&storage).open_all(std::slice::from_ref(&args.shard), &args.cache, true)?;
     let shard = shards
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
@@ -67,7 +71,7 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         || args.shard.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     );
-    let shard = ServedShard::new(name, shard, models)?;
+    let shard = ServedShard::new(name, shard, models)?.with_reopen(reopen(&storage, args));
     let config = SearchConfig {
         threads: args.threads.unwrap_or(0),
         ..SearchConfig::default()
@@ -89,6 +93,32 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         stopped.map_err(ServiceError::from)?;
         shutdown.map_err(|error| ServiceError::Io(std::io::Error::other(error)))?;
         Ok(())
+    })
+}
+
+fn lock(storage: &Mutex<ShardStorage>) -> std::sync::MutexGuard<'_, ShardStorage> {
+    storage
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Opens the shard again, with a fresh read of its manifest, for when an object of it on S3 was
+/// replaced.
+fn reopen(storage: &Arc<Mutex<ShardStorage>>, args: &ServeArgs) -> Reopen {
+    let (storage, shard, cache) = (
+        Arc::downgrade(storage),
+        args.shard.clone(),
+        args.cache.clone(),
+    );
+    Box::new(move || {
+        let storage = storage.upgrade()?;
+        let opened = lock(&storage).open_all(std::slice::from_ref(&shard), &cache, true);
+        opened
+            .map(|mut shards| shards.pop())
+            .unwrap_or_else(|error| {
+                eprintln!("jam serve: the shard could not be opened again: {error}");
+                None
+            })
     })
 }
 

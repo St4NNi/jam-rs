@@ -10,17 +10,23 @@ use crate::report::{Record, ReportError};
 use crate::search::{EntryEvent, SearchConfig, SearchControl, Searcher};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::sync_channel;
+use std::sync::{Arc, Mutex, PoisonError};
 use tokio::sync::mpsc;
 
 /// Entry events held between the search and their messages.
 const EVENT_QUEUE: usize = 64;
 
+/// Opens the shard again; `None` when it cannot be opened.
+pub type Reopen = Box<dyn Fn() -> Option<Shard> + Send + Sync>;
+
 /// An open shard with its name and miss models.
 pub struct ServedShard {
     name: String,
-    shard: Shard,
+    shard: Mutex<Arc<Shard>>,
     /// The miss models for seeds hit exactly and for seeds hit with one mismatch.
     models: [MissModel; 2],
+    /// How to open the shard again once an S3 object of it was replaced.
+    reopen: Option<Reopen>,
 }
 
 impl ServedShard {
@@ -30,9 +36,40 @@ impl ServedShard {
         Searcher::new(&shard, &models[0], &models[1])?;
         Ok(Self {
             name,
-            shard,
+            shard: Mutex::new(Arc::new(shard)),
             models,
+            reopen: None,
         })
+    }
+
+    /// The same shard, opened again with `reopen` after an S3 object of it was replaced, so a
+    /// shard uploaded again is served without a restart.
+    pub fn with_reopen(mut self, reopen: Reopen) -> Self {
+        self.reopen = Some(reopen);
+        self
+    }
+
+    /// The shard that searches use now.
+    fn current(&self) -> Arc<Shard> {
+        let shard = self.shard.lock().unwrap_or_else(PoisonError::into_inner);
+        Arc::clone(&shard)
+    }
+
+    /// Opens the shard again if `searched` is stale and no search did it yet. Searches that
+    /// fail for the replaced object end with a retryable error; the next one finds the new shard.
+    fn refresh(&self, searched: &Arc<Shard>) {
+        let Some(reopen) = &self.reopen else {
+            return;
+        };
+        if !searched.is_stale() {
+            return;
+        }
+        let mut shard = self.shard.lock().unwrap_or_else(PoisonError::into_inner);
+        if Arc::ptr_eq(&shard, searched)
+            && let Some(opened) = reopen()
+        {
+            *shard = Arc::new(opened);
+        }
     }
 
     /// The name the records of this shard carry.
@@ -50,10 +87,12 @@ impl ServedShard {
         control: SearchControl<'_>,
         replies: &mpsc::Sender<Reply>,
     ) {
-        let summary = match self.search_events(request, config, control, replies) {
+        let shard = self.current();
+        let summary = match self.search_events(&shard, request, config, control, replies) {
             Ok(summary) => Reply::record(self.name.clone(), summary),
             Err(error) => Reply::failed(self.name.clone(), request, &error),
         };
+        self.refresh(&shard);
         if replies.blocking_send(summary).is_err() {
             control.stop.store(true, Ordering::Relaxed);
         }
@@ -63,13 +102,14 @@ impl ServedShard {
     /// drops the event receiver, which also stops the search.
     fn search_events(
         &self,
+        shard: &Shard,
         request: &SearchRequest,
         config: &SearchConfig,
         control: SearchControl<'_>,
         replies: &mpsc::Sender<Reply>,
     ) -> Result<Record, ServiceError> {
         // A searcher borrows the shard, so each search builds its own; that is cheap.
-        let searcher = Searcher::new(&self.shard, &self.models[0], &self.models[1])?;
+        let searcher = Searcher::new(shard, &self.models[0], &self.models[1])?;
         let (events, received) = sync_channel(EVENT_QUEUE);
         let query = &request.query_name;
         std::thread::scope(|scope| {
@@ -77,7 +117,7 @@ impl ServedShard {
                 searcher.search(&request.bases, request.circular, config, control, &events)
             });
             for event in received {
-                let reply = Reply::record(self.name.clone(), self.record(query, &event)?);
+                let reply = Reply::record(self.name.clone(), self.record(shard, query, &event)?);
                 if replies.blocking_send(reply).is_err() {
                     control.stop.store(true, Ordering::Relaxed);
                     break;
@@ -88,9 +128,14 @@ impl ServedShard {
         })
     }
 
-    fn record(&self, query: &str, event: &EntryEvent) -> Result<Record, ServiceError> {
+    fn record(
+        &self,
+        shard: &Shard,
+        query: &str,
+        event: &EntryEvent,
+    ) -> Result<Record, ServiceError> {
         let index = event.entry();
-        let entry = (self.shard.manifest().entries.get(index as usize))
+        let entry = (shard.manifest().entries.get(index as usize))
             .ok_or(ReportError::UnknownEntry(index))?;
         Ok(Record::from_event(query, &entry.name, event)?)
     }

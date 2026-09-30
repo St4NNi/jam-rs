@@ -127,12 +127,10 @@ fn replaced_between_searches() {
     assert!(error.to_string().contains("retry"), "{error}");
     assert_eq!(config.changes(), 1);
     assert!(read_range(&shard, &old, 0, 0..1_000).is_err());
-    // The seeds file was replaced too, and its old ETag is still known, so the first open
-    // learns that; the next open works.
-    assert!(Shard::open_with(&location, &cached(&cache)).is_err());
+    // The change made the shard forget the ETags of all its files, also of the seeds file.
     let shard = Shard::open_with(&location, &cached(&cache)).unwrap();
     read_all(&shard, &new).unwrap();
-    assert_eq!(config.changes(), 2);
+    assert_eq!(config.changes(), 1);
 }
 
 /// A later run finds the ETags in the cache directory, so its cached blocks are used, and its

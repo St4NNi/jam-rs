@@ -50,11 +50,15 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
     let options = build_options(directory, 2);
     let output = directory.join(name);
     build_shard(&inputs, &output, &options).unwrap();
+    ServedShard::new(name.into(), Shard::open(&output).unwrap(), models()).unwrap()
+}
+
+/// The miss models of the shards that `build` makes.
+fn models() -> [MissModel; 2] {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    let scheme = options.parameters.scheme;
+    let scheme = build_options(Path::new("."), 2).parameters.scheme;
     let model = MODEL.get_or_init(|| MissModel::with_layouts(scheme, 200, 0).unwrap());
-    let models = [model.clone(), one_mismatch_model().clone()];
-    ServedShard::new(name.into(), Shard::open(&output).unwrap(), models).unwrap()
+    [model.clone(), one_mismatch_model().clone()]
 }
 
 /// 90% query coverage at 95% identity, on two threads.
@@ -394,4 +398,40 @@ fn records_cross_postcard() {
         let bytes = postcard::to_allocvec(&message).unwrap();
         assert_eq!(postcard::from_bytes::<Reply>(&bytes).unwrap(), message);
     }
+}
+
+/// A shard on S3 whose objects are uploaded again: the search that meets the change fails with
+/// the retryable error, the server opens the shard again, and the next search gives the results
+/// of the new shard.
+#[test]
+fn replaced_shard_reopened() {
+    use crate::index::{Location, ShardOptions};
+    use crate::storage::{S3Config, S3Limits};
+    use crate::test_support::{runtime, serve_seen};
+    let (served, new) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    build(served.path(), "shard", 1);
+    let expected = local_lines(&build(new.path(), "shard", 2));
+    let (server, _) = serve_seen(served.path());
+    let endpoint = Some(server.address.as_str());
+    let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
+    let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+    let open = move || Shard::open_with(&location, &ShardOptions::default());
+    let shard = ServedShard::new("shard".into(), open().unwrap(), models()).unwrap();
+    let shard = shard.with_reopen(Box::new(move || open().ok()));
+    let before = local_lines(&shard);
+    assert_ne!(before, expected);
+    assert_eq!(local_lines(&shard), before);
+    for name in [
+        "manifest.json",
+        "seeds",
+        "packed/shard_entry0.packed",
+        "packed/shard_entry1.packed",
+        "packed/shard_entry2.packed",
+    ] {
+        let from = new.path().join("shard").join(name);
+        std::fs::copy(from, served.path().join("shard").join(name)).unwrap();
+    }
+    let failed = local_lines(&shard).concat();
+    assert!(failed.contains("retry"), "{failed}");
+    assert_eq!(local_lines(&shard), expected);
 }

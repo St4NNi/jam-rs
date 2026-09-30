@@ -48,6 +48,12 @@ pub struct Shard {
 }
 
 impl Shard {
+    /// Whether an S3 object was found replaced since the shard was opened. Its reads then fail
+    /// until the shard is opened again, with a new manifest.
+    pub fn is_stale(&self) -> bool {
+        self.files.is_stale()
+    }
+
     /// Opens the shard in `directory`, with its packed sequences in `directory/packed`.
     pub fn open(directory: &Path) -> Result<Self, IndexError> {
         let location = Location::Directory(directory.to_path_buf());

@@ -97,6 +97,21 @@ impl Location {
         })
     }
 
+    /// How often an S3 object of the store was found replaced; 0 in a directory.
+    pub(crate) fn changes(&self) -> u64 {
+        match self {
+            Self::Directory(_) => 0,
+            Self::S3 { config, .. } => config.changes(),
+        }
+    }
+
+    /// Forgets the ETags of all S3 objects below this location.
+    fn forget_etags(&self) {
+        if let Self::S3 { prefix, config } = self {
+            config.forget_etags(prefix);
+        }
+    }
+
     /// Keeps the ETags of S3 objects in `directory` too, so a later run finds them.
     pub(crate) fn keep_etags(&self, directory: &Path) -> Result<(), IndexError> {
         if let Self::S3 { config, .. } = self {
@@ -174,6 +189,8 @@ pub(crate) struct ShardFiles {
     pins: HashMap<String, Vec<(Pin, PathBuf)>>,
     /// Packed sequences kept open per entry when they are cached or remote; empty otherwise.
     opened: Vec<OnceLock<Arc<dyn ReadAt>>>,
+    /// The replaced objects counted when the files were opened.
+    changes: u64,
 }
 
 impl ShardFiles {
@@ -209,7 +226,13 @@ impl ShardFiles {
             cache: options.cache.clone(),
             pins,
             opened,
+            changes: location.changes(),
         })
+    }
+
+    /// Whether an object was found replaced since the files were opened. Their reads then fail.
+    pub(crate) fn is_stale(&self) -> bool {
+        self.location.changes() != self.changes
     }
 
     /// The source of a shard file: its pinned range locally, the rest through the cache if
@@ -275,15 +298,18 @@ impl ShardFiles {
         false
     }
 
-    /// What to do when the file `name` of `record` is found replaced: drop its pins by their
-    /// exact paths, and its blocks of the old version.
+    /// What to do when the file `name` of `record` is found replaced: forget the ETags of the
+    /// shard, since an upload replaces all its files, drop the pins of the file by their exact
+    /// paths, and drop its blocks of the old version.
     fn forget(&self, name: &str, record: &FileRecord, block_bytes: Option<u64>) -> ChangeHook {
         let cache = self.cache.clone();
         let (digest, size) = (record.sha256.clone(), record.bytes);
         let pins: Vec<PathBuf> = (self.pins.get(name).into_iter().flatten())
             .map(|(_, path)| path.clone())
             .collect();
+        let locations = [self.location.clone(), self.packed.clone()];
         Arc::new(move |version| {
+            locations.iter().for_each(Location::forget_etags);
             pins.iter().for_each(|path| remove_pin(path));
             if let Some(cache) = &cache {
                 cache.forget(&digest, block_bytes, size, version);
