@@ -158,6 +158,13 @@ screen`, `jam serve`, `jam stats` and `jam index warm`. Credentials come from th
 environment variables, and the endpoint from `AWS_ENDPOINT_URL`. jam never sends HEAD requests:
 it takes object sizes from the manifest.
 
+jam learns the ETag of each file from its first read and sends it as `If-Match` with every later
+read. Cached blocks and pins belong to one ETag. With `--cache`, the ETags are kept in the cache
+directory, and the first use of each file in a run checks it with one byte. If a file was
+uploaded again, the search ends with `the index changed in S3 while it was read; retry`. Run it
+again, and it reads the new files. `jam serve` opens the shard again by itself. A pin made for
+the old file is removed; run `jam index warm` again to pin the new file.
+
 Reading from S3 is slow for the first requests. Two caches help:
 
 - **Pins.** `jam index warm` copies parts of a shard into a local cache directory. A search or
