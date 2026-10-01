@@ -16,6 +16,8 @@ mod plan;
 mod reshard;
 mod seed_file;
 mod seed_writer;
+#[allow(dead_code)]
+mod sequence_file;
 mod shard;
 mod sources;
 mod spill;

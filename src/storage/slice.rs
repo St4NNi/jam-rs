@@ -49,7 +49,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slice_reads_its_range() {
+    fn slice_reads_range() {
         let data: Vec<u8> = (0..=255).cycle().take(10_000).collect();
         let source = SliceSource::new(Arc::new(data.clone()), 4_096..6_000).unwrap();
         assert_eq!(source.size(), 1_904);
@@ -58,7 +58,8 @@ mod tests {
         assert_eq!(buffer, data[5_900..6_000]);
         assert!(source.read_exact_at(1_805, &mut buffer).is_err());
         assert!(SliceSource::new(Arc::new(data.clone()), 9_000..10_001).is_err());
-        assert!(SliceSource::new(Arc::new(data), 5..4).is_err());
+        let (start, end) = (5, 4);
+        assert!(SliceSource::new(Arc::new(data), start..end).is_err());
         source.will_need(1_900, 100);
     }
 }
