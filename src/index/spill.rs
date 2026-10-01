@@ -5,7 +5,7 @@
 
 use super::buckets::{encode_locator_bucket, encode_sketch_bucket};
 use super::seed_file::{SEED_KEY_BITS, encode_color_set};
-use super::seed_writer::{SeedFileShape, SeedWriter};
+use super::seed_writer::{SeedFileShape, SeedWriter, WrittenSeeds};
 use super::{AtPath, IndexError};
 use crate::storage::lock;
 use rayon::prelude::*;
@@ -84,13 +84,14 @@ impl SeedSpill {
         Ok(())
     }
 
-    /// Writes the seeds file at `path` from the records, and returns its totals.
+    /// Writes the seeds of the index file at `path` from the records, up to the manifest, and
+    /// returns their totals.
     pub(crate) fn write(
         self,
         path: &Path,
         shape: SeedFileShape,
         contig_tables: &[Vec<u8>],
-    ) -> Result<SeedTotals, IndexError> {
+    ) -> Result<(SeedTotals, WrittenSeeds), IndexError> {
         for (writer, path) in self.writers.into_iter().zip(&self.paths) {
             let writer = writer.into_inner().unwrap_or_else(PoisonError::into_inner);
             writer
@@ -120,11 +121,12 @@ impl SeedSpill {
                 }
             }
         }
-        writer.finish(&ranked, contig_tables)?;
-        Ok(SeedTotals {
+        let written = writer.finish(&ranked, contig_tables)?;
+        let totals = SeedTotals {
             seeds,
             color_sets: ranked.len() as u64,
-        })
+        };
+        Ok((totals, written))
     }
 }
 

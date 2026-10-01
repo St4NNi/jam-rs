@@ -422,7 +422,6 @@ fn replaced_shard_reopened() {
     assert_ne!(before, expected);
     assert_eq!(local_lines(&shard), before);
     for name in [
-        "manifest.json",
         "seeds",
         "packed/shard_entry0.packed",
         "packed/shard_entry1.packed",

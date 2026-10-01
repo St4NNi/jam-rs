@@ -9,10 +9,9 @@
 
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
-use super::manifest::{
-    MANIFEST_FILE, Manifest, PACKED_DIRECTORY, Parameters, check_names, sha256_file,
-};
+use super::manifest::{Manifest, PACKED_DIRECTORY, Parameters, check_names, sha256_hex};
 use super::seed_file::{ColorSetId, SEED_KEY_BITS, SEEDS_FILE, SeedFile};
+use super::sources::Location;
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
 use crate::storage::LocalFile;
@@ -131,7 +130,7 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
     let shards = directories
         .into_iter()
         .map(|directory| {
-            let manifest = Manifest::read(&directory)?;
+            let manifest = Location::Directory(directory.clone()).head()?.manifest;
             let file = LocalFile::open(directory.join(SEEDS_FILE))?;
             let seeds = SeedFile::open(Arc::new(file))?;
             let packed = manifest.entries.iter().all(|entry| entry.packed.is_some());
@@ -196,13 +195,13 @@ fn output_shard(
     let shard_directory = directory.join(&name);
     std::fs::create_dir(&shard_directory).at(&shard_directory)?;
     let manifest = write_shard(shards, part.sources, &shard_directory, options)?;
-    let manifest_digest = sha256_file(&shard_directory.join(MANIFEST_FILE))?;
+    let manifest_digest = sha256_hex(&[&manifest.to_bytes()?]);
     Ok(ShardRecord {
         directory: name,
         first_entry: part.first_entry as u64,
         entries: part.sources.len() as u64,
         seed_locations: manifest.seed_locations,
-        manifest_sha256: manifest_digest.sha256,
+        manifest_sha256: manifest_digest,
     })
 }
 

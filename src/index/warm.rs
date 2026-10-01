@@ -3,9 +3,9 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{EntryRecord, FileRecord, Manifest, PACKED_DIRECTORY, verify_source};
+use super::manifest::{EntryRecord, FileRecord, PACKED_DIRECTORY, verify_source};
 use super::plan::{PLAN_FILE, Pin, Plan, etag_file};
-use super::seed_file::{HEADER_BYTES, verify_part};
+use super::seed_file::{HEADER_BYTES, SEEDS_FILE, verify_part};
 use super::sources::{IndexHead, Location};
 use super::{AtPath, IndexError};
 use crate::storage::{LocalFile, ReadAt};
@@ -28,15 +28,19 @@ pub fn warm(
     plan: &Plan,
     cache: &Path,
 ) -> Result<(), IndexError> {
-    let manifest = &head.manifest;
     location.keep_etags(cache)?;
     remove_obsolete(plan, cache)?;
     let threads = rayon::ThreadPoolBuilder::new()
         .num_threads(DOWNLOAD_THREADS)
         .build()?;
+    let seeds = FileRecord {
+        path: SEEDS_FILE.into(),
+        bytes: head.bytes,
+        sha256: head.digest.clone(),
+    };
     threads.install(|| {
         (plan.pins.par_iter()).try_for_each(|pin| {
-            let record = file_record(manifest, &pin.file)?;
+            let record = file_record(&seeds, &head.manifest.entries, &pin.file)?;
             let path = plan.pin_path(cache, pin);
             if is_complete(location, &path, pin, record) {
                 return Ok(());
@@ -47,19 +51,23 @@ pub fn warm(
     plan.write(cache)
 }
 
-/// The manifest record of a shard file named relative to the shard.
-fn file_record<'a>(manifest: &'a Manifest, file: &str) -> Result<&'a FileRecord, IndexError> {
+/// The record of a shard file named relative to the shard: the seeds file, or the packed file of
+/// one of `entries`.
+fn file_record<'a>(
+    seeds: &'a FileRecord,
+    entries: &'a [EntryRecord],
+    file: &str,
+) -> Result<&'a FileRecord, IndexError> {
     let packed = |entry: &&EntryRecord| {
         file.strip_prefix(PACKED_DIRECTORY)
             .and_then(|rest| rest.strip_prefix('/'))
             == entry.packed.as_ref().map(|packed| packed.path.as_str())
     };
-    [&manifest.seeds]
+    [seeds]
         .into_iter()
         .find(|record| record.path == file)
         .or_else(|| {
-            manifest
-                .entries
+            entries
                 .iter()
                 .find(packed)
                 .and_then(|entry| entry.packed.as_ref())
@@ -90,7 +98,8 @@ fn verify_pin(
             pin.file
         )));
     }
-    if pin.bytes() == record.bytes {
+    // The seeds file ends with its manifest, which no pin holds.
+    if pin.file != SEEDS_FILE && pin.bytes() == record.bytes {
         return verify_source(file, record);
     }
     let mut header = [0u8; HEADER_BYTES as usize];
@@ -302,15 +311,10 @@ mod tests {
         let shard = Shard::open_with(&location, &options).unwrap();
         let ids = (0..head.manifest.color_sets as u32).map(crate::index::ColorSetId);
         assert!(shard.seed_file().read_color_sets(ids).is_ok());
-        // Opening reads the manifest; the seeds file is read from the pin, and S3 only gets the
-        // one check read of its first use.
+        // Opening reads the header and the manifest; the seeds are read from the pin, and S3
+        // only gets the one check read of its first use.
         let asked = asked.lock().unwrap();
-        assert!(
-            asked[before..]
-                .iter()
-                .filter(|key| key.ends_with("seeds"))
-                .count()
-                <= 1
-        );
+        let seeds = asked[before..].iter().filter(|key| key.ends_with("seeds"));
+        assert_eq!(seeds.count(), 3);
     }
 }

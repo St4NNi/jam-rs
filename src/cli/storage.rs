@@ -218,11 +218,16 @@ mod tests {
             .map(|pin| (pin.part.as_str(), pin.place))
             .collect();
         assert_eq!(parts, [("sketch", Place::Ram), ("locators", Place::Ram)]);
-        // The next start finds the plan and reads the seeds file from the pins alone.
+        // The next start finds the plan and reads the seeds from the pins alone: the seeds file
+        // only gets the reads of its header and manifest, and the check read beside them.
         let before = asked.lock().unwrap().len();
         open(true);
         let asked = asked.lock().unwrap();
-        assert!(asked[before..].iter().all(|key| !key.ends_with("seeds")));
+        let seeds = asked[before..]
+            .iter()
+            .filter(|k| k.ends_with("seeds"))
+            .count();
+        assert!((2..=3).contains(&seeds), "{seeds}");
     }
 
     /// A server opens its shard again with the same storage, so with the same block cache.

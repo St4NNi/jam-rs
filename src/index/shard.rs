@@ -5,9 +5,9 @@
 
 use super::IndexError;
 use super::contig_table::ContigTable;
-use super::manifest::{EntryRecord, FileRecord, Manifest, verify_source};
+use super::manifest::{EntryRecord, FileRecord, Manifest, sha256_range, verify_source};
 use super::packed::PackedSequence;
-use super::seed_file::SeedFile;
+use super::seed_file::{HEADER_BYTES, SeedFile};
 use super::sources::{IndexHead, Location, ShardFiles, ShardOptions};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -74,7 +74,8 @@ impl Shard {
         Self::open_with_head(location, options, location.head()?)
     }
 
-    /// Opens the shard at `location` as `options` say, with its head already read.
+    /// Opens the shard at `location` as `options` say, with the head of its seeds file already
+    /// read.
     pub fn open_with_head(
         location: &Location,
         options: &ShardOptions,
@@ -85,15 +86,13 @@ impl Shard {
         let manifest = &head.manifest;
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;
-        let seeds_file = files.open(&manifest.seeds)?;
-        let seeds_bytes = seeds_file.size();
-        let seeds = SeedFile::open(seeds_file)?;
+        let seeds = SeedFile::open(files.open_seeds()?)?;
         if seeds.entry_count() != entries
             || seeds.bucket_bits() != u32::from(parameters.bucket_bits)
             || seeds.seed_count() != manifest.stored_seeds
-            || seeds_bytes != manifest.seeds.bytes
             || seeds.sketch_part() != manifest.sketch_part
             || seeds.locator_part() != manifest.locator_part
+            || seeds.manifest_range().end != head.bytes
         {
             return Err(IndexError::format(
                 "the seeds file differs from the manifest",
@@ -112,7 +111,7 @@ impl Shard {
         &self.head.digest
     }
 
-    /// The head of the shard: manifest, digest, and the size and name of the seeds file.
+    /// The head of the seeds file: manifest, digest, size and name.
     pub fn head(&self) -> &IndexHead {
         &self.head
     }
@@ -169,10 +168,16 @@ impl Shard {
         Ok(PackedSequence::open(source, table))
     }
 
-    /// Checks the SHA-256 digest of every file and the checksum of every section.
+    /// Checks the SHA-256 digest of the seeds and of every packed file, and the checksums of
+    /// every section and of the manifest.
     pub fn verify(&self) -> Result<(), IndexError> {
-        let seeds = &self.manifest().seeds;
-        verify_source(self.files.open_uncached(seeds)?.as_ref(), seeds)?;
+        let file = self.files.open_seeds_uncached()?;
+        let seeds = HEADER_BYTES..self.seeds.manifest_range().start;
+        if sha256_range(file.as_ref(), seeds)? != self.manifest().seeds_sha256 {
+            return Err(IndexError::Checksum(
+                "the seeds differ from the manifest".into(),
+            ));
+        }
         self.seeds.verify_checksums()?;
         for file in self
             .manifest()

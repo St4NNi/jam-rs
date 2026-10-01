@@ -7,19 +7,17 @@
 
 use super::manifest::{
     EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters, check_names,
-    choose_bucket_bits, packed_file_name, sha256_file, sha256_hex,
+    choose_bucket_bits, packed_file_name, sha256_hex,
 };
 use super::packed::PackedWriter;
-use super::seed_file::{SEEDS_FILE, SeedFile, SeedLocation, seed_key};
+use super::seed_file::{SEEDS_FILE, SeedLocation, seed_key};
 use super::seed_writer::SeedFileShape;
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
-use crate::storage::LocalFile;
 use rayon::prelude::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Sequence bytes collected before a parallel round, in singleton mode.
 const RECORD_ROUND_BYTES: usize = 256 << 20;
@@ -151,9 +149,9 @@ pub(crate) fn in_partial_directory<T>(
     }
 }
 
-/// Writes the seeds file from the seed records in `spill` (with the locator part when `locators`)
-/// and the manifest of a shard with these entries; the build chooses its bucket bits unless
-/// `bucket_bits` is given.
+/// Writes the seeds file from the seed records in `spill` (with the locator part when there are
+/// contig tables), followed by the manifest of a shard with these entries; the build chooses its
+/// bucket bits unless `bucket_bits` is given.
 pub(crate) fn complete_shard(
     directory: &Path,
     parameters: Parameters,
@@ -181,28 +179,19 @@ pub(crate) fn complete_shard(
         locators: contig_tables.is_some(),
     };
     let tables = contig_tables.unwrap_or_default();
-    let totals = spill.write(&seeds_path, shape, &tables)?;
-    let seed_file = SeedFile::open(Arc::new(LocalFile::open(&seeds_path)?))?;
-    let record = |path: &Path, name: &str| -> Result<FileRecord, IndexError> {
-        let digest = sha256_file(path)?;
-        Ok(FileRecord {
-            path: name.to_string(),
-            bytes: digest.bytes,
-            sha256: digest.sha256,
-        })
-    };
+    let (totals, written) = spill.write(&seeds_path, shape, &tables)?;
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
         parameters,
         entries,
-        seeds: record(&seeds_path, SEEDS_FILE)?,
-        sketch_part: seed_file.sketch_part(),
-        locator_part: seed_file.locator_part(),
+        seeds_sha256: written.sha256.clone(),
+        sketch_part: written.sketch_part.clone(),
+        locator_part: written.locator_part.clone(),
         stored_seeds: totals.seeds,
         color_sets: totals.color_sets,
         seed_locations: locations,
     };
-    manifest.write(directory)?;
+    written.append_manifest(&manifest.to_bytes()?)?;
     Ok(manifest)
 }
 

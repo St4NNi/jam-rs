@@ -148,6 +148,8 @@ fn run_warm(args: &WarmArgs) -> Result<(), CliError> {
         path: args.shard.clone(),
         source,
     };
+    // The first read learns the ETag of the seeds file, so it is kept from the start.
+    location.keep_etags(&args.cache).map_err(failed)?;
     let head = location.head().map_err(failed)?;
     let (memory, disk) = (args.memory.as_u64(), args.disk.as_u64());
     let parts: Vec<Part> = args.pin.iter().flat_map(|parts| parts.0.clone()).collect();

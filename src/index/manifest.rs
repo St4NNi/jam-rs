@@ -1,20 +1,16 @@
-//! The manifest `manifest.json` of a shard: parameters, entries, and the size and SHA-256 digest of
-//! every file.
+//! The manifest at the end of the seeds file of a shard (JSON): parameters, entries, and the size
+//! and SHA-256 digest of every packed sequence file.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::seed_file::PAGE_BITS;
-use super::{AtPath, IndexError, MAX_BUCKET_BITS, MIN_BUCKET_BITS};
+use super::IndexError;
+use super::seed_file::{HEADER_BYTES, PAGE_BITS, header_manifest, header_sections};
+use super::{MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::seeds::SeedScheme;
 use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::io::Read;
 use std::ops::Range;
-use std::path::Path;
-
-/// The file name of the manifest in a shard directory.
-pub(crate) const MANIFEST_FILE: &str = "manifest.json";
 /// The directory of the packed sequences in a shard directory.
 pub(crate) const PACKED_DIRECTORY: &str = "packed";
 /// The format version that this code reads and writes.
@@ -99,8 +95,8 @@ pub struct Manifest {
     pub parameters: Parameters,
     /// Entries in entry id order.
     pub entries: Vec<EntryRecord>,
-    /// The seeds file.
-    pub seeds: FileRecord,
+    /// SHA-256 digest of the seeds: the bytes of the seeds file from its header to the manifest.
+    pub seeds_sha256: String,
     /// The bytes of the sketch part in the seeds file.
     pub sketch_part: Range<u64>,
     /// The bytes of the locator part in the seeds file, if it has one.
@@ -114,13 +110,7 @@ pub struct Manifest {
 }
 
 impl Manifest {
-    /// Reads and checks the manifest of the shard in `directory`.
-    pub fn read(directory: &Path) -> Result<Self, IndexError> {
-        let path = directory.join(MANIFEST_FILE);
-        Self::parse(&std::fs::read(&path).at(&path)?)
-    }
-
-    /// Parses and checks the bytes of a manifest file.
+    /// Parses and checks the bytes of a manifest.
     pub fn parse(bytes: &[u8]) -> Result<Self, IndexError> {
         let manifest: Self = serde_json::from_slice(bytes)
             .map_err(|error| IndexError::format(format!("manifest: {error}")))?;
@@ -135,15 +125,27 @@ impl Manifest {
         Ok(manifest)
     }
 
-    /// Writes the manifest into `directory`.
-    pub fn write(&self, directory: &Path) -> Result<(), IndexError> {
-        let bytes = serde_json::to_vec_pretty(self)
-            .map_err(|error| IndexError::format(format!("manifest: {error}")))?;
-        let path = directory.join(MANIFEST_FILE);
-        let mut file = std::fs::File::create_new(&path).at(&path)?;
-        std::io::Write::write_all(&mut file, &bytes).at(&path)?;
-        file.sync_all().at(&path)?;
-        Ok(())
+    /// The bytes of the manifest.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, IndexError> {
+        serde_json::to_vec_pretty(self)
+            .map_err(|error| IndexError::format(format!("manifest: {error}")))
+    }
+
+    /// Reads the manifest at the end of the seeds file `source`, checks it, and gives the
+    /// SHA-256 digest of its bytes, which names the shard, and the size of the seeds file.
+    pub fn read_from(source: &dyn ReadAt) -> Result<(Self, String, u64), IndexError> {
+        let mut header = [0u8; HEADER_BYTES as usize];
+        source.read_exact_at(0, &mut header)?;
+        header_sections(&header)?;
+        let (range, crc) = header_manifest(&header);
+        let length = usize::try_from(range.end - range.start)
+            .map_err(|_| IndexError::format("seeds file manifest"))?;
+        let mut bytes = vec![0u8; length];
+        source.read_exact_at(range.start, &mut bytes)?;
+        if length == 0 || crc32fast::hash(&bytes) != crc {
+            return Err(IndexError::Checksum("seeds file manifest".into()));
+        }
+        Ok((Self::parse(&bytes)?, sha256_hex(&[&bytes]), range.end))
     }
 }
 
@@ -194,32 +196,6 @@ pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
     hex::encode(digest.finalize())
 }
 
-/// The size and SHA-256 digest of a file.
-pub(crate) struct FileDigest {
-    /// Size in bytes.
-    pub(crate) bytes: u64,
-    /// SHA-256 digest, lower case hex.
-    pub(crate) sha256: String,
-}
-
-/// The size and SHA-256 digest of the file at `path`.
-pub(crate) fn sha256_file(path: &Path) -> Result<FileDigest, IndexError> {
-    let mut file = std::fs::File::open(path).at(path)?;
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    let mut bytes = 0u64;
-    loop {
-        let read = file.read(&mut buffer).at(path)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-        bytes += read as u64;
-    }
-    let sha256 = hex::encode(digest.finalize());
-    Ok(FileDigest { bytes, sha256 })
-}
-
 /// Checks a file read from `source` against its record, for files that may not be local.
 pub(crate) fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
     let size = source.size();
@@ -260,7 +236,6 @@ mod tests {
 
     #[test]
     fn manifest_round_trip() {
-        let directory = tempfile::tempdir().unwrap();
         let manifest = Manifest {
             format_version: FORMAT_VERSION,
             parameters: Parameters {
@@ -277,21 +252,22 @@ mod tests {
                 seed_locations: 90,
                 packed: Some(file("entry_1.packed")),
             }],
-            seeds: file("seeds"),
+            seeds_sha256: sha256_hex(&[b""]),
             sketch_part: 4096..8192,
             locator_part: None,
             stored_seeds: 10,
             color_sets: 1,
             seed_locations: 11,
         };
-        manifest.write(directory.path()).unwrap();
-        assert_eq!(Manifest::read(directory.path()).unwrap(), manifest);
+        let bytes = manifest.to_bytes().unwrap();
+        assert_eq!(Manifest::parse(&bytes).unwrap(), manifest);
+        let record = file("abc");
         assert_eq!(
-            manifest.seeds.sha256,
+            record.sha256,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        verify_source(&b"abc".to_vec(), &manifest.seeds).unwrap();
-        assert!(verify_source(&b"abd".to_vec(), &manifest.seeds).is_err());
+        verify_source(&b"abc".to_vec(), &record).unwrap();
+        assert!(verify_source(&b"abd".to_vec(), &record).is_err());
     }
 
     #[test]

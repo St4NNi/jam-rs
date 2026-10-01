@@ -174,7 +174,8 @@ fn write_chunk<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::manifest::sha256_file;
+    use crate::index::manifest::sha256_range;
+    use crate::storage::LocalFile;
 
     #[test]
     fn chunk_names() {
@@ -236,11 +237,9 @@ mod tests {
         let paths: Vec<PathBuf> = names.iter().map(|n| directory.path().join(n)).collect();
         let records = write_sequence_files(&paths, &names, &pieces, &places, true).unwrap();
         for (chunk, record) in records.iter().enumerate() {
-            let digest = sha256_file(&paths[chunk]).unwrap();
-            assert_eq!(
-                (record.bytes, &record.sha256),
-                (ends[chunk], &digest.sha256)
-            );
+            let file = LocalFile::open(&paths[chunk]).unwrap();
+            let digest = sha256_range(&file, 0..ends[chunk]).unwrap();
+            assert_eq!((record.bytes, &record.sha256), (ends[chunk], &digest));
             assert_eq!(record.path, names[chunk]);
         }
         let first = std::fs::read(&paths[places[1].chunk]).unwrap();

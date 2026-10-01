@@ -54,7 +54,8 @@ pub struct Pin {
     pub start: u64,
     /// The end of the range (exclusive).
     pub end: u64,
-    /// The SHA-256 digest of the whole file, checked when the range covers it.
+    /// The SHA-256 digest of the whole file, checked when the range covers it; for the seeds
+    /// file the digest of its manifest.
     pub sha256: String,
     /// Where the range is read from.
     pub place: Place,
@@ -71,7 +72,7 @@ impl Pin {
 /// manifest digest, next to the pinned files.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
-    /// The SHA-256 digest of the shard's manifest file.
+    /// The SHA-256 digest of the shard's manifest.
     pub shard: String,
     /// The RAM budget in bytes, for pins and the block cache.
     pub memory: u64,
@@ -200,19 +201,18 @@ pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>
         let packed = record.packed.as_ref()?;
         Some(whole(format!("{PACKED_DIRECTORY}/{}", packed.path), packed))
     };
+    let seeds = |range: &std::ops::Range<u64>| Pin {
+        part: part.to_string(),
+        file: head.file.clone(),
+        start: range.start,
+        end: range.end,
+        sha256: head.digest.clone(),
+        place,
+    };
     Ok(match part {
         // The header and the bucket table of the seeds file belong to the sketch part.
-        Part::Sketch => vec![Pin {
-            end: manifest.sketch_part.end,
-            ..whole(manifest.seeds.path.clone(), &manifest.seeds)
-        }],
-        Part::Locators => (manifest.locator_part.iter())
-            .map(|range| Pin {
-                start: range.start,
-                end: range.end,
-                ..whole(manifest.seeds.path.clone(), &manifest.seeds)
-            })
-            .collect(),
+        Part::Sketch => vec![seeds(&(0..manifest.sketch_part.end))],
+        Part::Locators => manifest.locator_part.iter().map(seeds).collect(),
         Part::Packed(None) => manifest.entries.iter().filter_map(packed).collect(),
         Part::Packed(Some(names)) => {
             let mut pins = Vec::new();

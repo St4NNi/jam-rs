@@ -1,5 +1,5 @@
-//! The seeds file (stages 1 and 2): a bucket table in RAM, the sketch part with color sets, and
-//! the optional locator part with seed locations and the contig table of every entry.
+//! The seeds of an index file (stages 1 and 2), before its manifest: a bucket table in RAM, the
+//! sketch part with color sets, and the optional locator part with locations and contig tables.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -42,6 +42,8 @@ pub(crate) const PAGE_BITS: Range<u32> = 6..17;
 pub(crate) const SECTIONS: usize = 6;
 /// Where the CRC-32 of each section lies in the header.
 pub(crate) const CRCS_AT: usize = 72 + 16 * SECTIONS;
+/// Where the offset and bytes of the manifest (u64 each) and its CRC-32 lie in the header.
+pub(crate) const MANIFEST_AT: usize = CRCS_AT + 4 * SECTIONS;
 /// Ranges closer than this are read as one.
 const JOIN_GAP: u64 = 8 << 10;
 /// Joined reads stop growing at this size.
@@ -133,6 +135,8 @@ pub struct SeedFile {
     locations: u64,
     sections: [Range<u64>; SECTIONS],
     crcs: [u32; SECTIONS],
+    /// The bytes of the manifest and their CRC-32.
+    manifest: (Range<u64>, u32),
     sketch: PartTable,
     locators: Option<PartTable>,
     /// Where the contig table of each entry starts in the file, then where the last one ends;
@@ -146,6 +150,7 @@ impl SeedFile {
         let mut header = [0u8; HEADER_BYTES as usize];
         source.read_exact_at(0, &mut header)?;
         let (sections, crcs) = header_sections(&header)?;
+        let manifest = header_manifest(&header);
         let field = |at: usize| u64_at(&header, at).unwrap_or_default();
         let (bucket_bits, page_bits) = (u32::from(header[20]), u32::from(header[22]));
         let bucket_range = u32::from(MIN_BUCKET_BITS)..=u32::from(MAX_BUCKET_BITS);
@@ -155,7 +160,7 @@ impl SeedFile {
         {
             return Err(IndexError::format("seeds file parameters"));
         }
-        check_sections(&sections, page_bits, source.size())?;
+        check_sections(&sections, page_bits, &manifest.0, source.size())?;
         let mut table = vec![0u8; (sections[0].end - sections[0].start) as usize];
         source.read_exact_at(sections[0].start, &mut table)?;
         if crc32fast::hash(&table) != crcs[0] {
@@ -187,6 +192,7 @@ impl SeedFile {
             locations: field(48),
             sections,
             crcs,
+            manifest,
             sketch,
             locators,
             table_starts,
@@ -376,10 +382,16 @@ impl SeedFile {
         Ok(read)
     }
 
-    /// Checks the CRC-32 of every section.
+    /// The bytes of the manifest in the file.
+    pub fn manifest_range(&self) -> Range<u64> {
+        self.manifest.0.clone()
+    }
+
+    /// Checks the CRC-32 of every section and of the manifest.
     pub fn verify_checksums(&self) -> Result<(), IndexError> {
-        for (section, crc) in self.sections.iter().zip(self.crcs) {
-            if crc_of(self.source.as_ref(), section.clone())? != crc {
+        let sections = self.sections.iter().cloned().zip(self.crcs);
+        for (section, crc) in sections.chain([self.manifest.clone()]) {
+            if crc_of(self.source.as_ref(), section)? != crc {
                 return Err(IndexError::Checksum("seeds section".into()));
             }
         }
@@ -462,6 +474,14 @@ pub(crate) fn header_sections(
     Ok((sections, crcs))
 }
 
+/// The bytes of the manifest and their CRC-32, from a header checked by `header_sections`.
+pub(crate) fn header_manifest(header: &[u8; HEADER_BYTES as usize]) -> (Range<u64>, u32) {
+    let field = |at: usize| u64_at(header, at).unwrap_or_default();
+    let start = field(MANIFEST_AT);
+    let crc = u32_at(header, MANIFEST_AT + 16).unwrap_or_default();
+    (start..start.saturating_add(field(MANIFEST_AT + 8)), crc)
+}
+
 /// Checks the CRC-32 of every section of a seeds file with `header` that lies within `range`.
 /// `part` holds the bytes of `range`, from its offset 0, as a pinned range does.
 pub(crate) fn verify_part(
@@ -542,11 +562,12 @@ fn read_table_starts(
     Ok(starts)
 }
 
-/// Checks that the sections follow each other in order within `size` bytes, with the table
-/// first and each part on a page boundary.
+/// Checks that the sections follow each other in order, with the table first and each part on a
+/// page boundary, and that the manifest follows them up to the end of the file of `size` bytes.
 fn check_sections(
     sections: &[Range<u64>; SECTIONS],
     page_bits: u32,
+    manifest: &Range<u64>,
     size: u64,
 ) -> Result<(), IndexError> {
     let on_page = |offset: u64| offset.is_multiple_of(1 << page_bits);
@@ -561,7 +582,9 @@ fn check_sections(
     let ordered = sections[0].start == HEADER_BYTES
         && on_page(sections[1].start)
         && (locators.is_empty() || on_page(locators.start))
-        && end == size;
+        && manifest.start == end
+        && manifest.end > manifest.start
+        && manifest.end == size;
     if !ordered {
         return Err(IndexError::format("seeds sections"));
     }

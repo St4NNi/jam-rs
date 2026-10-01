@@ -125,7 +125,7 @@ fn threads_keep_output() {
     let four = directory.path().join("four");
     build_shard(&inputs, &one, &options(directory.path(), 1)).unwrap();
     build_shard(&inputs, &four, &options(directory.path(), 4)).unwrap();
-    for file in [manifest::MANIFEST_FILE, SEEDS_FILE, "packed/entry3.packed"] {
+    for file in [SEEDS_FILE, "packed/entry3.packed"] {
         let read = |shard: &PathBuf| std::fs::read(shard.join(file)).unwrap();
         assert!(read(&one) == read(&four), "{file}");
     }
@@ -140,9 +140,8 @@ fn reshard_options(directory: &Path, split: Split, packed: PackedOutput) -> Resh
     }
 }
 
-/// Checks that two shards hold the same manifest and seeds file.
+/// Checks that two shards hold the same seeds file, with the same manifest.
 fn assert_same_shard(one: &Path, other: &Path) {
-    assert_eq!(Manifest::read(one).unwrap(), Manifest::read(other).unwrap());
     let read = |shard: &Path| std::fs::read(shard.join(SEEDS_FILE)).unwrap();
     assert!(read(one) == read(other));
 }
@@ -206,7 +205,7 @@ fn splits_equal_direct() {
         &reshard_options(directory.path(), Split::Shards(1), link),
     )
     .unwrap();
-    let total = Manifest::read(&whole).unwrap().seed_locations;
+    let total = Shard::open(&whole).unwrap().manifest().seed_locations;
     for split in [Split::Shards(3), Split::MaxSeedLocations(total / 4)] {
         let output = directory.path().join(format!("split-{split:?}"));
         // The merged index is given as an index directory, so its shards are read in order.
@@ -418,18 +417,19 @@ fn pins_read_locally() {
         pins: Some(cache),
         ..ShardOptions::default()
     };
-    // The manifest read to find the plan also opens the shard: one request for it.
+    // The head read to find the plan also opens the shard: two requests, then the check read of
+    // the pinned seeds file.
     let head = location.head().unwrap();
     let shard = Shard::open_with_head(&location, &options, head).unwrap();
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
-    let manifests = asked.iter().filter(|key| key.ends_with("manifest.json"));
-    assert_eq!(manifests.count(), 1);
+    assert_eq!(asked.iter().filter(|key| *key == "shard/seeds").count(), 3);
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
     // A pinned file gets nothing but the check read of its first use.
-    for pinned in ["shard/seeds", "shard/packed/entry1.packed"] {
-        assert!(asked.iter().filter(|key| *key == pinned).count() <= 1);
-    }
+    let pinned = asked
+        .iter()
+        .filter(|key| *key == "shard/packed/entry1.packed");
+    assert!(pinned.count() <= 1);
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its
@@ -485,7 +485,7 @@ fn sketch_only_shards() {
     assert!(shard.packed(0).is_err() && shard.contig_table(0).is_err());
     let full = directory.path().join("full");
     build_shard(&inputs, &full, &options(directory.path(), 2)).unwrap();
-    let full_sketch = Manifest::read(&full).unwrap().sketch_part;
+    let full_sketch = Shard::open(&full).unwrap().manifest().sketch_part.clone();
     let full_bytes = std::fs::read(full.join(SEEDS_FILE)).unwrap();
     let whole_bytes = std::fs::read(whole.join(SEEDS_FILE)).unwrap();
     // The sketch part is the same as in a full shard; only the header and table differ.

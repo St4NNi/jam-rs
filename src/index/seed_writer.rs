@@ -1,17 +1,20 @@
-//! Writes the seeds file bucket by bucket: each part goes to a temporary file, and both are joined
-//! behind the header and the bucket table at the end.
+//! Writes the seeds of an index file bucket by bucket: each part goes to a temporary file, and
+//! both are joined behind the header and the bucket table at the end; the manifest follows.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
 use super::bits::u32_at;
 use super::pages::{PartLayout, PartTable};
 use super::seed_file::{
-    CRCS_AT, HEADER_BYTES, MAGIC, PAGE_BITS, SECTIONS, SEED_KEY_BITS, UNIT_CHECK_BYTES, VERSION,
-    unit_check,
+    CRCS_AT, HEADER_BYTES, MAGIC, MANIFEST_AT, PAGE_BITS, SECTIONS, SEED_KEY_BITS,
+    UNIT_CHECK_BYTES, VERSION, unit_check,
 };
 use super::{AtPath, IndexError};
+use sha2::{Digest, Sha256};
 use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 /// The shape of a seeds file, fixed before its first bucket.
@@ -152,7 +155,7 @@ impl SeedWriter {
         mut self,
         color_sets: &[impl AsRef<[u8]>],
         contig_tables: &[Vec<u8>],
-    ) -> Result<(), IndexError> {
+    ) -> Result<WrittenSeeds, IndexError> {
         while self.next_bucket < 1 << self.shape.bucket_bits {
             self.push_one(&[], &[])?;
         }
@@ -225,6 +228,7 @@ impl SeedWriter {
         let mut out = Output {
             file: BufWriter::with_capacity(1 << 20, File::create(path).at(path)?),
             written: 0,
+            digest: Sha256::new(),
         };
         out.put(0, &header).at(path)?;
         out.put(sections[0].0, &table).at(path)?;
@@ -234,6 +238,7 @@ impl SeedWriter {
             out.put(out.written, set.as_ref()).at(path)?;
             out.put(out.written, check).at(path)?;
         }
+        let locators_written = locators.is_some();
         if let Some(part) = locators {
             out.copy(sections[4].0, part).at(path)?;
             out.put(sections[5].0, &tables).at(path)?;
@@ -241,7 +246,47 @@ impl SeedWriter {
         let file = (out.file.into_inner())
             .map_err(|error| error.into_error())
             .at(path)?;
-        file.sync_all().at(path)
+        let part = |at: usize| sections[at].0..sections[at].0 + sections[at].1;
+        Ok(WrittenSeeds {
+            file,
+            path: path.clone(),
+            header,
+            end: out.written,
+            sha256: hex::encode(out.digest.finalize()),
+            sketch_part: part(1).start..part(3).end,
+            locator_part: locators_written.then(|| part(4).start..part(5).end),
+        })
+    }
+}
+
+/// The seeds of an index file, written up to the manifest.
+pub(crate) struct WrittenSeeds {
+    file: File,
+    path: PathBuf,
+    header: Vec<u8>,
+    end: u64,
+    /// The SHA-256 digest of the bytes after the header, lower case hex.
+    pub(crate) sha256: String,
+    pub(crate) sketch_part: Range<u64>,
+    pub(crate) locator_part: Option<Range<u64>>,
+}
+
+impl WrittenSeeds {
+    /// Appends the manifest and names its bytes in the header.
+    pub(crate) fn append_manifest(mut self, manifest: &[u8]) -> Result<(), IndexError> {
+        let path = &self.path;
+        self.file.write_all_at(manifest, self.end).at(path)?;
+        let fields = [self.end, manifest.len() as u64];
+        for (index, value) in fields.into_iter().enumerate() {
+            let at = MANIFEST_AT + 8 * index;
+            self.header[at..at + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let crc = crc32fast::hash(manifest).to_le_bytes();
+        self.header[MANIFEST_AT + 16..MANIFEST_AT + 20].copy_from_slice(&crc);
+        let header_crc = crc32fast::hash(&self.header[..252]);
+        self.header[252..].copy_from_slice(&header_crc.to_le_bytes());
+        self.file.write_all_at(&self.header, 0).at(path)?;
+        self.file.sync_all().at(path)
     }
 }
 
@@ -273,18 +318,24 @@ struct FinishedPart {
     file: File,
 }
 
-/// The file being joined, with the bytes written so far.
+/// The file being joined, with the bytes written so far and the digest of those after the
+/// header.
 struct Output {
     file: BufWriter<File>,
     written: u64,
+    digest: Sha256,
 }
 
 impl Output {
     /// Writes zero bytes up to `at`, then `bytes`.
     fn put(&mut self, at: u64, bytes: &[u8]) -> std::io::Result<()> {
         let padding = vec![0u8; at.saturating_sub(self.written) as usize];
-        self.file.write_all(&padding)?;
-        self.file.write_all(bytes)?;
+        for part in [&padding[..], bytes] {
+            self.file.write_all(part)?;
+            if self.written >= HEADER_BYTES {
+                self.digest.update(part);
+            }
+        }
         self.written = at.max(self.written) + bytes.len() as u64;
         Ok(())
     }
@@ -292,9 +343,14 @@ impl Output {
     /// Writes zero bytes up to `at`, then the bytes of a finished part.
     fn copy(&mut self, at: u64, mut part: FinishedPart) -> std::io::Result<()> {
         self.put(at, &[])?;
-        let copied = std::io::copy(&mut part.file, &mut self.file)?;
-        self.written += copied;
-        Ok(())
+        let mut buffer = vec![0u8; 1 << 20];
+        loop {
+            let read = part.file.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(());
+            }
+            self.put(self.written, &buffer[..read])?;
+        }
     }
 }
 
@@ -434,9 +490,8 @@ mod tests {
                 bytes
             })
             .collect();
-        writer
-            .finish(&encoded, &contig_tables(shape.entries))
-            .unwrap();
+        let written = writer.finish(&encoded, &contig_tables(shape.entries));
+        written.unwrap().append_manifest(b"{}").unwrap();
         SeedFile::open(Arc::new(std::fs::read(&path).unwrap())).unwrap()
     }
 

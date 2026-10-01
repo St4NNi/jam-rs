@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{MANIFEST_FILE, sha256_file};
+use super::sources::Location;
 use super::{AtPath, IndexError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -83,8 +83,8 @@ impl IndexFile {
     /// Checks that every shard's manifest still has its recorded digest.
     pub fn verify(&self, directory: &Path) -> Result<(), IndexError> {
         for shard in &self.shards {
-            let path = directory.join(&shard.directory).join(MANIFEST_FILE);
-            if sha256_file(&path)?.sha256 != shard.manifest_sha256 {
+            let location = Location::Directory(directory.join(&shard.directory));
+            if location.head()?.digest != shard.manifest_sha256 {
                 return Err(IndexError::Checksum(format!(
                     "the manifest of {} differs from the index file",
                     shard.directory

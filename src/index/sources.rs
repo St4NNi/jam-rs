@@ -3,9 +3,10 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{FileRecord, MANIFEST_FILE, Manifest, PACKED_DIRECTORY, sha256_hex};
+use super::manifest::{FileRecord, Manifest, PACKED_DIRECTORY};
 use super::packed::BLOCK_BYTES;
 use super::plan::{Pin, Place, Plan, etag_file};
+use super::seed_file::SEEDS_FILE;
 use super::{AtPath, IndexError};
 use crate::storage::{
     BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config,
@@ -67,28 +68,17 @@ impl Location {
         }
     }
 
-    /// All bytes of the small file `name`.
-    pub(crate) fn read_whole(&self, name: &str) -> Result<Vec<u8>, IndexError> {
-        match self {
-            Self::Directory(path) => {
-                let path = path.join(name);
-                std::fs::read(&path).at(&path)
-            }
-            Self::S3 { prefix, config } => {
-                Ok(S3Object::read_whole(config, &format!("{prefix}{name}"))?)
-            }
-        }
-    }
-
-    /// The head of the shard at this location: its manifest and the digest of the manifest.
+    /// The head of the shard at this location: the header and the manifest of its seeds file.
+    /// On S3 the first read learns the ETag of the object, or sends the known one.
     pub fn head(&self) -> Result<IndexHead, IndexError> {
-        let bytes = self.read_whole(MANIFEST_FILE)?;
-        let manifest = Manifest::parse(&bytes)?;
-        let (file, seeds) = (manifest.seeds.path.clone(), manifest.seeds.bytes);
+        // The size is not known before the header is read.
+        let source = self.open(SEEDS_FILE, u64::MAX)?;
+        let (manifest, digest, bytes) = Manifest::read_from(source.as_ref())?;
+        let file = SEEDS_FILE.to_string();
         Ok(IndexHead {
             manifest,
-            digest: sha256_hex(&[&bytes]),
-            bytes: seeds,
+            digest,
+            bytes,
             file,
         })
     }
@@ -166,8 +156,8 @@ impl Location {
     }
 }
 
-/// The head of a shard: its manifest, the SHA-256 digest of the manifest, which names this
-/// version of the shard, and the size and name of the seeds file.
+/// The head of the seeds file of a shard: its manifest, the SHA-256 digest of the manifest,
+/// which names this version of the shard, the size of the file and its name.
 #[derive(Clone, Debug)]
 pub struct IndexHead {
     pub manifest: Manifest,
@@ -204,6 +194,8 @@ pub(crate) struct ShardFiles {
     cache: Option<Arc<BlockCache>>,
     /// The pins of the plan with their local files, by file name relative to the shard.
     pins: HashMap<String, Vec<(Pin, PathBuf)>>,
+    /// The seeds file as a record: its size, and the manifest digest as its key.
+    seeds: FileRecord,
     /// Packed sequences kept open per entry when they are cached or remote; empty otherwise.
     opened: Vec<OnceLock<Arc<dyn ReadAt>>>,
     /// The replaced objects counted when the files were opened.
@@ -241,6 +233,11 @@ impl ShardFiles {
             packed,
             cache: options.cache.clone(),
             pins,
+            seeds: FileRecord {
+                path: head.file.clone(),
+                bytes: head.bytes,
+                sha256: head.digest.clone(),
+            },
             opened,
             changes: location.changes(),
         })
@@ -251,10 +248,10 @@ impl ShardFiles {
         self.location.changes() != self.changes
     }
 
-    /// The source of a shard file: its pinned range locally, the rest through the cache if
-    /// there is one.
-    pub(crate) fn open(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.open_at(&self.location, &record.path, record, None)
+    /// The source of the seeds file: its pinned ranges locally, the rest through the cache if
+    /// there is one, cached under the manifest digest.
+    pub(crate) fn open_seeds(&self) -> Result<Arc<dyn ReadAt>, IndexError> {
+        self.open_at(&self.location, SEEDS_FILE, &self.seeds, None)
     }
 
     /// The file `name` (relative to the shard) of `record` at `location`, with its pins; cached
@@ -333,9 +330,9 @@ impl ShardFiles {
         })
     }
 
-    /// The source of a shard file without the cache, for example to verify it.
-    pub(crate) fn open_uncached(&self, record: &FileRecord) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.location.open(&record.path, record.bytes)
+    /// The seeds file without the cache, for example to verify it.
+    pub(crate) fn open_seeds_uncached(&self) -> Result<Arc<dyn ReadAt>, IndexError> {
+        self.location.open(SEEDS_FILE, self.seeds.bytes)
     }
 
     /// The local path of a packed sequence file, or `None` when it lies on S3.
