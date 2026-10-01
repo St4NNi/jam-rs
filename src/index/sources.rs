@@ -183,9 +183,6 @@ pub(crate) fn remove_pin(path: &Path) {
 /// How a shard opens its files.
 #[derive(Clone, Default)]
 pub struct ShardOptions {
-    /// Where the packed sequences lie when not in the shard's own `packed/`, for example a
-    /// directory that several shards share.
-    pub packed: Option<Location>,
     /// A block cache that every file except the sketch is read through. With it, each entry's
     /// packed sequence stays open after its first read, so its blocks are found again.
     pub cache: Option<Arc<BlockCache>>,
@@ -228,7 +225,7 @@ impl ShardFiles {
                     .push((pin.clone(), path));
             }
         }
-        let packed = (options.packed.clone()).unwrap_or_else(|| location.join(PACKED_DIRECTORY));
+        let packed = location.join(PACKED_DIRECTORY);
         let keep = options.cache.is_some() || matches!(packed, Location::S3 { .. });
         let opened = if keep {
             (0..entries).map(|_| OnceLock::new()).collect()

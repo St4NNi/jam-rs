@@ -58,16 +58,6 @@ impl Shard {
         Self::open_with(&location, &ShardOptions::default())
     }
 
-    /// Opens the shard in `directory`, with its packed sequences in `packed_directory`, which
-    /// several shards may share.
-    pub fn open_with_packed(directory: &Path, packed_directory: &Path) -> Result<Self, IndexError> {
-        let options = ShardOptions {
-            packed: Some(Location::Directory(packed_directory.to_path_buf())),
-            ..ShardOptions::default()
-        };
-        Self::open_with(&Location::Directory(directory.to_path_buf()), &options)
-    }
-
     /// Opens the shard at `location` as `options` say. Only headers and sizes are checked;
     /// `verify` reads everything.
     pub fn open_with(location: &Location, options: &ShardOptions) -> Result<Self, IndexError> {

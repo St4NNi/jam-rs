@@ -184,9 +184,6 @@ fn merged_equals_whole() {
         shard.verify().unwrap();
         check_every_seed(&shard, &entries);
     }
-    // A shard can read its packed sequences from another directory.
-    let shard = Shard::open_with_packed(&parts[0], &whole.join("packed")).unwrap();
-    check_every_seed(&shard, &entries[..2]);
 }
 
 #[test]
@@ -318,33 +315,19 @@ fn bad_builds_cleaned() {
 }
 
 #[test]
-fn packed_elsewhere_cached() {
+fn packed_read_cached() {
     use crate::storage::{BlockCache, CacheConfig};
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
     test_shard(directory.path(), &entries);
-    let output = directory.path().join("shard");
-    let elsewhere = directory.path().join("elsewhere");
-    std::fs::rename(output.join("packed"), &elsewhere).unwrap();
-    assert!(Shard::open(&output).unwrap().packed(0).is_err());
-    let options = ShardOptions {
-        packed: Some(Location::Directory(elsewhere.clone())),
-        ..ShardOptions::default()
-    };
-    let local = Location::Directory(output.clone());
-    let shard = Shard::open_with(&local, &options).unwrap();
-    shard.verify().unwrap();
-    check_every_seed(&shard, &entries);
-    assert_eq!(
-        shard.packed_path(1).unwrap(),
-        elsewhere.join("entry1.packed")
-    );
+    let local = Location::Directory(directory.path().join("shard"));
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let options = ShardOptions {
         cache: Some(Arc::clone(&cache)),
-        ..options
+        ..ShardOptions::default()
     };
     let shard = Shard::open_with(&local, &options).unwrap();
+    shard.verify().unwrap();
     check_every_seed(&shard, &entries);
     check_every_seed(&shard, &entries);
 }

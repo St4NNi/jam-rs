@@ -111,7 +111,6 @@ impl ShardStorage {
         let options = ShardOptions {
             cache: self.cache.clone(),
             pins: args.cache.clone(),
-            ..ShardOptions::default()
         };
         let open = |(path, location, head): (&PathBuf, Location, _)| {
             let shard = match head {
