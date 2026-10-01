@@ -3,7 +3,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{Manifest, PACKED_DIRECTORY};
+use super::manifest::PACKED_DIRECTORY;
+use super::sources::IndexHead;
 use super::{AtPath, IndexError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -112,18 +113,17 @@ impl Plan {
         std::fs::rename(&partial, &path).at(&path)
     }
 
-    /// The plan for the shard of `manifest` (manifest digest `shard`) within `memory` and `disk`
-    /// bytes: `parts`, or else the sketch and the locators while the budgets last, each in RAM if
-    /// it fits, else on disk. Packed sequences go on disk; a pin in RAM also takes disk bytes.
+    /// The plan for the shard of `head` within `memory` and `disk` bytes: `parts`, or else the
+    /// sketch and the locators while the budgets last, each in RAM if it fits, else on disk.
+    /// Packed sequences go on disk; a pin in RAM also takes disk bytes.
     pub fn choose(
-        manifest: &Manifest,
-        shard: &str,
+        head: &IndexHead,
         memory: u64,
         disk: u64,
         parts: &[Part],
     ) -> Result<Self, IndexError> {
         let mut plan = Self {
-            shard: shard.to_string(),
+            shard: head.digest.clone(),
             memory,
             disk,
             pins: Vec::new(),
@@ -134,7 +134,7 @@ impl Plan {
             parts
         };
         for part in chosen {
-            let pins = part_pins(manifest, part, Place::Ssd)?;
+            let pins = part_pins(head, part, Place::Ssd)?;
             let bytes: u64 = pins.iter().map(Pin::bytes).sum();
             let (memory_left, disk_left) = plan.cache_budget();
             let place = match part {
@@ -185,7 +185,8 @@ pub(crate) fn etag_file(path: &Path) -> PathBuf {
 
 /// The byte ranges that hold `part`, as pins in `place`. This is the one place that maps part
 /// names to files.
-pub fn part_pins(manifest: &Manifest, part: &Part, place: Place) -> Result<Vec<Pin>, IndexError> {
+pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>, IndexError> {
+    let manifest = &head.manifest;
     let whole = |file: String, record: &super::FileRecord| Pin {
         part: part.to_string(),
         file,
@@ -242,7 +243,7 @@ mod tests {
             locator_part.end - locator_part.start,
         );
         let places = |memory, disk, parts: &[Part]| {
-            let plan = Plan::choose(manifest, "d", memory, disk, parts).unwrap();
+            let plan = Plan::choose(shard.head(), memory, disk, parts).unwrap();
             let places: Vec<(String, Place)> = (plan.pins.iter())
                 .map(|pin| (pin.part.clone(), pin.place))
                 .collect();
@@ -265,7 +266,7 @@ mod tests {
         let (pinned, _) = places(1 << 30, 1 << 30, &[Part::Packed(None)]);
         assert!(pinned.iter().all(|(_, place)| *place == Place::Ssd));
         assert_eq!(pinned.len(), 2);
-        let error = Plan::choose(manifest, "d", 1 << 30, 10, &[Part::Sketch]).unwrap_err();
+        let error = Plan::choose(shard.head(), 1 << 30, 10, &[Part::Sketch]).unwrap_err();
         assert!(error.to_string().starts_with("pinning sketch needs"));
     }
 
@@ -275,20 +276,20 @@ mod tests {
         let entries = vec![vec![vec![b'A'; 2_000]], vec![vec![b'C'; 3_000]]];
         let shard = test_shard(directory.path(), &entries);
         let manifest = shard.manifest();
-        let mut pins = part_pins(manifest, &Part::Sketch, Place::Ram).unwrap();
-        pins.extend(part_pins(manifest, &Part::Locators, Place::Ssd).unwrap());
+        let mut pins = part_pins(shard.head(), &Part::Sketch, Place::Ram).unwrap();
+        pins.extend(part_pins(shard.head(), &Part::Locators, Place::Ssd).unwrap());
         assert_eq!(
-            part_pins(manifest, &Part::Packed(None), Place::Ssd)
+            part_pins(shard.head(), &Part::Packed(None), Place::Ssd)
                 .unwrap()
                 .len(),
             2
         );
         let named = Part::Packed(Some(vec!["entry1".into()]));
-        pins.extend(part_pins(manifest, &named, Place::Ssd).unwrap());
+        pins.extend(part_pins(shard.head(), &named, Place::Ssd).unwrap());
         assert_eq!(pins[2].file, "packed/entry1.packed");
         assert_eq!(pins[0].bytes(), manifest.sketch_part.end);
         let missing = Part::Packed(Some(vec!["other".into()]));
-        assert!(part_pins(manifest, &missing, Place::Ssd).is_err());
+        assert!(part_pins(shard.head(), &missing, Place::Ssd).is_err());
         let cache = directory.path().join("cache");
         assert_eq!(Plan::read(&cache, shard.digest()).unwrap(), None);
         let plan = Plan {

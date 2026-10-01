@@ -8,7 +8,7 @@ use super::contig_table::ContigTable;
 use super::manifest::{EntryRecord, FileRecord, Manifest, verify_source};
 use super::packed::PackedSequence;
 use super::seed_file::SeedFile;
-use super::sources::{Location, ShardFiles, ShardOptions};
+use super::sources::{IndexHead, Location, ShardFiles, ShardOptions};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -39,9 +39,7 @@ pub struct ShardStats {
 /// A shard opened from a local directory or an S3 prefix.
 pub struct Shard {
     files: ShardFiles,
-    manifest: Manifest,
-    /// The SHA-256 digest of the manifest file, lower case hex.
-    digest: String,
+    head: IndexHead,
     seeds: SeedFile,
     /// Wall seconds that opening took.
     open_seconds: f64,
@@ -73,20 +71,18 @@ impl Shard {
     /// Opens the shard at `location` as `options` say. Only headers and sizes are checked;
     /// `verify` reads everything.
     pub fn open_with(location: &Location, options: &ShardOptions) -> Result<Self, IndexError> {
-        let (manifest, digest) = location.manifest()?;
-        Self::open_with_manifest(location, options, manifest, digest)
+        Self::open_with_head(location, options, location.head()?)
     }
 
-    /// Opens the shard at `location` as `options` say, with its manifest already read and the
-    /// SHA-256 digest of the manifest file.
-    pub fn open_with_manifest(
+    /// Opens the shard at `location` as `options` say, with its head already read.
+    pub fn open_with_head(
         location: &Location,
         options: &ShardOptions,
-        manifest: Manifest,
-        digest: String,
+        head: IndexHead,
     ) -> Result<Self, IndexError> {
         let started = Instant::now();
-        let files = ShardFiles::new(location, options, manifest.entries.len(), &digest)?;
+        let files = ShardFiles::new(location, options, &head)?;
+        let manifest = &head.manifest;
         let parameters = manifest.parameters;
         let entries = manifest.entries.len() as u64;
         let seeds_file = files.open(&manifest.seeds)?;
@@ -105,16 +101,20 @@ impl Shard {
         }
         Ok(Self {
             files,
-            manifest,
-            digest,
+            head,
             seeds,
             open_seconds: started.elapsed().as_secs_f64(),
         })
     }
 
-    /// The SHA-256 digest of the manifest file, which names this version of the shard.
+    /// The SHA-256 digest of the manifest, which names this version of the shard.
     pub fn digest(&self) -> &str {
-        &self.digest
+        &self.head.digest
+    }
+
+    /// The head of the shard: manifest, digest, and the size and name of the seeds file.
+    pub fn head(&self) -> &IndexHead {
+        &self.head
     }
 
     /// Wall seconds that opening the shard took.
@@ -124,7 +124,7 @@ impl Shard {
 
     /// The manifest of the shard.
     pub fn manifest(&self) -> &Manifest {
-        &self.manifest
+        &self.head.manifest
     }
 
     /// The seeds file (stages 1 and 2).
@@ -171,11 +171,11 @@ impl Shard {
 
     /// Checks the SHA-256 digest of every file and the checksum of every section.
     pub fn verify(&self) -> Result<(), IndexError> {
-        let seeds = &self.manifest.seeds;
+        let seeds = &self.manifest().seeds;
         verify_source(self.files.open_uncached(seeds)?.as_ref(), seeds)?;
         self.seeds.verify_checksums()?;
         for file in self
-            .manifest
+            .manifest()
             .entries
             .iter()
             .filter_map(|e| e.packed.as_ref())
@@ -188,16 +188,16 @@ impl Shard {
 
     /// Sizes and counts of the shard.
     pub fn stats(&self) -> ShardStats {
-        let entries = &self.manifest.entries;
+        let entries = &self.manifest().entries;
         ShardStats {
             entries: entries.len() as u64,
             contigs: entries.iter().map(|entry| entry.contigs).sum(),
             bases: entries.iter().map(|entry| entry.bases).sum(),
-            seeds: self.manifest.stored_seeds,
-            color_sets: self.manifest.color_sets,
-            seed_locations: self.manifest.seed_locations,
-            sketch_bytes: part_bytes(Some(&self.manifest.sketch_part)),
-            locator_bytes: part_bytes(self.manifest.locator_part.as_ref()),
+            seeds: self.manifest().stored_seeds,
+            color_sets: self.manifest().color_sets,
+            seed_locations: self.manifest().seed_locations,
+            sketch_bytes: part_bytes(Some(&self.manifest().sketch_part)),
+            locator_bytes: part_bytes(self.manifest().locator_part.as_ref()),
             packed_bytes: (entries.iter().filter_map(|entry| entry.packed.as_ref()))
                 .map(|file| file.bytes)
                 .sum(),
@@ -207,7 +207,7 @@ impl Shard {
     /// The manifest record of an entry and of its packed file; an error for a shard built with
     /// the sketch part only.
     fn packed_record(&self, entry: u32) -> Result<(&EntryRecord, &FileRecord), IndexError> {
-        let record = (self.manifest.entries.get(entry as usize))
+        let record = (self.manifest().entries.get(entry as usize))
             .ok_or_else(|| IndexError::Input(format!("entry {entry} is not in this shard")))?;
         let file = record.packed.as_ref().ok_or_else(|| {
             IndexError::Input("the shard was built with the sketch part only".into())

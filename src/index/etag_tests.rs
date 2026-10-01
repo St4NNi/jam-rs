@@ -146,9 +146,9 @@ fn log_keeps_etags() {
     config.keep_etags(&kept).unwrap();
     let location = Location::s3("s3://bucket/shard", &config).unwrap();
     let cache = cache();
-    let (manifest, digest) = location.manifest().unwrap();
+    let head = location.head().unwrap();
     let options = cached(&cache);
-    let shard = Shard::open_with_manifest(&location, &options, manifest.clone(), digest.clone());
+    let shard = Shard::open_with_head(&location, &options, head.clone());
     read_all(&shard.unwrap(), &old).unwrap();
     assert!(seen.lock().unwrap().iter().any(|r| r.if_match.is_none()));
     // A next run: a new config over the same store, the same cached blocks.
@@ -156,8 +156,7 @@ fn log_keeps_etags() {
         let (server, seen, config) = store(directory.path());
         config.keep_etags(&kept).unwrap();
         let location = Location::s3("s3://bucket/shard", &config).unwrap();
-        let (manifest, digest) = (manifest.clone(), digest.clone());
-        let shard = Shard::open_with_manifest(&location, &options, manifest, digest).unwrap();
+        let shard = Shard::open_with_head(&location, &options, head.clone()).unwrap();
         (server, seen, shard)
     };
     let (_server, seen, shard) = next_run();
@@ -214,19 +213,19 @@ fn warm_redownloads_pin() {
     test_shard(directory.path(), &entries_of(1));
     let (server, generation) = serve_generations(directory.path());
     let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
-    let (manifest, digest) = location.manifest().unwrap();
+    let head = location.head().unwrap();
     let cache = directory.path().join("cache");
     let parts = [Part::Packed(Some(vec!["entry1".into()]))];
-    let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &parts).unwrap();
-    warm(&location, &manifest, &plan, &cache).unwrap();
+    let plan = Plan::choose(&head, 1 << 30, 1 << 30, &parts).unwrap();
+    warm(&location, &head, &plan, &cache).unwrap();
     let etag_path = plan.etag_path(&cache, &plan.pins[0]);
     assert_eq!(std::fs::read_to_string(&etag_path).unwrap(), "\"g0\"");
     let pinned = std::fs::metadata(plan.pin_path(&cache, &plan.pins[0])).unwrap();
     let before = server.requests.load(Ordering::SeqCst);
-    warm(&location, &manifest, &plan, &cache).unwrap();
+    warm(&location, &head, &plan, &cache).unwrap();
     assert_eq!(server.requests.load(Ordering::SeqCst), before + 1);
     generation.store(1, Ordering::SeqCst);
-    warm(&location, &manifest, &plan, &cache).unwrap();
+    warm(&location, &head, &plan, &cache).unwrap();
     assert_eq!(std::fs::read_to_string(&etag_path).unwrap(), "\"g1\"");
     assert_eq!(
         std::fs::metadata(plan.pin_path(&cache, &plan.pins[0]))
@@ -245,11 +244,11 @@ fn stale_pin_removed() {
     test_shard(directory.path(), &entries);
     let (server, generation) = serve_generations(directory.path());
     let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
-    let (manifest, digest) = location.manifest().unwrap();
+    let head = location.head().unwrap();
     let cache = directory.path().join("cache");
     let parts = [Part::Packed(Some(vec!["entry1".into()]))];
-    let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &parts).unwrap();
-    warm(&location, &manifest, &plan, &cache).unwrap();
+    let plan = Plan::choose(&head, 1 << 30, 1 << 30, &parts).unwrap();
+    warm(&location, &head, &plan, &cache).unwrap();
     let pin_path = plan.pin_path(&cache, &plan.pins[0]);
     let options = ShardOptions {
         pins: Some(cache.clone()),
@@ -258,10 +257,8 @@ fn stale_pin_removed() {
     generation.store(1, Ordering::SeqCst);
     // A new process: it knows no ETag but the one of the pin.
     let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
-    let open = |location: &Location| {
-        let (manifest, digest) = location.manifest().unwrap();
-        Shard::open_with_manifest(location, &options, manifest, digest)
-    };
+    let open =
+        |location: &Location| Shard::open_with_head(location, &options, location.head().unwrap());
     let shard = open(&location).unwrap();
     let error = read_all(&shard, &entries).unwrap_err();
     assert!(error.to_string().contains("retry"), "{error}");

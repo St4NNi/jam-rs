@@ -6,7 +6,7 @@
 use super::manifest::{EntryRecord, FileRecord, Manifest, PACKED_DIRECTORY, verify_source};
 use super::plan::{PLAN_FILE, Pin, Plan, etag_file};
 use super::seed_file::{HEADER_BYTES, verify_part};
-use super::sources::Location;
+use super::sources::{IndexHead, Location};
 use super::{AtPath, IndexError};
 use crate::storage::{LocalFile, ReadAt};
 use rayon::prelude::*;
@@ -19,15 +19,16 @@ const DOWNLOAD_CHUNK: usize = 8 << 20;
 /// Ranged reads in flight while downloading.
 const DOWNLOAD_THREADS: usize = 64;
 
-/// Downloads every pin of `plan` from the shard at `location` into `cache`, checks each, and
-/// writes the plan. The old plan and its pins that `plan` lacks go first, so the disk budget
+/// Downloads every pin of `plan` from the shard at `location` (head `head`) into `cache`, checks
+/// each, and writes the plan. The old plan and its pins that `plan` lacks go first, so the disk budget
 /// holds while new pins arrive; pins already in place and intact are kept.
 pub fn warm(
     location: &Location,
-    manifest: &Manifest,
+    head: &IndexHead,
     plan: &Plan,
     cache: &Path,
 ) -> Result<(), IndexError> {
+    let manifest = &head.manifest;
     location.keep_etags(cache)?;
     remove_obsolete(plan, cache)?;
     let threads = rayon::ThreadPoolBuilder::new()
@@ -180,18 +181,21 @@ mod tests {
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
-        let (manifest, digest) = location.manifest().unwrap();
-        assert_eq!(digest, local.digest());
+        let head = location.head().unwrap();
+        assert_eq!(head.digest, local.digest());
         let cache = directory.path().join("cache");
         let parts = [Part::Sketch, Part::Packed(Some(vec!["entry2".into()]))];
-        let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &parts).unwrap();
+        let plan = Plan::choose(&head, 1 << 30, 1 << 30, &parts).unwrap();
         assert_eq!(plan.pins[0].place, Place::Ram);
-        warm(&location, &manifest, &plan, &cache).unwrap();
-        assert_eq!(Plan::read(&cache, &digest).unwrap(), Some(plan.clone()));
+        warm(&location, &head, &plan, &cache).unwrap();
+        assert_eq!(
+            Plan::read(&cache, &head.digest).unwrap(),
+            Some(plan.clone())
+        );
         // A second warm finds every pin in place and downloads nothing; each pin only costs its
         // check read.
         let before = asked.lock().unwrap().len();
-        warm(&location, &manifest, &plan, &cache).unwrap();
+        warm(&location, &head, &plan, &cache).unwrap();
         assert_eq!(asked.lock().unwrap().len(), before + plan.pins.len());
         // A damaged pin is downloaded again, also a pin of part of the seeds file.
         for pin in &plan.pins[..2] {
@@ -201,7 +205,7 @@ mod tests {
             bytes[at] ^= 1;
             std::fs::write(&pinned, &bytes).unwrap();
             let before = asked.lock().unwrap().len();
-            warm(&location, &manifest, &plan, &cache).unwrap();
+            warm(&location, &head, &plan, &cache).unwrap();
             assert!(asked.lock().unwrap().len() > before, "{}", pin.file);
             assert_ne!(std::fs::read(&pinned).unwrap(), bytes);
         }
@@ -248,18 +252,18 @@ mod tests {
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
-        let (manifest, digest) = location.manifest().unwrap();
+        let head = location.head().unwrap();
         let cache = directory.path().join("cache");
         let all = [Part::Sketch, Part::Locators, Part::Packed(None)];
-        let wide = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &all).unwrap();
-        warm(&location, &manifest, &wide, &cache).unwrap();
-        let narrow = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &[Part::Sketch]).unwrap();
-        warm(&location, &manifest, &narrow, &cache).unwrap();
+        let wide = Plan::choose(&head, 1 << 30, 1 << 30, &all).unwrap();
+        warm(&location, &head, &wide, &cache).unwrap();
+        let narrow = Plan::choose(&head, 1 << 30, 1 << 30, &[Part::Sketch]).unwrap();
+        warm(&location, &head, &narrow, &cache).unwrap();
         for pin in &wide.pins[1..] {
             assert!(!wide.pin_path(&cache, pin).exists(), "{}", pin.file);
         }
         assert!(narrow.pin_path(&cache, &narrow.pins[0]).exists());
-        let plan_bytes = std::fs::metadata(cache.join(&digest).join(PLAN_FILE)).unwrap();
+        let plan_bytes = std::fs::metadata(cache.join(&head.digest).join(PLAN_FILE)).unwrap();
         let pinned: u64 = narrow.pins.iter().map(Pin::bytes).sum();
         assert_eq!(disk_bytes(&cache), pinned + plan_bytes.len());
     }
@@ -281,22 +285,22 @@ mod tests {
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
         let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
-        let (manifest, digest) = location.manifest().unwrap();
+        let head = location.head().unwrap();
         let cache = directory.path().join("cache");
         // The default plan pins the sketch part alone; there are no locators or packed files.
-        let plan = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &[]).unwrap();
+        let plan = Plan::choose(&head, 1 << 30, 1 << 30, &[]).unwrap();
         let parts: Vec<&str> = plan.pins.iter().map(|pin| pin.part.as_str()).collect();
         assert_eq!(parts, ["sketch"]);
-        let packed = Plan::choose(&manifest, &digest, 1 << 30, 1 << 30, &[Part::Packed(None)]);
+        let packed = Plan::choose(&head, 1 << 30, 1 << 30, &[Part::Packed(None)]);
         assert!(packed.unwrap().pins.is_empty());
-        warm(&location, &manifest, &plan, &cache).unwrap();
+        warm(&location, &head, &plan, &cache).unwrap();
         let options = ShardOptions {
             pins: Some(cache),
             ..ShardOptions::default()
         };
         let before = asked.lock().unwrap().len();
         let shard = Shard::open_with(&location, &options).unwrap();
-        let ids = (0..manifest.color_sets as u32).map(crate::index::ColorSetId);
+        let ids = (0..head.manifest.color_sets as u32).map(crate::index::ColorSetId);
         assert!(shard.seed_file().read_color_sets(ids).is_ok());
         // Opening reads the manifest; the seeds file is read from the pin, and S3 only gets the
         // one check read of its first use.

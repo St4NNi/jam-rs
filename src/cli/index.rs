@@ -148,14 +148,14 @@ fn run_warm(args: &WarmArgs) -> Result<(), CliError> {
         path: args.shard.clone(),
         source,
     };
-    let (manifest, digest) = location.manifest().map_err(failed)?;
+    let head = location.head().map_err(failed)?;
     let (memory, disk) = (args.memory.as_u64(), args.disk.as_u64());
     let parts: Vec<Part> = args.pin.iter().flat_map(|parts| parts.0.clone()).collect();
-    let plan = Plan::choose(&manifest, &digest, memory, disk, &parts)?;
+    let plan = Plan::choose(&head, memory, disk, &parts)?;
     for line in plan_lines(&plan) {
         println!("{line}");
     }
-    warm(&location, &manifest, &plan, &args.cache).map_err(failed)?;
+    warm(&location, &head, &plan, &args.cache).map_err(failed)?;
     let seconds = started.elapsed().as_secs_f64();
     println!("warmed {} in {seconds:.1} s", args.cache.display());
     Ok(())

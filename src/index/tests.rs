@@ -393,11 +393,11 @@ fn pins_read_locally() {
     let endpoint = Some(server.address.as_str());
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
     let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
-    let manifest = local.manifest();
-    let mut pins = part_pins(manifest, &Part::Sketch, Place::Ram).unwrap();
-    pins.extend(part_pins(manifest, &Part::Locators, Place::Ssd).unwrap());
+    let head = local.head();
+    let mut pins = part_pins(head, &Part::Sketch, Place::Ram).unwrap();
+    pins.extend(part_pins(head, &Part::Locators, Place::Ssd).unwrap());
     let named = Part::Packed(Some(vec!["entry1".into()]));
-    pins.extend(part_pins(manifest, &named, Place::Ram).unwrap());
+    pins.extend(part_pins(head, &named, Place::Ram).unwrap());
     let plan = Plan {
         shard: local.digest().to_string(),
         memory: 0,
@@ -419,8 +419,8 @@ fn pins_read_locally() {
         ..ShardOptions::default()
     };
     // The manifest read to find the plan also opens the shard: one request for it.
-    let (manifest, digest) = location.manifest().unwrap();
-    let shard = Shard::open_with_manifest(&location, &options, manifest, digest).unwrap();
+    let head = location.head().unwrap();
+    let shard = Shard::open_with_head(&location, &options, head).unwrap();
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
     let manifests = asked.iter().filter(|key| key.ends_with("manifest.json"));

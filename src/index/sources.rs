@@ -80,10 +80,17 @@ impl Location {
         }
     }
 
-    /// The manifest of the shard at this location and the SHA-256 digest of its file.
-    pub fn manifest(&self) -> Result<(Manifest, String), IndexError> {
+    /// The head of the shard at this location: its manifest and the digest of the manifest.
+    pub fn head(&self) -> Result<IndexHead, IndexError> {
         let bytes = self.read_whole(MANIFEST_FILE)?;
-        Ok((Manifest::parse(&bytes)?, sha256_hex(&[&bytes])))
+        let manifest = Manifest::parse(&bytes)?;
+        let (file, seeds) = (manifest.seeds.path.clone(), manifest.seeds.bytes);
+        Ok(IndexHead {
+            manifest,
+            digest: sha256_hex(&[&bytes]),
+            bytes: seeds,
+            file,
+        })
     }
 
     /// The S3 object of the file `name` of `bytes` bytes, or `None` in a directory. Nothing is
@@ -159,6 +166,16 @@ impl Location {
     }
 }
 
+/// The head of a shard: its manifest, the SHA-256 digest of the manifest, which names this
+/// version of the shard, and the size and name of the seeds file.
+#[derive(Clone, Debug)]
+pub struct IndexHead {
+    pub manifest: Manifest,
+    pub digest: String,
+    pub bytes: u64,
+    pub file: String,
+}
+
 /// Removes the pin file at `path` and its ETag file. Open sources keep reading what they mapped.
 pub(crate) fn remove_pin(path: &Path) {
     for file in [path.to_path_buf(), etag_file(path)] {
@@ -194,17 +211,16 @@ pub(crate) struct ShardFiles {
 }
 
 impl ShardFiles {
-    /// The files of the shard at `location` with `entries` entries and manifest digest `digest`,
-    /// opened as `options` say.
+    /// The files of the shard at `location` with head `head`, opened as `options` say.
     pub(crate) fn new(
         location: &Location,
         options: &ShardOptions,
-        entries: usize,
-        digest: &str,
+        head: &IndexHead,
     ) -> Result<Self, IndexError> {
+        let entries = head.manifest.entries.len();
         let mut pins: HashMap<String, Vec<(Pin, PathBuf)>> = HashMap::new();
         if let Some(cache) = &options.pins
-            && let Some(plan) = Plan::read(cache, digest)?
+            && let Some(plan) = Plan::read(cache, &head.digest)?
         {
             for pin in &plan.pins {
                 let path = plan.pin_path(cache, pin);

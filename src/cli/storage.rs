@@ -88,24 +88,24 @@ impl ShardStorage {
             if let Some(cache) = &args.cache {
                 location.keep_etags(cache).map_err(failed)?;
             }
-            let manifest = match location {
-                Location::S3 { .. } => Some(location.manifest().map_err(failed)?),
+            let head = match location {
+                Location::S3 { .. } => Some(location.head().map_err(failed)?),
                 Location::Directory(_) => None,
             };
-            if let (Some((manifest, digest)), Some(cache)) = (&manifest, &args.cache) {
-                let mut plan = Plan::read(cache, digest).map_err(failed)?;
+            if let (Some(head), Some(cache)) = (&head, &args.cache) {
+                let mut plan = Plan::read(cache, &head.digest).map_err(failed)?;
                 if let (None, true, Some(disk)) = (&plan, warm_unplanned, args.disk) {
                     let memory = args.memory.map_or(DEFAULT_MEMORY, |size| size.as_u64());
-                    let chosen = Plan::choose(manifest, digest, memory, disk.as_u64(), &[])?;
-                    warm(&location, manifest, &chosen, cache).map_err(failed)?;
+                    let chosen = Plan::choose(head, memory, disk.as_u64(), &[])?;
+                    warm(&location, head, &chosen, cache).map_err(failed)?;
                     plan = Some(chosen);
                 }
                 plans.extend(plan);
             }
-            opened.push((path, location, manifest));
+            opened.push((path, location, head));
         }
         // A shard opened again, for example after its upload changed, keeps the block cache.
-        if self.cache.is_none() && opened.iter().any(|(_, _, manifest)| manifest.is_some()) {
+        if self.cache.is_none() && opened.iter().any(|(_, _, head)| head.is_some()) {
             self.cache = Some(self.block_cache(&plans, args)?);
         }
         let options = ShardOptions {
@@ -113,12 +113,10 @@ impl ShardStorage {
             pins: args.cache.clone(),
             ..ShardOptions::default()
         };
-        let open = |(path, location, manifest): (&PathBuf, Location, _)| {
-            let shard = match manifest {
+        let open = |(path, location, head): (&PathBuf, Location, _)| {
+            let shard = match head {
                 None => Shard::open_with(&location, &ShardOptions::default()),
-                Some((manifest, digest)) => {
-                    Shard::open_with_manifest(&location, &options, manifest, digest)
-                }
+                Some(head) => Shard::open_with_head(&location, &options, head),
             };
             shard.map_err(|source| CliError::Shard {
                 path: path.clone(),

@@ -1,6 +1,5 @@
-//! Sequence files: the packed sequences of all entries of an index, one after another, each on a
-//! 4 KiB boundary so its checked blocks line up with the blocks of the file. An index may split
-//! them into chunks of about equal size; each entry lies in exactly one chunk.
+//! Sequence files: the packed sequences of the entries of an index one after another, each on a
+//! 4 KiB boundary, split into chunks of about equal size; each entry lies in one chunk.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 

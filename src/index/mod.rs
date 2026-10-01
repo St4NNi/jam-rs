@@ -40,7 +40,7 @@ pub use seed_file::{
     ColorSetId, ColorSets, SEEDS_FILE, SeedFile, SeedLocation, StoredSeed, seed_key,
 };
 pub use shard::{Shard, ShardStats};
-pub use sources::{Location, ShardOptions};
+pub use sources::{IndexHead, Location, ShardOptions};
 pub use warm::warm;
 
 /// Errors of the index module.
