@@ -168,9 +168,11 @@ impl Plan {
         )
     }
 
-    /// The local file of a pin in `cache`, by part, as one file may hold several parts.
+    /// The local file of a pin in `cache`, by part and range, as one file may hold several.
     pub fn pin_path(&self, cache: &Path, pin: &Pin) -> PathBuf {
-        cache.join(&self.shard).join(&pin.part).join(&pin.file)
+        let file = pin.file.replace('%', "%25").replace('/', "%2F");
+        let name = format!("{file}.{}-{}", pin.start, pin.end);
+        cache.join(&self.shard).join(&pin.part).join(name)
     }
 
     /// The file next to a pin that holds the ETag its bytes were downloaded under.
@@ -304,8 +306,10 @@ mod tests {
             Plan::read(&cache, shard.digest()).unwrap(),
             Some(plan.clone())
         );
-        let path = plan.pin_path(&cache, &plan.pins[2]);
-        assert!(path.ends_with("packed/entry1.packed"));
+        let pin = &plan.pins[2];
+        let path = plan.pin_path(&cache, pin);
+        let name = format!("packed/packed%2Fentry1.packed.{}-{}", pin.start, pin.end);
+        assert!(path.ends_with(name));
         let other = "0".repeat(64);
         std::fs::rename(cache.join(shard.digest()), cache.join(&other)).unwrap();
         assert!(Plan::read(&cache, &other).is_err());
