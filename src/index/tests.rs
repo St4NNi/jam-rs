@@ -417,13 +417,13 @@ fn pins_read_locally() {
         pins: Some(cache),
         ..ShardOptions::default()
     };
-    // The head read to find the plan also opens the shard: two requests, then the check read of
-    // the pinned seeds file.
+    // The head read to find the plan also opens the shard: two requests, which also check the
+    // seeds file for this process, so its pins need no check read.
     let head = location.head().unwrap();
     let shard = Shard::open_with_head(&location, &options, head).unwrap();
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
-    assert_eq!(asked.iter().filter(|key| *key == "shard/seeds").count(), 3);
+    assert_eq!(asked.iter().filter(|key| *key == "shard/seeds").count(), 2);
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
     // A pinned file gets nothing but the check read of its first use.
     let pinned = asked

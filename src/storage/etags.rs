@@ -154,6 +154,14 @@ impl EtagBook {
         }
     }
 
+    /// Marks the check of `location` as passed when its ETag is known and no check runs.
+    pub(crate) fn pass_check(&self, location: &str) {
+        let mut inner = lock(&self.inner);
+        if inner.etags.contains_key(location) && !inner.checks.contains_key(location) {
+            inner.checks.insert(location.to_string(), Check::Passed);
+        }
+    }
+
     /// Ends the check of `location` that `latch` belongs to. A passed check is not run again; a
     /// failed one is run again by the next read.
     pub(crate) fn end_check(&self, location: &str, latch: &Latch, result: &io::Result<()>) {

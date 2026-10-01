@@ -71,9 +71,16 @@ impl Location {
     /// The head of the shard at this location: the header and the manifest of its seeds file.
     /// On S3 the first read learns the ETag of the object, or sends the known one.
     pub fn head(&self) -> Result<IndexHead, IndexError> {
-        // The size is not known before the header is read.
-        let source = self.open(SEEDS_FILE, u64::MAX)?;
-        let (manifest, digest, bytes) = Manifest::read_from(source.as_ref())?;
+        // The size is not known before the header is read. The reads of an S3 object are bound
+        // to one ETag, so they also check the object for this process.
+        let (manifest, digest, bytes) = match self.object(SEEDS_FILE, u64::MAX)? {
+            Some(object) => {
+                let head = Manifest::read_from(&object)?;
+                object.pass_check();
+                head
+            }
+            None => Manifest::read_from(self.open(SEEDS_FILE, 0)?.as_ref())?,
+        };
         let file = SEEDS_FILE.to_string();
         Ok(IndexHead {
             manifest,

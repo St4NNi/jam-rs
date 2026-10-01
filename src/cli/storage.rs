@@ -219,7 +219,7 @@ mod tests {
             .collect();
         assert_eq!(parts, [("sketch", Place::Ram), ("locators", Place::Ram)]);
         // The next start finds the plan and reads the seeds from the pins alone: the seeds file
-        // only gets the reads of its header and manifest, and the check read beside them.
+        // only gets the reads of its header and manifest, which also check it.
         let before = asked.lock().unwrap().len();
         open(true);
         let asked = asked.lock().unwrap();
@@ -227,7 +227,7 @@ mod tests {
             .iter()
             .filter(|k| k.ends_with("seeds"))
             .count();
-        assert!((2..=3).contains(&seeds), "{seeds}");
+        assert_eq!(seeds, 2);
     }
 
     /// A server opens its shard again with the same storage, so with the same block cache.

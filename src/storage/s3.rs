@@ -281,6 +281,11 @@ impl S3Object {
         self.get(0..1).map(drop)
     }
 
+    /// Marks the check of this object as passed, after reads that its known ETag bound.
+    pub(crate) fn pass_check(&self) {
+        self.etags.pass_check(&self.location);
+    }
+
     /// Asks for the check of this object.
     pub(crate) fn begin_check(&self) -> Start {
         self.etags.begin_check(&self.location)
