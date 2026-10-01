@@ -222,23 +222,28 @@ pub(crate) fn sha256_file(path: &Path) -> Result<FileDigest, IndexError> {
 
 /// Checks a file read from `source` against its record, for files that may not be local.
 pub(crate) fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
-    let mut digest = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
     let size = source.size();
-    let mut offset = 0u64;
-    while offset < size {
-        let length = (size - offset).min(buffer.len() as u64) as usize;
-        source.read_exact_at(offset, &mut buffer[..length])?;
-        digest.update(&buffer[..length]);
-        offset += length as u64;
-    }
-    if size != record.bytes || hex::encode(digest.finalize()) != record.sha256 {
+    if size != record.bytes || sha256_range(source, 0..size)? != record.sha256 {
         return Err(IndexError::Checksum(format!(
             "{} differs from its manifest record",
             record.path
         )));
     }
     Ok(())
+}
+
+/// The SHA-256 digest of the bytes `range` of `source`, lower case hex.
+pub(crate) fn sha256_range(source: &dyn ReadAt, range: Range<u64>) -> Result<String, IndexError> {
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    let mut offset = range.start;
+    while offset < range.end {
+        let length = (range.end - offset).min(buffer.len() as u64) as usize;
+        source.read_exact_at(offset, &mut buffer[..length])?;
+        digest.update(&buffer[..length]);
+        offset += length as u64;
+    }
+    Ok(hex::encode(digest.finalize()))
 }
 
 #[cfg(test)]
