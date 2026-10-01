@@ -30,22 +30,11 @@ pub enum Split {
     MaxSeedLocations(u64),
 }
 
-/// How the packed sequences reach the output shards, so each output shard opens on its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PackedOutput {
-    /// A symbolic link to the original file of each packed sequence.
-    Link,
-    /// A copy of each packed sequence.
-    Copy,
-}
-
 /// How an index is resharded.
 #[derive(Clone, Debug)]
 pub struct ReshardOptions {
     /// How the entries are split into output shards.
     pub split: Split,
-    /// How the packed sequences reach the output shards.
-    pub packed: PackedOutput,
     /// Threads that write each seeds file.
     pub threads: usize,
     /// Directory for temporary files.
@@ -231,15 +220,7 @@ fn write_shard(
         };
         let source = input.directory.join(PACKED_DIRECTORY).join(&file.path);
         let target = packed.join(&file.path);
-        match options.packed {
-            // Links point at the original file, so they stay valid when the inputs are removed
-            // after an earlier reshard that linked them.
-            PackedOutput::Link => {
-                let original = std::fs::canonicalize(&source).at(&source)?;
-                std::os::unix::fs::symlink(original, &target).at(&target)?
-            }
-            PackedOutput::Copy => drop(std::fs::copy(&source, &target).at(&target)?),
-        }
+        std::fs::copy(&source, &target).at(&target)?;
         entries.push(record);
     }
     let spill = SeedSpill::create(&options.temporary_directory)?;

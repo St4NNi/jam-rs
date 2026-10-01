@@ -6,8 +6,8 @@
 use super::storage::ShardStorage;
 use super::{CliError, read_list};
 use crate::index::{
-    BuildOptions, EntryInput, Manifest, PackedOutput, Parameters, Part, Place, Plan,
-    ReshardOptions, Split, build_shard, reshard, warm,
+    BuildOptions, EntryInput, Manifest, Parameters, Part, Place, Plan, ReshardOptions, Split,
+    build_shard, reshard, warm,
 };
 use bytesize::ByteSize;
 use clap::{Args, Subcommand};
@@ -75,9 +75,6 @@ struct ReshardArgs {
     /// Most seed locations per output shard, which bounds the size of each seeds file
     #[arg(long, group = "split")]
     max_seed_locations: Option<u64>,
-    /// Copy the packed sequences instead of linking them
-    #[arg(long)]
-    copy_packed: bool,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -252,11 +249,6 @@ fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
     };
     let options = ReshardOptions {
         split,
-        packed: if args.copy_packed {
-            PackedOutput::Copy
-        } else {
-            PackedOutput::Link
-        },
         threads,
         temporary_directory: temp_dir,
     };

@@ -131,10 +131,9 @@ fn threads_keep_output() {
     }
 }
 
-fn reshard_options(directory: &Path, split: Split, packed: PackedOutput) -> ReshardOptions {
+fn reshard_options(directory: &Path, split: Split) -> ReshardOptions {
     ReshardOptions {
         split,
-        packed,
         threads: 3,
         temporary_directory: directory.to_path_buf(),
     }
@@ -163,27 +162,17 @@ fn merged_equals_whole() {
             part
         })
         .collect();
-    for packed in [PackedOutput::Link, PackedOutput::Copy] {
-        let merged = directory.path().join(format!("merged-{packed:?}"));
-        let split = Split::Shards(1);
-        let index = reshard(
-            &parts,
-            &merged,
-            &reshard_options(directory.path(), split, packed),
-        );
-        let index = index.unwrap();
-        assert_eq!(index, IndexFile::read(&merged).unwrap());
-        assert_eq!(index.shards.len(), 1);
-        assert_eq!(index.shards[0].entries, 6);
-        let shard_directory = merged.join(&index.shards[0].directory);
-        assert_same_shard(&whole, &shard_directory);
-        let link = shard_directory.join("packed/entry0.packed");
-        let is_link = std::fs::symlink_metadata(link).unwrap().is_symlink();
-        assert_eq!(is_link, packed == PackedOutput::Link);
-        let shard = Shard::open(&shard_directory).unwrap();
-        shard.verify().unwrap();
-        check_every_seed(&shard, &entries);
-    }
+    let merged = directory.path().join("merged");
+    let options = reshard_options(directory.path(), Split::Shards(1));
+    let index = reshard(&parts, &merged, &options).unwrap();
+    assert_eq!(index, IndexFile::read(&merged).unwrap());
+    assert_eq!(index.shards.len(), 1);
+    assert_eq!(index.shards[0].entries, 6);
+    let shard_directory = merged.join(&index.shards[0].directory);
+    assert_same_shard(&whole, &shard_directory);
+    let shard = Shard::open(&shard_directory).unwrap();
+    shard.verify().unwrap();
+    check_every_seed(&shard, &entries);
 }
 
 #[test]
@@ -194,19 +183,18 @@ fn splits_equal_direct() {
     let options = options(directory.path(), 2);
     let whole = directory.path().join("whole");
     build_shard(&inputs, &whole, &options).unwrap();
-    let link = PackedOutput::Link;
     let merged = directory.path().join("merged");
     reshard(
         std::slice::from_ref(&whole),
         &merged,
-        &reshard_options(directory.path(), Split::Shards(1), link),
+        &reshard_options(directory.path(), Split::Shards(1)),
     )
     .unwrap();
     let total = Shard::open(&whole).unwrap().manifest().seed_locations;
     for split in [Split::Shards(3), Split::MaxSeedLocations(total / 4)] {
         let output = directory.path().join(format!("split-{split:?}"));
         // The merged index is given as an index directory, so its shards are read in order.
-        let options_of = reshard_options(directory.path(), split, link);
+        let options_of = reshard_options(directory.path(), split);
         let index = reshard(std::slice::from_ref(&merged), &output, &options_of).unwrap();
         let mut names = Vec::new();
         for (number, record) in index.shards.iter().enumerate() {
@@ -235,7 +223,7 @@ fn splits_equal_direct() {
     let error = reshard(
         &[whole.clone(), whole.clone()],
         &directory.path().join("twice"),
-        &reshard_options(directory.path(), Split::Shards(1), link),
+        &reshard_options(directory.path(), Split::Shards(1)),
     );
     assert!(error.unwrap_err().to_string().contains("used twice"));
 }
@@ -478,7 +466,7 @@ fn sketch_only_shards() {
         full_bytes[full_sketch.start as usize..full_sketch.end as usize]
     );
     let output = directory.path().join("split");
-    let options = reshard_options(directory.path(), Split::Shards(2), PackedOutput::Link);
+    let options = reshard_options(directory.path(), Split::Shards(2));
     let index = reshard(std::slice::from_ref(&whole), &output, &options).unwrap();
     for record in &index.shards {
         let range = record.first_entry as usize..(record.first_entry + record.entries) as usize;
