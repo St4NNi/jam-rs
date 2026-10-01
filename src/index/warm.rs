@@ -41,11 +41,12 @@ pub fn warm(
     threads.install(|| {
         (plan.pins.par_iter()).try_for_each(|pin| {
             let record = file_record(&seeds, &head.manifest.entries, &pin.file)?;
+            let pinned = Pinned { pin, record };
             let path = plan.pin_path(cache, pin);
-            if is_complete(location, &path, pin, record) {
+            if is_complete(location, &path, &pinned) {
                 return Ok(());
             }
-            download(location, record, pin, &path)
+            download(location, &pinned, &path)
         })
     })?;
     plan.write(cache)
@@ -75,12 +76,19 @@ fn file_record<'a>(
         .ok_or_else(|| IndexError::Input(format!("the shard has no file {file}")))
 }
 
+/// A pin with the record of its file.
+struct Pinned<'a> {
+    pin: &'a Pin,
+    record: &'a FileRecord,
+}
+
 /// Whether the pin file at `path` is there and intact, as `verify_pin` checks it, and its
 /// object on S3 still has the ETag that the pin was downloaded under.
-fn is_complete(location: &Location, path: &Path, pin: &Pin, record: &FileRecord) -> bool {
-    let intact = LocalFile::open(path).is_ok_and(|f| verify_pin(location, &f, pin, record).is_ok());
+fn is_complete(location: &Location, path: &Path, pinned: &Pinned<'_>) -> bool {
+    let intact = LocalFile::open(path).is_ok_and(|f| verify_pin(location, &f, pinned).is_ok());
     let etag = std::fs::read_to_string(etag_file(path)).ok();
-    intact && (location.verify_etag(&pin.file, record.bytes, etag.as_deref())).is_ok()
+    let (file, bytes) = (&pinned.pin.file, pinned.record.bytes);
+    intact && (location.verify_etag(file, bytes, etag.as_deref())).is_ok()
 }
 
 /// Checks a pin file: its size, and the digest of a whole file or else the CRC-32 of every
@@ -89,9 +97,9 @@ fn is_complete(location: &Location, path: &Path, pin: &Pin, record: &FileRecord)
 fn verify_pin(
     location: &Location,
     file: &LocalFile,
-    pin: &Pin,
-    record: &FileRecord,
+    pinned: &Pinned<'_>,
 ) -> Result<(), IndexError> {
+    let Pinned { pin, record } = *pinned;
     if file.size() != pin.bytes() {
         return Err(IndexError::format(format!(
             "the pin of {} is cut",
@@ -111,12 +119,8 @@ fn verify_pin(
 }
 
 /// Downloads the range of `pin` into a partial file, checks it, and moves it to `path`.
-fn download(
-    location: &Location,
-    record: &FileRecord,
-    pin: &Pin,
-    path: &Path,
-) -> Result<(), IndexError> {
+fn download(location: &Location, pinned: &Pinned<'_>, path: &Path) -> Result<(), IndexError> {
+    let Pinned { pin, record } = *pinned;
     let etag_path = etag_file(path);
     let _ = std::fs::remove_file(&etag_path);
     let etag = location.refresh_etag(&pin.file, record.bytes)?;
@@ -134,7 +138,7 @@ fn download(
         file.write_all_at(&buffer, at).at(&partial)
     })?;
     file.sync_all().at(&partial)?;
-    verify_pin(location, &LocalFile::open(&partial)?, pin, record)?;
+    verify_pin(location, &LocalFile::open(&partial)?, pinned)?;
     std::fs::rename(&partial, path).at(path)?;
     match etag {
         Some(etag) => std::fs::write(&etag_path, etag).at(&etag_path),

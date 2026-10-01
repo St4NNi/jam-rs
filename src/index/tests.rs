@@ -121,12 +121,14 @@ fn threads_keep_output() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(5);
     let inputs = write_entries(directory.path(), &entries);
-    let one = directory.path().join("one");
-    let four = directory.path().join("four");
-    build_shard(&inputs, &one, &options(directory.path(), 1)).unwrap();
-    build_shard(&inputs, &four, &options(directory.path(), 4)).unwrap();
-    for file in [SEEDS_FILE, "packed/entry3.packed"] {
-        let read = |shard: &PathBuf| std::fs::read(shard.join(file)).unwrap();
+    let [one, four] = ["one", "four"].map(|name| directory.path().join(name));
+    for (output, threads) in [(&one, 1), (&four, 4)] {
+        std::fs::create_dir(output).unwrap();
+        let options = options(directory.path(), threads);
+        build_shard(&inputs, &output.join("shard"), &options).unwrap();
+    }
+    for file in ["shard/seeds", "shard/packed/entry3.packed"] {
+        let read = |output: &PathBuf| std::fs::read(output.join(file)).unwrap();
         assert!(read(&one) == read(&four), "{file}");
     }
 }
