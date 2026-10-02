@@ -12,8 +12,6 @@ use crate::storage::ReadAt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ops::Range;
-/// The directory of the packed sequences in a shard directory.
-pub(crate) const PACKED_DIRECTORY: &str = "packed";
 /// The format version that this code reads and writes.
 pub(crate) const FORMAT_VERSION: u32 = 2;
 
@@ -192,11 +190,6 @@ pub(crate) fn choose_bucket_bits(seeds: u64) -> u8 {
     (MIN_BUCKET_BITS..MAX_BUCKET_BITS)
         .find(|bits| seeds <= 256 << bits)
         .unwrap_or(MAX_BUCKET_BITS)
-}
-
-/// The packed file path of an entry, relative to the packed directory.
-pub(crate) fn packed_file_name(entry: &str) -> String {
-    format!("{entry}.packed")
 }
 
 /// Checks that entry names are valid file names and distinct.

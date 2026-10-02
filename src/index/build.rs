@@ -6,12 +6,13 @@
 //! The output never depends on the thread count, and entries keep the input order.
 
 use super::manifest::{
-    EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters,
-    SequenceRecord, check_names, choose_bucket_bits, packed_file_name, sha256_hex,
+    EntryRecord, FORMAT_VERSION, FileRecord, Manifest, Parameters, SequenceRecord, check_names,
+    choose_bucket_bits, sha256_hex,
 };
 use super::packed::PackedWriter;
 use super::seed_file::{SEEDS_FILE, SeedLocation, seed_key};
 use super::seed_writer::SeedFileShape;
+use super::sequence_file::{Piece, place_entries, sequence_file_names, write_sequence_files};
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
@@ -84,16 +85,22 @@ pub fn build_shard(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(options.threads)
         .build()?;
+    let temporary = &options.temporary_directory;
+    let pieces = (!options.sketch_only)
+        .then(|| {
+            tempfile::Builder::new()
+                .prefix("jam-packed")
+                .tempdir_in(temporary)
+        })
+        .transpose()
+        .at(temporary)?;
+    let name = output.file_name().unwrap_or_default().to_string_lossy();
     in_partial_directory(output, |directory| {
-        let packed = (!options.sketch_only).then(|| directory.join(PACKED_DIRECTORY));
-        if let Some(packed) = &packed {
-            std::fs::create_dir(packed).at(packed)?;
-        }
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
-            packed,
-            spill: SeedSpill::create(&options.temporary_directory)?,
+            packed: pieces.as_ref().map(|pieces| pieces.path().to_path_buf()),
+            spill: SeedSpill::create(temporary)?,
         };
         pool.install(|| {
             let built = if options.singleton {
@@ -103,20 +110,10 @@ pub fn build_shard(
             };
             let (mut entries, tables): (Vec<_>, Vec<_>) = built.into_iter().unzip();
             check_names(entries.iter().map(|entry| entry.name.as_str()))?;
-            // Each packed file is a sequence file of one entry.
-            let mut files = Vec::new();
-            for entry in &mut entries {
-                if let Some(sequence) = &mut entry.sequence {
-                    let path = format!("{PACKED_DIRECTORY}/{}", packed_file_name(&entry.name));
-                    let (bytes, sha256) = (sequence.bytes, sequence.sha256.clone());
-                    files.push(FileRecord {
-                        path,
-                        bytes,
-                        sha256,
-                    });
-                    sequence.file = files.len() - 1;
-                }
-            }
+            let files = match &context.packed {
+                Some(pieces) => write_sequences(&mut entries, pieces, directory, &name)?,
+                None => Vec::new(),
+            };
             let parameters = options.parameters;
             let spill = context.spill;
             let tables = (!options.sketch_only).then_some(tables);
@@ -131,6 +128,34 @@ pub fn build_shard(
             )
         })
     })
+}
+
+/// Writes the sequence file `NAME.jamseq` into `directory` from the packed sequence of each
+/// entry, in the file named by its entry id in `pieces`, and gives each entry its place.
+fn write_sequences(
+    entries: &mut [EntryRecord],
+    pieces: &Path,
+    directory: &Path,
+    name: &str,
+) -> Result<Vec<FileRecord>, IndexError> {
+    let pieces: Vec<Piece> = (entries.iter().enumerate())
+        .filter_map(|(entry, record)| Some((entry, record.sequence.as_ref()?.bytes)))
+        .map(|(entry, bytes)| Piece {
+            path: pieces.join(entry.to_string()),
+            offset: 0,
+            bytes,
+        })
+        .collect();
+    let sizes: Vec<u64> = pieces.iter().map(|piece| piece.bytes).collect();
+    let places = place_entries(&sizes, 1)?.0;
+    for (entry, place) in entries.iter_mut().zip(&places) {
+        if let Some(sequence) = &mut entry.sequence {
+            (sequence.file, sequence.offset) = (place.chunk, place.offset);
+        }
+    }
+    let names = sequence_file_names(name, 1);
+    let paths = [directory.join(&names[0])];
+    write_sequence_files(&paths, &names, &pieces, &places, true)
 }
 
 /// Runs `build` on a fresh partial directory next to `output`, and moves it to `output` when
@@ -216,7 +241,8 @@ pub(crate) fn complete_shard(
 struct Context {
     seeder: Seeder,
     parameters: Parameters,
-    /// The directory of the packed sequences; none when they are not written.
+    /// The directory of each entry's packed sequence until the sequence file is written; none
+    /// when they are not written.
     packed: Option<PathBuf>,
     spill: SeedSpill,
 }
@@ -262,10 +288,7 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEn
             .map(|(offset, (name, sequence))| {
                 let mut entry = EntryBuilder::new(context, first + offset);
                 entry.add_contig(name, sequence)?;
-                // The name becomes a file name, so it is checked before the file is made.
-                let name = String::from_utf8_lossy(name).into_owned();
-                check_names(std::iter::once(name.as_str()))?;
-                entry.finish(name)
+                entry.finish(String::from_utf8_lossy(name).into_owned())
             })
             .collect::<Result<Vec<_>, IndexError>>()?;
         built.extend(entries);
@@ -326,8 +349,8 @@ impl<'a> EntryBuilder<'a> {
         Ok(())
     }
 
-    /// Writes the packed sequence of the entry and spills its seed records; returns its record
-    /// and its encoded contig table.
+    /// Writes the packed sequence of the entry into a file named by its entry id and spills its
+    /// seed records; returns its record and its encoded contig table.
     fn finish(mut self, name: String) -> Result<BuiltEntry, IndexError> {
         self.records.sort_unstable();
         self.records.dedup();
@@ -338,7 +361,10 @@ impl<'a> EntryBuilder<'a> {
         let mut table = Vec::new();
         self.packed.contig_table().encode(&mut table);
         let sequence = match &self.context.packed {
-            Some(directory) => Some(write_packed(self.packed, directory, &name)?),
+            Some(pieces) => {
+                let path = pieces.join(self.entry.to_string());
+                Some(write_packed(self.packed, &path)?)
+            }
             None => None,
         };
         let record = EntryRecord {
@@ -352,31 +378,17 @@ impl<'a> EntryBuilder<'a> {
     }
 }
 
-/// Writes the packed sequence of the entry `name` into `directory` and returns its record; the
-/// manifest then lists the file as a sequence file.
-fn write_packed(
-    writer: PackedWriter,
-    directory: &Path,
-    name: &str,
-) -> Result<SequenceRecord, IndexError> {
+/// Writes the packed sequence of an entry to `path`; its record has its size and digest, and
+/// gets its place when the chunks are written.
+fn write_packed(writer: PackedWriter, path: &Path) -> Result<SequenceRecord, IndexError> {
     let parts = writer.finish()?;
-    let file_name = packed_file_name(name);
-    let path = directory.join(&file_name);
-    let file = std::fs::File::create_new(&path).map_err(|error| match error.kind() {
-        std::io::ErrorKind::AlreadyExists => {
-            IndexError::Input(format!("the entry name {name} is used twice"))
-        }
-        _ => IndexError::File {
-            path: path.clone(),
-            source: error,
-        },
-    })?;
+    let file = std::fs::File::create_new(path).at(path)?;
     let parts = parts.parts();
     let mut out = std::io::BufWriter::with_capacity(1 << 20, file);
     for part in &parts {
-        out.write_all(part).at(&path)?;
+        out.write_all(part).at(path)?;
     }
-    out.flush().at(&path)?;
+    out.flush().at(path)?;
     Ok(SequenceRecord {
         file: 0,
         offset: 0,

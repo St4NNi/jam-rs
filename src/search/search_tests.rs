@@ -627,14 +627,12 @@ fn circular_query_confirmed() {
     assert_eq!(summary.align.entries, 1);
 }
 
-/// A packed sequence that disappears after the shard is open fails stage 3 for its entry.
+/// A sequence file that disappears after the shard is open fails stage 3 for its entries.
 #[test]
 fn failure_marks_unfinished() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
-    for entry in 0..2 {
-        std::fs::remove_file(shard.sequence_path(entry).unwrap()).unwrap();
-    }
+    std::fs::remove_file(shard.sequence_path(0).unwrap()).unwrap();
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Align), false);
     assert!(
         matches!(summary.completion, Completion::Failed(_)),

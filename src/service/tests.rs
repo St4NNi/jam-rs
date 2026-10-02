@@ -421,12 +421,7 @@ fn replaced_shard_reopened() {
     let before = local_lines(&shard);
     assert_ne!(before, expected);
     assert_eq!(local_lines(&shard), before);
-    for name in [
-        "seeds",
-        "packed/shard_entry0.packed",
-        "packed/shard_entry1.packed",
-        "packed/shard_entry2.packed",
-    ] {
+    for name in ["seeds", "shard.jamseq"] {
         let from = new.path().join("shard").join(name);
         std::fs::copy(from, served.path().join("shard").join(name)).unwrap();
     }

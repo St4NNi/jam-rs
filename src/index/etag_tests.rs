@@ -52,15 +52,14 @@ fn read_all(shard: &Shard, entries: &[Vec<Vec<u8>>]) -> Result<(), IndexError> {
 }
 
 /// Replaces the files of the shard in `root` by those of another shard built from `entries`;
-/// with `packed` only the packed sequences.
+/// with `packed` only the sequence file.
 fn replace(root: &Path, entries: &[Vec<Vec<u8>>], packed: bool) {
     let other = tempfile::tempdir().unwrap();
     test_shard(other.path(), entries);
-    let packed_files = (0..entries.len()).map(|entry| format!("shard/packed/entry{entry}.packed"));
-    let names: Vec<String> = std::iter::once("shard/seeds".into())
-        .chain(packed_files)
-        .collect();
-    for name in names.iter().skip(usize::from(packed)) {
+    for name in ["shard/seeds", "shard/shard.jamseq"]
+        .iter()
+        .skip(usize::from(packed))
+    {
         std::fs::copy(other.path().join(name), root.join(name)).unwrap();
     }
 }
@@ -158,8 +157,8 @@ fn log_keeps_etags() {
         requests.iter().all(|r| r.if_match.is_some()),
         "{requests:?}"
     );
-    let packed = requests.iter().filter(|r| r.key.contains("packed/"));
-    assert_eq!(packed.count(), 3, "one check read per file: {requests:?}");
+    let packed = requests.iter().filter(|r| r.key.ends_with(".jamseq"));
+    assert_eq!(packed.count(), 1, "one check read per file: {requests:?}");
     replace(directory.path(), &entries_of(2), true);
     let (_server, seen, shard) = next_run();
     let error = read_all(&shard, &old).unwrap_err();
@@ -168,9 +167,9 @@ fn log_keeps_etags() {
     assert!(
         requests
             .iter()
-            .filter(|r| r.key.contains("packed/"))
+            .filter(|r| r.key.ends_with(".jamseq"))
             .count()
-            <= 3
+            <= 2
     );
 }
 

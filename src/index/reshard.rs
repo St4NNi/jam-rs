@@ -9,8 +9,9 @@
 
 use super::build::{complete_shard, in_partial_directory};
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
-use super::manifest::{Manifest, PACKED_DIRECTORY, Parameters, check_names, sha256_hex};
+use super::manifest::{Manifest, Parameters, check_names, sha256_hex};
 use super::seed_file::{ColorSetId, SEED_KEY_BITS, SEEDS_FILE, SeedFile};
+use super::sequence_file::{Piece, place_entries, sequence_file_names, write_sequence_files};
 use super::sources::Location;
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
@@ -186,7 +187,7 @@ fn output_shard(
     let name = format!("shard-{:04}", part.number);
     let shard_directory = directory.join(&name);
     std::fs::create_dir(&shard_directory).at(&shard_directory)?;
-    let manifest = write_shard(shards, part.sources, &shard_directory, options)?;
+    let manifest = write_shard(shards, part.sources, (&shard_directory, &name), options)?;
     let manifest_digest = sha256_hex(&[&manifest.to_bytes()?]);
     Ok(ShardRecord {
         directory: name,
@@ -197,38 +198,47 @@ fn output_shard(
     })
 }
 
-/// Writes one output shard of the entries `part` into `directory`.
+/// Writes one output shard `NAME` of the entries `part` into `directory`, with a copy of their
+/// packed sequences in its sequence file.
 fn write_shard(
     shards: &[InputShard],
     part: &[EntrySource],
-    directory: &Path,
+    (directory, name): (&Path, &str),
     options: &ReshardOptions,
 ) -> Result<Manifest, IndexError> {
     let locators = shards[0].seeds.has_locators();
-    let packed = directory.join(PACKED_DIRECTORY);
-    if locators {
-        std::fs::create_dir(&packed).at(&packed)?;
-    }
     let mut entries = Vec::with_capacity(part.len());
     let mut tables = Vec::with_capacity(part.len());
-    let mut files = Vec::new();
+    let mut pieces = Vec::new();
     for &EntrySource { shard, entry } in part {
         let input = &shards[shard];
-        let mut record = input.manifest.entries[entry as usize].clone();
+        let record = input.manifest.entries[entry as usize].clone();
         if locators {
             tables.push(input.seeds.contig_table_bytes(entry)?);
         }
-        let Some(sequence) = &mut record.sequence else {
-            entries.push(record);
-            continue;
-        };
-        let file = &input.manifest.sequence_files[sequence.file];
-        let source = input.directory.join(&file.path);
-        let target = directory.join(&file.path);
-        std::fs::copy(&source, &target).at(&target)?;
-        files.push(file.clone());
-        sequence.file = files.len() - 1;
+        if let Some(sequence) = &record.sequence {
+            let file = &input.manifest.sequence_files[sequence.file];
+            pieces.push(Piece {
+                path: input.directory.join(&file.path),
+                offset: sequence.offset,
+                bytes: sequence.bytes,
+            });
+        }
         entries.push(record);
+    }
+    let mut files = Vec::new();
+    if !pieces.is_empty() {
+        let sizes: Vec<u64> = pieces.iter().map(|piece| piece.bytes).collect();
+        let places = place_entries(&sizes, 1)?.0;
+        let names = sequence_file_names(name, 1);
+        let paths = [directory.join(&names[0])];
+        files = write_sequence_files(&paths, &names, &pieces, &places, false)?;
+        let sequences = entries
+            .iter_mut()
+            .filter_map(|entry| entry.sequence.as_mut());
+        for (sequence, place) in sequences.zip(&places) {
+            (sequence.file, sequence.offset) = (0, place.offset);
+        }
     }
     let spill = SeedSpill::create(&options.temporary_directory)?;
     for (shard, input) in shards.iter().enumerate() {

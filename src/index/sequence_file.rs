@@ -14,8 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The extension of an index file.
-pub(crate) const INDEX_EXTENSION: &str = "jam";
 /// The extension of a sequence file.
 pub(crate) const SEQUENCE_EXTENSION: &str = "jamseq";
 /// Chunks written at once.

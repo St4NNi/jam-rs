@@ -127,7 +127,7 @@ fn threads_keep_output() {
         let options = options(directory.path(), threads);
         build_shard(&inputs, &output.join("shard"), &options).unwrap();
     }
-    for file in ["shard/seeds", "shard/packed/entry3.packed"] {
+    for file in ["shard/seeds", "shard/shard.jamseq"] {
         let read = |output: &PathBuf| std::fs::read(output.join(file)).unwrap();
         assert!(read(&one) == read(&four), "{file}");
     }
@@ -420,7 +420,7 @@ fn pins_read_locally() {
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
     assert_eq!(asked.iter().filter(|key| *key == "shard/seeds").count(), 2);
-    assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
+    assert!(asked.contains(&"shard/shard.jamseq".to_string()));
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its

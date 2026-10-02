@@ -280,7 +280,7 @@ mod tests {
         assert!(places(0, 0, &[]).0.is_empty());
         let (pinned, _) = places(1 << 30, 1 << 30, &[Part::Packed(None)]);
         assert!(pinned.iter().all(|(_, place)| *place == Place::Ssd));
-        assert_eq!(pinned.len(), 2);
+        assert_eq!(pinned.len(), 1);
         let error = Plan::choose(shard.head(), 1 << 30, 10, &[Part::Sketch]).unwrap_err();
         assert!(error.to_string().starts_with("pinning sketch needs"));
     }
@@ -297,11 +297,11 @@ mod tests {
             part_pins(shard.head(), &Part::Packed(None), Place::Ssd)
                 .unwrap()
                 .len(),
-            2
+            1
         );
         let named = Part::Packed(Some(vec!["entry1".into()]));
         pins.extend(part_pins(shard.head(), &named, Place::Ssd).unwrap());
-        assert_eq!(pins[2].file, "packed/entry1.packed");
+        assert_eq!(pins[2].file, "shard.jamseq");
         assert_eq!(pins[0].bytes(), manifest.sketch_part.end);
         let missing = Part::Packed(Some(vec!["other".into()]));
         assert!(part_pins(shard.head(), &missing, Place::Ssd).is_err());
@@ -321,7 +321,7 @@ mod tests {
         );
         let pin = &plan.pins[2];
         let path = plan.pin_path(&cache, pin);
-        let name = format!("packed/packed%2Fentry1.packed.{}-{}", pin.start, pin.end);
+        let name = format!("packed/shard.jamseq.{}-{}", pin.start, pin.end);
         assert!(path.ends_with(name));
         let other = "0".repeat(64);
         std::fs::rename(cache.join(shard.digest()), cache.join(&other)).unwrap();
