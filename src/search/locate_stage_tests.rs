@@ -114,7 +114,7 @@ fn false_hits_dropped() {
     ];
     let mut options = build_options(directory.path(), 2);
     options.bucket_bits = Some(8);
-    let output = directory.path().join("shard");
+    let output = directory.path().join("shard.jam");
     build_shard(
         &write_entries(directory.path(), &entries),
         &output,

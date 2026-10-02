@@ -113,10 +113,11 @@ pub fn build_options(directory: &Path, threads: usize) -> BuildOptions {
     }
 }
 
-/// Builds and opens the shard `directory/shard` of `entries`, each a list of contigs.
+/// Builds and opens the index `directory/shard.jam` of `entries`, each a list of contigs, with
+/// its sequence file `shard.jamseq`.
 pub fn test_shard(directory: &Path, entries: &[Vec<Vec<u8>>]) -> Shard {
     let inputs = write_entries(directory, entries);
-    let output = directory.join("shard");
+    let output = directory.join("shard.jam");
     build_shard(&inputs, &output, &build_options(directory, 2)).unwrap();
     Shard::open(&output).unwrap()
 }

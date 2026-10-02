@@ -1,5 +1,5 @@
-//! `jam index`: build a shard from FASTA files, reshard shards (merge and split them), or warm
-//! a cache directory with pinned parts of a shard.
+//! `jam index`: build an index file and its sequence file from FASTA files, reshard index files
+//! (merge and split them), or warm a cache directory with pinned parts of an index.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -7,7 +7,7 @@ use super::storage::ShardStorage;
 use super::{CliError, read_list};
 use crate::index::{
     BuildOptions, EntryInput, Manifest, Parameters, Part, Place, Plan, ReshardOptions, Split,
-    build_shard, reshard, warm,
+    build_shard, index_file_path, reshard, warm,
 };
 use bytesize::ByteSize;
 use clap::{Args, Subcommand};
@@ -24,18 +24,18 @@ pub struct IndexArgs {
 
 #[derive(Debug, Subcommand)]
 enum IndexCommand {
-    /// Build one shard from FASTA files
+    /// Build an index file NAME.jam and its sequence file from FASTA files
     Build(BuildArgs),
-    /// Merge and split shards into an index directory of new shards
+    /// Merge and split index files into an index directory of new index files
     Reshard(ReshardArgs),
-    /// Pin parts of a shard in a local cache directory, within RAM and disk budgets
+    /// Pin parts of an index in a local cache directory, within RAM and disk budgets
     Warm(WarmArgs),
 }
 
 /// The options of `jam index build`.
 #[derive(Debug, Args)]
 struct BuildArgs {
-    /// The shard directory to create; it must not exist yet
+    /// The index to create: NAME writes NAME.jam and its sequence file, which must not exist
     #[arg(short, long)]
     output: PathBuf,
     /// FASTA files (plain or compressed), one entry per file
@@ -46,7 +46,7 @@ struct BuildArgs {
     /// Make each FASTA record an entry instead of each file
     #[arg(long)]
     singleton: bool,
-    /// Write only the sketch part and no packed sequences: the shard answers stage 1 only
+    /// Write only the sketch part and no sequence file: the index answers stage 1 only
     #[arg(long)]
     sketch_only: bool,
     #[command(flatten)]
@@ -66,13 +66,13 @@ struct ReshardArgs {
     /// The index directory to create; it must not exist yet
     #[arg(short, long)]
     output: PathBuf,
-    /// Shard directories, or index directories of earlier reshards; entries keep this order
+    /// Index files NAME.jam, or index directories of earlier reshards; entries keep this order
     #[arg(required = true)]
     inputs: Vec<PathBuf>,
     /// Number of output shards, balanced by seed locations
     #[arg(long, group = "split")]
     shards: Option<usize>,
-    /// Most seed locations per output shard, which bounds the size of each seeds file
+    /// Most seed locations per output shard, which bounds the size of each index file
     #[arg(long, group = "split")]
     max_seed_locations: Option<u64>,
     #[command(flatten)]
@@ -82,7 +82,7 @@ struct ReshardArgs {
 /// The options of `jam index warm`.
 #[derive(Debug, Args)]
 struct WarmArgs {
-    /// The shard: a directory or s3://bucket/prefix
+    /// The index file: NAME.jam or s3://bucket/prefix/NAME.jam
     shard: PathBuf,
     /// The cache directory to fill; search and serve read the pins from there
     #[arg(long)]
@@ -231,7 +231,10 @@ fn run_build(args: &BuildArgs) -> Result<(), CliError> {
     let (threads, temp_dir) = args.common.resolve(&args.output)?;
     let options = build_options(args, threads, temp_dir);
     let manifest = build_shard(&inputs_of(&inputs), &args.output, &options)?;
-    println!("{}", summary_line(&args.output, &manifest));
+    println!(
+        "{}",
+        summary_line(&index_file_path(&args.output), &manifest)
+    );
     Ok(())
 }
 

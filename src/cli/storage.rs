@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use crate::index::{Location, Place, Plan, SEEDS_FILE, Shard, ShardOptions, warm};
+use crate::index::{Location, Place, Plan, Shard, ShardOptions, warm};
 use crate::storage::{BlockCache, CacheConfig, DiskConfig, S3Config, S3Limits};
 use bytesize::ByteSize;
 use clap::Args;
@@ -56,14 +56,12 @@ impl ShardStorage {
         })
     }
 
-    /// The location of the seeds file of the shard at `path`, a local directory or
-    /// `s3://bucket/prefix`.
+    /// The location of the index file at `path`: `NAME.jam` or `s3://bucket/prefix/NAME.jam`.
     pub(super) fn location(&self, path: &Path) -> Result<Location, CliError> {
         let text = path.to_string_lossy();
         if !text.starts_with("s3://") {
-            return Ok(Location::File(path.join(SEEDS_FILE)));
+            return Ok(Location::File(path.to_path_buf()));
         }
-        let text = format!("{}/{SEEDS_FILE}", text.trim_end_matches('/'));
         Location::s3(&text, self.s3()?).map_err(|source| CliError::Shard {
             path: path.to_path_buf(),
             source,
@@ -172,6 +170,16 @@ impl ShardStorage {
     }
 }
 
+/// The name of the index file at `path` in records: its file name without `.jam`.
+pub(super) fn shard_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let name = name.unwrap_or_else(|| path.display().to_string());
+    name.strip_suffix(".jam")
+        .map_or(name.clone(), str::to_string)
+}
+
 impl Drop for ShardStorage {
     fn drop(&mut self) {
         // The disk level is best effort: blocks that fail to reach it are fetched again later.
@@ -204,7 +212,7 @@ mod tests {
             memory: Some(ByteSize::gib(1)),
             disk: Some(ByteSize::gib(1)),
         };
-        let paths = [PathBuf::from("s3://bucket/shard")];
+        let paths = [PathBuf::from("s3://bucket/shard.jam")];
         let open = |warm_unplanned| {
             let mut storage = ShardStorage::new().unwrap();
             assert!(storage.s3.set(config.clone()).is_ok());
@@ -224,10 +232,7 @@ mod tests {
         let before = asked.lock().unwrap().len();
         open(true);
         let asked = asked.lock().unwrap();
-        let seeds = asked[before..]
-            .iter()
-            .filter(|k| k.ends_with("seeds"))
-            .count();
+        let seeds = asked[before..].iter().filter(|k| *k == "shard.jam").count();
         assert_eq!(seeds, 2);
     }
 
@@ -248,7 +253,7 @@ mod tests {
         };
         let mut storage = ShardStorage::new().unwrap();
         assert!(storage.s3.set(config.unwrap().unsigned()).is_ok());
-        let paths = [PathBuf::from("s3://bucket/shard")];
+        let paths = [PathBuf::from("s3://bucket/shard.jam")];
         assert_eq!(storage.open_all(&paths, &args, true).unwrap().len(), 1);
         assert_eq!(storage.open_all(&paths, &args, true).unwrap().len(), 1);
     }

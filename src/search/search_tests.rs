@@ -169,7 +169,7 @@ fn level_ends_search() {
 fn sketch_only_answers() {
     let directory = tempfile::tempdir().unwrap();
     let (_, query) = small_shard(directory.path());
-    let output = directory.path().join("sketch");
+    let output = directory.path().join("sketch.jam");
     let options = BuildOptions {
         sketch_only: true,
         ..build_options(directory.path(), 2)

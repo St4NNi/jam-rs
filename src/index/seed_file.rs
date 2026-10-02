@@ -14,9 +14,6 @@ use integer_encoding::VarInt;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// The file name of the seeds file in a shard directory.
-pub const SEEDS_FILE: &str = "seeds";
-
 /// Bits of a seed's hash that the seeds file keeps: the bucket bits, then the check value.
 pub const SEED_KEY_BITS: u32 = 44;
 

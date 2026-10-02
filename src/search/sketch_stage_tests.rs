@@ -228,7 +228,7 @@ fn frequent_union_only() {
     // Many buckets, so no seed of entry 3 shares a stored key with a seed of the first half.
     let mut options = build_options(directory.path(), 2);
     options.bucket_bits = Some(20);
-    let output = directory.path().join("shard");
+    let output = directory.path().join("shard.jam");
     build_shard(
         &write_entries(directory.path(), &entries),
         &output,

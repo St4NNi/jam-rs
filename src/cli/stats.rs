@@ -12,7 +12,7 @@ use std::path::PathBuf;
 /// The options of `jam stats`.
 #[derive(Debug, Args)]
 pub struct StatsArgs {
-    /// The shard: a directory or s3://bucket/prefix
+    /// The shard: NAME.jam or s3://bucket/prefix/NAME.jam
     shard: PathBuf,
     /// Print JSON instead of a short table
     #[arg(long)]

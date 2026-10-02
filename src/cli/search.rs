@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::rule::RuleArgs;
-use super::storage::{CacheArgs, ShardStorage};
+use super::storage::{CacheArgs, ShardStorage, shard_name};
 use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
@@ -50,9 +50,9 @@ enum Format {
 /// The options of `jam search`.
 #[derive(Debug, Args)]
 pub struct SearchArgs {
-    /// One or more shards (directories or s3://bucket/prefix), then a FASTA file with the query
-    /// records; each record is searched on its own, in every shard. With --server only the query
-    /// file
+    /// One or more index files (NAME.jam or s3://bucket/prefix/NAME.jam), then a FASTA file
+    /// with the query records; each record is searched on its own, in every shard. With --server
+    /// only the query file
     #[arg(required = true, num_args = 1.., value_name = "SHARD... QUERY")]
     paths: Vec<PathBuf>,
     /// Search on the server at NODE_ID@ADDRESS, as `jam serve` prints it, instead of local shards
@@ -131,10 +131,7 @@ fn open_shards(
 ) -> Result<Vec<NamedShard>, CliError> {
     let mut names: Vec<String> = Vec::new();
     for directory in directories {
-        let name = directory.file_name().map_or_else(
-            || directory.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        let name = shard_name(directory);
         if names.contains(&name) {
             return Err(CliError::Usage(format!(
                 "two shards are named {name}; records could not tell them apart"

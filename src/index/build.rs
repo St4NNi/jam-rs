@@ -1,5 +1,5 @@
-//! Builds a shard from FASTA files, one entry per file or per record, with entries indexed in
-//! parallel.
+//! Builds an index file and its sequence file from FASTA files, one entry per file or per
+//! record, with entries indexed in parallel.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -10,9 +10,11 @@ use super::manifest::{
     choose_bucket_bits, sha256_hex,
 };
 use super::packed::PackedWriter;
-use super::seed_file::{SEEDS_FILE, SeedLocation, seed_key};
+use super::seed_file::{SeedLocation, seed_key};
 use super::seed_writer::SeedFileShape;
-use super::sequence_file::{Piece, place_entries, sequence_file_names, write_sequence_files};
+use super::sequence_file::{
+    INDEX_EXTENSION, Piece, place_entries, sequence_file_names, write_sequence_files,
+};
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
@@ -69,7 +71,17 @@ pub struct BuildOptions {
     pub sketch_only: bool,
 }
 
-/// Builds the shard directory `output` from `inputs` and returns its manifest.
+/// The index file of the output `NAME` or `NAME.jam`: `NAME.jam`.
+pub fn index_file_path(output: &Path) -> PathBuf {
+    let extension = output.extension().and_then(|e| e.to_str());
+    match extension {
+        Some(INDEX_EXTENSION) => output.to_path_buf(),
+        _ => PathBuf::from(format!("{}.{INDEX_EXTENSION}", output.display())),
+    }
+}
+
+/// Builds the index file `NAME.jam` of the output `NAME` (or `NAME.jam`) and its sequence file
+/// `NAME.jamseq` from `inputs`, and returns its manifest.
 pub fn build_shard(
     inputs: &[EntryInput],
     output: &Path,
@@ -94,8 +106,17 @@ pub fn build_shard(
         })
         .transpose()
         .at(temporary)?;
-    let name = output.file_name().unwrap_or_default().to_string_lossy();
-    in_partial_directory(output, |directory| {
+    let index = index_file_path(output);
+    let name = (index.file_stem().and_then(|name| name.to_str()))
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| IndexError::Input(format!("{} needs a file name", index.display())))?;
+    let names = sequence_file_names(name, 1);
+    let mut outputs = Vec::new();
+    if !options.sketch_only {
+        outputs.push(index.with_file_name(&names[0]));
+    }
+    outputs.push(index.clone());
+    in_partial_files(&outputs, |partial| {
         let context = Context {
             seeder: Seeder::new(options.parameters.scheme)?,
             parameters: options.parameters,
@@ -110,15 +131,18 @@ pub fn build_shard(
             };
             let (mut entries, tables): (Vec<_>, Vec<_>) = built.into_iter().unzip();
             check_names(entries.iter().map(|entry| entry.name.as_str()))?;
-            let files = match &context.packed {
-                Some(pieces) => write_sequences(&mut entries, pieces, directory, &name)?,
-                None => Vec::new(),
+            let (index, sequences) = partial.split_last().unwrap_or((&partial[0], &[]));
+            let files = match (&context.packed, sequences.first()) {
+                (Some(pieces), Some(path)) => {
+                    write_sequences(&mut entries, pieces, (path, &names[0]))?
+                }
+                _ => Vec::new(),
             };
             let parameters = options.parameters;
             let spill = context.spill;
             let tables = (!options.sketch_only).then_some(tables);
             complete_shard(
-                directory,
+                index,
                 parameters,
                 entries,
                 files,
@@ -130,13 +154,12 @@ pub fn build_shard(
     })
 }
 
-/// Writes the sequence file `NAME.jamseq` into `directory` from the packed sequence of each
-/// entry, in the file named by its entry id in `pieces`, and gives each entry its place.
+/// Writes the sequence file at `path`, named `name` in the manifest, from the packed sequence of
+/// each entry, in the file named by its entry id in `pieces`, and gives each entry its place.
 fn write_sequences(
     entries: &mut [EntryRecord],
     pieces: &Path,
-    directory: &Path,
-    name: &str,
+    (path, name): (&Path, &str),
 ) -> Result<Vec<FileRecord>, IndexError> {
     let pieces: Vec<Piece> = (entries.iter().enumerate())
         .filter_map(|(entry, record)| Some((entry, record.sequence.as_ref()?.bytes)))
@@ -153,47 +176,51 @@ fn write_sequences(
             (sequence.file, sequence.offset) = (place.chunk, place.offset);
         }
     }
-    let names = sequence_file_names(name, 1);
-    let paths = [directory.join(&names[0])];
+    let (paths, names) = ([path.to_path_buf()], [name.to_string()]);
     write_sequence_files(&paths, &names, &pieces, &places, true)
 }
 
-/// Runs `build` on a fresh partial directory next to `output`, and moves it to `output` when
-/// it succeeds; a failed build leaves nothing behind.
-pub(crate) fn in_partial_directory<T>(
-    output: &Path,
-    build: impl FnOnce(&Path) -> Result<T, IndexError>,
+/// Runs `build` on fresh partial files next to `outputs`, and moves them to `outputs` in order
+/// when it succeeds, so the index file, given last, comes last; a failed build leaves nothing
+/// behind.
+fn in_partial_files<T>(
+    outputs: &[PathBuf],
+    build: impl FnOnce(&[PathBuf]) -> Result<T, IndexError>,
 ) -> Result<T, IndexError> {
-    if output.exists() {
+    if let Some(output) = outputs.iter().find(|output| output.exists()) {
         return Err(IndexError::Input(format!(
             "{} already exists: remove it or choose another output",
             output.display()
         )));
     }
-    let name = output
-        .file_name()
-        .ok_or_else(|| IndexError::Input("the output needs a directory name".into()))?
-        .to_string_lossy()
-        .into_owned();
-    let partial = output.with_file_name(format!("{name}.partial-{}", std::process::id()));
-    std::fs::create_dir(&partial).at(&partial)?;
-    match build(&partial) {
-        Ok(built) => {
-            std::fs::rename(&partial, output).at(output)?;
-            Ok(built)
+    let partial: Vec<PathBuf> = (outputs.iter())
+        .map(|output| {
+            PathBuf::from(format!(
+                "{}.partial-{}",
+                output.display(),
+                std::process::id()
+            ))
+        })
+        .collect();
+    let built = build(&partial).and_then(|built| {
+        for (from, to) in partial.iter().zip(outputs) {
+            std::fs::rename(from, to).at(to)?;
         }
-        Err(error) => {
-            let _ = std::fs::remove_dir_all(&partial);
-            Err(error)
-        }
+        Ok(built)
+    });
+    if built.is_err() {
+        partial
+            .iter()
+            .for_each(|path| drop(std::fs::remove_file(path)));
     }
+    built
 }
 
 /// Writes the seeds file from the seed records in `spill` (with the locator part when there are
 /// contig tables), followed by the manifest of a shard with these entries and sequence files; the
 /// build chooses its bucket bits unless `bucket_bits` is given.
 pub(crate) fn complete_shard(
-    directory: &Path,
+    path: &Path,
     parameters: Parameters,
     entries: Vec<EntryRecord>,
     sequence_files: Vec<FileRecord>,
@@ -212,7 +239,6 @@ pub(crate) fn complete_shard(
         ..parameters
     };
     parameters.validate()?;
-    let seeds_path = directory.join(SEEDS_FILE);
     let shape = SeedFileShape {
         bucket_bits: u32::from(parameters.bucket_bits),
         page_bits: u32::from(parameters.page_bits),
@@ -220,7 +246,7 @@ pub(crate) fn complete_shard(
         locators: contig_tables.is_some(),
     };
     let tables = contig_tables.unwrap_or_default();
-    let (totals, written) = spill.write(&seeds_path, shape, &tables)?;
+    let (totals, written) = spill.write(path, shape, &tables)?;
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
         parameters,

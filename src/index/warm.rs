@@ -5,7 +5,7 @@
 
 use super::manifest::{EntryRecord, FileRecord, sha256_range};
 use super::plan::{PLAN_FILE, Pin, Plan, etag_file};
-use super::seed_file::{HEADER_BYTES, SEEDS_FILE, verify_part};
+use super::seed_file::{HEADER_BYTES, verify_part};
 use super::sources::{IndexHead, Location};
 use super::{AtPath, IndexError};
 use crate::storage::{LocalFile, ReadAt};
@@ -19,9 +19,9 @@ const DOWNLOAD_CHUNK: usize = 8 << 20;
 /// Ranged reads in flight while downloading.
 const DOWNLOAD_THREADS: usize = 64;
 
-/// Downloads every pin of `plan` from the shard at `location` (head `head`) into `cache`, checks
-/// each, and writes the plan. The old plan and its pins that `plan` lacks go first, so the disk budget
-/// holds while new pins arrive; pins already in place and intact are kept.
+/// Downloads every pin of `plan` from the index at `location` (head `head`) into `cache`, checks
+/// each, and writes the plan. The old plan and its pins that `plan` lacks go first, so the disk
+/// budget holds while new pins arrive; pins already in place and intact are kept.
 pub fn warm(
     location: &Location,
     head: &IndexHead,
@@ -34,7 +34,7 @@ pub fn warm(
         .num_threads(DOWNLOAD_THREADS)
         .build()?;
     let seeds = FileRecord {
-        path: SEEDS_FILE.into(),
+        path: head.file.clone(),
         bytes: head.bytes,
         sha256: head.digest.clone(),
     };
@@ -45,7 +45,7 @@ pub fn warm(
                 .map(|place| (&head.manifest.entries[..], place));
             let record = match file {
                 Some((_, place)) => &files[place],
-                None if pin.file == SEEDS_FILE => &seeds,
+                None if pin.file == head.file => &seeds,
                 None => return Err(IndexError::Input(format!("no file {}", pin.file))),
             };
             let pinned = Pinned { pin, record, file };
@@ -190,8 +190,7 @@ mod tests {
         let (server, asked) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-        let location =
-            Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
+        let location = Location::s3("s3://bucket/shard.jam", &config.unwrap().unsigned()).unwrap();
         let head = location.head().unwrap();
         assert_eq!(head.digest, local.digest());
         let cache = directory.path().join("cache");
@@ -262,8 +261,7 @@ mod tests {
         let (server, _) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-        let location =
-            Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
+        let location = Location::s3("s3://bucket/shard.jam", &config.unwrap().unsigned()).unwrap();
         let head = location.head().unwrap();
         let cache = directory.path().join("cache");
         let all = [Part::Sketch, Part::Locators, Part::Packed(None)];
@@ -292,12 +290,11 @@ mod tests {
             sketch_only: true,
             ..build_options(directory.path(), 2)
         };
-        build_shard(&inputs, &directory.path().join("shard"), &options).unwrap();
+        build_shard(&inputs, &directory.path().join("shard.jam"), &options).unwrap();
         let (server, asked) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-        let location =
-            Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
+        let location = Location::s3("s3://bucket/shard.jam", &config.unwrap().unsigned()).unwrap();
         let head = location.head().unwrap();
         let cache = directory.path().join("cache");
         // The default plan pins the sketch part alone; there are no locators or packed files.
@@ -315,10 +312,10 @@ mod tests {
         let shard = Shard::open_with(&location, &options).unwrap();
         let ids = (0..head.manifest.color_sets as u32).map(crate::index::ColorSetId);
         assert!(shard.seed_file().read_color_sets(ids).is_ok());
-        // Opening reads the header and the manifest, which also check the seeds file; the
+        // Opening reads the header and the manifest, which also check the index file; the
         // seeds are read from the pin.
         let asked = asked.lock().unwrap();
-        let seeds = asked[before..].iter().filter(|key| key.ends_with("seeds"));
+        let seeds = asked[before..].iter().filter(|key| *key == "shard.jam");
         assert_eq!(seeds.count(), 2);
     }
 }

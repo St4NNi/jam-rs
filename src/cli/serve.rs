@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use super::storage::{CacheArgs, ShardStorage};
+use super::storage::{CacheArgs, ShardStorage, shard_name};
 use crate::loss::MissModel;
 use crate::search::SearchConfig;
 use crate::service::{
@@ -23,7 +23,7 @@ use tokio::signal::unix::{SignalKind, signal};
 /// The options of `jam serve`.
 #[derive(Debug, Args)]
 pub struct ServeArgs {
-    /// The shard: a directory or s3://bucket/prefix
+    /// The shard: NAME.jam or s3://bucket/prefix/NAME.jam
     shard: PathBuf,
     /// The secret key file; its public key is the node id. It is created on first start
     #[arg(long)]
@@ -67,10 +67,7 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         MissModel::new(parameters.scheme)?,
         MissModel::one_mismatch(parameters.scheme)?,
     ];
-    let name = args.shard.file_name().map_or_else(
-        || args.shard.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    );
+    let name = shard_name(&args.shard);
     let shard = ServedShard::new(name, shard, models)?.with_reopen(reopen(&storage, args));
     let config = SearchConfig {
         threads: args.threads.unwrap_or(0),

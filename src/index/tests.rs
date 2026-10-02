@@ -97,7 +97,7 @@ fn every_seed_found() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(7);
     let inputs = write_entries(directory.path(), &entries);
-    let output = directory.path().join("shard");
+    let output = directory.path().join("shard.jam");
     let manifest = build_shard(&inputs, &output, &options(directory.path(), 3)).unwrap();
     assert_eq!(manifest.entries[2].name, "entry2");
     assert_eq!(manifest.entries[2].contigs, 3);
@@ -127,7 +127,7 @@ fn threads_keep_output() {
         let options = options(directory.path(), threads);
         build_shard(&inputs, &output.join("shard"), &options).unwrap();
     }
-    for file in ["shard/seeds", "shard/shard.jamseq"] {
+    for file in ["shard.jam", "shard.jamseq"] {
         let read = |output: &PathBuf| std::fs::read(output.join(file)).unwrap();
         assert!(read(&one) == read(&four), "{file}");
     }
@@ -143,8 +143,7 @@ fn reshard_options(directory: &Path, split: Split) -> ReshardOptions {
 
 /// Checks that two shards hold the same seeds and entries, wherever their packed sequences lie.
 fn assert_same_shard(one: &Path, other: &Path) {
-    let [one, other] =
-        [one, other].map(|path| Location::File(path.join(SEEDS_FILE)).head().unwrap());
+    let [one, other] = [one, other].map(|path| Location::File(path.into()).head().unwrap());
     let placed = |manifest: &Manifest| {
         let mut manifest = manifest.clone();
         manifest.sequence_files.clear();
@@ -166,13 +165,13 @@ fn merged_equals_whole() {
     let entries = generated_entries(6);
     let inputs = write_entries(directory.path(), &entries);
     let options = options(directory.path(), 2);
-    let whole = directory.path().join("whole");
+    let whole = directory.path().join("whole.jam");
     let whole_manifest = build_shard(&inputs, &whole, &options).unwrap();
     let parts: Vec<PathBuf> = [0..2, 2..3, 3..6]
         .into_iter()
         .enumerate()
         .map(|(index, range)| {
-            let part = directory.path().join(format!("part{index}"));
+            let part = directory.path().join(format!("part{index}.jam"));
             build_shard(&inputs[range], &part, &options).unwrap();
             part
         })
@@ -183,10 +182,10 @@ fn merged_equals_whole() {
     assert_eq!(index, IndexFile::read(&merged).unwrap());
     assert_eq!(index.shards.len(), 1);
     assert_eq!(index.shards[0].entries, 6);
-    let shard_directory = merged.join(&index.shards[0].directory);
-    assert_same_shard(&whole, &shard_directory);
+    let path = merged.join(&index.shards[0].file);
+    assert_same_shard(&whole, &path);
     // The copied sequence file is the one of a direct build.
-    let shard = Shard::open(&shard_directory).unwrap();
+    let shard = Shard::open(&path).unwrap();
     let files = &shard.manifest().sequence_files;
     assert_eq!(files[0].sha256, whole_manifest.sequence_files[0].sha256);
     shard.verify().unwrap();
@@ -199,7 +198,7 @@ fn splits_equal_direct() {
     let entries = generated_entries(7);
     let inputs = write_entries(directory.path(), &entries);
     let options = options(directory.path(), 2);
-    let whole = directory.path().join("whole");
+    let whole = directory.path().join("whole.jam");
     build_shard(&inputs, &whole, &options).unwrap();
     let merged = directory.path().join("merged");
     reshard(
@@ -217,9 +216,11 @@ fn splits_equal_direct() {
         let mut names = Vec::new();
         for (number, record) in index.shards.iter().enumerate() {
             let range = record.first_entry as usize..(record.first_entry + record.entries) as usize;
-            let direct = directory.path().join(format!("direct-{split:?}-{number}"));
+            let direct = directory
+                .path()
+                .join(format!("direct-{split:?}-{number}.jam"));
             build_shard(&inputs[range.clone()], &direct, &options).unwrap();
-            let shard_directory = output.join(&record.directory);
+            let shard_directory = output.join(&record.file);
             assert_same_shard(&direct, &shard_directory);
             let shard = Shard::open(&shard_directory).unwrap();
             check_every_seed(&shard, &entries[range]);
@@ -251,7 +252,7 @@ fn forced_bucket_bits() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(3);
     let inputs = write_entries(directory.path(), &entries);
-    let output = directory.path().join("shard");
+    let output = directory.path().join("shard.jam");
     let options = BuildOptions {
         bucket_bits: Some(12),
         ..options(directory.path(), 2)
@@ -283,7 +284,7 @@ fn records_as_entries() {
         .enumerate()
         .map(|(entry, contigs)| fasta_text(entry, contigs));
     std::fs::write(&path, text.collect::<Vec<_>>().concat()).unwrap();
-    let output = directory.path().join("shard");
+    let output = directory.path().join("shard.jam");
     let options = BuildOptions {
         singleton: true,
         ..options(directory.path(), 3)
@@ -326,7 +327,7 @@ fn sequences_read_cached() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
     test_shard(directory.path(), &entries);
-    let local = Location::File(directory.path().join("shard/seeds"));
+    let local = Location::File(directory.path().join("shard.jam"));
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let options = ShardOptions {
         cache: Some(Arc::clone(&cache)),
@@ -358,14 +359,14 @@ fn shard_on_s3() {
     let limits = S3Limits::default();
     let config = S3Config::new("local", endpoint, true, limits, runtime()).unwrap();
     let config = config.unsigned();
-    assert!(Location::s3("s3:///shard/seeds", &config).is_err());
-    assert!(Location::s3("/local/shard/seeds", &config).is_err());
-    let location = Location::s3("s3://bucket/shard/seeds", &config).unwrap();
+    assert!(Location::s3("s3:///shard", &config).is_err());
+    assert!(Location::s3("/local/shard", &config).is_err());
+    let location = Location::s3("s3://bucket/shard.jam", &config).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let shard = Shard::open_with(&location, &ShardOptions::default()).unwrap();
     assert!(shard.sequence_path(0).is_err());
     shard.verify().unwrap();
-    let local = Shard::open(&directory.path().join("shard")).unwrap();
+    let local = Shard::open(&directory.path().join("shard.jam")).unwrap();
     assert_eq!(shard.digest(), local.digest());
     // Each seed lookup is a small read, so the check reads through the cache.
     let options = ShardOptions {
@@ -374,7 +375,7 @@ fn shard_on_s3() {
     };
     let shard = Shard::open_with(&location, &options).unwrap();
     check_every_seed(&shard, &entries);
-    let missing = Location::s3("s3://bucket/missing/seeds", &config).unwrap();
+    let missing = Location::s3("s3://bucket/missing", &config).unwrap();
     assert!(Shard::open_with(&missing, &ShardOptions::default()).is_err());
 }
 
@@ -388,7 +389,7 @@ fn pins_read_locally() {
     let (server, asked) = serve_directory(directory.path());
     let endpoint = Some(server.address.as_str());
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-    let location = Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
+    let location = Location::s3("s3://bucket/shard.jam", &config.unwrap().unsigned()).unwrap();
     let head = local.head();
     let mut pins = part_pins(head, &Part::Sketch, Place::Ram).unwrap();
     pins.extend(part_pins(head, &Part::Locators, Place::Ssd).unwrap());
@@ -405,7 +406,7 @@ fn pins_read_locally() {
     for pin in &plan.pins {
         let path = plan.pin_path(&cache, pin);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let bytes = std::fs::read(directory.path().join("shard").join(&pin.file)).unwrap();
+        let bytes = std::fs::read(directory.path().join(&pin.file)).unwrap();
         std::fs::write(&path, &bytes[pin.start as usize..pin.end as usize]).unwrap();
         let etag = crate::test_support::etag_of(&bytes);
         std::fs::write(super::plan::etag_file(&path), etag).unwrap();
@@ -420,8 +421,8 @@ fn pins_read_locally() {
     let shard = Shard::open_with_head(&location, &options, head).unwrap();
     check_every_seed(&shard, &entries);
     let asked = asked.lock().unwrap().clone();
-    assert_eq!(asked.iter().filter(|key| *key == "shard/seeds").count(), 2);
-    assert!(asked.contains(&"shard/shard.jamseq".to_string()));
+    assert_eq!(asked.iter().filter(|key| *key == "shard.jam").count(), 2);
+    assert!(asked.contains(&"shard.jamseq".to_string()));
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its
@@ -443,7 +444,7 @@ fn escaped_sets_found() {
         .collect();
     let directory = tempfile::tempdir().unwrap();
     let inputs = write_entries(directory.path(), &entries);
-    let output = directory.path().join("shard");
+    let output = directory.path().join("shard.jam");
     let options = BuildOptions {
         bucket_bits: Some(13),
         ..options(directory.path(), 2)
@@ -459,7 +460,7 @@ fn sketch_only_shards() {
     let entries = generated_entries(5);
     let inputs = write_entries(directory.path(), &entries);
     let sketch_only = |name: &str, range: std::ops::Range<usize>| {
-        let output = directory.path().join(name);
+        let output = directory.path().join(format!("{name}.jam"));
         let options = BuildOptions {
             sketch_only: true,
             ..options(directory.path(), 2)
@@ -468,7 +469,7 @@ fn sketch_only_shards() {
         output
     };
     let whole = sketch_only("whole", 0..5);
-    assert!(!whole.join("whole.jamseq").exists());
+    assert!(!directory.path().join("whole.jamseq").exists());
     assert!(
         Shard::open(&whole)
             .unwrap()
@@ -482,11 +483,11 @@ fn sketch_only_shards() {
     assert_eq!(shard.stats().locator_bytes, 0);
     assert_eq!(shard.stats().packed_bytes, 0);
     assert!(shard.packed(0).is_err() && shard.contig_table(0).is_err());
-    let full = directory.path().join("full");
+    let full = directory.path().join("full.jam");
     build_shard(&inputs, &full, &options(directory.path(), 2)).unwrap();
     let full_sketch = Shard::open(&full).unwrap().manifest().sketch_part.clone();
-    let full_bytes = std::fs::read(full.join(SEEDS_FILE)).unwrap();
-    let whole_bytes = std::fs::read(whole.join(SEEDS_FILE)).unwrap();
+    let full_bytes = std::fs::read(&full).unwrap();
+    let whole_bytes = std::fs::read(&whole).unwrap();
     // The sketch part is the same as in a full shard; only the header and table differ.
     let sketch = shard.manifest().sketch_part.clone();
     assert_eq!(
@@ -498,8 +499,8 @@ fn sketch_only_shards() {
     let index = reshard(std::slice::from_ref(&whole), &output, &options).unwrap();
     for record in &index.shards {
         let range = record.first_entry as usize..(record.first_entry + record.entries) as usize;
-        let direct = sketch_only(&format!("direct-{}", record.directory), range);
-        assert_same_shard(&direct, &output.join(&record.directory));
+        let direct = sketch_only(&format!("direct-{}", record.first_entry), range);
+        assert_same_shard(&direct, &output.join(&record.file));
     }
     let mixed = [whole, full];
     assert!(reshard(&mixed, &directory.path().join("mixed"), &options).is_err());

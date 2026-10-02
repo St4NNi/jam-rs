@@ -7,11 +7,13 @@
 //! records of its entries, read from the seeds files of the inputs. The groups depend only on the
 //! inputs and the split, never on the thread count.
 
-use super::build::{complete_shard, in_partial_directory};
+use super::build::complete_shard;
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
 use super::manifest::{Manifest, Parameters, check_names, sha256_hex};
-use super::seed_file::{ColorSetId, SEED_KEY_BITS, SEEDS_FILE, SeedFile};
-use super::sequence_file::{Piece, place_entries, sequence_file_names, write_sequence_files};
+use super::seed_file::{ColorSetId, SEED_KEY_BITS, SeedFile};
+use super::sequence_file::{
+    INDEX_EXTENSION, Piece, place_entries, sequence_file_names, write_sequence_files,
+};
 use super::sources::Location;
 use super::spill::{SeedSpill, seed_record};
 use super::{AtPath, IndexError};
@@ -42,8 +44,8 @@ pub struct ReshardOptions {
     pub temporary_directory: PathBuf,
 }
 
-/// Reshards `inputs`, in order, into the new index directory `output`. An input is a shard
-/// directory or an index directory (with an index file), whose shards are taken in order.
+/// Reshards `inputs`, in order, into the new index directory `output`. An input is an index file
+/// or an index directory (with `index.json`), whose index files are taken in order.
 pub fn reshard(
     inputs: &[PathBuf],
     output: &Path,
@@ -82,9 +84,9 @@ pub fn reshard(
     })
 }
 
-/// One input shard, opened for copying its entries.
+/// One input index file, opened for copying its entries.
 struct InputShard {
-    directory: PathBuf,
+    path: PathBuf,
     manifest: Manifest,
     seeds: SeedFile,
 }
@@ -105,23 +107,24 @@ struct EntrySource {
     entry: u32,
 }
 
-/// Opens every input shard, expanding index directories, and checks that they fit together.
+/// Opens every input index file, expanding index directories, and checks that they fit
+/// together.
 fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
-    let mut directories = Vec::new();
+    let mut files = Vec::new();
     for input in inputs {
         if input.join(INDEX_FILE).exists() {
             let index = IndexFile::read(input)?;
             index.verify(input)?;
-            directories.extend(index.shard_directories(input));
+            files.extend(index.shard_files(input));
         } else {
-            directories.push(input.clone());
+            files.push(input.clone());
         }
     }
-    let shards = directories
+    let shards = files
         .into_iter()
-        .map(|directory| {
-            let manifest = Location::File(directory.join(SEEDS_FILE)).head()?.manifest;
-            let file = LocalFile::open(directory.join(SEEDS_FILE))?;
+        .map(|path| {
+            let manifest = Location::File(path.clone()).head()?.manifest;
+            let file = LocalFile::open(&path)?;
             let seeds = SeedFile::open(Arc::new(file))?;
             let packed = manifest
                 .entries
@@ -131,12 +134,12 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
                 || (seeds.has_locators() && !packed)
             {
                 return Err(IndexError::format(format!(
-                    "the seeds file of {} differs from its manifest",
-                    directory.display()
+                    "the seeds of {} differ from its manifest",
+                    path.display()
                 )));
             }
             Ok(InputShard {
-                directory,
+                path,
                 manifest,
                 seeds,
             })
@@ -177,7 +180,7 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
     Ok(shards)
 }
 
-/// Writes output shard `part` into its directory under `directory` and returns its record.
+/// Writes the index file of output shard `part` into `directory` and returns its record.
 fn output_shard(
     shards: &[InputShard],
     part: &Part<'_>,
@@ -185,12 +188,10 @@ fn output_shard(
     options: &ReshardOptions,
 ) -> Result<ShardRecord, IndexError> {
     let name = format!("shard-{:04}", part.number);
-    let shard_directory = directory.join(&name);
-    std::fs::create_dir(&shard_directory).at(&shard_directory)?;
-    let manifest = write_shard(shards, part.sources, (&shard_directory, &name), options)?;
+    let manifest = write_shard(shards, part.sources, (directory, &name), options)?;
     let manifest_digest = sha256_hex(&[&manifest.to_bytes()?]);
     Ok(ShardRecord {
-        directory: name,
+        file: format!("{name}.{INDEX_EXTENSION}"),
         first_entry: part.first_entry as u64,
         entries: part.sources.len() as u64,
         seed_locations: manifest.seed_locations,
@@ -198,8 +199,8 @@ fn output_shard(
     })
 }
 
-/// Writes one output shard `NAME` of the entries `part` into `directory`, with a copy of their
-/// packed sequences in its sequence file.
+/// Writes the index file `NAME.jam` of the entries `part` into `directory`, with a copy of their
+/// packed sequences in its sequence file `NAME.jamseq`.
 fn write_shard(
     shards: &[InputShard],
     part: &[EntrySource],
@@ -219,7 +220,7 @@ fn write_shard(
         if let Some(sequence) = &record.sequence {
             let file = &input.manifest.sequence_files[sequence.file];
             pieces.push(Piece {
-                path: input.directory.join(&file.path),
+                path: input.path.with_file_name("").join(&file.path),
                 offset: sequence.offset,
                 bytes: sequence.bytes,
             });
@@ -255,7 +256,39 @@ fn write_shard(
     }
     let parameters = shards[0].manifest.parameters;
     let tables = locators.then_some(tables);
-    complete_shard(directory, parameters, entries, files, spill, None, tables)
+    let path = directory.join(format!("{name}.{INDEX_EXTENSION}"));
+    complete_shard(&path, parameters, entries, files, spill, None, tables)
+}
+
+/// Runs `build` on a fresh partial directory next to `output`, and moves it to `output` when
+/// it succeeds; a failed build leaves nothing behind.
+fn in_partial_directory<T>(
+    output: &Path,
+    build: impl FnOnce(&Path) -> Result<T, IndexError>,
+) -> Result<T, IndexError> {
+    if output.exists() {
+        return Err(IndexError::Input(format!(
+            "{} already exists: remove it or choose another output",
+            output.display()
+        )));
+    }
+    let name = output
+        .file_name()
+        .ok_or_else(|| IndexError::Input("the output needs a directory name".into()))?
+        .to_string_lossy()
+        .into_owned();
+    let partial = output.with_file_name(format!("{name}.partial-{}", std::process::id()));
+    std::fs::create_dir(&partial).at(&partial)?;
+    match build(&partial) {
+        Ok(built) => {
+            std::fs::rename(&partial, output).at(output)?;
+            Ok(built)
+        }
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&partial);
+            Err(error)
+        }
+    }
 }
 
 /// Buckets of an input that one parallel step reads.

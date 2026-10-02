@@ -55,7 +55,7 @@ fn fixture() -> Fixture {
     copy[1_500] = if copy[1_500] == b'A' { b'C' } else { b'A' };
     let query = directory.path().join("query.fa");
     write_fasta(&query, "planted", &copy);
-    let shard = directory.path().join("shard");
+    let shard = directory.path().join("shard.jam");
     let mut arguments: Vec<&std::ffi::OsStr> = vec![
         "index".as_ref(),
         "build".as_ref(),
@@ -194,7 +194,7 @@ fn records_name_shards() {
     let fixture = fixture();
     let other_input = fixture.directory.path().join("other.fa");
     write_fasta(&other_input, "other_contig", &random_bases(44, 20_000));
-    let other = fixture.directory.path().join("other_shard");
+    let other = fixture.directory.path().join("other_shard.jam");
     let output = jam(&[
         "index".as_ref(),
         "build".as_ref(),

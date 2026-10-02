@@ -28,16 +28,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-pub use build::{BuildOptions, EntryInput, build_shard};
+pub use build::{BuildOptions, EntryInput, build_shard, index_file_path};
 pub use contig_table::ContigTable;
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters, SequenceRecord};
 pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use reshard::{ReshardOptions, Split, reshard};
-pub use seed_file::{
-    ColorSetId, ColorSets, SEEDS_FILE, SeedFile, SeedLocation, StoredSeed, seed_key,
-};
+pub use seed_file::{ColorSetId, ColorSets, SeedFile, SeedLocation, StoredSeed, seed_key};
 pub use shard::{Shard, ShardStats};
 pub use sources::{IndexHead, Location, ShardOptions};
 pub use warm::warm;

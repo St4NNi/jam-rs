@@ -48,7 +48,7 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
         })
         .collect();
     let options = build_options(directory, 2);
-    let output = directory.join(name);
+    let output = directory.join(format!("{name}.jam"));
     build_shard(&inputs, &output, &options).unwrap();
     ServedShard::new(name.into(), Shard::open(&output).unwrap(), models()).unwrap()
 }
@@ -414,16 +414,15 @@ fn replaced_shard_reopened() {
     let (server, _) = serve_seen(served.path());
     let endpoint = Some(server.address.as_str());
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-    let location = Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
+    let location = Location::s3("s3://bucket/shard.jam", &config.unwrap().unsigned()).unwrap();
     let open = move || Shard::open_with(&location, &ShardOptions::default());
     let shard = ServedShard::new("shard".into(), open().unwrap(), models()).unwrap();
     let shard = shard.with_reopen(Box::new(move || open().ok()));
     let before = local_lines(&shard);
     assert_ne!(before, expected);
     assert_eq!(local_lines(&shard), before);
-    for name in ["seeds", "shard.jamseq"] {
-        let from = new.path().join("shard").join(name);
-        std::fs::copy(from, served.path().join("shard").join(name)).unwrap();
+    for name in ["shard.jam", "shard.jamseq"] {
+        std::fs::copy(new.path().join(name), served.path().join(name)).unwrap();
     }
     let failed = local_lines(&shard).concat();
     assert!(failed.contains("retry"), "{failed}");

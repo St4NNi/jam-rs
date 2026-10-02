@@ -30,7 +30,7 @@ pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard 
         })
         .collect();
     let options = build_options(directory, 2);
-    let output = directory.join("index");
+    let output = directory.join("index.jam");
     build_shard(&inputs, &output, &options).unwrap();
     Shard::open(&output).unwrap()
 }

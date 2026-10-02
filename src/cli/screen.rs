@@ -20,7 +20,7 @@ const RECORD_QUEUE: usize = 64;
 /// The options of `jam screen`.
 #[derive(Debug, Args)]
 pub struct ScreenArgs {
-    /// The shard of the small sequences to look for: a directory or s3://bucket/prefix
+    /// The shard of the small sequences to look for: NAME.jam or s3://bucket/prefix/NAME.jam
     index: PathBuf,
     /// A file with one assembly path per line (plain or gzip FASTA); the file name names the
     /// assembly

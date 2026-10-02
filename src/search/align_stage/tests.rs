@@ -62,7 +62,7 @@ pub(super) fn build(directory: &Path, entries: &[EntryContigs]) -> Shard {
         singleton: false,
         sketch_only: false,
     };
-    let root = directory.join("shard");
+    let root = directory.join("shard.jam");
     build_shard(&inputs, &root, &options).unwrap();
     Shard::open(&root).unwrap()
 }

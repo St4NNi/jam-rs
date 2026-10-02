@@ -7,7 +7,7 @@ use super::IndexError;
 use super::contig_table::ContigTable;
 use super::manifest::{EntryRecord, Manifest, SequenceRecord, sha256_range, verify_source};
 use super::packed::PackedSequence;
-use super::seed_file::{HEADER_BYTES, SEEDS_FILE, SeedFile};
+use super::seed_file::{HEADER_BYTES, SeedFile};
 use super::sources::{IndexHead, Location, ShardFiles, ShardOptions};
 use crate::storage::SliceSource;
 use serde::Serialize;
@@ -54,9 +54,9 @@ impl Shard {
         self.files.is_stale()
     }
 
-    /// Opens the shard in `directory`, with its packed sequences in `directory/packed`.
-    pub fn open(directory: &Path) -> Result<Self, IndexError> {
-        let location = Location::File(directory.join(SEEDS_FILE));
+    /// Opens the local index file at `path`, with its sequence file next to it.
+    pub fn open(path: &Path) -> Result<Self, IndexError> {
+        let location = Location::File(path.to_path_buf());
         Self::open_with(&location, &ShardOptions::default())
     }
 

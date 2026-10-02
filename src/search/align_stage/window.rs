@@ -193,7 +193,7 @@ mod tests {
             singleton: false,
             sketch_only: false,
         };
-        let root = directory.join("shard");
+        let root = directory.join("shard.jam");
         build_shard(&[EntryInput::from_path(path)], &root, &options).unwrap();
         Shard::open(&root).unwrap()
     }
