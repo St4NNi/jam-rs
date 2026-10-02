@@ -6,8 +6,8 @@
 //! The output never depends on the thread count, and entries keep the input order.
 
 use super::manifest::{
-    EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters, check_names,
-    choose_bucket_bits, packed_file_name, sha256_hex,
+    EntryRecord, FORMAT_VERSION, FileRecord, Manifest, PACKED_DIRECTORY, Parameters,
+    SequenceRecord, check_names, choose_bucket_bits, packed_file_name, sha256_hex,
 };
 use super::packed::PackedWriter;
 use super::seed_file::{SEEDS_FILE, SeedLocation, seed_key};
@@ -101,8 +101,22 @@ pub fn build_shard(
             } else {
                 index_files(inputs, &context)?
             };
-            let (entries, tables): (Vec<_>, Vec<_>) = built.into_iter().unzip();
+            let (mut entries, tables): (Vec<_>, Vec<_>) = built.into_iter().unzip();
             check_names(entries.iter().map(|entry| entry.name.as_str()))?;
+            // Each packed file is a sequence file of one entry.
+            let mut files = Vec::new();
+            for entry in &mut entries {
+                if let Some(sequence) = &mut entry.sequence {
+                    let path = format!("{PACKED_DIRECTORY}/{}", packed_file_name(&entry.name));
+                    let (bytes, sha256) = (sequence.bytes, sequence.sha256.clone());
+                    files.push(FileRecord {
+                        path,
+                        bytes,
+                        sha256,
+                    });
+                    sequence.file = files.len() - 1;
+                }
+            }
             let parameters = options.parameters;
             let spill = context.spill;
             let tables = (!options.sketch_only).then_some(tables);
@@ -110,6 +124,7 @@ pub fn build_shard(
                 directory,
                 parameters,
                 entries,
+                files,
                 spill,
                 options.bucket_bits,
                 tables,
@@ -150,12 +165,13 @@ pub(crate) fn in_partial_directory<T>(
 }
 
 /// Writes the seeds file from the seed records in `spill` (with the locator part when there are
-/// contig tables), followed by the manifest of a shard with these entries; the build chooses its
-/// bucket bits unless `bucket_bits` is given.
+/// contig tables), followed by the manifest of a shard with these entries and sequence files; the
+/// build chooses its bucket bits unless `bucket_bits` is given.
 pub(crate) fn complete_shard(
     directory: &Path,
     parameters: Parameters,
     entries: Vec<EntryRecord>,
+    sequence_files: Vec<FileRecord>,
     spill: SeedSpill,
     bucket_bits: Option<u8>,
     contig_tables: Option<Vec<Vec<u8>>>,
@@ -184,6 +200,7 @@ pub(crate) fn complete_shard(
         format_version: FORMAT_VERSION,
         parameters,
         entries,
+        sequence_files,
         seeds_sha256: written.sha256.clone(),
         sketch_part: written.sketch_part.clone(),
         locator_part: written.locator_part.clone(),
@@ -320,7 +337,7 @@ impl<'a> EntryBuilder<'a> {
         let (contigs, bases) = (self.packed.contig_count(), self.packed.bases());
         let mut table = Vec::new();
         self.packed.contig_table().encode(&mut table);
-        let packed = match &self.context.packed {
+        let sequence = match &self.context.packed {
             Some(directory) => Some(write_packed(self.packed, directory, &name)?),
             None => None,
         };
@@ -329,18 +346,19 @@ impl<'a> EntryBuilder<'a> {
             contigs,
             bases,
             seed_locations,
-            packed,
+            sequence,
         };
         Ok((record, table))
     }
 }
 
-/// Writes the packed sequence of the entry `name` into `directory` and returns its record.
+/// Writes the packed sequence of the entry `name` into `directory` and returns its record; the
+/// manifest then lists the file as a sequence file.
 fn write_packed(
     writer: PackedWriter,
     directory: &Path,
     name: &str,
-) -> Result<FileRecord, IndexError> {
+) -> Result<SequenceRecord, IndexError> {
     let parts = writer.finish()?;
     let file_name = packed_file_name(name);
     let path = directory.join(&file_name);
@@ -359,8 +377,9 @@ fn write_packed(
         out.write_all(part).at(&path)?;
     }
     out.flush().at(&path)?;
-    Ok(FileRecord {
-        path: file_name,
+    Ok(SequenceRecord {
+        file: 0,
+        offset: 0,
         bytes: parts.iter().map(|part| part.len() as u64).sum(),
         sha256: sha256_hex(&parts),
     })

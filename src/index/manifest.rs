@@ -1,9 +1,10 @@
-//! The manifest at the end of the seeds file of a shard (JSON): parameters, entries, and the size
-//! and SHA-256 digest of every packed sequence file.
+//! The manifest at the end of the seeds file of a shard (JSON): parameters, entries, where each
+//! packed sequence lies, and the size and SHA-256 digest of every sequence file.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
 use super::IndexError;
+use super::packed::BLOCK_BYTES;
 use super::seed_file::{HEADER_BYTES, PAGE_BITS, header_manifest, header_sections};
 use super::{MAX_BUCKET_BITS, MIN_BUCKET_BITS};
 use crate::seeds::SeedScheme;
@@ -60,10 +61,10 @@ impl Parameters {
     }
 }
 
-/// One file of a shard with its size and digest.
+/// A sequence file with its size and digest.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileRecord {
-    /// Path relative to the shard directory, or to the packed directory for packed files.
+    /// Path relative to the shard directory.
     pub path: String,
     /// Size in bytes.
     pub bytes: u64,
@@ -82,8 +83,28 @@ pub struct EntryRecord {
     pub bases: u64,
     /// Seed locations of the entry: its distinct pairs of seed and seed location.
     pub seed_locations: u64,
-    /// The packed sequence file; none in a shard built with the sketch part only.
-    pub packed: Option<FileRecord>,
+    /// Where the packed sequence lies; none in a shard built with the sketch part only.
+    pub sequence: Option<SequenceRecord>,
+}
+
+/// Where the packed sequence of an entry lies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SequenceRecord {
+    /// The sequence file, by its place in the list of sequence files.
+    pub file: usize,
+    /// The first byte, on a 4 KiB boundary.
+    pub offset: u64,
+    /// Bytes of the packed sequence.
+    pub bytes: u64,
+    /// SHA-256 digest of those bytes, lower case hex.
+    pub sha256: String,
+}
+
+impl SequenceRecord {
+    /// The bytes of the packed sequence in its file.
+    pub fn range(&self) -> Range<u64> {
+        self.offset..self.offset + self.bytes
+    }
 }
 
 /// The manifest of a shard.
@@ -95,6 +116,8 @@ pub struct Manifest {
     pub parameters: Parameters,
     /// Entries in entry id order.
     pub entries: Vec<EntryRecord>,
+    /// The sequence files that hold the packed sequences.
+    pub sequence_files: Vec<FileRecord>,
     /// SHA-256 digest of the seeds: the bytes of the seeds file from its header to the manifest.
     pub seeds_sha256: String,
     /// The bytes of the sketch part in the seeds file.
@@ -122,6 +145,19 @@ impl Manifest {
         }
         manifest.parameters.validate()?;
         check_names(manifest.entries.iter().map(|entry| entry.name.as_str()))?;
+        let files = &manifest.sequence_files;
+        let placed = |sequence: &SequenceRecord| {
+            (files.get(sequence.file)).is_some_and(|file| {
+                sequence.offset.is_multiple_of(BLOCK_BYTES)
+                    && (sequence.offset.checked_add(sequence.bytes))
+                        .is_some_and(|e| e <= file.bytes)
+            })
+        };
+        let plain = |file: &FileRecord| !file.path.is_empty() && !file.path.starts_with('/');
+        let entries = manifest.entries.iter();
+        if !files.iter().all(plain) || !entries.filter_map(|e| e.sequence.as_ref()).all(placed) {
+            return Err(IndexError::format("manifest sequence files"));
+        }
         Ok(manifest)
     }
 
@@ -236,7 +272,13 @@ mod tests {
 
     #[test]
     fn manifest_round_trip() {
-        let manifest = Manifest {
+        let sequence = SequenceRecord {
+            file: 0,
+            offset: 4096,
+            bytes: 3,
+            sha256: sha256_hex(&[b"abc"]),
+        };
+        let mut manifest = Manifest {
             format_version: FORMAT_VERSION,
             parameters: Parameters {
                 scheme: SeedScheme {
@@ -250,7 +292,11 @@ mod tests {
                 contigs: 2,
                 bases: 1000,
                 seed_locations: 90,
-                packed: Some(file("entry_1.packed")),
+                sequence: Some(sequence),
+            }],
+            sequence_files: vec![FileRecord {
+                bytes: 4099,
+                ..file("x.jamseq")
             }],
             seeds_sha256: sha256_hex(&[b""]),
             sketch_part: 4096..8192,
@@ -268,6 +314,12 @@ mod tests {
         );
         verify_source(&b"abc".to_vec(), &record).unwrap();
         assert!(verify_source(&b"abd".to_vec(), &record).is_err());
+        // An entry must lie within its file, on a 4 KiB boundary.
+        manifest.sequence_files[0].bytes = 4098;
+        assert!(Manifest::parse(&manifest.to_bytes().unwrap()).is_err());
+        manifest.sequence_files[0].bytes = 8192;
+        manifest.entries[0].sequence.as_mut().unwrap().offset = 100;
+        assert!(Manifest::parse(&manifest.to_bytes().unwrap()).is_err());
     }
 
     #[test]

@@ -616,7 +616,8 @@ fn stop_between_windows() {
     assert_eq!(located.alignment_windows.len(), 2);
     let stop = Arc::new(AtomicBool::new(false));
     let file = MappedFile::open(&fixture.shard.sequence_path(s3).unwrap(), false).unwrap();
-    let range = 0..file.size();
+    let entries = &fixture.shard.manifest().entries;
+    let range = entries[s3 as usize].sequence.as_ref().unwrap().range();
     let source = Arc::new(StopOnRead {
         file: SliceSource::new(Arc::new(file), range).unwrap(),
         armed: AtomicBool::new(false),

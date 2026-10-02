@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{EntryRecord, FileRecord, PACKED_DIRECTORY, verify_source};
+use super::manifest::{EntryRecord, FileRecord, sha256_range};
 use super::plan::{PLAN_FILE, Pin, Plan, etag_file};
 use super::seed_file::{HEADER_BYTES, SEEDS_FILE, verify_part};
 use super::sources::{IndexHead, Location};
@@ -38,10 +38,17 @@ pub fn warm(
         bytes: head.bytes,
         sha256: head.digest.clone(),
     };
+    let files = &head.manifest.sequence_files;
     threads.install(|| {
         (plan.pins.par_iter()).try_for_each(|pin| {
-            let record = file_record(&seeds, &head.manifest.entries, &pin.file)?;
-            let pinned = Pinned { pin, record };
+            let file = (files.iter().position(|file| file.path == pin.file))
+                .map(|place| (&head.manifest.entries[..], place));
+            let record = match file {
+                Some((_, place)) => &files[place],
+                None if pin.file == SEEDS_FILE => &seeds,
+                None => return Err(IndexError::Input(format!("no file {}", pin.file))),
+            };
+            let pinned = Pinned { pin, record, file };
             let path = plan.pin_path(cache, pin);
             if is_complete(location, &path, &pinned) {
                 return Ok(());
@@ -52,34 +59,12 @@ pub fn warm(
     plan.write(cache)
 }
 
-/// The record of a shard file named relative to the shard: the seeds file, or the packed file of
-/// one of `entries`.
-fn file_record<'a>(
-    seeds: &'a FileRecord,
-    entries: &'a [EntryRecord],
-    file: &str,
-) -> Result<&'a FileRecord, IndexError> {
-    let packed = |entry: &&EntryRecord| {
-        file.strip_prefix(PACKED_DIRECTORY)
-            .and_then(|rest| rest.strip_prefix('/'))
-            == entry.packed.as_ref().map(|packed| packed.path.as_str())
-    };
-    [seeds]
-        .into_iter()
-        .find(|record| record.path == file)
-        .or_else(|| {
-            entries
-                .iter()
-                .find(packed)
-                .and_then(|entry| entry.packed.as_ref())
-        })
-        .ok_or_else(|| IndexError::Input(format!("the shard has no file {file}")))
-}
-
-/// A pin with the record of its file.
+/// A pin with the record of its file; for a sequence file also the entries and the place of the
+/// file in the manifest.
 struct Pinned<'a> {
     pin: &'a Pin,
     record: &'a FileRecord,
+    file: Option<(&'a [EntryRecord], usize)>,
 }
 
 /// Whether the pin file at `path` is there and intact, as `verify_pin` checks it, and its
@@ -91,24 +76,36 @@ fn is_complete(location: &Location, path: &Path, pinned: &Pinned<'_>) -> bool {
     intact && (location.verify_etag(file, bytes, etag.as_deref())).is_ok()
 }
 
-/// Checks a pin file: its size, and the digest of a whole file or else the CRC-32 of every
-/// section of the seeds file that the range holds. The header of the seeds file comes from the
-/// pin when it starts the file, else from `location`.
+/// Checks a pin file: its size; for a sequence file the digest of the whole file, else of each
+/// packed sequence the range holds; for the seeds file the CRC-32 of every section that the
+/// range holds, with the header from the pin when it starts the file, else from `location`.
 fn verify_pin(
     location: &Location,
     file: &LocalFile,
     pinned: &Pinned<'_>,
 ) -> Result<(), IndexError> {
-    let Pinned { pin, record } = *pinned;
+    let Pinned { pin, record, .. } = *pinned;
     if file.size() != pin.bytes() {
         return Err(IndexError::format(format!(
             "the pin of {} is cut",
             pin.file
         )));
     }
-    // The seeds file ends with its manifest, which no pin holds.
-    if pin.file != SEEDS_FILE && pin.bytes() == record.bytes {
-        return verify_source(file, record);
+    let damaged = || IndexError::Checksum(format!("the pin of {} is damaged", pin.file));
+    if let Some((entries, place)) = pinned.file {
+        if pin.bytes() == record.bytes {
+            let whole = sha256_range(file, 0..pin.bytes())? == record.sha256;
+            return whole.then_some(()).ok_or_else(damaged);
+        }
+        let inside = (entries.iter().filter_map(|entry| entry.sequence.as_ref()))
+            .filter(|s| s.file == place && pin.start <= s.offset && s.range().end <= pin.end);
+        for sequence in inside {
+            let range = sequence.offset - pin.start..sequence.range().end - pin.start;
+            if sha256_range(file, range)? != sequence.sha256 {
+                return Err(damaged());
+            }
+        }
+        return Ok(());
     }
     let mut header = [0u8; HEADER_BYTES as usize];
     match pin.start {
@@ -120,7 +117,7 @@ fn verify_pin(
 
 /// Downloads the range of `pin` into a partial file, checks it, and moves it to `path`.
 fn download(location: &Location, pinned: &Pinned<'_>, path: &Path) -> Result<(), IndexError> {
-    let Pinned { pin, record } = *pinned;
+    let Pinned { pin, record, .. } = *pinned;
     let etag_path = etag_file(path);
     let _ = std::fs::remove_file(&etag_path);
     let etag = location.refresh_etag(&pin.file, record.bytes)?;

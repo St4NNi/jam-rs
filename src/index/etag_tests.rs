@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Bases per entry, about a dozen blocks of a packed file.
+/// Bases per entry, about a dozen blocks of a packed sequence.
 const LENGTH: usize = 200_000;
 
 /// Three entries of one contig each, from the generator `seed`.
@@ -93,7 +93,7 @@ fn first_reads_learn() {
     let mut keys: Vec<&str> = seen.iter().map(|request| request.key.as_str()).collect();
     keys.sort_unstable();
     keys.dedup();
-    for key in keys.into_iter().filter(|key| key.contains("packed/")) {
+    for key in keys {
         let of_key: Vec<_> = seen.iter().filter(|request| request.key == key).collect();
         assert!(of_key[0].if_match.is_none(), "{key}");
         assert!(of_key[1..].iter().all(|r| r.if_match.is_some()), "{key}");

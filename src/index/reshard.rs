@@ -122,7 +122,10 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
             let manifest = Location::Directory(directory.clone()).head()?.manifest;
             let file = LocalFile::open(directory.join(SEEDS_FILE))?;
             let seeds = SeedFile::open(Arc::new(file))?;
-            let packed = manifest.entries.iter().all(|entry| entry.packed.is_some());
+            let packed = manifest
+                .entries
+                .iter()
+                .all(|entry| entry.sequence.is_some());
             if seeds.entry_count() != manifest.entries.len() as u64
                 || (seeds.has_locators() && !packed)
             {
@@ -208,19 +211,23 @@ fn write_shard(
     }
     let mut entries = Vec::with_capacity(part.len());
     let mut tables = Vec::with_capacity(part.len());
+    let mut files = Vec::new();
     for &EntrySource { shard, entry } in part {
         let input = &shards[shard];
-        let record = input.manifest.entries[entry as usize].clone();
+        let mut record = input.manifest.entries[entry as usize].clone();
         if locators {
             tables.push(input.seeds.contig_table_bytes(entry)?);
         }
-        let Some(file) = &record.packed else {
+        let Some(sequence) = &mut record.sequence else {
             entries.push(record);
             continue;
         };
-        let source = input.directory.join(PACKED_DIRECTORY).join(&file.path);
-        let target = packed.join(&file.path);
+        let file = &input.manifest.sequence_files[sequence.file];
+        let source = input.directory.join(&file.path);
+        let target = directory.join(&file.path);
         std::fs::copy(&source, &target).at(&target)?;
+        files.push(file.clone());
+        sequence.file = files.len() - 1;
         entries.push(record);
     }
     let spill = SeedSpill::create(&options.temporary_directory)?;
@@ -238,7 +245,7 @@ fn write_shard(
     }
     let parameters = shards[0].manifest.parameters;
     let tables = locators.then_some(tables);
-    complete_shard(directory, parameters, entries, spill, None, tables)
+    complete_shard(directory, parameters, entries, files, spill, None, tables)
 }
 
 /// Buckets of an input that one parallel step reads.

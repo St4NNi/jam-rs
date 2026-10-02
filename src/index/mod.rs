@@ -32,7 +32,7 @@ use thiserror::Error;
 pub use build::{BuildOptions, EntryInput, build_shard};
 pub use contig_table::ContigTable;
 pub use index_file::{IndexFile, ShardRecord};
-pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters};
+pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters, SequenceRecord};
 pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use reshard::{ReshardOptions, Split, reshard};

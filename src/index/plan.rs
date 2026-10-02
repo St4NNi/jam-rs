@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::PACKED_DIRECTORY;
+use super::packed::BLOCK_BYTES;
 use super::sources::IndexHead;
 use super::{AtPath, IndexError};
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ pub enum Place {
 pub struct Pin {
     /// The part it belongs to: `sketch`, `locators` or `packed`.
     pub part: String,
-    /// The file, relative to the shard: `seeds` or `packed/NAME.packed`.
+    /// The file, relative to the shard: `seeds` or a sequence file.
     pub file: String,
     /// The first byte of the range.
     pub start: u64,
@@ -190,19 +190,6 @@ pub(crate) fn etag_file(path: &Path) -> PathBuf {
 /// names to files.
 pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>, IndexError> {
     let manifest = &head.manifest;
-    let whole = |file: String, record: &super::FileRecord| Pin {
-        part: part.to_string(),
-        file,
-        start: 0,
-        end: record.bytes,
-        sha256: record.sha256.clone(),
-        place,
-    };
-    // A shard built with the sketch part only has no packed sequences to pin.
-    let packed = |record: &super::EntryRecord| {
-        let packed = record.packed.as_ref()?;
-        Some(whole(format!("{PACKED_DIRECTORY}/{}", packed.path), packed))
-    };
     let seeds = |range: &std::ops::Range<u64>| Pin {
         part: part.to_string(),
         file: head.file.clone(),
@@ -211,17 +198,43 @@ pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>
         sha256: head.digest.clone(),
         place,
     };
+    // The packed sequences of the entries in each sequence file, joined where they follow each
+    // other; a shard built with the sketch part only has none.
+    let packed = |entries: &mut dyn Iterator<Item = &super::EntryRecord>| {
+        let mut sequences: Vec<_> = entries
+            .filter_map(|entry| entry.sequence.as_ref())
+            .collect();
+        sequences.sort_by_key(|sequence| (sequence.file, sequence.offset));
+        let mut pins: Vec<Pin> = Vec::new();
+        for sequence in sequences {
+            let file = &manifest.sequence_files[sequence.file];
+            match pins.last_mut() {
+                Some(last)
+                    if last.file == file.path
+                        && last.end.next_multiple_of(BLOCK_BYTES) == sequence.offset =>
+                {
+                    last.end = sequence.range().end;
+                }
+                _ => pins.push(Pin {
+                    file: file.path.clone(),
+                    sha256: file.sha256.clone(),
+                    ..seeds(&sequence.range())
+                }),
+            }
+        }
+        pins
+    };
     Ok(match part {
         // The header and the bucket table of the seeds file belong to the sketch part.
         Part::Sketch => vec![seeds(&(0..manifest.sketch_part.end))],
         Part::Locators => manifest.locator_part.iter().map(seeds).collect(),
-        Part::Packed(None) => manifest.entries.iter().filter_map(packed).collect(),
+        Part::Packed(None) => packed(&mut manifest.entries.iter()),
         Part::Packed(Some(names)) => {
             let mut pins = Vec::new();
             for name in names {
                 let record = (manifest.entries.iter().find(|entry| &entry.name == name))
                     .ok_or_else(|| IndexError::Input(format!("no entry is named {name}")))?;
-                pins.extend(packed(record));
+                pins.extend(packed(&mut std::iter::once(record)));
             }
             pins
         }

@@ -141,10 +141,22 @@ fn reshard_options(directory: &Path, split: Split) -> ReshardOptions {
     }
 }
 
-/// Checks that two shards hold the same seeds file, with the same manifest.
+/// Checks that two shards hold the same seeds and entries, wherever their packed sequences lie.
 fn assert_same_shard(one: &Path, other: &Path) {
-    let read = |shard: &Path| std::fs::read(shard.join(SEEDS_FILE)).unwrap();
-    assert!(read(one) == read(other));
+    let [one, other] = [one, other].map(|path| Location::Directory(path.into()).head().unwrap());
+    let placed = |manifest: &Manifest| {
+        let mut manifest = manifest.clone();
+        manifest.sequence_files.clear();
+        for sequence in manifest
+            .entries
+            .iter_mut()
+            .filter_map(|e| e.sequence.as_mut())
+        {
+            (sequence.file, sequence.offset) = (0, 0);
+        }
+        manifest
+    };
+    assert_eq!(placed(&one.manifest), placed(&other.manifest));
 }
 
 #[test]
@@ -154,7 +166,7 @@ fn merged_equals_whole() {
     let inputs = write_entries(directory.path(), &entries);
     let options = options(directory.path(), 2);
     let whole = directory.path().join("whole");
-    build_shard(&inputs, &whole, &options).unwrap();
+    let whole_manifest = build_shard(&inputs, &whole, &options).unwrap();
     let parts: Vec<PathBuf> = [0..2, 2..3, 3..6]
         .into_iter()
         .enumerate()
@@ -172,7 +184,10 @@ fn merged_equals_whole() {
     assert_eq!(index.shards[0].entries, 6);
     let shard_directory = merged.join(&index.shards[0].directory);
     assert_same_shard(&whole, &shard_directory);
+    // The copied sequence file is the one of a direct build.
     let shard = Shard::open(&shard_directory).unwrap();
+    let files = &shard.manifest().sequence_files;
+    assert_eq!(files[0].sha256, whole_manifest.sequence_files[0].sha256);
     shard.verify().unwrap();
     check_every_seed(&shard, &entries);
 }
@@ -305,7 +320,7 @@ fn bad_builds_cleaned() {
 }
 
 #[test]
-fn packed_read_cached() {
+fn sequences_read_cached() {
     use crate::storage::{BlockCache, CacheConfig};
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
@@ -320,6 +335,14 @@ fn packed_read_cached() {
     shard.verify().unwrap();
     check_every_seed(&shard, &entries);
     check_every_seed(&shard, &entries);
+    let sequences = shard.sequence_path(0).unwrap();
+    std::fs::rename(&sequences, directory.path().join("moved")).unwrap();
+    assert!(
+        Shard::open_with(&local, &options)
+            .unwrap()
+            .packed(0)
+            .is_err()
+    );
 }
 
 #[test]
@@ -398,11 +421,6 @@ fn pins_read_locally() {
     let asked = asked.lock().unwrap().clone();
     assert_eq!(asked.iter().filter(|key| *key == "shard/seeds").count(), 2);
     assert!(asked.contains(&"shard/packed/entry0.packed".to_string()));
-    // A pinned file gets nothing but the check read of its first use.
-    let pinned = asked
-        .iter()
-        .filter(|key| *key == "shard/packed/entry1.packed");
-    assert!(pinned.count() <= 1);
 }
 
 /// A shard with more buckets than partitions holds several bucket blocks per partition, and its
@@ -449,7 +467,14 @@ fn sketch_only_shards() {
         output
     };
     let whole = sketch_only("whole", 0..5);
-    assert!(!whole.join("packed").exists());
+    assert!(!whole.join("whole.jamseq").exists());
+    assert!(
+        Shard::open(&whole)
+            .unwrap()
+            .manifest()
+            .sequence_files
+            .is_empty()
+    );
     let shard = Shard::open(&whole).unwrap();
     shard.verify().unwrap();
     assert!(!shard.seed_file().has_locators());

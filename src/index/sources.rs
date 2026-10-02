@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::manifest::{FileRecord, Manifest, PACKED_DIRECTORY};
+use super::manifest::{FileRecord, Manifest};
 use super::packed::BLOCK_BYTES;
 use super::plan::{Pin, Place, Plan, etag_file};
 use super::seed_file::SEEDS_FILE;
@@ -47,17 +47,6 @@ impl Location {
         }
         let config = Box::new(config.clone());
         Ok(Self::S3 { prefix, config })
-    }
-
-    /// The location of the directory `name` in this one.
-    pub(crate) fn join(&self, name: &str) -> Self {
-        match self {
-            Self::Directory(path) => Self::Directory(path.join(name)),
-            Self::S3 { prefix, config } => Self::S3 {
-                prefix: format!("{prefix}{name}/"),
-                config: config.clone(),
-            },
-        }
     }
 
     /// The local path of the file `name`, or `None` when it lies on S3.
@@ -183,8 +172,8 @@ pub(crate) fn remove_pin(path: &Path) {
 /// How a shard opens its files.
 #[derive(Clone, Default)]
 pub struct ShardOptions {
-    /// A block cache that every file except the sketch is read through. With it, each entry's
-    /// packed sequence stays open after its first read, so its blocks are found again.
+    /// A block cache that every file except the sketch is read through. With it, each sequence
+    /// file stays open after its first read, so its blocks are found again.
     pub cache: Option<Arc<BlockCache>>,
     /// A cache directory warmed by `jam index warm`; the ranges its plan pins are read from
     /// there. Without a plan for the shard nothing is pinned.
@@ -194,13 +183,14 @@ pub struct ShardOptions {
 /// The file sources of one open shard.
 pub(crate) struct ShardFiles {
     location: Location,
-    packed: Location,
+    /// The sequence files.
+    files: Vec<FileRecord>,
     cache: Option<Arc<BlockCache>>,
     /// The pins of the plan with their local files, by file name relative to the shard.
     pins: HashMap<String, Vec<(Pin, PathBuf)>>,
     /// The seeds file as a record: its size, and the manifest digest as its key.
     seeds: FileRecord,
-    /// Packed sequences kept open per entry when they are cached or remote; empty otherwise.
+    /// The sequence files, each opened at its first use.
     opened: Vec<OnceLock<Arc<dyn ReadAt>>>,
     /// The replaced objects counted when the files were opened.
     changes: u64,
@@ -213,7 +203,6 @@ impl ShardFiles {
         options: &ShardOptions,
         head: &IndexHead,
     ) -> Result<Self, IndexError> {
-        let entries = head.manifest.entries.len();
         let mut pins: HashMap<String, Vec<(Pin, PathBuf)>> = HashMap::new();
         if let Some(cache) = &options.pins
             && let Some(plan) = Plan::read(cache, &head.digest)?
@@ -225,16 +214,11 @@ impl ShardFiles {
                     .push((pin.clone(), path));
             }
         }
-        let packed = location.join(PACKED_DIRECTORY);
-        let keep = options.cache.is_some() || matches!(packed, Location::S3 { .. });
-        let opened = if keep {
-            (0..entries).map(|_| OnceLock::new()).collect()
-        } else {
-            Vec::new()
-        };
+        let files = head.manifest.sequence_files.clone();
         Ok(Self {
             location: location.clone(),
-            packed,
+            opened: files.iter().map(|_| OnceLock::new()).collect(),
+            files,
             cache: options.cache.clone(),
             pins,
             seeds: FileRecord {
@@ -242,7 +226,6 @@ impl ShardFiles {
                 bytes: head.bytes,
                 sha256: head.digest.clone(),
             },
-            opened,
             changes: location.changes(),
         })
     }
@@ -324,9 +307,9 @@ impl ShardFiles {
         let pins: Vec<PathBuf> = (self.pins.get(name).into_iter().flatten())
             .map(|(_, path)| path.clone())
             .collect();
-        let locations = [self.location.clone(), self.packed.clone()];
+        let location = self.location.clone();
         Arc::new(move |version| {
-            locations.iter().for_each(Location::forget_etags);
+            location.forget_etags();
             pins.iter().for_each(|path| remove_pin(path));
             if let Some(cache) = &cache {
                 cache.forget(&digest, block_bytes, size, version);
@@ -339,37 +322,38 @@ impl ShardFiles {
         self.location.open(SEEDS_FILE, self.seeds.bytes)
     }
 
-    /// The local path of a packed sequence file, or `None` when it lies on S3.
-    pub(crate) fn packed_path(&self, record: &FileRecord) -> Option<PathBuf> {
-        self.packed.local_path(&record.path)
+    /// The local path of sequence file `file`, or `None` when it lies on S3.
+    pub(crate) fn sequence_path(&self, file: usize) -> Option<PathBuf> {
+        self.location.local_path(&self.files.get(file)?.path)
     }
 
-    /// The source of entry `entry`'s packed sequence file, through the cache if there is one.
-    pub(crate) fn open_packed(
-        &self,
-        entry: usize,
-        record: &FileRecord,
-    ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        let name = format!("{PACKED_DIRECTORY}/{}", record.path);
-        // Packed files are cached in their checked blocks, so a window reads few bytes.
-        let blocks = Some(BLOCK_BYTES);
-        let Some(slot) = self.opened.get(entry) else {
-            return self.open_at(&self.packed, &name, record, blocks);
-        };
+    /// The source of sequence file `file`, opened once, through the cache if there is one. It
+    /// is cached in the checked blocks of the packed sequences, so a window reads few bytes.
+    pub(crate) fn sequence(&self, file: usize) -> Result<Arc<dyn ReadAt>, IndexError> {
+        let (slot, record) = (self.opened.get(file).zip(self.files.get(file)))
+            .ok_or_else(|| IndexError::format("the manifest names no such sequence file"))?;
         if let Some(source) = slot.get() {
             return Ok(Arc::clone(source));
         }
-        let source = self.open_at(&self.packed, &name, record, blocks)?;
-        // Two threads may open the same entry at once; both get the source that was kept.
+        let source = self.open_at(&self.location, &record.path, record, Some(BLOCK_BYTES))?;
+        if source.size() != record.bytes {
+            let path = &record.path;
+            return Err(IndexError::format(format!(
+                "{path} differs from the manifest"
+            )));
+        }
+        // Two threads may open the same file at once; both get the source that was kept.
         Ok(Arc::clone(slot.get_or_init(|| source)))
     }
 
-    /// The source of a packed sequence file without the cache.
-    pub(crate) fn open_packed_uncached(
+    /// Sequence file `file` without the cache, with its record.
+    pub(crate) fn open_uncached(
         &self,
-        record: &FileRecord,
-    ) -> Result<Arc<dyn ReadAt>, IndexError> {
-        self.packed.open(&record.path, record.bytes)
+        file: usize,
+    ) -> Result<(Arc<dyn ReadAt>, &FileRecord), IndexError> {
+        let record = (self.files.get(file))
+            .ok_or_else(|| IndexError::format("the manifest names no such sequence file"))?;
+        Ok((self.location.open(&record.path, record.bytes)?, record))
     }
 
     /// `source` read through the cache, if there is one, under the digest of its record.
