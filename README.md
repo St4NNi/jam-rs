@@ -44,14 +44,15 @@ The `Dockerfile` builds the same binary into a small container image.
 
 Build an index from FASTA files (plain or compressed). Each file becomes one entry:
 
-    jam index build -o plasmids.shard -t 8 plasmids/*.fa
+    jam index build -o assemblies -t 8 assemblies/*.fa.gz
 
-The output directory must not exist yet. Use `-l LIST` for a file with one FASTA path per line,
-or `--singleton` to make each FASTA record its own entry.
+This writes the index file `assemblies.jam` and the sequence file `assemblies.jamseq`, which must
+not exist yet. Use `-l LIST` for a file with one FASTA path per line, or `--singleton` to make
+each FASTA record its own entry.
 
 Search it with the records of a query file:
 
-    jam search plasmids.shard query.fa > hits.jsonl
+    jam search assemblies.jam query.fa > hits.jsonl
 
 Each query record is searched on its own, in every shard you name. Write to a file with
 `-o FILE`.
@@ -118,7 +119,7 @@ Other options of `jam search`:
 
 Example:
 
-    jam search plasmids.shard query.fa --coverage 0.8 --identity 0.9 --format paf -o hits.paf
+    jam search assemblies.jam query.fa --coverage 0.8 --identity 0.9 --format paf -o hits.paf
 
 ### Low-complexity queries
 
@@ -128,54 +129,76 @@ other bases. It gets no answer, rather than false hits.
 
 ## Indexes
 
-A shard is one directory with these files:
+A shard of an index is two kinds of file:
 
-- `manifest.json`: the parameters, the entries, and the size and SHA-256 digest of each file.
-- `seeds`: the seeds of all entries. Its sketch part answers stage 1. Its locator part answers
-  stage 2.
-- `packed/`: the sequences of each entry, 2 bits per base. Stage 3 reads them.
+- `NAME.jam`, the index file: the seeds of all entries, then the manifest. The sketch part of the
+  seeds answers stage 1, the locator part stage 2. The manifest holds the parameters, the
+  entries, and the size and SHA-256 digest of each sequence file.
+- `NAME.jamseq`, the sequence file: the sequences of all entries, 2 bits per base, one entry
+  after another. Stage 3 reads them. The index file finds it next to itself.
 
 `jam index build` takes `-k` (bases per k-mer, default 25) and `-w` (k-mers per minimizer
-window, default 100). With `--sketch-only` it writes the sketch part alone and no packed
-sequences. Such a shard answers stage 1 only (`--level sketch`) but is much smaller.
+window, default 100). With `--chunks N` it splits the sequence file into `NAME.1.jamseq` to
+`NAME.N.jamseq` of about equal size, for example for object size limits or parallel copies;
+each entry lies in one chunk. With `--sketch-only` it writes the index file alone, with the
+sketch part only. Such a shard answers stage 1 only (`--level sketch`) but is much smaller.
 
-An index can have several shards. `jam index reshard` merges and splits shards into a directory
-of new shards, balanced by seed locations. Use `--shards N` for a number of output shards, or
-`--max-seed-locations N` to bound the size of each seeds file:
+An index can have several shards. `jam index reshard` merges and splits index files into a
+directory of new index files `shard-0000.jam` and so on, balanced by seed locations. Use
+`--shards N` for a number of output shards, or `--max-seed-locations N` to bound the size of
+each index file:
 
-    jam index reshard -o all.index --shards 4 part1.shard part2.shard
+    jam index reshard -o all --shards 4 part1.jam part2.jam
 
-The packed sequences are linked, not copied, unless you give `--copy-packed`. The input can also
-be index directories of earlier reshards. `jam search` accepts several shards (or index
-directories) before the query file.
+The new index files point into the sequence files of their inputs, so nothing is copied. Give
+`--copy-sequences` to write a sequence file for each new shard instead. The input can also be
+index directories of earlier reshards. `jam search` accepts several index files before the
+query file.
 
-`jam stats SHARD` shows what a shard holds (`--json` for JSON).
+`jam stats NAME.jam` shows what a shard holds (`--json` for JSON).
 
 ## S3 and local caches
 
-A shard can lie on S3. Give `s3://bucket/prefix` instead of a directory to `jam search`, `jam
+A shard can lie on S3. Copy it there with `jam index copy`:
+
+    jam index copy assemblies.jam s3://bucket/indexes --cache /scratch/cache
+
+This uploads the sequence files first and the index file last, each in parts that go up at
+once, so a reader never sees an index without its sequence files. `jam index copy` works the
+other way too, and between two places of the same kind; a download is checked against the sizes
+and digests in the index file. The target is a directory or `s3://bucket/prefix`, or the new
+index file `NAME.jam` there. Any other S3 tool works as well, as long as the files keep their
+names.
+
+Then give `s3://bucket/prefix/NAME.jam` instead of a local index file to `jam search`, `jam
 screen`, `jam serve`, `jam stats` and `jam index warm`. Credentials come from the usual `AWS_*`
 environment variables, and the endpoint from `AWS_ENDPOINT_URL`. jam never sends HEAD requests:
-it takes object sizes from the manifest.
+it reads the size of the index file from its header, and the sizes of the sequence files from
+its manifest.
 
 jam learns the ETag of each file from its first read and sends it as `If-Match` with every later
 read. Cached blocks and pins belong to one ETag. With `--cache`, the ETags are kept in the cache
-directory, and the first use of each file in a run checks it with one byte. If a file was
-uploaded again, the search ends with `the index changed in S3 while it was read; retry`. Run it
-again, and it reads the new files. `jam serve` opens the shard again by itself. A pin made for
-the old file is removed; run `jam index warm` again to pin the new file.
+directory, and the first use of each file in a run checks it with one byte. `jam index copy
+--cache` keeps the ETags of the files it uploads there too, so searches with that cache are
+bound to the uploaded files from their first read. If a file was uploaded again, the search
+ends with `the index changed in S3 while it was read; retry`. Run it again, and it reads the
+new files. `jam serve` opens the shard again by itself. A pin made for the old file is removed;
+run `jam index warm` again to pin the new file.
 
 Reading from S3 is slow for the first requests. Two caches help:
 
-- **Pins.** `jam index warm` copies parts of a shard into a local cache directory. A search or
-  a server reads them from there, from RAM or from local disk. Pins are never evicted.
+- **Pins.** `jam index warm` copies byte ranges of the index file and the sequence files into a
+  local cache directory. A search or a server reads them from there, from RAM or from local
+  disk. Pins are never evicted.
 - **Block cache.** Everything not pinned is read in blocks. The blocks stay in RAM, and on local
   disk when you give a disk budget. They are kept across runs, so a second search is faster.
 
 Example:
 
-    jam index warm s3://bucket/plasmids --cache /scratch/cache --memory 16GiB --disk 200GiB
-    jam search s3://bucket/plasmids query.fa --cache /scratch/cache --memory 16GiB --disk 200GiB
+    jam index warm s3://bucket/indexes/assemblies.jam --cache /scratch/cache --memory 16GiB \
+        --disk 200GiB
+    jam search s3://bucket/indexes/assemblies.jam query.fa --cache /scratch/cache \
+        --memory 16GiB --disk 200GiB
 
 `jam index warm` needs `--cache`, `--memory` and `--disk`. By default it pins the sketch part,
 then the locator part, while the disk budget lasts. Choose parts yourself with `--pin`:
@@ -183,17 +206,19 @@ then the locator part, while the disk budget lasts. Choose parts yourself with `
     --pin sketch,locators,packed
     --pin sketch,packed=NAME1,NAME2
 
-Every item after `packed=` is an entry name, so it comes last. The flag may repeat.
+`packed` pins the sequences of all entries, `packed=NAME` those of the named entries. Every item
+after `packed=` is an entry name, so it comes last. The flag may repeat.
 
 `jam search` and `jam serve` take `--cache`, `--memory` and `--disk` too. `--memory` defaults
 to the budget of the plan, else 1GiB. `--disk` defaults to the budget of the plan, else 0.
 
 ## Screening assemblies
 
-`jam screen` works the other way round. The index holds many small sequences (plasmids, genes).
+`jam screen` works the other way round. The index holds many small sequences (plasmids, genes),
+for example one entry per record with `jam index build --singleton -o plasmids plasmids.fa`.
 Large assemblies stream past it once:
 
-    jam screen plasmids.shard --assemblies assemblies.txt --coverage 0.8 -o screen.jsonl
+    jam screen plasmids.jam --assemblies assemblies.txt --coverage 0.8 -o screen.jsonl
 
 `assemblies.txt` has one path per line (plain or gzip FASTA). The file name names the assembly.
 Every shard entry that an assembly holds is reported as a JSON line, followed by one `assembly`
@@ -217,7 +242,7 @@ options:
 `jam serve` keeps a shard open and answers searches from other machines. The machines connect
 over [iroh](https://www.iroh.computer), with a secret key file for each server:
 
-    jam serve plasmids.shard --key server.key
+    jam serve assemblies.jam --key server.key
 
 The key file is created on first start. Its public key is the node id. `jam serve` prints the
 address as `NODE_ID@ADDRESS`. Search on the server with:
@@ -246,7 +271,7 @@ collection had 1,000 SPIRE assemblies (241.8 Gbp). Searches ran with 8 threads a
 cache.
 
 - Building the index took about 10 minutes with 32 threads. The index was 108 GB (68 GB packed
-  sequences, 28 GB locators, 12 GB sketch).
+  sequences, 28 GB locators, 12 GB sketch), measured with an earlier layout of the same data.
 - On local NVMe, queries of 1 kb to 10 kb finished in about 1 to 10 seconds. A query of 2 Mb
   with no hit took about 40 seconds.
 - On network storage (Ceph), the same searches took about 30 seconds to 3 minutes.
