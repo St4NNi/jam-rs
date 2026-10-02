@@ -8,6 +8,7 @@ mod bits;
 mod buckets;
 mod build;
 mod contig_table;
+mod copy;
 mod index_file;
 mod manifest;
 mod packed;
@@ -30,6 +31,7 @@ use thiserror::Error;
 
 pub use build::{BuildOptions, EntryInput, build_shard, index_file_path};
 pub use contig_table::ContigTable;
+pub use copy::{CopySummary, copy_index};
 pub use index_file::{IndexFile, ShardRecord};
 pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters, SequenceRecord};
 pub use packed::{Contig, PackedSequence};

@@ -165,6 +165,7 @@ pub struct Request {
     pub method: String,
     pub path: String,
     pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
 }
 
 impl Request {
@@ -193,6 +194,18 @@ impl Reply {
             status,
             headers,
             declared: 0,
+            body,
+        }
+    }
+
+    /// An answer with status 200 and `text` as its body.
+    pub fn text(text: String) -> Self {
+        let body = text.into_bytes();
+        let (headers, declared) = (Vec::new(), body.len());
+        Self {
+            status: 200,
+            headers,
+            declared,
             body,
         }
     }
@@ -286,6 +299,81 @@ pub fn serve_seen(root: &Path) -> (Server, Arc<Mutex<Vec<Seen>>>) {
     (server, seen)
 }
 
+/// Like [`serve_seen`], and PUT and multipart uploads write files below `root`. The answer to an
+/// upload names the ETag that later reads get.
+pub fn serve_store(root: &Path) -> (Server, Arc<Mutex<Vec<Seen>>>) {
+    let root = root.to_path_buf();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&seen);
+    let parts: Mutex<HashMap<(String, u32), Vec<u8>>> = Mutex::default();
+    let server = serve(move |index, request| {
+        let (path, query) = request.path.split_once('?').unwrap_or((&request.path, ""));
+        let key = path
+            .strip_prefix("/bucket/")
+            .unwrap_or_default()
+            .to_string();
+        log.lock().unwrap().push(Seen {
+            method: request.method.clone(),
+            key: key.clone(),
+            if_match: request.headers.get("if-match").cloned(),
+        });
+        let file = root.join(&key);
+        let value = |name: &str| {
+            let mut pairs = query.split('&');
+            pairs.find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+        };
+        let write = |data: &[u8]| {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, data).unwrap();
+        };
+        match (request.method.as_str(), value("partNumber")) {
+            ("GET", _) => match std::fs::read(&file) {
+                Ok(data) => Reply::object(&data, request),
+                Err(_) => Reply::status(404),
+            },
+            ("POST", _) if query.starts_with("uploads") => Reply::text(format!(
+                "<InitiateMultipartUploadResult><Bucket>bucket</Bucket><Key>{key}</Key>\
+                 <UploadId>u{index}</UploadId></InitiateMultipartUploadResult>"
+            )),
+            ("PUT", Some(number)) => {
+                let number: u32 = number.parse().unwrap();
+                parts
+                    .lock()
+                    .unwrap()
+                    .insert((key, number), request.body.clone());
+                let mut reply = Reply::status(200);
+                reply
+                    .headers
+                    .push(("ETag".into(), format!("\"p{number}\"")));
+                reply
+            }
+            ("POST", _) => {
+                let mut parts = parts.lock().unwrap();
+                let mut numbers: Vec<u32> = (parts.keys())
+                    .filter(|(of, _)| *of == key)
+                    .map(|(_, number)| *number)
+                    .collect();
+                numbers.sort_unstable();
+                let data: Vec<u8> = (numbers.iter())
+                    .flat_map(|n| parts.remove(&(key.clone(), *n)).unwrap())
+                    .collect();
+                write(&data);
+                let etag = etag_of(&data).replace('"', "&quot;");
+                let result = "CompleteMultipartUploadResult";
+                Reply::text(format!("<{result}><ETag>{etag}</ETag></{result}>"))
+            }
+            ("PUT", None) => {
+                write(&request.body);
+                let mut reply = Reply::status(200);
+                reply.headers.push(("ETag".into(), etag_of(&request.body)));
+                reply
+            }
+            _ => Reply::status(403),
+        }
+    });
+    (server, seen)
+}
+
 /// A server that answers each request with `handler(index, request)`, where `index` counts
 /// requests from 0. It stops when dropped.
 pub struct Server {
@@ -348,10 +436,16 @@ fn answer(
         };
         headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
     }
+    let length = headers
+        .get("content-length")
+        .map_or(0, |n| n.parse().unwrap());
+    let mut body = vec![0; length];
+    std::io::Read::read_exact(&mut reader, &mut body).unwrap();
     let request = Request {
         method,
         path,
         headers,
+        body,
     };
     let reply = handler(index, &request);
     let mut head = format!(

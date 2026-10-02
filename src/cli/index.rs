@@ -1,5 +1,5 @@
-//! `jam index`: build an index file and its sequence file from FASTA files, reshard index files
-//! (merge and split them), or warm a cache directory with pinned parts of an index.
+//! `jam index`: build an index file and its sequence files from FASTA files, reshard index files
+//! (merge and split them), copy them, or warm a cache directory with pinned parts of an index.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -7,7 +7,7 @@ use super::storage::ShardStorage;
 use super::{CliError, read_list};
 use crate::index::{
     BuildOptions, EntryInput, Manifest, Parameters, Part, Place, Plan, ReshardOptions, Split,
-    build_shard, index_file_path, reshard, warm,
+    build_shard, copy_index, index_file_path, reshard, warm,
 };
 use bytesize::ByteSize;
 use clap::{Args, Subcommand};
@@ -30,6 +30,21 @@ enum IndexCommand {
     Reshard(ReshardArgs),
     /// Pin parts of an index in a local cache directory, within RAM and disk budgets
     Warm(WarmArgs),
+    /// Copy an index file and its sequence files between local directories and S3
+    Copy(CopyArgs),
+}
+
+/// The options of `jam index copy`.
+#[derive(Debug, Args)]
+struct CopyArgs {
+    /// The index file: NAME.jam or s3://bucket/prefix/NAME.jam
+    source: PathBuf,
+    /// The target directory or s3://bucket/prefix, or the new index file NAME.jam there
+    target: PathBuf,
+    /// A cache directory that keeps the ETag of every uploaded object, so searches with it are
+    /// bound to the uploaded version from their first read
+    #[arg(long)]
+    cache: Option<PathBuf>,
 }
 
 /// The options of `jam index build`.
@@ -140,7 +155,34 @@ pub fn run(args: &IndexArgs) -> Result<(), CliError> {
         IndexCommand::Build(args) => run_build(args),
         IndexCommand::Reshard(args) => run_reshard(args),
         IndexCommand::Warm(args) => run_warm(args),
+        IndexCommand::Copy(args) => run_copy(args),
     }
+}
+
+fn run_copy(args: &CopyArgs) -> Result<(), CliError> {
+    let started = Instant::now();
+    let storage = ShardStorage::new()?;
+    let source = storage.location(&args.source)?;
+    let mut target = args.target.to_string_lossy().into_owned();
+    if !target.ends_with(".jam") {
+        let name = source.file_name();
+        target = format!("{}/{name}", target.trim_end_matches('/'));
+    }
+    let target = storage.location(Path::new(&target))?;
+    let failed = |source| CliError::Shard {
+        path: args.source.clone(),
+        source,
+    };
+    if let Some(cache) = &args.cache {
+        source.keep_etags(cache).map_err(failed)?;
+        target.keep_etags(cache).map_err(failed)?;
+    }
+    let copied = copy_index(&source, &target).map_err(failed)?;
+    let (files, bytes) = (copied.head.manifest.sequence_files.len(), copied.bytes);
+    let bytes = ByteSize(bytes).display().iec();
+    let seconds = started.elapsed().as_secs_f64();
+    println!("copied {target} and {files} sequence files ({bytes}) in {seconds:.1} s");
+    Ok(())
 }
 
 fn run_warm(args: &WarmArgs) -> Result<(), CliError> {

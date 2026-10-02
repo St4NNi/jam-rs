@@ -39,4 +39,13 @@ pub enum StorageError {
         #[source]
         source: io::Error,
     },
+    /// The object cannot be written.
+    #[error("S3 object {location} cannot be written: {source}")]
+    Upload {
+        /// The `s3://` location that was written.
+        location: String,
+        /// What went wrong.
+        #[source]
+        source: io::Error,
+    },
 }

@@ -55,7 +55,7 @@ impl Location {
     }
 
     /// The file name of the index file.
-    fn file_name(&self) -> String {
+    pub(crate) fn file_name(&self) -> String {
         let text = self.to_string();
         text.rsplit('/').next().unwrap_or_default().to_string()
     }
@@ -171,6 +171,21 @@ impl Location {
             (Some(object), Some(etag)) => Ok(object.verify(etag).at(Path::new(name))?),
             (Some(_), None) => Err(IndexError::Input(format!("{name} has no ETag"))),
             (None, _) => Ok(()),
+        }
+    }
+
+    /// Uploads all bytes of `source` as the S3 object of the file `name` and returns its new
+    /// ETag; `None` for a local file, which is written elsewhere.
+    pub(crate) fn upload(
+        &self,
+        name: &str,
+        source: &dyn ReadAt,
+    ) -> Result<Option<String>, IndexError> {
+        match self {
+            Self::File(_) => Ok(None),
+            Self::S3 { location, config } => Ok(Some(
+                config.upload(&Self::s3_location(location, name), source)?,
+            )),
         }
     }
 

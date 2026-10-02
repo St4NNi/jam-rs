@@ -8,6 +8,7 @@ use super::{ReadAt, StorageError, checked_end, lock};
 use opendal::Operator;
 use opendal::layers::{ConcurrentLimitLayer, RetryEvent, RetryLayer, TimeoutLayer};
 use opendal::services::S3;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::io;
 use std::ops::Range;
@@ -136,6 +137,47 @@ impl S3Config {
         self.etags.changes()
     }
 
+    /// Uploads all bytes of `source` as the object `s3://bucket/key`, in parts that go up several
+    /// at once, and returns the ETag of the new object from the store's answer. It becomes the
+    /// known ETag, so later reads are bound to this version from their first one.
+    pub fn upload(&self, location: &str, source: &dyn ReadAt) -> Result<String, StorageError> {
+        let (bucket, key) = split_location(location)?;
+        let operator = self.operator(bucket)?;
+        let failed = |source: io::Error| StorageError::Upload {
+            location: location.to_string(),
+            source,
+        };
+        let size = source.size();
+        // S3 takes at most 10,000 parts of one object.
+        let part = PART_BYTES.max(size.div_ceil(9_999).next_multiple_of(1 << 20));
+        let write = operator
+            .writer_with(key)
+            .concurrent(UPLOAD_PARTS)
+            .chunk(part as usize);
+        let writer = self.runtime.block_on(async { write.await });
+        let mut writer = writer.map_err(|e| failed(e.into()))?;
+        let starts: Vec<u64> = (0..size).step_by(part as usize).collect();
+        // Each round reads the parts it uploads at once, then hands them over in order.
+        for round in starts.chunks(UPLOAD_PARTS) {
+            let parts = (round.par_iter())
+                .map(|&start| {
+                    let mut buffer = vec![0u8; (size - start).min(part) as usize];
+                    source.read_exact_at(start, &mut buffer).map(|()| buffer)
+                })
+                .collect::<io::Result<Vec<_>>>()
+                .map_err(failed)?;
+            for buffer in parts {
+                let written = self.runtime.block_on(writer.write(buffer));
+                written.map_err(|e| failed(e.into()))?;
+            }
+        }
+        let meta = (self.runtime.block_on(writer.close())).map_err(|e| failed(e.into()))?;
+        let etag = (meta.etag()).ok_or_else(|| failed(invalid("the store sent no ETag")))?;
+        self.etags.forget(location);
+        let _ = self.etags.settle(location, etag);
+        Ok(etag.to_string())
+    }
+
     /// The same config, sending requests without signatures.
     #[cfg(test)]
     pub(crate) fn unsigned(mut self) -> Self {
@@ -199,6 +241,11 @@ pub struct S3Object {
     /// Called with the version of the old ETag when the object was found replaced.
     on_change: Option<ChangeHook>,
 }
+
+/// Parts of one upload in flight.
+const UPLOAD_PARTS: usize = 8;
+/// The smallest part of an upload; an object of many parts gets larger ones.
+const PART_BYTES: u64 = 16 << 20;
 
 /// What to do when an object is found replaced.
 pub type ChangeHook = Arc<dyn Fn(u64) + Send + Sync>;
