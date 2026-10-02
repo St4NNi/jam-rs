@@ -633,7 +633,7 @@ fn failure_marks_unfinished() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = planted_shard(directory.path());
     for entry in 0..2 {
-        std::fs::remove_file(shard.packed_path(entry).unwrap()).unwrap();
+        std::fs::remove_file(shard.sequence_path(entry).unwrap()).unwrap();
     }
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Align), false);
     assert!(

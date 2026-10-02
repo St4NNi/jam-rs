@@ -56,20 +56,12 @@ fn read_all(shard: &Shard, entries: &[Vec<Vec<u8>>]) -> Result<(), IndexError> {
 fn replace(root: &Path, entries: &[Vec<Vec<u8>>], packed: bool) {
     let other = tempfile::tempdir().unwrap();
     test_shard(other.path(), entries);
-    let mut stack = vec![other.path().join("shard")];
-    while let Some(directory) = stack.pop() {
-        for file in std::fs::read_dir(directory).unwrap() {
-            let path = file.unwrap().path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let relative = path.strip_prefix(other.path()).unwrap();
-            if packed && !relative.starts_with("shard/packed") {
-                continue;
-            }
-            std::fs::copy(&path, root.join(relative)).unwrap();
-        }
+    let packed_files = (0..entries.len()).map(|entry| format!("shard/packed/entry{entry}.packed"));
+    let names: Vec<String> = std::iter::once("shard/seeds".into())
+        .chain(packed_files)
+        .collect();
+    for name in names.iter().skip(usize::from(packed)) {
+        std::fs::copy(other.path().join(name), root.join(name)).unwrap();
     }
 }
 

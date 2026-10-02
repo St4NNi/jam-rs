@@ -339,7 +339,7 @@ fn shard_on_s3() {
     let location = Location::s3("s3://bucket/shard", &config).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let shard = Shard::open_with(&location, &ShardOptions::default()).unwrap();
-    assert!(shard.packed_path(0).is_err());
+    assert!(shard.sequence_path(0).is_err());
     shard.verify().unwrap();
     let local = Shard::open(&directory.path().join("shard")).unwrap();
     assert_eq!(shard.digest(), local.digest());

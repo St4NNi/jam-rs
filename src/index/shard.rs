@@ -121,8 +121,8 @@ impl Shard {
         &self.seeds
     }
 
-    /// The local path of an entry's packed sequence; an error when it lies on S3.
-    pub fn packed_path(&self, entry: u32) -> Result<PathBuf, IndexError> {
+    /// The local path of the file of an entry's packed sequence; an error when it lies on S3.
+    pub fn sequence_path(&self, entry: u32) -> Result<PathBuf, IndexError> {
         let (record, file) = self.packed_record(entry)?;
         self.files.packed_path(file).ok_or_else(|| {
             IndexError::Input(format!("the packed sequence of {} is on S3", record.name))

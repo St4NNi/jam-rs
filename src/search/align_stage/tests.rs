@@ -9,7 +9,7 @@ use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Parameters, Shard, build_shard};
 use crate::search::ContigWindows;
 use crate::seeds::reverse_complement;
-use crate::storage::MappedFile;
+use crate::storage::{MappedFile, SliceSource};
 use crate::test_support::{no_stop, random_bases, rng, with_substitutions};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -587,7 +587,7 @@ fn insertion_deletion_sides() {
 
 /// A packed sequence source that sets the stop flag when it is first read after `armed`.
 struct StopOnRead {
-    file: MappedFile,
+    file: SliceSource,
     armed: AtomicBool,
     stop: Arc<AtomicBool>,
     reads: AtomicUsize,
@@ -615,8 +615,10 @@ fn stop_between_windows() {
     let located = located(&fixture.shard, s3, &fixture.query, 300);
     assert_eq!(located.alignment_windows.len(), 2);
     let stop = Arc::new(AtomicBool::new(false));
+    let file = MappedFile::open(&fixture.shard.sequence_path(s3).unwrap(), false).unwrap();
+    let range = 0..file.size();
     let source = Arc::new(StopOnRead {
-        file: MappedFile::open(&fixture.shard.packed_path(s3).unwrap(), false).unwrap(),
+        file: SliceSource::new(Arc::new(file), range).unwrap(),
         armed: AtomicBool::new(false),
         stop: stop.clone(),
         reads: AtomicUsize::new(0),
