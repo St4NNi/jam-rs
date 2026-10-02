@@ -61,6 +61,7 @@ pub(super) fn build(directory: &Path, entries: &[EntryContigs]) -> Shard {
         temporary_directory: directory.to_path_buf(),
         singleton: false,
         sketch_only: false,
+        chunks: 1,
     };
     let root = directory.join("shard.jam");
     build_shard(&inputs, &root, &options).unwrap();

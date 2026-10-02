@@ -1,4 +1,4 @@
-//! Builds an index file and its sequence file from FASTA files, one entry per file or per
+//! Builds an index file and its sequence files from FASTA files, one entry per file or per
 //! record, with entries indexed in parallel.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
@@ -11,11 +11,11 @@ use super::manifest::{
 };
 use super::packed::PackedWriter;
 use super::seed_file::{SeedLocation, seed_key};
-use super::seed_writer::SeedFileShape;
+use super::seed_writer::{SeedFileShape, WrittenSeeds};
 use super::sequence_file::{
-    INDEX_EXTENSION, Piece, place_entries, sequence_file_names, write_sequence_files,
+    INDEX_EXTENSION, Piece, Place, place_entries, sequence_file_names, write_sequence_files,
 };
-use super::spill::{SeedSpill, seed_record};
+use super::spill::{SeedSpill, SeedTotals, seed_record};
 use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
 use rayon::prelude::*;
@@ -69,6 +69,8 @@ pub struct BuildOptions {
     /// Write only the sketch part of the seeds file and no packed sequences, so the shard
     /// answers stage 1 only.
     pub sketch_only: bool,
+    /// Sequence files to split the packed sequences into, of about equal size.
+    pub chunks: usize,
 }
 
 /// The index file of the output `NAME` or `NAME.jam`: `NAME.jam`.
@@ -80,8 +82,8 @@ pub fn index_file_path(output: &Path) -> PathBuf {
     }
 }
 
-/// Builds the index file `NAME.jam` of the output `NAME` (or `NAME.jam`) and its sequence file
-/// `NAME.jamseq` from `inputs`, and returns its manifest.
+/// Builds the index file `NAME.jam` of the output `NAME` (or `NAME.jam`) and its sequence files
+/// from `inputs`, and returns its manifest.
 pub fn build_shard(
     inputs: &[EntryInput],
     output: &Path,
@@ -110,11 +112,15 @@ pub fn build_shard(
     let name = (index.file_stem().and_then(|name| name.to_str()))
         .filter(|name| !name.is_empty())
         .ok_or_else(|| IndexError::Input(format!("{} needs a file name", index.display())))?;
-    let names = sequence_file_names(name, 1);
-    let mut outputs = Vec::new();
-    if !options.sketch_only {
-        outputs.push(index.with_file_name(&names[0]));
-    }
+    let chunks = if options.sketch_only {
+        0
+    } else {
+        options.chunks
+    };
+    let names = sequence_file_names(name, chunks.max(1));
+    let mut outputs: Vec<PathBuf> = (names.iter().take(chunks))
+        .map(|name| index.with_file_name(name))
+        .collect();
     outputs.push(index.clone());
     in_partial_files(&outputs, |partial| {
         let context = Context {
@@ -131,36 +137,41 @@ pub fn build_shard(
             };
             let (mut entries, tables): (Vec<_>, Vec<_>) = built.into_iter().unzip();
             check_names(entries.iter().map(|entry| entry.name.as_str()))?;
-            let (index, sequences) = partial.split_last().unwrap_or((&partial[0], &[]));
-            let files = match (&context.packed, sequences.first()) {
-                (Some(pieces), Some(path)) => {
-                    write_sequences(&mut entries, pieces, (path, &names[0]))?
-                }
-                _ => Vec::new(),
-            };
-            let parameters = options.parameters;
-            let spill = context.spill;
+            let (index, chunk_paths) = partial.split_last().unwrap_or((&partial[0], &[]));
+            let pieces = context.packed.as_deref().unwrap_or(Path::new(""));
+            let (pieces, places) = place_sequences(&mut entries, pieces, chunks)?;
             let tables = (!options.sketch_only).then_some(tables);
-            complete_shard(
-                index,
-                parameters,
-                entries,
-                files,
-                spill,
-                options.bucket_bits,
-                tables,
-            )
+            let names = &names[..chunk_paths.len()];
+            // The chunks are written while the seeds are, as both take long.
+            std::thread::scope(|scope| {
+                let files = scope
+                    .spawn(|| write_sequence_files(chunk_paths, names, &pieces, &places, true));
+                let parameters = options.parameters;
+                let bucket_bits = options.bucket_bits;
+                let seeds = write_seeds(
+                    index,
+                    parameters,
+                    &entries,
+                    context.spill,
+                    bucket_bits,
+                    tables,
+                );
+                let files = files
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+                finish_index(seeds?, entries, files)
+            })
         })
     })
 }
 
-/// Writes the sequence file at `path`, named `name` in the manifest, from the packed sequence of
-/// each entry, in the file named by its entry id in `pieces`, and gives each entry its place.
-fn write_sequences(
+/// Gives each entry its place in `chunks` chunks, and returns the packed sequence of each entry,
+/// in the file named by its entry id in `pieces`, with the places.
+fn place_sequences(
     entries: &mut [EntryRecord],
     pieces: &Path,
-    (path, name): (&Path, &str),
-) -> Result<Vec<FileRecord>, IndexError> {
+    chunks: usize,
+) -> Result<(Vec<Piece>, Vec<Place>), IndexError> {
     let pieces: Vec<Piece> = (entries.iter().enumerate())
         .filter_map(|(entry, record)| Some((entry, record.sequence.as_ref()?.bytes)))
         .map(|(entry, bytes)| Piece {
@@ -169,15 +180,18 @@ fn write_sequences(
             bytes,
         })
         .collect();
-    let sizes: Vec<u64> = pieces.iter().map(|piece| piece.bytes).collect();
-    let places = place_entries(&sizes, 1)?.0;
-    for (entry, place) in entries.iter_mut().zip(&places) {
-        if let Some(sequence) = &mut entry.sequence {
-            (sequence.file, sequence.offset) = (place.chunk, place.offset);
-        }
+    if chunks == 0 {
+        return Ok((pieces, Vec::new()));
     }
-    let (paths, names) = ([path.to_path_buf()], [name.to_string()]);
-    write_sequence_files(&paths, &names, &pieces, &places, true)
+    let sizes: Vec<u64> = pieces.iter().map(|piece| piece.bytes).collect();
+    let places = place_entries(&sizes, chunks)?.0;
+    let sequences = entries
+        .iter_mut()
+        .filter_map(|entry| entry.sequence.as_mut());
+    for (sequence, place) in sequences.zip(&places) {
+        (sequence.file, sequence.offset) = (place.chunk, place.offset);
+    }
+    Ok((pieces, places))
 }
 
 /// Runs `build` on fresh partial files next to `outputs`, and moves them to `outputs` in order
@@ -216,9 +230,9 @@ fn in_partial_files<T>(
     built
 }
 
-/// Writes the seeds file from the seed records in `spill` (with the locator part when there are
-/// contig tables), followed by the manifest of a shard with these entries and sequence files; the
-/// build chooses its bucket bits unless `bucket_bits` is given.
+/// Writes the index file `path` from the seed records in `spill` (with the locator part when there
+/// are contig tables) and the manifest of these entries and sequence files; the build chooses
+/// the bucket bits unless `bucket_bits` is given.
 pub(crate) fn complete_shard(
     path: &Path,
     parameters: Parameters,
@@ -228,6 +242,35 @@ pub(crate) fn complete_shard(
     bucket_bits: Option<u8>,
     contig_tables: Option<Vec<Vec<u8>>>,
 ) -> Result<Manifest, IndexError> {
+    let seeds = write_seeds(
+        path,
+        parameters,
+        &entries,
+        spill,
+        bucket_bits,
+        contig_tables,
+    )?;
+    finish_index(seeds, entries, sequence_files)
+}
+
+/// The seeds of an index file, written up to the manifest.
+struct Seeds {
+    written: WrittenSeeds,
+    totals: SeedTotals,
+    parameters: Parameters,
+    seed_locations: u64,
+}
+
+/// Writes the seeds of the index file `path` from the seed records in `spill`, up to the manifest
+/// that `finish_index` adds.
+fn write_seeds(
+    path: &Path,
+    parameters: Parameters,
+    entries: &[EntryRecord],
+    spill: SeedSpill,
+    bucket_bits: Option<u8>,
+    contig_tables: Option<Vec<Vec<u8>>>,
+) -> Result<Seeds, IndexError> {
     if u32::try_from(entries.len()).is_err() {
         return Err(IndexError::Input(
             "a shard holds at most 2^32 - 1 entries".into(),
@@ -247,17 +290,32 @@ pub(crate) fn complete_shard(
     };
     let tables = contig_tables.unwrap_or_default();
     let (totals, written) = spill.write(path, shape, &tables)?;
+    Ok(Seeds {
+        written,
+        totals,
+        parameters,
+        seed_locations: locations,
+    })
+}
+
+/// Appends the manifest of these entries and sequence files to the seeds of an index file.
+fn finish_index(
+    seeds: Seeds,
+    entries: Vec<EntryRecord>,
+    sequence_files: Vec<FileRecord>,
+) -> Result<Manifest, IndexError> {
+    let written = seeds.written;
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
-        parameters,
+        parameters: seeds.parameters,
         entries,
         sequence_files,
         seeds_sha256: written.sha256.clone(),
         sketch_part: written.sketch_part.clone(),
         locator_part: written.locator_part.clone(),
-        stored_seeds: totals.seeds,
-        color_sets: totals.color_sets,
-        seed_locations: locations,
+        stored_seeds: seeds.totals.seeds,
+        color_sets: seeds.totals.color_sets,
+        seed_locations: seeds.seed_locations,
     };
     written.append_manifest(&manifest.to_bytes()?)?;
     Ok(manifest)

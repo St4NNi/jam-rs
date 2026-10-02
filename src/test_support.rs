@@ -110,6 +110,7 @@ pub fn build_options(directory: &Path, threads: usize) -> BuildOptions {
         temporary_directory: directory.to_path_buf(),
         singleton: false,
         sketch_only: false,
+        chunks: 1,
     }
 }
 

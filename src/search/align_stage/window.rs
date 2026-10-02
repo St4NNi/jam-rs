@@ -192,6 +192,7 @@ mod tests {
             temporary_directory: directory.to_path_buf(),
             singleton: false,
             sketch_only: false,
+            chunks: 1,
         };
         let root = directory.join("shard.jam");
         build_shard(&[EntryInput::from_path(path)], &root, &options).unwrap();

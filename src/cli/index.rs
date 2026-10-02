@@ -49,6 +49,9 @@ struct BuildArgs {
     /// Write only the sketch part and no sequence file: the index answers stage 1 only
     #[arg(long)]
     sketch_only: bool,
+    /// Split the sequence file into N chunks of about equal size
+    #[arg(long, value_name = "N", default_value_t = 1)]
+    chunks: usize,
     #[command(flatten)]
     common: CommonArgs,
     /// Bases per k-mer, 1 to 32 [default: 25]
@@ -297,6 +300,7 @@ fn build_options(args: &BuildArgs, threads: usize, temp_dir: PathBuf) -> BuildOp
         temporary_directory: temp_dir,
         singleton: args.singleton,
         sketch_only: args.sketch_only,
+        chunks: args.chunks,
     }
 }
 

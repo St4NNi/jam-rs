@@ -244,7 +244,8 @@ pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::test_shard;
+    use crate::index::{Shard, build_shard};
+    use crate::test_support::{build_options, test_shard, write_entries};
 
     #[test]
     fn budgets_place_parts() {
@@ -283,6 +284,45 @@ mod tests {
         assert_eq!(pinned.len(), 1);
         let error = Plan::choose(shard.head(), 1 << 30, 10, &[Part::Sketch]).unwrap_err();
         assert!(error.to_string().starts_with("pinning sketch needs"));
+    }
+
+    /// Pins are byte ranges: the seeds parts of the index file, a whole chunk for all packed
+    /// sequences, and the exact range of a named entry.
+    #[test]
+    fn pins_are_ranges() {
+        let directory = tempfile::tempdir().unwrap();
+        let entries: Vec<Vec<Vec<u8>>> = (0..3).map(|e| vec![vec![b"ACG"[e]; 9_000]]).collect();
+        let inputs = write_entries(directory.path(), &entries);
+        let options = crate::index::BuildOptions {
+            chunks: 2,
+            ..build_options(directory.path(), 2)
+        };
+        build_shard(&inputs, &directory.path().join("shard"), &options).unwrap();
+        let shard = Shard::open(&directory.path().join("shard.jam")).unwrap();
+        let (head, manifest) = (shard.head(), shard.manifest());
+        let ranges = |part: &Part| {
+            let pins = part_pins(head, part, Place::Ssd).unwrap();
+            let ranges = pins
+                .iter()
+                .map(|pin| (pin.file.clone(), pin.start..pin.end));
+            ranges.collect::<Vec<_>>()
+        };
+        let index = "shard.jam".to_string();
+        assert_eq!(
+            ranges(&Part::Sketch),
+            [(index.clone(), 0..manifest.sketch_part.end)]
+        );
+        let locators = manifest.locator_part.clone().unwrap();
+        assert_eq!(ranges(&Part::Locators), [(index, locators)]);
+        let files = &manifest.sequence_files;
+        let whole: Vec<_> = files.iter().map(|f| (f.path.clone(), 0..f.bytes)).collect();
+        assert_eq!(ranges(&Part::Packed(None)), whole);
+        let sequence = manifest.entries[2].sequence.clone().unwrap();
+        let file = files[sequence.file].path.clone();
+        let named = Part::Packed(Some(vec!["entry2".into()]));
+        assert_eq!(ranges(&named), [(file, sequence.range())]);
+        let missing = Part::Packed(Some(vec!["other".into()]));
+        assert!(part_pins(head, &missing, Place::Ssd).is_err());
     }
 
     #[test]

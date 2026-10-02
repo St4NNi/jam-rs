@@ -97,11 +97,37 @@ fn every_seed_found() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(7);
     let inputs = write_entries(directory.path(), &entries);
-    let output = directory.path().join("shard.jam");
-    let manifest = build_shard(&inputs, &output, &options(directory.path(), 3)).unwrap();
+    let output = directory.path().join("shard");
+    let options = BuildOptions {
+        chunks: 3,
+        ..options(directory.path(), 3)
+    };
+    let manifest = build_shard(&inputs, &output, &options).unwrap();
     assert_eq!(manifest.entries[2].name, "entry2");
     assert_eq!(manifest.entries[2].contigs, 3);
-    let shard = Shard::open(&output).unwrap();
+    // Each entry lies in one of the three chunks, which differ by at most one entry.
+    let files: Vec<&str> = manifest
+        .sequence_files
+        .iter()
+        .map(|f| f.path.as_str())
+        .collect();
+    assert_eq!(
+        files,
+        ["shard.1.jamseq", "shard.2.jamseq", "shard.3.jamseq"]
+    );
+    let sizes: Vec<u64> = manifest
+        .sequence_files
+        .iter()
+        .map(|file| file.bytes)
+        .collect();
+    let largest = manifest
+        .entries
+        .iter()
+        .map(|e| e.sequence.as_ref().unwrap().bytes)
+        .max();
+    let spread = sizes.iter().max().unwrap() - sizes.iter().min().unwrap();
+    assert!(spread <= largest.unwrap() + 4096, "{sizes:?}");
+    let shard = Shard::open(&directory.path().join("shard.jam")).unwrap();
     let packed = shard.packed(2).unwrap();
     assert_eq!(packed.contig_name(1).unwrap(), b"entry2_contig1");
     shard.verify().unwrap();
