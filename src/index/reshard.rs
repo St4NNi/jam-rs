@@ -9,7 +9,7 @@
 
 use super::build::complete_shard;
 use super::index_file::{INDEX_FILE, INDEX_FORMAT_VERSION, IndexFile, ShardRecord};
-use super::manifest::{Manifest, Parameters, check_names, sha256_hex};
+use super::manifest::{FileRecord, Manifest, Parameters, check_names, sha256_hex};
 use super::seed_file::{ColorSetId, SEED_KEY_BITS, SeedFile};
 use super::sequence_file::{
     INDEX_EXTENSION, Piece, place_entries, sequence_file_names, write_sequence_files,
@@ -20,7 +20,7 @@ use super::{AtPath, IndexError};
 use crate::storage::LocalFile;
 use rayon::prelude::*;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 /// How the entries are split into output shards.
@@ -38,6 +38,8 @@ pub enum Split {
 pub struct ReshardOptions {
     /// How the entries are split into output shards.
     pub split: Split,
+    /// Write a sequence file for each output shard instead of pointing into those of the inputs.
+    pub copy_sequences: bool,
     /// Threads that write each seeds file.
     pub threads: usize,
     /// Directory for temporary files.
@@ -64,6 +66,10 @@ pub fn reshard(
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(options.threads.max(1))
         .build()?;
+    // Sequence files are named relative to where the output directory will be.
+    let parent = (output.parent().filter(|p| !p.as_os_str().is_empty())).unwrap_or(Path::new("."));
+    let parent = std::fs::canonicalize(parent).at(parent)?;
+    let target = parent.join(output.file_name().unwrap_or_default());
     in_partial_directory(output, |directory| {
         let records = (groups.iter().enumerate())
             .map(|(number, group)| {
@@ -72,7 +78,8 @@ pub fn reshard(
                     first_entry: group.start,
                     sources: &sources[group.clone()],
                 };
-                pool.install(|| output_shard(&shards, &part, directory, options))
+                let place = (directory, target.as_path());
+                pool.install(|| output_shard(&shards, &part, place, options))
             })
             .collect::<Result<Vec<_>, IndexError>>()?;
         let index = IndexFile {
@@ -138,6 +145,7 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
                     path.display()
                 )));
             }
+            let path = std::fs::canonicalize(&path).at(&path)?;
             Ok(InputShard {
                 path,
                 manifest,
@@ -184,11 +192,11 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
 fn output_shard(
     shards: &[InputShard],
     part: &Part<'_>,
-    directory: &Path,
+    place: (&Path, &Path),
     options: &ReshardOptions,
 ) -> Result<ShardRecord, IndexError> {
     let name = format!("shard-{:04}", part.number);
-    let manifest = write_shard(shards, part.sources, (directory, &name), options)?;
+    let manifest = write_shard(shards, part.sources, place, &name, options)?;
     let manifest_digest = sha256_hex(&[&manifest.to_bytes()?]);
     Ok(ShardRecord {
         file: format!("{name}.{INDEX_EXTENSION}"),
@@ -199,36 +207,51 @@ fn output_shard(
     })
 }
 
-/// Writes the index file `NAME.jam` of the entries `part` into `directory`, with a copy of their
-/// packed sequences in its sequence file `NAME.jamseq`.
+/// Writes the index file `NAME.jam` of the entries `part` into `directory`, the partial output
+/// directory whose final path is `target`. It points into the sequence files of the inputs, or
+/// with `copy_sequences` copies the packed sequences into its own sequence file `NAME.jamseq`.
 fn write_shard(
     shards: &[InputShard],
     part: &[EntrySource],
-    (directory, name): (&Path, &str),
+    (directory, target): (&Path, &Path),
+    name: &str,
     options: &ReshardOptions,
 ) -> Result<Manifest, IndexError> {
     let locators = shards[0].seeds.has_locators();
     let mut entries = Vec::with_capacity(part.len());
     let mut tables = Vec::with_capacity(part.len());
+    let mut files: Vec<FileRecord> = Vec::new();
     let mut pieces = Vec::new();
     for &EntrySource { shard, entry } in part {
         let input = &shards[shard];
-        let record = input.manifest.entries[entry as usize].clone();
+        let mut record = input.manifest.entries[entry as usize].clone();
         if locators {
             tables.push(input.seeds.contig_table_bytes(entry)?);
         }
-        if let Some(sequence) = &record.sequence {
+        if let Some(sequence) = &mut record.sequence {
             let file = &input.manifest.sequence_files[sequence.file];
+            let source = normalized(&input.path.with_file_name("").join(&file.path));
+            // The path from the output directory to the input's sequence file.
+            let path = relative_path(target, &source)?;
             pieces.push(Piece {
-                path: input.path.with_file_name("").join(&file.path),
+                path: source,
                 offset: sequence.offset,
                 bytes: sequence.bytes,
             });
+            sequence.file = match files.iter().position(|known| known.path == path) {
+                Some(known) => known,
+                None => {
+                    files.push(FileRecord {
+                        path,
+                        ..file.clone()
+                    });
+                    files.len() - 1
+                }
+            };
         }
         entries.push(record);
     }
-    let mut files = Vec::new();
-    if !pieces.is_empty() {
+    if options.copy_sequences && !pieces.is_empty() {
         let sizes: Vec<u64> = pieces.iter().map(|piece| piece.bytes).collect();
         let places = place_entries(&sizes, 1)?.0;
         let names = sequence_file_names(name, 1);
@@ -258,6 +281,37 @@ fn write_shard(
     let tables = locators.then_some(tables);
     let path = directory.join(format!("{name}.{INDEX_EXTENSION}"));
     complete_shard(&path, parameters, entries, files, spill, None, tables)
+}
+
+/// `path` with its `.` and `..` parts resolved, without following links.
+fn normalized(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => drop(result.pop()),
+            part => result.push(part),
+        }
+    }
+    result
+}
+
+/// The path of the file `file` relative to the directory `directory`, both absolute, with `/`
+/// between parts.
+fn relative_path(directory: &Path, file: &Path) -> Result<String, IndexError> {
+    let from: Vec<Component<'_>> = directory.components().collect();
+    let to: Vec<Component<'_>> = file.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut parts = vec![".."; from.len() - common];
+    for part in &to[common..] {
+        let text = part.as_os_str().to_str();
+        parts.push(
+            text.ok_or_else(|| {
+                IndexError::Input(format!("{} is not a UTF-8 path", file.display()))
+            })?,
+        );
+    }
+    Ok(parts.join("/"))
 }
 
 /// Runs `build` on a fresh partial directory next to `output`, and moves it to `output` when

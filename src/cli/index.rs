@@ -75,6 +75,9 @@ struct ReshardArgs {
     /// Most seed locations per output shard, which bounds the size of each index file
     #[arg(long, group = "split")]
     max_seed_locations: Option<u64>,
+    /// Write a sequence file for each output shard instead of pointing into those of the inputs
+    #[arg(long)]
+    copy_sequences: bool,
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -252,6 +255,7 @@ fn run_reshard(args: &ReshardArgs) -> Result<(), CliError> {
     };
     let options = ReshardOptions {
         split,
+        copy_sequences: args.copy_sequences,
         threads,
         temporary_directory: temp_dir,
     };
