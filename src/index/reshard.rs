@@ -120,7 +120,7 @@ fn open_inputs(inputs: &[PathBuf]) -> Result<Vec<InputShard>, IndexError> {
     let shards = directories
         .into_iter()
         .map(|directory| {
-            let manifest = Location::Directory(directory.clone()).head()?.manifest;
+            let manifest = Location::File(directory.join(SEEDS_FILE)).head()?.manifest;
             let file = LocalFile::open(directory.join(SEEDS_FILE))?;
             let seeds = SeedFile::open(Arc::new(file))?;
             let packed = manifest

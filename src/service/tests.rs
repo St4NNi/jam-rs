@@ -414,7 +414,7 @@ fn replaced_shard_reopened() {
     let (server, _) = serve_seen(served.path());
     let endpoint = Some(server.address.as_str());
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-    let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
     let open = move || Shard::open_with(&location, &ShardOptions::default());
     let shard = ServedShard::new("shard".into(), open().unwrap(), models()).unwrap();
     let shard = shard.with_reopen(Box::new(move || open().ok()));

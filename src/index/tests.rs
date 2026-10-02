@@ -143,7 +143,8 @@ fn reshard_options(directory: &Path, split: Split) -> ReshardOptions {
 
 /// Checks that two shards hold the same seeds and entries, wherever their packed sequences lie.
 fn assert_same_shard(one: &Path, other: &Path) {
-    let [one, other] = [one, other].map(|path| Location::Directory(path.into()).head().unwrap());
+    let [one, other] =
+        [one, other].map(|path| Location::File(path.join(SEEDS_FILE)).head().unwrap());
     let placed = |manifest: &Manifest| {
         let mut manifest = manifest.clone();
         manifest.sequence_files.clear();
@@ -325,7 +326,7 @@ fn sequences_read_cached() {
     let directory = tempfile::tempdir().unwrap();
     let entries = generated_entries(4);
     test_shard(directory.path(), &entries);
-    let local = Location::Directory(directory.path().join("shard"));
+    let local = Location::File(directory.path().join("shard/seeds"));
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let options = ShardOptions {
         cache: Some(Arc::clone(&cache)),
@@ -357,9 +358,9 @@ fn shard_on_s3() {
     let limits = S3Limits::default();
     let config = S3Config::new("local", endpoint, true, limits, runtime()).unwrap();
     let config = config.unsigned();
-    assert!(Location::s3("s3:///shard", &config).is_err());
-    assert!(Location::s3("/local/shard", &config).is_err());
-    let location = Location::s3("s3://bucket/shard", &config).unwrap();
+    assert!(Location::s3("s3:///shard/seeds", &config).is_err());
+    assert!(Location::s3("/local/shard/seeds", &config).is_err());
+    let location = Location::s3("s3://bucket/shard/seeds", &config).unwrap();
     let cache = BlockCache::open(&CacheConfig::new(1 << 20, 4096), runtime()).unwrap();
     let shard = Shard::open_with(&location, &ShardOptions::default()).unwrap();
     assert!(shard.sequence_path(0).is_err());
@@ -373,7 +374,7 @@ fn shard_on_s3() {
     };
     let shard = Shard::open_with(&location, &options).unwrap();
     check_every_seed(&shard, &entries);
-    let missing = Location::s3("s3://bucket/missing", &config).unwrap();
+    let missing = Location::s3("s3://bucket/missing/seeds", &config).unwrap();
     assert!(Shard::open_with(&missing, &ShardOptions::default()).is_err());
 }
 
@@ -387,7 +388,7 @@ fn pins_read_locally() {
     let (server, asked) = serve_directory(directory.path());
     let endpoint = Some(server.address.as_str());
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-    let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
     let head = local.head();
     let mut pins = part_pins(head, &Part::Sketch, Place::Ram).unwrap();
     pins.extend(part_pins(head, &Part::Locators, Place::Ssd).unwrap());

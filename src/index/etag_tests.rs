@@ -83,7 +83,7 @@ fn first_reads_learn() {
     let entries = entries_of(1);
     test_shard(directory.path(), &entries);
     let (_server, seen, config) = store(directory.path());
-    let location = Location::s3("s3://bucket/shard", &config).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config).unwrap();
     let shard = Shard::open_with(&location, &cached(&cache())).unwrap();
     read_all(&shard, &entries).unwrap();
     read_all(&shard, &entries).unwrap();
@@ -108,7 +108,7 @@ fn replaced_between_searches() {
     let old = entries_of(1);
     test_shard(directory.path(), &old);
     let (_server, _seen, config) = store(directory.path());
-    let location = Location::s3("s3://bucket/shard", &config).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config).unwrap();
     let cache = cache();
     let shard = Shard::open_with(&location, &cached(&cache)).unwrap();
     read_range(&shard, &old, 0, 0..1_000).unwrap();
@@ -135,7 +135,7 @@ fn log_keeps_etags() {
     let kept = directory.path().join("kept");
     let (_server, seen, config) = store(directory.path());
     config.keep_etags(&kept).unwrap();
-    let location = Location::s3("s3://bucket/shard", &config).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config).unwrap();
     let cache = cache();
     let head = location.head().unwrap();
     let options = cached(&cache);
@@ -146,7 +146,7 @@ fn log_keeps_etags() {
     let next_run = || {
         let (server, seen, config) = store(directory.path());
         config.keep_etags(&kept).unwrap();
-        let location = Location::s3("s3://bucket/shard", &config).unwrap();
+        let location = Location::s3("s3://bucket/shard/seeds", &config).unwrap();
         let shard = Shard::open_with_head(&location, &options, head.clone()).unwrap();
         (server, seen, shard)
     };
@@ -203,7 +203,7 @@ fn warm_redownloads_pin() {
     let directory = tempfile::tempdir().unwrap();
     test_shard(directory.path(), &entries_of(1));
     let (server, generation) = serve_generations(directory.path());
-    let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config_for(&server)).unwrap();
     let head = location.head().unwrap();
     let cache = directory.path().join("cache");
     let parts = [Part::Packed(Some(vec!["entry1".into()]))];
@@ -234,7 +234,7 @@ fn stale_pin_removed() {
     let entries = entries_of(1);
     test_shard(directory.path(), &entries);
     let (server, generation) = serve_generations(directory.path());
-    let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config_for(&server)).unwrap();
     let head = location.head().unwrap();
     let cache = directory.path().join("cache");
     let parts = [Part::Packed(Some(vec!["entry1".into()]))];
@@ -247,7 +247,7 @@ fn stale_pin_removed() {
     };
     generation.store(1, Ordering::SeqCst);
     // A new process: it knows no ETag but the one of the pin.
-    let location = Location::s3("s3://bucket/shard", &config_for(&server)).unwrap();
+    let location = Location::s3("s3://bucket/shard/seeds", &config_for(&server)).unwrap();
     let open =
         |location: &Location| Shard::open_with_head(location, &options, location.head().unwrap());
     let shard = open(&location).unwrap();

@@ -2,6 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::seed_file::SEEDS_FILE;
 use super::sources::Location;
 use super::{AtPath, IndexError};
 use serde::{Deserialize, Serialize};
@@ -83,7 +84,7 @@ impl IndexFile {
     /// Checks that every shard's manifest still has its recorded digest.
     pub fn verify(&self, directory: &Path) -> Result<(), IndexError> {
         for shard in &self.shards {
-            let location = Location::Directory(directory.join(&shard.directory));
+            let location = Location::File(directory.join(&shard.directory).join(SEEDS_FILE));
             if location.head()?.digest != shard.manifest_sha256 {
                 return Err(IndexError::Checksum(format!(
                     "the manifest of {} differs from the index file",

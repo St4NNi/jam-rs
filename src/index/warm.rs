@@ -190,7 +190,8 @@ mod tests {
         let (server, asked) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-        let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        let location =
+            Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
         let head = location.head().unwrap();
         assert_eq!(head.digest, local.digest());
         let cache = directory.path().join("cache");
@@ -261,7 +262,8 @@ mod tests {
         let (server, _) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-        let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        let location =
+            Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
         let head = location.head().unwrap();
         let cache = directory.path().join("cache");
         let all = [Part::Sketch, Part::Locators, Part::Packed(None)];
@@ -294,7 +296,8 @@ mod tests {
         let (server, asked) = serve_directory(directory.path());
         let endpoint = Some(server.address.as_str());
         let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
-        let location = Location::s3("s3://bucket/shard", &config.unwrap().unsigned()).unwrap();
+        let location =
+            Location::s3("s3://bucket/shard/seeds", &config.unwrap().unsigned()).unwrap();
         let head = location.head().unwrap();
         let cache = directory.path().join("cache");
         // The default plan pins the sketch part alone; there are no locators or packed files.

@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
-use crate::index::{Location, Place, Plan, Shard, ShardOptions, warm};
+use crate::index::{Location, Place, Plan, SEEDS_FILE, Shard, ShardOptions, warm};
 use crate::storage::{BlockCache, CacheConfig, DiskConfig, S3Config, S3Limits};
 use bytesize::ByteSize;
 use clap::Args;
@@ -56,12 +56,14 @@ impl ShardStorage {
         })
     }
 
-    /// The location of the shard at `path`, a local directory or `s3://bucket/prefix`.
+    /// The location of the seeds file of the shard at `path`, a local directory or
+    /// `s3://bucket/prefix`.
     pub(super) fn location(&self, path: &Path) -> Result<Location, CliError> {
         let text = path.to_string_lossy();
         if !text.starts_with("s3://") {
-            return Ok(Location::Directory(path.to_path_buf()));
+            return Ok(Location::File(path.join(SEEDS_FILE)));
         }
+        let text = format!("{}/{SEEDS_FILE}", text.trim_end_matches('/'));
         Location::s3(&text, self.s3()?).map_err(|source| CliError::Shard {
             path: path.to_path_buf(),
             source,
@@ -90,7 +92,7 @@ impl ShardStorage {
             }
             let head = match location {
                 Location::S3 { .. } => Some(location.head().map_err(failed)?),
-                Location::Directory(_) => None,
+                Location::File(_) => None,
             };
             if let (Some(head), Some(cache)) = (&head, &args.cache) {
                 let mut plan = Plan::read(cache, &head.digest).map_err(failed)?;
