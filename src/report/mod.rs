@@ -3,10 +3,12 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+mod compact;
 mod decision;
 mod event;
 mod paf;
 
+pub use compact::{QueryTotals, result_line};
 pub use decision::{DecisionRecord, FragmentRecord};
 pub use event::{
     Confirmed, Dropped, Located, Possible, Reason, Record, ShardRecord, Status, Summary,
