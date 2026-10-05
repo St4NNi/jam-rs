@@ -6,7 +6,7 @@
 use super::ServiceError;
 use crate::decide::DecisionRule;
 use crate::loss::LossBudget;
-use crate::search::{MissBound, SearchConfig, SearchStage, SeedMismatches};
+use crate::search::{SearchConfig, SearchStage, SeedMismatches};
 use serde::{Deserialize, Serialize};
 
 /// The settings of one search that a client may choose.
@@ -20,9 +20,6 @@ pub struct SearchSettings {
     pub min_chain_identity: f64,
     /// The largest accepted chance of missing a qualifying entry.
     pub loss_budget: f64,
-    /// How the coverage bound chooses its allowance.
-    #[serde(default)]
-    pub miss_bound: MissBound,
     /// Whether query k-mers one substitution away are looked up too.
     pub seed_mismatches: SeedMismatches,
     /// The alignment score of a match.
@@ -44,7 +41,6 @@ impl SearchSettings {
             rule: *rule,
             min_chain_identity: config.align.min_chain_identity,
             loss_budget: config.loss_budget.chance(),
-            miss_bound: config.miss_bound,
             seed_mismatches: config.seed_mismatches,
             match_score: scores.match_score,
             mismatch_score: scores.mismatch_score,
@@ -60,7 +56,6 @@ impl SearchSettings {
         config.rule = self.rule;
         config.align.min_chain_identity = self.min_chain_identity;
         config.loss_budget = LossBudget::new(self.loss_budget)?;
-        config.miss_bound = self.miss_bound;
         config.seed_mismatches = self.seed_mismatches;
         let scores = &mut config.align.band.alignment;
         scores.match_score = self.match_score;

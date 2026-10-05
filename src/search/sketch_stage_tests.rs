@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::bound::{CoverageBound, MissBound};
+use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::query::QueryKmers;
@@ -54,7 +54,6 @@ fn bound_at(length: u64, required_bases: u64, identity: f64) -> CoverageBound<'s
     CoverageBound::new(
         miss_model(),
         LossBudget::default(),
-        MissBound::Estimate,
         identity,
         length,
         false,
@@ -94,7 +93,7 @@ fn run_with(
 fn low_bounds_dropped() {
     let directory = tempfile::tempdir().unwrap();
     let (shard, query) = shard(directory.path());
-    let kept = run(&shard, &query, 2_500, UNLIMITED);
+    let kept = run(&shard, &query, 3_500, UNLIMITED);
     assert_eq!(kept.len(), 2, "{kept:?}");
     assert_eq!(kept[0], (0, 5_000));
     assert_eq!(kept[1].0, 1);
@@ -104,7 +103,7 @@ fn low_bounds_dropped() {
         kept.iter().map(|(entry, _)| *entry).collect::<Vec<_>>(),
         [0, 1, 2]
     );
-    assert!(kept[2].1 >= 1_500 && kept[2].1 < 2_500, "{kept:?}");
+    assert!(kept[2].1 >= 1_500 && kept[2].1 < 3_500, "{kept:?}");
 }
 
 /// The containment estimate of each entry of the 4 entry shard; 0 when it is not a candidate.
@@ -245,11 +244,11 @@ fn frequent_union_only() {
     assert_eq!(without, 0);
     assert_eq!(bound_of(4), 6_000);
     for entry in 0..3 {
-        assert!(bound_of(entry) >= 3_000 && bound_of(entry) < 4_000);
+        assert!(bound_of(entry) >= 3_000 && bound_of(entry) < 5_000);
     }
     // Entry 3 is in no frequent color set: only its own seed hits on the second half count.
     assert!(
-        bound_of(3) >= 3_000 && bound_of(3) < 4_000,
+        bound_of(3) >= 3_000 && bound_of(3) < 5_000,
         "{}",
         bound_of(3)
     );

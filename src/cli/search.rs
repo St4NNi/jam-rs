@@ -13,8 +13,7 @@ use crate::report::{
     tsv_line,
 };
 use crate::search::{
-    EntryEvent, MissBound, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
-    SeedMismatches,
+    EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher, SeedMismatches,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
@@ -38,8 +37,7 @@ k-mer, stays within 10 CPU seconds. With the default coverage this takes 1 at 80
 queries up to about 10 kb, and at 95% for queries below about 7.2 kb. 2 also looks up every k-mer \
 two substitutions away (2,700 more lookups per k-mer). auto takes 2 instead of 1 when also: the \
 identity is below 0.9; the query has at most 1,800 k-mers; the proven bound with one mismatch is \
-above the loss budget; and two mismatches lower it. There is no stored estimate table for two \
-mismatches, so with 2 both --miss-bound modes use the proven bound.";
+above the loss budget; and two mismatches lower it.";
 
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -74,9 +72,6 @@ pub struct SearchArgs {
     /// Chance of missing a qualifying entry that the coverage bound may spend
     #[arg(long, default_value_t = LossBudget::default().chance())]
     loss_budget: f64,
-    /// How the coverage bound allows for stretches without a seed hit: estimate or proven
-    #[arg(long, value_enum, default_value = "estimate")]
-    miss_bound: MissBound,
     /// Mismatches a query k-mer may have against a seed: auto, 0, 1 or 2
     #[arg(long, value_enum, default_value = "auto", long_help = SEED_MISMATCHES_HELP)]
     seed_mismatches: SeedMismatches,
@@ -338,7 +333,6 @@ fn settings_of(args: &SearchArgs) -> Result<SearchSettings, CliError> {
     settings.rule = args.rule.rule();
     settings.loss_budget = args.loss_budget;
     settings.seed_mismatches = args.seed_mismatches;
-    settings.miss_bound = args.miss_bound;
     settings.apply(&SearchConfig::default())?;
     Ok(settings)
 }

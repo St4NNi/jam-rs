@@ -347,7 +347,7 @@ fn accepted_identity_kept() {
 /// few short scattered pieces of the query must be dropped.
 #[test]
 fn long_stretch_kept() {
-    const PIECE: usize = 4_000;
+    const PIECE: usize = 8_000;
     let mut random = rng(0x9ece);
     let directory = tempfile::tempdir().unwrap();
     let query = random_bases(&mut random, 20_000);

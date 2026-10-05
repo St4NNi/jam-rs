@@ -10,7 +10,7 @@ use crate::loss::LossBudget;
 use crate::search::QueryKmers;
 use crate::search::read_entry_locations;
 use crate::search::{AlignStageWorkspace, PreparedQuery, align_entry};
-use crate::search::{CoverageBound, MissBound};
+use crate::search::CoverageBound;
 use crate::search::{LocateOutcome, LocateRequest, LocateWorkspace, locate_entry};
 use crate::search::{SketchLimits, sketch_stage};
 use crate::seeds::{Seeder, reverse_complement};
@@ -30,7 +30,6 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
     let bound = CoverageBound::new(
         model,
         LossBudget::default(),
-        MissBound::Estimate,
         rule.min_identity,
         length,
         false,

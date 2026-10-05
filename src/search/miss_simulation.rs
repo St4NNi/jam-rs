@@ -3,7 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::bound::{CoverageBound, MissBound};
+use super::bound::CoverageBound;
 use super::query::QueryKmers;
 use crate::loss::{LossBudget, MissModel};
 use crate::seeds::{SeedScheme, Seeder};
@@ -172,13 +172,11 @@ fn hit_starts(seeder: &Seeder, query: &[u8], entry: &[u8], one_mismatch: bool) -
     kmers.sorted_positions(&hits)
 }
 
-/// Losses of one setting: entries without a seed hit, and entries that the estimated and the
-/// proven bound drop.
+/// Losses of one setting: entries without a seed hit, and entries that the bound drops.
 #[derive(Clone, Copy, Debug, Default)]
 struct Losses {
     unseeded: u64,
-    estimated: u64,
-    proven: u64,
+    dropped: u64,
 }
 
 fn measure(change: Change, length: usize, identity: f64, one_mismatch: bool, trials: u64) {
@@ -191,58 +189,40 @@ fn measure(change: Change, length: usize, identity: f64, one_mismatch: bool, tri
     };
     let required = length as u64 / 2;
     let budget = LossBudget::default();
-    let bound = |miss_bound| {
-        CoverageBound::new(
-            &model,
-            budget,
-            miss_bound,
-            identity,
-            length as u64,
-            false,
-            required,
-        )
-    };
-    let (estimated, proven) = (bound(MissBound::Estimate), bound(MissBound::Proven));
+    let bound = CoverageBound::new(&model, budget, identity, length as u64, false, required);
     let losses = (0..trials)
         .into_par_iter()
         .map(|index| {
             let mut random = rng(index ^ (length as u64) << 32);
             let (query, entry) = trial(change, length, identity, &mut random);
             let starts = hit_starts(&seeder, &query, &entry, one_mismatch);
-            let drops = |bound: &CoverageBound| u64::from(!bound.keeps(bound.bound(&starts)));
             Losses {
                 unseeded: u64::from(starts.is_empty()),
-                estimated: drops(&estimated),
-                proven: drops(&proven),
+                dropped: u64::from(!bound.keeps(bound.bound(&starts))),
             }
         })
         .reduce(Losses::default, |a, b| Losses {
             unseeded: a.unseeded + b.unseeded,
-            estimated: a.estimated + b.estimated,
-            proven: a.proven + b.proven,
+            dropped: a.dropped + b.dropped,
         });
     println!(
-        "{}\t{identity}\t{length}\t{}\t{trials}\t{}\t{}\t{}\t{:.3e}\t{:.3e}",
+        "{}\t{identity}\t{length}\t{}\t{trials}\t{}\t{}\t{:.3e}",
         change.name(),
         u8::from(one_mismatch),
         losses.unseeded,
-        losses.estimated,
-        losses.proven,
-        estimated.seed_miss_chance(),
-        estimated.seed_miss_bound(),
+        losses.dropped,
+        bound.seed_miss_bound(),
     );
 }
 
 /// Prints, per change, identity, query length and lookup mode: trials, entries without a seed
-/// hit, entries each bound drops (counted against the required half of the query), and the
-/// estimated and the proven chance of no seed hit. TRIALS sets the trials per setting (default 2,000).
+/// hit, entries the bound drops (counted against the required half of the query), and the
+/// proven chance of no seed hit. TRIALS sets the trials per setting (default 2,000).
 #[test]
 #[ignore]
 fn adversarial_losses() {
     let trials = std::env::var("TRIALS").map_or(2_000, |value| value.parse().unwrap());
-    println!(
-        "change\tidentity\tlength\tone_mismatch\ttrials\tunseeded\testimated\tproven\tmiss_estimate\tmiss_bound"
-    );
+    println!("change\tidentity\tlength\tone_mismatch\ttrials\tunseeded\tdropped\tmiss_bound");
     let changes = [
         Change::Substitutions,
         Change::WholeQuery,

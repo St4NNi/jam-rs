@@ -4,18 +4,6 @@
 // SPDX-License-Identifier: MIT
 
 use crate::loss::{LossBudget, MissModel};
-use serde::{Deserialize, Serialize};
-
-/// How the allowance of a stretch without a seed hit is chosen.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
-#[serde(rename_all = "snake_case")]
-pub enum MissBound {
-    /// From the miss table, an estimate over random seed layouts
-    #[default]
-    Estimate,
-    /// From a bound proven under independent substitutions alone; prunes much less
-    Proven,
-}
 
 /// Computes coverage bounds for one query against one shard.
 #[derive(Clone, Copy, Debug)]
@@ -38,7 +26,6 @@ impl<'a> CoverageBound<'a> {
     pub fn new(
         model: &'a MissModel,
         budget: LossBudget,
-        miss_bound: MissBound,
         identity: f64,
         query_length: u64,
         circular: bool,
@@ -53,10 +40,7 @@ impl<'a> CoverageBound<'a> {
             required_bases,
             allowance: query_length,
         };
-        bound.allowance = match miss_bound {
-            MissBound::Estimate => bound.estimated_allowance(),
-            MissBound::Proven => bound.proven_allowance(),
-        };
+        bound.allowance = bound.proven_allowance();
         bound
     }
 
@@ -72,14 +56,8 @@ impl<'a> CoverageBound<'a> {
         self.query_length - left_out
     }
 
-    /// The modeled chance that a present piece of the required length shows no seed hit: the
-    /// chance to lose a qualifying entry before any bound sees it.
-    pub fn seed_miss_chance(&self) -> f64 {
-        let required = self.required_bases.min(self.query_length);
-        self.model.miss_chance(required, self.identity)
-    }
-
-    /// As `seed_miss_chance`, from the proven upper bound instead of the table.
+    /// The proven bound on the chance that a present piece of the required length shows no seed
+    /// hit: the chance to lose a qualifying entry before any bound sees it.
     pub fn seed_miss_bound(&self) -> f64 {
         let required = self.required_bases.min(self.query_length);
         self.model.miss_upper_bound(required, self.identity)
@@ -98,22 +76,6 @@ impl<'a> CoverageBound<'a> {
             };
             let miss = self.model.miss_upper_bound(allowance + 1, self.identity);
             starts as f64 * miss <= self.budget.chance()
-        };
-        smallest_fit(length, fits)
-    }
-
-    /// The shortest length `a` with `(1 + L / a) * P(a) + 2 L / (w + 1) * P(a - w) <= B`, P the
-    /// table's miss chance and L the query length, or L: a union over the starts of present pieces
-    /// and the seeds before a seedless stretch. An estimate, as a seed changes the layout after it.
-    fn estimated_allowance(&self) -> u64 {
-        let length = self.query_length;
-        let w = self.model.w() as u64;
-        let seeds = 2.0 * length as f64 / (w + 1) as f64;
-        let fits = |allowance: u64| {
-            let miss = |bases: u64| self.model.miss_chance(bases, self.identity);
-            let starts = 1.0 + length as f64 / allowance.max(1) as f64;
-            let after_seed = seeds * miss(allowance.saturating_sub(w));
-            starts * miss(allowance) + after_seed <= self.budget.chance()
         };
         smallest_fit(length, fits)
     }
@@ -175,15 +137,7 @@ mod tests {
     use rand::RngExt;
 
     fn bound(length: u64, circular: bool) -> CoverageBound<'static> {
-        CoverageBound::new(
-            model(),
-            LossBudget::default(),
-            MissBound::Estimate,
-            0.95,
-            length,
-            circular,
-            0,
-        )
+        CoverageBound::new(model(), LossBudget::default(), 0.95, length, circular, 0)
     }
 
     #[test]
@@ -208,10 +162,8 @@ mod tests {
         let linear = bound(10_000, false);
         // The test model has k 21 and w 20.
         let fits = |allowance: u64| {
-            let miss = |bases: u64| model().miss_chance(bases, 0.95);
-            let starts = 1.0 + 10_000.0 / allowance as f64;
-            let seeds = 2.0 * 10_000.0 / 21.0;
-            starts * miss(allowance) + seeds * miss(allowance - 20) <= 1e-4
+            let miss = model().miss_upper_bound(allowance + 1, 0.95);
+            (10_000 - allowance) as f64 * miss <= 1e-4
         };
         assert!(fits(linear.allowance) && !fits(linear.allowance - 1));
         assert_eq!(linear.bound(&[]), linear.allowance);
@@ -250,7 +202,7 @@ mod tests {
         );
     }
 
-    /// The stored model of the default k 25 and w 100.
+    /// The model of the default k 25 and w 100.
     fn default_model() -> &'static MissModel {
         static MODEL: std::sync::OnceLock<MissModel> = std::sync::OnceLock::new();
         MODEL.get_or_init(|| MissModel::new(SeedScheme::default()).unwrap())
@@ -262,15 +214,7 @@ mod tests {
     #[test]
     fn extra_hit_kept() {
         let budget = LossBudget::new(0.00005).unwrap();
-        let bound = CoverageBound::new(
-            default_model(),
-            budget,
-            MissBound::Estimate,
-            0.95,
-            10_000,
-            false,
-            5_000,
-        );
+        let bound = CoverageBound::new(default_model(), budget, 0.95, 10_000, false, 5_000);
         let without: Vec<u32> = (1..=3_075).collect();
         let with: Vec<u32> = (0..=3_075).collect();
         assert!(bound.bound(&with) >= bound.bound(&without));
@@ -311,22 +255,15 @@ mod tests {
             .collect();
         let positions = query.sorted_positions(&hit);
         let length = sequence.len() as u64;
-        let bound = CoverageBound::new(
-            default_model(),
-            LossBudget::default(),
-            MissBound::Estimate,
-            1.0,
-            length,
-            false,
-            length,
-        );
+        let budget = LossBudget::default();
+        let bound = CoverageBound::new(default_model(), budget, 1.0, length, false, length);
         assert_eq!(bound.bound(&positions), length);
     }
 
     /// The bound of a query, at identity 0.95 and budget 0.00005, with the default k and w.
     fn proven(model: &'static MissModel, length: u64, circular: bool) -> CoverageBound<'static> {
         let budget = LossBudget::new(0.00005).unwrap();
-        CoverageBound::new(model, budget, MissBound::Proven, 0.95, length, circular, 0)
+        CoverageBound::new(model, budget, 0.95, length, circular, 0)
     }
 
     #[test]
@@ -371,11 +308,8 @@ mod tests {
             .map(|(seed, _)| seed)
             .collect();
         let positions = query.sorted_positions(&hit);
-        for miss_bound in [MissBound::Estimate, MissBound::Proven] {
-            let budget = LossBudget::default();
-            let bound =
-                CoverageBound::new(default_model(), budget, miss_bound, 1.0, 124, true, 124);
-            assert_eq!(bound.bound(&positions), 124, "{miss_bound:?}");
-        }
+        let budget = LossBudget::default();
+        let bound = CoverageBound::new(default_model(), budget, 1.0, 124, true, 124);
+        assert_eq!(bound.bound(&positions), 124);
     }
 }

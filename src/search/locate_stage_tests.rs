@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::bound::{CoverageBound, MissBound};
+use super::bound::CoverageBound;
 use super::events::DropReason;
 use super::locate_stage::{
     LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry, read_entry_locations,
@@ -27,7 +27,6 @@ fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
     CoverageBound::new(
         miss_model(),
         LossBudget::default(),
-        MissBound::Estimate,
         0.95,
         length,
         false,

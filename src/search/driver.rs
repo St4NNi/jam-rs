@@ -7,7 +7,7 @@ use super::align_stage::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
     align_packed_entry,
 };
-use super::bound::{CoverageBound, MissBound};
+use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
@@ -41,8 +41,6 @@ pub struct SearchConfig {
     /// The chance of missing a qualifying entry that the coverage bound may spend. Stages 1 and 2
     /// share one fixed allowance and stage 2 sees a subset of the hits, so one budget covers both.
     pub loss_budget: LossBudget,
-    /// How the coverage bound chooses its allowance.
-    pub miss_bound: MissBound,
     /// Whether query k-mers one substitution away are looked up too.
     pub seed_mismatches: SeedMismatches,
     /// A seed held by more entries is not expanded in stage 1. `None` takes 1% of the shard's
@@ -67,7 +65,6 @@ impl Default for SearchConfig {
             last_stage: SearchStage::Align,
             rule: DecisionRule::default(),
             loss_budget: LossBudget::default(),
-            miss_bound: MissBound::Estimate,
             seed_mismatches: SeedMismatches::Auto,
             frequent_seed_entries: None,
             // 32 Mi pairs of entry and query k-mer, 256 MiB.
@@ -286,7 +283,6 @@ impl<'a> Searcher<'a> {
         let bound = CoverageBound::new(
             model,
             budget,
-            config.miss_bound,
             rule.min_identity,
             length,
             circular,
@@ -295,11 +291,10 @@ impl<'a> Searcher<'a> {
         let mut summary = self.empty_summary(length, model.mismatches());
         summary.times.prepare_query = start.finish();
         let budget = config.loss_budget.chance();
-        let (miss_estimate, miss_upper_bound) = (bound.seed_miss_chance(), bound.seed_miss_bound());
+        let miss_upper_bound = bound.seed_miss_bound();
         let miss_over_budget = miss_upper_bound > budget;
         summary.sketch = SketchWork {
             low_complexity_bases: low_complexity,
-            miss_estimate,
             miss_upper_bound,
             miss_over_budget,
             ..SketchWork::default()
@@ -325,7 +320,6 @@ impl<'a> Searcher<'a> {
         };
         summary.sketch = SketchWork {
             low_complexity_bases: low_complexity,
-            miss_estimate,
             miss_upper_bound,
             miss_over_budget,
             ..sketch.work

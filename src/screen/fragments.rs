@@ -16,7 +16,7 @@ use crate::search::SearchControl;
 use crate::search::{
     AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, entry_fragments,
 };
-use crate::search::{CoverageBound, MissBound};
+use crate::search::CoverageBound;
 use crate::search::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
 use crate::search::{find_query_seeds, read_entry_locations};
 use rayon::prelude::*;
@@ -74,7 +74,6 @@ impl BatchAlignment<'_> {
         let bound = CoverageBound::new(
             self.model,
             LossBudget::default(),
-            MissBound::Estimate,
             self.rule.min_identity,
             kmers.length(),
             false,
