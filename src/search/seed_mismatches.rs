@@ -45,7 +45,7 @@ impl SeedMismatches {
     /// the identity, `MAX_TWO_KMERS` and the bounds of one and two mismatches allow it.
     pub fn resolve(
         self,
-        models: [&MissModel; 3],
+        models: &[MissModel; 3],
         rule: &DecisionRule,
         budget: LossBudget,
         length: u64,
@@ -91,24 +91,18 @@ mod tests {
         choice_with(identity, length, LossBudget::default().chance())
     }
 
+    fn models() -> [MissModel; 3] {
+        [0, 1, 2].map(|mismatches| MissModel::new(SeedScheme::default(), mismatches).unwrap())
+    }
+
     fn choice_with(identity: f64, length: u64, budget: f64) -> usize {
-        let scheme = SeedScheme::default();
-        let exact = MissModel::new(scheme).unwrap();
-        let one_mismatch = MissModel::one_mismatch(scheme).unwrap();
-        let two_mismatch = MissModel::two_mismatch(scheme).unwrap();
         let rule = DecisionRule {
             min_identity: identity,
             ..DecisionRule::default()
         };
         let budget = LossBudget::new(budget).unwrap();
         let mode = SeedMismatches::Auto;
-        mode.resolve(
-            [&exact, &one_mismatch, &two_mismatch],
-            &rule,
-            budget,
-            length,
-            false,
-        )
+        mode.resolve(&models(), &rule, budget, length, false)
     }
 
     #[test]
@@ -155,18 +149,12 @@ mod tests {
     /// so that bound fits the budget whenever either mode's bound does.
     #[test]
     fn auto_takes_lower() {
-        let scheme = SeedScheme::default();
-        let (exact, one, two) = (
-            MissModel::new(scheme).unwrap(),
-            MissModel::one_mismatch(scheme).unwrap(),
-            MissModel::two_mismatch(scheme).unwrap(),
-        );
+        let models = models();
         let budget = LossBudget::default().chance();
         for identity in [0.8, 0.85, 0.9, 0.95, 0.98, 0.99] {
             for length in (200u64..=10_000).step_by(97) {
                 let required = length.div_ceil(2);
-                let bounds =
-                    [&exact, &one, &two].map(|model| model.miss_upper_bound(required, identity));
+                let bounds = models.map(|model| model.miss_upper_bound(required, identity));
                 let chosen = bounds[choice(identity, length)];
                 assert!(
                     chosen <= bounds[0].min(bounds[1]).max(budget),
@@ -178,11 +166,11 @@ mod tests {
 
     #[test]
     fn forced_choice_holds() {
-        let model = MissModel::new(SeedScheme::default()).unwrap();
+        let models = models();
         let rule = DecisionRule::default();
         let budget = LossBudget::default();
         let resolve =
-            |mode: SeedMismatches, length| mode.resolve([&model; 3], &rule, budget, length, false);
+            |mode: SeedMismatches, length| mode.resolve(&models, &rule, budget, length, false);
         assert_eq!(resolve(SeedMismatches::Zero, 1_000), 0);
         assert_eq!(resolve(SeedMismatches::One, 1_000_000), 1);
         assert_eq!(resolve(SeedMismatches::Two, 1_000_000), 2);

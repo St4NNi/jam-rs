@@ -137,18 +137,10 @@ pub fn diverged(rng: &mut StdRng, bases: &[u8], identity: f64) -> Vec<u8> {
     copy
 }
 
-/// The miss model of the test shards, built once per test process. 50 layouts per length keep
-/// the build short and are enough for tests.
+/// The miss model of the test shards, for seeds hit exactly.
 pub fn miss_model() -> &'static MissModel {
     static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(parameters().scheme, 50, 0).unwrap())
-}
-
-/// As `miss_model`, for seeds hit with at most one mismatch. Its exact chance takes much
-/// longer per layout, so 2 layouts per length keep the tests fast.
-pub fn one_mismatch_model() -> &'static MissModel {
-    static MODEL: OnceLock<MissModel> = OnceLock::new();
-    MODEL.get_or_init(|| MissModel::with_layouts(parameters().scheme, 2, 1).unwrap())
+    MODEL.get_or_init(|| MissModel::new(parameters().scheme, 0).unwrap())
 }
 
 /// A search control without a deadline whose stop flag is never set.

@@ -182,11 +182,7 @@ struct Losses {
 fn measure(change: Change, length: usize, identity: f64, one_mismatch: bool, trials: u64) {
     let scheme = SeedScheme::default();
     let seeder = Seeder::new(scheme).unwrap();
-    let model = if one_mismatch {
-        MissModel::one_mismatch(scheme).unwrap()
-    } else {
-        MissModel::new(scheme).unwrap()
-    };
+    let model = MissModel::new(scheme, usize::from(one_mismatch)).unwrap();
     let required = length as u64 / 2;
     let budget = LossBudget::default();
     let bound = CoverageBound::new(&model, budget, identity, length as u64, false, required);

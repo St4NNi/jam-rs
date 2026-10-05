@@ -128,41 +128,26 @@ impl AlignStageWork {
     }
 }
 
-/// Searches one shard. The miss models depend only on k and w, so shards share them.
+/// Searches one shard.
 pub struct Searcher<'a> {
     shard: &'a Shard,
-    /// The miss models for seeds hit exactly and for seeds hit with one mismatch.
-    models: [&'a MissModel; 2],
-    /// The model for seeds hit with two mismatches, built from the k and w of the shard.
-    two_mismatch: MissModel,
+    /// The miss models of the shard's k and w, for seeds hit with 0, 1 and 2 mismatches.
+    models: [MissModel; 3],
     seeder: Seeder,
 }
 
 impl<'a> Searcher<'a> {
-    /// A searcher of `shard`, with the miss models of the shard's k and minimizer window for
-    /// seeds hit exactly and for seeds hit with one mismatch.
-    pub fn new(
-        shard: &'a Shard,
-        exact: &'a MissModel,
-        one_mismatch: &'a MissModel,
-    ) -> Result<Self, SearchError> {
+    /// A searcher of `shard`.
+    pub fn new(shard: &'a Shard) -> Result<Self, SearchError> {
         let scheme = shard.manifest().parameters.scheme;
-        let fits = |model: &MissModel, mismatches: usize| {
-            (model.k(), model.w()) == (usize::from(scheme.k), usize::from(scheme.w))
-                && model.mismatches() == mismatches
-        };
-        if !fits(exact, 0) || !fits(one_mismatch, 1) {
-            return Err(SearchError::InvalidConfig(
-                "the miss models do not fit the k and minimizer window of the shard",
-            ));
-        }
         let seeder = Seeder::new(scheme)?;
-        let two_mismatch = MissModel::two_mismatch(scheme)
-            .map_err(|_| SearchError::InvalidConfig("the seed scheme of the shard is invalid"))?;
+        let model = |mismatches| {
+            MissModel::new(scheme, mismatches)
+                .map_err(|_| SearchError::InvalidConfig("the seed scheme of the shard is invalid"))
+        };
         Ok(Self {
             shard,
-            models: [exact, one_mismatch],
-            two_mismatch,
+            models: [model(0)?, model(1)?, model(2)?],
             seeder,
         })
     }
@@ -190,9 +175,8 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = config.loss_budget;
-        let [exact, one_mismatch] = self.models;
         let mismatches = config.seed_mismatches.resolve(
-            [exact, one_mismatch, &self.two_mismatch],
+            &self.models,
             &config.rule,
             config.loss_budget,
             query.len() as u64,
@@ -245,10 +229,7 @@ impl<'a> Searcher<'a> {
                 events,
                 low_complexity,
             };
-            let model = match mismatches {
-                2 => &self.two_mismatch,
-                _ => self.models[mismatches],
-            };
+            let model = &self.models[mismatches];
             Ok(self.run(&query_kmers, circular, model, budget, &request, start))
         };
         if config.threads == 0 {

@@ -205,7 +205,7 @@ mod tests {
     /// The model of the default k 25 and w 100.
     fn default_model() -> &'static MissModel {
         static MODEL: std::sync::OnceLock<MissModel> = std::sync::OnceLock::new();
-        MODEL.get_or_init(|| MissModel::new(SeedScheme::default()).unwrap())
+        MODEL.get_or_init(|| MissModel::new(SeedScheme::default(), 0).unwrap())
     }
 
     /// Hit starts 1 to 3,075 leave stretches of 1 and 6,900 bases; a hit at 0 removes the first.
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn proven_allowances() {
         let exact = default_model();
-        let one = MissModel::one_mismatch(SeedScheme::default()).unwrap();
+        let one = MissModel::new(SeedScheme::default(), 1).unwrap();
         let one: &'static MissModel = Box::leak(Box::new(one));
         // A linear query of L bases holds L - a starts of a + 1 bases, a circular one L.
         assert_eq!(proven(exact, 5_000, false).allowance, 4_978);

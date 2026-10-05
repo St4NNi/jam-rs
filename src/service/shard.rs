@@ -5,7 +5,6 @@
 use super::ServiceError;
 use super::protocol::{Reply, SearchRequest};
 use crate::index::Shard;
-use crate::loss::MissModel;
 use crate::report::{Record, ReportError};
 use crate::search::{EntryEvent, SearchConfig, SearchControl, Searcher};
 use std::sync::atomic::Ordering;
@@ -19,25 +18,22 @@ const EVENT_QUEUE: usize = 64;
 /// Opens the shard again; `None` when it cannot be opened.
 pub type Reopen = Box<dyn Fn() -> Option<Shard> + Send + Sync>;
 
-/// An open shard with its name and miss models.
+/// An open shard with its name.
 pub struct ServedShard {
     name: String,
     shard: Mutex<Arc<Shard>>,
-    /// The miss models for seeds hit exactly and for seeds hit with one mismatch.
-    models: [MissModel; 2],
     /// How to open the shard again once an S3 object of it was replaced.
     reopen: Option<Reopen>,
 }
 
 impl ServedShard {
-    /// Serves `shard` under `name`, the name its records carry. Fails when the miss models
-    /// (exact, then one mismatch) do not fit the shard's k and minimizer window.
-    pub fn new(name: String, shard: Shard, models: [MissModel; 2]) -> Result<Self, ServiceError> {
-        Searcher::new(&shard, &models[0], &models[1])?;
+    /// Serves `shard` under `name`, the name its records carry. Fails when the shard's seed
+    /// scheme is invalid.
+    pub fn new(name: String, shard: Shard) -> Result<Self, ServiceError> {
+        Searcher::new(&shard)?;
         Ok(Self {
             name,
             shard: Mutex::new(Arc::new(shard)),
-            models,
             reopen: None,
         })
     }
@@ -109,7 +105,7 @@ impl ServedShard {
         replies: &mpsc::Sender<Reply>,
     ) -> Result<Record, ServiceError> {
         // A searcher borrows the shard, so each search builds its own; that is cheap.
-        let searcher = Searcher::new(shard, &self.models[0], &self.models[1])?;
+        let searcher = Searcher::new(shard)?;
         let (events, received) = sync_channel(EVENT_QUEUE);
         let query = &request.query_name;
         std::thread::scope(|scope| {

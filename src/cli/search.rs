@@ -7,13 +7,14 @@ use super::rule::RuleArgs;
 use super::storage::{CacheArgs, ShardStorage, shard_name};
 use super::{CliError, output_writer};
 use crate::index::Shard;
-use crate::loss::{LossBudget, MissModel};
+use crate::loss::LossBudget;
 use crate::report::{
     QueryTotals, Record, ReportError, ShardRecord, Status, TSV_HEADER, paf_lines, result_line,
     tsv_line,
 };
 use crate::search::{
-    EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher, SeedMismatches,
+    EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
+    SeedMismatches,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
@@ -165,20 +166,9 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     let inputs = args.inputs()?;
     let mut storage = ShardStorage::new()?;
     let shards = open_shards(&inputs.shards, &mut storage, &args.cache)?;
-    let parameters = shards[0].shard.manifest().parameters;
-    if shards.iter().any(|open| {
-        let other = open.shard.manifest().parameters;
-        (other.scheme.k, other.scheme.w) != (parameters.scheme.k, parameters.scheme.w)
-    }) {
-        return Err(CliError::Usage(
-            "the shards differ in k or minimizer window".into(),
-        ));
-    }
-    let exact = MissModel::new(parameters.scheme)?;
-    let one_mismatch = MissModel::one_mismatch(parameters.scheme)?;
     let searchers = shards
         .iter()
-        .map(|open| Searcher::new(&open.shard, &exact, &one_mismatch))
+        .map(|open| Searcher::new(&open.shard))
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = Sink::new(args)?;
     let incomplete = each_query(inputs.query, |name, sequence| {

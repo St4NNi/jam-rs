@@ -5,16 +5,14 @@
 use super::*;
 use crate::decide::QueryCoverage;
 use crate::index::{EntryInput, Shard, build_shard};
-use crate::loss::MissModel;
 use crate::report::{Dropped, Record, ShardRecord, Unfinished};
 use crate::search::{DropReason, SearchConfig, SearchControl, SearchStage, SeedMismatches};
 use crate::test_support::{
-    build_options, one_mismatch_model, random_bases, rng, with_substitutions,
+    build_options, random_bases, rng, with_substitutions,
 };
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -50,15 +48,7 @@ fn build(directory: &Path, name: &str, seed: u64) -> ServedShard {
     let options = build_options(directory, 2);
     let output = directory.join(format!("{name}.jam"));
     build_shard(&inputs, &output, &options).unwrap();
-    ServedShard::new(name.into(), Shard::open(&output).unwrap(), models()).unwrap()
-}
-
-/// The miss models of the shards that `build` makes.
-fn models() -> [MissModel; 2] {
-    static MODEL: OnceLock<MissModel> = OnceLock::new();
-    let scheme = build_options(Path::new("."), 2).parameters.scheme;
-    let model = MODEL.get_or_init(|| MissModel::with_layouts(scheme, 200, 0).unwrap());
-    [model.clone(), one_mismatch_model().clone()]
+    ServedShard::new(name.into(), Shard::open(&output).unwrap()).unwrap()
 }
 
 /// 90% query coverage at 95% identity, on two threads.
@@ -416,7 +406,7 @@ fn replaced_shard_reopened() {
     let config = S3Config::new("local", endpoint, true, S3Limits::default(), runtime());
     let location = Location::s3("s3://bucket/shard.jam", &config.unwrap().unsigned()).unwrap();
     let open = move || Shard::open_with(&location, &ShardOptions::default());
-    let shard = ServedShard::new("shard".into(), open().unwrap(), models()).unwrap();
+    let shard = ServedShard::new("shard".into(), open().unwrap()).unwrap();
     let shard = shard.with_reopen(Box::new(move || open().ok()));
     let before = local_lines(&shard);
     assert_ne!(before, expected);

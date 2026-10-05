@@ -5,7 +5,6 @@
 
 use super::CliError;
 use super::storage::{CacheArgs, ShardStorage, shard_name};
-use crate::loss::MissModel;
 use crate::search::SearchConfig;
 use crate::service::{
     Reopen, ServedShard, Server, ServerLimits, ServiceError, bind, parse_address,
@@ -62,13 +61,8 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
     let shard = shards
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
-    let parameters = shard.manifest().parameters;
-    let models = [
-        MissModel::new(parameters.scheme)?,
-        MissModel::one_mismatch(parameters.scheme)?,
-    ];
     let name = shard_name(&args.shard);
-    let shard = ServedShard::new(name, shard, models)?.with_reopen(reopen(&storage, args));
+    let shard = ServedShard::new(name, shard)?.with_reopen(reopen(&storage, args));
     let config = SearchConfig {
         threads: args.threads.unwrap_or(0),
         ..SearchConfig::default()
