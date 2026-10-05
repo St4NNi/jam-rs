@@ -33,8 +33,6 @@ needletail = { version = "0.7.3", features = [
 ] }
 rayon = "1.12.0"
 rustc-hash = "2.1.3"
-rand_core = "0.10.1"
-rand_pcg = "0.10.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 clap = { version = "4.6.7", features = ["derive"] }

@@ -1852,8 +1852,6 @@ dependencies = [
  "opendal",
  "postcard",
  "rand",
- "rand_core",
- "rand_pcg",
  "rayon",
  "rlimit",
  "rustc-hash",

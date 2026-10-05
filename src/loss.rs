@@ -9,10 +9,6 @@
 use crate::seeds::{SeedError, SeedScheme};
 use thiserror::Error;
 
-/// The table estimate of the miss chance, no longer used; it goes next.
-#[allow(dead_code)]
-mod estimate;
-
 /// Bad input to the loss model.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum LossError {
