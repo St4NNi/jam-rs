@@ -228,7 +228,7 @@ async fn failing_peer_fails() {
     let failed = format!("{{\"shard\":\"{}\",\"kind\":\"summary\"", silent.id());
     let failed: Vec<_> = lines.iter().filter(|l| l.starts_with(&failed)).collect();
     assert_eq!(failed.len(), 1, "{lines:?}");
-    assert!(failed[0].contains("\"ending\":\"failed\""), "{}", failed[0]);
+    assert!(failed[0].contains("\"status\":\"failed\""), "{}", failed[0]);
 }
 
 /// A server that runs no search and lets one wait, so the second search is busy.
@@ -313,7 +313,7 @@ async fn deadline_ends_search() {
         .iter()
         .find(|line| line.contains("\"kind\":\"summary\""));
     assert!(
-        summary.unwrap().contains("\"ending\":\"deadline\""),
+        summary.unwrap().contains("\"reason\":\"deadline\""),
         "{lines:?}"
     );
 }

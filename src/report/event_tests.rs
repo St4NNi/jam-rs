@@ -78,7 +78,7 @@ fn shard_record_flat() {
 }
 
 #[test]
-fn summary_names_ending() {
+fn summary_names_status() {
     let summary = SearchSummary {
         query_length: 5_000,
         seed_mismatches: 1,
@@ -92,7 +92,8 @@ fn summary_names_ending() {
     round_trip(&record);
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(json["kind"], "summary");
-    assert_eq!(json["ending"], "deadline");
+    assert_eq!(json["status"], "stopped");
+    assert_eq!(json["reason"], "deadline");
     assert_eq!(json["seed_mismatches"], 1);
 }
 
@@ -111,5 +112,6 @@ fn resource_drop_named() {
     let record = Record::summary("q1", &summary);
     round_trip(&record);
     let json = serde_json::to_value(&record).unwrap();
-    assert_eq!(json["ending"], "resource_incomplete");
+    assert_eq!(json["status"], "incomplete");
+    assert_eq!(json["reason"], "resource_limit");
 }

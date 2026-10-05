@@ -8,7 +8,7 @@ use super::storage::{CacheArgs, ShardStorage, shard_name};
 use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
-use crate::report::{Ending, Record, ReportError, ShardRecord, paf_lines};
+use crate::report::{Record, ReportError, ShardRecord, Status, paf_lines};
 use crate::search::{
     Completion, EntryEvent, MissBound, SearchConfig, SearchControl, SearchStage, SearchSummary,
     Searcher, SeedMismatches,
@@ -243,7 +243,7 @@ async fn search_remote(
     let mut incomplete = 0;
     while let Some(record) = answer.next().await?.and_then(|reply| reply.into_record()) {
         if let Record::Summary(summary) = &record.record {
-            incomplete += usize::from(summary.ending != Ending::Complete);
+            incomplete += usize::from(summary.status != Status::Complete);
         }
         sink.write_lines(&record_lines(format, &record)?)?;
     }

@@ -9,7 +9,8 @@ mod paf;
 
 pub use decision::{DecisionRecord, FragmentRecord};
 pub use event::{
-    Confirmed, Dropped, Ending, Located, Possible, Record, ShardRecord, Summary, Unfinished,
+    Confirmed, Dropped, Located, Possible, Reason, Record, ShardRecord, Status, Summary,
+    Unfinished,
 };
 pub use paf::paf_lines;
 

@@ -10,20 +10,32 @@ use crate::search::{
 use serde::{Deserialize, Serialize};
 
 /// How a search ended.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Ending {
+pub enum Status {
     /// Every possible entry was decided.
     Complete,
     /// Every other entry was decided, but at least one was dropped for a resource limit
     /// (`align.limited_entries`), so a qualifying entry may be missing.
-    ResourceIncomplete,
+    Incomplete,
+    /// The search stopped early, at its deadline or when asked.
+    Stopped,
+    /// A stage, or the server, failed; the summary names the error.
+    Failed,
+}
+
+/// Why a search did not complete.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
     /// The search passed its deadline.
     Deadline,
     /// The search was asked to stop.
     Asked,
-    /// A stage, or the server, failed; the summary names the error.
-    Failed,
+    /// An entry needed more memory or work than a limit allows.
+    ResourceLimit,
+    /// A stage, or the server, failed.
+    Error,
 }
 
 /// Stage 1 kept the entry.
@@ -84,8 +96,10 @@ pub struct Summary {
     /// The mismatches a query k-mer could have against a seed: 1 when the k-mers one
     /// substitution away were looked up too.
     pub seed_mismatches: u8,
-    pub ending: Ending,
-    /// The cause when the ending is `failed`.
+    pub status: Status,
+    /// Why the search did not complete; `None` when it did.
+    pub reason: Option<Reason>,
+    /// The cause when the status is `failed`.
     pub error: Option<String>,
     pub sketch: SketchWork,
     pub locate: LocateWork,
@@ -174,7 +188,8 @@ impl Record {
             query: query.to_string(),
             query_length,
             seed_mismatches: 0,
-            ending: Ending::Failed,
+            status: Status::Failed,
+            reason: Some(Reason::Error),
             error: Some(error.to_string()),
             sketch: SketchWork::default(),
             locate: LocateWork::default(),
@@ -185,18 +200,25 @@ impl Record {
 
     /// The summary line of a finished search.
     pub fn summary(query: &str, summary: &SearchSummary) -> Self {
-        let (ending, error) = match &summary.completion {
-            Completion::Complete => (Ending::Complete, None),
-            Completion::ResourceIncomplete => (Ending::ResourceIncomplete, None),
-            Completion::Stopped(Stopped::Deadline) => (Ending::Deadline, None),
-            Completion::Stopped(Stopped::Asked) => (Ending::Asked, None),
-            Completion::Failed(error) => (Ending::Failed, Some(error.to_string())),
+        let (status, reason, error) = match &summary.completion {
+            Completion::Complete => (Status::Complete, None, None),
+            Completion::ResourceIncomplete => {
+                (Status::Incomplete, Some(Reason::ResourceLimit), None)
+            }
+            Completion::Stopped(Stopped::Deadline) => {
+                (Status::Stopped, Some(Reason::Deadline), None)
+            }
+            Completion::Stopped(Stopped::Asked) => (Status::Stopped, Some(Reason::Asked), None),
+            Completion::Failed(error) => {
+                (Status::Failed, Some(Reason::Error), Some(error.to_string()))
+            }
         };
         Self::Summary(Box::new(Summary {
             query: query.to_string(),
             query_length: summary.query_length,
             seed_mismatches: summary.seed_mismatches,
-            ending,
+            status,
+            reason,
             error,
             sketch: summary.sketch,
             locate: summary.locate,

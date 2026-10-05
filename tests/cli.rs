@@ -126,7 +126,7 @@ fn planted_query_confirmed() {
     assert_eq!(fragment["contig_interval"]["end"], 8_000);
     let summary = json(lines.last().unwrap());
     assert_eq!(summary["kind"], "summary");
-    assert_eq!(summary["ending"], "complete");
+    assert_eq!(summary["status"], "complete");
     assert_eq!(summary["query_length"], 3_000);
 }
 
@@ -227,7 +227,7 @@ fn records_name_shards() {
         .map(|record| {
             (
                 record["shard"].as_str().unwrap(),
-                record["ending"].as_str().unwrap(),
+                record["status"].as_str().unwrap(),
             )
         })
         .collect();
@@ -249,7 +249,7 @@ fn incomplete_search_fails() {
     ]);
     assert!(!output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(json(text.lines().last().unwrap())["ending"], "deadline");
+    assert_eq!(json(text.lines().last().unwrap())["reason"], "deadline");
     let message = String::from_utf8(output.stderr).unwrap();
     assert!(
         message.starts_with("jam: 1 searches did not complete"),
