@@ -157,7 +157,7 @@ fn level_ends_search() {
     for (entry, list) in &events {
         assert_eq!(list.len(), 2, "{list:?}");
         assert!(matches!(list[0], EntryEvent::Possible { .. }));
-        let EntryEvent::Located(located) = &list[1] else {
+        let EntryEvent::Located(located, _) = &list[1] else {
             panic!("entry {entry}: {list:?}");
         };
         assert_eq!(located.alignment_windows.len(), 1);
@@ -321,7 +321,7 @@ fn accepted_identity_kept() {
                 let last = events.get(&entry).and_then(|list| list.last());
                 if entry < 150 {
                     assert!(
-                        matches!(last, Some(EntryEvent::Located(_))),
+                        matches!(last, Some(EntryEvent::Located(..))),
                         "trial {trial}, entry {entry}: {last:?}"
                     );
                 } else {
@@ -386,7 +386,7 @@ fn long_stretch_kept() {
             let last = events.get(&entry).and_then(|list| list.last());
             if entry < 150 {
                 assert!(
-                    matches!(last, Some(EntryEvent::Located(_))),
+                    matches!(last, Some(EntryEvent::Located(..))),
                     "entry {entry}: {last:?}"
                 );
             } else {
@@ -406,7 +406,7 @@ fn last_event(events: &BTreeMap<u32, Vec<EntryEvent>>, entry: u32) -> &EntryEven
     let list = &events[&entry];
     assert_eq!(list.len(), 3, "entry {entry}: {list:?}");
     assert!(matches!(list[0], EntryEvent::Possible { .. }));
-    assert!(matches!(list[1], EntryEvent::Located(_)));
+    assert!(matches!(list[1], EntryEvent::Located(..)));
     &list[2]
 }
 

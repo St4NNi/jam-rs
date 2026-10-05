@@ -26,6 +26,7 @@ use crate::loss::{LossBudget, MissModel};
 use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
@@ -440,13 +441,18 @@ impl<'a> Searcher<'a> {
             }
         };
         let Some(prepared) = request.prepared else {
-            return emit(events, EntryEvent::Located(located), SearchStage::Locate);
+            let windows = located.alignment_windows.iter().map(|w| w.contig);
+            let contigs = (self.shard.packed(entry))
+                .and_then(|packed| packed.contigs(windows))
+                .map_err(|error| Halt {
+                    stage: SearchStage::Locate,
+                    error: error.into(),
+                })?;
+            let event = EntryEvent::Located(located, contigs);
+            return emit(events, event, SearchStage::Locate);
         };
-        emit(
-            events,
-            EntryEvent::Located(located.clone()),
-            SearchStage::Locate,
-        )?;
+        let event = EntryEvent::Located(located.clone(), BTreeMap::new());
+        emit(events, event, SearchStage::Locate)?;
         let started = Instant::now();
         let last = self.align(prepared, &located, request, worker);
         worker.align.entries += 1;

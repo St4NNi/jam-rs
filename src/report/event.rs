@@ -3,11 +3,13 @@
 // SPDX-License-Identifier: MIT
 
 use super::{DecisionRecord, ReportError};
+use crate::index::Contig;
 use crate::search::{
-    AlignStageWork, Completion, DropReason, EntryEvent, LocateWork, SearchStage, SearchSummary,
+    AlignStageWork, Completion, ContigWindows, DropReason, EntryEvent, LocateWork, SearchStage, SearchSummary,
     SearchTimes, SketchWork, Stopped,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// How a search ended.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -61,6 +63,16 @@ pub struct Located {
     /// Alignment windows and their bases together.
     pub alignment_windows: u64,
     pub window_bases: u64,
+    /// The windows on named contigs; only at the locate level, else empty.
+    pub windows: Vec<Window>,
+}
+
+/// An alignment window on a named contig, in contig coordinates.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct Window {
+    pub contig: String,
+    pub start: u64,
+    pub end: u64,
 }
 
 /// Stage 3 aligned the entry and it qualifies.
@@ -146,7 +158,7 @@ impl Record {
                 coverage_bound: *coverage_bound,
                 containment_estimate: *containment_estimate,
             }),
-            EntryEvent::Located(located) => Self::Located(Located {
+            EntryEvent::Located(located, contigs) => Self::Located(Located {
                 query,
                 entry,
                 coverage_bound: located.coverage_bound,
@@ -162,6 +174,7 @@ impl Record {
                     .flat_map(|c| &c.ranges)
                     .map(|range| range.end - range.start)
                     .sum(),
+                windows: named_windows(&located.alignment_windows, contigs),
             }),
             EntryEvent::Confirmed { aligned, contigs } => Self::Confirmed(Confirmed {
                 query,
@@ -226,6 +239,22 @@ impl Record {
             times: summary.times,
         }))
     }
+}
+
+/// The windows of the contigs that `contigs` names.
+fn named_windows(windows: &[ContigWindows], contigs: &BTreeMap<u32, Contig>) -> Vec<Window> {
+    let named = windows
+        .iter()
+        .filter_map(|windows| Some((contigs.get(&windows.contig)?, &windows.ranges)));
+    named
+        .flat_map(|(contig, ranges)| {
+            ranges.iter().map(|range| Window {
+                contig: contig.name.clone(),
+                start: range.start,
+                end: range.end,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

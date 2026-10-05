@@ -61,8 +61,9 @@ pub enum EntryEvent {
         coverage_bound: u64,
         containment_estimate: f64,
     },
-    /// Stage 2 found where to align the entry.
-    Located(LocatedEntry),
+    /// Stage 2 found where to align the entry. At the locate level the map holds the contigs of
+    /// the alignment windows, by contig index; else it is empty.
+    Located(LocatedEntry, BTreeMap<u32, Contig>),
     /// Stage 3 aligned the entry and it qualifies; the decision holds its mosaic, and `contigs`
     /// the contigs that its fragments refer to, by contig index.
     Confirmed {
@@ -86,7 +87,7 @@ impl EntryEvent {
             Self::Possible { entry, .. }
             | Self::Dropped { entry, .. }
             | Self::Unfinished { entry, .. } => *entry,
-            Self::Located(located) => located.entry,
+            Self::Located(located, _) => located.entry,
             Self::Confirmed { aligned, .. } => aligned.entry,
         }
     }

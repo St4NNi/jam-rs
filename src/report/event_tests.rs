@@ -11,6 +11,13 @@ fn round_trip(record: &Record) {
     assert_eq!(&serde_json::from_str::<Record>(&text).unwrap(), record);
 }
 
+fn contig_a() -> Contig {
+    Contig {
+        name: "contig_a".into(),
+        length: 100,
+    }
+}
+
 #[test]
 fn events_round_trip() {
     let events = [
@@ -19,15 +26,18 @@ fn events_round_trip() {
             coverage_bound: 900,
             containment_estimate: 0.75,
         },
-        EntryEvent::Located(LocatedEntry {
-            entry: 3,
-            coverage_bound: 900,
-            containment_estimate: 0.75,
-            alignment_windows: vec![crate::search::ContigWindows {
-                contig: 0,
-                ranges: vec![10..20, 40..45],
-            }],
-        }),
+        EntryEvent::Located(
+            LocatedEntry {
+                entry: 3,
+                coverage_bound: 900,
+                containment_estimate: 0.75,
+                alignment_windows: vec![crate::search::ContigWindows {
+                    contig: 0,
+                    ranges: vec![10..20, 40..45],
+                }],
+            },
+            BTreeMap::from([(0, contig_a())]),
+        ),
         EntryEvent::Dropped {
             entry: 3,
             stage: SearchStage::Align,
@@ -51,6 +61,15 @@ fn events_round_trip() {
             ..
         }))
     ));
+    let Ok(Record::Located(located)) = located else {
+        panic!("not located");
+    };
+    let window = |start, end| Window {
+        contig: "contig_a".into(),
+        start,
+        end,
+    };
+    assert_eq!(located.windows, [window(10, 20), window(40, 45)]);
 }
 
 #[test]
