@@ -157,6 +157,30 @@ fn paf_fragment_lines() {
 }
 
 #[test]
+fn tsv_lines() {
+    let fixture = fixture();
+    let lines = search(&fixture, &["--format", "tsv"]);
+    assert_eq!(
+        lines,
+        [
+            "query\tassembly\tcoverage\tidentity\tbases\tfragments",
+            "planted\tplasmid_1\t1\t0.9997\t3000\t1"
+        ]
+    );
+    let output = jam(&[
+        "search".as_ref(),
+        fixture.shard.as_os_str(),
+        fixture.query.as_os_str(),
+        "--format".as_ref(),
+        "tsv".as_ref(),
+        "--level".as_ref(),
+        "sketch".as_ref(),
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
+#[test]
 fn sketch_level_possible() {
     let fixture = fixture();
     let lines = search(&fixture, &["--level", "sketch"]);

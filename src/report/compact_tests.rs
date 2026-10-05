@@ -89,6 +89,10 @@ fn align_line() {
         "f": [["c1", 2, 10, 100, 109, "+", "3=1X3=1D1="]],
         "alt": [["c1", 0, 8, 100, 109, "-", "3=1X3=1D1="]]});
     assert_eq!(line(&confirmed, SearchStage::Align), Some(expected));
+    let Record::Confirmed(confirmed) = confirmed else {
+        unreachable!()
+    };
+    assert_eq!(tsv_line(&confirmed), "q1\ta1\t0.8\t0.7778\t8\t1");
 }
 
 fn summary(status: Status, reason: Option<Reason>) -> Summary {

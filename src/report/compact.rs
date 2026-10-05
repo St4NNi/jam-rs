@@ -116,6 +116,23 @@ fn rounded(value: f64, places: i32) -> f64 {
     (value * scale).round() / scale
 }
 
+/// The header line of the TSV output.
+pub const TSV_HEADER: &str = "query\tassembly\tcoverage\tidentity\tbases\tfragments";
+
+/// The TSV line of a confirmed entry: the columns of `TSV_HEADER`.
+pub fn tsv_line(confirmed: &Confirmed) -> String {
+    let decision = &confirmed.decision;
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{}",
+        confirmed.query,
+        confirmed.entry,
+        rounded(decision.query_coverage, 4),
+        rounded(decision.identity, 4),
+        decision.covered_bases,
+        decision.fragments.len()
+    )
+}
+
 /// The summary of one query over all shards.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueryTotals {

@@ -9,7 +9,8 @@ use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
 use crate::report::{
-    QueryTotals, Record, ReportError, ShardRecord, Status, paf_lines, result_line,
+    QueryTotals, Record, ReportError, ShardRecord, Status, TSV_HEADER, paf_lines, result_line,
+    tsv_line,
 };
 use crate::search::{
     EntryEvent, MissBound, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
@@ -45,6 +46,9 @@ mismatches, so with 2 both --miss-bound modes use the proven bound.";
 enum Format {
     /// One JSON line per reported entry, then one summary line per query
     Json,
+    /// A header line, then one line per confirmed entry: query, assembly, coverage, identity,
+    /// covered bases and fragments
+    Tsv,
     /// One PAF line per fragment of a confirmed entry
     Paf,
 }
@@ -324,6 +328,11 @@ fn settings_of(args: &SearchArgs) -> Result<SearchSettings, CliError> {
             "--deadline must be a number of seconds above 0".into(),
         ));
     }
+    if args.format != Format::Json && args.level != SearchStage::Align {
+        return Err(CliError::Usage(
+            "--format tsv and paf need --level align".into(),
+        ));
+    }
     let mut settings = SearchSettings::of(&SearchConfig::default());
     settings.last_stage = args.level;
     settings.rule = args.rule.rule();
@@ -352,8 +361,12 @@ struct Sink {
 
 impl Sink {
     fn new(args: &SearchArgs) -> Result<Self, CliError> {
+        let mut writer = output_writer(args.output.as_deref())?;
+        if args.format == Format::Tsv {
+            writeln!(writer, "{TSV_HEADER}")?;
+        }
         Ok(Self {
-            writer: output_writer(args.output.as_deref())?,
+            writer,
             format: args.format,
             level: args.level,
             verbose: args.verbose,
@@ -399,7 +412,8 @@ impl Sink {
             (Format::Paf, Record::Confirmed(confirmed)) => {
                 paf_lines(&confirmed.query, &confirmed.decision)
             }
-            (Format::Paf, _) => Vec::new(),
+            (Format::Tsv, Record::Confirmed(confirmed)) => vec![tsv_line(confirmed)],
+            (Format::Tsv | Format::Paf, _) => Vec::new(),
         })
     }
 
