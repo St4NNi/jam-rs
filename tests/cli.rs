@@ -156,6 +156,22 @@ fn paf_fragment_lines() {
     assert!(columns.contains(&"cg:Z:1500=1X1499="));
 }
 
+/// A --max-miss below the seed miss bound turns the pruning off and marks the summary; the
+/// planted copy is still found.
+#[test]
+fn max_miss_unpruned() {
+    let fixture = fixture();
+    let lines = search(&fixture, &["--max-miss", "0.000000001"]);
+    assert_eq!(json(&lines[0])["a"], "plasmid_1");
+    let summary = json(lines.last().unwrap());
+    assert_eq!(summary["prune"], false);
+    assert!(summary["miss"].as_f64().unwrap() > 0.000_000_001);
+    let lines = search(&fixture, &[]);
+    let summary = json(lines.last().unwrap());
+    assert!(summary.get("prune").is_none());
+    assert!(summary["miss"].as_f64().unwrap() <= 0.0001);
+}
+
 #[test]
 fn tsv_lines() {
     let fixture = fixture();

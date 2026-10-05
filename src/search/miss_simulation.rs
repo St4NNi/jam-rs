@@ -5,7 +5,7 @@
 
 use super::bound::CoverageBound;
 use super::query::QueryKmers;
-use crate::loss::{LossBudget, MissModel};
+use crate::loss::{MaxMiss, MissModel};
 use crate::seeds::{SeedScheme, Seeder};
 use crate::test_support::{random_bases, rng, with_substitutions};
 use rand::RngExt;
@@ -184,7 +184,7 @@ fn measure(change: Change, length: usize, identity: f64, one_mismatch: bool, tri
     let seeder = Seeder::new(scheme).unwrap();
     let model = MissModel::new(scheme, usize::from(one_mismatch)).unwrap();
     let required = length as u64 / 2;
-    let budget = LossBudget::default();
+    let budget = MaxMiss::default();
     let bound = CoverageBound::new(&model, budget, identity, length as u64, false, required);
     let losses = (0..trials)
         .into_par_iter()

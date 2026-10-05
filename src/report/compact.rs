@@ -143,6 +143,8 @@ pub struct QueryTotals {
     /// Seeded, possible, located and confirmed entries.
     counts: [u64; 4],
     miss: f64,
+    /// Whether the pruning was off in a shard, as the seed miss bound reached --max-miss.
+    unpruned: bool,
     /// Seconds of the sketch, locate and align stages.
     seconds: [f64; 3],
 }
@@ -158,6 +160,9 @@ struct SummaryLine<'a> {
     error: Option<&'a str>,
     n: [u64; 4],
     miss: f64,
+    /// False when the pruning was off; left out when it ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prune: Option<bool>,
     t: [f64; 3],
 }
 
@@ -171,6 +176,7 @@ impl QueryTotals {
             error: None,
             counts: [0; 4],
             miss: 0.0,
+            unpruned: false,
             seconds: [0.0; 3],
         }
     }
@@ -192,7 +198,8 @@ impl QueryTotals {
         for (total, count) in self.counts.iter_mut().zip(counts) {
             *total += count;
         }
-        self.miss = self.miss.max(summary.sketch.miss_upper_bound);
+        self.miss = self.miss.max(summary.sketch.total_miss);
+        self.unpruned |= summary.sketch.miss_over_budget;
         let times = &summary.times;
         let sketch = times.prepare_query.wall_seconds + times.sketch.wall_seconds;
         let seconds = [sketch, summary.locate.seconds, summary.align.seconds];
@@ -215,6 +222,7 @@ impl QueryTotals {
             error: self.error.as_deref(),
             n: self.counts,
             miss: self.miss,
+            prune: self.unpruned.then_some(false),
             t: self.seconds.map(|seconds| rounded(seconds, 3)),
         })
     }
@@ -229,9 +237,11 @@ impl QueryTotals {
         };
         let [seeded, possible, located, confirmed] = self.counts;
         let [sketch, locate, align] = self.seconds;
+        let pruning = if self.unpruned { "; pruning off" } else { "" };
         format!(
             "{}: {status}; {seeded} seeded, {possible} possible, {located} located, \
-             {confirmed} confirmed; sketch {sketch:.3} s, locate {locate:.3} s, align {align:.3} s",
+             {confirmed} confirmed; sketch {sketch:.3} s, locate {locate:.3} s, align {align:.3} s\
+             {pruning}",
             self.query
         )
     }

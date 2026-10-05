@@ -9,7 +9,7 @@ use super::turn::{slice_alignment, swap_roles};
 use crate::align::{Alignment, AlignmentConfig, Interval};
 use crate::decide::{DecisionRule, Fragment};
 use crate::index::{SeedLocation, Shard};
-use crate::loss::{LossBudget, MissModel};
+use crate::loss::{MaxMiss, MissModel};
 use crate::search::PossibleEntry;
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
@@ -73,7 +73,7 @@ impl BatchAlignment<'_> {
         // the bound of stage 2 keeps every entry.
         let bound = CoverageBound::new(
             self.model,
-            LossBudget::default(),
+            MaxMiss::default(),
             self.rule.min_identity,
             kmers.length(),
             false,

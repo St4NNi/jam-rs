@@ -45,7 +45,7 @@ pub enum CliError {
     /// The search settings are invalid.
     #[error(transparent)]
     Settings(#[from] SearchError),
-    /// The loss budget or the miss model is invalid.
+    /// The --max-miss value or the miss model is invalid.
     #[error(transparent)]
     Loss(#[from] LossError),
     /// A record cannot be built.

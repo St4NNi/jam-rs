@@ -80,7 +80,7 @@ pub enum ServiceError {
     /// Reading the shard failed.
     #[error(transparent)]
     Index(#[from] IndexError),
-    /// The loss budget of a request is invalid.
+    /// The --max-miss value of a request is invalid.
     #[error(transparent)]
     Loss(#[from] LossError),
     /// The search could not run, or its settings are invalid.

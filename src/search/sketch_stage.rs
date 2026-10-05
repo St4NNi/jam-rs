@@ -64,11 +64,13 @@ pub struct SketchWork {
     pub possible_entries: u64,
     /// Wall seconds of the stage.
     pub seconds: f64,
-    /// A proven upper bound on that chance, under independent substitutions, for a piece that
-    /// is one coherent copy without indels in one clean run. With the loss budget added, it
-    /// bounds the chance to drop such an entry before stage 3.
+    /// A proven upper bound on the chance that a present piece of the required coverage shows no
+    /// seed hit, under independent substitutions, for one continuous piece without indels.
     pub miss_upper_bound: f64,
-    /// Whether `miss_upper_bound` exceeds the loss budget.
+    /// The modeled total chance of missing a qualifying entry: `miss_upper_bound` plus the chance
+    /// the coverage pruning spends; at most --max-miss while the pruning is on.
+    pub total_miss: f64,
+    /// Whether `miss_upper_bound` leaves no room under --max-miss, so the pruning was off.
     pub miss_over_budget: bool,
 }
 

@@ -22,7 +22,7 @@ use super::times::{PartStart, SearchTimes};
 use crate::align::{AlignmentError, Interval};
 use crate::decide::DecisionRule;
 use crate::index::{SeedLocation, Shard};
-use crate::loss::{LossBudget, MissModel};
+use crate::loss::{MaxMiss, MissModel};
 use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -38,9 +38,10 @@ pub struct SearchConfig {
     pub last_stage: SearchStage,
     /// The rule that reports an entry; its query coverage and identity also drive the pruning.
     pub rule: DecisionRule,
-    /// The chance of missing a qualifying entry that the coverage bound may spend. Stages 1 and 2
-    /// share one fixed allowance and stage 2 sees a subset of the hits, so one budget covers both.
-    pub loss_budget: LossBudget,
+    /// The largest total chance of missing a qualifying entry: the seed miss bound, plus what the
+    /// coverage bound may spend. Stages 1 and 2 share one fixed allowance and stage 2 sees a subset
+    /// of the hits, so one share covers both.
+    pub max_miss: MaxMiss,
     /// Whether query k-mers one substitution away are looked up too.
     pub seed_mismatches: SeedMismatches,
     /// A seed held by more entries is not expanded in stage 1. `None` takes 1% of the shard's
@@ -64,7 +65,7 @@ impl Default for SearchConfig {
         Self {
             last_stage: SearchStage::Align,
             rule: DecisionRule::default(),
-            loss_budget: LossBudget::default(),
+            max_miss: MaxMiss::default(),
             seed_mismatches: SeedMismatches::Auto,
             frequent_seed_entries: None,
             // 32 Mi pairs of entry and query k-mer, 256 MiB.
@@ -174,11 +175,11 @@ impl<'a> Searcher<'a> {
                 "the query must hold at least k bases and fewer than 2^32",
             ));
         }
-        let budget = config.loss_budget;
+        let budget = config.max_miss;
         let mismatches = config.seed_mismatches.resolve(
             &self.models,
             &config.rule,
-            config.loss_budget,
+            config.max_miss,
             query.len() as u64,
             circular,
         );
@@ -248,7 +249,7 @@ impl<'a> Searcher<'a> {
         query_kmers: &QueryKmers,
         circular: bool,
         model: &MissModel,
-        budget: LossBudget,
+        budget: MaxMiss,
         request: &Request<'_>,
         start: PartStart,
     ) -> SearchSummary {
@@ -271,12 +272,12 @@ impl<'a> Searcher<'a> {
         );
         let mut summary = self.empty_summary(length, model.mismatches());
         summary.times.prepare_query = start.finish();
-        let budget = config.loss_budget.chance();
-        let miss_upper_bound = bound.seed_miss_bound();
-        let miss_over_budget = miss_upper_bound > budget;
+        let (miss_upper_bound, total_miss) = (bound.seed_miss_bound(), bound.total_miss());
+        let miss_over_budget = !bound.prunes();
         summary.sketch = SketchWork {
             low_complexity_bases: low_complexity,
             miss_upper_bound,
+            total_miss,
             miss_over_budget,
             ..SketchWork::default()
         };
@@ -302,6 +303,7 @@ impl<'a> Searcher<'a> {
         summary.sketch = SketchWork {
             low_complexity_bases: low_complexity,
             miss_upper_bound,
+            total_miss,
             miss_over_budget,
             ..sketch.work
         };

@@ -5,7 +5,7 @@
 
 use super::ServiceError;
 use crate::decide::DecisionRule;
-use crate::loss::LossBudget;
+use crate::loss::MaxMiss;
 use crate::search::{SearchConfig, SearchStage, SeedMismatches};
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +19,7 @@ pub struct SearchSettings {
     /// The identity below which a chain's anchors are too sparse for it to be aligned.
     pub min_chain_identity: f64,
     /// The largest accepted chance of missing a qualifying entry.
-    pub loss_budget: f64,
+    pub max_miss: f64,
     /// Whether query k-mers one substitution away are looked up too.
     pub seed_mismatches: SeedMismatches,
     /// The alignment score of a match.
@@ -40,7 +40,7 @@ impl SearchSettings {
             last_stage: config.last_stage,
             rule: *rule,
             min_chain_identity: config.align.min_chain_identity,
-            loss_budget: config.loss_budget.chance(),
+            max_miss: config.max_miss.chance(),
             seed_mismatches: config.seed_mismatches,
             match_score: scores.match_score,
             mismatch_score: scores.mismatch_score,
@@ -55,7 +55,7 @@ impl SearchSettings {
         config.last_stage = self.last_stage;
         config.rule = self.rule;
         config.align.min_chain_identity = self.min_chain_identity;
-        config.loss_budget = LossBudget::new(self.loss_budget)?;
+        config.max_miss = MaxMiss::new(self.max_miss)?;
         config.seed_mismatches = self.seed_mismatches;
         let scores = &mut config.align.band.alignment;
         scores.match_score = self.match_score;
@@ -80,7 +80,7 @@ mod tests {
         };
         client.rule.min_query_coverage = "0.7".parse().unwrap();
         client.rule.min_identity = 0.9;
-        client.loss_budget = LossBudget::new(0.001).unwrap();
+        client.max_miss = MaxMiss::new(0.001).unwrap();
         client.seed_mismatches = SeedMismatches::One;
         client.align.band.alignment.mismatch_score = -4;
         let settings = SearchSettings::of(&client);
@@ -96,7 +96,7 @@ mod tests {
         assert_eq!(applied.threads, 8);
         assert_eq!(applied.last_stage, SearchStage::Locate);
         assert_eq!(applied.rule, client.rule);
-        assert_eq!(applied.loss_budget, client.loss_budget);
+        assert_eq!(applied.max_miss, client.max_miss);
         assert_eq!(applied.seed_mismatches, SeedMismatches::One);
         assert_eq!(applied.align.band.alignment, client.align.band.alignment);
     }
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn invalid_settings_fail() {
         let mut settings = SearchSettings::of(&SearchConfig::default());
-        settings.loss_budget = 0.0;
+        settings.max_miss = 0.0;
         assert!(settings.apply(&SearchConfig::default()).is_err());
         let mut settings = SearchSettings::of(&SearchConfig::default());
         settings.rule.min_identity = 2.0;

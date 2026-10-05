@@ -1,5 +1,5 @@
 //! The proven bound on the chance that a query piece present in an entry shows no seed hit, and
-//! the loss budget that the shortcuts of a search stay within.
+//! the largest total chance of missing a qualifying entry that a search accepts.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -15,9 +15,9 @@ pub enum LossError {
     /// The seed scheme has a value outside its range.
     #[error(transparent)]
     Seeds(#[from] SeedError),
-    /// The loss budget is not a chance above 0 and below 1.
-    #[error("the loss budget must be a chance above 0 and below 1")]
-    InvalidBudget,
+    /// The --max-miss value is not a chance above 0 and below 1.
+    #[error("--max-miss must be a chance above 0 and below 1")]
+    InvalidMaxMiss,
 }
 
 /// The proven bound on the chance that a piece of a given length and identity shows no seed hit.
@@ -65,6 +65,18 @@ impl MissModel {
         missed.clamp(0.0, 1.0).powf(blocks as f64)
     }
 
+    /// The identity p* = 1 - (1 - p) R / (R - k + 1) for a copy of R bases that qualifies at p:
+    /// its at most (1 - p) R random substitutions change each seed base with at most that chance.
+    /// 0, so no bound, when R < k.
+    pub fn qualifying_identity(&self, identity: f64, required: u64) -> f64 {
+        let span = required.saturating_sub(self.k as u64 - 1);
+        if span == 0 || identity.is_nan() {
+            return 0.0;
+        }
+        let changed = (1.0 - identity) * required as f64 / span as f64;
+        (1.0 - changed).clamp(0.0, 1.0)
+    }
+
     /// The k-mer size of the model.
     pub fn k(&self) -> usize {
         self.k
@@ -76,30 +88,30 @@ impl MissModel {
     }
 }
 
-/// The chance of losing a qualifying entry that the shortcuts of one search may spend. It holds
-/// under the assumptions of `MissModel` only.
+/// The largest total chance of missing a qualifying entry (`--max-miss`): the seed lookups and the
+/// coverage pruning together. It holds under the assumptions of `MissModel` only.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LossBudget {
+pub struct MaxMiss {
     chance: f64,
 }
 
-impl Default for LossBudget {
+impl Default for MaxMiss {
     /// 0.0001, which is 0.01%.
     fn default() -> Self {
         Self { chance: 0.0001 }
     }
 }
 
-impl LossBudget {
-    /// A budget of `chance`, which must be above 0 and below 1.
+impl MaxMiss {
+    /// A limit of `chance`, which must be above 0 and below 1.
     pub fn new(chance: f64) -> Result<Self, LossError> {
         if chance.is_nan() || chance <= 0.0 || chance >= 1.0 {
-            return Err(LossError::InvalidBudget);
+            return Err(LossError::InvalidMaxMiss);
         }
         Ok(Self { chance })
     }
 
-    /// The chance of the budget.
+    /// The chance of the limit.
     pub fn chance(self) -> f64 {
         self.chance
     }
@@ -150,6 +162,23 @@ mod tests {
         assert!(two.miss_upper_bound(750, 0.8) < one.miss_upper_bound(750, 0.8));
     }
 
+    /// At R = 1,116 and p = 0.95, p* = 1 - 0.05 * 1,116 / 1,092 = 0.948 90.
+    #[test]
+    fn qualifying_identity_lower() {
+        let model = MissModel::new(SeedScheme::default(), 0).unwrap();
+        let lower = model.qualifying_identity(0.95, 1_116);
+        assert!((lower - 0.948_901).abs() < 1e-6, "{lower}");
+        assert_eq!(model.qualifying_identity(1.0, 500), 1.0);
+        // Up to k - 1 required bases there is no bound: the chance stays 1.
+        assert_eq!(model.qualifying_identity(0.95, 24), 0.0);
+        assert_eq!(
+            model.miss_upper_bound(500, model.qualifying_identity(0.95, 24)),
+            1.0
+        );
+        // With 25 bases, 1.25 changes may fall on the one seed span: no bound either.
+        assert_eq!(model.qualifying_identity(0.95, 25), 0.0);
+    }
+
     #[test]
     fn bad_seeding_rejected() {
         for (k, w) in [(0, 100), (33, 100), (25, 0)] {
@@ -164,14 +193,14 @@ mod tests {
     }
 
     #[test]
-    fn default_budget() {
-        assert_eq!(LossBudget::default().chance(), 0.0001);
+    fn default_max_miss() {
+        assert_eq!(MaxMiss::default().chance(), 0.0001);
     }
 
     #[test]
-    fn budget_is_chance() {
+    fn max_miss_checked() {
         for bad in [0.0, 1.0, -0.1, f64::NAN, 2.0] {
-            assert_eq!(LossBudget::new(bad).unwrap_err(), LossError::InvalidBudget);
+            assert_eq!(MaxMiss::new(bad).unwrap_err(), LossError::InvalidMaxMiss);
         }
     }
 }

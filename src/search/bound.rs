@@ -3,29 +3,33 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use crate::loss::{LossBudget, MissModel};
+use crate::loss::{MaxMiss, MissModel};
 
 /// Computes coverage bounds for one query against one shard.
 #[derive(Clone, Copy, Debug)]
 pub struct CoverageBound<'a> {
     model: &'a MissModel,
-    budget: LossBudget,
-    /// The lowest identity at which an entry still qualifies.
+    /// The identity at which the proven bound holds for a qualifying copy: below the identity
+    /// limit, see `MissModel::qualifying_identity`.
     identity: f64,
     query_length: u64,
     circular: bool,
     /// The query coverage, in bases, that an entry must reach.
     required_bases: u64,
     /// The present bases that a stretch without a seed hit may hold, for this query and these
-    /// settings; it never depends on the hits, so a further hit can only raise a bound.
+    /// settings; it never depends on the hits, so a further hit can only raise a bound. The query
+    /// length turns the pruning off.
     allowance: u64,
+    /// The chance that the pruning may spend: --max-miss less the seed miss bound.
+    pruning_share: f64,
 }
 
 impl<'a> CoverageBound<'a> {
-    /// A bound for a query of `query_length` bases, spending `budget` per entry.
+    /// A bound for a query of `query_length` bases. The seed miss bound and the pruning together
+    /// stay within `max_miss`; when the seed miss bound alone reaches it, the pruning is off.
     pub fn new(
         model: &'a MissModel,
-        budget: LossBudget,
+        max_miss: MaxMiss,
         identity: f64,
         query_length: u64,
         circular: bool,
@@ -33,14 +37,17 @@ impl<'a> CoverageBound<'a> {
     ) -> Self {
         let mut bound = Self {
             model,
-            budget,
-            identity,
+            identity: model.qualifying_identity(identity, required_bases.min(query_length)),
             query_length,
             circular,
             required_bases,
             allowance: query_length,
+            pruning_share: 0.0,
         };
-        bound.allowance = bound.proven_allowance();
+        bound.pruning_share = max_miss.chance() - bound.seed_miss_bound();
+        if bound.pruning_share > 0.0 {
+            bound.allowance = bound.proven_allowance();
+        }
         bound
     }
 
@@ -63,21 +70,43 @@ impl<'a> CoverageBound<'a> {
         self.model.miss_upper_bound(required, self.identity)
     }
 
-    /// The shortest length `a` with `n * U(a + 1) <= B`, U the proven miss bound and n the fixed
-    /// starts of a seedless stretch of a + 1 bases (L on a circular query, else L - a), or L.
-    /// It holds when each stretch meets at most one coherent present piece.
-    fn proven_allowance(&self) -> u64 {
-        let length = self.query_length;
-        let fits = |allowance: u64| {
-            let starts = if self.circular {
-                length
-            } else {
-                length.saturating_sub(allowance).max(1)
-            };
-            let miss = self.model.miss_upper_bound(allowance + 1, self.identity);
-            starts as f64 * miss <= self.budget.chance()
+    /// Whether the coverage bound can drop an entry: false when the allowance is the whole query.
+    pub fn prunes(&self) -> bool {
+        self.allowance < self.query_length
+    }
+
+    /// The modeled total chance of missing a qualifying entry: the seed miss bound, plus the
+    /// chance the pruning spends, `n * U(a + 1)`, when it is on.
+    pub fn total_miss(&self) -> f64 {
+        let pruning = match self.prunes() {
+            true => self.starts(self.allowance) as f64 * self.stretch_miss(self.allowance),
+            false => 0.0,
         };
-        smallest_fit(length, fits)
+        (self.seed_miss_bound() + pruning).min(1.0)
+    }
+
+    /// The starts of a seedless stretch of a + 1 bases: L on a circular query, else L - a.
+    fn starts(&self, allowance: u64) -> u64 {
+        match self.circular {
+            true => self.query_length,
+            false => self.query_length.saturating_sub(allowance).max(1),
+        }
+    }
+
+    /// The proven chance that a present piece of a + 1 bases shows no seed hit.
+    fn stretch_miss(&self, allowance: u64) -> f64 {
+        self.model.miss_upper_bound(allowance + 1, self.identity)
+    }
+
+    /// The shortest length `a` with `n * U(a + 1) <= B`, or L: B the pruning share, U the proven
+    /// bound and n the starts of a seedless stretch of a + 1 bases. It holds when each stretch
+    /// meets at most one coherent present piece.
+    fn proven_allowance(&self) -> u64 {
+        let fits = |allowance: u64| {
+            let miss = self.stretch_miss(allowance);
+            self.starts(allowance) as f64 * miss <= self.pruning_share
+        };
+        smallest_fit(self.query_length, fits)
     }
 
     /// Whether an entry with this bound can still reach the required query coverage.
@@ -137,7 +166,7 @@ mod tests {
     use rand::RngExt;
 
     fn bound(length: u64, circular: bool) -> CoverageBound<'static> {
-        CoverageBound::new(model(), LossBudget::default(), 0.95, length, circular, 0)
+        CoverageBound::new(model(), MaxMiss::default(), 0.95, length, circular, length)
     }
 
     #[test]
@@ -163,7 +192,7 @@ mod tests {
         // The test model has k 21 and w 20.
         let fits = |allowance: u64| {
             let miss = model().miss_upper_bound(allowance + 1, 0.95);
-            (10_000 - allowance) as f64 * miss <= 1e-4
+            (10_000 - allowance) as f64 * miss <= 1e-4 - linear.seed_miss_bound()
         };
         assert!(fits(linear.allowance) && !fits(linear.allowance - 1));
         assert_eq!(linear.bound(&[]), linear.allowance);
@@ -213,7 +242,7 @@ mod tests {
     /// 5,034 to 4,911, below the 5,000 required bases.
     #[test]
     fn extra_hit_kept() {
-        let budget = LossBudget::new(0.00005).unwrap();
+        let budget = MaxMiss::new(0.00005).unwrap();
         let bound = CoverageBound::new(default_model(), budget, 0.95, 10_000, false, 5_000);
         let without: Vec<u32> = (1..=3_075).collect();
         let with: Vec<u32> = (0..=3_075).collect();
@@ -255,15 +284,34 @@ mod tests {
             .collect();
         let positions = query.sorted_positions(&hit);
         let length = sequence.len() as u64;
-        let budget = LossBudget::default();
+        let budget = MaxMiss::default();
         let bound = CoverageBound::new(default_model(), budget, 1.0, length, false, length);
         assert_eq!(bound.bound(&positions), length);
     }
 
-    /// The bound of a query, at identity 0.95 and budget 0.00005, with the default k and w.
+    /// The bound of a query that must be covered whole, at identity 0.95 and --max-miss
+    /// 0.00005, with the default k and w.
     fn proven(model: &'static MissModel, length: u64, circular: bool) -> CoverageBound<'static> {
-        let budget = LossBudget::new(0.00005).unwrap();
-        CoverageBound::new(model, budget, 0.95, length, circular, 0)
+        let max_miss = MaxMiss::new(0.00005).unwrap();
+        CoverageBound::new(model, max_miss, 0.95, length, circular, length)
+    }
+
+    /// When the seed miss bound alone reaches --max-miss, the pruning is off: every bound is the
+    /// whole query, and the total is the seed miss bound.
+    #[test]
+    fn seed_miss_unpruned() {
+        let max_miss = MaxMiss::default();
+        // Half of 1,000 bases holds 4 blocks of 124 bases: U = (1 - 0.95^25)^4, about 0.27.
+        let off = CoverageBound::new(default_model(), max_miss, 0.95, 1_000, false, 500);
+        assert!(!off.prunes());
+        assert_eq!(off.bound(&[]), 1_000);
+        assert!(off.seed_miss_bound() > 0.2);
+        assert_eq!(off.total_miss(), off.seed_miss_bound());
+        // A whole 10 kb query leaves room: the pruning is on and the total stays within.
+        let on = CoverageBound::new(default_model(), max_miss, 0.95, 10_000, false, 10_000);
+        assert!(on.prunes());
+        assert!(on.total_miss() <= max_miss.chance());
+        assert!(on.total_miss() > on.seed_miss_bound());
     }
 
     #[test]
@@ -272,10 +320,10 @@ mod tests {
         let one = MissModel::new(SeedScheme::default(), 1).unwrap();
         let one: &'static MissModel = Box::leak(Box::new(one));
         // A linear query of L bases holds L - a starts of a + 1 bases, a circular one L.
-        assert_eq!(proven(exact, 5_000, false).allowance, 4_978);
+        assert_eq!(proven(exact, 5_000, false).allowance, 4_982);
         assert_eq!(proven(exact, 5_000, true).allowance, 5_000);
         assert_eq!(proven(exact, 10_000, false).allowance, 6_943);
-        assert_eq!(proven(exact, 10_000, true).allowance, 7_315);
+        assert_eq!(proven(exact, 10_000, true).allowance, 7_439);
         assert_eq!(proven(exact, 50_000, false).allowance, 7_935);
         assert_eq!(proven(one, 5_000, false).allowance, 2_231);
         assert_eq!(proven(one, 10_000, false).allowance, 2_355);
@@ -308,7 +356,7 @@ mod tests {
             .map(|(seed, _)| seed)
             .collect();
         let positions = query.sorted_positions(&hit);
-        let budget = LossBudget::default();
+        let budget = MaxMiss::default();
         let bound = CoverageBound::new(default_model(), budget, 1.0, 124, true, 124);
         assert_eq!(bound.bound(&positions), 124);
     }

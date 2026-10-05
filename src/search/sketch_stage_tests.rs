@@ -8,7 +8,7 @@ use super::error::SearchError;
 use super::query::QueryKmers;
 use super::sketch_stage::{SketchLimits, sketch_stage};
 use crate::index::{Shard, build_shard};
-use crate::loss::LossBudget;
+use crate::loss::MaxMiss;
 use crate::seeds::Seeder;
 use crate::test_support::{
     build_options, miss_model, no_stop, parameters, random_bases, rng, test_shard,
@@ -53,7 +53,7 @@ fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
 fn bound_at(length: u64, required_bases: u64, identity: f64) -> CoverageBound<'static> {
     CoverageBound::new(
         miss_model(),
-        LossBudget::default(),
+        MaxMiss::default(),
         identity,
         length,
         false,
@@ -239,7 +239,7 @@ fn frequent_union_only() {
         frequent_seed_entries: 2,
         max_seed_hits: u64::MAX,
     };
-    let (kept, without) = run_with(&shard, &query, &bound(6_000, 0), limits);
+    let (kept, without) = run_with(&shard, &query, &bound(6_000, 3_000), limits);
     let bound_of = |entry: u32| kept.iter().find(|(e, _)| *e == entry).unwrap().1;
     assert_eq!(without, 0);
     assert_eq!(bound_of(4), 6_000);

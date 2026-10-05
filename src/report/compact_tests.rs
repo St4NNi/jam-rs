@@ -110,7 +110,7 @@ fn summary(status: Status, reason: Option<Reason>) -> Summary {
     };
     summary.sketch.seeded_entries = 5;
     summary.sketch.possible_entries = 3;
-    summary.sketch.miss_upper_bound = 0.000_01;
+    summary.sketch.total_miss = 0.000_01;
     summary.locate.entries = 3;
     summary.locate.dropped_entries = 1;
     summary.locate.seconds = 0.25;
@@ -127,7 +127,10 @@ fn summary_over_shards() {
     let expected = json!({"q": "q1", "status": "complete", "n": [5, 3, 2, 1],
         "miss": 0.000_01, "t": [0.5, 0.25, 0.0]});
     assert_eq!(complete, expected);
-    totals.add(&summary(Status::Stopped, Some(Reason::Deadline)));
+    let mut unpruned = summary(Status::Stopped, Some(Reason::Deadline));
+    unpruned.sketch.miss_over_budget = true;
+    unpruned.sketch.total_miss = 0.02;
+    totals.add(&unpruned);
     totals.add(&summary(Status::Incomplete, Some(Reason::ResourceLimit)));
     assert_eq!(totals.status(), Status::Stopped);
     let stopped: Value = serde_json::from_str(&totals.line().unwrap()).unwrap();
@@ -135,8 +138,12 @@ fn summary_over_shards() {
     assert_eq!(stopped["reason"], "deadline");
     assert_eq!(stopped["n"], json!([15, 9, 6, 3]));
     assert_eq!(
+        (stopped["miss"].as_f64(), stopped["prune"].as_bool()),
+        (Some(0.02), Some(false))
+    );
+    assert_eq!(
         totals.progress(),
         "q1: stopped (deadline); 15 seeded, 9 possible, 6 located, 3 confirmed; \
-         sketch 1.500 s, locate 0.750 s, align 0.000 s"
+         sketch 1.500 s, locate 0.750 s, align 0.000 s; pruning off"
     );
 }

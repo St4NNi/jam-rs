@@ -4,14 +4,14 @@
 // SPDX-License-Identifier: MIT
 
 use crate::decide::DecisionRule;
-use crate::loss::{LossBudget, MissModel};
+use crate::loss::{MaxMiss, MissModel};
 use serde::{Deserialize, Serialize};
 
 /// The mismatches a query k-mer may have against a seed and still hit it.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum SeedMismatches {
-    /// Chosen per query from the identity, the loss budget and the query length
+    /// Chosen per query from the identity, --max-miss and the query length
     #[default]
     Auto,
     /// A seed is hit only by an equal query k-mer
@@ -47,7 +47,7 @@ impl SeedMismatches {
         self,
         models: &[MissModel; 3],
         rule: &DecisionRule,
-        budget: LossBudget,
+        budget: MaxMiss,
         length: u64,
         circular: bool,
     ) -> usize {
@@ -60,8 +60,9 @@ impl SeedMismatches {
         let [exact, one_mismatch, two_mismatch] = models;
         let required = rule.min_query_coverage.required_bases(length).min(length);
         let identity = rule.min_identity;
-        let missed = exact.miss_upper_bound(required, identity);
-        let lowered = one_mismatch.miss_upper_bound(required, identity) < missed;
+        let bounded = exact.qualifying_identity(identity, required);
+        let missed = exact.miss_upper_bound(required, bounded);
+        let lowered = one_mismatch.miss_upper_bound(required, bounded) < missed;
         let kmers = if circular {
             length
         } else {
@@ -71,8 +72,8 @@ impl SeedMismatches {
         if !(missed > budget.chance() && lowered && small) {
             return 0;
         }
-        let one = one_mismatch.miss_upper_bound(required, identity);
-        let two = two_mismatch.miss_upper_bound(required, identity);
+        let one = one_mismatch.miss_upper_bound(required, bounded);
+        let two = two_mismatch.miss_upper_bound(required, bounded);
         let lower = identity < TWO_BELOW_IDENTITY && kmers <= MAX_TWO_KMERS;
         if lower && one > budget.chance() && two < one {
             2
@@ -88,7 +89,7 @@ mod tests {
     use crate::seeds::SeedScheme;
 
     fn choice(identity: f64, length: u64) -> usize {
-        choice_with(identity, length, LossBudget::default().chance())
+        choice_with(identity, length, MaxMiss::default().chance())
     }
 
     fn models() -> [MissModel; 3] {
@@ -100,7 +101,7 @@ mod tests {
             min_identity: identity,
             ..DecisionRule::default()
         };
-        let budget = LossBudget::new(budget).unwrap();
+        let budget = MaxMiss::new(budget).unwrap();
         let mode = SeedMismatches::Auto;
         mode.resolve(&models(), &rule, budget, length, false)
     }
@@ -150,7 +151,7 @@ mod tests {
     #[test]
     fn auto_takes_lower() {
         let models = models();
-        let budget = LossBudget::default().chance();
+        let budget = MaxMiss::default().chance();
         for identity in [0.8, 0.85, 0.9, 0.95, 0.98, 0.99] {
             for length in (200u64..=10_000).step_by(97) {
                 let required = length.div_ceil(2);
@@ -168,7 +169,7 @@ mod tests {
     fn forced_choice_holds() {
         let models = models();
         let rule = DecisionRule::default();
-        let budget = LossBudget::default();
+        let budget = MaxMiss::default();
         let resolve =
             |mode: SeedMismatches, length| mode.resolve(&models, &rule, budget, length, false);
         assert_eq!(resolve(SeedMismatches::Zero, 1_000), 0);

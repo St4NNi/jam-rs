@@ -10,7 +10,7 @@ use super::locate_stage::{
 use super::query::QueryKmers;
 use super::sketch_stage::{PossibleEntry, SketchLimits, find_query_seeds, sketch_stage};
 use crate::index::{Shard, build_shard};
-use crate::loss::LossBudget;
+use crate::loss::MaxMiss;
 use crate::seeds::Seeder;
 use crate::test_support::{
     build_options, miss_model, no_stop, parameters, random_bases, rng, test_shard, write_entries,
@@ -26,7 +26,7 @@ fn kmers(query: &[u8]) -> QueryKmers {
 fn bound(length: u64, required_bases: u64) -> CoverageBound<'static> {
     CoverageBound::new(
         miss_model(),
-        LossBudget::default(),
+        MaxMiss::default(),
         0.95,
         length,
         false,

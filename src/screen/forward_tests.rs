@@ -6,7 +6,7 @@
 use super::tests::{index_of, plasmids, screen};
 use super::*;
 use crate::index::Shard;
-use crate::loss::LossBudget;
+use crate::loss::MaxMiss;
 use crate::search::QueryKmers;
 use crate::search::read_entry_locations;
 use crate::search::{AlignStageWorkspace, PreparedQuery, align_entry};
@@ -29,7 +29,7 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
     let required = rule.min_query_coverage.required_bases(length);
     let bound = CoverageBound::new(
         model,
-        LossBudget::default(),
+        MaxMiss::default(),
         rule.min_identity,
         length,
         false,
