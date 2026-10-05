@@ -8,10 +8,12 @@ use super::storage::{CacheArgs, ShardStorage, shard_name};
 use super::{CliError, output_writer};
 use crate::index::Shard;
 use crate::loss::{LossBudget, MissModel};
-use crate::report::{Record, ReportError, ShardRecord, Status, paf_lines};
+use crate::report::{
+    QueryTotals, Record, ReportError, ShardRecord, Status, paf_lines, result_line,
+};
 use crate::search::{
-    Completion, EntryEvent, MissBound, SearchConfig, SearchControl, SearchStage, SearchSummary,
-    Searcher, SeedMismatches,
+    EntryEvent, MissBound, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
+    SeedMismatches,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
@@ -41,7 +43,7 @@ mismatches, so with 2 both --miss-bound modes use the proven bound.";
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Format {
-    /// One JSON line per entry event, then one summary line per query
+    /// One JSON line per reported entry, then one summary line per query
     Json,
     /// One PAF line per fragment of a confirmed entry
     Paf,
@@ -89,6 +91,10 @@ pub struct SearchArgs {
     /// Write to this file instead of the standard output
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Write a progress line per query to the standard error; twice (-vv) also the events and
+    /// full summaries as JSON lines
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
 }
 
 /// The shards and the query file of the command line.
@@ -177,14 +183,13 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = Sink::new(args)?;
     let incomplete = each_query(inputs.query, |name, sequence| {
-        let mut incomplete = 0;
+        sink.totals = QueryTotals::new(name);
         for (open, searcher) in shards.iter().zip(&searchers) {
             let query = Query { name, sequence };
             let summary = search_one(args, searcher, open, &config, &mut sink, &query)?;
-            sink.finish_query(args.format, &open.name, name, &summary)?;
-            incomplete += usize::from(!matches!(summary.completion, Completion::Complete));
+            sink.record(&open.name, Record::summary(name, &summary))?;
         }
-        Ok(incomplete)
+        sink.finish_query()
     })?;
     match incomplete {
         0 => Ok(()),
@@ -216,13 +221,7 @@ fn run_remote(args: &SearchArgs, server: &EndpointAddr) -> Result<(), CliError> 
             deadline_ms,
             local_only: false,
         };
-        runtime.block_on(search_remote(
-            &endpoint,
-            server,
-            &request,
-            args.format,
-            &mut sink,
-        ))
+        runtime.block_on(search_remote(&endpoint, server, &request, &mut sink))
     })?;
     match incomplete {
         0 => Ok(()),
@@ -230,29 +229,24 @@ fn run_remote(args: &SearchArgs, server: &EndpointAddr) -> Result<(), CliError> 
     }
 }
 
-/// Writes the records of one remote search as they arrive; returns how many shards did not
+/// Writes the records of one remote search as they arrive; returns 1 when a shard did not
 /// complete.
 async fn search_remote(
     endpoint: &Endpoint,
     server: &EndpointAddr,
     request: &SearchRequest,
-    format: Format,
     sink: &mut Sink,
 ) -> Result<usize, CliError> {
     let mut answer = search(endpoint, server.clone(), request).await?;
-    let mut incomplete = 0;
+    sink.totals = QueryTotals::new(&request.query_name);
     while let Some(record) = answer.next().await?.and_then(|reply| reply.into_record()) {
-        if let Record::Summary(summary) = &record.record {
-            incomplete += usize::from(summary.status != Status::Complete);
-        }
-        sink.write_lines(&record_lines(format, &record)?)?;
+        sink.record(&record.shard, record.record)?;
     }
-    sink.writer.flush()?;
-    Ok(incomplete)
+    sink.finish_query()
 }
 
 /// Calls `search` with the name (first word of the id) and the bases of every record
-/// of the query file, and sums the incomplete searches it returns. Fails on a file without
+/// of the query file, and sums the incomplete queries it returns. Fails on a file without
 /// records.
 fn each_query(
     path: &Path,
@@ -305,7 +299,7 @@ fn search_one(
             summary
         });
         for event in receiver {
-            sink.event(args.format, open, query.name, &event)?;
+            sink.event(open, query.name, &event)?;
         }
         search
             .join()
@@ -345,80 +339,82 @@ fn first_word(id: &[u8]) -> String {
     id.split_whitespace().next().unwrap_or_default().to_string()
 }
 
-/// The output of a search.
+/// The output of a search: results on the writer, progress and debug lines on the standard
+/// error.
 struct Sink {
     writer: Box<dyn Write>,
+    format: Format,
+    level: SearchStage,
+    verbose: u8,
+    /// The summary of the query being searched.
+    totals: QueryTotals,
 }
 
 impl Sink {
     fn new(args: &SearchArgs) -> Result<Self, CliError> {
         Ok(Self {
             writer: output_writer(args.output.as_deref())?,
+            format: args.format,
+            level: args.level,
+            verbose: args.verbose,
+            totals: QueryTotals::new(""),
         })
     }
 
     fn event(
         &mut self,
-        format: Format,
         open: &NamedShard,
         query: &str,
         event: &EntryEvent,
     ) -> Result<(), CliError> {
         let index = event.entry();
-        let shard = &open.shard;
-        let entry = shard
-            .manifest()
-            .entries
-            .get(index as usize)
+        let entry = (open.shard.manifest().entries.get(index as usize))
             .ok_or(ReportError::UnknownEntry(index))?;
-        let record = ShardRecord {
-            shard: open.name.clone(),
-            record: Record::from_event(query, &entry.name, event)?,
-        };
-        self.write_lines(&record_lines(format, &record)?)
+        self.record(&open.name, Record::from_event(query, &entry.name, event)?)
     }
 
-    fn write_lines(&mut self, lines: &[String]) -> Result<(), CliError> {
+    /// Writes the result lines of a record of `shard` and its debug line with -vv, and adds a
+    /// summary to the totals of the query.
+    fn record(&mut self, shard: &str, record: Record) -> Result<(), CliError> {
+        if let Record::Summary(summary) = &record {
+            self.totals.add(summary);
+        }
+        let lines = self.result_lines(&record)?;
+        if self.verbose >= 2 && !matches!(record, Record::Confirmed(_)) {
+            let shard = shard.to_string();
+            let debug = serde_json::to_string(&ShardRecord { shard, record })?;
+            writeln!(std::io::stderr(), "{debug}")?;
+        }
         for line in lines {
             writeln!(self.writer, "{line}")?;
         }
         Ok(())
     }
 
-    /// Writes the summary line of a query in a shard (JSON only) and flushes.
-    fn finish_query(
-        &mut self,
-        format: Format,
-        shard: &str,
-        query: &str,
-        summary: &SearchSummary,
-    ) -> Result<(), CliError> {
-        if format == Format::Json {
-            let line = json_line(shard, Record::summary(query, summary))?;
-            self.write_lines(&[line])?;
+    /// The output lines of one record: its compact JSON line, or the PAF lines of a confirmed
+    /// entry.
+    fn result_lines(&self, record: &Record) -> Result<Vec<String>, CliError> {
+        Ok(match (self.format, record) {
+            (Format::Json, _) => result_line(record, self.level)?.into_iter().collect(),
+            (Format::Paf, Record::Confirmed(confirmed)) => {
+                paf_lines(&confirmed.query, &confirmed.decision)
+            }
+            (Format::Paf, _) => Vec::new(),
+        })
+    }
+
+    /// Writes the summary line of a query (JSON only) and its progress line with -v, and
+    /// flushes. Returns 1 when the query did not complete, else 0.
+    fn finish_query(&mut self) -> Result<usize, CliError> {
+        if self.format == Format::Json {
+            writeln!(self.writer, "{}", self.totals.line()?)?;
         }
         self.writer.flush()?;
-        Ok(())
-    }
-}
-
-/// The output lines of one record: its JSON line, or the PAF lines of a confirmed entry.
-fn record_lines(format: Format, record: &ShardRecord) -> Result<Vec<String>, CliError> {
-    Ok(match (format, &record.record) {
-        (Format::Json, _) => vec![serde_json::to_string(record)?],
-        (Format::Paf, Record::Confirmed(confirmed)) => {
-            paf_lines(&confirmed.query, &confirmed.decision)
+        if self.verbose >= 1 {
+            writeln!(std::io::stderr(), "{}", self.totals.progress())?;
         }
-        (Format::Paf, _) => Vec::new(),
-    })
-}
-
-fn json_line(shard: &str, record: Record) -> Result<String, CliError> {
-    let record = ShardRecord {
-        shard: shard.to_string(),
-        record,
-    };
-    Ok(serde_json::to_string(&record)?)
+        Ok(usize::from(self.totals.status() != Status::Complete))
+    }
 }
 
 #[cfg(test)]

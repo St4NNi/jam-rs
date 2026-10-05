@@ -78,7 +78,8 @@ fn fixture() -> Fixture {
     }
 }
 
-fn search(fixture: &Fixture, extra: &[&str]) -> Vec<String> {
+/// The standard output and error of a successful search.
+fn search_output(fixture: &Fixture, extra: &[&str]) -> (String, String) {
     let mut arguments: Vec<&std::ffi::OsStr> = vec![
         "search".as_ref(),
         fixture.shard.as_os_str(),
@@ -93,11 +94,13 @@ fn search(fixture: &Fixture, extra: &[&str]) -> Vec<String> {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout)
-        .unwrap()
-        .lines()
-        .map(str::to_string)
-        .collect()
+    let text = |bytes| String::from_utf8(bytes).unwrap();
+    (text(output.stdout), text(output.stderr))
+}
+
+fn search(fixture: &Fixture, extra: &[&str]) -> Vec<String> {
+    let (stdout, _) = search_output(fixture, extra);
+    stdout.lines().map(str::to_string).collect()
 }
 
 fn json(line: &str) -> serde_json::Value {
@@ -108,26 +111,30 @@ fn json(line: &str) -> serde_json::Value {
 fn planted_query_confirmed() {
     let fixture = fixture();
     let lines = search(&fixture, &[]);
-    let confirmed: Vec<_> = lines
-        .iter()
-        .map(|line| json(line))
-        .filter(|record| record["kind"] == "confirmed")
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    let record = json(&lines[0]);
+    assert_eq!(
+        (record["q"].as_str(), record["a"].as_str()),
+        (Some("planted"), Some("plasmid_1"))
+    );
+    assert_eq!(record["s"], 3);
+    assert!(record["cov"].as_f64().unwrap() > 0.99);
+    assert!(record["id"].as_f64().unwrap() > 0.99);
+    assert_eq!(record["bases"], 3_000);
+    let fragment = serde_json::json!(["contig_1", 0, 3000, 5000, 8000, "+", "1500=1X1499="]);
+    assert_eq!(record["f"], serde_json::json!([fragment]));
+    let summary = json(&lines[1]);
+    let keys: Vec<&str> = summary
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
         .collect();
-    assert_eq!(confirmed.len(), 1);
-    let record = &confirmed[0];
-    assert_eq!(record["entry"], "plasmid_1");
-    assert_eq!(record["query"], "planted");
-    let decision = &record["decision"];
-    assert!(decision["query_coverage"].as_f64().unwrap() > 0.99);
-    assert!(decision["identity"].as_f64().unwrap() > 0.99);
-    let fragment = &decision["fragments"][0];
-    assert_eq!(fragment["contig"], "contig_1");
-    assert_eq!(fragment["contig_interval"]["start"], 5_000);
-    assert_eq!(fragment["contig_interval"]["end"], 8_000);
-    let summary = json(lines.last().unwrap());
-    assert_eq!(summary["kind"], "summary");
+    assert_eq!(keys, ["miss", "n", "q", "status", "t"]);
+    assert!(lines[1].starts_with(r#"{"q":"planted","status":"complete","n":["#));
+    assert_eq!(summary["q"], "planted");
     assert_eq!(summary["status"], "complete");
-    assert_eq!(summary["query_length"], 3_000);
+    assert_eq!(summary["n"][3], 1);
 }
 
 #[test]
@@ -155,17 +162,64 @@ fn sketch_level_possible() {
     let lines = search(&fixture, &["--level", "sketch"]);
     let records: Vec<_> = lines.iter().map(|line| json(line)).collect();
     let (summary, possible) = records.split_last().unwrap();
-    assert_eq!(summary["kind"], "summary");
-    assert!(possible.iter().all(|record| record["kind"] == "possible"));
+    assert_eq!(summary["status"], "complete");
+    assert!(possible.iter().all(|record| record["s"] == 1));
     // An unrelated entry is possible only by a false seed hit, so its estimate stays low.
-    let estimate = |record: &serde_json::Value| record["containment_estimate"].as_f64().unwrap();
+    let estimate = |record: &serde_json::Value| record["c"].as_f64().unwrap();
     for record in possible {
-        let planted = record["entry"] == "plasmid_1";
+        let planted = record["a"] == "plasmid_1";
         assert!(planted == (estimate(record) > 0.9), "{lines:?}");
     }
-    assert!(possible.iter().any(|record| record["entry"] == "plasmid_1"));
-    let without = summary["sketch"]["unseeded_entries"].as_u64().unwrap();
-    assert_eq!(without + possible.len() as u64, 3);
+    assert!(possible.iter().any(|record| record["a"] == "plasmid_1"));
+    assert_eq!(summary["n"][1], possible.len());
+    assert_eq!(summary["n"][2], 0);
+}
+
+#[test]
+fn locate_level_windows() {
+    let fixture = fixture();
+    let lines = search(&fixture, &["--level", "locate"]);
+    let records: Vec<_> = lines.iter().map(|line| json(line)).collect();
+    let planted = records.iter().find(|record| record["a"] == "plasmid_1");
+    let planted = planted.unwrap();
+    assert_eq!(planted["s"], 2);
+    assert!(planted["c"].as_f64().unwrap() > 0.9);
+    let windows = planted["w"].as_array().unwrap();
+    let covers = |window: &serde_json::Value| {
+        window[0] == "contig_1"
+            && window[1].as_u64().unwrap() <= 5_000
+            && window[2].as_u64().unwrap() >= 8_000
+    };
+    assert!(windows.iter().any(covers), "{lines:?}");
+    assert_eq!(records.last().unwrap()["status"], "complete");
+}
+
+/// The standard output holds only results; -v adds a progress line and -vv the debug lines,
+/// both on the standard error.
+#[test]
+fn verbose_on_stderr() {
+    let fixture = fixture();
+    let (quiet, nothing) = search_output(&fixture, &[]);
+    assert!(nothing.is_empty(), "{nothing}");
+    let (stdout, stderr) = search_output(&fixture, &["-v"]);
+    assert_eq!(stdout.lines().count(), quiet.lines().count());
+    let progress: Vec<&str> = stderr.lines().collect();
+    assert_eq!(progress.len(), 1, "{stderr}");
+    assert!(progress[0].starts_with("planted: complete; "), "{stderr}");
+    assert!(progress[0].contains(" 1 confirmed; sketch "), "{stderr}");
+    let (stdout, stderr) = search_output(&fixture, &["-vv"]);
+    assert!(stdout.lines().all(|line| json(line).get("kind").is_none()));
+    let (debug, progress): (Vec<&str>, Vec<&str>) =
+        stderr.lines().partition(|line| line.starts_with('{'));
+    assert_eq!(progress.len(), 1, "{stderr}");
+    let kinds: Vec<String> = debug
+        .iter()
+        .map(|line| json(line)["kind"].to_string())
+        .collect();
+    assert!(kinds.contains(&"\"possible\"".to_string()), "{stderr}");
+    assert!(kinds.contains(&"\"located\"".to_string()), "{stderr}");
+    assert!(!kinds.contains(&"\"confirmed\"".to_string()), "{stderr}");
+    assert_eq!(kinds.last().map(String::as_str), Some("\"summary\""));
 }
 
 #[test]
@@ -190,7 +244,7 @@ fn stats_and_errors() {
 }
 
 #[test]
-fn records_name_shards() {
+fn shards_share_summary() {
     let fixture = fixture();
     let other_input = fixture.directory.path().join("other.fa");
     write_fasta(&other_input, "other_contig", &random_bases(44, 20_000));
@@ -214,27 +268,9 @@ fn records_name_shards() {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     let records: Vec<_> = text.lines().map(json).collect();
-    assert!(records.iter().all(|record| record["shard"].is_string()));
-    let confirmed: Vec<_> = records
-        .iter()
-        .filter(|record| record["kind"] == "confirmed")
-        .collect();
-    assert_eq!(confirmed.len(), 1);
-    assert_eq!(confirmed[0]["shard"], "shard");
-    let summaries: Vec<_> = records
-        .iter()
-        .filter(|record| record["kind"] == "summary")
-        .map(|record| {
-            (
-                record["shard"].as_str().unwrap(),
-                record["status"].as_str().unwrap(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        summaries,
-        [("shard", "complete"), ("other_shard", "complete")]
-    );
+    assert_eq!(records.len(), 2, "{text}");
+    assert_eq!(records[0]["a"], "plasmid_1");
+    assert_eq!(records[1]["status"], "complete");
 }
 
 #[test]
@@ -249,7 +285,9 @@ fn incomplete_search_fails() {
     ]);
     assert!(!output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
-    assert_eq!(json(text.lines().last().unwrap())["reason"], "deadline");
+    let summary = json(text.lines().last().unwrap());
+    assert_eq!(summary["status"], "stopped");
+    assert_eq!(summary["reason"], "deadline");
     let message = String::from_utf8(output.stderr).unwrap();
     assert!(
         message.starts_with("jam: 1 searches did not complete"),
