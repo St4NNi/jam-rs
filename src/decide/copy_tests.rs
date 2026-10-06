@@ -242,3 +242,69 @@ fn random_entries() {
     }
     assert!(checked > 100, "{checked}");
 }
+
+#[test]
+fn split_copy_outranked() {
+    // A and B are adjacent on contig 0 at 0.95. C on contig 1 is better and takes part of A's
+    // bases first, so A adds 450 matches in 500 bases and all fragments together reach 0.94.
+    let rule = DecisionRule {
+        min_query_coverage: "2000bp".parse().unwrap(),
+        ..DecisionRule::default()
+    };
+    let a = fragment(0, &[(0, 1000)], "500=50X450=");
+    let b = fragment(0, &[(1000, 2000)], "500=50X450=");
+    let c = fragment(1, &[(0, 500)], "240=20X240=");
+    assert!(confirmed(&rule, 4000, vec![a.clone(), b.clone()], &[]));
+    let decision = rule
+        .decide(4000, vec![a, b, c], &[], || false, |_| 0)
+        .unwrap();
+    assert!(decision.qualifies);
+    assert_eq!(decision.mosaic.covered_bases, 2000);
+    assert!(
+        decision
+            .mosaic
+            .primary
+            .iter()
+            .all(|part| part.fragment.contig_index == 0)
+    );
+}
+
+#[test]
+fn contig_with_extras() {
+    let mut random = rng(47);
+    let length = 4000;
+    let rule = DecisionRule {
+        min_query_coverage: "1500bp".parse().unwrap(),
+        ..DecisionRule::default()
+    };
+    for round in 0..300 {
+        // One contig: 2 or 3 adjacent pieces, each at 0.95 or better, covering 1,500 or more.
+        let mut start = random.random_range(0..length - 3000);
+        let mut own = Vec::new();
+        for _ in 0..random.random_range(2..4) {
+            let columns = random.random_range(760..1000);
+            let count = columns / 20 - random.random_range(0..2);
+            let changes = match random.random_range(0..2) {
+                0 => random_changes(&mut random, columns, count),
+                _ => (columns - count..columns).collect(),
+            };
+            own.push(copy(0, start, columns, &changes));
+            start += columns;
+        }
+        assert!(confirmed(&rule, length, own.clone(), &[]), "own {round}");
+        let first = own[0].alignment.query_interval.start;
+        let mut all = own;
+        // A better fragment over the start of the copy, as in the case above.
+        let columns = random.random_range(300..700);
+        let spread = random_changes(&mut random, columns, columns / 25);
+        all.push(copy(9, first, columns, &spread));
+        for contig in 1..random.random_range(2..8) {
+            let columns = random.random_range(100..1500);
+            let from = random.random_range(0..length - columns);
+            let count = random.random_range(0..=columns / 25);
+            let changes = random_changes(&mut random, columns, count);
+            all.push(copy(contig, from, columns, &changes));
+        }
+        assert!(confirmed(&rule, length, all, &[]), "extras {round}");
+    }
+}
