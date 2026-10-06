@@ -55,7 +55,7 @@ struct Added {
     counts: EditCounts,
 }
 
-/// Builds the mosaic of `fragments` from the first of three selections (see the steps below) that
+/// Builds the mosaic of `fragments` from the first of four selections (see the steps below) that
 /// covers `required_bases` outside `low_complexity` at `min_identity`. Masked bases count toward
 /// no coverage, but toward identity as in the fragment limits. Fails when `stopped` returns true.
 pub(super) fn build_mosaic(
@@ -92,7 +92,8 @@ pub(super) fn build_mosaic(
         .for_each(|&piece| masked.insert(piece));
 
     // 1: all fragments, highest identity first, each over the bases it adds.
-    let (mut added, alternatives) = add_in_order(&prepared, &masked, stopped)?;
+    let all = 0..prepared.len();
+    let (mut added, alternatives) = add_in_order(&prepared, all, &masked, stopped)?;
     if !reaches(total_counts(&added), min_identity) {
         // 2: without the fragments whose added bases are below the limit.
         added.retain(|part| reaches(part.counts, min_identity));
@@ -101,16 +102,22 @@ pub(super) fn build_mosaic(
             .iter()
             .map(|part| Interval::total_length(&part.bases))
             .sum();
-        if bases < required_bases
-            && let Some(single) = best_single(&prepared, &masked, min_identity, stopped)?
-            && Interval::total_length(&single.bases) >= required_bases
-        {
-            return Ok(finish_mosaic(
-                query_length,
-                prepared,
-                vec![single],
-                Vec::new(),
-            ));
+        if bases < required_bases {
+            if let Some(single) = best_single(&prepared, &masked, min_identity, stopped)?
+                && Interval::total_length(&single.bases) >= required_bases
+            {
+                return Ok(finish_mosaic(
+                    query_length,
+                    prepared,
+                    vec![single],
+                    Vec::new(),
+                ));
+            }
+            // 4: the fragments of the one contig that covers the most bases at the limit.
+            let found = best_contig(&prepared, &masked, min_identity, required_bases, stopped)?;
+            if let Some((contig, rest)) = found {
+                return Ok(finish_mosaic(query_length, prepared, contig, rest));
+            }
         }
     }
     Ok(finish_mosaic(query_length, prepared, added, alternatives))
@@ -121,6 +128,7 @@ pub(super) fn build_mosaic(
 /// else it is an alternative.
 fn add_in_order(
     prepared: &[Prepared],
+    order: impl Iterator<Item = usize>,
     masked: &IntervalSet,
     stopped: &dyn Fn() -> bool,
 ) -> Result<(Vec<Added>, Vec<usize>), DecideError> {
@@ -130,7 +138,8 @@ fn add_in_order(
     let mut spanned = IntervalSet::default();
     let mut added = Vec::new();
     let mut alternatives = Vec::new();
-    for (index, item) in prepared.iter().enumerate() {
+    for index in order {
+        let item = &prepared[index];
         if stopped() {
             return Err(DecideError::Stopped);
         }
@@ -188,6 +197,50 @@ fn best_single(
                 bases,
                 counts,
             });
+        }
+    }
+    Ok(best)
+}
+
+/// The fragments of the one contig that alone cover the most bases outside `masked`, at least
+/// `required_bases`, at `min_identity`; the higher identity wins a tie. Each contig is tried as
+/// selections 1 and 2 try all fragments. Contigs with fewer paired bases than needed are skipped.
+fn best_contig(
+    prepared: &[Prepared],
+    masked: &IntervalSet,
+    min_identity: f64,
+    required_bases: u64,
+    stopped: &dyn Fn() -> bool,
+) -> Result<Option<(Vec<Added>, Vec<usize>)>, DecideError> {
+    let mut contigs: BTreeMap<u32, (u64, Vec<usize>)> = BTreeMap::new();
+    for (index, item) in prepared.iter().enumerate() {
+        let entry = contigs.entry(item.fragment.contig_index).or_default();
+        entry.0 += item.support_bases;
+        entry.1.push(index);
+    }
+    let mut best: Option<(Vec<Added>, Vec<usize>)> = None;
+    let mut best_key = (0, EditCounts::default());
+    for (span, order) in contigs.into_values() {
+        if span < required_bases {
+            continue;
+        }
+        let (mut added, alternatives) = add_in_order(prepared, order.into_iter(), masked, stopped)?;
+        if !reaches(total_counts(&added), min_identity) {
+            added.retain(|part| reaches(part.counts, min_identity));
+        }
+        let counts = total_counts(&added);
+        let bases: u64 = added.iter().map(|p| Interval::total_length(&p.bases)).sum();
+        if bases < required_bases || !reaches(counts, min_identity) {
+            continue;
+        }
+        let better = best.is_none()
+            || bases > best_key.0
+            || (bases == best_key.0
+                && u128::from(counts.matches) * u128::from(best_key.1.columns())
+                    > u128::from(best_key.1.matches) * u128::from(counts.columns()));
+        if better {
+            best_key = (bases, counts);
+            best = Some((added, alternatives));
         }
     }
     Ok(best)
