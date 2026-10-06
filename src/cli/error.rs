@@ -57,10 +57,10 @@ pub enum CliError {
     /// The output cannot be written.
     #[error("cannot write the output: {0}")]
     Output(#[from] std::io::Error),
-    /// Searches ended before every possible entry was decided: a deadline passed, a stage
+    /// Queries ended before every possible entry was decided: a deadline passed, a stage
     /// failed, or a resource limit dropped an entry. PAF output then lacks those entries.
     #[error(
-        "{0} searches did not complete (deadline, failure or resource limit); \
+        "{0} queries did not complete (deadline, failure or resource limit); \
          the JSON summary lines tell which"
     )]
     Incomplete(usize),

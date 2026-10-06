@@ -330,7 +330,7 @@ fn incomplete_search_fails() {
     assert_eq!(summary["reason"], "deadline");
     let message = String::from_utf8(output.stderr).unwrap();
     assert!(
-        message.starts_with("jam: 1 searches did not complete"),
+        message.starts_with("jam: 1 queries did not complete"),
         "{message}"
     );
 }
