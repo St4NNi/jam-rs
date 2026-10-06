@@ -411,97 +411,110 @@ JSON keys may change between versions.
 ## The decision rule
 
 An assembly is reported when its alignments cover enough of the query at a high enough
-identity (`-c` and `-i`).
+sequence identity (`-c` and `-i`).
 
-Only the stretches of an alignment that reach `--stretch-identity` and are at least
-`--stretch-length` columns long count toward coverage. A poor stretch inside a fragment adds
-nothing. Fragments are chosen so that no query base is counted twice.
+Within an alignment, only local stretches that reach `--stretch-identity` and span at least
+`--stretch-length` alignment columns count toward query coverage. A low-identity stretch inside
+a fragment adds nothing. When multiple fragments align, jam chooses fragments so that no query
+base is counted twice.
 
-The contig rule is off by default. It keeps out contigs that only share a gene or a repeat with
-the query: with `--contig-coverage`, a contig counts only if the alignments cover at least that
-share of the contig itself, and with `--contig-identity`, only if they reach that identity.
+The contig filters are off by default. They exclude contigs that share only a short gene or a
+repeat with the query: with `--contig-coverage`, a contig counts only if alignments cover at
+least that share of the contig itself, and with `--contig-identity`, only if the alignments on
+that contig reach at least that identity.
 
-Low-complexity stretches of the query (repeats of a few bases, as found by DUST masking) count
-toward no coverage. A query that is mostly low-complexity cannot reach the required coverage
-with its other bases. It gets no answer, rather than false hits.
+Low-complexity stretches of the query (short repeats identified by DUST masking) do not count
+toward coverage. A query that consists mostly of low-complexity sequence cannot reach the
+required coverage with its remaining bases. In that case, jam reports no hits rather than
+returning false positives.
 
 ## The miss chance
 
-jam never aligns every assembly. It may miss an assembly that qualifies in two ways:
+jam does not align the query against every assembly. It can miss a qualifying assembly in two
+ways:
 
-1. **Seeds.** The copy in the assembly may have no seed in common with the query, because
-   every seed in it carries a substitution. Then stage 1 never sees it.
-2. **Pruning.** Between the stages, jam drops assemblies whose seed hits leave too much of the
-   query uncovered. A long stretch without seed hits may still hold the query, with bad luck.
+1. **Seeds.** The matching copy in the assembly may share no seeds with the query if every seed
+   in the copy contains a substitution. When this happens, stage 1 never sees the assembly.
+2. **Pruning.** Between stages, jam drops assemblies whose seed hits leave too much of the
+   query uncovered. By chance, substitutions may eliminate all seed hits across a long region
+   that still contains a valid match.
 
-`--max-miss` (default 0.0001) is the largest accepted total chance of both. jam computes a
-proven upper bound U for the first part: the chance that a copy of the required length shows
-no seed hit. The rest, `--max-miss` minus U, goes to the pruning. jam picks the shortest
-allowance for seedless stretches that keeps the pruning within that rest. When U alone reaches
-`--max-miss` (a short query, or a low `--identity`), jam turns the pruning off for that query
-and reports `"prune":false`. The summary key `miss` holds the total for the query.
+`--max-miss` (default 0.0001) sets the maximum allowed combined probability of both events. jam
+first computes a proven upper bound U for the first event: the probability that a qualifying
+copy of the required length produces no seed hits at all. The remaining budget, `--max-miss`
+minus U, goes to pruning. jam picks the tightest allowance for unseeded stretches that keeps
+the pruning miss probability within that remaining budget. When U alone reaches `--max-miss`
+(for example, with a short query or a low `--identity`), jam turns pruning off for that query
+and reports `"prune":false`. The summary key `miss` reports the total miss probability for the
+query.
 
-The bound holds under these assumptions:
+This upper bound holds under two assumptions:
 
-- the qualifying copy is one continuous piece of at least the required length, without
+- the qualifying copy is one continuous segment of at least the required length, with no
   insertions or deletions;
-- its substitutions fall at random places, independently of each other.
+- substitutions occur independently at random positions.
 
-Repeats, indels or clustered changes can miss more often. Under these assumptions, jam checks
-blocks of w + k - 1 bases, each of which holds a whole minimizer window and so at least one
-seed. It evaluates the bound at an identity slightly below `--identity`, so that it covers any
-copy that qualifies.
+Repeats, indels, or clustered mutations can cause higher miss rates. Under these assumptions,
+the bound uses non-overlapping blocks of w + k - 1 bases. Each block spans a complete minimizer
+window and therefore contains at least one seed. jam evaluates the bound at a sequence identity
+slightly below `--identity` so that the bound covers any copy that qualifies.
 
-`--seed-mismatches auto` uses the same bound. It takes 1 for a query when U with exact seeds
-is above `--max-miss`, one mismatch lowers it, and the extra work stays within about 10 CPU
-seconds (estimated as 1 ms per query k-mer). It takes 2 instead when also the identity is below
-0.9, the query has at most 1,800 k-mers, U with one mismatch is still above `--max-miss`, and
-two mismatches lower it.
+`--seed-mismatches auto` uses the same bound. It selects 1 mismatch for a query when U with
+exact seeds exceeds `--max-miss`, allowing one mismatch lowers U, and the extra lookup work
+stays within about 10 CPU seconds (estimated at 1 ms per query k-mer). It selects 2 mismatches
+instead when the required identity is below 0.9, the query has at most 1,800 k-mers, U with one
+mismatch still exceeds `--max-miss`, and allowing two mismatches lowers U.
 
 ## Index files
 
-An index is one or more shards. A shard is two kinds of file:
+An index consists of one or more shards. Each shard consists of two kinds of files:
 
-- `NAME.jam`, the index file: the seeds of all entries, then the manifest. The sketch part of the
-  seeds answers stage 1, the locator part stage 2. The manifest holds the parameters, the
-  entries, and the size and SHA-256 digest of each sequence file.
-- `NAME.jamseq`, the sequence file: the sequences of all entries, 2 bits per base, one entry
-  after another. Stage 3 reads them. The index file finds it next to itself. With `--chunks N`
-  there are several, `NAME.1.jamseq` to `NAME.N.jamseq`.
+- `NAME.jam`, the index file: stores the seeds of all entries, followed by the manifest. The
+  sketch section of the seeds answers stage 1, and the locator section answers stage 2. The
+  manifest stores the index parameters, the entry list, and the byte size and SHA-256 digest of
+  each sequence file.
+- `NAME.jamseq`, the sequence file: stores the sequences of all entries, packed at 2 bits per
+  base, one entry after another. Stage 3 reads this file from the same directory as the index
+  file. With `--chunks N`, the sequences are split into several files named `NAME.1.jamseq`
+  through `NAME.N.jamseq`.
 
 ## S3 and local caches
 
-An index can lie on S3. Copy it there with `jam index copy`:
+An index can be stored on S3. Upload it with `jam index copy`:
 
     jam index copy assemblies.jam s3://bucket/indexes --cache /scratch/cache
 
-This uploads the sequence files first and the index file last, each in parts that go up at
-once, so a reader never sees an index without its sequence files. `jam index copy` works the
-other way too, and between two places of the same kind; a download is checked against the sizes
-and digests in the index file. Any other S3 tool works as well, as long as the files keep their
-names.
+This uploads the sequence files first and the index file last, transferring each file in
+parallel parts so that a reader never sees an index file before its sequence files are in
+place. `jam index copy` also downloads from S3 to a local path, or copies between two locations
+of the same kind. Downloads are verified against the file sizes and SHA-256 digests stored in
+the index manifest. You can also copy the files with any other S3 tool, as long as the file
+names stay the same.
 
-Then give `s3://bucket/prefix/NAME.jam` instead of a local index file to `jam search`, `jam
-screen`, `jam serve`, `jam stats` and `jam index warm`. Credentials come from the usual `AWS_*`
-environment variables, and the endpoint from `AWS_ENDPOINT_URL`. jam never sends HEAD requests:
-it reads the size of the index file from its header, and the sizes of the sequence files from
-its manifest.
+Once uploaded, pass `s3://bucket/prefix/NAME.jam` instead of a local index file to `jam search`, `jam
+screen`, `jam serve`, `jam stats`, and `jam index warm`. jam reads credentials from the
+standard `AWS_*` environment variables and reads a custom endpoint from `AWS_ENDPOINT_URL`. It
+never sends S3 HEAD requests: it reads the size of the index file from the file header and the
+sizes of the sequence files from the manifest.
 
-jam learns the ETag of each file from its first read and sends it as `If-Match` with every later
-read. Cached blocks and pins belong to one ETag. With `--cache`, the ETags are kept in the cache
-directory, and the first use of each file in a run checks it with one byte. `jam index copy
---cache` keeps the ETags of the files it uploads there too. If a file was uploaded again, the
-search ends with `the index changed in S3 while it was read; retry`. Run it again, and it reads
-the new files. `jam serve` opens the index again by itself. A pin made for the old file is
-removed; run `jam index warm` again to pin the new file.
+On its first read of each S3 file, jam records the file's ETag and sends that ETag as
+`If-Match` on every subsequent read. Cached blocks and pinned data are tied to a specific ETag.
+When `--cache` is used, jam saves the ETags in the cache directory, and the first read of each
+file in a run verifies the ETag with a 1-byte request. `jam index copy
+--cache` also saves the ETags of the files it uploads in the cache directory. If a file on S3
+is replaced while it is being used, the search stops with the error
+`the index changed in S3 while it was read; retry`. Run the command again to read the new
+files. `jam serve` reopens the updated index automatically. Pinned data from the old version is
+removed; run `jam index warm` again to pin the updated file.
 
-Reading from S3 is slow for the first requests. Two caches help:
+Reading directly from S3 is slow on the first requests. Two local caches speed this up:
 
-- **Pins.** `jam index warm` copies byte ranges of the index file and the sequence files into a
-  local cache directory. A search or a server reads them from there, from RAM or from local
-  disk. Pins are never evicted.
-- **Block cache.** Everything not pinned is read in blocks. The blocks stay in RAM, and on local
-  disk when you give a disk budget. They are kept across runs, so a second search is faster.
+- **Pins.** `jam index warm` copies selected byte ranges of the index file and sequence files
+  into a local cache directory. Searches and servers read those ranges from RAM or local disk.
+  Pinned data is never evicted.
+- **Block cache.** Any data that is not pinned is read in blocks. Those blocks stay in RAM, and
+  also on local disk when a disk budget is given. Disk blocks are kept across runs, making
+  subsequent searches faster.
 
 Example:
 
@@ -510,59 +523,61 @@ Example:
     jam search s3://bucket/indexes/assemblies.jam plasmid.fa --cache /scratch/cache \
         --memory 16GiB --disk 200GiB
 
-By default `jam index warm` pins the sketch part, then the locator part, while the disk budget
-lasts. Choose parts yourself with `--pin`, for example `--pin sketch,locators,packed` or
-`--pin sketch,packed=NAME1,NAME2`.
+By default, `jam index warm` pins the sketch section first and then the locator section, up to
+the disk budget. Use `--pin` to choose which sections to pin, for example
+`--pin sketch,locators,packed` or `--pin sketch,packed=NAME1,NAME2`.
 
 ## Screening assemblies
 
-`jam screen` looks for many small sequences in large assemblies. Build the index with one entry
-per record, then stream the assemblies past it:
+`jam screen` searches for many small sequences across large assemblies. Build an index with one
+entry per FASTA record, then stream the assemblies against it:
 
     jam index build --singleton -o plasmids plasmids.fa
     jam screen plasmids.jam --assemblies assemblies.txt -c 0.8 -o screen.jsonl
 
-It writes JSON lines. The key `type` names the line:
+The command writes JSON lines, where the `type` key identifies the line kind:
 
-- `entry`: a small sequence (`entry`) found in an assembly (`assembly`). The line holds its
-  length (`entry_length`), the covered bases and their share (`covered_bases`,
-  `query_coverage`), the identity and the base counts, the assembly contigs it lies on
-  (`contigs`, each with its name, length, aligned bases, identity, `score`, `best_score` and the
-  number of entries it counts for), the fragments (`primary`, `alternatives`) and the uncovered
-  stretches (`gaps`).
-- `assembly`: the summary of one assembly: its contigs and bases, the work counts and the
-  seconds of the survey and the alignments.
-- `failed`: an assembly that could not be read, with the `error`. The other assemblies go on,
-  and jam exits with an error at the end.
+- `entry`: reports a small sequence (`entry`) found in an assembly (`assembly`). The line
+  gives the sequence length (`entry_length`), the covered bases and their share
+  (`covered_bases`, `query_coverage`), the sequence identity, and the alignment base counts. It
+  also lists the assembly contigs that the sequence aligns to (`contigs`), where each contig
+  item includes its name, length, aligned bases, identity, `score`, `best_score`, and the
+  number of entries it counts toward. Finally, it lists the aligned fragments (`primary`,
+  `alternatives`) and the uncovered query intervals (`gaps`).
+- `assembly`: summary for one screened assembly, including its contig and base counts, work
+  counts, and the time in seconds spent in the survey and alignment stages.
+- `failed`: reports an assembly that could not be read, along with the `error` message.
+  Screening continues with the remaining assemblies, and jam exits with an error at the end.
 
 ## Server
 
-`jam serve` keeps an index open and answers searches from other machines. The machines connect
-over [iroh](https://www.iroh.computer), with a secret key file for each server:
+`jam serve` keeps an index open and answers searches from other machines. Clients connect over
+[iroh](https://www.iroh.computer), using a secret key file for each server:
 
     jam serve assemblies.jam --key server.key
 
-The key file is created on first start. Its public key is the node id. `jam serve` prints the
-address as `NODE_ID@ADDRESS`. Search on the server with:
+If the key file does not exist, jam creates it on first start. Its public key is the server's
+node ID. `jam serve` prints its address as `NODE_ID@ADDRESS`. Search against the server with:
 
     jam search --server NODE_ID@ADDRESS plasmid.fa
 
-The decision options work as for a local search, and the output is the same.
+All decision options work the same way as in a local search, and the output is identical.
 
-With `--peer`, the server is a coordinator. Every search also runs on each peer, and the
-coordinator merges the results. This spreads a large index over several machines, one shard
-each.
+With `--peer`, the server also acts as a coordinator. Every search runs on the coordinator and
+on each peer, and the coordinator merges the results. This lets you spread a large index across
+several machines, with one shard per machine.
 
 ## Speed and size
 
-These numbers are from one test on 2026-10-22, one run per case, so treat them as rough. The
-collection had 1,000 SPIRE assemblies (241.8 Gbp). Searches ran with 8 threads and a cold file
-cache.
+These numbers come from a single test on 2026-10-22, with one run per case, so treat them as
+rough estimates. The collection held 1,000 SPIRE assemblies (241.8 Gbp). Searches ran with 8
+threads and a cold file cache.
 
-- Building the index took about 10 minutes with 32 threads. The index was 108 GB (68 GB packed
-  sequences, 28 GB locators, 12 GB sketch), measured with an earlier layout of the same data.
-- On local NVMe, queries of 1 kb to 10 kb finished in about 1 to 10 seconds. A query of 2 Mb
-  with no hit took about 40 seconds.
+- Building the index took about 10 minutes with 32 threads. The index totaled 108 GB (68 GB
+  packed sequences, 28 GB locators, and 12 GB sketch), measured on an earlier layout of the
+  same data.
+- On local NVMe storage, queries of 1 kb to 10 kb finished in about 1 to 10 seconds. A 2 Mb
+  query with no hits took about 40 seconds.
 - On network storage (Ceph), the same searches took about 30 seconds to 3 minutes.
 
 ## License
