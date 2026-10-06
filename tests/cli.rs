@@ -397,3 +397,47 @@ fn screen_finds_copy() {
     assert_eq!(failed.len(), 1, "{stdout}");
     assert_eq!(failed[0]["assembly"], "missing.fa");
 }
+
+/// Every option that `--help` of a command shows is described in the README.
+#[test]
+fn readme_lists_options() {
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"));
+    let readme = readme.unwrap();
+    let commands: [&[&str]; 8] = [
+        &["index", "build"],
+        &["index", "reshard"],
+        &["index", "warm"],
+        &["index", "copy"],
+        &["stats"],
+        &["search"],
+        &["serve"],
+        &["screen"],
+    ];
+    let mut missing = Vec::new();
+    for command in commands {
+        assert!(readme.contains(&format!("### jam {}", command.join(" "))));
+        let mut arguments: Vec<&std::ffi::OsStr> = command.iter().map(|w| w.as_ref()).collect();
+        arguments.push("--help".as_ref());
+        let help = String::from_utf8(jam(&arguments).stdout).unwrap();
+        let options = help
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with('-'))
+            .flat_map(|line| line.split([' ', ',']))
+            .filter(|word| word.starts_with("--") && *word != "--help");
+        for option in options.map(|word| word.trim_end_matches('.')) {
+            if !mentions(&readme, option) {
+                missing.push(format!("jam {} {option}", command.join(" ")));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "not in the README: {missing:?}");
+}
+
+/// Whether `text` names `option` as a whole word, so `--k` does not match `--key`.
+fn mentions(text: &str, option: &str) -> bool {
+    text.match_indices(option).any(|(at, _)| {
+        let next = text[at + option.len()..].chars().next();
+        !next.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
+}

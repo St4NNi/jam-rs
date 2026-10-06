@@ -79,6 +79,88 @@ This pruning is safe up to a small modeled chance, see [The miss chance](#the-mi
 | `jam serve` | Serve an index over the network for `jam search --server`. |
 | `jam screen` | Stream large assemblies past an index of small sequences. |
 
+### jam index build
+
+    jam index build -o NAME [OPTIONS] FASTA...
+
+Builds the index file `NAME.jam` and the sequence file `NAME.jamseq`. Neither may exist yet.
+
+Normal options:
+
+- `-o, --output NAME`: the index to create.
+- `-l, --list FILE`: a file with one FASTA path per line, added to the paths.
+- `--singleton`: make each FASTA record an entry, instead of each file.
+- `-t, --threads N` (default: all cores): threads to use.
+
+Advanced options:
+
+- `-k, --k K` (default 25): bases per k-mer, 1 to 32.
+- `-w, --window W` (default 100): k-mers per minimizer window.
+- `--sketch-only`: write only the index file with the sketch part. Such an index answers
+  `--level sketch` only, but it is much smaller.
+- `--chunks N` (default 1): split the sequence file into `NAME.1.jamseq` to `NAME.N.jamseq` of
+  about equal size, for example for object size limits or parallel copies. Each entry lies in
+  one chunk.
+- `--temp-dir DIR` (default: the directory of the output): where temporary files go.
+
+### jam index reshard
+
+    jam index reshard -o DIR (--shards N | --max-seed-locations N) [OPTIONS] INDEX...
+
+Merges and splits index files into a new index directory `DIR` with the index files
+`shard-0000.jam` and so on. The shards are balanced by seed locations. The inputs are index
+files or index directories of earlier reshards. Entries keep the order of the inputs.
+
+- `-o, --output DIR`: the index directory to create. It must not exist yet.
+- `--shards N`: the number of output shards.
+- `--max-seed-locations N`: the most seed locations per output shard, which bounds the size of
+  each index file. Give this or `--shards`.
+- `--copy-sequences`: write a sequence file for each output shard. Without it, the new index
+  files point into the sequence files of their inputs, so nothing is copied.
+- `-t, --threads N` (default: all cores): threads to use.
+- `--temp-dir DIR` (default: the directory of the output): where temporary files go.
+
+Example:
+
+    jam index reshard -o all --shards 4 part1.jam part2.jam
+
+`jam search` takes several index files before the query file.
+
+### jam index warm
+
+    jam index warm INDEX --cache DIR --memory SIZE --disk SIZE [--pin PARTS]
+
+Copies byte ranges of an index on S3 into a local cache directory, so later searches read them
+from RAM or local disk. See [S3 and local caches](#s3-and-local-caches).
+
+- `--cache DIR`: the cache directory to fill. `jam search` and `jam serve` read the pins from
+  there.
+- `--memory SIZE`: RAM for pins and the block cache, for example `16GiB`.
+- `--disk SIZE`: disk for pins and the block cache, for example `200GiB`.
+- `--pin PARTS`: the parts to pin instead of the default plan, as a comma list of `sketch`,
+  `locators`, `packed`, or `packed=NAME,NAME` for the sequences of some entries. Every item after
+  `packed=` is an entry name, so it comes last. The flag may repeat.
+
+### jam index copy
+
+    jam index copy SOURCE TARGET [--cache DIR]
+
+Copies an index file and its sequence files. Either side may be a local path or
+`s3://bucket/prefix`. `SOURCE` is the index file `NAME.jam`. `TARGET` is a directory or
+`s3://bucket/prefix`, or the new index file `NAME.jam` there.
+
+- `--cache DIR`: a cache directory that keeps the ETag of every uploaded file. Searches with
+  this cache are then bound to the uploaded version from their first read.
+
+### jam stats
+
+    jam stats INDEX [--json]
+
+Shows the parameters and the counts of an index file: entries, contigs, bases, seeds, seed
+locations and the bytes of each part.
+
+- `--json`: print JSON instead of a short table.
+
 ### jam search
 
     jam search [OPTIONS] INDEX... QUERY
@@ -129,6 +211,51 @@ Advanced options:
 Example:
 
     jam search assemblies.jam plasmid.fa -c 0.8 -i 0.9 --format paf -o hits.paf
+
+### jam serve
+
+    jam serve INDEX --key FILE [OPTIONS]
+
+Keeps an index open and answers searches from other machines, see [Server](#server).
+
+- `--key FILE`: the secret key file. Its public key is the node id. It is created on first
+  start.
+- `--bind ADDRESS` (default `0.0.0.0:4100`): a UDP address to listen on. Repeat it to add an
+  IPv6 address.
+- `--peer NODE_ID@ADDRESS`: a peer server. Every search also runs there. Repeat it for more
+  peers.
+- `--searches N` (default 4): searches that run at once.
+- `--queue N` (default 32): searches that wait for a place. More are refused as busy.
+- `-t, --threads N` (default: all cores): threads of each search.
+- `--cache DIR`, `--memory SIZE`, `--disk SIZE`: as for `jam search`.
+
+### jam screen
+
+    jam screen INDEX --assemblies LIST [OPTIONS]
+
+Works the other way round: the index holds many small sequences (plasmids, genes), and large
+assemblies stream past it once. See [Screening assemblies](#screening-assemblies).
+
+Normal options:
+
+- `--assemblies LIST`: a file with one assembly path per line (plain or gzip FASTA). The file
+  name names the assembly.
+- `-c, --coverage C` and `-i, --identity I`: as for `jam search`, for each small sequence.
+- `-t, --threads N` (default: all cores): each thread screens one assembly at a time.
+- `-o, --output FILE`: write to this file instead of the standard output.
+
+Advanced options:
+
+- `--stretch-identity`, `--stretch-length`, `--contig-coverage`, `--contig-identity`: as for
+  `jam search`.
+- `--closest-margin M` (0 to 1): a contig counts only for the entries within this margin of its
+  best one. The score of an entry for a contig is the aligned share of the contig times the
+  identity. Without it, a contig counts for every entry it qualifies for.
+- `--batch-bases N` (default 500000): bases of contigs searched together.
+- `--contig-dir DIR`: write the contigs that share enough with an entry to this folder, one gzip
+  FASTA per assembly.
+- `--survey-only`: stop after the survey. Nothing is aligned and no entries are reported. Only
+  `--contig-dir` is written.
 
 ## Output
 
