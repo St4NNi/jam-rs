@@ -281,9 +281,9 @@ impl<'a> Searcher<'a> {
             miss_over_budget,
             ..SketchWork::default()
         };
-        // As BLAST's DUST masking, low-complexity bases count toward no coverage, so a query whose
-        // other bases cannot reach the required coverage has no answer, and nothing is looked up.
-        if length - low_complexity < rule.min_query_coverage.required_bases(length) {
+        // Half of the required coverage must be normal bases, so a query with fewer normal bases
+        // has no answer, and nothing is looked up.
+        if length - low_complexity < rule.min_query_coverage.required_normal_bases(length) {
             return summary;
         }
         let start = PartStart::now();

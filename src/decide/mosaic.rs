@@ -56,14 +56,15 @@ struct Added {
 }
 
 /// Builds the mosaic of `fragments` from the first of four selections (see the steps below) that
-/// covers `required_bases` outside `low_complexity` at `min_identity`. Masked bases count toward
-/// no coverage, but toward identity as in the fragment limits. Fails when `stopped` returns true.
+/// covers `required_bases` at `min_identity`, `normal_bases` of them outside `low_complexity`.
+/// Masked bases count toward coverage and identity. Fails when `stopped` returns true.
 pub(super) fn build_mosaic(
     query_length: u64,
     fragments: Vec<Fragment>,
     low_complexity: &[Interval],
     min_identity: f64,
     required_bases: u64,
+    normal_bases: u64,
     stopped: &dyn Fn() -> bool,
 ) -> Result<Mosaic, DecideError> {
     if query_length == 0 {
@@ -93,18 +94,20 @@ pub(super) fn build_mosaic(
 
     // 1: all fragments, highest identity first, each over the bases it adds.
     let all = 0..prepared.len();
-    let (mut added, alternatives) = add_in_order(&prepared, all, &masked, stopped)?;
+    let (mut added, alternatives) = add_in_order(&prepared, all, stopped)?;
     if !reaches(total_counts(&added), min_identity) {
         // 2: without the fragments whose added bases are below the limit.
         added.retain(|part| reaches(part.counts, min_identity));
         // 3: the one fragment that covers the most bases at the limit alone.
-        let bases: u64 = added
-            .iter()
-            .map(|part| Interval::total_length(&part.bases))
-            .sum();
-        if bases < required_bases {
-            if let Some(single) = best_single(&prepared, &masked, min_identity, stopped)?
-                && Interval::total_length(&single.bases) >= required_bases
+        let enough = |added: &[Added]| {
+            let bases = added.iter().map(|part| part.bases.as_slice());
+            let (all, normal) = base_totals(bases, &masked);
+            all >= required_bases && normal >= normal_bases
+        };
+        if !enough(&added) {
+            let found = best_single(&prepared, &masked, min_identity, normal_bases, stopped)?;
+            if let Some(single) = found
+                && enough(std::slice::from_ref(&single))
             {
                 return Ok(finish_mosaic(
                     query_length,
@@ -114,7 +117,7 @@ pub(super) fn build_mosaic(
                 ));
             }
             // 4: the fragments of the one contig that covers the most bases at the limit.
-            let found = best_contig(&prepared, &masked, min_identity, required_bases, stopped)?;
+            let found = best_contig(&prepared, min_identity, required_bases, &enough, stopped)?;
             if let Some((contig, rest)) = found {
                 return Ok(finish_mosaic(query_length, prepared, contig, rest));
             }
@@ -123,17 +126,14 @@ pub(super) fn build_mosaic(
     Ok(finish_mosaic(query_length, prepared, added, alternatives))
 }
 
-/// Adds the fragments in order: one is primary when it covers a query base outside `masked`
-/// that no earlier one covers, and counts over the bases no earlier one spans (masked ones too);
-/// else it is an alternative.
+/// Adds the fragments in order: one is primary when it covers a query base that no earlier one
+/// covers, and counts over the bases no earlier one spans; else it is an alternative.
 fn add_in_order(
     prepared: &[Prepared],
     order: impl Iterator<Item = usize>,
-    masked: &IntervalSet,
     stopped: &dyn Fn() -> bool,
 ) -> Result<(Vec<Added>, Vec<usize>), DecideError> {
-    // Masked bases start as taken, so no fragment adds them to the coverage.
-    let mut covered = IntervalSet(masked.0.clone());
+    let mut covered = IntervalSet::default();
     // The query bases that earlier primary fragments span, insertions too, for the counts.
     let mut spanned = IntervalSet::default();
     let mut added = Vec::new();
@@ -166,12 +166,13 @@ fn add_in_order(
     Ok((added, alternatives))
 }
 
-/// The fragment that alone covers the most query bases outside `masked` with identity at least
-/// `min_identity`; the first in order on ties.
+/// The fragment that alone covers the most query bases with identity at least `min_identity`,
+/// among those with `normal_bases` outside `masked`; the first in order on ties.
 fn best_single(
     prepared: &[Prepared],
     masked: &IntervalSet,
     min_identity: f64,
+    normal_bases: u64,
     stopped: &dyn Fn() -> bool,
 ) -> Result<Option<Added>, DecideError> {
     let mut best: Option<Added> = None;
@@ -183,14 +184,12 @@ fn best_single(
         if !reaches(counts, min_identity) {
             continue;
         }
-        let mut bases = Vec::new();
-        for &piece in &item.support {
-            masked.outside(piece, &mut bases);
-        }
-        let length = Interval::total_length(&bases);
-        if best
-            .as_ref()
-            .is_none_or(|old| length > Interval::total_length(&old.bases))
+        let bases = item.support.clone();
+        let (length, normal) = base_totals([bases.as_slice()], masked);
+        if normal >= normal_bases
+            && best
+                .as_ref()
+                .is_none_or(|old| length > Interval::total_length(&old.bases))
         {
             best = Some(Added {
                 index,
@@ -202,14 +201,14 @@ fn best_single(
     Ok(best)
 }
 
-/// The fragments of the one contig that alone cover the most bases outside `masked`, at least
-/// `required_bases`, at `min_identity`; the higher identity wins a tie. Each contig is tried as
+/// The fragments of the one contig that alone cover the most bases, enough by `enough`, at
+/// `min_identity`; the higher identity wins a tie. Each contig is tried as
 /// selections 1 and 2 try all fragments. Contigs with fewer paired bases than needed are skipped.
 fn best_contig(
     prepared: &[Prepared],
-    masked: &IntervalSet,
     min_identity: f64,
     required_bases: u64,
+    enough: &dyn Fn(&[Added]) -> bool,
     stopped: &dyn Fn() -> bool,
 ) -> Result<Option<(Vec<Added>, Vec<usize>)>, DecideError> {
     let mut contigs: BTreeMap<u32, (u64, Vec<usize>)> = BTreeMap::new();
@@ -224,13 +223,13 @@ fn best_contig(
         if span < required_bases {
             continue;
         }
-        let (mut added, alternatives) = add_in_order(prepared, order.into_iter(), masked, stopped)?;
+        let (mut added, alternatives) = add_in_order(prepared, order.into_iter(), stopped)?;
         if !reaches(total_counts(&added), min_identity) {
             added.retain(|part| reaches(part.counts, min_identity));
         }
         let counts = total_counts(&added);
         let bases: u64 = added.iter().map(|p| Interval::total_length(&p.bases)).sum();
-        if bases < required_bases || !reaches(counts, min_identity) {
+        if !enough(&added) || !reaches(counts, min_identity) {
             continue;
         }
         let better = best.is_none()
@@ -244,6 +243,30 @@ fn best_contig(
         }
     }
     Ok(best)
+}
+
+/// The number of bases in `pieces`, and of those outside `masked`.
+fn base_totals<'a>(
+    pieces: impl IntoIterator<Item = &'a [Interval]>,
+    masked: &IntervalSet,
+) -> (u64, u64) {
+    let (mut all, mut normal) = (0, 0);
+    for piece in pieces.into_iter().flatten() {
+        let mut outside = Vec::new();
+        masked.outside(*piece, &mut outside);
+        all += piece.end - piece.start;
+        normal += Interval::total_length(&outside);
+    }
+    (all, normal)
+}
+
+/// The query bases of `covered` outside `low_complexity`.
+pub(super) fn normal_covered(covered: &[Interval], low_complexity: &[Interval]) -> u64 {
+    let mut masked = IntervalSet::default();
+    low_complexity
+        .iter()
+        .for_each(|&piece| masked.insert(piece));
+    base_totals([covered], &masked).1
 }
 
 /// The summed counts of `added`.
@@ -535,6 +558,7 @@ mod tests {
             &[],
             0.0,
             1,
+            1,
             &|| false,
         )
         .unwrap();
@@ -550,6 +574,7 @@ mod tests {
             &[],
             0.0,
             1,
+            1,
             &|| false,
         )
         .unwrap();
@@ -564,7 +589,7 @@ mod tests {
             equal_fragment(1, 8, 4, 10),
             equal_fragment(0, 10, 0, 6),
         ];
-        let mosaic = build_mosaic(10, input.to_vec(), &[], 0.0, 1, &|| false).unwrap();
+        let mosaic = build_mosaic(10, input.to_vec(), &[], 0.0, 1, 1, &|| false).unwrap();
         assert_eq!(mosaic.covered_bases, 10);
         assert_eq!(mosaic.primary.len(), 2);
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
@@ -573,7 +598,7 @@ mod tests {
         let mut reversed = input.to_vec();
         reversed.reverse();
         assert_eq!(
-            build_mosaic(10, reversed.to_vec(), &[], 0.0, 1, &|| false).unwrap(),
+            build_mosaic(10, reversed.to_vec(), &[], 0.0, 1, 1, &|| false).unwrap(),
             mosaic
         );
     }
@@ -583,16 +608,17 @@ mod tests {
         let conserved = scored(0, 100, &[(0, 1000)], "1000=");
         let diverged = scored(1, 200, &[(0, 1000)], "900=100X");
         let input = [diverged, conserved.clone()];
-        let mosaic = build_mosaic(1000, input.to_vec(), &[], 0.95, 1, &|| false).unwrap();
+        let mosaic = build_mosaic(1000, input.to_vec(), &[], 0.95, 1, 1, &|| false).unwrap();
         assert_eq!(mosaic.primary.len(), 1);
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
         assert_eq!(mosaic.alternatives[0].contig_index, 1);
         // Without a limit the higher identity still comes first.
-        let mosaic = build_mosaic(1000, input.to_vec(), &[], 0.0, 1, &|| false).unwrap();
+        let mosaic = build_mosaic(1000, input.to_vec(), &[], 0.0, 1, 1, &|| false).unwrap();
         assert_eq!(mosaic.primary[0].fragment.contig_index, 0);
         // At equal identity the higher score wins.
         let longer = scored(2, 300, &[(0, 1000)], "1000=");
-        let mosaic = build_mosaic(1000, vec![conserved, longer], &[], 0.0, 1, &|| false).unwrap();
+        let mosaic =
+            build_mosaic(1000, vec![conserved, longer], &[], 0.0, 1, 1, &|| false).unwrap();
         assert_eq!(mosaic.primary[0].fragment.contig_index, 2);
     }
 
@@ -601,7 +627,7 @@ mod tests {
         let first = scored(0, 2000, &[(0, 500)], "500=");
         let count = |cigar: &str| {
             let second = scored(1, 1000, &[(0, 1000)], cigar);
-            build_mosaic(1000, vec![first.clone(), second], &[], 0.0, 1, &|| false)
+            build_mosaic(1000, vec![first.clone(), second], &[], 0.0, 1, 1, &|| false)
                 .unwrap()
                 .counts
         };
@@ -630,6 +656,7 @@ mod tests {
             &[],
             0.0,
             1,
+            1,
             &|| false,
         )
         .unwrap();
@@ -638,32 +665,31 @@ mod tests {
         assert!(combined.alternatives.is_empty());
         assert_eq!(combined.query_length, 101);
         a.contig_index = 5;
-        let one = build_mosaic(101, vec![a], &[], 0.0, 1, &|| false).unwrap();
+        let one = build_mosaic(101, vec![a], &[], 0.0, 1, 1, &|| false).unwrap();
         assert_eq!(one.covered_bases, 30);
     }
 
     #[test]
-    fn low_complexity_uncovered() {
+    fn low_complexity_covered() {
         let masked = [interval(20, 50)];
         let whole = scored(0, 100, &[(0, 100)], "60=1X39=");
         let inside = scored(1, 300, &[(25, 45)], "20=");
-        let mosaic = build_mosaic(100, vec![whole, inside], &masked, 0.0, 1, &|| false).unwrap();
-        assert_eq!(mosaic.covered_bases, 70);
-        assert_eq!(
-            mosaic.covered_intervals,
-            [interval(0, 20), interval(50, 100)]
-        );
+        let mosaic = build_mosaic(100, vec![whole, inside], &masked, 0.0, 1, 1, &|| false).unwrap();
+        assert_eq!(mosaic.covered_bases, 100);
+        assert_eq!(mosaic.covered_intervals, [interval(0, 100)]);
         assert_eq!(
             (mosaic.counts.matches, mosaic.counts.substitutions),
             (99, 1)
         );
-        assert_eq!(mosaic.alternatives.len(), 1);
+        // The exact fragment inside the masked bases ranks first and now adds its bases.
+        assert_eq!(mosaic.primary.len(), 2);
+        assert!(mosaic.alternatives.is_empty());
     }
 
     #[test]
     fn wrap_covers_ends() {
         let wrapped = scored(0, 8, &[(8, 10), (0, 2)], "4=");
-        let mosaic = build_mosaic(10, vec![wrapped], &[], 0.0, 1, &|| false).unwrap();
+        let mosaic = build_mosaic(10, vec![wrapped], &[], 0.0, 1, 1, &|| false).unwrap();
         assert_eq!(mosaic.covered_intervals, [interval(0, 2), interval(8, 10)]);
         assert_eq!(mosaic.gaps, [interval(2, 8)]);
     }
@@ -671,7 +697,7 @@ mod tests {
     #[test]
     fn wrap_insertions_uncovered() {
         let wrapped = scored(0, 8, &[(8, 10), (0, 3)], "1=1I1=1I1=");
-        let mosaic = build_mosaic(10, vec![wrapped], &[], 0.0, 1, &|| false).unwrap();
+        let mosaic = build_mosaic(10, vec![wrapped], &[], 0.0, 1, 1, &|| false).unwrap();
         assert_eq!(
             mosaic.covered_intervals,
             [interval(0, 1), interval(2, 3), interval(8, 9)]
@@ -682,22 +708,22 @@ mod tests {
     #[test]
     fn bad_fragments_fail() {
         assert_eq!(
-            build_mosaic(0, vec![], &[], 0.0, 1, &|| false),
+            build_mosaic(0, vec![], &[], 0.0, 1, 1, &|| false),
             Err(DecideError::EmptyQuery)
         );
         let outside = scored(0, 1, &[(5, 12)], "7=");
         assert_eq!(
-            build_mosaic(10, vec![outside], &[], 0.0, 1, &|| false),
+            build_mosaic(10, vec![outside], &[], 0.0, 1, 1, &|| false),
             Err(DecideError::InvalidQuerySegments)
         );
         let overlap = scored(0, 1, &[(0, 4), (3, 6)], "7=");
         assert_eq!(
-            build_mosaic(10, vec![overlap], &[], 0.0, 1, &|| false),
+            build_mosaic(10, vec![overlap], &[], 0.0, 1, 1, &|| false),
             Err(DecideError::InvalidQuerySegments)
         );
         let short = scored(0, 1, &[(0, 4)], "5=");
         assert_eq!(
-            build_mosaic(10, vec![short], &[], 0.0, 1, &|| false),
+            build_mosaic(10, vec![short], &[], 0.0, 1, 1, &|| false),
             Err(DecideError::QuerySpanMismatch)
         );
     }

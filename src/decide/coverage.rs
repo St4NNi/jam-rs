@@ -76,6 +76,12 @@ impl QueryCoverage {
         }
     }
 
+    /// The number of covered bases that must be normal (not low-complexity): half of the
+    /// required bases, rounded up. Masked bases count toward the rest.
+    pub fn required_normal_bases(self, query_length: u64) -> u64 {
+        self.required_bases(query_length).div_ceil(2)
+    }
+
     /// Whether `covered_bases` of a query of `query_length` bases are enough.
     pub fn accepts(self, covered_bases: u64, query_length: u64) -> bool {
         covered_bases >= self.required_bases(query_length)

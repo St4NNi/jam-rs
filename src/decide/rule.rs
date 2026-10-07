@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::contigs::counted_contig_fragments;
-use super::mosaic::build_mosaic;
+use super::mosaic::{build_mosaic, normal_covered};
 use super::segments::{RunOffsets, maximal_segments, reaches, slice_fragment};
 use super::{DecideError, Fragment, Mosaic, QueryCoverage};
 use crate::align::{Alignment, EditCounts, Interval};
@@ -120,7 +120,7 @@ impl DecisionRule {
     }
 
     /// Builds the mosaic of the counted fragments of one entry and decides; `low_complexity` bases
-    /// count toward no coverage and identity. `contig_length` serves the contig rule; `Stopped`
+    /// count toward coverage and identity, but half of the required coverage must be normal. `contig_length` serves the contig rule; `Stopped`
     /// when `stopped`, asked between fragments, returns true.
     pub fn decide(
         &self,
@@ -159,6 +159,7 @@ impl DecisionRule {
             low_complexity,
             self.min_identity,
             required,
+            self.min_query_coverage.required_normal_bases(query_length),
             &stopped,
         )?;
         let counts = mosaic.counts;
@@ -166,7 +167,9 @@ impl DecisionRule {
             && reaches(counts, self.min_identity)
             && self
                 .min_query_coverage
-                .accepts(mosaic.covered_bases, query_length);
+                .accepts(mosaic.covered_bases, query_length)
+            && normal_covered(&mosaic.covered_intervals, low_complexity)
+                >= self.min_query_coverage.required_normal_bases(query_length);
         Ok(Decision {
             mosaic,
             counts,
@@ -427,10 +430,16 @@ mod tests {
         let decision = rule
             .decide(10_000, vec![half], &masked, || false, |_| 0)
             .unwrap();
+        // The masked bases count, but only about 500 covered bases are normal, under 2,500.
         assert!(!decision.qualifies);
-        assert!(decision.mosaic.covered_bases < 1000);
-        // Masked bases count toward identity, as in the fragment limits.
+        assert_eq!(decision.mosaic.covered_bases, 5000);
         assert_eq!(decision.counts.columns(), 5000);
+        // With 1,000 random bases more the normal part is still under 2,500.
+        let more = fragment(0, &[(0, 5500)], "5500=");
+        let decision = rule
+            .decide(10_000, vec![more], &masked, || false, |_| 0)
+            .unwrap();
+        assert!(!decision.qualifies);
     }
 
     #[test]

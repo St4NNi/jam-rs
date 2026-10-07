@@ -565,9 +565,9 @@ fn repeat_query_unanswered() {
     ));
 }
 
-/// Low-complexity query bases count toward no coverage and no identity of a confirmed entry.
+/// Low-complexity query bases count toward the coverage and the identity of a confirmed entry.
 #[test]
-fn repeat_bases_uncovered() {
+fn repeat_bases_covered() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = rng(0x1d);
     let mut query = b"ACGT".repeat(250);
@@ -585,7 +585,7 @@ fn repeat_bases_uncovered() {
         panic!("not confirmed: {events:?}");
     };
     let decision = &aligned.decision;
-    assert_eq!(decision.mosaic.covered_bases, 10_000 - masked);
+    assert_eq!(decision.mosaic.covered_bases, 10_000);
     assert_eq!(decision.counts.columns(), 10_000);
 }
 

@@ -142,7 +142,7 @@ fn exact_limits() {
 #[test]
 fn masked_better_fragment() {
     // The other fragment ranks first by its exact masked part (masked columns count toward
-    // identity, as in the fragment limits), and covers the copy's bases.
+    // identity, as in the fragment limits), and covers the copy's bases and the masked ones.
     let masked = [Interval::new(0, 3000).unwrap()];
     let other = copy(1, 0, 4000, &(3000..3100).collect::<Vec<_>>());
     let rule = DecisionRule {
@@ -154,7 +154,31 @@ fn masked_better_fragment() {
         .decide(4000, fragments, &masked, || false, |_| 0)
         .unwrap();
     assert!(decision.qualifies);
-    assert_eq!(decision.mosaic.covered_bases, 1000);
+    assert_eq!(decision.mosaic.covered_bases, 4000);
+}
+
+#[test]
+fn masked_read_confirmed() {
+    // An exact copy of 1,000 bases, 530 of them masked: masked bases count toward the coverage,
+    // and the 470 normal bases are over the half (250) of the required 500.
+    let rule = half_rule();
+    let masked = [Interval::new(200, 730).unwrap()];
+    assert!(confirmed(&rule, 1000, vec![copy(0, 0, 1000, &[])], &masked));
+}
+
+#[test]
+fn masked_half_needed() {
+    // The same copy with 800 masked bases has 200 normal bases, under the 250 needed.
+    let rule = half_rule();
+    let masked = [Interval::new(100, 900).unwrap()];
+    assert!(!confirmed(
+        &rule,
+        1000,
+        vec![copy(0, 0, 1000, &[])],
+        &masked
+    ));
+    let masked = [Interval::new(100, 850).unwrap()];
+    assert!(confirmed(&rule, 1000, vec![copy(0, 0, 1000, &[])], &masked));
 }
 
 #[test]
