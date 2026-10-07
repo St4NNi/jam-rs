@@ -22,7 +22,7 @@ pub use config::AlignStageConfig;
 pub use query::PreparedQuery;
 
 use super::{LocatedEntry, SearchControl, Stopped};
-use crate::align::{AlignmentError, AlignmentWorkspace, JoinScratch};
+use crate::align::{AlignmentError, AlignmentWorkspace, Interval, JoinScratch};
 use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
 use crate::index::{IndexError, PackedSequence};
 use place::Collected;
@@ -30,6 +30,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, PoisonError};
 use thiserror::Error;
+use window::PreparedWindow;
 
 /// Why stage 3 could not decide an entry.
 #[derive(Debug, Error)]
@@ -156,8 +157,19 @@ pub fn align_packed_entry(
     workspace: &AlignStageWorkspace,
     control: SearchControl<'_>,
 ) -> Result<AlignedEntry, AlignStageError> {
-    let (fragments, work) =
-        entry_fragments(packed, query, located, config, rule, workspace, control)?;
+    let request = EntryRequest {
+        packed,
+        query,
+        located,
+        config,
+        rule,
+        workspace,
+        control,
+    };
+    let required = rule.min_query_coverage.required_bases(query.length());
+    // An entry whose fragments cannot reach the coverage is decided without them.
+    let (fragments, work) = request.fragments(Some(required))?;
+    let fragments = fragments.unwrap_or_default();
     control.check()?;
     let contig_length = |contig: u32| {
         packed
@@ -194,31 +206,187 @@ pub fn entry_fragments(
     workspace: &AlignStageWorkspace,
     control: SearchControl<'_>,
 ) -> Result<(Vec<Fragment>, AlignWork), AlignStageError> {
-    config.validate()?;
-    rule.validate()?;
-    query.check(config)?;
-    // Contigs are aligned on all threads, as an entry may hold thousands of contigs with one
-    // window each; their fragments are added in contig order, so the limit acts as on one thread.
-    let aligned: Vec<Result<(Vec<Fragment>, AlignWork), AlignStageError>> = located
-        .alignment_windows
-        .par_iter()
-        .map(|windows| {
-            control.check()?;
-            let job = contig::ContigJob::new(packed, windows.contig, query, config, rule, control)?;
-            let mut fragments = Collected::new(config.max_fragment_bytes);
-            let mut work = AlignWork::default();
-            job.align(&windows.ranges, workspace, &mut fragments, &mut work)?;
-            Ok((fragments.into_list(), work))
-        })
-        .collect();
-    let mut fragments = Collected::new(config.max_fragment_bytes);
-    let mut work = AlignWork::default();
-    for result in aligned {
-        let (contig_fragments, contig_work) = result?;
-        work.add(&contig_work);
-        for fragment in contig_fragments {
-            fragments.push(fragment)?;
-        }
+    let request = EntryRequest {
+        packed,
+        query,
+        located,
+        config,
+        rule,
+        workspace,
+        control,
+    };
+    let (fragments, work) = request.fragments(None)?;
+    Ok((fragments.unwrap_or_default(), work))
+}
+
+/// Prepared windows an entry keeps at once while its reach is computed; past them, a contig's
+/// windows are read again when it is aligned.
+const KEPT_PREPARED_BYTES: usize = 256 << 20;
+
+/// Batches in which the contigs of an entry are aligned between checks of its reach.
+const REACH_BATCHES: usize = 8;
+
+/// One located entry with everything its contigs are aligned with.
+#[derive(Clone, Copy)]
+struct EntryRequest<'a> {
+    packed: &'a PackedSequence,
+    query: &'a PreparedQuery,
+    located: &'a LocatedEntry,
+    config: &'a AlignStageConfig,
+    rule: &'a DecisionRule,
+    workspace: &'a AlignStageWorkspace,
+    control: SearchControl<'a>,
+}
+
+/// A contig of an entry while its entry is aligned: its prepared round, or its result.
+enum ContigState {
+    Prepared(contig::ContigRound, Option<Vec<Interval>>),
+    Done(Result<Vec<Fragment>, AlignStageError>),
+}
+
+impl EntryRequest<'_> {
+    fn job(&self, contig: u32) -> Result<contig::ContigJob<'_>, AlignStageError> {
+        let Self {
+            packed,
+            query,
+            config,
+            rule,
+            control,
+            ..
+        } = *self;
+        contig::ContigJob::new(packed, contig, query, config, rule, control)
     }
-    Ok((fragments.into_list(), work))
+
+    /// The fragments of the entry in contig order. With `required`, `None` when the fragments
+    /// cannot cover that many query bases: the contigs not aligned yet are counted by their
+    /// reach, and the entry stops once aligned and unaligned contigs together fall short.
+    fn fragments(
+        &self,
+        required: Option<u64>,
+    ) -> Result<(Option<Vec<Fragment>>, AlignWork), AlignStageError> {
+        let (config, workspace, control) = (self.config, self.workspace, self.control);
+        config.validate()?;
+        self.rule.validate()?;
+        self.query.check(config)?;
+        let required = required.filter(|_| !self.query.circular());
+        let windows = &self.located.alignment_windows;
+        let kept = std::sync::atomic::AtomicUsize::new(0);
+        // Contigs are prepared and aligned on all threads, as an entry may hold thousands of
+        // contigs with one window each.
+        let prepared: Vec<(ContigState, AlignWork)> = windows
+            .par_iter()
+            .map(|windows| {
+                let mut work = AlignWork::default();
+                let round = control
+                    .check()
+                    .map_err(AlignStageError::from)
+                    .and_then(|()| {
+                        let job = self.job(windows.contig)?;
+                        let mut round = job.prepare(&windows.ranges, workspace, &mut work)?;
+                        let reach =
+                            required.and(round.prepared.as_deref().and_then(|p| job.reach(p)));
+                        let bytes = round
+                            .prepared
+                            .iter()
+                            .flatten()
+                            .map(PreparedWindow::bytes)
+                            .sum();
+                        let order = std::sync::atomic::Ordering::Relaxed;
+                        if kept.fetch_add(bytes, order) + bytes > KEPT_PREPARED_BYTES {
+                            round.prepared = None;
+                            kept.fetch_sub(bytes, order);
+                        }
+                        Ok((round, reach))
+                    });
+                let state = match round {
+                    Ok((round, reach)) => ContigState::Prepared(round, reach),
+                    Err(error) => ContigState::Done(Err(error)),
+                };
+                (state, work)
+            })
+            .collect();
+        let (mut states, works): (Vec<ContigState>, Vec<AlignWork>) = prepared.into_iter().unzip();
+        let mut work = AlignWork::default();
+        works.iter().for_each(|contig_work| work.add(contig_work));
+        // Contigs that may still grow first, then those that reach the most query bases.
+        let mut order: Vec<usize> = (0..states.len()).collect();
+        order.sort_by_key(|&at| match &states[at] {
+            ContigState::Prepared(_, reach) => (
+                reach.is_some(),
+                std::cmp::Reverse(reach.as_deref().map_or(0, Interval::total_length)),
+            ),
+            ContigState::Done(_) => (false, std::cmp::Reverse(0)),
+        });
+        let batch = order.len().div_ceil(REACH_BATCHES).max(1);
+        for part in order.chunks(batch) {
+            if required.is_some_and(|required| self.short_of(&states, required)) {
+                return Ok((None, work));
+            }
+            let taken: Vec<(usize, contig::ContigRound)> = part
+                .iter()
+                .filter_map(
+                    |&at| match std::mem::replace(&mut states[at], placeholder()) {
+                        ContigState::Prepared(round, _) => Some((at, round)),
+                        done => {
+                            states[at] = done;
+                            None
+                        }
+                    },
+                )
+                .collect();
+            let aligned: Vec<(usize, Result<Vec<Fragment>, AlignStageError>, AlignWork)> = taken
+                .into_par_iter()
+                .map(|(at, contig_round)| {
+                    let mut contig_work = AlignWork::default();
+                    let mut fragments = Collected::new(config.max_fragment_bytes);
+                    let result = control
+                        .check()
+                        .map_err(AlignStageError::from)
+                        .and_then(|()| self.job(windows[at].contig))
+                        .and_then(|job| {
+                            job.finish(contig_round, workspace, &mut fragments, &mut contig_work)
+                        });
+                    (at, result.map(|()| fragments.into_list()), contig_work)
+                })
+                .collect();
+            for (at, result, contig_work) in aligned {
+                work.add(&contig_work);
+                states[at] = ContigState::Done(result);
+            }
+        }
+        // Their fragments are added in contig order, so the limit acts as on one thread.
+        let mut fragments = Collected::new(config.max_fragment_bytes);
+        for state in states {
+            let ContigState::Done(result) = state else {
+                unreachable!("every contig is aligned");
+            };
+            for fragment in result? {
+                fragments.push(fragment)?;
+            }
+        }
+        Ok((Some(fragments.into_list()), work))
+    }
+
+    /// Whether the aligned fragments and the reach of the contigs not aligned yet cover fewer
+    /// than `required` query bases. Never after a contig failed, so failures stay as they are.
+    fn short_of(&self, states: &[ContigState], required: u64) -> bool {
+        let mut covered = Vec::new();
+        for state in states {
+            match state {
+                ContigState::Prepared(_, Some(reach)) => covered.extend_from_slice(reach),
+                ContigState::Prepared(_, None) | ContigState::Done(Err(_)) => return false,
+                ContigState::Done(Ok(fragments)) => covered.extend(
+                    fragments
+                        .iter()
+                        .flat_map(|fragment| fragment.query_segments.iter().copied()),
+                ),
+            }
+        }
+        Interval::total_length(&Interval::union(covered)) < required
+    }
+}
+
+/// A state to hold a contig's place while its round is taken out.
+fn placeholder() -> ContigState {
+    ContigState::Done(Ok(Vec::new()))
 }

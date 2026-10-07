@@ -10,7 +10,7 @@ use super::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
     SearchControl, WindowWorkspace, chains, walks,
 };
-use crate::align::Alignment;
+use crate::align::{Alignment, Interval};
 use crate::decide::DecisionRule;
 use crate::decide::Fragment;
 use crate::index::PackedSequence;
@@ -21,6 +21,23 @@ use std::ops::Range;
 /// the extension and one anchor.
 fn edge_reach(config: &AlignStageConfig) -> u64 {
     u64::from(config.chains.max_gap) + u64::from(config.extension) + u64::from(config.anchors.a)
+}
+
+/// Diagonals beyond a chain's anchors that its alignments can reach: the widest band of a
+/// drifting chain reaches 64 past its anchors, a narrow one 128, and endpoint completion adds
+/// at most one anchor length.
+const CHAIN_SLACK: i64 = 192;
+
+/// Diagonals beyond a walk that its alignments can reach: a gapped box over walks within one
+/// band of diagonal (two bands of 1,088), and joins through pieces of at most 1,039 bases.
+const WALK_SLACK: i64 = 4_096;
+
+/// A contig's windows after the rounds that grew before aligning, with their chains and walks
+/// unless they were let go to save memory.
+pub(super) struct ContigRound {
+    spans: Vec<Range<u64>>,
+    step: u64,
+    pub prepared: Option<Vec<PreparedWindow>>,
 }
 
 /// One contig of an entry and everything its windows are aligned with.
@@ -66,33 +83,118 @@ impl<'a> ContigJob<'a> {
         })
     }
 
-    /// Aligns the query in the windows `ranges` of the contig, widening them until no alignment
-    /// is cut by a window edge, and adds the fragments.
-    pub fn align(
+    /// Reads the windows `ranges` of the contig and finds their chains and walks, widening them
+    /// until no chain or walk lies near a cut edge. Nothing is aligned yet.
+    pub fn prepare(
         &self,
         ranges: &[Range<u64>],
+        workspace: &AlignStageWorkspace,
+        work: &mut AlignWork,
+    ) -> Result<ContigRound, AlignStageError> {
+        let spans = self.checked_spans(ranges)?;
+        let step = self.config.widening.max(edge_reach(self.config));
+        self.prepare_until_still(spans, step, workspace, work)
+    }
+
+    /// Prepare rounds from `spans` until no window grows before aligning.
+    fn prepare_until_still(
+        &self,
+        mut spans: Vec<Range<u64>>,
+        mut step: u64,
+        workspace: &AlignStageWorkspace,
+        work: &mut AlignWork,
+    ) -> Result<ContigRound, AlignStageError> {
+        loop {
+            self.control.check()?;
+            let (prepared, grown) = self.prepare_round(&mut spans, step, workspace, work)?;
+            if !grown {
+                return Ok(ContigRound {
+                    spans,
+                    step,
+                    prepared: Some(prepared),
+                });
+            }
+            work.widenings += 1;
+            merge_spans(&mut spans);
+            step = step.saturating_mul(2);
+        }
+    }
+
+    /// Aligns a prepared round, widening and aligning again until no alignment is cut by a
+    /// window edge, and adds the fragments. A round without its windows is read again.
+    pub fn finish(
+        &self,
+        round: ContigRound,
         workspace: &AlignStageWorkspace,
         fragments: &mut Collected,
         work: &mut AlignWork,
     ) -> Result<(), AlignStageError> {
-        let mut spans = self.checked_spans(ranges)?;
-        let mut step = self.config.widening.max(edge_reach(self.config));
+        let ContigRound {
+            mut spans,
+            mut step,
+            prepared,
+        } = round;
+        let mut prepared = match prepared {
+            Some(prepared) => prepared,
+            None => {
+                let round = self.prepare_until_still(spans, step, workspace, work)?;
+                (spans, step) = (round.spans, round.step);
+                round.prepared.unwrap_or_default()
+            }
+        };
         let first = fragments.mark();
         loop {
-            self.control.check()?;
-            let (prepared, mut grown) = self.prepare_round(&mut spans, step, workspace, work)?;
-            if !grown {
-                grown =
-                    self.align_round(&prepared, &mut spans, step, workspace, fragments, work)?;
-            }
-            if !grown {
+            if !self.align_round(&prepared, &mut spans, step, workspace, fragments, work)? {
                 return Ok(());
             }
             fragments.reset(first);
             work.widenings += 1;
             merge_spans(&mut spans);
             step = step.saturating_mul(2);
+            let round = self.prepare_until_still(spans, step, workspace, work)?;
+            (spans, step) = (round.spans, round.step);
+            prepared = round.prepared.unwrap_or_default();
         }
+    }
+
+    /// The query bases that the fragments of a prepared round can cover, if the round is
+    /// aligned without growing: each chain and walk paired along its band, over the whole
+    /// window. `None` when a window with a chain or walk has a cut edge, as it may still grow.
+    pub fn reach(&self, prepared: &[PreparedWindow]) -> Option<Vec<Interval>> {
+        let mut reach = Vec::new();
+        let length = self.query.length() as i64;
+        for window in prepared {
+            let width = window.bases.len() as i64;
+            let chained = window.chains.iter().map(|chain| {
+                let diagonals = chain
+                    .anchors
+                    .iter()
+                    .map(|anchor| i64::from(anchor.contig) - i64::from(anchor.query));
+                let low = diagonals.clone().min().unwrap_or(0);
+                (
+                    low - CHAIN_SLACK,
+                    diagonals.max().unwrap_or(0) + CHAIN_SLACK,
+                )
+            });
+            let walked = window.walks.iter().map(|walk| {
+                let diagonal = i64::from(walk.contig) - i64::from(walk.query);
+                (diagonal - WALK_SLACK, diagonal + WALK_SLACK)
+            });
+            let mut bands = chained.chain(walked).peekable();
+            let range = window.range();
+            if bands.peek().is_some() && (range.start > 0 || range.end < self.contig_length) {
+                return None;
+            }
+            // Query position = window position - diagonal, for window positions 0..width.
+            for (low, high) in bands {
+                let start = (-high).clamp(0, length) as u64;
+                let end = (width - low).clamp(0, length) as u64;
+                if start < end {
+                    reach.push(Interval { start, end });
+                }
+            }
+        }
+        Some(Interval::union(reach))
     }
 
     /// The windows, checked against the contig and merged.
