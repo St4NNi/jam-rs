@@ -41,7 +41,7 @@ Search for the sequences of a query FASTA file in the index:
     jam search assemblies.jam plasmid.fa > hits.jsonl
 
 Each query record is searched separately. For each query, jam writes one JSON line per assembly
-that contains the query, followed by one summary line.
+that contains the query. Standard output holds only these matches.
 
 ## How it works
 
@@ -192,8 +192,8 @@ Normal options:
 - `--circular`: treat query sequences as circular. An alignment fragment that wraps across the
   end of the query is reported with an end coordinate beyond the query length. By default,
   queries are treated as linear.
-- `-v, --verbose`: write one progress line per query to standard error. Pass twice (`-vv`) to
-  also write per-assembly debug lines.
+- `-v, --verbose`: write one progress line per query to standard error, with its status, counts
+  and miss probability. Pass twice (`-vv`) to also write per-assembly debug lines.
 
 Advanced options:
 
@@ -214,8 +214,8 @@ Advanced options:
   substitution away, and `2` looks up every k-mer two substitutions away. Allowing mismatches
   finds assemblies at lower identity, at the cost of extra CPU time. `auto` chooses a setting
   for each query; see [The miss chance](#the-miss-chance).
-- `--deadline SECONDS`: stop searching a query after this many seconds. The summary line then
-  reports the status as `stopped`.
+- `--deadline SECONDS`: stop searching a query after this many seconds. jam then reports the
+  query as `stopped` on standard error.
 - `--server NODE_ID@ADDRESS`: run the search on a `jam serve` server instead of local index
   files.
 - `--cache DIR`, `--memory SIZE`, `--disk SIZE`: local cache directory and memory or disk
@@ -279,8 +279,8 @@ Advanced options:
 
 ## Output
 
-`jam search` writes only search results to standard output (or to `-o FILE`). Progress and
-debug lines go to standard error.
+`jam search` writes only matches (query x assembly) to standard output (or to `-o FILE`). A query
+with no match writes nothing. Progress, problem and debug lines go to standard error.
 
 ### JSON lines (the default)
 
@@ -325,27 +325,16 @@ At `--level align`, jam writes one line per confirmed assembly:
 
 Share and identity values are rounded to 4 decimal places.
 
-After all result lines for a query, jam writes one summary line:
+### Problems
 
-    {"q":"plasmid1","status":"complete","n":[120,14,9,3],"miss":0.0001,"t":[0.21,0.35,1.8]}
+jam always reports a query that does not end `complete` on standard error, even without `-v`. It
+writes one line with the query name, the status and the reason:
 
-- `q`: the query name.
-- `status`: how the search ended; see the table below.
-- `reason`: why the search did not finish normally (included only when the status is not
-  `complete`).
-- `error`: the error message (included only when the status is `failed`).
-- `n`: assembly counts at each step, as `[seeded, possible, located, confirmed]`. Seeded
-  assemblies share at least one seed with the query. Possible assemblies passed stage 1,
-  located assemblies passed stage 2, and confirmed assemblies passed stage 3 and were reported.
-- `miss`: modeled probability that the search missed a qualifying assembly; see
-  [The miss chance](#the-miss-chance).
-- `prune`: included only when `false`. Indicates that pruning was turned off for this query
-  because seed matching alone could not stay within `--max-miss`.
-- `t`: time in seconds spent in `[sketch, locate, align]`. The sketch time is wall-clock time,
-  including query preparation. The locate and align times are summed across threads.
+    plasmid1: stopped (deadline)
 
-When searching multiple index files, the summary combines all of them: the counts are summed,
-`miss` is the largest value across indexes, and the status is the worst outcome.
+For `failed`, the line ends with `: ` and the error message. With several index files, the worst
+status wins. With `-v`, the progress line below already holds this information, so there is no
+extra line.
 
 The status values:
 
@@ -355,11 +344,10 @@ The status values:
 | `incomplete` | `resource_limit` | An assembly required more memory or work than a limit allows (for example, when a periodic query matches many periodic regions) and could not be evaluated. |
 | `stopped` | `deadline` | The search exceeded `--deadline`. |
 | `stopped` | `asked` | The search was asked to stop (for example, when the program reading standard output closed the pipe). |
-| `failed` | `error` | A search stage or the server failed. `error` gives the reason. |
+| `failed` | `error` | A search stage or the server failed. The message gives the reason. |
 
 Whenever a query does not end with `complete`, jam writes all remaining output and then exits
-with an error. This also applies to `--format tsv` and `paf`, even though those formats have no
-summary line.
+with an error. This applies to every format.
 
 ### TSV
 
@@ -388,7 +376,14 @@ and `cg:Z:` with the CIGAR string described above.
 `-v` writes one progress line per query to standard error when the query's search finishes, for
 example:
 
-    plasmid1: complete; 120 seeded, 14 possible, 9 located, 3 confirmed; sketch 0.210 s, locate 0.350 s, align 1.800 s
+    plasmid1: complete; 120 seeded, 14 possible, 9 located, 3 confirmed; miss 1e-4; sketch 0.210 s, locate 0.350 s, align 1.800 s
+
+The counts are the assemblies at each step. Seeded assemblies share at least one seed with the
+query. Possible assemblies passed stage 1, located assemblies passed stage 2, and confirmed
+assemblies passed stage 3 and were reported. `miss` is the modeled probability that the search
+missed a qualifying assembly; see [The miss chance](#the-miss-chance). The times are seconds. The
+sketch time is wall-clock time, including query preparation. The locate and align times are
+summed across threads. With several index files, the counts are summed and `miss` is the largest.
 
 If pruning was turned off for the query, the line ends with `; pruning off`.
 
@@ -423,10 +418,10 @@ repeat with the query: with `--contig-coverage`, a contig counts only if alignme
 least that share of the contig itself, and with `--contig-identity`, only if the alignments on
 that contig reach at least that identity.
 
-Low-complexity stretches of the query (short repeats identified by DUST masking) do not count
-toward coverage. A query that consists mostly of low-complexity sequence cannot reach the
-required coverage with its remaining bases. In that case, jam reports no hits rather than
-returning false positives.
+Low-complexity stretches of the query (short repeats identified by DUST masking) count toward
+coverage like other bases. But at least half of the required coverage must come from normal bases.
+A query with fewer normal bases than that gets no answer. In that case, jam reports no hits
+rather than returning false positives.
 
 ## The miss chance
 
@@ -445,8 +440,8 @@ copy of the required length produces no seed hits at all. The remaining budget, 
 minus U, goes to pruning. jam picks the tightest allowance for unseeded stretches that keeps
 the pruning miss probability within that remaining budget. When U alone reaches `--max-miss`
 (for example, with a short query or a low `--identity`), jam turns pruning off for that query
-and reports `"prune":false`. The summary key `miss` reports the total miss probability for the
-query.
+and marks the `-v` line with `pruning off`. The `miss` value in that line is the total miss
+probability for the query.
 
 This upper bound holds under two assumptions:
 

@@ -61,7 +61,7 @@ pub enum CliError {
     /// failed, or a resource limit dropped an entry. PAF output then lacks those entries.
     #[error(
         "{0} queries did not complete (deadline, failure or resource limit); \
-         the JSON summary lines tell which"
+         the lines above name them"
     )]
     Incomplete(usize),
     /// The screen settings are invalid or the shard cannot be screened.

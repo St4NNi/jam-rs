@@ -149,23 +149,6 @@ pub struct QueryTotals {
     seconds: [f64; 3],
 }
 
-/// The summary line of a query.
-#[derive(Serialize)]
-struct SummaryLine<'a> {
-    q: &'a str,
-    status: Status,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<Reason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'a str>,
-    n: [u64; 4],
-    miss: f64,
-    /// False when the pruning was off; left out when it ran.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    prune: Option<bool>,
-    t: [f64; 3],
-}
-
 impl QueryTotals {
     /// The totals of `query` before any shard reported.
     pub fn new(query: &str) -> Self {
@@ -213,37 +196,38 @@ impl QueryTotals {
         self.status
     }
 
-    /// The summary line.
-    pub fn line(&self) -> serde_json::Result<String> {
-        serde_json::to_string(&SummaryLine {
-            q: &self.query,
-            status: self.status,
-            reason: self.reason,
-            error: self.error.as_deref(),
-            n: self.counts,
-            miss: self.miss,
-            prune: self.unpruned.then_some(false),
-            t: self.seconds.map(|seconds| rounded(seconds, 3)),
-        })
+    /// The status, with its reason and error text when there are any.
+    fn status_text(&self) -> String {
+        let name = |value: serde_json::Result<serde_json::Value>| {
+            value.ok().and_then(|v| v.as_str().map(str::to_string))
+        };
+        let mut text = name(serde_json::to_value(self.status)).unwrap_or_default();
+        if let Some(reason) = self.reason.and_then(|r| name(serde_json::to_value(r))) {
+            text = format!("{text} ({reason})");
+        }
+        match &self.error {
+            Some(error) => format!("{text}: {error}"),
+            None => text,
+        }
     }
 
-    /// The progress line of `-v`: status, stage counts and seconds.
+    /// The line of `-v`: status, stage counts, miss chance, seconds and the pruning mark.
     pub fn progress(&self) -> String {
-        let status = serde_json::to_value(self.status).unwrap_or_default();
-        let status = status.as_str().unwrap_or_default().to_string();
-        let status = match self.reason.and_then(|r| serde_json::to_value(r).ok()) {
-            Some(reason) => format!("{status} ({})", reason.as_str().unwrap_or_default()),
-            None => status,
-        };
         let [seeded, possible, located, confirmed] = self.counts;
         let [sketch, locate, align] = self.seconds;
+        let (status, miss) = (self.status_text(), self.miss);
         let pruning = if self.unpruned { "; pruning off" } else { "" };
         format!(
             "{}: {status}; {seeded} seeded, {possible} possible, {located} located, \
-             {confirmed} confirmed; sketch {sketch:.3} s, locate {locate:.3} s, align {align:.3} s\
-             {pruning}",
+             {confirmed} confirmed; miss {miss:e}; sketch {sketch:.3} s, locate {locate:.3} s, \
+             align {align:.3} s{pruning}",
             self.query
         )
+    }
+
+    /// The line for a query that did not complete: its name, status and reason.
+    pub fn problem(&self) -> Option<String> {
+        (self.status != Status::Complete).then(|| format!("{}: {}", self.query, self.status_text()))
     }
 }
 

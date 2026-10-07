@@ -111,7 +111,7 @@ fn json(line: &str) -> serde_json::Value {
 fn planted_query_confirmed() {
     let fixture = fixture();
     let lines = search(&fixture, &[]);
-    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines.len(), 1, "{lines:?}");
     let record = json(&lines[0]);
     assert_eq!(
         (record["q"].as_str(), record["a"].as_str()),
@@ -123,18 +123,6 @@ fn planted_query_confirmed() {
     assert_eq!(record["bases"], 3_000);
     let fragment = serde_json::json!(["contig_1", 0, 3000, 5000, 8000, "+", "1500=1X1499="]);
     assert_eq!(record["f"], serde_json::json!([fragment]));
-    let summary = json(&lines[1]);
-    let keys: Vec<&str> = summary
-        .as_object()
-        .unwrap()
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys, ["miss", "n", "q", "status", "t"]);
-    assert!(lines[1].starts_with(r#"{"q":"planted","status":"complete","n":["#));
-    assert_eq!(summary["q"], "planted");
-    assert_eq!(summary["status"], "complete");
-    assert_eq!(summary["n"][3], 1);
 }
 
 #[test]
@@ -156,20 +144,17 @@ fn paf_fragment_lines() {
     assert!(columns.contains(&"cg:Z:1500=1X1499="));
 }
 
-/// A --max-miss below the seed miss bound turns the pruning off and marks the summary; the
-/// planted copy is still found.
+/// A --max-miss below the seed miss bound turns the pruning off, which -v marks; the planted
+/// copy is still found.
 #[test]
 fn max_miss_unpruned() {
     let fixture = fixture();
-    let lines = search(&fixture, &["--max-miss", "0.000000001"]);
-    assert_eq!(json(&lines[0])["a"], "plasmid_1");
-    let summary = json(lines.last().unwrap());
-    assert_eq!(summary["prune"], false);
-    assert!(summary["miss"].as_f64().unwrap() > 0.000_000_001);
-    let lines = search(&fixture, &[]);
-    let summary = json(lines.last().unwrap());
-    assert!(summary.get("prune").is_none());
-    assert!(summary["miss"].as_f64().unwrap() <= 0.0001);
+    let (stdout, stderr) = search_output(&fixture, &["--max-miss", "0.000000001", "-v"]);
+    assert_eq!(json(stdout.lines().next().unwrap())["a"], "plasmid_1");
+    assert!(stderr.trim_end().ends_with("; pruning off"), "{stderr}");
+    let (_, stderr) = search_output(&fixture, &["-v"]);
+    assert!(!stderr.contains("pruning off"), "{stderr}");
+    assert!(stderr.contains("; miss "), "{stderr}");
 }
 
 #[test]
@@ -201,8 +186,7 @@ fn sketch_level_possible() {
     let fixture = fixture();
     let lines = search(&fixture, &["--level", "sketch"]);
     let records: Vec<_> = lines.iter().map(|line| json(line)).collect();
-    let (summary, possible) = records.split_last().unwrap();
-    assert_eq!(summary["status"], "complete");
+    let possible = &records;
     assert!(possible.iter().all(|record| record["s"] == 1));
     // An unrelated entry is possible only by a false seed hit, so its estimate stays low.
     let estimate = |record: &serde_json::Value| record["c"].as_f64().unwrap();
@@ -211,8 +195,6 @@ fn sketch_level_possible() {
         assert!(planted == (estimate(record) > 0.9), "{lines:?}");
     }
     assert!(possible.iter().any(|record| record["a"] == "plasmid_1"));
-    assert_eq!(summary["n"][1], possible.len());
-    assert_eq!(summary["n"][2], 0);
 }
 
 #[test]
@@ -231,10 +213,27 @@ fn locate_level_windows() {
             && window[2].as_u64().unwrap() >= 8_000
     };
     assert!(windows.iter().any(covers), "{lines:?}");
-    assert_eq!(records.last().unwrap()["status"], "complete");
 }
 
-/// The standard output holds only results; -v adds a progress line and -vv the debug lines,
+/// A query without a hit writes nothing to the standard output.
+#[test]
+fn no_hit_writes_nothing() {
+    let fixture = fixture();
+    let other = fixture.directory.path().join("other.fa");
+    write_fasta(&other, "stranger", &random_bases(77, 3_000));
+    let output = jam(&[
+        "search".as_ref(),
+        fixture.shard.as_os_str(),
+        other.as_os_str(),
+        "-t".as_ref(),
+        "2".as_ref(),
+    ]);
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+/// The standard output holds only matches; -v adds a progress line and -vv the debug lines,
 /// both on the standard error.
 #[test]
 fn verbose_on_stderr() {
@@ -246,7 +245,8 @@ fn verbose_on_stderr() {
     let progress: Vec<&str> = stderr.lines().collect();
     assert_eq!(progress.len(), 1, "{stderr}");
     assert!(progress[0].starts_with("planted: complete; "), "{stderr}");
-    assert!(progress[0].contains(" 1 confirmed; sketch "), "{stderr}");
+    assert!(progress[0].contains(" 1 confirmed; miss "), "{stderr}");
+    assert!(progress[0].contains("; sketch "), "{stderr}");
     let (stdout, stderr) = search_output(&fixture, &["-vv"]);
     assert!(stdout.lines().all(|line| json(line).get("kind").is_none()));
     let (debug, progress): (Vec<&str>, Vec<&str>) =
@@ -308,9 +308,8 @@ fn shards_share_summary() {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     let records: Vec<_> = text.lines().map(json).collect();
-    assert_eq!(records.len(), 2, "{text}");
+    assert_eq!(records.len(), 1, "{text}");
     assert_eq!(records[0]["a"], "plasmid_1");
-    assert_eq!(records[1]["status"], "complete");
 }
 
 #[test]
@@ -324,13 +323,20 @@ fn incomplete_search_fails() {
         "0.000000001".as_ref(),
     ]);
     assert!(!output.status.success());
-    let text = String::from_utf8(output.stdout).unwrap();
-    let summary = json(text.lines().last().unwrap());
-    assert_eq!(summary["status"], "stopped");
-    assert_eq!(summary["reason"], "deadline");
+    assert!(output.stdout.is_empty());
+    // The problem line comes without -v, then the error.
     let message = String::from_utf8(output.stderr).unwrap();
+    let mut lines = message.lines();
+    assert_eq!(
+        lines.next(),
+        Some("planted: stopped (deadline)"),
+        "{message}"
+    );
     assert!(
-        message.starts_with("jam: 1 queries did not complete"),
+        lines
+            .next()
+            .unwrap()
+            .starts_with("jam: 1 queries did not complete"),
         "{message}"
     );
 }

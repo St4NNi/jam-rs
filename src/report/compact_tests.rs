@@ -123,27 +123,34 @@ fn summary(status: Status, reason: Option<Reason>) -> Summary {
 fn summary_over_shards() {
     let mut totals = QueryTotals::new("q1");
     totals.add(&summary(Status::Complete, None));
-    let complete: Value = serde_json::from_str(&totals.line().unwrap()).unwrap();
-    let expected = json!({"q": "q1", "status": "complete", "n": [5, 3, 2, 1],
-        "miss": 0.000_01, "t": [0.5, 0.25, 0.0]});
-    assert_eq!(complete, expected);
+    assert_eq!(totals.problem(), None);
+    assert_eq!(
+        totals.progress(),
+        "q1: complete; 5 seeded, 3 possible, 2 located, 1 confirmed; miss 1e-5; \
+         sketch 0.500 s, locate 0.250 s, align 0.000 s"
+    );
     let mut unpruned = summary(Status::Stopped, Some(Reason::Deadline));
     unpruned.sketch.miss_over_budget = true;
     unpruned.sketch.total_miss = 0.02;
     totals.add(&unpruned);
     totals.add(&summary(Status::Incomplete, Some(Reason::ResourceLimit)));
     assert_eq!(totals.status(), Status::Stopped);
-    let stopped: Value = serde_json::from_str(&totals.line().unwrap()).unwrap();
-    assert_eq!(stopped["status"], "stopped");
-    assert_eq!(stopped["reason"], "deadline");
-    assert_eq!(stopped["n"], json!([15, 9, 6, 3]));
-    assert_eq!(
-        (stopped["miss"].as_f64(), stopped["prune"].as_bool()),
-        (Some(0.02), Some(false))
-    );
+    assert_eq!(totals.problem().as_deref(), Some("q1: stopped (deadline)"));
     assert_eq!(
         totals.progress(),
-        "q1: stopped (deadline); 15 seeded, 9 possible, 6 located, 3 confirmed; \
+        "q1: stopped (deadline); 15 seeded, 9 possible, 6 located, 3 confirmed; miss 2e-2; \
          sketch 1.500 s, locate 0.750 s, align 0.000 s; pruning off"
+    );
+}
+
+#[test]
+fn failed_problem_has_error() {
+    let mut failed = summary(Status::Failed, None);
+    failed.error = Some("shard unreadable".into());
+    let mut totals = QueryTotals::new("q1");
+    totals.add(&failed);
+    assert_eq!(
+        totals.problem().as_deref(),
+        Some("q1: failed: shard unreadable")
     );
 }

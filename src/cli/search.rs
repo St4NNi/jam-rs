@@ -1,5 +1,5 @@
 //! `jam search`: search every record of a query file in one or more shards, or on a server, and
-//! write the records.
+//! write the matches.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
@@ -42,7 +42,7 @@ above --max-miss; and two mismatches lower it.";
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Format {
-    /// One JSON line per reported entry, then one summary line per query
+    /// One JSON line per reported entry
     Json,
     /// A header line, then one line per confirmed entry: query, assembly, coverage, identity,
     /// covered bases and fragments
@@ -92,8 +92,8 @@ pub struct SearchArgs {
     /// Write to this file instead of the standard output
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Write a progress line per query to the standard error; twice (-vv) also the events and
-    /// full summaries as JSON lines
+    /// Write a progress line per query to the standard error, with its status, counts and miss
+    /// chance; twice (-vv) also the events and full summaries as JSON lines
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 }
@@ -402,15 +402,14 @@ impl Sink {
         })
     }
 
-    /// Writes the summary line of a query (JSON only) and its progress line with -v, and
-    /// flushes. Returns 1 when the query did not complete, else 0.
+    /// Flushes, then writes the progress line with -v, else the problem line of a query that did
+    /// not complete, on the standard error. Returns 1 when the query did not complete, else 0.
     fn finish_query(&mut self) -> Result<usize, CliError> {
-        if self.format == Format::Json {
-            writeln!(self.writer, "{}", self.totals.line()?)?;
-        }
         self.writer.flush()?;
         if self.verbose >= 1 {
             writeln!(std::io::stderr(), "{}", self.totals.progress())?;
+        } else if let Some(problem) = self.totals.problem() {
+            writeln!(std::io::stderr(), "{problem}")?;
         }
         Ok(usize::from(self.totals.status() != Status::Complete))
     }
