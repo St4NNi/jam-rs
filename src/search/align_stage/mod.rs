@@ -14,6 +14,8 @@ mod paths;
 mod place;
 mod query;
 #[cfg(test)]
+mod reach_tests;
+#[cfg(test)]
 mod tests;
 mod walks;
 mod window;
