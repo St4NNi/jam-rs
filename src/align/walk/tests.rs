@@ -354,3 +354,40 @@ fn widened_result_kept() {
     let found = align_dense_walk(input, config, &mut workspace, &mut results).unwrap();
     assert_eq!(format_cigar(&found.unwrap().runs), "1000=1D2000=");
 }
+
+/// Window k-mers that reach the entropy limit are not looked up in the table of the k-mers
+/// below it; the walks stay the same.
+#[test]
+fn low_walks_unchanged() {
+    let mut generator = rng(31);
+    let repeat = |unit: &[u8], times: usize| unit.repeat(times);
+    let mut query = random_bases(&mut generator, 2_000);
+    for unit in [&b"A"[..], b"AT", b"GGC", b"AAAAAAAAAAAAG", b"CCCCTCCC"] {
+        query.extend(repeat(unit, 40));
+        query.extend(random_bases(&mut generator, 500));
+    }
+    let mut contig = random_bases(&mut generator, 800);
+    contig.extend_from_slice(&query[1_500..4_000]);
+    contig.extend(repeat(b"TTTTTTTTTTTTC", 9));
+    contig.extend(repeat(b"GGGGAGGG", 12));
+    contig.extend(random_bases(&mut generator, 800));
+    for circular in [false, true] {
+        let split = || {
+            QueryTable::split(
+                &query,
+                circular,
+                AnchorConfig::default(),
+                ChainConfig::default(),
+            )
+            .unwrap()
+            .1
+        };
+        let walks = |table: &QueryTable| {
+            let dense = dense_walks(table, &contig, 0, BandConfig::default(), 64 << 20).unwrap();
+            (dense.walks, dense.reverse)
+        };
+        let limited = walks(&split());
+        assert!(limited.0.len() > 20, "{}", limited.0.len());
+        assert_eq!(limited, walks(&split().without_limit()));
+    }
+}

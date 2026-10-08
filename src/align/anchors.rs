@@ -77,6 +77,9 @@ pub struct QueryTable {
     /// For each occurrence: the code of the base before a forward occurrence, 5 for a reverse one.
     left: Vec<u8>,
     query: Vec<u8>,
+    /// Set for the table of the k-mers below the entropy limit, which holds no k-mer that
+    /// reaches it on either strand.
+    below: Option<EntropyLimit>,
 }
 
 impl QueryTable {
@@ -157,8 +160,8 @@ impl QueryTable {
         };
         let low_scanned = scanned.clone();
         Ok(rayon::join(
-            || shape.table(kept, scanned),
-            || shape.table(low, low_scanned),
+            || shape.table(kept, scanned, None),
+            || shape.table(low, low_scanned, Some(passes)),
         ))
     }
 
@@ -187,6 +190,20 @@ impl QueryTable {
             }
             slot = (slot + 1) & mask;
         }
+    }
+
+    /// Whether the table can hold the 2-bit k-mer `kmer` or its reverse complement: not when
+    /// the table holds only k-mers below the entropy limit and `kmer` reaches it, as the
+    /// reverse complement has the same base composition.
+    pub(super) fn may_hold(&self, kmer: u64) -> bool {
+        self.below.as_ref().is_none_or(|limit| !limit.holds(kmer))
+    }
+
+    /// The table without its entropy limit, so every window k-mer is looked up.
+    #[cfg(test)]
+    pub(super) fn without_limit(mut self) -> Self {
+        self.below = None;
+        self
     }
 
     /// Occurrences of `key` on both strands.
@@ -423,7 +440,12 @@ struct TableShape {
 
 impl TableShape {
     /// The table of the k-mer `pairs` of the query `scanned`.
-    fn table(self, mut pairs: Vec<KmerPair>, scanned: Vec<u8>) -> QueryTable {
+    fn table(
+        self,
+        mut pairs: Vec<KmerPair>,
+        scanned: Vec<u8>,
+        below: Option<EntropyLimit>,
+    ) -> QueryTable {
         pairs.par_sort_unstable();
         let same_kmer = |a: &KmerPair, b: &KmerPair| a.1 == b.1;
         let distinct = pairs.chunk_by(same_kmer).count();
@@ -471,6 +493,7 @@ impl TableShape {
             occurrences,
             left,
             query: scanned,
+            below,
         }
     }
 }

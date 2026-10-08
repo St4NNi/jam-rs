@@ -175,6 +175,9 @@ fn match_starts(
     let a = usize::from(table.anchors().a);
     kmers(window, table.anchors().a, |kmer| {
         let start = kmer.position;
+        if !table.may_hold(kmer.forward) {
+            return;
+        }
         if table.multiplicity(kmer.forward) > above {
             let left = start
                 .checked_sub(1)
