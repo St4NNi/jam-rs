@@ -6,7 +6,6 @@
 use super::manifest::{FileRecord, Manifest};
 use super::packed::BLOCK_BYTES;
 use super::plan::{Pin, Place, Plan, etag_file};
-use super::sequence_file::INDEX_EXTENSION;
 use super::{AtPath, IndexError};
 use crate::storage::{
     BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config,
@@ -45,13 +44,6 @@ impl Location {
         let config = Box::new(config.clone());
         let location = location.to_string();
         Ok(Self::S3 { location, config })
-    }
-
-    /// The file name without `.jam`, which names the index in records.
-    pub fn name(&self) -> String {
-        let file = self.file_name();
-        let suffix = format!(".{INDEX_EXTENSION}");
-        file.strip_suffix(&suffix).unwrap_or(&file).to_string()
     }
 
     /// The file name of the index file.
@@ -375,11 +367,13 @@ impl ShardFiles {
     }
 
     /// The index file without the cache, for example to verify it.
+    #[cfg(test)]
     pub(crate) fn open_seeds_uncached(&self) -> Result<Arc<dyn ReadAt>, IndexError> {
         self.location.open(&self.seeds.path, self.seeds.bytes)
     }
 
     /// The local path of sequence file `file`, or `None` when it lies on S3.
+    #[cfg(test)]
     pub(crate) fn sequence_path(&self, file: usize) -> Option<PathBuf> {
         self.location.local_path(&self.files.get(file)?.path)
     }
@@ -404,6 +398,7 @@ impl ShardFiles {
     }
 
     /// Sequence file `file` without the cache, with its record.
+    #[cfg(test)]
     pub(crate) fn open_uncached(
         &self,
         file: usize,

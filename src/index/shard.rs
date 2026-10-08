@@ -5,12 +5,17 @@
 
 use super::IndexError;
 use super::contig_table::ContigTable;
-use super::manifest::{EntryRecord, Manifest, SequenceRecord, sha256_range, verify_source};
+use super::manifest::{EntryRecord, Manifest, SequenceRecord};
+#[cfg(test)]
+use super::manifest::{sha256_range, verify_source};
 use super::packed::PackedSequence;
-use super::seed_file::{HEADER_BYTES, SeedFile};
+#[cfg(test)]
+use super::seed_file::HEADER_BYTES;
+use super::seed_file::SeedFile;
 use super::sources::{IndexHead, Location, ShardFiles, ShardOptions};
 use crate::storage::SliceSource;
 use serde::Serialize;
+#[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -55,6 +60,7 @@ impl Shard {
     }
 
     /// Opens the local index file at `path`, with its sequence file next to it.
+    #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self, IndexError> {
         let location = Location::File(path.to_path_buf());
         Self::open_with(&location, &ShardOptions::default())
@@ -99,11 +105,13 @@ impl Shard {
     }
 
     /// The SHA-256 digest of the manifest, which names this version of the shard.
+    #[cfg(test)]
     pub fn digest(&self) -> &str {
         &self.head.digest
     }
 
     /// The head of the seeds file: manifest, digest, size and name.
+    #[cfg(test)]
     pub fn head(&self) -> &IndexHead {
         &self.head
     }
@@ -124,6 +132,7 @@ impl Shard {
     }
 
     /// The local path of the sequence file of an entry; an error when it lies on S3.
+    #[cfg(test)]
     pub fn sequence_path(&self, entry: u32) -> Result<PathBuf, IndexError> {
         let (record, sequence) = self.packed_record(entry)?;
         self.files.sequence_path(sequence.file).ok_or_else(|| {
@@ -157,6 +166,7 @@ impl Shard {
 
     /// Checks the SHA-256 digest of the seeds and of every sequence file, and the checksums of
     /// every section and of the manifest.
+    #[cfg(test)]
     pub fn verify(&self) -> Result<(), IndexError> {
         let file = self.files.open_seeds_uncached()?;
         let seeds = HEADER_BYTES..self.seeds.manifest_range().start;

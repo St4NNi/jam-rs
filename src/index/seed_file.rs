@@ -129,8 +129,8 @@ pub struct SeedFile {
     entries: u64,
     seeds: u64,
     color_sets: u64,
-    locations: u64,
     sections: [Range<u64>; SECTIONS],
+    #[cfg(test)]
     crcs: [u32; SECTIONS],
     /// The bytes of the manifest and their CRC-32.
     manifest: (Range<u64>, u32),
@@ -186,8 +186,8 @@ impl SeedFile {
             entries: field(24),
             seeds: field(32),
             color_sets: field(40),
-            locations: field(48),
             sections,
+            #[cfg(test)]
             crcs,
             manifest,
             sketch,
@@ -219,16 +219,6 @@ impl SeedFile {
     /// Stored seeds: distinct seed keys.
     pub fn seed_count(&self) -> u64 {
         self.seeds
-    }
-
-    /// Distinct color sets.
-    pub fn color_set_count(&self) -> u64 {
-        self.color_sets
-    }
-
-    /// Seed locations of the locator part, 0 without it.
-    pub fn location_count(&self) -> u64 {
-        self.locations
     }
 
     /// Whether the file has the locator part, which stage 2 needs.
@@ -385,6 +375,7 @@ impl SeedFile {
     }
 
     /// Checks the CRC-32 of every section and of the manifest.
+    #[cfg(test)]
     pub fn verify_checksums(&self) -> Result<(), IndexError> {
         let sections = self.sections.iter().cloned().zip(self.crcs);
         for (section, crc) in sections.chain([self.manifest.clone()]) {

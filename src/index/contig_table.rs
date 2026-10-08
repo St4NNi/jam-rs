@@ -60,14 +60,6 @@ impl ContigTable {
         }
     }
 
-    /// The contig that holds the base at an entry coordinate.
-    pub fn contig_at(&self, position: u64) -> Option<usize> {
-        if position >= self.bases() {
-            return None;
-        }
-        Some(self.starts.partition_point(|start| *start <= position) - 1)
-    }
-
     /// The runs that overlap bases `range` in entry coordinates.
     pub(crate) fn runs_in(&self, range: Range<u64>) -> impl Iterator<Item = &Run> {
         let first =
@@ -173,8 +165,6 @@ mod tests {
         assert_eq!(table.starts(), &[0, 10, 10, 1_000_010]);
         assert_eq!(table.contig_range(2).unwrap(), 10..1_000_010);
         assert!(table.contig_range(3).is_err());
-        assert_eq!(table.contig_at(10), Some(2));
-        assert_eq!(table.contig_at(1_000_010), None);
         let runs: Vec<u64> = table.runs_in(4..301).map(|run| run.start).collect();
         assert_eq!(runs, [3, 300]);
         assert_eq!(table.runs_in(5..300).count(), 0);

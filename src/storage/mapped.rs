@@ -2,9 +2,12 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{ReadAt, StorageError, read_slice};
+#[cfg(test)]
+use super::StorageError;
+use super::{ReadAt, read_slice};
 use rayon::prelude::*;
 use std::io;
+#[cfg(test)]
 use std::path::Path;
 
 /// Reads of at least this many bytes ask the kernel for all their pages at once, so they are read
@@ -22,6 +25,7 @@ pub struct MappedFile {
 
 impl MappedFile {
     /// Maps the file at `path`; `populate` reads it into RAM at once.
+    #[cfg(test)]
     pub fn open(path: &Path, populate: bool) -> Result<Self, StorageError> {
         let failed = |source| StorageError::File {
             path: path.to_path_buf(),
@@ -55,14 +59,6 @@ impl MappedFile {
         Ok(Self {
             map: Some(map.make_read_only()?),
         })
-    }
-
-    /// Reads every page of the file into RAM now, so later reads never wait for storage.
-    pub fn load(&self) -> io::Result<()> {
-        match &self.map {
-            Some(map) => map.advise(memmap2::Advice::PopulateRead),
-            None => Ok(()),
-        }
     }
 
     /// All bytes of the file.

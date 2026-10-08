@@ -51,6 +51,7 @@ pub fn format_cigar(runs: &[EditRun]) -> String {
 
 /// Parses CIGAR text with the operations `=`, `X`, `I` and `D`. Empty runs and two neighbouring
 /// runs of one operation are invalid.
+#[cfg(test)]
 pub fn parse_cigar(cigar: &str) -> Result<Vec<EditRun>, AlignmentError> {
     let mut runs: Vec<EditRun> = Vec::new();
     let mut length = 0u32;

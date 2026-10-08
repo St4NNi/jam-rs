@@ -81,11 +81,6 @@ impl MissModel {
     pub fn k(&self) -> usize {
         self.k
     }
-
-    /// The minimizer window of the model, in k-mers.
-    pub fn w(&self) -> usize {
-        self.w
-    }
 }
 
 /// The largest total chance of missing a qualifying entry (`--max-miss`): the seed lookups and the

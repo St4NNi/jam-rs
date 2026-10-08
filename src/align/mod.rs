@@ -17,7 +17,9 @@ pub use chain_alignment::{BandConfig, align_chain};
 pub use chains::{
     CHAINING_BYTES, Chain, ChainConfig, WindowChains, forward_extent, split_by_drift, window_chains,
 };
-pub use cigar::{EditOperation, EditRun, format_cigar, parse_cigar};
+#[cfg(test)]
+pub use cigar::parse_cigar;
+pub use cigar::{EditOperation, EditRun, format_cigar};
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
 pub use walk::{
     DenseResults, DenseWalk, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk,
@@ -150,6 +152,7 @@ impl Alignment {
     }
 
     /// Matches divided by alignment columns.
+    #[cfg(test)]
     pub fn identity(&self) -> f64 {
         self.counts().identity()
     }

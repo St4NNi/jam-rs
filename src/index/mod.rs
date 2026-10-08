@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: MIT
 
 mod bits;
-#[allow(dead_code)]
 mod buckets;
 mod build;
 mod contig_table;

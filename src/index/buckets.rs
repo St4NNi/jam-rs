@@ -112,6 +112,7 @@ impl<'a> SketchBucket<'a> {
     }
 
     /// Whether the bucket holds no seed.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.seeds == 0
     }

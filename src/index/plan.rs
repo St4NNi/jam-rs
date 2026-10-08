@@ -176,6 +176,7 @@ impl Plan {
     }
 
     /// The file next to a pin that holds the ETag its bytes were downloaded under.
+    #[cfg(test)]
     pub fn etag_path(&self, cache: &Path, pin: &Pin) -> PathBuf {
         etag_file(&self.pin_path(cache, pin))
     }

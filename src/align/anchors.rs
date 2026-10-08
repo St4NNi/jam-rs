@@ -88,6 +88,7 @@ pub struct QueryTable {
 
 impl QueryTable {
     /// The table of the query k-mers that pass the entropy limit.
+    #[cfg(test)]
     pub fn new(
         query: &[u8],
         circular: bool,

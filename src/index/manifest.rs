@@ -226,6 +226,7 @@ pub(crate) fn sha256_hex(parts: &[&[u8]]) -> String {
 }
 
 /// Checks a file read from `source` against its record, for files that may not be local.
+#[cfg(test)]
 pub(crate) fn verify_source(source: &dyn ReadAt, record: &FileRecord) -> Result<(), IndexError> {
     let size = source.size();
     if size != record.bytes || sha256_range(source, 0..size)? != record.sha256 {

@@ -374,6 +374,7 @@ impl S3Object {
     }
 
     /// All bytes of the small object `s3://bucket/key`, read with one GET.
+    #[cfg(test)]
     pub fn read_whole(config: &S3Config, location: &str) -> Result<Vec<u8>, StorageError> {
         let (bucket, key) = split_location(location)?;
         let operator = config.operator(bucket)?;
