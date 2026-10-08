@@ -6,7 +6,7 @@
 
 jam (just another minimizer) searches for query sequences (plasmids, genes, contigs; 1 kb to a
 few Mb) in very large collections of assemblies. It computes full base-level alignments with
-CIGAR strings and decides for each assembly whether it contains the query.
+CIGAR strings. jam decides each candidate assembly and reports those that pass.
 
 ## Install
 
@@ -46,7 +46,12 @@ that contains the query. Standard output holds only these matches.
 ## How it works
 
 Each assembly in the index is stored as an *entry*. With `--singleton`, each FASTA record
-becomes a separate entry instead. A search runs in three stages and answers one question per
+becomes a separate entry instead.
+
+The two commands name things differently. `jam search` calls every indexed entry an assembly.
+`jam screen` calls an indexed sequence an entry, and a streamed file an assembly.
+
+A search runs in three stages and answers one question per
 stage:
 
 1. **Sketch**: which entries may contain the query? jam looks up the query's seeds (minimizers)
@@ -105,7 +110,8 @@ Advanced options:
 - `-k, --k K` (default 25): k-mer length in bases (1 to 32).
 - `-w, --window W` (default 100): number of k-mers per minimizer window.
 - `--sketch-only`: write only the index file containing the sketch data. This index is much
-  smaller, but it supports only `--level sketch` searches.
+  smaller, but it supports only `--level sketch` searches. It writes no `.jamseq` file, so
+  `--chunks` has no effect with it.
 - `--chunks N` (default 1): split the sequence data into `NAME.1.jamseq` through
   `NAME.N.jamseq` of roughly equal size (for example, to stay within object size limits or to
   parallelize file transfers). Each entry is stored completely within one chunk.
@@ -134,7 +140,8 @@ Example:
     jam index reshard -o all --shards 4 part1.jam part2.jam
 
 To search across multiple shards, pass all of their index files to `jam search` before the
-query file.
+query file, for example `all/shard-*.jam`. `jam search` needs the `.jam` files. It does not
+accept the output directory itself. Only `jam index reshard` reads the `index.json` in it.
 
 ### jam index warm
 
@@ -147,6 +154,12 @@ from RAM or local disk. See [S3 and local caches](#s3-and-local-caches).
   data from this directory.
 - `--memory SIZE`: RAM budget for pinned data and the block cache (for example, `16GiB`).
 - `--disk SIZE`: disk budget for pinned data and the block cache (for example, `200GiB`).
+
+A size is a number with an optional unit, such as `500`, `1.5GiB` or `200 GB`. A number
+without a unit means bytes. Units are not case sensitive. `KB`, `MB`, `GB`, `TB`, `PB` and
+`EB` (also `K`, `M`, `G`, `T`, `P` and `E`) are powers of 1000. `KiB`, `MiB`, `GiB`, `TiB`,
+`PiB` and `EiB` (also `Ki`, `Mi`, `Gi`, `Ti`, `Pi` and `Ei`) are powers of 1024. The same
+format applies to `--memory` and `--disk` in `jam search` and `jam serve` too.
 - `--pin PARTS`: index sections to pin instead of the default plan. Give a comma-separated list
   of `sketch`, `locators`, `packed`, or `packed=NAME,NAME` (to pin sequences for specific
   entries). Because every item after `packed=` is read as an entry name, that item must come
@@ -269,8 +282,9 @@ Advanced options:
   for `jam search`.
 - `--closest-margin M` (0 to 1): for each contig, score every matching entry as the aligned
   share of the contig multiplied by the alignment identity. A contig then counts only toward
-  entries whose score is within margin M of the highest-scoring entry on that contig. Without
-  this option, a contig counts toward every entry it qualifies for.
+  entries whose score is at least the highest score on that contig minus M. M is a plain
+  difference, not a ratio: with M 0.05 and a best score of 0.90, entries that score 0.85 or
+  more count. Without this option, a contig counts toward every entry it qualifies for.
 - `--batch-bases N` (default 500000): number of contig bases searched together in one batch.
 - `--contig-dir DIR`: write contigs that share enough with an entry into this directory, as one
   gzipped FASTA file per assembly.
@@ -303,7 +317,10 @@ At `--level locate`, jam writes one line per located candidate:
 
     {"q":"plasmid1","a":"SAMN0001","s":2,"c":0.81,"w":[["contig_7",120000,148000]]}
 
-- `c`: the containment estimate, recomputed from the seeds whose positions were located.
+- `c`: the containment estimate, recomputed from the seeds whose positions were located. It
+  can be lower than at stage 1. Stage 1 can count a seed hit that the entry does not have,
+  because the index keeps only 44 bits of each seed hash, so two k-mers can share a key.
+  Stage 2 counts a seed only if the index lists a location for it in the entry.
 - `w`: the candidate alignment windows, each given as `[contig, start, end]` on the contig.
 
 At `--level align`, jam writes one line per confirmed assembly:
@@ -360,7 +377,7 @@ with an error. This applies to every format.
 | `coverage` | The query coverage, as in `cov` above. |
 | `identity` | The sequence identity, as in `id` above. |
 | `bases` | The number of covered query bases. |
-| `fragments` | The number of aligned fragments. |
+| `fragments` | The number of aligned fragments in `f`. Alternative fragments (`alt`) are not counted. |
 
 ### PAF
 
@@ -530,6 +547,10 @@ entry per FASTA record, then stream the assemblies against it:
     jam index build --singleton -o plasmids plasmids.fa
     jam screen plasmids.jam --assemblies assemblies.txt -c 0.8 -o screen.jsonl
 
+A screen has two stages. The first is the *survey*. jam looks up the seeds of the contigs of an
+assembly, a batch at a time, in the index. It keeps the entries that share enough seeds with a
+contig and aligns only those. `--survey-only` stops after the survey.
+
 The command writes JSON lines, where the `type` key identifies the line kind:
 
 - `entry`: reports a small sequence (`entry`) found in an assembly (`assembly`). The line
@@ -543,6 +564,23 @@ The command writes JSON lines, where the `type` key identifies the line kind:
   counts, and the time in seconds spent in the survey and alignment stages.
 - `failed`: reports an assembly that could not be read, along with the `error` message.
   Screening continues with the remaining assemblies, and jam exits with an error at the end.
+
+Example lines, one of each type (the long lines are wrapped here):
+
+    {"type":"entry","entry":"pl1","entry_length":1200,"assembly":"asm1.fa","covered_bases":1200,
+     "query_coverage":1.0,"identity":0.9975,"matches":1197,"substitutions":3,"insertions":0,
+     "deletions":0,"contigs":[{"id":0,"name":"ctg_1","length":3000,"aligned":1200,
+     "identity":0.9975,"score":0.399,"best_score":0.399,"entries":1}],
+     "primary":[{"new_bases":1200,"fragment":{"contig_index":0,
+     "query_segments":[{"start":0,"end":1200}],"alignment":{"score":2385,"strand":"forward",
+     "query_interval":{"start":0,"end":1200},"contig_interval":{"start":1000,"end":2200},
+     "matches":1197,"substitutions":3,"insertions":0,"deletions":0,"identity":0.9975,
+     "cigar":"300=1X299=1X299=1X299="}}}],"alternatives":[],"gaps":[]}
+    {"type":"assembly","assembly":"asm1.fa","contigs":1,"bases":3000,"skipped_contigs":0,
+     "batches":1,"surveyed_entries":1,"aligned_entries":1,"fragments":1,"alignments":1,
+     "reported_entries":1,"matched_contigs":1,"matched_bases":3000,"reported_contigs":1,
+     "reported_bases":3000,"survey_seconds":0.000429435,"align_seconds":0.002707405}
+    {"type":"failed","assembly":"missing.fa","error":"bad assembly: /data/missing.fa: No such file or directory (os error 2)"}
 
 ## Server
 
@@ -565,7 +603,7 @@ several machines, with one shard per machine.
 ## Speed and size
 
 These numbers come from a single test on 2026-10-22, with one run per case, so treat them as
-rough estimates. The collection held 1,000 SPIRE assemblies (241.8 Gbp). Searches ran with 8
+rough estimates. The collection held 1,000 SPIRE metagenome assemblies (241.8 Gbp). Searches ran with 8
 threads and a cold file cache.
 
 - Building the index took about 10 minutes with 32 threads. The index totaled 108 GB (68 GB
