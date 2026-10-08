@@ -9,11 +9,12 @@ use crate::align::Interval;
 use crate::test_support::{no_stop, random_bases, rng, with_substitutions};
 
 /// Contigs that hold pieces of `query`: copies, substituted copies on both strands, a run of
-/// one base and a piece inside unrelated bases, each between random flanks.
-fn piece_contigs(query: &[u8], seed: u64) -> Vec<(String, Vec<u8>)> {
+/// one base and a piece inside unrelated bases, each between random flanks. A piece starts
+/// every `step` query bases; flanks are `flank` bases or up to 1,800 more.
+fn piece_contigs(query: &[u8], seed: u64, step: usize, flank: usize) -> Vec<(String, Vec<u8>)> {
     let mut random = rng(seed);
     let mut contigs = Vec::new();
-    for (index, start) in (0..query.len() - 1_500).step_by(1_700).enumerate() {
+    for (index, start) in (0..query.len() - 1_500).step_by(step).enumerate() {
         let length = 400 + 300 * (index % 4);
         let piece = &query[start..start + length];
         let piece = match index % 4 {
@@ -22,7 +23,7 @@ fn piece_contigs(query: &[u8], seed: u64) -> Vec<(String, Vec<u8>)> {
             2 => crate::seeds::reverse_complement(&with_substitutions(&mut random, piece, 0.85)),
             _ => [piece, &[b'A'; 120][..], piece].concat(),
         };
-        let flank = 200 + 900 * (index % 3);
+        let flank = flank + 900 * (index % 3);
         let bases = [
             random_bases(&mut random, flank),
             piece,
@@ -50,7 +51,12 @@ fn reach_holds_fragments() {
     ]
     .concat();
     let entries: Vec<EntryContigs> = (0..3)
-        .map(|seed| (format!("e{seed}"), piece_contigs(&query, 40 + seed)))
+        .map(|seed| {
+            (
+                format!("e{seed}"),
+                piece_contigs(&query, 40 + seed, 1_700, 200),
+            )
+        })
         .collect();
     let shard = build(directory.path(), &entries);
     let config = AlignStageConfig::default();
@@ -97,10 +103,15 @@ fn reach_holds_fragments() {
 fn short_entries_stop() {
     let directory = tempfile::tempdir().unwrap();
     let mut random = rng(9);
-    let query = random_bases(&mut random, 12_000);
+    let query = random_bases(&mut random, 80_000);
     let whole = with_substitutions(&mut random, &query, 0.97);
+    // Short flanks keep the reach of each piece small: past the first batch it falls short.
+    let mut pieces = piece_contigs(&query, 3, 2_500, 100);
+    pieces
+        .iter_mut()
+        .for_each(|(_, bases)| bases.truncate(bases.len().min(1_900)));
     let entries: Vec<EntryContigs> = vec![
-        ("pieces".to_string(), piece_contigs(&query, 3)),
+        ("pieces".to_string(), pieces),
         ("whole".to_string(), vec![("c".to_string(), whole)]),
     ];
     let shard = build(directory.path(), &entries);

@@ -226,7 +226,10 @@ pub fn entry_fragments(
 const KEPT_PREPARED_BYTES: usize = 256 << 20;
 
 /// Batches in which the contigs of an entry are aligned between checks of its reach.
-const REACH_BATCHES: usize = 8;
+const REACH_BATCHES: usize = 64;
+
+/// The fewest contigs of one batch, so that the threads stay busy.
+const LEAST_BATCH: usize = 16;
 
 /// One located entry with everything its contigs are aligned with.
 #[derive(Clone, Copy)]
@@ -319,7 +322,7 @@ impl EntryRequest<'_> {
             ),
             ContigState::Done(_) => (false, std::cmp::Reverse(0)),
         });
-        let batch = order.len().div_ceil(REACH_BATCHES).max(1);
+        let batch = order.len().div_ceil(REACH_BATCHES).max(LEAST_BATCH);
         for part in order.chunks(batch) {
             if required.is_some_and(|required| self.short_of(&states, required)) {
                 return Ok((None, work));
