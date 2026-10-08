@@ -207,6 +207,65 @@ impl Seeder {
         });
     }
 
+    /// Calls `emit` for every k-mer one indel away from the query at a start of the query: a
+    /// base inserted into, or removed from, the inside of k bases. With `substituted`, also every
+    /// k-mer one substitution away from those.
+    pub fn query_neighbours_indel(
+        &self,
+        query: &[u8],
+        substituted: bool,
+        mut emit: impl FnMut(Kmer),
+    ) {
+        let k = usize::from(self.scheme.k);
+        let codes: Vec<u8> = query.iter().map(|&byte| CODE[usize::from(byte)]).collect();
+        let clean = |range: Range<usize>| {
+            range.end <= codes.len() && codes[range].iter().all(|&code| code != OTHER)
+        };
+        let mut push = |position: usize, bases: &mut dyn Iterator<Item = u8>| {
+            let forward = bases.fold(0u64, |word, code| (word << 2) | u64::from(code));
+            let reverse = reverse_code(forward, k);
+            let code = KmerCode {
+                position,
+                forward,
+                reverse,
+            };
+            emit(self.query_kmer(code));
+            if substituted {
+                for base in 0..k {
+                    for change in 1..4u64 {
+                        emit(self.query_kmer(KmerCode {
+                            forward: forward ^ (change << (2 * (k - 1 - base))),
+                            reverse: reverse ^ (change << (2 * base)),
+                            position,
+                        }));
+                    }
+                }
+            }
+        };
+        for start in 0..codes.len() {
+            if clean(start..start + k - 1) {
+                let kept = &codes[start..start + k - 1];
+                for at in 1..k - 1 {
+                    for added in 0..4u8 {
+                        let mut bases = kept[..at]
+                            .iter()
+                            .copied()
+                            .chain([added])
+                            .chain(kept[at..].iter().copied());
+                        push(start, &mut bases);
+                    }
+                }
+            }
+            if clean(start..start + k + 1) {
+                let longer = &codes[start..start + k + 1];
+                for at in 1..k {
+                    let mut bases = longer[..at].iter().chain(&longer[at + 1..]).copied();
+                    push(start, &mut bases);
+                }
+            }
+        }
+    }
+
     /// The hash and strand of one query k-mer, salted below the entropy limit.
     fn query_kmer(&self, code: KmerCode) -> Kmer {
         let mut hash = jamhash::jamhash_u64(code.canonical());
@@ -361,6 +420,14 @@ fn kmer_mask(k: u32) -> u64 {
     } else {
         (1u64 << (2 * k)) - 1
     }
+}
+
+/// The reverse complement of a 2-bit k-mer of `k` bases.
+fn reverse_code(forward: u64, k: usize) -> u64 {
+    let mut word = !forward;
+    word = ((word >> 2) & 0x3333_3333_3333_3333) | ((word & 0x3333_3333_3333_3333) << 2);
+    word = ((word >> 4) & 0x0f0f_0f0f_0f0f_0f0f) | ((word & 0x0f0f_0f0f_0f0f_0f0f) << 4);
+    word.swap_bytes() >> (64 - 2 * k)
 }
 
 /// One step of a scan: a k-mer, or a byte other than A, C, G or T that ends a clean run.

@@ -444,3 +444,46 @@ fn ordinary_unmasked() {
     assert!(low_complexity_mask(b"AA").is_empty());
     assert_eq!(low_complexity_mask(&[b'T'; 30]), vec![0..30]);
 }
+
+#[test]
+fn indel_neighbours_cover() {
+    let query = random_bases(&mut rng(15), 50);
+    let seeder = Seeder::new(scheme(15, 10, 1.0)).unwrap();
+    let collect = |substituted: bool| {
+        let mut found = std::collections::HashSet::new();
+        let mut count = 0;
+        seeder.query_neighbours_indel(&query, substituted, |kmer| {
+            found.insert((kmer.position, kmer.hash, kmer.reverse));
+            count += 1;
+        });
+        (found, count)
+    };
+    let (plain, count) = collect(false);
+    // 13 places times 4 bases for an added base, 14 places for a removed one.
+    assert_eq!(count, (50 - 14 + 1) * 52 + (50 - 16 + 1) * 14);
+    let (changed, more) = collect(true);
+    assert_eq!(more, count * 46);
+    // A seed holding an added or a removed query base inside it, and one substitution.
+    for at in [1, 9, 20, 33, 48] {
+        let added = [&query[..at], b"G", &query[at..]].concat();
+        let removed = [&query[..at], &query[at + 1..]].concat();
+        for (copy, end) in [(added, 14), (removed, 15)] {
+            let mut substituted = copy.clone();
+            let other = (at + 5) % copy.len();
+            substituted[other] = if copy[other] == b'A' { b'C' } else { b'A' };
+            seeder.query_kmers(&copy, |kmer| {
+                let start = kmer.position as usize;
+                if start < at && at < start + end {
+                    let key = (kmer.position, kmer.hash, kmer.reverse);
+                    assert!(plain.contains(&key), "at {at}");
+                }
+            });
+            seeder.query_kmers(&substituted, |kmer| {
+                let start = kmer.position as usize;
+                if start < at && at < start + end && (start..start + 15).contains(&other) {
+                    assert!(changed.contains(&(kmer.position, kmer.hash, kmer.reverse)));
+                }
+            });
+        }
+    }
+}
