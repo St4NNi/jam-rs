@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn short_queries_take_indels() {
+    fn indel_lookups_limited() {
         let seeder = seeder();
         let pairs = |kmers: &QueryKmers| -> usize {
             let all = 0..kmers.distinct().len() as u32;
