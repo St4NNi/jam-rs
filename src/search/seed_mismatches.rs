@@ -20,7 +20,8 @@ pub enum SeedMismatches {
     /// A seed is also hit by a query k-mer with one mismatch
     #[value(name = "1")]
     One,
-    /// A seed is also hit by a query k-mer with two mismatches
+    /// A seed is also hit by a query k-mer with two mismatches; on queries of up to about
+    /// 1.1 kb also by one with one indel and at most one mismatch
     #[value(name = "2")]
     Two,
 }
