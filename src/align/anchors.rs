@@ -58,6 +58,10 @@ pub struct Anchor {
     pub query: u32,
 }
 
+/// Queries of at most this many bases align chains of a single anchor: a short or low-identity
+/// copy may hold fewer than three anchors, and the alignments of a short query are cheap.
+const SINGLE_ANCHOR_BASES: u32 = 1_000;
+
 /// Every k-mer of the query on both strands, keyed by its 2-bit code. The forward occurrences of
 /// a k-mer come first, ordered by the code of the query base before them (4 for none or another
 /// byte), then its reverse occurrences.
@@ -283,6 +287,16 @@ impl QueryTable {
     /// The anchor settings the table was built with.
     pub fn anchors(&self) -> AnchorConfig {
         self.anchors
+    }
+
+    /// The fewest anchors of a chain: one for a query of at most `SINGLE_ANCHOR_BASES`, else
+    /// the chaining limit.
+    pub fn fewest_anchors(&self) -> u32 {
+        if self.query_length <= SINGLE_ANCHOR_BASES {
+            1
+        } else {
+            self.chains.min_anchors
+        }
     }
 
     /// The chaining limits the table was built with.

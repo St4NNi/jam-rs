@@ -288,7 +288,12 @@ pub(super) fn chain_anchors(
     let config = table.chains();
     // Lookups every `stride` positions can miss up to stride - 1 bases at each end of an exact
     // stretch, so a stretch of `min_score` bases may score 2 (stride - 1) less.
-    let lowest = config.min_score - 2 * (i64::from(table.anchors().stride) - 1);
+    let mut lowest = config.min_score - 2 * (i64::from(table.anchors().stride) - 1);
+    // A chain of a short query may be one anchor, which scores a.
+    let fewest = table.fewest_anchors();
+    if fewest < config.min_anchors {
+        lowest = lowest.min(i64::from(table.anchors().a));
+    }
     let links = chain_links(table, anchors, examined)?;
     let mut order: Vec<usize> = (0..anchors.len()).collect();
     order.sort_unstable_by_key(|&index| (std::cmp::Reverse(links[index].score), index));
@@ -310,7 +315,7 @@ pub(super) fn chain_anchors(
             }
             at = links[at].previous;
         }
-        if path.len() < config.min_anchors as usize || links[end].score - base < lowest {
+        if path.len() < fewest as usize || links[end].score - base < lowest {
             continue;
         }
         path.reverse();

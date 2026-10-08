@@ -373,3 +373,20 @@ fn chaining_work_bounded() {
     );
     assert_eq!(run(u64::MAX, true), Err(AlignmentError::Stopped));
 }
+
+#[test]
+fn single_anchor_chains() {
+    let query = random_bases(&mut rng(31), 1_600);
+    let mut random = rng(32);
+    // Eighteen query bases at a looked-up window position give exactly one anchor.
+    let window = [
+        random_bases(&mut random, 300),
+        query[100..118].to_vec(),
+        random_bases(&mut random, 300),
+    ]
+    .concat();
+    let short = chains(&query[..1_000], false, &window);
+    assert_eq!(short.len(), 1);
+    assert_eq!(position(short[0].anchors[0]), (300, 100));
+    assert!(chains(&query, false, &window).is_empty());
+}
