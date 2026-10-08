@@ -27,6 +27,8 @@ enum Placement {
     Periodic,
     /// Exactly 5% of the bases (the identity limit), uniformly at random.
     Limit,
+    /// Exactly this many bases, uniformly at random.
+    Count(usize),
 }
 
 /// Substitution positions in a copy of `length` bases. The first and last 10 bases stay equal,
@@ -34,13 +36,12 @@ enum Placement {
 fn substitutions(placement: Placement, length: usize, random: &mut StdRng) -> Vec<usize> {
     let inner = 10..length - 10;
     let mut picked: Vec<usize> = match placement {
-        Placement::Uniform | Placement::Limit => {
-            let share = if matches!(placement, Placement::Uniform) {
-                0.04
-            } else {
-                0.05
+        Placement::Uniform | Placement::Limit | Placement::Count(_) => {
+            let count = match placement {
+                Placement::Uniform => length * 4 / 100,
+                Placement::Count(count) => count,
+                _ => length * 5 / 100,
             };
-            let count = (length as f64 * share) as usize;
             let mut all: Vec<usize> = inner.collect();
             for at in 0..count.min(all.len()) {
                 let other = random.random_range(at..all.len());
@@ -204,5 +205,69 @@ fn substituted_copies_covered() {
             [copy],
             "{placement:?} length {length} reverse {reverse}"
         );
+    }
+}
+
+/// Short copies at 90% and 95% with the rule at that identity: one fragment counts whole over
+/// the whole copy, and the decision confirms the entry.
+#[test]
+fn short_copies_confirmed() {
+    let config = AlignStageConfig::default();
+    let mut cases = Vec::new();
+    for length in [150usize, 250, 390] {
+        for identity in [0.9, 0.95] {
+            for reverse in [false, true] {
+                let count = (length as f64 * (1.0 - identity) + 1e-6) as usize;
+                let seed = 2000 + (length + count) as u64 * 2 + u64::from(reverse);
+                let planted = case(length, Placement::Count(count), reverse, seed);
+                cases.push((length, identity, reverse, planted));
+            }
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let entries: Vec<_> = cases
+        .iter()
+        .enumerate()
+        .map(|(at, (.., case))| {
+            (
+                format!("e{at}"),
+                vec![("c".to_string(), case.contig.clone())],
+            )
+        })
+        .collect();
+    let shard = build(directory.path(), &entries);
+    let workspace = AlignStageWorkspace::default();
+    for (entry, (length, identity, reverse, case)) in cases.iter().enumerate() {
+        let rule = DecisionRule {
+            min_query_coverage: format!("{length}bp").parse().unwrap(),
+            min_identity: *identity,
+            min_fragment_identity: *identity,
+            ..DecisionRule::default()
+        };
+        let located = LocatedEntry {
+            entry: entry as u32,
+            coverage_bound: case.query.len() as u64,
+            containment_estimate: 1.0,
+            alignment_windows: vec![ContigWindows {
+                contig: 0,
+                ranges: vec![case.window.clone()],
+            }],
+        };
+        let prepared = PreparedQuery::new(&case.query, false, &config).unwrap();
+        let packed = shard.packed(entry as u32).unwrap();
+        let control = no_stop();
+        let found = entry_fragments(
+            &packed, &prepared, &located, &config, &rule, &workspace, control,
+        );
+        let (fragments, _) = found.unwrap();
+        let copy = Interval::new(FLANK as u64, (FLANK + length) as u64).unwrap();
+        let whole = fragments.iter().filter(|fragment| {
+            rule.counts_fragment(&fragment.alignment) && fragment.query_segments == [copy]
+        });
+        let label = format!("length {length} identity {identity} reverse {reverse}");
+        assert_eq!(whole.count(), 1, "{label}");
+        let query_length = case.query.len() as u64;
+        let decision = rule.decide(query_length, fragments, &[], || false, |_| 0);
+        assert!(decision.unwrap().qualifies, "{label}");
     }
 }
