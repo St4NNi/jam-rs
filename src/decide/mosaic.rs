@@ -201,6 +201,9 @@ fn best_single(
     Ok(best)
 }
 
+/// A contig selection: the added pieces and the indices of the fragments they came from.
+type ContigPick = (Vec<Added>, Vec<usize>);
+
 /// The fragments of the one contig that alone cover the most bases, enough by `enough`, at
 /// `min_identity`; the higher identity wins a tie. Each contig is tried as
 /// selections 1 and 2 try all fragments. Contigs with fewer paired bases than needed are skipped.
@@ -210,14 +213,14 @@ fn best_contig(
     required_bases: u64,
     enough: &dyn Fn(&[Added]) -> bool,
     stopped: &dyn Fn() -> bool,
-) -> Result<Option<(Vec<Added>, Vec<usize>)>, DecideError> {
+) -> Result<Option<ContigPick>, DecideError> {
     let mut contigs: BTreeMap<u32, (u64, Vec<usize>)> = BTreeMap::new();
     for (index, item) in prepared.iter().enumerate() {
         let entry = contigs.entry(item.fragment.contig_index).or_default();
         entry.0 += item.support_bases;
         entry.1.push(index);
     }
-    let mut best: Option<(Vec<Added>, Vec<usize>)> = None;
+    let mut best: Option<ContigPick> = None;
     let mut best_key = (0, EditCounts::default());
     for (span, order) in contigs.into_values() {
         if span < required_bases {
