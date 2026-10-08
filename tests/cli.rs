@@ -217,7 +217,7 @@ fn locate_level_windows() {
 
 /// A query without a hit writes nothing to the standard output.
 #[test]
-fn no_hit_writes_nothing() {
+fn no_hit_silent() {
     let fixture = fixture();
     let other = fixture.directory.path().join("other.fa");
     write_fasta(&other, "stranger", &random_bases(77, 3_000));

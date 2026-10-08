@@ -144,7 +144,7 @@ fn summary_over_shards() {
 }
 
 #[test]
-fn failed_problem_has_error() {
+fn failure_shows_error() {
     let mut failed = summary(Status::Failed, None);
     failed.error = Some("shard unreadable".into());
     let mut totals = QueryTotals::new("q1");
