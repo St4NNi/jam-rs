@@ -349,10 +349,15 @@ impl MissCount {
         if self.over == 0 {
             return None;
         }
-        let (over, queries, worst) = (self.over, self.queries, self.worst);
+        let (over, queries) = (self.over, self.queries);
+        let worst = if self.worst >= 0.01 {
+            format!("{:.2}", self.worst)
+        } else {
+            format!("{:.1e}", self.worst)
+        };
         let mut line = format!(
             "jam: {over} of {queries} queries miss --max-miss {max_miss} at -i {identity} \
-             (worst-case bound up to {worst:.2})"
+             (worst-case bound up to {worst})"
         );
         if let Some(length) = from {
             line += &format!(

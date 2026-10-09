@@ -149,11 +149,19 @@ fn paf_fragment_lines() {
 #[test]
 fn max_miss_unpruned() {
     let fixture = fixture();
-    let (stdout, stderr) = search_output(&fixture, &["--max-miss", "0.000000001", "-v"]);
+    let (stdout, stderr) = search_output(&fixture, &["--max-miss", "0.000000000000001", "-v"]);
     assert_eq!(json(stdout.lines().next().unwrap())["a"], "plasmid_1");
-    assert!(stderr.trim_end().ends_with("; pruning off"), "{stderr}");
+    assert!(stderr.contains("; pruning off\n"), "{stderr}");
+    assert!(
+        stderr.contains("jam: 1 of 1 queries miss --max-miss"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("jam:"), "{stdout}");
     let (_, stderr) = search_output(&fixture, &["-v"]);
-    assert!(!stderr.contains("pruning off"), "{stderr}");
+    assert!(
+        !stderr.contains("pruning off") && !stderr.contains("jam:"),
+        "{stderr}"
+    );
     assert!(stderr.contains("; miss "), "{stderr}");
 }
 
