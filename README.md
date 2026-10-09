@@ -484,7 +484,7 @@ levels, from the cheapest to the most thorough:
 
 jam may spend at most one extra CPU minute per query on mismatch lookups. Within that, it takes
 the cheapest level that meets the miss target; if none does, the cheapest level at which a
-typical copy gets about 3 seed hits. If no level gets there, it takes the highest level within
+typical copy gets about 6 seed hits. If no level gets there, it takes the highest level within
 the limit. For a query of at most 1,100 k-mers, level 2 becomes level 3, which also finds copies
 with an indel. The extra CPU time is about 0.001 s per query k-mer for level 1, 0.0055 s for
 level 2 and 0.009 s for level 3.

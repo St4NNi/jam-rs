@@ -17,8 +17,8 @@ const SECONDS_PER_KMER: [f64; 3] = [0.001, 0.0055, 0.009];
 const CPU_LIMIT_SECONDS: f64 = 60.0;
 
 /// The seed hits that a whole copy is expected to give before a level is enough. A copy then
-/// shows a seed hit with a chance of about 95%.
-const EXPECTED_HITS: f64 = 3.0;
+/// shows a seed hit with a chance of about 99.75%.
+const EXPECTED_HITS: f64 = 6.0;
 
 /// The most query k-mers for which level 2 also looks up the k-mers one indel away.
 const MAX_INDEL_KMERS: u64 = 1_100;
@@ -136,26 +136,26 @@ mod tests {
         for (identity, length, level) in [
             (0.95, 250, 3),
             (0.95, 500, 1),
-            (0.95, 600, 0),
+            (0.95, 600, 1),
             (0.95, 1_300, 2),
             (0.95, 3_000, 1),
             (0.95, 10_000, 0),
             (0.9, 250, 3),
-            (0.9, 1_000, 1),
-            (0.9, 2_200, 0),
+            (0.9, 1_000, 3),
+            (0.9, 2_200, 1),
             (0.9, 3_300, 2),
             (0.9, 8_000, 1),
             (0.9, 40_000, 0),
             (0.85, 1_000, 3),
-            (0.85, 2_000, 1),
+            (0.85, 2_000, 2),
             (0.85, 9_000, 2),
-            (0.85, 15_000, 0),
+            (0.85, 15_000, 1),
             (0.85, 30_000, 1),
             (0.85, 70_000, 0),
             (0.85, 200_000, 0),
             (0.8, 1_500, 2),
-            (0.8, 6_000, 1),
-            (0.8, 41_000, 0),
+            (0.8, 6_000, 2),
+            (0.8, 41_000, 1),
             (0.8, 1_000_000, 0),
         ] {
             assert_eq!(choice(identity, length), level, "{identity} {length}");
