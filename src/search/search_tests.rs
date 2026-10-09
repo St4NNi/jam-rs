@@ -5,7 +5,6 @@
 use super::control::{SearchControl, Stopped};
 use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
-use super::seed_mismatches::SeedMismatches;
 use crate::align::{Strand, format_cigar};
 use crate::decide::{Fragment, QueryCoverage};
 use crate::index::{BuildOptions, EntryInput, Shard, build_shard};
@@ -71,8 +70,8 @@ fn search(
     (summary, events)
 }
 
-/// A query whose every 21-mer differs from the entry in exactly two bases is found with two
-/// mismatches and not with one (the test seeds have k = 21).
+/// A query whose every 21-mer differs from the entry in exactly two bases is found by the
+/// lookups the rule takes (the test seeds have k = 21).
 #[test]
 fn two_seeds_found() {
     let directory = tempfile::tempdir().unwrap();
@@ -103,15 +102,10 @@ fn two_seeds_found() {
         numerator: 5,
         decimal_places: 1,
     };
-    let mut found = |mismatches: SeedMismatches, expected: u8| {
-        base.seed_mismatches = mismatches;
-        let (summary, events) = search(&shard, &query, false, &base, false);
-        assert_eq!(summary.seed_mismatches, expected);
-        events.contains_key(&0)
-    };
-    assert!(!found(SeedMismatches::Zero, 0));
-    assert!(!found(SeedMismatches::One, 1));
-    assert!(found(SeedMismatches::Two, 2));
+    // 1,476 k-mers at 80%: the rule takes level 3, which finds the entry.
+    let (summary, events) = search(&shard, &query, false, &base, false);
+    assert_eq!(summary.seed_mismatches, 3);
+    assert!(events.contains_key(&0));
 }
 
 /// Entries 0 to 3 hold the query at 97% identity, entries 4 to 7 are unrelated.

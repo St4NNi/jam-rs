@@ -16,7 +16,7 @@ use super::locate_stage::{
 };
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
-use super::seed_mismatches::SeedMismatches;
+use super::seed_mismatches::lookup_level;
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
 use crate::align::{AlignmentError, Interval};
@@ -42,8 +42,6 @@ pub struct SearchConfig {
     /// coverage bound may spend. Stages 1 and 2 share one fixed allowance and stage 2 sees a subset
     /// of the hits, so one share covers both.
     pub max_miss: MaxMiss,
-    /// Whether query k-mers one substitution away are looked up too.
-    pub seed_mismatches: SeedMismatches,
     /// A seed held by more entries is not expanded in stage 1. `None` takes 1% of the shard's
     /// entries, at least `MIN_FREQUENT_LIMIT`.
     pub frequent_seed_entries: Option<u64>,
@@ -66,7 +64,6 @@ impl Default for SearchConfig {
             last_stage: SearchStage::Align,
             rule: DecisionRule::default(),
             max_miss: MaxMiss::default(),
-            seed_mismatches: SeedMismatches::Auto,
             frequent_seed_entries: None,
             // 32 Mi pairs of entry and query k-mer, 256 MiB.
             max_seed_hits: 1 << 25,
@@ -93,7 +90,7 @@ impl SearchConfig {
 #[derive(Debug)]
 pub struct SearchSummary {
     pub query_length: u64,
-    /// The mismatches a query k-mer could have against a seed (0 or 1).
+    /// The lookup level: 0 exact, 1 one mismatch, 2 two mismatches, 3 also one indel.
     pub seed_mismatches: u8,
     pub completion: Completion,
     pub sketch: SketchWork,
@@ -176,7 +173,7 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = config.max_miss;
-        let mismatches = config.seed_mismatches.resolve(
+        let mismatches = lookup_level(
             &self.models,
             &config.rule,
             config.max_miss,
@@ -210,14 +207,11 @@ impl<'a> Searcher<'a> {
                     }
                     _ => Ok(None),
                 },
-                || {
-                    if mismatches == 2 {
-                        QueryKmers::with_two_neighbours(&self.seeder, query, circular)
-                    } else if mismatches == 1 {
-                        QueryKmers::with_neighbours(&self.seeder, query, circular)
-                    } else {
-                        QueryKmers::new(&self.seeder, query, circular)
-                    }
+                || match mismatches {
+                    3 => QueryKmers::with_indel_neighbours(&self.seeder, query, circular),
+                    2 => QueryKmers::with_two_neighbours(&self.seeder, query, circular),
+                    1 => QueryKmers::with_neighbours(&self.seeder, query, circular),
+                    _ => QueryKmers::new(&self.seeder, query, circular),
                 },
             );
             let prepared = prepared?;
@@ -230,8 +224,10 @@ impl<'a> Searcher<'a> {
                 events,
                 low_complexity,
             };
-            let model = &self.models[mismatches];
-            Ok(self.run(&query_kmers, circular, model, budget, &request, start))
+            let model = &self.models[mismatches.min(2)];
+            let mut summary = self.run(&query_kmers, circular, model, budget, &request, start);
+            summary.seed_mismatches = mismatches as u8;
+            Ok(summary)
         };
         if config.threads == 0 {
             return search();

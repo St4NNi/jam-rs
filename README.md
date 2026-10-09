@@ -222,11 +222,6 @@ Advanced options:
   [How it works](#how-it-works).
 - `--max-miss P` (default 0.0001): maximum allowed probability of missing a qualifying
   assembly; see [The miss chance](#the-miss-chance).
-- `--seed-mismatches auto|0|1|2` (default `auto`): number of substitutions allowed when
-  matching a query k-mer to an indexed seed. Setting `1` also looks up every k-mer one
-  substitution away, and `2` looks up every k-mer two substitutions away. Allowing mismatches
-  finds assemblies at lower identity, at the cost of extra CPU time. `auto` chooses a setting
-  for each query; see [The miss chance](#the-miss-chance).
 - `--deadline SECONDS`: stop searching a query after this many seconds. jam then reports the
   query as `stopped` on standard error.
 - `--server NODE_ID@ADDRESS`: run the search on a `jam serve` server instead of local index
@@ -471,11 +466,28 @@ the bound uses non-overlapping blocks of w + k - 1 bases. Each block spans a com
 window and therefore contains at least one seed. jam evaluates the bound at a sequence identity
 slightly below `--identity` so that the bound covers any copy that qualifies.
 
-`--seed-mismatches auto` uses the same bound. It selects 1 mismatch for a query when U with
-exact seeds exceeds `--max-miss`, allowing one mismatch lowers U, and the extra lookup work
-stays within about 10 CPU seconds (estimated at 1 ms per query k-mer). It selects 2 mismatches
-instead when the required identity is below 0.9, the query has at most 1,800 k-mers, U with one
-mismatch still exceeds `--max-miss`, and allowing two mismatches lowers U.
+jam also chooses how many mismatches the seed lookups allow, for each query. There are four
+levels, from the cheapest to the most thorough:
+
+- level 0: exact seeds only;
+- level 1: also seeds with one mismatch;
+- level 2: also seeds with two mismatches;
+- level 3: level 2, plus seeds one insertion or deletion away.
+
+Each level costs CPU time in proportion to the number of query k-mers. jam estimates about
+0.001 s per k-mer for level 1, 0.0055 s for level 2 and 0.009 s for level 3. A query may use at
+most 30 CPU seconds (summed over threads) for the lookups. This budget is fixed. It covers a
+read of 2 kb at 80% identity with level 3.
+
+jam only considers the levels that fit the budget. Level 0 always fits. Among them it takes the
+cheapest level whose bound U is within `--max-miss`. If none is, it takes the level with the
+lowest U. Level 3 has the same U as level 2, but it also finds copies with an indel, so jam
+takes level 3 wherever it fits instead of level 2.
+
+So 0.0001 is a worst-case bound under the model above. jam reaches it for queries above a
+certain length (about 1,250 bases at 95% identity, 31 kb at 90%, 132 kb at 85% and 604 kb at
+80%, with coverage 0.5). Shorter queries get the best bound their budget allows. `-v` reports
+the own value of each query, and marks it when it is above `--max-miss`. The `seed_mismatches` field of the `-vv` summary holds the chosen level.
 
 ## Index files
 

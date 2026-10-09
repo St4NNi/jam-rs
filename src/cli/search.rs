@@ -13,7 +13,7 @@ use crate::report::{
     tsv_line,
 };
 use crate::search::{
-    EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher, SeedMismatches,
+    EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
@@ -26,18 +26,6 @@ use std::time::{Duration, Instant};
 
 /// Events held between the search and the writer.
 const EVENT_QUEUE: usize = 64;
-
-/// The long help of `--seed-mismatches`.
-const SEED_MISMATCHES_HELP: &str = "Mismatches a query k-mer may have against a seed. 1 also \
-looks up every k-mer one substitution away (3 k lookups per k-mer), which finds entries at lower \
-identity. auto takes 1 for a query when both hold: (a) the proven upper bound on the chance that \
-exact seeds miss a present piece of the required query coverage, at the --identity value, is \
-above --max-miss, and one mismatch lowers it; (b) the extra CPU, estimated as 1 ms per query \
-k-mer, stays within 10 CPU seconds. With the default coverage this takes 1 at 80% identity for \
-queries up to about 10 kb, and at 95% for queries below about 7.2 kb. 2 also looks up every k-mer \
-two substitutions away (2,700 more lookups per k-mer). auto takes 2 instead of 1 when also: the \
-identity is below 0.9; the query has at most 1,800 k-mers; the proven bound with one mismatch is \
-above --max-miss; and two mismatches lower it.";
 
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -74,9 +62,6 @@ pub struct SearchArgs {
     /// cannot reach it is searched without pruning
     #[arg(long, default_value_t = MaxMiss::default().chance())]
     max_miss: f64,
-    /// Mismatches a query k-mer may have against a seed: auto, 0, 1 or 2
-    #[arg(long, value_enum, default_value = "auto", long_help = SEED_MISMATCHES_HELP)]
-    seed_mismatches: SeedMismatches,
     /// The last stage that runs
     #[arg(long, value_enum, default_value = "align")]
     level: SearchStage,
@@ -323,7 +308,6 @@ fn settings_of(args: &SearchArgs) -> Result<SearchSettings, CliError> {
     settings.last_stage = args.level;
     settings.rule = args.rule.rule();
     settings.max_miss = args.max_miss;
-    settings.seed_mismatches = args.seed_mismatches;
     settings.apply(&SearchConfig::default())?;
     Ok(settings)
 }
@@ -417,40 +401,19 @@ impl Sink {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::cli::{Cli, Command};
+    use crate::cli::Cli;
     use clap::Parser;
 
-    /// The seed mismatches of a search command line with `extra` flags, or `None` if it fails.
-    fn parsed(extra: &[&str]) -> Option<SeedMismatches> {
-        let line = ["jam", "search", "shard", "query.fa"].iter().chain(extra);
-        match Cli::try_parse_from(line).ok()?.command {
-            Command::Search(args) => Some(settings_of(&args).ok()?.seed_mismatches),
-            _ => None,
-        }
-    }
-
     #[test]
-    fn seed_mismatches_parsed() {
-        assert_eq!(parsed(&[]), Some(SeedMismatches::Auto));
-        assert_eq!(
-            parsed(&["--seed-mismatches", "auto"]),
-            Some(SeedMismatches::Auto)
-        );
-        assert_eq!(
-            parsed(&["--seed-mismatches", "0"]),
-            Some(SeedMismatches::Zero)
-        );
-        assert_eq!(
-            parsed(&["--seed-mismatches", "1"]),
-            Some(SeedMismatches::One)
-        );
-        assert_eq!(
-            parsed(&["--seed-mismatches", "2"]),
-            Some(SeedMismatches::Two)
-        );
-        for bad in ["3", "one", ""] {
-            assert_eq!(parsed(&["--seed-mismatches", bad]), None, "{bad}");
-        }
+    fn seed_mismatches_rejected() {
+        let line = [
+            "jam",
+            "search",
+            "shard",
+            "query.fa",
+            "--seed-mismatches",
+            "1",
+        ];
+        assert!(Cli::try_parse_from(line).is_err());
     }
 }

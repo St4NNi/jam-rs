@@ -5,8 +5,8 @@
 use super::{DecisionRecord, ReportError};
 use crate::index::Contig;
 use crate::search::{
-    AlignStageWork, Completion, ContigWindows, DropReason, EntryEvent, LocateWork, SearchStage, SearchSummary,
-    SearchTimes, SketchWork, Stopped,
+    AlignStageWork, Completion, ContigWindows, DropReason, EntryEvent, LocateWork, SearchStage,
+    SearchSummary, SearchTimes, SketchWork, Stopped,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -105,8 +105,7 @@ pub struct Unfinished {
 pub struct Summary {
     pub query: String,
     pub query_length: u64,
-    /// The mismatches a query k-mer could have against a seed: 1 when the k-mers one
-    /// substitution away were looked up too.
+    /// The lookup level: 0 exact, 1 one mismatch, 2 two mismatches, 3 also one indel.
     pub seed_mismatches: u8,
     pub status: Status,
     /// Why the search did not complete; `None` when it did.

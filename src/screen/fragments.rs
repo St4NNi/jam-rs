@@ -10,13 +10,13 @@ use crate::align::{Alignment, AlignmentConfig, Interval};
 use crate::decide::{DecisionRule, Fragment};
 use crate::index::{SeedLocation, Shard};
 use crate::loss::{MaxMiss, MissModel};
+use crate::search::CoverageBound;
 use crate::search::PossibleEntry;
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
 use crate::search::{
     AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, entry_fragments,
 };
-use crate::search::CoverageBound;
 use crate::search::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
 use crate::search::{find_query_seeds, read_entry_locations};
 use rayon::prelude::*;

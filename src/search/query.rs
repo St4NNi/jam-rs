@@ -6,11 +6,6 @@ use crate::seeds::Seeder;
 use rayon::prelude::*;
 use std::ops::Range;
 
-/// The most query k-mers whose two-mismatch lookups also take the k-mers one indel away, with
-/// at most one substitution: about 3.5 CPU seconds more per 1,000 k-mers on 1,000 assemblies, so
-/// two mismatches stay within 10 CPU seconds (`seed_mismatches.rs`).
-const MAX_INDEL_KMERS: u64 = 1_100;
-
 /// One distinct query k-mer and where it occurs on the query.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DistinctKmer {
@@ -45,10 +40,14 @@ impl QueryKmers {
         Self::hashed(seeder, query, circular, 1)
     }
 
-    /// As `with_neighbours`, adding every k-mer two substitutions away too. A query of at most
-    /// `MAX_INDEL_KMERS` k-mers also adds every k-mer one indel and at most one substitution away.
+    /// As `with_neighbours`, adding every k-mer two substitutions away too.
     pub fn with_two_neighbours(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
         Self::hashed(seeder, query, circular, 2)
+    }
+
+    /// As `with_two_neighbours`, adding every k-mer one indel and at most one substitution away.
+    pub fn with_indel_neighbours(seeder: &Seeder, query: &[u8], circular: bool) -> Self {
+        Self::hashed(seeder, query, circular, 3)
     }
 
     fn hashed(seeder: &Seeder, query: &[u8], circular: bool, neighbours: u8) -> Self {
@@ -77,13 +76,13 @@ impl QueryKmers {
                     kmers.push((kmer.hash, kmer.position as u32));
                 }
             });
-            if exact <= MAX_INDEL_KMERS {
-                seeder.query_neighbours_indel(&scanned, true, |kmer| {
-                    if kmer.position < query.len() as u64 {
-                        kmers.push((kmer.hash, kmer.position as u32));
-                    }
-                });
-            }
+        }
+        if neighbours >= 3 {
+            seeder.query_neighbours_indel(&scanned, true, |kmer| {
+                if kmer.position < query.len() as u64 {
+                    kmers.push((kmer.hash, kmer.position as u32));
+                }
+            });
         }
         kmers.par_sort_unstable();
         let mut distinct: Vec<DistinctKmer> = Vec::new();
@@ -209,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn indel_lookups_limited() {
+    fn indel_lookups_added() {
         let seeder = seeder();
         let pairs = |kmers: &QueryKmers| -> usize {
             let all = 0..kmers.distinct().len() as u32;
@@ -227,13 +226,13 @@ mod tests {
         wide.query_kmers(&[&query[..7], &query[8..16]].concat(), |kmer| {
             removed.push(kmer.hash)
         });
-        let kmers = QueryKmers::with_two_neighbours(&wide, &query, false);
+        let kmers = QueryKmers::with_indel_neighbours(&wide, &query, false);
         assert!(kmers.distinct().iter().any(|kmer| kmer.hash == removed[0]));
-        // Past the limit only substitutions: 1 + 15 + 90 lookups per k-mer of 5 bases.
+        // Two neighbours are substitutions only: 1 + 15 + 90 lookups per k-mer of 5 bases.
         let long = random_bases(&mut rng(3), 1200);
-        let longer = QueryKmers::with_two_neighbours(&seeder, &long, false);
-        assert_eq!(pairs(&longer), 1196 * 106);
-        let short = QueryKmers::with_two_neighbours(&seeder, &long[..1104], false);
-        assert!(pairs(&short) > 1100 * 106);
+        let two = QueryKmers::with_two_neighbours(&seeder, &long, false);
+        assert_eq!(pairs(&two), 1196 * 106);
+        let indel = QueryKmers::with_indel_neighbours(&seeder, &long, false);
+        assert!(pairs(&indel) > 1196 * 106);
     }
 }
