@@ -157,7 +157,7 @@ fn max_miss_unpruned() {
         "{stderr}"
     );
     assert!(!stdout.contains("jam:"), "{stdout}");
-    let (_, stderr) = search_output(&fixture, &["-v"]);
+    let (_, stderr) = search_output(&fixture, &["--max-miss", "0.05", "-v"]);
     assert!(
         !stderr.contains("pruning off") && !stderr.contains("jam:"),
         "{stderr}"
@@ -235,6 +235,8 @@ fn no_hit_silent() {
         other.as_os_str(),
         "-t".as_ref(),
         "2".as_ref(),
+        "--max-miss".as_ref(),
+        "0.05".as_ref(),
     ]);
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
@@ -246,16 +248,16 @@ fn no_hit_silent() {
 #[test]
 fn verbose_on_stderr() {
     let fixture = fixture();
-    let (quiet, nothing) = search_output(&fixture, &[]);
+    let (quiet, nothing) = search_output(&fixture, &["--max-miss", "0.05"]);
     assert!(nothing.is_empty(), "{nothing}");
-    let (stdout, stderr) = search_output(&fixture, &["-v"]);
+    let (stdout, stderr) = search_output(&fixture, &["--max-miss", "0.05", "-v"]);
     assert_eq!(stdout.lines().count(), quiet.lines().count());
     let progress: Vec<&str> = stderr.lines().collect();
     assert_eq!(progress.len(), 1, "{stderr}");
     assert!(progress[0].starts_with("planted: complete; "), "{stderr}");
     assert!(progress[0].contains(" 1 confirmed; miss "), "{stderr}");
     assert!(progress[0].contains("; sketch "), "{stderr}");
-    let (stdout, stderr) = search_output(&fixture, &["-vv"]);
+    let (stdout, stderr) = search_output(&fixture, &["--max-miss", "0.05", "-vv"]);
     assert!(stdout.lines().all(|line| json(line).get("kind").is_none()));
     let (debug, progress): (Vec<&str>, Vec<&str>) =
         stderr.lines().partition(|line| line.starts_with('{'));
