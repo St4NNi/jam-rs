@@ -11,8 +11,10 @@ use crate::loss::{MaxMiss, MissModel};
 /// measured as 5.5 seconds per 1,000 k-mers. Level 3 stays within 10 seconds up to 1,100 k-mers.
 const SECONDS_PER_KMER: [f64; 3] = [0.001, 0.0055, 0.009];
 
-/// The extra CPU seconds per query above which a level is stepped down. Only low identities reach it.
-const SAFETY_SECONDS: f64 = 60.0;
+/// The most extra CPU seconds per query that the lookups may cost, summed over threads: one
+/// minute. It is the round limit with which the default target is proven without gaps from
+/// 1.25 kb at 95% and 3.25 kb at 90%.
+const CPU_LIMIT_SECONDS: f64 = 60.0;
 
 /// The seed hits that a whole copy is expected to give before a level is enough. A copy then
 /// shows a seed hit with a chance of about 95%.
@@ -31,12 +33,13 @@ fn at_most(k: usize, mismatches: usize, identity: f64) -> f64 {
     sum
 }
 
-/// The lookup level of a query: 0 exact, 1 or 2 mismatches, 3 level 2 plus indels (up to
-/// `MAX_INDEL_KMERS`). It is the cheapest level where a whole copy at the rule's identity is
-/// expected to show `EXPECTED_HITS` seed hits, else 2; over `SAFETY_SECONDS` it steps down.
+/// The lookup level of a query: 0 exact, 1 or 2 mismatches, 3 level 2 plus indels. Only levels
+/// within `CPU_LIMIT_SECONDS` count. It is the cheapest whose bound meets `budget`, else the
+/// cheapest with `EXPECTED_HITS` hits on a copy, else the highest.
 pub fn lookup_level(
     models: &[MissModel; 3],
     rule: &DecisionRule,
+    budget: MaxMiss,
     length: u64,
     circular: bool,
 ) -> usize {
@@ -46,16 +49,22 @@ pub fn lookup_level(
     } else {
         (length + 1).saturating_sub(k as u64)
     };
+    // Level 3 stands in for level 2 on a short query.
+    let named = |r: usize| {
+        if r == 2 && kmers <= MAX_INDEL_KMERS {
+            3
+        } else {
+            r
+        }
+    };
+    let allowed =
+        |r: usize| r == 0 || kmers as f64 * SECONDS_PER_KMER[named(r) - 1] <= CPU_LIMIT_SECONDS;
     let per_window = 2.0 / (w as f64 + 1.0);
-    let hits = |level: usize| kmers as f64 * per_window * at_most(k, level, rule.min_identity);
-    let mut level = (0..2).find(|&r| hits(r) >= EXPECTED_HITS).unwrap_or(2);
-    if level == 2 && kmers <= MAX_INDEL_KMERS {
-        level = 3;
-    }
-    while level > 0 && kmers as f64 * SECONDS_PER_KMER[level - 1] > SAFETY_SECONDS {
-        level -= 1;
-    }
-    level
+    let hits = |r: usize| kmers as f64 * per_window * at_most(k, r, rule.min_identity);
+    let bound = |r: usize| level_bound(models, rule, length, r);
+    let pick = (0..3).find(|&r| allowed(r) && bound(r) <= budget.chance());
+    let pick = pick.or_else(|| (0..3).find(|&r| allowed(r) && hits(r) >= EXPECTED_HITS));
+    named(pick.unwrap_or_else(|| (0..3).rev().find(|&r| allowed(r)).unwrap_or(0)))
 }
 
 /// The proven miss bound of lookup level `level` for a query of `length` bases. Level 3 has the
@@ -74,7 +83,7 @@ const LONGEST_QUERY: f64 = 1e9;
 /// sampled 1% apart, and the first reaching length after the last failing sample is bisected.
 pub fn target_length(models: &[MissModel; 3], rule: &DecisionRule, budget: MaxMiss) -> Option<u64> {
     let reaches = |length: u64| {
-        let level = lookup_level(models, rule, length, false);
+        let level = lookup_level(models, rule, budget, length, false);
         level_bound(models, rule, length, level) <= budget.chance()
     };
     let first = models[0].k() as u64;
@@ -118,7 +127,7 @@ mod tests {
             min_identity: identity,
             ..DecisionRule::default()
         };
-        lookup_level(&models(), &rule, length, false)
+        lookup_level(&models(), &rule, MaxMiss::default(), length, false)
     }
 
     #[test]
@@ -128,18 +137,24 @@ mod tests {
             (0.95, 250, 3),
             (0.95, 500, 1),
             (0.95, 600, 0),
+            (0.95, 1_300, 2),
+            (0.95, 3_000, 1),
             (0.95, 10_000, 0),
             (0.9, 250, 3),
-            (0.9, 500, 3),
             (0.9, 1_000, 1),
             (0.9, 2_200, 0),
+            (0.9, 3_300, 2),
+            (0.9, 8_000, 1),
+            (0.9, 40_000, 0),
             (0.85, 1_000, 3),
             (0.85, 2_000, 1),
-            (0.85, 8_900, 0),
+            (0.85, 9_000, 2),
+            (0.85, 15_000, 0),
+            (0.85, 30_000, 1),
+            (0.85, 70_000, 0),
+            (0.85, 200_000, 0),
             (0.8, 1_500, 2),
-            (0.8, 5_000, 2),
             (0.8, 6_000, 1),
-            (0.8, 40_000, 1),
             (0.8, 41_000, 0),
             (0.8, 1_000_000, 0),
         ] {
@@ -147,9 +162,9 @@ mod tests {
         }
     }
 
-    /// The safety limit steps a level down at low identity: 0.6 wants level 2 for 12 kb.
+    /// The CPU limit rules out level 2 for 12 kb at 60% identity, and level 1 for 70 kb.
     #[test]
-    fn safety_steps_down() {
+    fn limit_steps_down() {
         assert_eq!(choice(0.6, 12_000), 1);
         assert_eq!(choice(0.6, 70_000), 0);
     }
@@ -165,8 +180,8 @@ mod tests {
             target_length(&models, &rule, MaxMiss::default()).unwrap() as f64
         };
         let near = |at: f64, expected: f64| (at / expected - 1.0).abs() < 0.05;
-        assert!(near(from(0.95), 7_200.0));
-        assert!(near(from(0.9), 31_000.0));
+        assert!(near(from(0.95), 1_240.0));
+        assert!(near(from(0.9), 3_220.0));
         assert!(near(from(0.85), 132_000.0));
         assert!(near(from(0.8), 604_000.0));
     }

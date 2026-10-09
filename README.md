@@ -482,30 +482,29 @@ levels, from the cheapest to the most thorough:
 - level 2: also seeds with two mismatches;
 - level 3: level 2, plus seeds one insertion or deletion away.
 
-jam adds one- or two-mismatch lookups until a true copy is expected to have at least 3 seed
-hits. It uses the cheapest level for which this holds, and level 2 if none does. For a query of
-at most 1,100 k-mers, level 2 becomes level 3, which also finds copies with an indel. A longer
-query needs fewer lookups, since it has more seeds. The extra work of a level is about 0.001 s
-CPU per query k-mer for level 1, 0.0055 s for level 2 and 0.009 s for level 3. A safety limit
-of 60 CPU seconds per query applies: a level above it steps down to the highest cheaper level
-that fits. The limit only matters below about 80% identity.
+jam may spend at most one extra CPU minute per query on mismatch lookups. Within that, it takes
+the cheapest level that meets the miss target; if none does, the cheapest level at which a
+typical copy gets about 3 seed hits. If no level gets there, it takes the highest level within
+the limit. For a query of at most 1,100 k-mers, level 2 becomes level 3, which also finds copies
+with an indel. The extra CPU time is about 0.001 s per query k-mer for level 1, 0.0055 s for
+level 2 and 0.009 s for level 3.
 
 `--max-miss` is a target, not a promise. jam can prove it only for some combinations of query
 length and identity. Short queries at low identity cannot meet it as a guarantee. With the
 default 0.0001 and coverage 0.5, jam proves it from these query lengths:
 
-| Identity | Query length |
-| -------- | ------------ |
-| 95% | 7.2 kb |
-| 90% | 31 kb |
-| 85% | 132 kb |
+| Identity | Met from |
+| -------- | -------- |
+| 95% | 1.24 kb |
+| 90% | 3.22 kb |
+| 85% | 132 kb, and on part of the range below (about 8.2 to 10.9 kb and 23.6 to 60 kb) |
 | 80% | 604 kb |
 
 Below these lengths jam still searches normally and finds most copies in practice. The proven
 worst case is only higher there. `-v` reports the value of each query and marks it when it is
 above `--max-miss`. jam also writes one hint line to standard error after the run (see
-[Progress lines](#progress-and-debug-lines)). The `seed_mismatches` field of the `-vv` summary holds the
-chosen level.
+[Progress and debug lines](#progress-and-debug-lines)). The `seed_mismatches` field of the `-vv`
+summary holds the chosen level.
 
 ## Index files
 

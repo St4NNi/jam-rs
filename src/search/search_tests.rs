@@ -97,14 +97,14 @@ fn two_seeds_found() {
         }
     }
     let mut base = config(SearchStage::Sketch);
-    base.rule.min_identity = 0.8;
+    base.rule.min_identity = 0.7;
     base.rule.min_query_coverage = QueryCoverage::Share {
         numerator: 5,
         decimal_places: 1,
     };
-    // 1,476 k-mers at 80%: the rule takes level 3, which finds the entry.
+    // 1,476 k-mers at 70%: the rule takes level 2, which finds the entry.
     let (summary, events) = search(&shard, &query, false, &base, false);
-    assert_eq!(summary.seed_mismatches, 3);
+    assert_eq!(summary.seed_mismatches, 2);
     assert!(events.contains_key(&0));
 }
 
