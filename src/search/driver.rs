@@ -16,7 +16,7 @@ use super::locate_stage::{
 };
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
-use super::seed_mismatches::lookup_level;
+use super::seed_mismatches::{lookup_level, target_length};
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
 use crate::align::{AlignmentError, Interval};
@@ -148,6 +148,12 @@ impl<'a> Searcher<'a> {
             models: [model(0)?, model(1)?, model(2)?],
             seeder,
         })
+    }
+
+    /// The smallest query length from which every longer query reaches `--max-miss` with the
+    /// lookups the rule chooses, or `None` if none does.
+    pub fn target_length(&self, config: &SearchConfig) -> Option<u64> {
+        target_length(&self.models, &config.rule, config.max_miss)
     }
 
     /// Searches `query` and sends an event into `events` each time an entry changes its state;

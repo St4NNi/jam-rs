@@ -191,6 +191,16 @@ impl QueryTotals {
         }
     }
 
+    /// Whether the miss bound of the query reached `--max-miss` in some shard.
+    pub fn over_target(&self) -> bool {
+        self.unpruned
+    }
+
+    /// The largest miss chance over the shards so far.
+    pub fn miss(&self) -> f64 {
+        self.miss
+    }
+
     /// The status over all shards so far.
     pub fn status(&self) -> Status {
         self.status

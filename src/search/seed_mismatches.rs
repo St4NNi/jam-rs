@@ -57,6 +57,44 @@ fn level_bound(models: &[MissModel; 3], rule: &DecisionRule, length: u64, level:
     models[level.min(2)].miss_upper_bound(required, bounded)
 }
 
+/// The longest query length checked by `target_length`.
+const LONGEST_QUERY: f64 = 1e9;
+
+/// The smallest length from which every longer query reaches `budget`, or `None` up to 1e9.
+/// The bound is not monotone in the length, as the level changes with the cost. So lengths are
+/// sampled 1% apart, and the first reaching length after the last failing sample is bisected.
+pub fn target_length(models: &[MissModel; 3], rule: &DecisionRule, budget: MaxMiss) -> Option<u64> {
+    let reaches = |length: u64| {
+        let level = lookup_level(models, rule, budget, length, false);
+        level_bound(models, rule, length, level) <= budget.chance()
+    };
+    let first = models[0].k() as u64;
+    let lengths = std::iter::successors(Some(first as f64), |&n| Some((n * 1.01).max(n + 1.0)))
+        .take_while(|&n| n <= LONGEST_QUERY)
+        .map(|n| n as u64);
+    let mut failing = None;
+    for length in lengths {
+        if !reaches(length) {
+            failing = Some(length);
+        }
+    }
+    let failing = failing?;
+    if failing as f64 * 1.01 > LONGEST_QUERY {
+        return None;
+    }
+    // The samples above `failing` reach; bisect (failing, failing * 1.01 + 1].
+    let (mut low, mut high) = (failing, (failing as f64 * 1.01) as u64 + 1);
+    while high - low > 1 {
+        let middle = low + (high - low) / 2;
+        if reaches(middle) {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    Some(high)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,6 +127,25 @@ mod tests {
         assert_eq!(choice(0.8, 1_000_000), 0);
         // Below the identities where seeds can be hit at all, no lookup helps.
         assert_eq!(choice(0.0, 1_000), 0);
+    }
+
+    /// Past 30,000 k-mers level 1 no longer fits, so at 90% and 85% the bound reaches the
+    /// target only once exact seeds do.
+    #[test]
+    fn target_length_found() {
+        let models = models();
+        let from = |identity: f64| {
+            let rule = DecisionRule {
+                min_identity: identity,
+                ..DecisionRule::default()
+            };
+            target_length(&models, &rule, MaxMiss::default()).unwrap() as f64
+        };
+        let near = |at: f64, expected: f64| (at / expected - 1.0).abs() < 0.05;
+        assert!(near(from(0.95), 1_250.0));
+        assert!(near(from(0.9), 31_000.0));
+        assert!(near(from(0.85), 132_000.0));
+        assert!(near(from(0.8), 604_000.0));
     }
 
     /// The chosen bound is the lowest among the allowed levels, or within the budget.

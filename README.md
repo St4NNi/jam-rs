@@ -399,6 +399,14 @@ summed across threads. With several index files, the counts are summed and `miss
 
 If pruning was turned off for the query, the line ends with `; pruning off`.
 
+After the last query, jam writes one hint line to standard error, even without `-v`, if some
+queries could not reach `--max-miss`. It never goes to standard output. For example:
+
+    jam: 3 of 10 queries miss --max-miss 0.0001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 604 kb. -v shows each query.
+
+The length is the smallest one from which every longer query reaches `--max-miss` with the
+lookups jam chooses. A search with `--server` writes the line without the length.
+
 `-vv` also writes JSON debug lines to standard error. Each line names its index file in `shard`
 and its event type in `kind`:
 

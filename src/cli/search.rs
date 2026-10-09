@@ -166,6 +166,10 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         }
         sink.finish_query()
     })?;
+    let from = searchers
+        .first()
+        .and_then(|searcher| searcher.target_length(&config));
+    sink.hint(&config, from)?;
     match incomplete {
         0 => Ok(()),
         count => Err(CliError::Incomplete(count)),
@@ -326,6 +330,55 @@ struct Sink {
     verbose: u8,
     /// The summary of the query being searched.
     totals: QueryTotals,
+    /// The queries searched, those over the target, and the largest miss chance among them.
+    seen: MissCount,
+}
+
+/// How many queries missed `--max-miss`.
+#[derive(Default)]
+struct MissCount {
+    queries: u64,
+    over: u64,
+    worst: f64,
+}
+
+impl MissCount {
+    /// The hint line for stderr, if any query was over the target. `from` is the length from
+    /// which queries reach it, when known.
+    fn hint(&self, max_miss: f64, identity: f64, from: Option<u64>) -> Option<String> {
+        if self.over == 0 {
+            return None;
+        }
+        let (over, queries, worst) = (self.over, self.queries, self.worst);
+        let mut line = format!(
+            "jam: {over} of {queries} queries miss --max-miss {max_miss} at -i {identity} \
+             (worst-case bound up to {worst:.2})"
+        );
+        if let Some(length) = from {
+            line += &format!(
+                "; at this identity the bound reaches it from about {}",
+                rounded(length)
+            );
+        }
+        Some(line + ". -v shows each query.")
+    }
+}
+
+/// A length in bases rounded up to three digits, as bases or kb.
+fn rounded(length: u64) -> String {
+    let digits = length.to_string().len() as u32;
+    let step = 10u64.pow(digits.saturating_sub(if length < 10_000 { 3 } else { 2 }));
+    let up = length.div_ceil(step) * step;
+    if up < 10_000 {
+        let text = up.to_string();
+        let (head, tail) = text.split_at(text.len() - 3);
+        format!(
+            "{head}{}{tail} bases",
+            if head.is_empty() { "" } else { "," }
+        )
+    } else {
+        format!("{} kb", up / 1_000)
+    }
 }
 
 impl Sink {
@@ -340,7 +393,17 @@ impl Sink {
             level: args.level,
             verbose: args.verbose,
             totals: QueryTotals::new(""),
+            seen: MissCount::default(),
         })
+    }
+
+    /// Writes the hint on the standard error when some queries missed `--max-miss`.
+    fn hint(&self, config: &SearchConfig, from: Option<u64>) -> Result<(), CliError> {
+        let (miss, identity) = (config.max_miss.chance(), config.rule.min_identity);
+        if let Some(line) = self.seen.hint(miss, identity, from) {
+            writeln!(std::io::stderr(), "{line}")?;
+        }
+        Ok(())
     }
 
     fn event(
@@ -390,6 +453,11 @@ impl Sink {
     /// not complete, on the standard error. Returns 1 when the query did not complete, else 0.
     fn finish_query(&mut self) -> Result<usize, CliError> {
         self.writer.flush()?;
+        self.seen.queries += 1;
+        if self.totals.over_target() {
+            self.seen.over += 1;
+            self.seen.worst = self.seen.worst.max(self.totals.miss());
+        }
         if self.verbose >= 1 {
             writeln!(std::io::stderr(), "{}", self.totals.progress())?;
         } else if let Some(problem) = self.totals.problem() {
@@ -401,8 +469,29 @@ impl Sink {
 
 #[cfg(test)]
 mod tests {
+    use super::MissCount;
     use crate::cli::Cli;
     use clap::Parser;
+
+    #[test]
+    fn hint_when_over() {
+        let mut seen = MissCount {
+            queries: 10,
+            ..MissCount::default()
+        };
+        assert_eq!(seen.hint(0.0001, 0.8, Some(600_000)), None);
+        seen.over = 3;
+        seen.worst = 0.39;
+        let line = seen.hint(0.0001, 0.8, Some(598_123)).unwrap();
+        assert!(line.starts_with("jam: 3 of 10 queries miss --max-miss 0.0001 at -i 0.8"));
+        assert!(line.contains("up to 0.39"));
+        assert!(line.contains("from about 600 kb."), "{line}");
+        assert!(
+            seen.hint(0.0001, 0.95, Some(1_248))
+                .unwrap()
+                .contains("about 1,250 bases.")
+        );
+    }
 
     #[test]
     fn seed_mismatches_rejected() {
