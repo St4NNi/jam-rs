@@ -77,6 +77,11 @@ impl MissModel {
         (1.0 - changed).clamp(0.0, 1.0)
     }
 
+    /// The minimizer window of the model, in k-mers.
+    pub fn w(&self) -> usize {
+        self.w
+    }
+
     /// The k-mer size of the model.
     pub fn k(&self) -> usize {
         self.k

@@ -153,7 +153,7 @@ fn max_miss_unpruned() {
     assert_eq!(json(stdout.lines().next().unwrap())["a"], "plasmid_1");
     assert!(stderr.contains("; pruning off\n"), "{stderr}");
     assert!(
-        stderr.contains("jam: 1 of 1 queries miss --max-miss"),
+        stderr.contains("jam: 1 of 1 queries are above the miss target --max-miss"),
         "{stderr}"
     );
     assert!(!stdout.contains("jam:"), "{stdout}");

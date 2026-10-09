@@ -220,8 +220,8 @@ Advanced options:
   reach at least this identity.
 - `--level sketch|locate|align` (default `align`): stop the search after this stage; see
   [How it works](#how-it-works).
-- `--max-miss P` (default 0.0001): maximum allowed probability of missing a qualifying
-  assembly; see [The miss chance](#the-miss-chance).
+- `--max-miss P` (default 0.0001): the miss target, the total chance, per query and matching
+  copy, that jam may lose a copy; see [The miss chance](#the-miss-chance).
 - `--deadline SECONDS`: stop searching a query after this many seconds. jam then reports the
   query as `stopped` on standard error.
 - `--server NODE_ID@ADDRESS`: run the search on a `jam serve` server instead of local index
@@ -402,7 +402,7 @@ If pruning was turned off for the query, the line ends with `; pruning off`.
 After the last query, jam writes one hint line to standard error, even without `-v`, if some
 queries could not reach `--max-miss`. It never goes to standard output. For example:
 
-    jam: 3 of 10 queries miss --max-miss 0.0001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 604 kb. -v shows each query.
+    jam: 3 of 10 queries are above the miss target --max-miss 0.0001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 604 kb. -v shows each query.
 
 The length is the smallest one from which every longer query reaches `--max-miss` with the
 lookups jam chooses. A search with `--server` writes the line without the length.
@@ -454,7 +454,7 @@ ways:
    query uncovered. By chance, substitutions may eliminate all seed hits across a long region
    that still contains a valid match.
 
-`--max-miss` (default 0.0001) sets the maximum allowed combined probability of both events. jam
+`--max-miss` (default 0.0001) sets the miss target, the combined probability of both events. jam
 first computes a proven upper bound U for the first event: the probability that a qualifying
 copy of the required length produces no seed hits at all. The remaining budget, `--max-miss`
 minus U, goes to pruning. jam picks the tightest allowance for unseeded stretches that keeps
@@ -482,20 +482,30 @@ levels, from the cheapest to the most thorough:
 - level 2: also seeds with two mismatches;
 - level 3: level 2, plus seeds one insertion or deletion away.
 
-Each level costs CPU time in proportion to the number of query k-mers. jam estimates about
-0.001 s per k-mer for level 1, 0.0055 s for level 2 and 0.009 s for level 3. A query may use at
-most 30 CPU seconds (summed over threads) for the lookups. This budget is fixed. It covers a
-read of 2 kb at 80% identity with level 3.
+jam adds one- or two-mismatch lookups until a true copy is expected to have at least 3 seed
+hits. It uses the cheapest level for which this holds, and level 2 if none does. For a query of
+at most 1,100 k-mers, level 2 becomes level 3, which also finds copies with an indel. A longer
+query needs fewer lookups, since it has more seeds. The extra work of a level is about 0.001 s
+CPU per query k-mer for level 1, 0.0055 s for level 2 and 0.009 s for level 3. A safety limit
+of 60 CPU seconds per query applies: a level above it steps down to the highest cheaper level
+that fits. The limit only matters below about 80% identity.
 
-jam only considers the levels that fit the budget. Level 0 always fits. Among them it takes the
-cheapest level whose bound U is within `--max-miss`. If none is, it takes the level with the
-lowest U. Level 3 has the same U as level 2, but it also finds copies with an indel, so jam
-takes level 3 wherever it fits instead of level 2.
+`--max-miss` is a target, not a promise. jam can prove it only for some combinations of query
+length and identity. Short queries at low identity cannot meet it as a guarantee. With the
+default 0.0001 and coverage 0.5, jam proves it from these query lengths:
 
-So 0.0001 is a worst-case bound under the model above. jam reaches it for queries above a
-certain length (about 1,250 bases at 95% identity, 31 kb at 90%, 132 kb at 85% and 604 kb at
-80%, with coverage 0.5). Shorter queries get the best bound their budget allows. `-v` reports
-the own value of each query, and marks it when it is above `--max-miss`. The `seed_mismatches` field of the `-vv` summary holds the chosen level.
+| Identity | Query length |
+| -------- | ------------ |
+| 95% | 7.2 kb |
+| 90% | 31 kb |
+| 85% | 132 kb |
+| 80% | 604 kb |
+
+Below these lengths jam still searches normally and finds most copies in practice. The proven
+worst case is only higher there. `-v` reports the value of each query and marks it when it is
+above `--max-miss`. jam also writes one hint line to standard error after the run (see
+[Progress lines](#progress-and-debug-lines)). The `seed_mismatches` field of the `-vv` summary holds the
+chosen level.
 
 ## Index files
 

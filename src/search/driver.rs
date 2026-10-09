@@ -179,13 +179,7 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = config.max_miss;
-        let mismatches = lookup_level(
-            &self.models,
-            &config.rule,
-            config.max_miss,
-            query.len() as u64,
-            circular,
-        );
+        let mismatches = lookup_level(&self.models, &config.rule, query.len() as u64, circular);
         let masked: Vec<Interval> = (low_complexity_mask(query).into_iter())
             .map(|stretch| Interval {
                 start: stretch.start as u64,

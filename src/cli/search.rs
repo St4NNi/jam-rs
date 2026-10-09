@@ -57,9 +57,9 @@ pub struct SearchArgs {
     rule: RuleArgs,
     #[command(flatten)]
     cache: CacheArgs,
-    /// The largest accepted chance of missing an assembly that qualifies, modeled with a proven
-    /// bound. It covers the seed lookups and the pruning of candidates together; a query that
-    /// cannot reach it is searched without pruning
+    /// The miss target: the total chance, per query and matching copy, that jam may lose a copy
+    /// through its seed lookups and the pruning of candidates. jam can prove it only for some
+    /// query lengths and identities; a query that cannot reach it is searched without pruning
     #[arg(long, default_value_t = MaxMiss::default().chance())]
     max_miss: f64,
     /// The last stage that runs
@@ -356,7 +356,7 @@ impl MissCount {
             format!("{:.1e}", self.worst)
         };
         let mut line = format!(
-            "jam: {over} of {queries} queries miss --max-miss {max_miss} at -i {identity} \
+            "jam: {over} of {queries} queries are above the miss target --max-miss {max_miss} at -i {identity} \
              (worst-case bound up to {worst})"
         );
         if let Some(length) = from {
@@ -488,7 +488,9 @@ mod tests {
         seen.over = 3;
         seen.worst = 0.39;
         let line = seen.hint(0.0001, 0.8, Some(598_123)).unwrap();
-        assert!(line.starts_with("jam: 3 of 10 queries miss --max-miss 0.0001 at -i 0.8"));
+        assert!(line.starts_with(
+            "jam: 3 of 10 queries are above the miss target --max-miss 0.0001 at -i 0.8"
+        ));
         assert!(line.contains("up to 0.39"));
         assert!(line.contains("from about 600 kb."), "{line}");
         assert!(
