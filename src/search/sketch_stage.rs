@@ -46,6 +46,9 @@ pub struct SketchWork {
     pub low_complexity_bases: u64,
     /// Query k-mers, counting repeats.
     pub query_kmers: u64,
+    /// Query starts expected to get the lookups of the next lookup level too.
+    #[serde(default)]
+    pub sampled_kmers: u64,
     /// Distinct query k-mers looked up in the sketch part.
     pub lookups: u64,
     /// Distinct query k-mers that the sketch part holds.

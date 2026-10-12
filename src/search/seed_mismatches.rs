@@ -18,8 +18,15 @@ const MAX_INDEL_KMERS: u64 = 1_100;
 const LIMIT_IDENTITY: f64 = 0.8;
 const LIMIT_COVERAGE: f64 = 0.5;
 
+/// Query positions per stratum of the sampled lookups.
+const STRATUM: u64 = 32;
+
+/// Salts of the hashes that pick the sampled positions.
+const STRATUM_SALT: u64 = 0x5bd1_e995_9e37_79b9;
+const POSITION_SALT: u64 = 0x2545_f491_4f6c_dd1d;
+
 /// The lookups of one query. Every query k-mer gets the lookups of level `full`; about `sampled`
-/// of the `starts` query starts also get those of level `full + 1`.
+/// of the `starts` query starts, spread by `sampled_in`, also get those of level `full + 1`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LookupPlan {
     /// The level of every query k-mer: 0 exact, 1 or 2 mismatches.
@@ -37,6 +44,18 @@ pub struct LookupPlan {
 }
 
 impl LookupPlan {
+    /// The plan of level `level` on every k-mer, 3 being level 2 with the indel lookups.
+    pub fn full(level: usize) -> Self {
+        Self {
+            full: level.min(2),
+            sampled: 0,
+            starts: 0,
+            indels: level >= 3,
+            proven: false,
+            expected_hits: 0.0,
+        }
+    }
+
     /// The highest level of the plan: 0 exact, 1 or 2 mismatches, 3 also one indel.
     pub fn level(&self) -> usize {
         match self.indels {
@@ -44,6 +63,51 @@ impl LookupPlan {
             false => self.full + usize::from(self.sampled > 0),
         }
     }
+
+    /// The query positions of stratum `stratum` (positions 32 s to 32 s + 31, as bits) that get
+    /// the lookups of level `full + 1`. With x = 32 times the sampled share, the stratum takes
+    /// floor(x) positions, and one more with chance x - floor(x), by a hash of the stratum. They
+    /// are those with the lowest hashes of their position. So the choice is the same on every
+    /// run, follows no period of the query, and a larger share picks a superset.
+    pub fn sampled_in(&self, stratum: u64) -> u32 {
+        if self.sampled == 0 {
+            return 0;
+        }
+        if self.sampled >= self.starts {
+            return u32::MAX;
+        }
+        let target = self.sampled as f64 / self.starts as f64 * STRATUM as f64;
+        let extra = unit(mix(stratum ^ STRATUM_SALT)) < target.fract();
+        let count = target as usize + usize::from(extra);
+        let mut order: [(u64, u32); STRATUM as usize] = std::array::from_fn(|at| {
+            (
+                mix((stratum * STRATUM + at as u64) ^ POSITION_SALT),
+                at as u32,
+            )
+        });
+        order.sort_unstable();
+        order[..count]
+            .iter()
+            .fold(0, |bits, &(_, at)| bits | 1 << at)
+    }
+
+    /// Whether query position `position` gets the lookups of level `full + 1`.
+    pub fn is_sampled(&self, position: u64) -> bool {
+        self.sampled_in(position / STRATUM) >> (position % STRATUM) & 1 == 1
+    }
+}
+
+/// The splitmix64 finalizer.
+fn mix(value: u64) -> u64 {
+    let mut z = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// A hash as a number from 0 up to 1.
+fn unit(hash: u64) -> f64 {
+    (hash >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// The chance that a k-mer holds at most `mismatches` substitutions at identity `identity`.
@@ -69,7 +133,7 @@ pub fn full_two_limit(k: usize, w: usize) -> u64 {
 /// meets `budget`, among levels 0 and 1 and level 2 up to `full_two_limit` k-mers. Otherwise the
 /// plan by hits: the cheapest plan at which a copy at the identity limit is expected to give
 /// `EXPECTED_HITS` seed hits on the required bases, adding level 1, then level 2, on just enough
-/// sampled k-mers; full level 2 if even that is not enough. The k-mers with level-2
+/// sampled k-mers (`LookupPlan::sampled_in`); full level 2 if even that is not enough. The k-mers with level-2
 /// lookups also get indel lookups on queries of at most `MAX_INDEL_KMERS` k-mers.
 pub fn lookup_plan(
     models: &[MissModel; 3],
@@ -281,5 +345,56 @@ mod tests {
         assert_eq!(from(0.9), Some(3_223));
         assert_eq!(from(0.85), Some(23_559));
         assert_eq!(from(0.8), Some(82_583));
+    }
+
+    fn sampled(plan: &LookupPlan, positions: u64) -> Vec<u64> {
+        (0..positions).filter(|&at| plan.is_sampled(at)).collect()
+    }
+
+    /// The same plan picks the same positions, about the share of them, and a larger share
+    /// picks a superset.
+    #[test]
+    fn sampling_nested() {
+        let mut plan = plan(0.8, 50_000);
+        let first = sampled(&plan, plan.starts);
+        assert_eq!(first, sampled(&plan, plan.starts));
+        let share = first.len() as f64 / plan.starts as f64;
+        assert!((share / (plan.sampled as f64 / plan.starts as f64) - 1.0).abs() < 0.02);
+        plan.sampled += plan.starts / 10;
+        let more = sampled(&plan, plan.starts);
+        assert!(first.iter().all(|at| more.binary_search(at).is_ok()));
+        plan.sampled = plan.starts;
+        assert_eq!(sampled(&plan, 100), (0..100).collect::<Vec<_>>());
+    }
+
+    /// Useful seeds every d positions from offset o, for every period and offset, and their
+    /// mirror on the other strand: each layout keeps close to the share of sampled positions.
+    /// A lattice of every second position kept none of them at period 2 and offset 0.
+    #[test]
+    fn sampling_periodic() {
+        let mut plan = plan(0.8, 50_000);
+        for share in [0.25, 0.5, 0.75] {
+            plan.sampled = (share * plan.starts as f64) as u64;
+            for period in [2, 3, 4, 7, 16, 32, 64, 101] {
+                for offset in 0..period {
+                    let useful: Vec<u64> = (offset..plan.starts).step_by(period as usize).collect();
+                    let hit = |at: &u64| plan.is_sampled(*at);
+                    let forward = useful.iter().filter(|at| hit(at)).count();
+                    let mirror = useful
+                        .iter()
+                        .filter(|&&at| hit(&(plan.starts - 1 - at)))
+                        .count();
+                    // Within four standard deviations of independent picks.
+                    let spread = 4.0 * (share * (1.0 - share) / useful.len() as f64).sqrt();
+                    for count in [forward, mirror] {
+                        let got = count as f64 / useful.len() as f64;
+                        assert!(
+                            (got - share).abs() < spread,
+                            "{share} {period} {offset} {got}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

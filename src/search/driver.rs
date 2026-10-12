@@ -213,12 +213,7 @@ impl<'a> Searcher<'a> {
                     }
                     _ => Ok(None),
                 },
-                || match plan.level() {
-                    3 => QueryKmers::with_indel_neighbours(&self.seeder, query, circular),
-                    2 => QueryKmers::with_two_neighbours(&self.seeder, query, circular),
-                    1 => QueryKmers::with_neighbours(&self.seeder, query, circular),
-                    _ => QueryKmers::new(&self.seeder, query, circular),
-                },
+                || QueryKmers::planned(&self.seeder, query, circular, &plan),
             );
             let prepared = prepared?;
             let workspace = AlignStageWorkspace::default();
@@ -278,6 +273,7 @@ impl<'a> Searcher<'a> {
         let miss_over_budget = !bound.prunes();
         summary.sketch = SketchWork {
             low_complexity_bases: low_complexity,
+            sampled_kmers: plan.sampled,
             miss_upper_bound,
             total_miss,
             miss_over_budget,
@@ -304,6 +300,7 @@ impl<'a> Searcher<'a> {
         };
         summary.sketch = SketchWork {
             low_complexity_bases: low_complexity,
+            sampled_kmers: plan.sampled,
             miss_upper_bound,
             total_miss,
             miss_over_budget,
