@@ -17,7 +17,7 @@ use super::locate_stage::{
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
 use super::seed_mismatches::{LookupPlan, lookup_plan, target_length};
-use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
+use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, keep_found, sketch_stage};
 use super::times::{PartStart, SearchTimes};
 use crate::align::{AlignmentError, Interval};
 use crate::decide::DecisionRule;
@@ -213,9 +213,23 @@ impl<'a> Searcher<'a> {
                     }
                     _ => Ok(None),
                 },
-                || QueryKmers::planned(&self.seeder, query, circular, &plan),
+                || {
+                    let seeds = self.shard.seed_file();
+                    QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
+                        control.check()?;
+                        keep_found(seeds, lookups)
+                    })
+                },
             );
             let prepared = prepared?;
+            let query_kmers = match query_kmers {
+                Ok(query_kmers) => query_kmers,
+                Err(error) => {
+                    let mut summary = self.empty_summary(query.len() as u64, plan.level());
+                    summary.completion = error.into();
+                    return Ok(summary);
+                }
+            };
             let workspace = AlignStageWorkspace::default();
             let request = Request {
                 config,

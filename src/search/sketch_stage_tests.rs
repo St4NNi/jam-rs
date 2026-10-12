@@ -6,7 +6,7 @@ use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::query::QueryKmers;
-use super::sketch_stage::{SketchLimits, sketch_stage};
+use super::sketch_stage::{SketchLimits, keep_found, sketch_stage};
 use crate::index::{Shard, build_shard};
 use crate::loss::MaxMiss;
 use crate::seeds::Seeder;
@@ -252,4 +252,31 @@ fn frequent_union_only() {
         "{}",
         bound_of(3)
     );
+}
+
+/// Keeping only the lookups the index holds leaves the same candidates as looking up all of
+/// them, with the one-substitution neighbours as well.
+#[test]
+fn found_lookups_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = shard(directory.path());
+    let seeder = Seeder::new(parameters().scheme).unwrap();
+    let all = QueryKmers::with_neighbours(&seeder, &query, false);
+    let plan = super::seed_mismatches::LookupPlan::full(1);
+    let keep = |lookups: &mut Vec<(u64, u32)>| keep_found(shard.seed_file(), lookups);
+    let kept = QueryKmers::filtered(&seeder, &query, false, &plan, keep).unwrap();
+    assert!(kept.distinct().len() < all.distinct().len() / 10);
+    let bound = bound(query.len() as u64, 1_000);
+    let entries = |kmers: &QueryKmers| {
+        let outcome = sketch_stage(shard.seed_file(), kmers, &bound, UNLIMITED, no_stop());
+        let outcome = outcome.unwrap();
+        let entries: Vec<(u32, u64)> = (outcome.candidates.iter())
+            .map(|possible| (possible.entry, possible.coverage_bound))
+            .collect();
+        (entries, outcome.work.seed_hits, outcome.work.lookups)
+    };
+    let (kept_entries, kept_hits, lookups) = entries(&kept);
+    let (all_entries, all_hits, _) = entries(&all);
+    assert_eq!((kept_entries, kept_hits), (all_entries, all_hits));
+    assert_eq!(lookups, all.lookups());
 }

@@ -46,10 +46,11 @@ pub struct SketchWork {
     pub low_complexity_bases: u64,
     /// Query k-mers, counting repeats.
     pub query_kmers: u64,
-    /// Query starts expected to get the lookups of the next lookup level too.
+    /// Query starts that also got the lookups of the next lookup level.
     #[serde(default)]
     pub sampled_kmers: u64,
-    /// Distinct query k-mers looked up in the sketch part.
+    /// Lookups made: query k-mers and their neighbours, counting repeats. Only those the sketch
+    /// part holds are kept.
     pub lookups: u64,
     /// Distinct query k-mers that the sketch part holds.
     pub seeds_found: u64,
@@ -135,7 +136,7 @@ pub fn sketch_stage(
     let found = find_query_seeds(seed_file, query, control)?;
     let mut work = SketchWork {
         query_kmers: query.kmers(),
-        lookups: query.distinct().len() as u64,
+        lookups: query.lookups(),
         seeds_found: found.len() as u64,
         ..SketchWork::default()
     };
@@ -241,6 +242,27 @@ pub fn find_query_seeds(
         seeds,
         color_sets: ColorSets::concat(parts),
     })
+}
+
+/// Keeps the lookups, pairs of k-mer hash and query start, whose seed keys the sketch part holds.
+pub fn keep_found(seed_file: &SeedFile, lookups: &mut Vec<(u64, u32)>) -> Result<(), SearchError> {
+    let mut keys: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
+    keys.par_sort_unstable();
+    keys.dedup();
+    let held = keys
+        .par_chunks(CHUNK_SEEDS)
+        .map(|chunk| {
+            let stored = seed_file.find_seeds(chunk)?;
+            let held = chunk
+                .iter()
+                .zip(stored)
+                .filter(|(_, stored)| stored.is_some());
+            Ok(held.map(|(&key, _)| key).collect::<Vec<u64>>())
+        })
+        .collect::<Result<Vec<_>, SearchError>>()?
+        .concat();
+    lookups.retain(|&(hash, _)| held.binary_search(&seed_key(hash)).is_ok());
+    Ok(())
 }
 
 /// Splits the found seeds into those to expand, rarest first, and the frequent ones: those held
