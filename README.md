@@ -482,12 +482,13 @@ levels, from the cheapest to the most thorough:
 - level 2: also seeds with two mismatches;
 - level 3: level 2, plus seeds one insertion or deletion away.
 
-jam may spend at most one extra CPU minute per query on mismatch lookups. Within that, it takes
-the cheapest level that meets the miss target; if none does, the cheapest level at which a
-typical copy gets about 6 seed hits. If no level gets there, it takes the highest level within
+jam may spend at most ten extra CPU minutes per query on mismatch lookups, as estimated from the
+costs below. Within that, it takes the cheapest level that meets the miss target; if none does,
+the cheapest level at which a typical copy gets about 8 seed hits. If no level gets there, it takes the highest level within
 the limit. For a query of at most 1,100 k-mers, level 2 becomes level 3, which also finds copies
-with an indel. The extra CPU time is about 0.001 s per query k-mer for level 1, 0.0055 s for
-level 2 and 0.009 s for level 3.
+with an indel. The estimate is 0.001 s per query k-mer for level 1, 0.0055 s for level 2 and
+0.009 s for level 3, measured on genes with many copies; long plasmids and reads cost 4 to 8 times
+less. These values were chosen on a separate tuning set of genes, plasmids and reads.
 
 `--max-miss` is a target, not a promise. jam can prove it only for some combinations of query
 length and identity. Short queries at low identity cannot meet it as a guarantee. With the
@@ -497,8 +498,8 @@ default 0.0001 and coverage 0.5, jam proves it from these query lengths:
 | -------- | -------- |
 | 95% | 1.24 kb |
 | 90% | 3.22 kb |
-| 85% | 132 kb, and on part of the range below (about 8.2 to 10.9 kb and 23.6 to 60 kb) |
-| 80% | 604 kb |
+| 85% | 8.18 kb |
+| 80% | 22.3 kb, except queries of 600 to 604 kb |
 
 Below these lengths jam still searches normally and finds most copies in practice. The proven
 worst case is only higher there. `-v` reports the value of each query and marks it when it is

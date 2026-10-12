@@ -11,14 +11,16 @@ use crate::loss::{MaxMiss, MissModel};
 /// measured as 5.5 seconds per 1,000 k-mers. Level 3 stays within 10 seconds up to 1,100 k-mers.
 const SECONDS_PER_KMER: [f64; 3] = [0.001, 0.0055, 0.009];
 
-/// The most extra CPU seconds per query that the lookups may cost, summed over threads: one
-/// minute. It is the round limit with which the default target is proven without gaps from
-/// 1.25 kb at 95% and 3.25 kb at 90%.
-const CPU_LIMIT_SECONDS: f64 = 60.0;
+/// The most extra CPU seconds per query that the lookups may cost by `SECONDS_PER_KMER`, summed
+/// over threads: ten minutes. Chosen on a tuning set of genes, plasmids and reads, together with
+/// `EXPECTED_HITS`: the cheapest setting that kept 99.9% of the recall of level 3 at 95% and 80%
+/// identity. The costs are measured on genes with many copies; long plasmids and reads cost 4 to 8
+/// times less, so the real extra time is lower.
+const CPU_LIMIT_SECONDS: f64 = 600.0;
 
 /// The seed hits that a whole copy is expected to give before a level is enough. A copy then
-/// shows a seed hit with a chance of about 99.75%.
-const EXPECTED_HITS: f64 = 6.0;
+/// shows a seed hit with a chance of about 99.97%.
+const EXPECTED_HITS: f64 = 8.0;
 
 /// The most query k-mers for which level 2 also looks up the k-mers one indel away.
 const MAX_INDEL_KMERS: u64 = 1_100;
@@ -135,8 +137,8 @@ mod tests {
         // Level 3 is level 2 with the indel lookups, up to 1,100 k-mers.
         for (identity, length, level) in [
             (0.95, 250, 3),
-            (0.95, 500, 1),
-            (0.95, 600, 1),
+            (0.95, 500, 3),
+            (0.95, 600, 3),
             (0.95, 1_300, 2),
             (0.95, 3_000, 1),
             (0.95, 10_000, 0),
@@ -149,24 +151,24 @@ mod tests {
             (0.85, 1_000, 3),
             (0.85, 2_000, 2),
             (0.85, 9_000, 2),
-            (0.85, 15_000, 1),
+            (0.85, 15_000, 2),
             (0.85, 30_000, 1),
-            (0.85, 70_000, 0),
+            (0.85, 70_000, 1),
             (0.85, 200_000, 0),
             (0.8, 1_500, 2),
             (0.8, 6_000, 2),
-            (0.8, 41_000, 1),
+            (0.8, 41_000, 2),
             (0.8, 1_000_000, 0),
         ] {
             assert_eq!(choice(identity, length), level, "{identity} {length}");
         }
     }
 
-    /// The CPU limit rules out level 2 for 12 kb at 60% identity, and level 1 for 70 kb.
+    /// The CPU limit rules out level 2 for 120 kb at 60% identity, and level 1 for 700 kb.
     #[test]
     fn limit_steps_down() {
-        assert_eq!(choice(0.6, 12_000), 1);
-        assert_eq!(choice(0.6, 70_000), 0);
+        assert_eq!(choice(0.6, 120_000), 1);
+        assert_eq!(choice(0.6, 700_000), 0);
     }
 
     #[test]
@@ -182,7 +184,9 @@ mod tests {
         let near = |at: f64, expected: f64| (at / expected - 1.0).abs() < 0.05;
         assert!(near(from(0.95), 1_240.0));
         assert!(near(from(0.9), 3_220.0));
-        assert!(near(from(0.85), 132_000.0));
-        assert!(near(from(0.8), 604_000.0));
+        assert!(near(from(0.85), 8_183.0));
+        // At 80% the target also fails on 600,025 to 603,878 bases, a gap narrower than the
+        // 1% sampling, where level 1 is over the limit and level 0 not yet enough.
+        assert!(near(from(0.8), 22_319.0));
     }
 }
