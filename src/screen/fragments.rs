@@ -84,6 +84,7 @@ impl BatchAlignment<'_> {
             bound: &bound,
             frequent_seeds: &[],
             flank: self.flank,
+            verify: None,
         };
         let query = PreparedQuery::new(&batch.bases, false, self.align)?;
         let candidates: Vec<PossibleEntry> = (seed_hits.into_iter())

@@ -11,6 +11,7 @@ use super::located::{ContigWindows, LocatedEntry};
 use super::query::QueryKmers;
 use super::sketch_stage::{FoundSeeds, PossibleEntry};
 use crate::index::{SeedFile, SeedLocation, Shard, StoredSeed};
+use crate::seeds::Seeder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
@@ -18,6 +19,11 @@ use std::time::Instant;
 
 /// Seeds whose seed locations one parallel step reads.
 const CHUNK_SEEDS: usize = 4096;
+
+/// The most query starts with a located seed hit at which an entry counts as weak, so its seed
+/// hits are checked on its sequence before it is aligned: the seed hits that a plan expects of a
+/// qualifying copy.
+const WEAK_HIT_STARTS: usize = 8;
 
 /// The seed locations of one candidate entry: pairs of seed (an index into
 /// `QueryKmers::distinct`) and seed location, ascending.
@@ -38,6 +44,13 @@ pub struct LocateWork {
     pub seed_locations: u64,
     /// Entries dropped by the second pruning or for lack of seed hits.
     pub dropped_entries: u64,
+    /// Weak entries dropped as none of their seed hits is on their sequence: chance matches of
+    /// seed keys.
+    #[serde(default)]
+    pub unverified_entries: u64,
+    /// Bins read from the sequences to check the seed hits of weak entries.
+    #[serde(default)]
+    pub verified_bins: u64,
     /// Bins with seed hits, over all located entries.
     pub candidate_bins: u64,
     /// Alignment windows, over all located entries.
@@ -53,6 +66,8 @@ impl LocateWork {
         self.lookups += other.lookups;
         self.seed_locations += other.seed_locations;
         self.dropped_entries += other.dropped_entries;
+        self.unverified_entries += other.unverified_entries;
+        self.verified_bins += other.verified_bins;
         self.candidate_bins += other.candidate_bins;
         self.alignment_windows += other.alignment_windows;
         self.seconds += other.seconds;
@@ -71,10 +86,15 @@ pub enum LocateOutcome {
 pub struct LocateWorkspace {
     positions: Vec<u32>,
     bins: Vec<u32>,
+    bases: Vec<u8>,
+    /// Bins read to check seed hits, for the work of the entry.
+    verified_bins: u64,
+    /// Whether the entry was dropped as none of its seed hits checked out.
+    unverified: bool,
 }
 
 /// The query, bound and settings that every entry of one search shares in stage 2.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct LocateRequest<'a> {
     pub query: &'a QueryKmers,
     pub bound: &'a CoverageBound<'a>,
@@ -82,6 +102,9 @@ pub struct LocateRequest<'a> {
     pub frequent_seeds: &'a [u32],
     /// Bases added on each side of a candidate bin.
     pub flank: u64,
+    /// The seeder of the shard, to check the seed hits of weak entries on their sequence; `None`
+    /// checks none.
+    pub verify: Option<&'a Seeder>,
 }
 
 /// Runs stage 2 for one candidate entry with its seed locations from `read_entry_locations`. The
@@ -111,6 +134,8 @@ pub fn locate_entry(
         Ok(LocateOutcome::Dropped(_)) => work.dropped_entries += 1,
         Err(_) => {}
     }
+    work.verified_bins += workspace.verified_bins;
+    work.unverified_entries += u64::from(workspace.unverified);
     outcome
 }
 
@@ -121,7 +146,11 @@ fn locate(
     locations: &[(u32, SeedLocation)],
     workspace: &mut LocateWorkspace,
 ) -> Result<LocateOutcome, SearchError> {
-    let LocateWorkspace { positions, bins } = workspace;
+    workspace.verified_bins = 0;
+    workspace.unverified = false;
+    let LocateWorkspace {
+        positions, bins, ..
+    } = workspace;
     positions.clear();
     bins.clear();
     for same in locations.chunk_by(|a, b| a.0 == b.0) {
@@ -139,14 +168,82 @@ fn locate(
     }
     bins.sort_unstable();
     bins.dedup();
-    let contig_table = shard.contig_table(possible.entry)?;
     let bin_bits = u32::from(shard.manifest().parameters.bin_bits);
+    let hit_starts = positions.len() as u64;
+    if let Some(seeder) = request
+        .verify
+        .filter(|_| hit_starts as usize <= WEAK_HIT_STARTS)
+    {
+        let checked = Check {
+            shard,
+            seeder,
+            query: request.query,
+            entry: possible.entry,
+            bin_bits,
+        };
+        if !checked.any_on_sequence(locations, workspace)? {
+            workspace.unverified = true;
+            return Ok(LocateOutcome::Dropped(DropReason::NoSeedHits));
+        }
+    }
+    let LocateWorkspace { bins, .. } = workspace;
+    let contig_table = shard.contig_table(possible.entry)?;
     Ok(LocateOutcome::Located(LocatedEntry {
         entry: possible.entry,
         coverage_bound,
-        containment_estimate: request.query.containment_estimate(positions.len() as u64),
+        containment_estimate: request.query.containment_estimate(hit_starts),
         alignment_windows: alignment_windows(contig_table.starts(), bins, bin_bits, request.flank),
     }))
+}
+
+/// What checking the seed hits of one weak entry on its sequence needs.
+struct Check<'a> {
+    shard: &'a Shard,
+    seeder: &'a Seeder,
+    query: &'a QueryKmers,
+    entry: u32,
+    bin_bits: u32,
+}
+
+impl Check<'_> {
+    /// Whether any seed hit is on the sequence: whether the bin of a seed location, with k bases
+    /// more on each side, holds the looked-up k-mer (with its substitutions or indel) on either
+    /// strand. A seed hit whose 44-bit key only matches by chance fails, as the full hash differs.
+    /// Bins are read one by one until a seed hit checks out.
+    fn any_on_sequence(
+        &self,
+        locations: &[(u32, SeedLocation)],
+        workspace: &mut LocateWorkspace,
+    ) -> Result<bool, SearchError> {
+        let k = u64::from(self.seeder.scheme().k);
+        let packed = self.shard.packed(self.entry)?;
+        let mut by_bin: Vec<(u32, u64)> = (locations.iter())
+            .map(|(seed, location)| (location.bin, self.query.distinct()[*seed as usize].hash))
+            .collect();
+        by_bin.sort_unstable();
+        by_bin.dedup();
+        let mut hashes = Vec::new();
+        for same in by_bin.chunk_by(|a, b| a.0 == b.0) {
+            let start = u64::from(same[0].0) << self.bin_bits;
+            let end = (start + (1 << self.bin_bits) + k).min(packed.bases());
+            let start = start.saturating_sub(k);
+            if start >= end {
+                continue;
+            }
+            packed.read_bases(start..end, &mut workspace.bases)?;
+            workspace.verified_bins += 1;
+            hashes.clear();
+            (self.seeder).query_kmers(&workspace.bases, |kmer| hashes.push(kmer.hash));
+            hashes.sort_unstable();
+            if same
+                .iter()
+                .any(|(_, hash)| hashes.binary_search(hash).is_ok())
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// Reads the seed locations of the seed hits of all candidate entries, and of the frequent seeds

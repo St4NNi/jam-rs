@@ -46,6 +46,7 @@ fn forward(shard: &Shard, query: &[u8], config: &ScreenConfig) -> Option<(u64, f
         bound: &bound,
         frequent_seeds: &sketched.frequent_seeds,
         flank: config.flank,
+        verify: None,
     };
     let mut work = Default::default();
     let candidates = std::slice::from_ref(possible);

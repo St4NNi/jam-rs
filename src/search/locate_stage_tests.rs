@@ -47,6 +47,7 @@ fn locate(
         bound,
         frequent_seeds: &[],
         flank: FLANK,
+        verify: None,
     };
     let mut work = LocateWork::default();
     let found = find_query_seeds(shard.seed_file(), query, control).unwrap();
@@ -197,4 +198,76 @@ fn flank_widens_bins() {
             assert!(windows[1].1[0].end >= 2_000 + FLANK - 21);
         }
     }
+}
+
+/// Stage 2 of entry 0 with sequence checks, after `edit` changes its seed locations.
+fn checked(
+    shard: &Shard,
+    query: &QueryKmers,
+    edit: impl Fn(&mut Vec<(u32, crate::index::SeedLocation)>),
+) -> (LocateOutcome, LocateWork) {
+    let (control, seeder) = (no_stop(), Seeder::new(parameters().scheme).unwrap());
+    let bound = bound(query.length(), 0);
+    let request = LocateRequest {
+        query,
+        bound: &bound,
+        frequent_seeds: &[],
+        flank: FLANK,
+        verify: Some(&seeder),
+    };
+    let found = find_query_seeds(shard.seed_file(), query, control).unwrap();
+    let limits = SketchLimits {
+        frequent_seed_entries: u64::MAX,
+        max_seed_hits: u64::MAX,
+    };
+    let sketch = sketch_stage(shard.seed_file(), query, &bound, limits, control).unwrap();
+    let possible = sketch.candidates.iter().find(|p| p.entry == 0).unwrap();
+    let mut work = LocateWork::default();
+    let candidates = std::slice::from_ref(possible);
+    let file = shard.seed_file();
+    let read = read_entry_locations(file, &request, &found, candidates, control, &mut work);
+    let mut locations = read.unwrap().remove(0);
+    edit(&mut locations);
+    let mut workspace = LocateWorkspace::default();
+    let outcome = locate_entry(
+        shard,
+        &request,
+        possible,
+        &locations,
+        &mut workspace,
+        &mut work,
+    );
+    (outcome.unwrap(), work)
+}
+
+/// A weak entry whose seed hits lie in its sequence is kept. Moved to a bin that does not hold
+/// the k-mers, as a chance match of a seed key would be, it is dropped.
+#[test]
+fn chance_keys_dropped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0xc011);
+    let query = random_bases(&mut random, 2_000);
+    let piece = query[700..760].to_vec();
+    let entries = vec![vec![
+        [
+            random_bases(&mut random, 5_000),
+            piece,
+            random_bases(&mut random, 15_000),
+        ]
+        .concat(),
+    ]];
+    let shard = test_shard(directory.path(), &entries);
+    let query = kmers(&query);
+    let (kept, work) = checked(&shard, &query, |_| {});
+    assert!(matches!(kept, LocateOutcome::Located(_)), "{kept:?}");
+    assert_eq!((work.unverified_entries, work.verified_bins), (0, 1));
+    // Bin 60 of 256 bases starts at 15,360, far from the piece.
+    let moved = |locations: &mut Vec<(u32, crate::index::SeedLocation)>| {
+        locations
+            .iter_mut()
+            .for_each(|(_, location)| location.bin = 60);
+    };
+    let (dropped, work) = checked(&shard, &query, moved);
+    assert_eq!(dropped, LocateOutcome::Dropped(DropReason::NoSeedHits));
+    assert_eq!((work.unverified_entries, work.verified_bins), (1, 1));
 }

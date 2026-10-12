@@ -340,6 +340,7 @@ impl<'a> Searcher<'a> {
             bound: &bound,
             frequent_seeds: &sketch.frequent_seeds,
             flank: config.flank,
+            verify: Some(&self.seeder),
         };
         let start = PartStart::now();
         let locations = read_entry_locations(

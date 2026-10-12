@@ -639,3 +639,59 @@ fn failure_marks_unfinished() {
         );
     }
 }
+
+/// Thirteen exact 40-base pieces of a 1 kb query, every second one reverse complemented,
+/// together 520 bases: entry 0 holds them on 13 contigs, entry 1 on one contig, apart. Neither
+/// the sequence check nor a count of seed hits drops them before stage 3.
+#[test]
+fn mosaic_pieces_kept() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0x13);
+    let query = random_bases(&mut random, 1_000);
+    let pieces: Vec<Vec<u8>> = (0..13)
+        .map(|j| {
+            let piece = query[j * 76..j * 76 + 40].to_vec();
+            if j % 2 == 1 {
+                reverse_complement(&piece)
+            } else {
+                piece
+            }
+        })
+        .collect();
+    let mut spread = Vec::new();
+    let mut joined = Vec::new();
+    for piece in &pieces {
+        spread.push(
+            [
+                random_bases(&mut random, 300),
+                piece.clone(),
+                random_bases(&mut random, 300),
+            ]
+            .concat(),
+        );
+        joined.extend([random_bases(&mut random, 300), piece.clone()].concat());
+    }
+    joined.extend(random_bases(&mut random, 300));
+    let shard = test_shard(directory.path(), &[spread, vec![joined]]);
+    let mut config = config(SearchStage::Align);
+    config.rule.min_identity = 1.0;
+    config.rule.min_query_coverage = QueryCoverage::Share {
+        numerator: 5,
+        decimal_places: 1,
+    };
+    let (summary, events) = search(&shard, &query, false, &config, false);
+    assert_eq!(summary.locate.unverified_entries, 0);
+    for entry in [0, 1] {
+        let list = &events[&entry];
+        assert!(
+            matches!(list[1], EntryEvent::Located(..)),
+            "{entry}: {list:?}"
+        );
+        // Stage 3 then decides; the 40-base pieces fail the decision rule there, a limit of
+        // alignment and decision, not of the seeds.
+        let last = list.last().unwrap();
+        let decided =
+            matches!(last, EntryEvent::Dropped { reason, .. } if *reason == DropReason::Decision);
+        assert!(decided, "{entry}: {last:?}");
+    }
+}
