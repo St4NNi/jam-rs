@@ -6,24 +6,45 @@
 use crate::decide::DecisionRule;
 use crate::loss::{MaxMiss, MissModel};
 
-/// The extra CPU seconds per query k-mer of levels 1, 2 and 3, summed over threads. Level 1 is
-/// measured on 1,000 assemblies at 80% identity, with the extra alignment windows. Level 2 is
-/// measured as 5.5 seconds per 1,000 k-mers. Level 3 stays within 10 seconds up to 1,100 k-mers.
-const SECONDS_PER_KMER: [f64; 3] = [0.001, 0.0055, 0.009];
-
-/// The most extra CPU seconds per query that the lookups may cost by `SECONDS_PER_KMER`, summed
-/// over threads: ten minutes. Chosen on a tuning set of genes, plasmids and reads, together with
-/// `EXPECTED_HITS`: the cheapest setting that kept 99.9% of the recall of level 3 at 95% and 80%
-/// identity. The costs are measured on genes with many copies; long plasmids and reads cost 4 to 8
-/// times less, so the real extra time is lower.
-const CPU_LIMIT_SECONDS: f64 = 600.0;
-
-/// The seed hits that a whole copy is expected to give before a level is enough. A copy then
-/// shows a seed hit with a chance of about 99.97%.
+/// The seed hits that a qualifying copy is expected to give on the required bases before a plan
+/// is enough. A copy then shows a seed hit with a chance of about 99.97%.
 const EXPECTED_HITS: f64 = 8.0;
 
-/// The most query k-mers for which level 2 also looks up the k-mers one indel away.
+/// The most query k-mers for which the k-mers with level-2 lookups also look up the k-mers one
+/// indel away.
 const MAX_INDEL_KMERS: u64 = 1_100;
+
+/// The identity and the share of required bases at which `full_two_limit` is set.
+const LIMIT_IDENTITY: f64 = 0.8;
+const LIMIT_COVERAGE: f64 = 0.5;
+
+/// The lookups of one query. Every query k-mer gets the lookups of level `full`; about `sampled`
+/// of the `starts` query starts also get those of level `full + 1`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LookupPlan {
+    /// The level of every query k-mer: 0 exact, 1 or 2 mismatches.
+    pub full: usize,
+    /// The query starts expected to get the lookups of level `full + 1`.
+    pub sampled: u64,
+    /// The query starts: the query length on a circular query, else the length less k - 1.
+    pub starts: u64,
+    /// Whether the k-mers with level-2 lookups also look up the k-mers one indel away.
+    pub indels: bool,
+    /// Whether the proven bound of level `full` meets the miss target.
+    pub proven: bool,
+    /// The seed hits that a copy at the identity limit is expected to give on the required bases.
+    pub expected_hits: f64,
+}
+
+impl LookupPlan {
+    /// The highest level of the plan: 0 exact, 1 or 2 mismatches, 3 also one indel.
+    pub fn level(&self) -> usize {
+        match self.indels {
+            true => 3,
+            false => self.full + usize::from(self.sampled > 0),
+        }
+    }
+}
 
 /// The chance that a k-mer holds at most `mismatches` substitutions at identity `identity`.
 fn at_most(k: usize, mismatches: usize, identity: f64) -> f64 {
@@ -35,38 +56,70 @@ fn at_most(k: usize, mismatches: usize, identity: f64) -> f64 {
     sum
 }
 
-/// The lookup level of a query: 0 exact, 1 or 2 mismatches, 3 level 2 plus indels. Only levels
-/// within `CPU_LIMIT_SECONDS` count. It is the cheapest whose bound meets `budget`, else the
-/// cheapest with `EXPECTED_HITS` hits on a copy, else the highest.
-pub fn lookup_level(
+/// The most query k-mers on which a full level 2 counts as cheap: those at which the plan by
+/// hits needs level 2 on every k-mer at 80% identity and coverage 0.5,
+/// 8 / (0.5 * 2 / (w + 1) * P(at most 2 substitutions at 80%)), about 8,226 with k 25 and w 100.
+/// From 80% identity and coverage 0.5 up, the plan by hits never holds more level-2 k-mers.
+pub fn full_two_limit(k: usize, w: usize) -> u64 {
+    let per_kmer = 2.0 / (w as f64 + 1.0) * at_most(k, 2, LIMIT_IDENTITY);
+    (EXPECTED_HITS / (LIMIT_COVERAGE * per_kmer)).ceil() as u64
+}
+
+/// The lookups of a query. First the proof step: the cheapest full level whose proven bound
+/// meets `budget`, among levels 0 and 1 and level 2 up to `full_two_limit` k-mers. Otherwise the
+/// plan by hits: the cheapest plan at which a copy at the identity limit is expected to give
+/// `EXPECTED_HITS` seed hits on the required bases, adding level 1, then level 2, on just enough
+/// sampled k-mers; full level 2 if even that is not enough. The k-mers with level-2
+/// lookups also get indel lookups on queries of at most `MAX_INDEL_KMERS` k-mers.
+pub fn lookup_plan(
     models: &[MissModel; 3],
     rule: &DecisionRule,
     budget: MaxMiss,
     length: u64,
     circular: bool,
-) -> usize {
+) -> LookupPlan {
     let (k, w) = (models[0].k(), models[0].w());
-    let kmers = if circular {
+    let starts = if circular {
         length
     } else {
         (length + 1).saturating_sub(k as u64)
     };
-    // Level 3 stands in for level 2 on a short query.
-    let named = |r: usize| {
-        if r == 2 && kmers <= MAX_INDEL_KMERS {
-            3
-        } else {
-            r
+    let required = rule.min_query_coverage.required_bases(length).min(length);
+    let per_start = required as f64 * 2.0 / (w as f64 + 1.0);
+    let chance = |r: usize| at_most(k, r, rule.min_identity);
+    let plan = |full: usize, sampled: u64, proven: bool| {
+        let added = match sampled {
+            0 => 0.0,
+            _ => sampled as f64 / starts as f64 * (chance(full + 1) - chance(full)),
+        };
+        LookupPlan {
+            full,
+            sampled,
+            starts,
+            indels: (full == 2 || sampled > 0 && full == 1) && starts <= MAX_INDEL_KMERS,
+            proven,
+            expected_hits: per_start * (chance(full) + added),
         }
     };
-    let allowed =
-        |r: usize| r == 0 || kmers as f64 * SECONDS_PER_KMER[named(r) - 1] <= CPU_LIMIT_SECONDS;
-    let per_window = 2.0 / (w as f64 + 1.0);
-    let hits = |r: usize| kmers as f64 * per_window * at_most(k, r, rule.min_identity);
-    let bound = |r: usize| level_bound(models, rule, length, r);
-    let pick = (0..3).find(|&r| allowed(r) && bound(r) <= budget.chance());
-    let pick = pick.or_else(|| (0..3).find(|&r| allowed(r) && hits(r) >= EXPECTED_HITS));
-    named(pick.unwrap_or_else(|| (0..3).rev().find(|&r| allowed(r)).unwrap_or(0)))
+    let cheap = |r: usize| r < 2 || starts <= full_two_limit(k, w);
+    let proven =
+        (0..3).find(|&r| cheap(r) && level_bound(models, rule, length, r) <= budget.chance());
+    if let Some(r) = proven {
+        return plan(r, 0, true);
+    }
+    let needed = EXPECTED_HITS / per_start;
+    match (0..3).find(|&r| chance(r) >= needed) {
+        Some(0) => plan(0, 0, false),
+        Some(r) => {
+            let share = (needed - chance(r - 1)) / (chance(r) - chance(r - 1));
+            let sampled = ((share * starts as f64).ceil() as u64).clamp(1, starts);
+            match sampled == starts {
+                true => plan(r, 0, false),
+                false => plan(r - 1, sampled, false),
+            }
+        }
+        None => plan(2, 0, false),
+    }
 }
 
 /// The proven miss bound of lookup level `level` for a query of `length` bases. Level 3 has the
@@ -80,14 +133,11 @@ fn level_bound(models: &[MissModel; 3], rule: &DecisionRule, length: u64, level:
 /// The longest query length checked by `target_length`.
 const LONGEST_QUERY: f64 = 1e9;
 
-/// The smallest length from which every longer query reaches `--max-miss`, or `None` up to 1e9.
-/// The bound is not monotone in the length, as the level changes with it. So lengths are
-/// sampled 1% apart, and the first reaching length after the last failing sample is bisected.
+/// The smallest length from which the proof step meets `--max-miss` on every longer query, or
+/// `None` up to 1e9. It is not monotone in the length, as level 2 stops being cheap. So lengths
+/// are sampled 1% apart, and the first reaching length after the last failing sample is bisected.
 pub fn target_length(models: &[MissModel; 3], rule: &DecisionRule, budget: MaxMiss) -> Option<u64> {
-    let reaches = |length: u64| {
-        let level = lookup_level(models, rule, budget, length, false);
-        level_bound(models, rule, length, level) <= budget.chance()
-    };
+    let reaches = |length: u64| lookup_plan(models, rule, budget, length, false).proven;
     let first = models[0].k() as u64;
     let lengths = std::iter::successors(Some(first as f64), |&n| Some((n * 1.01).max(n + 1.0)))
         .take_while(|&n| n <= LONGEST_QUERY)
@@ -118,75 +168,118 @@ pub fn target_length(models: &[MissModel; 3], rule: &DecisionRule, budget: MaxMi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decide::QueryCoverage;
     use crate::seeds::SeedScheme;
 
     fn models() -> [MissModel; 3] {
         [0, 1, 2].map(|mismatches| MissModel::new(SeedScheme::default(), mismatches).unwrap())
     }
 
-    fn choice(identity: f64, length: u64) -> usize {
-        let rule = DecisionRule {
+    fn rule(identity: f64) -> DecisionRule {
+        DecisionRule {
             min_identity: identity,
             ..DecisionRule::default()
-        };
-        lookup_level(&models(), &rule, MaxMiss::default(), length, false)
-    }
-
-    #[test]
-    fn level_follows_length() {
-        // Level 3 is level 2 with the indel lookups, up to 1,100 k-mers.
-        for (identity, length, level) in [
-            (0.95, 250, 3),
-            (0.95, 500, 3),
-            (0.95, 600, 3),
-            (0.95, 1_300, 2),
-            (0.95, 3_000, 1),
-            (0.95, 10_000, 0),
-            (0.9, 250, 3),
-            (0.9, 1_000, 3),
-            (0.9, 2_200, 1),
-            (0.9, 3_300, 2),
-            (0.9, 8_000, 1),
-            (0.9, 40_000, 0),
-            (0.85, 1_000, 3),
-            (0.85, 2_000, 2),
-            (0.85, 9_000, 2),
-            (0.85, 15_000, 2),
-            (0.85, 30_000, 1),
-            (0.85, 70_000, 1),
-            (0.85, 200_000, 0),
-            (0.8, 1_500, 2),
-            (0.8, 6_000, 2),
-            (0.8, 41_000, 2),
-            (0.8, 1_000_000, 0),
-        ] {
-            assert_eq!(choice(identity, length), level, "{identity} {length}");
         }
     }
 
-    /// The CPU limit rules out level 2 for 120 kb at 60% identity, and level 1 for 700 kb.
+    fn plan(identity: f64, length: u64) -> LookupPlan {
+        lookup_plan(
+            &models(),
+            &rule(identity),
+            MaxMiss::default(),
+            length,
+            false,
+        )
+    }
+
+    /// Full level, sampled share in percent (rounded), indels and proof, by identity and length.
     #[test]
-    fn limit_steps_down() {
-        assert_eq!(choice(0.6, 120_000), 1);
-        assert_eq!(choice(0.6, 700_000), 0);
+    fn plan_follows_length() {
+        for (identity, length, full, share, indels, proven) in [
+            (0.95, 250, 2, 0, true, false),
+            (0.95, 1_000, 1, 72, true, false),
+            (0.95, 1_300, 2, 0, false, true),
+            (0.95, 3_000, 1, 0, false, true),
+            (0.95, 10_000, 0, 0, false, true),
+            (0.9, 1_000, 2, 0, true, false),
+            (0.9, 2_000, 1, 50, false, false),
+            (0.9, 3_000, 0, 99, false, false),
+            (0.9, 5_000, 2, 0, false, true),
+            (0.9, 50_000, 0, 0, false, true),
+            (0.85, 10_000, 0, 84, false, false),
+            (0.85, 30_000, 1, 0, false, true),
+            (0.8, 5_000, 2, 0, false, false),
+            (0.8, 10_000, 1, 75, false, false),
+            (0.8, 50_000, 0, 52, false, false),
+            (0.8, 100_000, 1, 0, false, true),
+            (0.8, 1_000_000, 0, 0, false, true),
+        ] {
+            let plan = plan(identity, length);
+            let at = format!("{identity} {length}");
+            assert_eq!(plan.full, full, "{at}");
+            let percent = (100.0 * plan.sampled as f64 / plan.starts as f64).round();
+            assert_eq!(percent as u64, share, "{at}");
+            assert_eq!((plan.indels, plan.proven), (indels, proven), "{at}");
+            if !proven && plan.full < 2 {
+                assert!((plan.expected_hits - EXPECTED_HITS).abs() < 0.01, "{at}");
+            }
+        }
+    }
+
+    /// Level 2 proves 0.85 up to `full_two_limit` k-mers, one more is not cheap; indels stop
+    /// after 1,100 k-mers.
+    #[test]
+    fn plan_boundaries() {
+        let limit = full_two_limit(25, 100);
+        assert_eq!(limit, 8_226);
+        let at = |identity, kmers: u64| plan(identity, kmers + 24);
+        assert!(at(0.85, limit).proven && at(0.85, limit).full == 2);
+        assert!(!at(0.85, limit + 1).proven);
+        assert!(at(0.8, 1_100).indels && !at(0.8, 1_101).indels);
+        // At 100% identity a copy of 124 bases misses no seed: level 0 from 247 bases.
+        assert!(plan(1.0, 247).proven && plan(1.0, 247).full == 0);
+        assert!(!plan(1.0, 246).proven);
+        assert!(plan(0.99, 1_000).proven);
+    }
+
+    /// The plan follows the coverage rule: a small share or a fixed number of bases needs more
+    /// lookups, and when even level 2 gives no 8 hits it is full level 2.
+    #[test]
+    fn plan_follows_coverage() {
+        let with = |coverage: QueryCoverage, length: u64| {
+            let rule = DecisionRule {
+                min_query_coverage: coverage,
+                ..rule(0.8)
+            };
+            lookup_plan(&models(), &rule, MaxMiss::default(), length, false)
+        };
+        let bases = with(QueryCoverage::Bases(1_000), 300_000);
+        assert_eq!((bases.full, bases.sampled, bases.proven), (2, 0, false));
+        assert!(bases.expected_hits < 2.0);
+        let share = QueryCoverage::Share {
+            numerator: 5,
+            decimal_places: 2,
+        };
+        let small = with(share, 100_000);
+        assert!(small.level() > plan(0.8, 100_000).level());
+        // A very small target is not met at 3 kb; the plan by hits applies.
+        let tight = lookup_plan(
+            &models(),
+            &rule(0.95),
+            MaxMiss::new(1e-12).unwrap(),
+            3_000,
+            false,
+        );
+        assert!(!tight.proven && tight.full == 0 && tight.expected_hits >= EXPECTED_HITS);
     }
 
     #[test]
     fn target_length_found() {
         let models = models();
-        let from = |identity: f64| {
-            let rule = DecisionRule {
-                min_identity: identity,
-                ..DecisionRule::default()
-            };
-            target_length(&models, &rule, MaxMiss::default()).unwrap() as f64
-        };
-        let near = |at: f64, expected: f64| (at / expected - 1.0).abs() < 0.05;
-        assert!(near(from(0.95), 1_240.0));
-        assert!(near(from(0.9), 3_220.0));
-        assert!(near(from(0.85), 8_183.0));
-        // At 80% the target also fails on 600,025 to 603,878 bases, a gap narrower than the
-        // 1% sampling, where level 1 is over the limit and level 0 not yet enough.
-        assert!(near(from(0.8), 22_319.0));
+        let from = |identity: f64| target_length(&models, &rule(identity), MaxMiss::default());
+        assert_eq!(from(0.95), Some(1_239));
+        assert_eq!(from(0.9), Some(3_223));
+        assert_eq!(from(0.85), Some(23_559));
+        assert_eq!(from(0.8), Some(82_583));
     }
 }

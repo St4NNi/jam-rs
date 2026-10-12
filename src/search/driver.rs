@@ -16,7 +16,7 @@ use super::locate_stage::{
 };
 use super::located::LocatedEntry;
 use super::query::QueryKmers;
-use super::seed_mismatches::{lookup_level, target_length};
+use super::seed_mismatches::{LookupPlan, lookup_plan, target_length};
 use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, sketch_stage};
 use super::times::{PartStart, SearchTimes};
 use crate::align::{AlignmentError, Interval};
@@ -179,7 +179,7 @@ impl<'a> Searcher<'a> {
             ));
         }
         let budget = config.max_miss;
-        let mismatches = lookup_level(
+        let plan = lookup_plan(
             &self.models,
             &config.rule,
             budget,
@@ -195,7 +195,7 @@ impl<'a> Searcher<'a> {
         let low_complexity = Interval::total_length(&masked);
         // A search that waited past its deadline, or was stopped meanwhile, builds no tables.
         if let Err(stopped) = control.check() {
-            let mut summary = self.empty_summary(query.len() as u64, mismatches);
+            let mut summary = self.empty_summary(query.len() as u64, plan.level());
             summary.completion = Completion::Stopped(stopped);
             return Ok(summary);
         }
@@ -213,7 +213,7 @@ impl<'a> Searcher<'a> {
                     }
                     _ => Ok(None),
                 },
-                || match mismatches {
+                || match plan.level() {
                     3 => QueryKmers::with_indel_neighbours(&self.seeder, query, circular),
                     2 => QueryKmers::with_two_neighbours(&self.seeder, query, circular),
                     1 => QueryKmers::with_neighbours(&self.seeder, query, circular),
@@ -230,9 +230,8 @@ impl<'a> Searcher<'a> {
                 events,
                 low_complexity,
             };
-            let model = &self.models[mismatches.min(2)];
-            let mut summary = self.run(&query_kmers, circular, model, budget, &request, start);
-            summary.seed_mismatches = mismatches as u8;
+            let mut summary = self.run(&query_kmers, circular, &plan, budget, &request, start);
+            summary.seed_mismatches = plan.level() as u8;
             Ok(summary)
         };
         if config.threads == 0 {
@@ -250,7 +249,7 @@ impl<'a> Searcher<'a> {
         &self,
         query_kmers: &QueryKmers,
         circular: bool,
-        model: &MissModel,
+        plan: &LookupPlan,
         budget: MaxMiss,
         request: &Request<'_>,
         start: PartStart,
@@ -264,6 +263,7 @@ impl<'a> Searcher<'a> {
         } = *request;
         let length = query_kmers.length();
         let rule = &config.rule;
+        let model = &self.models[plan.full];
         let bound = CoverageBound::new(
             model,
             budget,
