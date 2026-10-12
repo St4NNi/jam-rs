@@ -402,7 +402,7 @@ If pruning was turned off for the query, the line ends with `; pruning off`.
 After the last query, jam writes one hint line to standard error, even without `-v`, if some
 queries could not reach `--max-miss`. It never goes to standard output. For example:
 
-    jam: 3 of 10 queries are above the miss target --max-miss 0.0001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 604 kb. -v shows each query.
+    jam: 3 of 10 queries are above the miss target --max-miss 0.0001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 83 kb. -v shows each query.
 
 The length is the smallest one from which every longer query reaches `--max-miss` with the
 lookups jam chooses. A search with `--server` writes the line without the length.
@@ -482,13 +482,28 @@ levels, from the cheapest to the most thorough:
 - level 2: also seeds with two mismatches;
 - level 3: level 2, plus seeds one insertion or deletion away.
 
-jam may spend at most ten extra CPU minutes per query on mismatch lookups, as estimated from the
-costs below. Within that, it takes the cheapest level that meets the miss target; if none does,
-the cheapest level at which a typical copy gets about 8 seed hits. If no level gets there, it takes the highest level within
-the limit. For a query of at most 1,100 k-mers, level 2 becomes level 3, which also finds copies
-with an indel. The estimate is 0.001 s per query k-mer for level 1, 0.0055 s for level 2 and
-0.009 s for level 3, measured on genes with many copies; long plasmids and reads cost 4 to 8 times
-less. These values were chosen on a separate tuning set of genes, plasmids and reads.
+jam first tries to prove the miss target. It takes the cheapest level whose proven bound meets
+`--max-miss`, with that level on every query k-mer. Only cheap levels count for this: levels 0
+and 1 at any length, and level 2 for queries of at most 8,226 k-mers. That is the number of
+k-mers at which the plan below needs level 2 on every k-mer, at 80% identity and coverage 0.5.
+
+Otherwise jam plans the lookups by seed hits. A copy that just qualifies covers the required
+part of the query (coverage times length) at the identity limit. jam takes the cheapest plan at
+which such a copy is expected to show 8 seed hits on the required part. All query k-mers get
+exact lookups. When that is not enough, jam adds level 1, then level 2, for just enough of the
+query positions. These positions are spread over the query in strata of 32 positions, picked by
+a hash of the position, so the same query always gets the same lookups and no period of the
+query lines up with them. If even level 2 on every k-mer is not enough (a short query, or a
+small or fixed `-c`), jam uses it on every k-mer. For a query of at most 1,100 k-mers, the
+positions with level 2 also get the lookups one insertion or deletion away. The target of 8 hits
+was tuned on a separate set of genes, plasmids and reads; it is not part of the proof.
+
+jam makes the lookups in batches and keeps only those whose seed keys the index holds, so memory
+does not grow with the number of lookups. Before it aligns a candidate assembly with few seed
+hits (at most 8 query positions), jam checks them on the assembly sequence: the bin of each seed
+hit, with k bases on each side, must hold the looked-up k-mer on either strand. A candidate
+whose seed hits all fail this check only matched seed keys by chance, and is dropped with the
+reason `no_seed_hits`.
 
 `--max-miss` is a target, not a promise. jam can prove it only for some combinations of query
 length and identity. Short queries at low identity cannot meet it as a guarantee. With the
@@ -498,14 +513,15 @@ default 0.0001 and coverage 0.5, jam proves it from these query lengths:
 | -------- | -------- |
 | 95% | 1.24 kb |
 | 90% | 3.22 kb |
-| 85% | 8.18 kb |
-| 80% | 22.3 kb, except queries of 600 to 604 kb |
+| 85% | 23.6 kb, and also 8.18 to 8.25 kb |
+| 80% | 82.6 kb |
 
 Below these lengths jam still searches normally and finds most copies in practice. The proven
 worst case is only higher there. `-v` reports the value of each query and marks it when it is
 above `--max-miss`. jam also writes one hint line to standard error after the run (see
 [Progress and debug lines](#progress-and-debug-lines)). The `seed_mismatches` field of the `-vv`
-summary holds the chosen level.
+summary holds the highest level used, and `sketch.sampled_kmers` the query positions expected to
+get it when only some do.
 
 ## Index files
 
