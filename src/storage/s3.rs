@@ -423,6 +423,10 @@ impl ReadAt for S3Object {
         self.size
     }
 
+    fn costly_reads(&self) -> bool {
+        true
+    }
+
     fn version(&self) -> io::Result<u64> {
         if self.size == 0 {
             return Ok(0);

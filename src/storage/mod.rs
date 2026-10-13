@@ -44,6 +44,12 @@ pub trait ReadAt: Send + Sync {
     fn version(&self) -> io::Result<u64> {
         Ok(0)
     }
+
+    /// Whether each read costs much beyond its bytes, as on CephFS or S3, so close ranges are
+    /// better read together.
+    fn costly_reads(&self) -> bool {
+        false
+    }
 }
 
 impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
@@ -60,6 +66,10 @@ impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
     }
     fn version(&self) -> io::Result<u64> {
         (**self).version()
+    }
+
+    fn costly_reads(&self) -> bool {
+        (**self).costly_reads()
     }
 }
 

@@ -13,7 +13,13 @@ use std::path::Path;
 pub struct LocalFile {
     file: File,
     size: u64,
+    /// Whether the file lies on CephFS, where each read costs much system time.
+    on_ceph: bool,
 }
+
+/// The `f_type` of CephFS in `statfs`.
+#[cfg(target_os = "linux")]
+const CEPH_SUPER_MAGIC: i64 = 0x00c3_6400;
 
 impl LocalFile {
     /// Opens the file at `path` for reading.
@@ -26,12 +32,22 @@ impl LocalFile {
         let file = File::open(path).map_err(failed)?;
         let size = file.metadata().map_err(failed)?.len();
         #[cfg(target_os = "linux")]
-        {
+        let on_ceph = {
             use std::os::fd::AsRawFd;
             // SAFETY: the descriptor is open, and the call only sets advice.
             unsafe { libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_RANDOM) };
-        }
-        Ok(Self { file, size })
+            // SAFETY: the descriptor is open, and `stats` is written by the call before use.
+            let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+            let known = unsafe { libc::fstatfs(file.as_raw_fd(), &mut stats) } == 0;
+            known && stats.f_type as i64 == CEPH_SUPER_MAGIC
+        };
+        #[cfg(not(target_os = "linux"))]
+        let on_ceph = false;
+        Ok(Self {
+            file,
+            size,
+            on_ceph,
+        })
     }
 }
 
@@ -47,6 +63,10 @@ impl ReadAt for LocalFile {
 
     fn will_need(&self, offset: u64, length: u64) {
         readahead::will_need(&self.file, offset, length);
+    }
+
+    fn costly_reads(&self) -> bool {
+        self.on_ceph
     }
 }
 
@@ -67,6 +87,8 @@ mod tests {
         assert_eq!(buffer, data[9_700..]);
         assert!(file.read_exact_at(9_701, &mut buffer).is_err());
         file.will_need(0, 4096);
+        // A temporary directory is not on CephFS.
+        assert!(!file.costly_reads());
         assert!(LocalFile::open(directory.path().join("missing")).is_err());
     }
 
