@@ -7,7 +7,6 @@
 //! own, and the query side salts such query k-mers too, so both sides meet.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 use std::ops::Range;
 use thiserror::Error;
 
@@ -116,48 +115,74 @@ impl Seeder {
     /// minimizer window of a clean run, or of a whole clean run shorter than one. Selected k-mers
     /// below the entropy limit give no seed; their runs select salted seeds of their own.
     pub fn seeds(&self, contig: &[u8], mut emit: impl FnMut(Kmer)) {
-        let w = usize::from(self.scheme.w);
-        let mut all = SlidingMinimum::new(w);
-        let mut low = SlidingMinimum::new(w);
-        let mut emit_all = |selected: Option<Candidate>| {
-            if let Some(selected) = selected.filter(|selected| selected.passes) {
-                emit(selected.kmer);
-            }
-        };
+        let (k, w) = (usize::from(self.scheme.k), usize::from(self.scheme.w));
+        let mut run = RunKmers::default();
         let mut low_seeds = Vec::new();
-        let mut keep_low = |selected: Option<Candidate>| {
-            if let Some(selected) = selected {
-                low_seeds.push(Kmer {
-                    hash: selected.kmer.hash ^ LOW_COMPLEXITY_SALT,
-                    ..selected.kmer
+        let mut start = 0;
+        let breaks = (0..contig.len()).filter(|&at| CODE[usize::from(contig[at])] == OTHER);
+        for end in breaks.chain([contig.len()]) {
+            if end - start >= k {
+                self.run_kmers(&contig[start..end], start, &mut run);
+                minimizers(&run.hashes, w, |at| {
+                    if run.passes(at) {
+                        emit(run.kmer(at));
+                    }
                 });
-            }
-        };
-        scan(contig, self.scheme.k, |step| match step {
-            Step::Break => {
-                emit_all(all.finish());
-                keep_low(low.finish());
-            }
-            Step::Kmer(code) => {
-                let candidate = Candidate {
-                    kmer: Kmer {
-                        hash: jamhash::jamhash_u64(code.canonical()),
-                        position: code.position as u64,
-                        reverse: code.reverse < code.forward,
-                    },
-                    passes: self.passes_entropy(code.canonical()),
-                };
-                emit_all(all.push(candidate));
-                if candidate.passes {
-                    keep_low(low.finish());
-                } else {
-                    keep_low(low.push(candidate));
+                let mut at = 0;
+                while at < run.hashes.len() {
+                    let first = at;
+                    while at < run.hashes.len() && !run.passes(at) {
+                        at += 1;
+                    }
+                    minimizers(&run.hashes[first..at], w, |low| {
+                        let kmer = run.kmer(first + low);
+                        let hash = kmer.hash ^ LOW_COMPLEXITY_SALT;
+                        low_seeds.push(Kmer { hash, ..kmer });
+                    });
+                    at += 1;
                 }
             }
-        });
-        emit_all(all.finish());
-        keep_low(low.finish());
+            start = end + 1;
+        }
         low_seeds.into_iter().for_each(emit);
+    }
+
+    /// Fills `kmers` with the hash, strand and entropy test of every k-mer of a clean run that
+    /// starts at `offset` of its contig; the base counts of each k-mer follow it along the run.
+    fn run_kmers(&self, run: &[u8], offset: usize, kmers: &mut RunKmers) {
+        let k = usize::from(self.scheme.k);
+        let mask = kmer_mask(k as u32);
+        let side = k + 1;
+        let (mut forward, mut reverse, mut counts) = (0u64, 0u64, [0usize; 4]);
+        kmers.hashes.clear();
+        kmers.flags.clear();
+        kmers.offset = offset;
+        kmers.k = k;
+        for (index, &byte) in run.iter().enumerate() {
+            let code = CODE[usize::from(byte)];
+            counts[usize::from(code)] += 1;
+            if index >= k {
+                counts[usize::from(CODE[usize::from(run[index - k])])] -= 1;
+            }
+            let code = u64::from(code);
+            forward = ((forward << 2) | code) & mask;
+            reverse = (reverse >> 2) | ((3 - code) << (2 * (k - 1)));
+            if index + 1 < k {
+                continue;
+            }
+            // The canonical k-mer is the reverse complement when it is the smaller: its A, C and
+            // G are the T, G and C of the k-mer read on the run.
+            let backward = reverse < forward;
+            let [a, c, g, t] = counts;
+            let counted = if backward { (t, g, c) } else { (a, c, g) };
+            let passes = self.passes[(counted.0 * side + counted.1) * side + counted.2];
+            kmers
+                .hashes
+                .push(jamhash::jamhash_u64(forward.min(reverse)));
+            kmers
+                .flags
+                .push(u8::from(backward) | (u8::from(passes) << 1));
+        }
     }
 
     /// Calls `emit` for every k-mer of a query, in order. A k-mer below the entropy limit gets the
@@ -478,71 +503,62 @@ fn scan(sequence: &[u8], k: u8, mut visit: impl FnMut(Step)) {
     }
 }
 
-/// A k-mer of a clean run and whether it reaches the entropy limit.
-#[derive(Clone, Copy)]
-struct Candidate {
-    kmer: Kmer,
-    passes: bool,
+/// The k-mers of one clean run, in order: their hashes, and per k-mer whether the canonical
+/// k-mer is the reverse complement (bit 0) and whether it reaches the entropy limit (bit 1).
+#[derive(Default)]
+struct RunKmers {
+    hashes: Vec<u64>,
+    flags: Vec<u8>,
+    /// Start of the run in its contig.
+    offset: usize,
+    k: usize,
 }
 
-/// The sliding minimum over the k-mers of one clean run.
-struct SlidingMinimum {
-    w: usize,
-    queue: VecDeque<Candidate>,
-    kmers: usize,
-    last: Option<u64>,
+impl RunKmers {
+    fn passes(&self, at: usize) -> bool {
+        self.flags[at] & 2 != 0
+    }
+
+    /// The k-mer at index `at` of the run.
+    fn kmer(&self, at: usize) -> Kmer {
+        Kmer {
+            hash: self.hashes[at],
+            position: (self.offset + at) as u64,
+            reverse: self.flags[at] & 1 != 0,
+        }
+    }
 }
 
-impl SlidingMinimum {
-    fn new(w: usize) -> Self {
-        Self {
-            w,
-            queue: VecDeque::with_capacity(w + 1),
-            kmers: 0,
-            last: None,
+/// Calls `select` with the index of the smallest hash (leftmost on ties) of every window of `w`
+/// hashes, once per index and in order; with fewer hashes than `w`, of all of them. The minimum
+/// is searched for again only when it leaves the window.
+fn minimizers(hashes: &[u64], w: usize, mut select: impl FnMut(usize)) {
+    if hashes.is_empty() {
+        return;
+    }
+    let mut best = leftmost_minimum(&hashes[..hashes.len().min(w)]);
+    select(best);
+    for end in w..hashes.len() {
+        if best + w <= end {
+            let start = end + 1 - w;
+            best = start + leftmost_minimum(&hashes[start..=end]);
+            select(best);
+        } else if hashes[end] < hashes[best] {
+            best = end;
+            select(best);
         }
     }
+}
 
-    /// Adds the next k-mer of the run, and returns the minimum of a full minimizer window when it is new.
-    fn push(&mut self, candidate: Candidate) -> Option<Candidate> {
-        while self
-            .queue
-            .back()
-            .is_some_and(|back| back.kmer.hash > candidate.kmer.hash)
-        {
-            self.queue.pop_back();
+/// The index of the smallest of some hashes, leftmost on ties.
+fn leftmost_minimum(hashes: &[u64]) -> usize {
+    let (mut best, mut lowest) = (0, u64::MAX);
+    for (index, &hash) in hashes.iter().enumerate() {
+        if index == 0 || hash < lowest {
+            (best, lowest) = (index, hash);
         }
-        self.queue.push_back(candidate);
-        self.kmers += 1;
-        if self.kmers < self.w {
-            return None;
-        }
-        let first_start = candidate.kmer.position + 1 - self.w as u64;
-        while self
-            .queue
-            .front()
-            .is_some_and(|front| front.kmer.position < first_start)
-        {
-            self.queue.pop_front();
-        }
-        let best = *self.queue.front()?;
-        if self.last == Some(best.kmer.position) {
-            return None;
-        }
-        self.last = Some(best.kmer.position);
-        Some(best)
     }
-
-    /// Ends the run: a run shorter than a minimizer window returns its minimum.
-    fn finish(&mut self) -> Option<Candidate> {
-        let short = (self.kmers < self.w)
-            .then(|| self.queue.front().copied())
-            .flatten();
-        self.queue.clear();
-        self.kmers = 0;
-        self.last = None;
-        short
-    }
+    best
 }
 
 #[cfg(test)]

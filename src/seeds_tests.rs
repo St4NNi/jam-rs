@@ -487,3 +487,183 @@ fn indel_neighbours_cover() {
         }
     }
 }
+
+/// A k-mer of a clean run and whether it reaches the entropy limit, for `queue_seeds`.
+#[derive(Clone, Copy)]
+struct Candidate {
+    kmer: Kmer,
+    passes: bool,
+}
+
+/// The sliding minimum as a queue of rising hashes, for `queue_seeds`.
+struct QueueMinimum {
+    w: usize,
+    queue: std::collections::VecDeque<Candidate>,
+    kmers: usize,
+    last: Option<u64>,
+}
+
+impl QueueMinimum {
+    fn new(w: usize) -> Self {
+        let queue = std::collections::VecDeque::new();
+        let (kmers, last) = (0, None);
+        Self {
+            w,
+            queue,
+            kmers,
+            last,
+        }
+    }
+
+    fn push(&mut self, candidate: Candidate) -> Option<Candidate> {
+        while (self.queue.back()).is_some_and(|back| back.kmer.hash > candidate.kmer.hash) {
+            self.queue.pop_back();
+        }
+        self.queue.push_back(candidate);
+        self.kmers += 1;
+        if self.kmers < self.w {
+            return None;
+        }
+        let first_start = candidate.kmer.position + 1 - self.w as u64;
+        while (self.queue.front()).is_some_and(|front| front.kmer.position < first_start) {
+            self.queue.pop_front();
+        }
+        let best = *self.queue.front()?;
+        if self.last == Some(best.kmer.position) {
+            return None;
+        }
+        self.last = Some(best.kmer.position);
+        Some(best)
+    }
+
+    fn finish(&mut self) -> Option<Candidate> {
+        let short = (self.kmers < self.w)
+            .then(|| self.queue.front().copied())
+            .flatten();
+        self.queue.clear();
+        (self.kmers, self.last) = (0, None);
+        short
+    }
+}
+
+/// The seeds of a contig as the first seed selection chose them, k-mer by k-mer with two
+/// queues: the reference that `Seeder::seeds` must match exactly, in order.
+fn queue_seeds(seeder: &Seeder, contig: &[u8]) -> Vec<Kmer> {
+    let mut seeds = Vec::new();
+    let w = usize::from(seeder.scheme.w);
+    let (mut all, mut low) = (QueueMinimum::new(w), QueueMinimum::new(w));
+    let mut low_seeds = Vec::new();
+    let mut emit_all = |selected: Option<Candidate>| {
+        if let Some(selected) = selected.filter(|selected| selected.passes) {
+            seeds.push(selected.kmer);
+        }
+    };
+    let mut keep_low = |selected: Option<Candidate>| {
+        if let Some(selected) = selected {
+            let hash = selected.kmer.hash ^ LOW_COMPLEXITY_SALT;
+            low_seeds.push(Kmer {
+                hash,
+                ..selected.kmer
+            });
+        }
+    };
+    scan(contig, seeder.scheme.k, |step| match step {
+        Step::Break => {
+            emit_all(all.finish());
+            keep_low(low.finish());
+        }
+        Step::Kmer(code) => {
+            let candidate = Candidate {
+                kmer: Kmer {
+                    hash: jamhash::jamhash_u64(code.canonical()),
+                    position: code.position as u64,
+                    reverse: code.reverse < code.forward,
+                },
+                passes: seeder.passes_entropy(code.canonical()),
+            };
+            emit_all(all.push(candidate));
+            if candidate.passes {
+                keep_low(low.finish());
+            } else {
+                keep_low(low.push(candidate));
+            }
+        }
+    });
+    emit_all(all.finish());
+    keep_low(low.finish());
+    seeds.extend(low_seeds);
+    seeds
+}
+
+/// Random contigs with breaks, lower case, IUPAC codes, homopolymers, short tandem repeats and
+/// two-base stretches, for comparing seed selections.
+fn mixed_contig(draws: &mut rand::rngs::StdRng, length: usize) -> Vec<u8> {
+    let mut contig = Vec::with_capacity(length + 600);
+    while contig.len() < length {
+        match rand::RngExt::random_range(draws, 0..12) {
+            0 => contig.extend(std::iter::repeat_n(
+                b"ACGT"[contig.len() % 4],
+                1 + contig.len() % 300,
+            )),
+            1 => {
+                let unit_length = rand::RngExt::random_range(draws, 1..7);
+                let unit = random_bases(draws, unit_length);
+                let times = rand::RngExt::random_range(draws, 1..80);
+                contig.extend(unit.repeat(times));
+            }
+            2 => {
+                let length = rand::RngExt::random_range(draws, 1..400);
+                for _ in 0..length {
+                    contig.push(b"AT"[rand::RngExt::random_range(draws, 0..2)]);
+                }
+            }
+            3 => contig.push(b"NRYnx-"[rand::RngExt::random_range(draws, 0..6)]),
+            4 => contig.extend(random_bases(draws, 40).to_ascii_lowercase()),
+            _ => {
+                let length = rand::RngExt::random_range(draws, 1..600);
+                contig.extend(random_bases(draws, length));
+            }
+        }
+    }
+    contig
+}
+
+/// `Seeder::seeds` gives exactly the seeds of the queue selection, in the same order, for many
+/// schemes and contigs, including contigs shorter than one k-mer or one window.
+#[test]
+fn seeds_match_queue_selection() {
+    let mut draws = rng(0xc0ffee);
+    let schemes = [
+        (1, 1, 0.0),
+        (3, 2, 0.5),
+        (15, 10, 1.2),
+        (21, 100, 1.0),
+        (25, 100, 1.0),
+        (25, 100, 1.9),
+        (25, 1, 1.0),
+        (31, 1000, 1.5),
+        (32, 7, 2.0),
+        (16, 50, 1.0),
+    ];
+    let (mut seeds, mut salted) = (0, 0);
+    for (k, w, min_entropy) in schemes {
+        let seeder = Seeder::new(scheme(k, w, min_entropy)).unwrap();
+        for length in [0, 1, 5, 24, 25, 26, 130, 3000, 40_000] {
+            let contig = mixed_contig(&mut draws, length);
+            let mut found = Vec::new();
+            seeder.seeds(&contig, |seed| found.push(seed));
+            let expected = queue_seeds(&seeder, &contig);
+            assert_eq!(found, expected, "k {k} w {w} length {length}");
+            seeds += found.len();
+            let low = |seed: &&Kmer| {
+                let at = seed.position as usize;
+                !seeder.passes_entropy(encode(&contig[at..at + usize::from(k)]).0)
+            };
+            salted += found.iter().filter(low).count();
+        }
+    }
+    assert!(
+        seeds > 20_000 && salted > 1_000,
+        "{seeds} seeds, {salted} salted"
+    );
+}
