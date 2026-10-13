@@ -9,7 +9,7 @@ use super::seed_writer::{SeedFileShape, SeedWriter, WrittenSeeds};
 use super::{AtPath, IndexError};
 use crate::storage::lock;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,7 +23,7 @@ const COUNT_STRIPES: usize = 64;
 const WRITE_ROUND: usize = 64;
 
 /// Keys per distinct color set (encoded), in lock stripes.
-type SetCounts = Vec<HashMap<Box<[u8]>, u64>>;
+type SetCounts = Vec<FxHashMap<Box<[u8]>, u64>>;
 
 /// One seed location of one entry: the seed key in bits 64 and up, then the entry, then the
 /// seed location value. Sorting records sorts by key, entry and seed location.
@@ -104,7 +104,7 @@ impl SeedSpill {
             bucket_bits: shape.bucket_bits,
         };
         let ranked = rank(count_color_sets(&units)?);
-        let ids: HashMap<&[u8], u32> = (ranked.iter().enumerate())
+        let ids: FxHashMap<&[u8], u32> = (ranked.iter().enumerate())
             .map(|(id, set)| (&set[..], id as u32))
             .collect();
         let mut writer = SeedWriter::create(path, self.directory.path(), shape)?;
@@ -178,14 +178,14 @@ fn for_each_key(
 
 /// Counts the keys of every distinct color set.
 fn count_color_sets(units: &Units) -> Result<SetCounts, IndexError> {
-    let stripes: Vec<Mutex<HashMap<Box<[u8]>, u64>>> =
+    let stripes: Vec<Mutex<FxHashMap<Box<[u8]>, u64>>> =
         (0..COUNT_STRIPES).map(|_| Mutex::default()).collect();
     (0..units.count())
         .into_par_iter()
         .with_max_len(1)
         .try_for_each(|unit| {
             let records = units.read(unit)?;
-            let mut local: HashMap<Box<[u8]>, u64> = HashMap::new();
+            let mut local: FxHashMap<Box<[u8]>, u64> = FxHashMap::default();
             let mut encoded = Vec::new();
             for_each_key(&records, |_, entries, _| {
                 encoded.clear();
@@ -231,7 +231,7 @@ struct EncodedBucket {
 fn encode_unit(
     units: &Units,
     unit: usize,
-    ids: &HashMap<&[u8], u32>,
+    ids: &FxHashMap<&[u8], u32>,
     locators: bool,
 ) -> Result<Vec<EncodedBucket>, IndexError> {
     let records = units.read(unit)?;
