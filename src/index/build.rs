@@ -20,9 +20,9 @@ use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
 use crate::storage::lock;
 use rayon::prelude::*;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 /// Sequence bytes collected before a parallel round, in singleton mode.
@@ -33,6 +33,10 @@ const SEED_BATCH: u64 = 16 << 20;
 /// Most bases of one entry waiting in batches; beyond that its thread seeds them itself, so a
 /// fast reader cannot fill the memory.
 const WAITING_BASES: u64 = 128 << 20;
+/// Files read ahead of the next file to index, at most.
+const READ_AHEAD: usize = 64;
+/// Files larger than this are not read ahead: their own thread reads them as a stream.
+const READ_AHEAD_BYTES: u64 = 64 << 20;
 
 /// One input file and the name of its entry.
 #[derive(Clone, Debug)]
@@ -343,41 +347,121 @@ struct Context {
 /// An entry's record and its encoded contig table.
 type BuiltEntry = (EntryRecord, Vec<u8>);
 
-/// One entry per file: files run in parallel, the largest first.
+/// One entry per file: files run in parallel, the largest first. Threads read files ahead of
+/// the ones that index them, so these find small files in the page cache.
 fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
-    let mut order: Vec<(u64, usize)> = inputs
-        .iter()
-        .enumerate()
-        .map(|(index, input)| Ok((std::fs::metadata(&input.path).at(&input.path)?.len(), index)))
-        .collect::<Result<_, IndexError>>()?;
+    let sizes: Vec<Result<u64, IndexError>> = (inputs.par_iter())
+        .map(|input| Ok(std::fs::metadata(&input.path).at(&input.path)?.len()))
+        .collect();
+    let mut order = Vec::with_capacity(inputs.len());
+    for (index, size) in sizes.into_iter().enumerate() {
+        order.push((size?, index));
+    }
     order.sort_unstable_by(|a, b| b.cmp(a));
-    let mut built = order
-        .par_iter()
-        .with_max_len(1)
-        .map(|&(_, index)| {
-            let input = &inputs[index];
-            let mut entry = EntryBuilder::new(context, index);
-            let handed = HandedBatches::default();
-            rayon::in_place_scope(|scope| {
-                for_each_record(&input.path, |name, sequence| {
-                    if let Some(batch) = entry.add_contig(name, sequence)? {
-                        entry.hand_off(batch, scope, &handed);
-                    }
-                    Ok(())
-                })?;
-                let last = std::mem::take(&mut entry.batch);
-                entry.seed_batch(&last);
-                Ok::<_, IndexError>(())
-            })?;
-            let handed = handed.records.into_inner();
-            for records in handed.unwrap_or_else(PoisonError::into_inner) {
-                entry.records.extend_from_slice(&records);
+    let threads = rayon::current_num_threads();
+    let next = AtomicUsize::new(0);
+    let failed = AtomicBool::new(false);
+    let built = Mutex::new(Vec::with_capacity(inputs.len()));
+    let error = Mutex::new(None);
+    let work = || {
+        while !failed.load(Ordering::Relaxed) {
+            let Some(&(_, index)) = order.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                return;
+            };
+            match index_file(&inputs[index], index, context) {
+                Ok(entry) => lock(&built).push((index, entry)),
+                Err(failure) => {
+                    failed.store(true, Ordering::Relaxed);
+                    lock(&error).get_or_insert(failure);
+                }
             }
-            Ok((index, entry.finish(input.name.clone())?))
-        })
-        .collect::<Result<Vec<_>, IndexError>>()?;
+        }
+    };
+    std::thread::scope(|reading| {
+        for reader in 0..threads {
+            let (order, next, failed) = (&order, &next, &failed);
+            reading.spawn(move || read_ahead(inputs, order, reader, threads, next, failed));
+        }
+        let _taken = AllTaken(&next, order.len());
+        rayon::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|_| work());
+            }
+        });
+    });
+    if let Some(failure) = error.into_inner().unwrap_or_else(PoisonError::into_inner) {
+        return Err(failure);
+    }
+    let mut built = built.into_inner().unwrap_or_else(PoisonError::into_inner);
     built.sort_unstable_by_key(|(index, _)| *index);
     Ok(built.into_iter().map(|(_, entry)| entry).collect())
+}
+
+/// Marks every file as taken when dropped, also when a thread panics, so the readers stop.
+struct AllTaken<'a>(&'a AtomicUsize, usize);
+
+impl Drop for AllTaken<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(self.1, Ordering::Relaxed);
+    }
+}
+
+/// The entry of one file.
+fn index_file(
+    input: &EntryInput,
+    index: usize,
+    context: &Context,
+) -> Result<BuiltEntry, IndexError> {
+    let mut entry = EntryBuilder::new(context, index);
+    let handed = HandedBatches::default();
+    rayon::in_place_scope(|scope| {
+        for_each_record(&input.path, |name, sequence| {
+            if let Some(batch) = entry.add_contig(name, sequence)? {
+                entry.hand_off(batch, scope, &handed);
+            }
+            Ok(())
+        })?;
+        let last = std::mem::take(&mut entry.batch);
+        entry.seed_batch(&last);
+        Ok::<_, IndexError>(())
+    })?;
+    let handed = handed.records.into_inner();
+    for records in handed.unwrap_or_else(PoisonError::into_inner) {
+        entry.records.extend_from_slice(&records);
+    }
+    entry.finish(input.name.clone())
+}
+
+/// Reads the files of `order` that reader `reader` of `readers` takes, while they are among the
+/// next `READ_AHEAD` files to index and at most `READ_AHEAD_BYTES` large, and drops the bytes:
+/// the page cache keeps them for the thread that indexes the file. Errors are left to that
+/// thread.
+fn read_ahead(
+    inputs: &[EntryInput],
+    order: &[(u64, usize)],
+    reader: usize,
+    readers: usize,
+    next: &AtomicUsize,
+    failed: &AtomicBool,
+) {
+    let mut buffer = vec![0u8; 1 << 20];
+    for (at, &(size, index)) in order.iter().enumerate().skip(reader).step_by(readers) {
+        if size > READ_AHEAD_BYTES {
+            continue;
+        }
+        while at >= next.load(Ordering::Relaxed) + READ_AHEAD {
+            if failed.load(Ordering::Relaxed) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if at < next.load(Ordering::Relaxed) {
+            continue;
+        }
+        if let Ok(mut file) = std::fs::File::open(&inputs[index].path) {
+            while matches!(file.read(&mut buffer), Ok(read) if read > 0) {}
+        }
+    }
 }
 
 /// One entry per record: records are read in order and indexed in parallel rounds.
