@@ -63,15 +63,15 @@ impl QueryKmers {
         }
     }
 
-    /// As `planned`, making the lookups in parallel chunks of query positions, each passed to
-    /// `keep`, which may drop lookups (those the index does not hold), so only the kept ones are
-    /// held. Each thread reuses one buffer for its chunks.
-    pub fn filtered<E: Send>(
+    /// As `planned`, making the lookups in batches of query positions, each passed to `keep`,
+    /// which may drop lookups (those the index does not hold), so only the kept ones are held.
+    /// A batch is made in parallel chunks of positions.
+    pub fn filtered<E>(
         seeder: &Seeder,
         query: &[u8],
         circular: bool,
         plan: &LookupPlan,
-        keep: impl Fn(&mut Vec<(u64, u32)>) -> Result<(), E> + Sync,
+        mut keep: impl FnMut(&mut Vec<(u64, u32)>) -> Result<(), E>,
     ) -> Result<Self, E> {
         let k = usize::from(seeder.scheme().k);
         let mut scanned = query.to_vec();
@@ -83,21 +83,27 @@ impl QueryKmers {
             exact += u64::from(kmer.position < query.len() as u64);
         });
         let per_position = LOOKUPS_PER_POSITION[plan.level()];
+        let batch = (BATCH_LOOKUPS / per_position).max(1) as usize;
         let chunk = (CHUNK_LOOKUPS / per_position).clamp(1, CHUNK_POSITIONS) as usize;
-        let firsts: Vec<usize> = (0..query.len()).step_by(chunk).collect();
-        let chunks = (firsts.into_par_iter())
-            .map_init(Vec::new, |made, first| {
-                made.clear();
-                for position in first..(first + chunk).min(query.len()) {
-                    lookups_at(seeder, &scanned, plan, position, made);
-                }
-                let count = made.len() as u64;
-                keep(made)?;
-                Ok((count, made.clone()))
-            })
-            .collect::<Result<Vec<_>, E>>()?;
-        let lookups = chunks.iter().map(|(count, _)| count).sum();
-        let mut kmers: Vec<(u64, u32)> = chunks.into_iter().flat_map(|(_, kept)| kept).collect();
+        let (mut kmers, mut lookups) = (Vec::new(), 0);
+        for first in (0..query.len()).step_by(batch) {
+            let end = (first + batch).min(query.len());
+            let firsts: Vec<usize> = (first..end).step_by(chunk).collect();
+            let pieces: Vec<Vec<(u64, u32)>> = (firsts.into_par_iter())
+                .map(|start| {
+                    let mut made = Vec::with_capacity(chunk * per_position as usize);
+                    for position in start..(start + chunk).min(end) {
+                        lookups_at(seeder, &scanned, plan, position, &mut made);
+                    }
+                    made
+                })
+                .collect();
+            let mut made = pieces.concat();
+            drop(pieces);
+            lookups += made.len() as u64;
+            keep(&mut made)?;
+            kmers.append(&mut made);
+        }
         kmers.par_sort_unstable();
         let mut distinct: Vec<DistinctKmer> = Vec::new();
         for (index, &(hash, _)) in kmers.iter().enumerate() {
@@ -170,7 +176,12 @@ impl QueryKmers {
     }
 }
 
-/// The most lookups that one chunk of `QueryKmers::filtered` makes, 4 MiB.
+/// The most lookups that one batch of `QueryKmers::filtered` makes, 256 MiB. A batch reads the
+/// sketch buckets of its keys once, and a query with many lookups touches most buckets, so a
+/// batch should be large.
+const BATCH_LOOKUPS: u64 = 1 << 24;
+
+/// The most lookups that one chunk of a batch makes, 4 MiB.
 const CHUNK_LOOKUPS: u64 = 1 << 18;
 
 /// The most query positions in one chunk, so exact lookups still spread over the threads.
