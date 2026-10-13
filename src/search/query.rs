@@ -63,14 +63,15 @@ impl QueryKmers {
         }
     }
 
-    /// As `planned`, making the lookups in batches of query positions, each passed to `keep`,
-    /// which may drop lookups (those the index does not hold), so only the kept ones are held.
-    pub fn filtered<E>(
+    /// As `planned`, making the lookups in parallel chunks of query positions, each passed to
+    /// `keep`, which may drop lookups (those the index does not hold), so only the kept ones are
+    /// held. Each thread reuses one buffer for its chunks.
+    pub fn filtered<E: Send>(
         seeder: &Seeder,
         query: &[u8],
         circular: bool,
         plan: &LookupPlan,
-        mut keep: impl FnMut(&mut Vec<(u64, u32)>) -> Result<(), E>,
+        keep: impl Fn(&mut Vec<(u64, u32)>) -> Result<(), E> + Sync,
     ) -> Result<Self, E> {
         let k = usize::from(seeder.scheme().k);
         let mut scanned = query.to_vec();
@@ -82,17 +83,21 @@ impl QueryKmers {
             exact += u64::from(kmer.position < query.len() as u64);
         });
         let per_position = LOOKUPS_PER_POSITION[plan.level()];
-        let batch = (BATCH_LOOKUPS / per_position).max(1) as usize;
-        let (mut kmers, mut lookups) = (Vec::new(), 0);
-        for first in (0..query.len()).step_by(batch) {
-            let positions = first..(first + batch).min(query.len());
-            let mut made: Vec<(u64, u32)> = (positions.into_par_iter())
-                .flat_map_iter(|position| lookups_at(seeder, &scanned, plan, position))
-                .collect();
-            lookups += made.len() as u64;
-            keep(&mut made)?;
-            kmers.append(&mut made);
-        }
+        let chunk = (CHUNK_LOOKUPS / per_position).clamp(1, CHUNK_POSITIONS) as usize;
+        let firsts: Vec<usize> = (0..query.len()).step_by(chunk).collect();
+        let chunks = (firsts.into_par_iter())
+            .map_init(Vec::new, |made, first| {
+                made.clear();
+                for position in first..(first + chunk).min(query.len()) {
+                    lookups_at(seeder, &scanned, plan, position, made);
+                }
+                let count = made.len() as u64;
+                keep(made)?;
+                Ok((count, made.clone()))
+            })
+            .collect::<Result<Vec<_>, E>>()?;
+        let lookups = chunks.iter().map(|(count, _)| count).sum();
+        let mut kmers: Vec<(u64, u32)> = chunks.into_iter().flat_map(|(_, kept)| kept).collect();
         kmers.par_sort_unstable();
         let mut distinct: Vec<DistinctKmer> = Vec::new();
         for (index, &(hash, _)) in kmers.iter().enumerate() {
@@ -165,14 +170,17 @@ impl QueryKmers {
     }
 }
 
-/// The most lookups that one batch of `QueryKmers::filtered` makes, about 64 MiB.
-const BATCH_LOOKUPS: u64 = 1 << 22;
+/// The most lookups that one chunk of `QueryKmers::filtered` makes, 4 MiB.
+const CHUNK_LOOKUPS: u64 = 1 << 18;
+
+/// The most query positions in one chunk, so exact lookups still spread over the threads.
+const CHUNK_POSITIONS: u64 = 4_096;
 
 /// The lookups per query position, by the highest level of a plan, at k 25: 1, 1 + 75,
 /// 1 + 75 + 2,700, and that plus 116 indel variants with their 75 substitutions each.
 const LOOKUPS_PER_POSITION: [u64; 4] = [1, 76, 2_776, 2_776 + 116 * 76];
 
-/// The lookups that `plan` makes at query position `position`, each on the bases from there alone
+/// Adds to `made` the lookups that `plan` makes at query position `position`, each on the bases from there alone
 /// (k, or k + 1 for the indel lookups, fewer at the end), so a position gets exactly the lookups
 /// that enumerating the whole query gives it. An indel lookup also starts at the last k - 1 bases.
 fn lookups_at(
@@ -180,11 +188,11 @@ fn lookups_at(
     scanned: &[u8],
     plan: &LookupPlan,
     position: usize,
-) -> Vec<(u64, u32)> {
+    made: &mut Vec<(u64, u32)>,
+) {
     let k = usize::from(seeder.scheme().k);
     let bases = &scanned[position..(position + k + 1).min(scanned.len())];
     let level = plan.full + usize::from(plan.is_sampled(position as u64));
-    let mut made = Vec::new();
     let mut push = |kmer: Kmer| {
         if kmer.position == 0 {
             made.push((kmer.hash, position as u32));
@@ -202,7 +210,6 @@ fn lookups_at(
     if level >= 2 && plan.indels {
         seeder.query_neighbours_indel_at(bases, true, &mut push);
     }
-    made
 }
 
 #[cfg(test)]
