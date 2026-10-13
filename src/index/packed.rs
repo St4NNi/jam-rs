@@ -61,22 +61,40 @@ impl PackedWriter {
         self.names.extend_from_slice(name);
         self.names.push(b'\n');
         self.packed.reserve((sequence.len() / 4).saturating_sub(1));
-        for &byte in sequence {
-            let slot = self.bases & 3;
-            if slot == 0 {
-                self.packed.push(0);
+        let fill = (4 - (self.bases & 3) as usize) & 3;
+        let (head, rest) = sequence.split_at(fill.min(sequence.len()));
+        head.iter().for_each(|&byte| self.push_base(byte));
+        // From a byte boundary on, four bases of A, C, G or T fill one byte at once.
+        let (quads, remainder) = rest.as_chunks::<4>();
+        for quad in quads {
+            match quad.map(base_code) {
+                [Some(one), Some(two), Some(three), Some(four)] => {
+                    self.packed
+                        .push(one | (two << 2) | (three << 4) | (four << 6));
+                    self.bases += 4;
+                }
+                _ => quad.iter().for_each(|&byte| self.push_base(byte)),
             }
-            match base_code(byte) {
-                None => self.push_run(byte.to_ascii_uppercase()),
-                Some(code) => {
-                    if let Some(last) = self.packed.last_mut() {
-                        *last |= code << (2 * slot);
-                    }
+        }
+        remainder.iter().for_each(|&byte| self.push_base(byte));
+        Ok(())
+    }
+
+    /// Adds one base: its code in the last byte, or a run for a byte other than A, C, G or T.
+    fn push_base(&mut self, byte: u8) {
+        let slot = self.bases & 3;
+        if slot == 0 {
+            self.packed.push(0);
+        }
+        match base_code(byte) {
+            None => self.push_run(byte.to_ascii_uppercase()),
+            Some(code) => {
+                if let Some(last) = self.packed.last_mut() {
+                    *last |= code << (2 * slot);
                 }
             }
-            self.bases += 1;
         }
-        Ok(())
+        self.bases += 1;
     }
 
     /// Bases added so far.

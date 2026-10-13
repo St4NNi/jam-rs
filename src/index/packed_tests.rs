@@ -168,3 +168,25 @@ fn damage_is_detected() {
     let other = ContigTable::new([1, 2], Vec::new());
     assert!(open(&path, &other).read_bases(0..1, &mut out).is_err());
 }
+
+/// Packing four bases at once gives the bytes and runs that packing base by base gives, for
+/// contigs that start at every offset within a byte and hold other bytes anywhere.
+#[test]
+fn quads_match_bases() {
+    let mut rng = rng(0x9a11);
+    let (mut quads, mut bases) = (PackedWriter::new(), PackedWriter::new());
+    for index in 0..400 {
+        let length = rng.random_range(0..90);
+        let sequence: Vec<u8> = (0..length)
+            .map(|_| b"ACGTacgtACGTNnRy-"[rng.random_range(0..17)])
+            .collect();
+        let name = format!("contig_{index}").into_bytes();
+        quads.add_contig(&name, &sequence).unwrap();
+        bases.starts.push(bases.bases);
+        sequence.iter().for_each(|&byte| bases.push_base(byte));
+    }
+    assert_eq!(quads.bases, bases.bases);
+    assert_eq!(quads.packed, bases.packed);
+    assert_eq!(quads.runs, bases.runs);
+    assert!(quads.runs.len() > 100);
+}
