@@ -428,14 +428,19 @@ impl SeedFile {
         }
         let mut hints: Vec<(u64, u64)> = groups.iter().map(|(r, _)| (r.start, r.end)).collect();
         will_need_ranges(self.source.as_ref(), &mut hints);
+        // The buffer only grows, so its bytes are zeroed once, not before every read.
         let mut buffer = Vec::new();
         for (joined, members) in groups {
-            buffer.resize((joined.end - joined.start) as usize, 0);
-            self.source.read_exact_at(joined.start, &mut buffer)?;
+            let length = (joined.end - joined.start) as usize;
+            if buffer.len() < length {
+                buffer.resize(length, 0);
+            }
+            let read = &mut buffer[..length];
+            self.source.read_exact_at(joined.start, read)?;
             for index in members {
                 let range = &ranges[index];
                 let at = (range.start - joined.start) as usize;
-                visit(index, &buffer[at..at + (range.end - range.start) as usize])?;
+                visit(index, &read[at..at + (range.end - range.start) as usize])?;
             }
         }
         Ok(())
