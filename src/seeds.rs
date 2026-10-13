@@ -210,9 +210,25 @@ impl Seeder {
     /// Calls `emit` for every k-mer one indel away from the query at a start of the query: a
     /// base inserted into, or removed from, the inside of k bases. With `substituted`, also every
     /// k-mer one substitution away from those.
-    pub fn query_neighbours_indel(
+    pub fn query_neighbours_indel(&self, query: &[u8], substituted: bool, emit: impl FnMut(Kmer)) {
+        self.indel_neighbours(query, 0..query.len(), substituted, emit);
+    }
+
+    /// As `query_neighbours_indel`, for the first start of `query` only.
+    pub fn query_neighbours_indel_at(
         &self,
         query: &[u8],
+        substituted: bool,
+        emit: impl FnMut(Kmer),
+    ) {
+        self.indel_neighbours(query, 0..1, substituted, emit);
+    }
+
+    /// The k-mers one indel away (and with `substituted` one substitution more) at `starts`.
+    fn indel_neighbours(
+        &self,
+        query: &[u8],
+        starts: Range<usize>,
         substituted: bool,
         mut emit: impl FnMut(Kmer),
     ) {
@@ -242,7 +258,7 @@ impl Seeder {
                 }
             }
         };
-        for start in 0..codes.len() {
+        for start in starts.start..starts.end.min(codes.len()) {
             if clean(start..start + k - 1) {
                 let kept = &codes[start..start + k - 1];
                 for at in 1..k - 1 {

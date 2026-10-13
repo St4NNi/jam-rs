@@ -200,7 +200,7 @@ fn lookups_at(
         }
     }
     if level >= 2 && plan.indels {
-        seeder.query_neighbours_indel(bases, true, &mut push);
+        seeder.query_neighbours_indel_at(bases, true, &mut push);
     }
     made
 }
