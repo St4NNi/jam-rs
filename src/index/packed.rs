@@ -8,6 +8,7 @@ use super::bits::{u32_at, u64_at};
 use super::contig_table::{ContigTable, Run};
 use crate::seeds::base_code;
 use crate::storage::{ReadAt, will_need_ranges};
+use rayon::prelude::*;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
@@ -101,9 +102,13 @@ impl PackedWriter {
         let mut names = Vec::new();
         let lines: Vec<&[u8]> = self.names.split_inclusive(|b| *b == b'\n').collect();
         let block_contigs = name_block(lines.len() as u64) as usize;
-        for block in lines.chunks(block_contigs) {
+        // Name blocks are compressed on their own, so a large entry compresses them in parallel.
+        let blocks = (lines.par_chunks(block_contigs))
+            .map(|block| zstd::bulk::compress(&block.concat(), NAME_LEVEL))
+            .collect::<Result<Vec<_>, _>>()?;
+        for block in blocks {
             let start = names.len();
-            names.extend(zstd::bulk::compress(&block.concat(), NAME_LEVEL)?);
+            names.extend(block);
             let crc = crc32fast::hash(&names[start..]);
             names.extend_from_slice(&crc.to_le_bytes());
             index.extend_from_slice(&(names.len() as u64).to_le_bytes());
