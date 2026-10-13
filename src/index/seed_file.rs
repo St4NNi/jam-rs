@@ -41,10 +41,11 @@ pub(crate) const SECTIONS: usize = 6;
 pub(crate) const CRCS_AT: usize = 72 + 16 * SECTIONS;
 /// Where the offset and bytes of the manifest (u64 each) and its CRC-32 lie in the header.
 pub(crate) const MANIFEST_AT: usize = CRCS_AT + 4 * SECTIONS;
-/// Ranges closer than this are read as one.
-const JOIN_GAP: u64 = 8 << 10;
-/// Joined reads stop growing at this size.
-const JOIN_LIMIT: u64 = 1 << 20;
+/// Ranges closer than this are read as one. On CephFS one more read costs about as much system
+/// time as copying 64 KiB more (measured on worm), and on S3 each read is one request.
+const JOIN_GAP: u64 = 64 << 10;
+/// Joined reads stop growing at this size, so a thread holds at most this much at once.
+const JOIN_LIMIT: u64 = 4 << 20;
 /// Bytes of the CRC-32 that ends every non-empty bucket, color set and contig table, so each
 /// read checks what it uses. It covers the unit's index, then its bytes.
 pub(crate) const UNIT_CHECK_BYTES: usize = 4;
