@@ -18,12 +18,21 @@ use super::sequence_file::{
 use super::spill::{SeedSpill, SeedTotals, seed_record};
 use super::{AtPath, IndexError};
 use crate::seeds::Seeder;
+use crate::storage::lock;
 use rayon::prelude::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 /// Sequence bytes collected before a parallel round, in singleton mode.
 const RECORD_ROUND_BYTES: usize = 256 << 20;
+/// Bases an entry seeds on its own thread; its later contigs go to other threads in batches of
+/// about this many bases, so a large entry does not keep one thread busy alone.
+const SEED_BATCH: u64 = 16 << 20;
+/// Most bases of one entry waiting in batches; beyond that its thread seeds them itself, so a
+/// fast reader cannot fill the memory.
+const WAITING_BASES: u64 = 128 << 20;
 
 /// One input file and the name of its entry.
 #[derive(Clone, Debug)]
@@ -348,9 +357,22 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntr
         .map(|&(_, index)| {
             let input = &inputs[index];
             let mut entry = EntryBuilder::new(context, index);
-            for_each_record(&input.path, |name, sequence| {
-                entry.add_contig(name, sequence)
+            let handed = HandedBatches::default();
+            rayon::in_place_scope(|scope| {
+                for_each_record(&input.path, |name, sequence| {
+                    if let Some(batch) = entry.add_contig(name, sequence)? {
+                        entry.hand_off(batch, scope, &handed);
+                    }
+                    Ok(())
+                })?;
+                let last = std::mem::take(&mut entry.batch);
+                entry.seed_batch(&last);
+                Ok::<_, IndexError>(())
             })?;
+            let handed = handed.records.into_inner();
+            for records in handed.unwrap_or_else(PoisonError::into_inner) {
+                entry.records.extend_from_slice(&records);
+            }
             Ok((index, entry.finish(input.name.clone())?))
         })
         .collect::<Result<Vec<_>, IndexError>>()?;
@@ -371,7 +393,9 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEn
             .with_max_len(1)
             .map(|(offset, (name, sequence))| {
                 let mut entry = EntryBuilder::new(context, first + offset);
-                entry.add_contig(name, sequence)?;
+                if let Some(batch) = entry.add_contig(name, sequence)? {
+                    entry.seed_batch(&batch);
+                }
                 entry.finish(String::from_utf8_lossy(name).into_owned())
             })
             .collect::<Result<Vec<_>, IndexError>>()?;
@@ -394,12 +418,28 @@ fn index_records(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEn
     Ok(built)
 }
 
+/// Contigs of one entry not seeded yet: their bases one after another, and the start of each
+/// in the entry with its length.
+#[derive(Default)]
+struct Batch {
+    bases: Vec<u8>,
+    contigs: Vec<(u64, usize)>,
+}
+
+/// The seed records of the batches an entry handed to other threads, and their bases that wait.
+#[derive(Default)]
+struct HandedBatches {
+    records: Mutex<Vec<Vec<u128>>>,
+    waiting: AtomicU64,
+}
+
 /// Collects the contigs of one entry: its packed sequence and its seed records.
 struct EntryBuilder<'a> {
     context: &'a Context,
     entry: u32,
     packed: PackedWriter,
     records: Vec<u128>,
+    batch: Batch,
 }
 
 impl<'a> EntryBuilder<'a> {
@@ -409,10 +449,13 @@ impl<'a> EntryBuilder<'a> {
             entry: entry as u32,
             packed: PackedWriter::new(),
             records: Vec::new(),
+            batch: Batch::default(),
         }
     }
 
-    fn add_contig(&mut self, name: &[u8], sequence: &[u8]) -> Result<(), IndexError> {
+    /// Packs a contig and seeds it, or keeps it for a batch once the entry has `SEED_BATCH`
+    /// bases; gives the batch when it is full.
+    fn add_contig(&mut self, name: &[u8], sequence: &[u8]) -> Result<Option<Batch>, IndexError> {
         let start = self.packed.bases();
         self.packed.add_contig(name, sequence)?;
         let bin_bits = self.context.parameters.bin_bits;
@@ -421,22 +464,45 @@ impl<'a> EntryBuilder<'a> {
                 "an entry has too many bases for its bins".into(),
             ));
         }
-        let (records, entry) = (&mut self.records, self.entry);
-        self.context.seeder.seeds(sequence, |seed| {
-            let bin = ((start + seed.position) >> bin_bits) as u32;
-            let location = SeedLocation {
-                bin,
-                reverse: seed.reverse,
-            };
-            records.push(seed_record(seed_key(seed.hash), entry, location.value()));
+        if start < SEED_BATCH {
+            let records = &mut self.records;
+            seed_contig(self.context, self.entry, start, sequence, records);
+            return Ok(None);
+        }
+        self.batch.bases.extend_from_slice(sequence);
+        self.batch.contigs.push((start, sequence.len()));
+        Ok((self.batch.bases.len() as u64 >= SEED_BATCH).then(|| std::mem::take(&mut self.batch)))
+    }
+
+    /// Seeds a batch on another thread of `scope`, or on this one when too many bases wait.
+    fn hand_off<'s>(&mut self, batch: Batch, scope: &rayon::Scope<'s>, handed: &'s HandedBatches)
+    where
+        'a: 's,
+    {
+        let bases = batch.bases.len() as u64;
+        if handed.waiting.fetch_add(bases, Ordering::Relaxed) + bases > WAITING_BASES {
+            handed.waiting.fetch_sub(bases, Ordering::Relaxed);
+            self.seed_batch(&batch);
+            return;
+        }
+        let (context, entry) = (self.context, self.entry);
+        scope.spawn(move |_| {
+            let mut records = Vec::new();
+            seed_batch(context, entry, &batch, &mut records);
+            lock(&handed.records).push(records);
+            handed.waiting.fetch_sub(bases, Ordering::Relaxed);
         });
-        Ok(())
+    }
+
+    /// Seeds a batch on this thread.
+    fn seed_batch(&mut self, batch: &Batch) {
+        seed_batch(self.context, self.entry, batch, &mut self.records);
     }
 
     /// Writes the packed sequence of the entry into a file named by its entry id and spills its
     /// seed records; returns its record and its encoded contig table.
     fn finish(mut self, name: String) -> Result<BuiltEntry, IndexError> {
-        self.records.sort_unstable();
+        self.records.par_sort_unstable();
         self.records.dedup();
         let seed_locations = self.records.len() as u64;
         self.context.spill.push(&mut self.records)?;
@@ -460,6 +526,35 @@ impl<'a> EntryBuilder<'a> {
         };
         Ok((record, table))
     }
+}
+
+/// Adds the seed records of the contigs of a batch.
+fn seed_batch(context: &Context, entry: u32, batch: &Batch, records: &mut Vec<u128>) {
+    let mut at = 0;
+    for &(start, length) in &batch.contigs {
+        let sequence = &batch.bases[at..at + length];
+        seed_contig(context, entry, start, sequence, records);
+        at += length;
+    }
+}
+
+/// Adds the seed records of a contig that starts at `start` in the entry.
+fn seed_contig(
+    context: &Context,
+    entry: u32,
+    start: u64,
+    sequence: &[u8],
+    records: &mut Vec<u128>,
+) {
+    let bin_bits = context.parameters.bin_bits;
+    context.seeder.seeds(sequence, |seed| {
+        let bin = ((start + seed.position) >> bin_bits) as u32;
+        let location = SeedLocation {
+            bin,
+            reverse: seed.reverse,
+        };
+        records.push(seed_record(seed_key(seed.hash), entry, location.value()));
+    });
 }
 
 /// Writes the packed sequence of an entry to `path`; its record has its size and digest, and
