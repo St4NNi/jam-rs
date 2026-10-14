@@ -10,6 +10,16 @@ use crate::loss::{MaxMiss, MissModel};
 /// is enough. A copy then shows a seed hit with a chance of about 99.97%.
 const EXPECTED_HITS: f64 = 8.0;
 
+/// The seed hits the plan by hits asks for from `HIGH_IDENTITY` up, instead of `EXPECTED_HITS`.
+/// Chosen by a pre-registered experiment on separate tuning queries: at 95% to 100% identity 4
+/// hits lost no truth pair on tuning and cost a quarter of the CPU of 8 on genes; the few test
+/// losses were mosaics of pieces under 124 bases at the coverage limit. Below 90% 8 hits keep
+/// partial divergent copies that 4 loses.
+const HIGH_IDENTITY_HITS: f64 = 4.0;
+
+/// The identity from which the plan by hits asks for `HIGH_IDENTITY_HITS`.
+const HIGH_IDENTITY: f64 = 0.9;
+
 /// The most query k-mers for which the k-mers with level-2 lookups also look up the k-mers one
 /// indel away.
 const MAX_INDEL_KMERS: u64 = 1_100;
@@ -171,7 +181,11 @@ pub fn lookup_plan(
     if let Some(r) = proven {
         return plan(r, 0, true);
     }
-    let needed = EXPECTED_HITS / per_start;
+    let target = match rule.min_identity >= HIGH_IDENTITY {
+        true => HIGH_IDENTITY_HITS,
+        false => EXPECTED_HITS,
+    };
+    let needed = target / per_start;
     match (0..3).find(|&r| chance(r) >= needed) {
         Some(0) => plan(0, 0, false),
         Some(r) => {
@@ -261,13 +275,13 @@ mod tests {
     fn plan_follows_length() {
         for (identity, length, full, share, indels, proven) in [
             (0.95, 250, 2, 0, true, false),
-            (0.95, 1_000, 1, 72, true, false),
+            (0.95, 1_000, 0, 35, false, false),
             (0.95, 1_300, 2, 0, false, true),
             (0.95, 3_000, 1, 0, false, true),
             (0.95, 10_000, 0, 0, false, true),
-            (0.9, 1_000, 2, 0, true, false),
-            (0.9, 2_000, 1, 50, false, false),
-            (0.9, 3_000, 0, 99, false, false),
+            (0.9, 1_000, 1, 50, true, false),
+            (0.9, 2_000, 0, 65, false, false),
+            (0.9, 3_000, 0, 32, false, false),
             (0.9, 5_000, 2, 0, false, true),
             (0.9, 50_000, 0, 0, false, true),
             (0.85, 10_000, 0, 84, false, false),
@@ -284,8 +298,12 @@ mod tests {
             let percent = (100.0 * plan.sampled as f64 / plan.starts as f64).round();
             assert_eq!(percent as u64, share, "{at}");
             assert_eq!((plan.indels, plan.proven), (indels, proven), "{at}");
+            let target = match identity >= HIGH_IDENTITY {
+                true => HIGH_IDENTITY_HITS,
+                false => EXPECTED_HITS,
+            };
             if !proven && plan.full < 2 {
-                assert!((plan.expected_hits - EXPECTED_HITS).abs() < 0.01, "{at}");
+                assert!((plan.expected_hits - target).abs() < 0.01, "{at}");
             }
         }
     }

@@ -493,14 +493,16 @@ k-mers at which the plan below needs level 2 on every k-mer, at 80% identity and
 
 Otherwise jam plans the lookups by seed hits. A copy that just qualifies covers the required
 part of the query (coverage times length) at the identity limit. jam takes the cheapest plan at
-which such a copy is expected to show 8 seed hits on the required part. All query k-mers get
+which such a copy is expected to show 4 seed hits on the required part from 90% identity up, and
+8 below, where divergent partial copies need more. All query k-mers get
 exact lookups. When that is not enough, jam adds level 1, then level 2, for just enough of the
 query positions. These positions are spread over the query in strata of 32 positions, picked by
 a hash of the position, so the same query always gets the same lookups and no period of the
 query lines up with them. If even level 2 on every k-mer is not enough (a short query, or a
 small or fixed `-c`), jam uses it on every k-mer. For a query of at most 1,100 k-mers, the
-positions with level 2 also get the lookups one insertion or deletion away. The target of 8 hits
-was tuned on a separate set of genes, plasmids and reads; it is not part of the proof.
+positions with level 2 also get the lookups one insertion or deletion away. The targets of 4
+and 8 hits were chosen on a separate set of genes, plasmids and reads; they are not part of the
+proof.
 
 jam makes the lookups in batches and keeps only those whose seed keys the index holds, so memory
 does not grow with the number of lookups. Before it aligns a candidate assembly with few seed
