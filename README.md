@@ -399,6 +399,10 @@ summed across threads. With several index files, the counts are summed and `miss
 
 If pruning was turned off for the query, the line ends with `; pruning off`.
 
+When `--identity` or `--stretch-identity` is below 0.8, `jam search` and `jam screen` write
+one note to standard error at the start, and `jam serve` logs it once: such settings are
+allowed, but slower and not validated, as the benchmarks and the tuning cover 0.8 and above.
+
 After the last query, jam writes one hint line to standard error, even without `-v`, if some
 queries could not reach `--max-miss`. It never goes to standard output. For example:
 

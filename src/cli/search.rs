@@ -141,6 +141,9 @@ fn open_shards(
 /// Searches every query record in every shard and writes the records. Fails when a search did
 /// not complete, after all records are written.
 pub fn run(args: &SearchArgs) -> Result<(), CliError> {
+    if let Some(note) = args.rule.rule().identity_note() {
+        eprintln!("jam: {note}");
+    }
     if let Some(server) = &args.server {
         return run_remote(args, server);
     }

@@ -68,7 +68,19 @@ impl Decision {
     }
 }
 
+/// The lowest `--identity` and `--stretch-identity` that the benchmarks and the tuning of the
+/// lookups cover. Lower settings are allowed, but slower and not validated.
+pub const VALIDATED_IDENTITY: f64 = 0.8;
+
 impl DecisionRule {
+    /// The note to print once per run when an identity limit lies below `VALIDATED_IDENTITY`.
+    pub fn identity_note(&self) -> Option<&'static str> {
+        let low = self.min_identity.min(self.min_fragment_identity) < VALIDATED_IDENTITY;
+        low.then_some(
+            "identity settings below 0.8 are slower and not validated; results may miss more copies",
+        )
+    }
+
     /// Checks that the limits make sense.
     pub fn validate(&self) -> Result<(), DecideError> {
         self.min_query_coverage.validate()?;
@@ -181,6 +193,20 @@ impl DecisionRule {
 
 #[cfg(test)]
 mod tests {
+    /// The note appears when either identity limit lies below 0.8.
+    #[test]
+    fn low_identity_noted() {
+        let rule = |identity: f64, stretch: f64| super::DecisionRule {
+            min_identity: identity,
+            min_fragment_identity: stretch,
+            ..super::DecisionRule::default()
+        };
+        assert!(rule(0.8, 0.8).identity_note().is_none());
+        assert!(rule(0.95, 0.95).identity_note().is_none());
+        assert!(rule(0.79, 0.95).identity_note().is_some());
+        assert!(rule(0.95, 0.7).identity_note().is_some());
+    }
+
     use super::*;
     use crate::decide::fragment::tests::fragment;
     use crate::seeds::low_complexity_mask;

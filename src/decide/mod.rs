@@ -14,7 +14,7 @@ mod segments;
 pub use coverage::QueryCoverage;
 pub use fragment::Fragment;
 pub use mosaic::{Mosaic, SelectedFragment};
-pub use rule::{Decision, DecisionRule};
+pub use rule::{Decision, DecisionRule, VALIDATED_IDENTITY};
 
 use crate::align::AlignmentError;
 use thiserror::Error;

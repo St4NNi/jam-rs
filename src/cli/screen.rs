@@ -60,6 +60,9 @@ enum Line {
 /// Screens every assembly of the list on the threads and writes the records as they come, on
 /// this thread. Fails after all records are written when an assembly could not be screened.
 pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
+    if let Some(note) = args.rule.rule().identity_note() {
+        eprintln!("jam: {note}");
+    }
     let config = ScreenConfig {
         closest_margin: args.closest_margin,
         batch_bases: args.batch_bases,

@@ -111,6 +111,11 @@ impl Server {
             Ok(config) => config,
             Err(error) => return refuse(writer, error.to_string()).await,
         };
+        if let Some(note) = config.rule.identity_note()
+            && !LOW_IDENTITY_LOGGED.swap(true, Ordering::Relaxed)
+        {
+            eprintln!("jam serve: {note}");
+        }
         let Ok(_place) = self.places.try_acquire() else {
             return refuse(writer, BUSY.to_string()).await;
         };
@@ -180,6 +185,9 @@ impl ProtocolHandler for Server {
         Ok(())
     }
 }
+
+/// Whether the server has logged the note on identity limits below 0.8; it logs it once.
+static LOW_IDENTITY_LOGGED: AtomicBool = AtomicBool::new(false);
 
 async fn refuse(mut writer: MessageWriter, reason: String) -> Result<(), ServiceError> {
     send(&mut writer, &Reply::Refused { reason }).await?;
