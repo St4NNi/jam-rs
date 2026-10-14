@@ -30,9 +30,9 @@ const RECORD_ROUND_BYTES: usize = 256 << 20;
 /// Bases an entry seeds on its own thread; its later contigs go to other threads in batches of
 /// about this many bases, so a large entry does not keep one thread busy alone.
 const SEED_BATCH: u64 = 16 << 20;
-/// Most bases of one entry waiting in batches; beyond that its thread seeds them itself, so a
-/// fast reader cannot fill the memory.
-const WAITING_BASES: u64 = 128 << 20;
+/// Most bases of all entries waiting in batches; beyond that an entry's thread seeds its batch
+/// itself, so fast readers cannot fill the memory.
+const WAITING_BASES: u64 = 256 << 20;
 /// Files read ahead of the next file to index, at most.
 const READ_AHEAD: usize = 64;
 /// Files larger than this are not read ahead: their own thread reads them as a stream.
@@ -141,6 +141,7 @@ pub fn build_shard(
             parameters: options.parameters,
             packed: pieces.as_ref().map(|pieces| pieces.path().to_path_buf()),
             spill: SeedSpill::create(temporary)?,
+            waiting: AtomicU64::new(0),
         };
         pool.install(|| {
             let built = if options.singleton {
@@ -342,6 +343,8 @@ struct Context {
     /// when they are not written.
     packed: Option<PathBuf>,
     spill: SeedSpill,
+    /// Bases in batches handed to other threads and not seeded yet.
+    waiting: AtomicU64,
 }
 
 /// An entry's record and its encoded contig table.
@@ -514,11 +517,10 @@ struct Batch {
     contigs: Vec<(u64, usize)>,
 }
 
-/// The seed records of the batches an entry handed to other threads, and their bases that wait.
+/// The seed records of the batches an entry handed to other threads.
 #[derive(Default)]
 struct HandedBatches {
     records: Mutex<Vec<Vec<u128>>>,
-    waiting: AtomicU64,
 }
 
 /// Collects the contigs of one entry: its packed sequence and its seed records.
@@ -568,8 +570,9 @@ impl<'a> EntryBuilder<'a> {
         'a: 's,
     {
         let bases = batch.bases.len() as u64;
-        if handed.waiting.fetch_add(bases, Ordering::Relaxed) + bases > WAITING_BASES {
-            handed.waiting.fetch_sub(bases, Ordering::Relaxed);
+        let waiting = &self.context.waiting;
+        if waiting.fetch_add(bases, Ordering::Relaxed) + bases > WAITING_BASES {
+            waiting.fetch_sub(bases, Ordering::Relaxed);
             self.seed_batch(&batch);
             return;
         }
@@ -578,7 +581,7 @@ impl<'a> EntryBuilder<'a> {
             let mut records = Vec::new();
             seed_batch(context, entry, &batch, &mut records);
             lock(&handed.records).push(records);
-            handed.waiting.fetch_sub(bases, Ordering::Relaxed);
+            context.waiting.fetch_sub(bases, Ordering::Relaxed);
         });
     }
 
