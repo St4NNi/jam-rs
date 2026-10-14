@@ -426,7 +426,11 @@ fn index_file(
         Ok::<_, IndexError>(())
     })?;
     let handed = handed.records.into_inner();
-    for records in handed.unwrap_or_else(PoisonError::into_inner) {
+    let handed = handed.unwrap_or_else(PoisonError::into_inner);
+    entry
+        .records
+        .reserve_exact(handed.iter().map(Vec::len).sum());
+    for records in handed {
         entry.records.extend_from_slice(&records);
     }
     entry.finish(input.name.clone())
