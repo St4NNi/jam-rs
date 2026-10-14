@@ -350,8 +350,8 @@ struct Context {
 /// An entry's record and its encoded contig table.
 type BuiltEntry = (EntryRecord, Vec<u8>);
 
-/// One entry per file: files run in parallel, the largest first. Threads read files ahead of
-/// the ones that index them, so these find small files in the page cache.
+/// One entry per file: files run in parallel, in the order of `spread_by_size`. Threads read files
+/// ahead of the ones that index them, so these find small files in the page cache.
 fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntry>, IndexError> {
     let sizes: Vec<Result<u64, IndexError>> = (inputs.par_iter())
         .map(|input| Ok(std::fs::metadata(&input.path).at(&input.path)?.len()))
@@ -360,8 +360,8 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntr
     for (index, size) in sizes.into_iter().enumerate() {
         order.push((size?, index));
     }
-    order.sort_unstable_by(|a, b| b.cmp(a));
     let threads = rayon::current_num_threads();
+    let order = spread_by_size(order, threads);
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
     let built = Mutex::new(Vec::with_capacity(inputs.len()));
@@ -398,6 +398,18 @@ fn index_files(inputs: &[EntryInput], context: &Context) -> Result<Vec<BuiltEntr
     let mut built = built.into_inner().unwrap_or_else(PoisonError::into_inner);
     built.sort_unstable_by_key(|(index, _)| *index);
     Ok(built.into_iter().map(|(_, entry)| entry).collect())
+}
+
+/// Sorts files by size, largest first, cuts the list into one part per thread, and takes the next
+/// file of each part in turn: the largest files do not all run at once, which would hold the most
+/// memory.
+fn spread_by_size(mut order: Vec<(u64, usize)>, threads: usize) -> Vec<(u64, usize)> {
+    order.sort_unstable_by(|a, b| b.cmp(a));
+    let part = order.len().div_ceil(threads.max(1)).max(1);
+    let parts: Vec<&[(u64, usize)]> = order.chunks(part).collect();
+    (0..part)
+        .flat_map(|at| parts.iter().filter_map(move |files| files.get(at).copied()))
+        .collect()
 }
 
 /// Marks every file as taken when dropped, also when a thread panics, so the readers stop.
