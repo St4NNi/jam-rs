@@ -108,19 +108,41 @@ impl SeedSpill {
             .map(|(id, set)| (&set[..], id as u32))
             .collect();
         let mut writer = SeedWriter::create(path, self.directory.path(), shape)?;
-        let mut seeds = 0u64;
         let all: Vec<usize> = (0..units.count()).collect();
-        for round in all.chunks(WRITE_ROUND) {
-            let encoded = (round.par_iter())
-                .map(|&unit| encode_unit(&units, unit, &ids, shape.locators))
-                .collect::<Result<Vec<_>, IndexError>>()?;
-            for unit in encoded {
-                for bucket in unit {
-                    writer.push_bucket(bucket.bucket, &bucket.sketch, &bucket.locators)?;
-                    seeds += bucket.seeds;
+        // One thread writes the buckets of a round while the others encode the next round.
+        let (send, receive) = std::sync::mpsc::sync_channel::<Vec<Vec<EncodedBucket>>>(1);
+        let (encoded, pushed) = std::thread::scope(|scope| {
+            let pushing = scope.spawn(move || {
+                let mut seeds = 0u64;
+                for unit in receive.into_iter().flatten() {
+                    for bucket in unit {
+                        writer.push_bucket(bucket.bucket, &bucket.sketch, &bucket.locators)?;
+                        seeds += bucket.seeds;
+                    }
+                }
+                Ok::<_, IndexError>((seeds, writer))
+            });
+            let mut encoded = Ok(());
+            for round in all.chunks(WRITE_ROUND) {
+                let round = (round.par_iter())
+                    .map(|&unit| encode_unit(&units, unit, &ids, shape.locators))
+                    .collect::<Result<Vec<_>, IndexError>>();
+                // A failed writer drops its end; its error comes from the join.
+                match round.map(|round| send.send(round)) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => break,
+                    Err(error) => {
+                        encoded = Err(error);
+                        break;
+                    }
                 }
             }
-        }
+            drop(send);
+            let pushed = (pushing.join()).unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (encoded, pushed)
+        });
+        encoded?;
+        let (seeds, writer) = pushed?;
         let written = writer.finish(&ranked, contig_tables)?;
         let totals = SeedTotals {
             seeds,
