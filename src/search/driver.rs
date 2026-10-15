@@ -29,6 +29,7 @@ use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
@@ -102,10 +103,11 @@ pub struct SearchSummary {
     pub times: SearchTimes,
 }
 
-/// The query k-mers of one query made by `Searcher::prepare_kmers`, and its share of the time.
+/// The seed keys held by the sketch, found by `Searcher::prepare_kmers` for a batch of queries,
+/// and one query's share of the time of the pass.
 #[derive(Debug)]
 pub struct PreparedKmers {
-    kmers: QueryKmers,
+    held: Arc<Vec<u64>>,
     time: PartTime,
 }
 
@@ -177,12 +179,13 @@ impl<'a> Searcher<'a> {
         lookup_bound(&plan, length)
     }
 
-    /// The query k-mers of several queries, made in one pass: the lookups of all of them are
-    /// checked against the sketch together, so close keys of different queries share bucket
-    /// reads. Each query keeps its own plan and the lookups of its own that the sketch holds, so
-    /// its search is the same as without the pass. Each gets the share of the time of the pass
+    /// The seed keys that the sketch holds among the lookups of several queries, found in one
+    /// pass: the keys of all of them are checked together, so close keys of different queries
+    /// share bucket reads. Only the distinct keys of each query are held during the pass. Each
+    /// search then makes its lookups again, by its own plan, and keeps those whose keys are held,
+    /// so it is the same as without the pass. Each query gets the share of the time of the pass
     /// that its lookups make up. A query the search would reject gets `None`, and so do all when
-    /// the pass fails; their searches then make their own lookups.
+    /// the pass fails; their searches then look up their own keys.
     pub fn prepare_kmers(
         &self,
         queries: &[(&[u8], bool)],
@@ -191,40 +194,32 @@ impl<'a> Searcher<'a> {
         let pass = || {
             let start = PartStart::now();
             let k = usize::from(self.seeder.scheme().k);
-            let made: Vec<_> = (queries.iter())
-                .map(|&(query, circular)| {
-                    if query.len() < k || query.len() >= u32::MAX as usize {
-                        return None;
-                    }
-                    let length = query.len() as u64;
-                    let rule = &config.rule;
-                    let plan = lookup_plan(&self.models, rule, config.max_miss, length, circular);
-                    Some(QueryKmers::made(&self.seeder, query, circular, &plan))
-                })
-                .collect();
-            let keys = (made.iter().flatten())
-                .flat_map(|(_, lookups)| lookups.iter().map(|&(hash, _)| seed_key(hash)))
-                .collect();
-            let held = held_keys(self.shard.seed_file(), keys)?;
-            let total: u64 = made.iter().flatten().map(|(_, l)| l.len() as u64).sum();
-            let kmers: Vec<Option<(QueryKmers, u64)>> = (made.into_iter().zip(queries))
-                .map(|(made, &(query, _))| {
-                    let (exact, mut lookups) = made?;
-                    let count = lookups.len() as u64;
-                    lookups.retain(|&(hash, _)| held.binary_search(&seed_key(hash)).is_ok());
-                    let kmers =
-                        QueryKmers::from_kept(&self.seeder, query.len(), exact, count, lookups);
-                    Some((kmers, count))
-                })
-                .collect();
+            let (mut keys, mut counts) = (Vec::new(), Vec::with_capacity(queries.len()));
+            for &(query, circular) in queries {
+                if query.len() < k || query.len() >= u32::MAX as usize {
+                    counts.push(None);
+                    continue;
+                }
+                let length = query.len() as u64;
+                let rule = &config.rule;
+                let plan = lookup_plan(&self.models, rule, config.max_miss, length, circular);
+                let (_, lookups) = QueryKmers::made(&self.seeder, query, circular, &plan);
+                let mut own: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
+                counts.push(Some(lookups.len() as u64));
+                drop(lookups);
+                own.par_sort_unstable();
+                own.dedup();
+                keys.append(&mut own);
+            }
+            let held = Arc::new(held_keys(self.shard.seed_file(), keys)?);
             let time = start.finish();
-            let share = |count: u64| time.share(count as f64 / total.max(1) as f64);
+            let total: u64 = counts.iter().flatten().sum();
             Ok::<_, SearchError>(
-                (kmers.into_iter())
-                    .map(|kmers| {
-                        kmers.map(|(kmers, count)| PreparedKmers {
-                            kmers,
-                            time: share(count),
+                (counts.into_iter())
+                    .map(|count| {
+                        count.map(|count| PreparedKmers {
+                            held: Arc::clone(&held),
+                            time: time.share(count as f64 / total.max(1) as f64),
                         })
                     })
                     .collect(),
@@ -255,8 +250,8 @@ impl<'a> Searcher<'a> {
         self.search_prepared(query, circular, config, control, events, None)
     }
 
-    /// As `search`, with the query k-mers from `prepare_kmers` when given. Their share of the
-    /// time of the pass counts toward the preparation of the query.
+    /// As `search`, with the held seed keys from `prepare_kmers` when given. The query's share
+    /// of the time of the pass counts toward its preparation.
     pub fn search_prepared(
         &self,
         query: &[u8],
@@ -299,8 +294,8 @@ impl<'a> Searcher<'a> {
             return Ok(summary);
         }
         // The query tables are built on the threads of the search too.
-        let (prepared_kmers, prepared_time) = match prepared {
-            Some(prepared) => (Some(prepared.kmers), prepared.time),
+        let (held, prepared_time) = match prepared {
+            Some(prepared) => (Some(prepared.held), prepared.time),
             None => (None, PartTime::default()),
         };
         let search = || {
@@ -316,15 +311,19 @@ impl<'a> Searcher<'a> {
                     }
                     _ => Ok(None),
                 },
-                || match prepared_kmers {
-                    Some(kmers) => Ok(kmers),
-                    None => {
-                        let seeds = self.shard.seed_file();
-                        QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
-                            control.check()?;
-                            keep_found(seeds, lookups)
-                        })
-                    }
+                || {
+                    let seeds = self.shard.seed_file();
+                    QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
+                        control.check()?;
+                        match &held {
+                            Some(held) => {
+                                let held = |hash| held.binary_search(&seed_key(hash)).is_ok();
+                                lookups.retain(|&(hash, _)| held(hash));
+                                Ok(())
+                            }
+                            None => keep_found(seeds, lookups),
+                        }
+                    })
                 },
             );
             let prepared = prepared?;
