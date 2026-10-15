@@ -216,12 +216,8 @@ impl<'a> Searcher<'a> {
                 let length = query.len() as u64;
                 let rule = &config.rule;
                 let plan = lookup_plan(&self.models, rule, config.max_miss, length, circular);
-                let (_, lookups) = QueryKmers::made(&self.seeder, query, circular, &plan);
-                let mut own: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
-                counts.push(Some(lookups.len() as u64));
-                drop(lookups);
-                own.par_sort_unstable();
-                own.dedup();
+                let (count, mut own) = QueryKmers::made_keys(&self.seeder, query, circular, &plan);
+                counts.push(Some(count));
                 keys.append(&mut own);
             }
             let held = Arc::new(held_keys(self.shard.seed_file(), keys)?);

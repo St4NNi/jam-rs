@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::seed_mismatches::LookupPlan;
+use crate::index::seed_key;
 use crate::seeds::{Kmer, Seeder};
 use rayon::prelude::*;
 use std::convert::Infallible;
@@ -86,16 +87,36 @@ impl QueryKmers {
         Ok(Self::from_kept(seeder, query.len(), exact, lookups, kmers))
     }
 
-    /// All lookups that `plan` makes on `query`, at once, with the number of query k-mers; for
-    /// a query whose lookups fit one batch (`lookup_bound`). `from_kept` then builds the table.
-    pub fn made(
+    /// The number of lookups that `plan` makes on `query`, and their distinct seed keys,
+    /// ascending. Each chunk of lookups is turned into keys at once, so the lookups are never
+    /// held together.
+    pub fn made_keys(
         seeder: &Seeder,
         query: &[u8],
         circular: bool,
         plan: &LookupPlan,
-    ) -> (u64, Vec<(u64, u32)>) {
-        let (scanned, exact) = scanned(seeder, query, circular);
-        (exact, make(seeder, &scanned, plan, 0..query.len()))
+    ) -> (u64, Vec<u64>) {
+        let (scanned, _) = scanned(seeder, query, circular);
+        let per_position = LOOKUPS_PER_POSITION[plan.level()];
+        let chunk = (CHUNK_LOOKUPS / per_position).clamp(1, CHUNK_POSITIONS) as usize;
+        let firsts: Vec<usize> = (0..query.len()).step_by(chunk).collect();
+        let pieces: Vec<(u64, Vec<u64>)> = (firsts.into_par_iter())
+            .map(|start| {
+                let mut made = Vec::new();
+                for position in start..(start + chunk).min(query.len()) {
+                    lookups_at(seeder, &scanned, plan, position, &mut made);
+                }
+                let mut keys: Vec<u64> = made.iter().map(|&(hash, _)| seed_key(hash)).collect();
+                keys.sort_unstable();
+                keys.dedup();
+                (made.len() as u64, keys)
+            })
+            .collect();
+        let count = pieces.iter().map(|(count, _)| count).sum();
+        let mut keys: Vec<u64> = pieces.into_iter().flat_map(|(_, keys)| keys).collect();
+        keys.par_sort_unstable();
+        keys.dedup();
+        (count, keys)
     }
 
     /// The table of a query of `length` bases with `exact` query k-mers, from the `lookups`
@@ -194,9 +215,28 @@ const CHUNK_POSITIONS: u64 = 4_096;
 /// 1 + 75 + 2,700, and that plus 116 indel variants with their 75 substitutions each.
 const LOOKUPS_PER_POSITION: [u64; 4] = [1, 76, 2_776, 2_776 + 116 * 76];
 
-/// The most lookups that `plan` makes on a query of `length` bases.
+/// The most lookups that `plan` makes on a query of `length` bases: those of the full level at
+/// every position, and those of the higher level at the sampled positions, at most one more
+/// per stratum than planned.
 pub fn lookup_bound(plan: &LookupPlan, length: u64) -> u64 {
-    length.saturating_mul(LOOKUPS_PER_POSITION[plan.level()])
+    let full = LOOKUPS_PER_POSITION[if plan.full == 2 && plan.indels {
+        3
+    } else {
+        plan.full
+    }];
+    let sampled = match plan.sampled {
+        0 => 0,
+        // Each stratum of 32 positions takes its share of `sampled` over `starts`, plus one.
+        sampled => {
+            let strata = length.div_ceil(32);
+            let share = (sampled.saturating_mul(strata * 32)).div_ceil(plan.starts.max(1));
+            (share + strata).min(length)
+        }
+    };
+    let extra = LOOKUPS_PER_POSITION[plan.level()] - full;
+    length
+        .saturating_mul(full)
+        .saturating_add(sampled.saturating_mul(extra))
 }
 
 /// The query with the first k - 1 bases appended when it is circular, and its query k-mers.
@@ -415,5 +455,38 @@ mod tests {
         expected.retain(|&(_, hash)| hash % 2 == 0);
         assert_eq!(pairs(&kept), expected);
         assert_eq!((kept.kmers(), kept.lookups()), (all.kmers(), all.lookups()));
+    }
+
+    /// The bound of a plan is never below the lookups it makes, and the keys made at once are
+    /// those of all lookups.
+    #[test]
+    fn bound_holds_keys() {
+        let seeder = seeder();
+        let query = random_bases(&mut rng(9), 2_000);
+        for (full, sampled, indels) in [
+            (0, 0, false),
+            (0, 700, false),
+            (1, 1_300, true),
+            (2, 0, true),
+        ] {
+            let plan = LookupPlan {
+                full,
+                sampled,
+                starts: 1_996,
+                indels,
+                proven: false,
+                expected_hits: 0.0,
+            };
+            let all = QueryKmers::planned(&seeder, &query, false, &plan);
+            assert!(lookup_bound(&plan, 2_000) >= all.lookups(), "{plan:?}");
+            let (count, keys) = QueryKmers::made_keys(&seeder, &query, false, &plan);
+            assert_eq!(count, all.lookups());
+            let mut expected: Vec<u64> = (all.distinct().iter())
+                .map(|kmer| seed_key(kmer.hash))
+                .collect();
+            expected.sort_unstable();
+            expected.dedup();
+            assert_eq!(keys, expected);
+        }
     }
 }

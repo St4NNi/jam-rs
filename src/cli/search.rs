@@ -281,9 +281,10 @@ fn each_query(
     }
 }
 
-/// The most lookups that the queries of one batch may make together, as the bound of their
-/// plans: 2^24, as many as one batch of a single long query (`QueryKmers::filtered`), so the
-/// memory of a shared pass stays that of one long query. A query with more is searched alone.
+/// The most lookups that the queries of one batch may make together, by the bounds of their
+/// plans: 2^24. The shared pass holds one 8-byte seed key per lookup at most, 128 MiB, beside
+/// the keys of the query being made; a query searched alone holds 16 bytes per lookup, twice,
+/// while its lookups are made. A query with more lookups is searched alone.
 const BATCH_LOOKUPS: u64 = 1 << 24;
 
 /// Calls `search` with batches of query records (name, the first word of the id, and bases), in
