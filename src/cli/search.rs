@@ -167,7 +167,13 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     };
     let lookups = |sequence: &[u8]| {
         let length = sequence.len() as u64;
-        let bound = |searcher: &Searcher<'_>| searcher.lookup_bound(length, args.circular, &config);
+        // A query that does not gain from a shared pass is searched alone.
+        let bound =
+            |searcher: &Searcher<'_>| match searcher.shares_lookups(length, args.circular, &config)
+            {
+                true => searcher.lookup_bound(length, args.circular, &config),
+                false => u64::MAX,
+            };
         searchers.iter().map(bound).max().unwrap_or(0)
     };
     let incomplete = each_batch(inputs.query, budget, lookups, |batch| {

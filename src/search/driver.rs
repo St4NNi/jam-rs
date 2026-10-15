@@ -58,6 +58,11 @@ pub struct SearchConfig {
     pub align: AlignStageConfig,
 }
 
+/// The sketch bytes per lookup above which a shared lookup pass pays. A query's own pass reads up
+/// to its whole sketch part, at about 0.3 ns per byte on CephFS, and the shared pass makes its
+/// lookups a second time, at about 70 ns each (measured on worm): 230 bytes, rounded up.
+const SKETCH_BYTES_PER_LOOKUP: u64 = 256;
+
 /// The least frequent-seed limit that `SearchConfig::frequent_seed_entries` takes by default.
 pub const MIN_FREQUENT_LIMIT: u64 = 32;
 
@@ -177,6 +182,14 @@ impl<'a> Searcher<'a> {
             circular,
         );
         lookup_bound(&plan, length)
+    }
+
+    /// Whether a query of `length` bases gains from a shared lookup pass: when its own pass could
+    /// read more sketch bytes than making its lookups again costs, at `SKETCH_BYTES_PER_LOOKUP`.
+    pub fn shares_lookups(&self, length: u64, circular: bool, config: &SearchConfig) -> bool {
+        let sketch = self.shard.seed_file().sketch_part();
+        let bound = self.lookup_bound(length, circular, config);
+        sketch.end - sketch.start >= bound.saturating_mul(SKETCH_BYTES_PER_LOOKUP)
     }
 
     /// The seed keys that the sketch holds among the lookups of several queries, found in one
