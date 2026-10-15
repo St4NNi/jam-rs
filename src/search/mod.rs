@@ -42,6 +42,8 @@ mod locate_stage_tests;
 #[cfg(test)]
 mod miss_simulation;
 #[cfg(test)]
+mod s3_reads_tests;
+#[cfg(test)]
 mod search_tests;
 #[cfg(test)]
 mod sketch_stage_tests;

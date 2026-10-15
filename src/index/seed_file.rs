@@ -374,6 +374,12 @@ impl SeedFile {
         Ok(read)
     }
 
+    /// The bytes of the contig tables section in the file.
+    #[cfg(test)]
+    pub(crate) fn contig_tables(&self) -> Range<u64> {
+        self.sections[5].clone()
+    }
+
     /// The bytes of the manifest in the file.
     pub fn manifest_range(&self) -> Range<u64> {
         self.manifest.0.clone()
