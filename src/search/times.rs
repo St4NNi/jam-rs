@@ -19,12 +19,51 @@ pub struct PartTime {
     pub storage: StorageCounts,
 }
 
+impl PartTime {
+    /// The share `part` (0 to 1) of this cost; counts are rounded.
+    pub(super) fn share(&self, part: f64) -> Self {
+        let count = |value: u64| (value as f64 * part).round() as u64;
+        let storage = &self.storage;
+        Self {
+            wall_seconds: self.wall_seconds * part,
+            cpu_seconds: self.cpu_seconds * part,
+            major_faults: count(self.major_faults),
+            storage: StorageCounts {
+                s3_requests: count(storage.s3_requests),
+                s3_bytes: count(storage.s3_bytes),
+                cache_hits: count(storage.cache_hits),
+                cache_misses: count(storage.cache_misses),
+                pinned_reads: count(storage.pinned_reads),
+            },
+        }
+    }
+
+    /// This cost and `other` together.
+    pub(super) fn plus(&self, other: &Self) -> Self {
+        let (a, b) = (&self.storage, &other.storage);
+        Self {
+            wall_seconds: self.wall_seconds + other.wall_seconds,
+            cpu_seconds: self.cpu_seconds + other.cpu_seconds,
+            major_faults: self.major_faults + other.major_faults,
+            storage: StorageCounts {
+                s3_requests: a.s3_requests + b.s3_requests,
+                s3_bytes: a.s3_bytes + b.s3_bytes,
+                cache_hits: a.cache_hits + b.cache_hits,
+                cache_misses: a.cache_misses + b.cache_misses,
+                pinned_reads: a.pinned_reads + b.pinned_reads,
+            },
+        }
+    }
+}
+
 /// The cost of the parts of one search, in the order they run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SearchTimes {
     /// Opening the shard, once per process before its first search.
     pub open_shard_seconds: f64,
-    /// Hashing the query k-mers and building the query tables of stage 3.
+    /// Hashing the query k-mers, looking them up in the sketch, and building the query tables
+    /// of stage 3. When several queries were looked up in one pass, this query's share of that
+    /// pass is counted here, by its share of the lookups.
     pub prepare_query: PartTime,
     /// Stage 1.
     pub sketch: PartTime,

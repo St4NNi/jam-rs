@@ -23,7 +23,7 @@ pub use align_stage::{
 };
 pub use bound::CoverageBound;
 pub use control::{SearchControl, Stopped};
-pub use driver::{AlignStageWork, SearchConfig, SearchSummary, Searcher};
+pub use driver::{AlignStageWork, PreparedKmers, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;
 pub use events::{Completion, DropReason, EntryEvent, SearchStage};
 pub use locate_stage::{

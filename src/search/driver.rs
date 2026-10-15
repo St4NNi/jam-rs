@@ -15,13 +15,15 @@ use super::locate_stage::{
     LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry, read_entry_locations,
 };
 use super::located::LocatedEntry;
-use super::query::QueryKmers;
+use super::query::{QueryKmers, lookup_bound};
 use super::seed_mismatches::{LookupPlan, lookup_plan, target_length};
-use super::sketch_stage::{PossibleEntry, SketchLimits, SketchWork, keep_found, sketch_stage};
-use super::times::{PartStart, SearchTimes};
+use super::sketch_stage::{
+    PossibleEntry, SketchLimits, SketchWork, held_keys, keep_found, sketch_stage,
+};
+use super::times::{PartStart, PartTime, SearchTimes};
 use crate::align::{AlignmentError, Interval};
 use crate::decide::DecisionRule;
-use crate::index::{SeedLocation, Shard};
+use crate::index::{SeedLocation, Shard, seed_key};
 use crate::loss::{MaxMiss, MissModel};
 use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
@@ -100,6 +102,13 @@ pub struct SearchSummary {
     pub times: SearchTimes,
 }
 
+/// The query k-mers of one query made by `Searcher::prepare_kmers`, and its share of the time.
+#[derive(Debug)]
+pub struct PreparedKmers {
+    kmers: QueryKmers,
+    time: PartTime,
+}
+
 /// The work of stage 3, summed over entries.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct AlignStageWork {
@@ -156,6 +165,82 @@ impl<'a> Searcher<'a> {
         target_length(&self.models, &config.rule, config.max_miss)
     }
 
+    /// The most lookups that the search of a query of `length` bases makes, by its plan.
+    pub fn lookup_bound(&self, length: u64, circular: bool, config: &SearchConfig) -> u64 {
+        let plan = lookup_plan(
+            &self.models,
+            &config.rule,
+            config.max_miss,
+            length,
+            circular,
+        );
+        lookup_bound(&plan, length)
+    }
+
+    /// The query k-mers of several queries, made in one pass: the lookups of all of them are
+    /// checked against the sketch together, so close keys of different queries share bucket
+    /// reads. Each query keeps its own plan and the lookups of its own that the sketch holds, so
+    /// its search is the same as without the pass. Each gets the share of the time of the pass
+    /// that its lookups make up. A query the search would reject gets `None`, and so do all when
+    /// the pass fails; their searches then make their own lookups.
+    pub fn prepare_kmers(
+        &self,
+        queries: &[(&[u8], bool)],
+        config: &SearchConfig,
+    ) -> Vec<Option<PreparedKmers>> {
+        let pass = || {
+            let start = PartStart::now();
+            let k = usize::from(self.seeder.scheme().k);
+            let made: Vec<_> = (queries.iter())
+                .map(|&(query, circular)| {
+                    if query.len() < k || query.len() >= u32::MAX as usize {
+                        return None;
+                    }
+                    let length = query.len() as u64;
+                    let rule = &config.rule;
+                    let plan = lookup_plan(&self.models, rule, config.max_miss, length, circular);
+                    Some(QueryKmers::made(&self.seeder, query, circular, &plan))
+                })
+                .collect();
+            let keys = (made.iter().flatten())
+                .flat_map(|(_, lookups)| lookups.iter().map(|&(hash, _)| seed_key(hash)))
+                .collect();
+            let held = held_keys(self.shard.seed_file(), keys)?;
+            let total: u64 = made.iter().flatten().map(|(_, l)| l.len() as u64).sum();
+            let kmers: Vec<Option<(QueryKmers, u64)>> = (made.into_iter().zip(queries))
+                .map(|(made, &(query, _))| {
+                    let (exact, mut lookups) = made?;
+                    let count = lookups.len() as u64;
+                    lookups.retain(|&(hash, _)| held.binary_search(&seed_key(hash)).is_ok());
+                    let kmers =
+                        QueryKmers::from_kept(&self.seeder, query.len(), exact, count, lookups);
+                    Some((kmers, count))
+                })
+                .collect();
+            let time = start.finish();
+            let share = |count: u64| time.share(count as f64 / total.max(1) as f64);
+            Ok::<_, SearchError>(
+                (kmers.into_iter())
+                    .map(|kmers| {
+                        kmers.map(|(kmers, count)| PreparedKmers {
+                            kmers,
+                            time: share(count),
+                        })
+                    })
+                    .collect(),
+            )
+        };
+        let prepared = match config.threads {
+            0 => pass(),
+            threads => rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .map_err(SearchError::from)
+                .and_then(|pool| pool.install(pass)),
+        };
+        prepared.unwrap_or_else(|_| queries.iter().map(|_| None).collect())
+    }
+
     /// Searches `query` and sends an event into `events` each time an entry changes its state;
     /// another thread must read the receiver, and dropping it stops the search as if asked.
     /// Bad input fails at once; a later stop or failure ends it early, as the summary tells.
@@ -166,6 +251,20 @@ impl<'a> Searcher<'a> {
         config: &SearchConfig,
         control: SearchControl<'_>,
         events: &SyncSender<EntryEvent>,
+    ) -> Result<SearchSummary, SearchError> {
+        self.search_prepared(query, circular, config, control, events, None)
+    }
+
+    /// As `search`, with the query k-mers from `prepare_kmers` when given. Their share of the
+    /// time of the pass counts toward the preparation of the query.
+    pub fn search_prepared(
+        &self,
+        query: &[u8],
+        circular: bool,
+        config: &SearchConfig,
+        control: SearchControl<'_>,
+        events: &SyncSender<EntryEvent>,
+        prepared: Option<PreparedKmers>,
     ) -> Result<SearchSummary, SearchError> {
         config.validate()?;
         if config.last_stage != SearchStage::Sketch && !self.shard.seed_file().has_locators() {
@@ -200,6 +299,10 @@ impl<'a> Searcher<'a> {
             return Ok(summary);
         }
         // The query tables are built on the threads of the search too.
+        let (prepared_kmers, prepared_time) = match prepared {
+            Some(prepared) => (Some(prepared.kmers), prepared.time),
+            None => (None, PartTime::default()),
+        };
         let search = || {
             let start = PartStart::now();
             let (prepared, query_kmers) = rayon::join(
@@ -213,12 +316,15 @@ impl<'a> Searcher<'a> {
                     }
                     _ => Ok(None),
                 },
-                || {
-                    let seeds = self.shard.seed_file();
-                    QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
-                        control.check()?;
-                        keep_found(seeds, lookups)
-                    })
+                || match prepared_kmers {
+                    Some(kmers) => Ok(kmers),
+                    None => {
+                        let seeds = self.shard.seed_file();
+                        QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
+                            control.check()?;
+                            keep_found(seeds, lookups)
+                        })
+                    }
                 },
             );
             let prepared = prepared?;
@@ -241,6 +347,7 @@ impl<'a> Searcher<'a> {
             };
             let mut summary = self.run(&query_kmers, circular, &plan, budget, &request, start);
             summary.seed_mismatches = plan.level() as u8;
+            summary.times.prepare_query = summary.times.prepare_query.plus(&prepared_time);
             Ok(summary)
         };
         if config.threads == 0 {

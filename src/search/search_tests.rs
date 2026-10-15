@@ -695,3 +695,48 @@ fn mosaic_pieces_kept() {
         assert!(decided, "{entry}: {last:?}");
     }
 }
+
+/// Queries searched after one shared lookup pass give the same events and summaries, apart
+/// from the times, as searched alone. A query too short to search gets no prepared k-mers.
+#[test]
+fn shared_pass_same() {
+    let directory = tempfile::tempdir().unwrap();
+    let (shard, query) = planted_shard(directory.path());
+    let mut random = rng(0x5a);
+    let queries: Vec<Vec<u8>> = vec![
+        query.clone(),
+        query[1_000..2_200].to_vec(),
+        reverse_complement(&query[2_500..4_000]),
+        random_bases(&mut random, 3_000),
+        query[..10].to_vec(),
+    ];
+    let config = config(SearchStage::Align);
+    let searcher = Searcher::new(&shard).unwrap();
+    let pairs: Vec<(&[u8], bool)> = queries.iter().map(|q| (q.as_slice(), false)).collect();
+    let prepared = searcher.prepare_kmers(&pairs, &config);
+    assert!(prepared[4].is_none() && prepared[..4].iter().all(Option::is_some));
+    for (query, prepared) in queries.iter().zip(prepared).take(4) {
+        let (alone, alone_events) = search(&shard, query, false, &config, false);
+        let stop = AtomicBool::new(false);
+        let control = SearchControl {
+            deadline: None,
+            stop: &stop,
+        };
+        let (sender, receiver) = sync_channel(1 << 16);
+        let shared = searcher.search_prepared(query, false, &config, control, &sender, prepared);
+        drop(sender);
+        let mut shared_events = BTreeMap::<u32, Vec<EntryEvent>>::new();
+        for event in receiver {
+            shared_events.entry(event.entry()).or_default().push(event);
+        }
+        let without_times = |mut summary: SearchSummary| {
+            summary.sketch.seconds = 0.0;
+            summary.locate.seconds = 0.0;
+            summary.align.seconds = 0.0;
+            summary.times = Default::default();
+            format!("{summary:?}")
+        };
+        assert_eq!(without_times(shared.unwrap()), without_times(alone));
+        assert_eq!(shared_events, alone_events);
+    }
+}

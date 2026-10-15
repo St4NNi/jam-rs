@@ -246,7 +246,15 @@ pub fn find_query_seeds(
 
 /// Keeps the lookups, pairs of k-mer hash and query start, whose seed keys the sketch part holds.
 pub fn keep_found(seed_file: &SeedFile, lookups: &mut Vec<(u64, u32)>) -> Result<(), SearchError> {
-    let mut keys: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
+    let keys: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
+    let held = held_keys(seed_file, keys)?;
+    lookups.retain(|&(hash, _)| held.binary_search(&seed_key(hash)).is_ok());
+    Ok(())
+}
+
+/// The seed keys among `keys` that the sketch part holds, ascending and distinct. The buckets
+/// are read in ascending order, so close keys share reads.
+pub fn held_keys(seed_file: &SeedFile, mut keys: Vec<u64>) -> Result<Vec<u64>, SearchError> {
     keys.par_sort_unstable();
     keys.dedup();
     let held = keys
@@ -259,10 +267,8 @@ pub fn keep_found(seed_file: &SeedFile, lookups: &mut Vec<(u64, u32)>) -> Result
                 .filter(|(_, stored)| stored.is_some());
             Ok(held.map(|(&key, _)| key).collect::<Vec<u64>>())
         })
-        .collect::<Result<Vec<_>, SearchError>>()?
-        .concat();
-    lookups.retain(|&(hash, _)| held.binary_search(&seed_key(hash)).is_ok());
-    Ok(())
+        .collect::<Result<Vec<_>, SearchError>>()?;
+    Ok(held.concat())
 }
 
 /// Splits the found seeds into those to expand, rarest first, and the frequent ones: those held

@@ -73,37 +73,40 @@ impl QueryKmers {
         plan: &LookupPlan,
         mut keep: impl FnMut(&mut Vec<(u64, u32)>) -> Result<(), E>,
     ) -> Result<Self, E> {
-        let k = usize::from(seeder.scheme().k);
-        let mut scanned = query.to_vec();
-        if circular {
-            scanned.extend_from_slice(&query[..(k - 1).min(query.len())]);
-        }
-        let mut exact = 0;
-        seeder.query_kmers(&scanned, |kmer| {
-            exact += u64::from(kmer.position < query.len() as u64);
-        });
-        let per_position = LOOKUPS_PER_POSITION[plan.level()];
-        let batch = (BATCH_LOOKUPS / per_position).max(1) as usize;
-        let chunk = (CHUNK_LOOKUPS / per_position).clamp(1, CHUNK_POSITIONS) as usize;
+        let (scanned, exact) = scanned(seeder, query, circular);
+        let batch = (BATCH_LOOKUPS / LOOKUPS_PER_POSITION[plan.level()]).max(1) as usize;
         let (mut kmers, mut lookups) = (Vec::new(), 0);
         for first in (0..query.len()).step_by(batch) {
             let end = (first + batch).min(query.len());
-            let firsts: Vec<usize> = (first..end).step_by(chunk).collect();
-            let pieces: Vec<Vec<(u64, u32)>> = (firsts.into_par_iter())
-                .map(|start| {
-                    let mut made = Vec::with_capacity(chunk * per_position as usize);
-                    for position in start..(start + chunk).min(end) {
-                        lookups_at(seeder, &scanned, plan, position, &mut made);
-                    }
-                    made
-                })
-                .collect();
-            let mut made = pieces.concat();
-            drop(pieces);
+            let mut made = make(seeder, &scanned, plan, first..end);
             lookups += made.len() as u64;
             keep(&mut made)?;
             kmers.append(&mut made);
         }
+        Ok(Self::from_kept(seeder, query.len(), exact, lookups, kmers))
+    }
+
+    /// All lookups that `plan` makes on `query`, at once, with the number of query k-mers; for
+    /// a query whose lookups fit one batch (`lookup_bound`). `from_kept` then builds the table.
+    pub fn made(
+        seeder: &Seeder,
+        query: &[u8],
+        circular: bool,
+        plan: &LookupPlan,
+    ) -> (u64, Vec<(u64, u32)>) {
+        let (scanned, exact) = scanned(seeder, query, circular);
+        (exact, make(seeder, &scanned, plan, 0..query.len()))
+    }
+
+    /// The table of a query of `length` bases with `exact` query k-mers, from the `lookups`
+    /// made and those of them that were `kept`.
+    pub fn from_kept(
+        seeder: &Seeder,
+        length: usize,
+        exact: u64,
+        lookups: u64,
+        mut kmers: Vec<(u64, u32)>,
+    ) -> Self {
         kmers.par_sort_unstable();
         let mut distinct: Vec<DistinctKmer> = Vec::new();
         for (index, &(hash, _)) in kmers.iter().enumerate() {
@@ -115,14 +118,14 @@ impl QueryKmers {
                 }),
             }
         }
-        Ok(Self {
-            length: query.len() as u64,
+        Self {
+            length: length as u64,
             window: u64::from(seeder.scheme().w),
             kmers: exact,
             lookups,
             distinct,
             positions: kmers.into_iter().map(|(_, position)| position).collect(),
-        })
+        }
     }
 
     /// The lookups made, counting repeats: query k-mers, their neighbours and indel variants.
@@ -190,6 +193,48 @@ const CHUNK_POSITIONS: u64 = 4_096;
 /// The lookups per query position, by the highest level of a plan, at k 25: 1, 1 + 75,
 /// 1 + 75 + 2,700, and that plus 116 indel variants with their 75 substitutions each.
 const LOOKUPS_PER_POSITION: [u64; 4] = [1, 76, 2_776, 2_776 + 116 * 76];
+
+/// The most lookups that `plan` makes on a query of `length` bases.
+pub fn lookup_bound(plan: &LookupPlan, length: u64) -> u64 {
+    length.saturating_mul(LOOKUPS_PER_POSITION[plan.level()])
+}
+
+/// The query with the first k - 1 bases appended when it is circular, and its query k-mers.
+fn scanned(seeder: &Seeder, query: &[u8], circular: bool) -> (Vec<u8>, u64) {
+    let k = usize::from(seeder.scheme().k);
+    let mut scanned = query.to_vec();
+    if circular {
+        scanned.extend_from_slice(&query[..(k - 1).min(query.len())]);
+    }
+    let mut exact = 0;
+    seeder.query_kmers(&scanned, |kmer| {
+        exact += u64::from(kmer.position < query.len() as u64);
+    });
+    (scanned, exact)
+}
+
+/// The lookups of `plan` at the query positions `positions`, made in parallel chunks.
+fn make(
+    seeder: &Seeder,
+    scanned: &[u8],
+    plan: &LookupPlan,
+    positions: Range<usize>,
+) -> Vec<(u64, u32)> {
+    let per_position = LOOKUPS_PER_POSITION[plan.level()];
+    let chunk = (CHUNK_LOOKUPS / per_position).clamp(1, CHUNK_POSITIONS) as usize;
+    let end = positions.end;
+    let firsts: Vec<usize> = positions.step_by(chunk).collect();
+    let pieces: Vec<Vec<(u64, u32)>> = (firsts.into_par_iter())
+        .map(|start| {
+            let mut made = Vec::with_capacity(chunk * per_position as usize);
+            for position in start..(start + chunk).min(end) {
+                lookups_at(seeder, scanned, plan, position, &mut made);
+            }
+            made
+        })
+        .collect();
+    pieces.concat()
+}
 
 /// Adds to `made` the lookups that `plan` makes at query position `position`, each on the bases from there alone
 /// (k, or k + 1 for the indel lookups, fewer at the end), so a position gets exactly the lookups
