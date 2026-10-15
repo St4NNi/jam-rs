@@ -13,7 +13,7 @@ use crate::report::{
     tsv_line,
 };
 use crate::search::{
-    EntryEvent, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
+    EntryEvent, PreparedKmers, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
 use clap::{Args, ValueEnum};
@@ -160,14 +160,38 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         .map(|open| Searcher::new(&open.shard))
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = Sink::new(args)?;
-    let incomplete = each_query(inputs.query, |name, sequence| {
-        sink.totals = QueryTotals::new(name);
-        for (open, searcher) in shards.iter().zip(&searchers) {
-            let query = Query { name, sequence };
-            let summary = search_one(args, searcher, open, &config, &mut sink, &query)?;
-            sink.record(&open.name, Record::summary(name, &summary))?;
+    // The deadline of a query starts with its own search, so with one nothing is looked up ahead.
+    let budget = match args.deadline {
+        Some(_) => 0,
+        None => BATCH_LOOKUPS,
+    };
+    let lookups = |sequence: &[u8]| {
+        let length = sequence.len() as u64;
+        let bound = |searcher: &Searcher<'_>| searcher.lookup_bound(length, args.circular, &config);
+        searchers.iter().map(bound).max().unwrap_or(0)
+    };
+    let incomplete = each_batch(inputs.query, budget, lookups, |batch| {
+        let pairs: Vec<(&[u8], bool)> = (batch.iter())
+            .map(|(_, sequence)| (sequence.as_slice(), args.circular))
+            .collect();
+        let mut prepared: Vec<Vec<Option<PreparedKmers>>> = (searchers.iter())
+            .map(|searcher| match batch.len() {
+                1 => vec![None],
+                _ => searcher.prepare_kmers(&pairs, &config),
+            })
+            .collect();
+        let mut incomplete = 0;
+        for (index, (name, sequence)) in batch.iter().enumerate() {
+            sink.totals = QueryTotals::new(name);
+            for ((open, searcher), kmers) in shards.iter().zip(&searchers).zip(&mut prepared) {
+                let query = Query { name, sequence };
+                let kmers = kmers[index].take();
+                let summary = search_one(args, searcher, open, &config, &mut sink, &query, kmers)?;
+                sink.record(&open.name, Record::summary(name, &summary))?;
+            }
+            incomplete += sink.finish_query()?;
         }
-        sink.finish_query()
+        Ok(incomplete)
     })?;
     let from = searchers
         .first()
@@ -251,6 +275,48 @@ fn each_query(
     }
 }
 
+/// The most lookups that the queries of one batch may make together, as the bound of their
+/// plans: 2^24, as many as one batch of a single long query (`QueryKmers::filtered`), so the
+/// memory of a shared pass stays that of one long query. A query with more is searched alone.
+const BATCH_LOOKUPS: u64 = 1 << 24;
+
+/// Calls `search` with batches of query records (name, the first word of the id, and bases), in
+/// file order, and sums the incomplete queries it returns. A batch holds queries whose `lookups`
+/// sum to at most `budget`, or one query. Fails on a file without records.
+fn each_batch(
+    path: &Path,
+    budget: u64,
+    lookups: impl Fn(&[u8]) -> u64,
+    mut search: impl FnMut(&[(String, Vec<u8>)]) -> Result<usize, CliError>,
+) -> Result<usize, CliError> {
+    let query_error = |source| CliError::Query {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut reader = needletail::parse_fastx_file(path).map_err(query_error)?;
+    let (mut records, mut incomplete) = (0, 0);
+    let (mut batch, mut used): (Vec<(String, Vec<u8>)>, u64) = (Vec::new(), 0);
+    while let Some(record) = reader.next() {
+        let record = record.map_err(query_error)?;
+        records += 1;
+        let sequence = record.seq().into_owned();
+        let cost = lookups(&sequence);
+        if !batch.is_empty() && used.saturating_add(cost) > budget {
+            incomplete += search(&batch)?;
+            (batch, used) = (Vec::new(), 0);
+        }
+        batch.push((first_word(record.id()), sequence));
+        used = used.saturating_add(cost);
+    }
+    if !batch.is_empty() {
+        incomplete += search(&batch)?;
+    }
+    match records {
+        0 => Err(CliError::NoQueries(path.to_path_buf())),
+        _ => Ok(incomplete),
+    }
+}
+
 /// One query record.
 struct Query<'a> {
     name: &'a str,
@@ -264,6 +330,7 @@ fn search_one(
     config: &SearchConfig,
     sink: &mut Sink,
     query: &Query<'_>,
+    prepared: Option<PreparedKmers>,
 ) -> Result<SearchSummary, CliError> {
     let stop = AtomicBool::new(false);
     let control = SearchControl {
@@ -276,7 +343,9 @@ fn search_one(
     // A write error returns at once; the dropped receiver then stops the search.
     std::thread::scope(|scope| {
         let search = scope.spawn(|| {
-            let summary = searcher.search(query.sequence, args.circular, config, control, &sender);
+            let (sequence, circular) = (query.sequence, args.circular);
+            let summary =
+                searcher.search_prepared(sequence, circular, config, control, &sender, prepared);
             drop(sender);
             summary
         });
