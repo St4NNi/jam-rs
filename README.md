@@ -495,8 +495,9 @@ Otherwise jam plans the lookups by seed hits. A copy that just qualifies covers 
 part of the query (coverage times length) at the identity limit. jam takes the cheapest plan at
 which such a copy is expected to show 4 seed hits on the required part from 90% identity up, and
 8 below, where divergent partial copies need more. All query k-mers get
-exact lookups. When that is not enough, jam adds level 1, then level 2, for just enough of the
-query positions. These positions are spread over the query in strata of 32 positions, picked by
+exact lookups. When that is not enough, jam adds level 1 on every query position (it costs only
+76 lookups per position), then level 2 for just enough of the query positions. These positions
+are spread over the query in strata of 32 positions, picked by
 a hash of the position, so the same query always gets the same lookups and no period of the
 query lines up with them. If even level 2 on every k-mer is not enough (a short query, or a
 small or fixed `-c`), jam uses it on every k-mer. For a query of at most 1,100 k-mers, the

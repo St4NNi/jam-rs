@@ -191,7 +191,9 @@ pub fn lookup_plan(
         Some(r) => {
             let share = (needed - chance(r - 1)) / (chance(r) - chance(r - 1));
             let sampled = ((share * starts as f64).ceil() as u64).clamp(1, starts);
-            match sampled == starts {
+            // Level 1 is cheap (76 lookups per k-mer), so it goes on every k-mer; only level 2
+            // is sampled.
+            match sampled == starts || r == 1 {
                 true => plan(r, 0, false),
                 false => plan(r - 1, sampled, false),
             }
@@ -275,20 +277,20 @@ mod tests {
     fn plan_follows_length() {
         for (identity, length, full, share, indels, proven) in [
             (0.95, 250, 2, 0, true, false),
-            (0.95, 1_000, 0, 35, false, false),
+            (0.95, 1_000, 1, 0, false, false),
             (0.95, 1_300, 2, 0, false, true),
             (0.95, 3_000, 1, 0, false, true),
             (0.95, 10_000, 0, 0, false, true),
             (0.9, 1_000, 1, 50, true, false),
-            (0.9, 2_000, 0, 65, false, false),
-            (0.9, 3_000, 0, 32, false, false),
+            (0.9, 2_000, 1, 0, false, false),
+            (0.9, 3_000, 1, 0, false, false),
             (0.9, 5_000, 2, 0, false, true),
             (0.9, 50_000, 0, 0, false, true),
-            (0.85, 10_000, 0, 84, false, false),
+            (0.85, 10_000, 1, 0, false, false),
             (0.85, 30_000, 1, 0, false, true),
             (0.8, 5_000, 2, 0, false, false),
             (0.8, 10_000, 1, 75, false, false),
-            (0.8, 50_000, 0, 52, false, false),
+            (0.8, 50_000, 1, 0, false, false),
             (0.8, 100_000, 1, 0, false, true),
             (0.8, 1_000_000, 0, 0, false, true),
         ] {
@@ -303,7 +305,7 @@ mod tests {
                 false => EXPECTED_HITS,
             };
             if !proven && plan.full < 2 {
-                assert!((plan.expected_hits - target).abs() < 0.01, "{at}");
+                assert!(plan.expected_hits >= target - 0.01, "{at}");
             }
         }
     }
@@ -373,7 +375,7 @@ mod tests {
     /// picks a superset.
     #[test]
     fn sampling_nested() {
-        let mut plan = plan(0.8, 50_000);
+        let mut plan = plan(0.8, 10_000);
         let first = sampled(&plan, plan.starts);
         assert_eq!(first, sampled(&plan, plan.starts));
         let share = first.len() as f64 / plan.starts as f64;
