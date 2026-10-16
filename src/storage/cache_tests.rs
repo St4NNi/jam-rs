@@ -230,6 +230,32 @@ fn read_ahead_fills() {
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
+/// A long read in pieces with the next pieces asked for has many fetches in flight, where a
+/// plain read has one, and returns the same bytes.
+#[test]
+fn long_read_ahead() {
+    let data = random_bytes(&mut rng(11), 40 << 20);
+    let config = CacheConfig {
+        read_ahead: 64,
+        ..CacheConfig::new(256 << 20, 64 << 10)
+    };
+    for ahead in [false, true] {
+        let mut source = Watched::new(data.clone());
+        source.delay = Duration::from_millis(2);
+        let peak = Arc::clone(&source.peak);
+        let cache = BlockCache::open(&config, runtime()).unwrap();
+        let cached = cache.wrap(Arc::new(source), DIGEST, None).unwrap();
+        let mut out = vec![0; data.len()];
+        match ahead {
+            true => crate::storage::read_exact_ahead(&cached, 0, &mut out).unwrap(),
+            false => cached.read_exact_at(0, &mut out).unwrap(),
+        }
+        assert!(out == data);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(if ahead { peak > 4 } else { peak == 1 }, "{ahead} {peak}");
+    }
+}
+
 #[test]
 fn hints_stay_bounded() {
     let data = random_bytes(&mut rng(11), 5 << 20);

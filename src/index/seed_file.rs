@@ -9,7 +9,7 @@ use super::buckets::{LocatorBucket, SketchBucket};
 use super::contig_table::ContigTable;
 use super::pages::PartTable;
 use super::{MAX_BUCKET_BITS, MIN_BUCKET_BITS};
-use crate::storage::{ReadAt, will_need_ranges};
+use crate::storage::{ReadAt, read_exact_ahead, will_need_ranges};
 use integer_encoding::VarInt;
 use std::ops::Range;
 use std::sync::Arc;
@@ -164,7 +164,7 @@ impl SeedFile {
         }
         check_sections(&sections, page_bits, &manifest.0, source.size())?;
         let mut table = vec![0u8; (sections[0].end - sections[0].start) as usize];
-        source.read_exact_at(sections[0].start, &mut table)?;
+        read_exact_ahead(source.as_ref(), sections[0].start, &mut table)?;
         if crc32fast::hash(&table) != crcs[0] {
             return Err(IndexError::Checksum("seeds bucket table".into()));
         }
@@ -557,7 +557,7 @@ fn read_table_starts(
     if 8 * count as u64 > section.end - section.start {
         return Err(IndexError::format("seeds contig tables"));
     }
-    source.read_exact_at(section.start, &mut bytes)?;
+    read_exact_ahead(source, section.start, &mut bytes)?;
     let starts: Vec<u64> = (bytes.as_chunks::<8>().0.iter())
         .map(|word| section.start.saturating_add(u64::from_le_bytes(*word)))
         .collect();

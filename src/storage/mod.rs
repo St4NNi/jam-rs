@@ -106,6 +106,27 @@ pub fn will_need_ranges(source: &dyn ReadAt, ranges: &mut [(u64, u64)]) {
     }
 }
 
+/// Bytes of one piece of a long read, and the pieces asked for ahead of the one being read.
+const AHEAD_PIECE: usize = 16 << 20;
+const AHEAD_PIECES: u64 = 4;
+
+/// Reads like `read_exact_at`, in pieces, and asks for the next pieces before each is read, so a
+/// long read of a slow source has many requests in flight but only a few pieces ahead.
+pub fn read_exact_ahead(source: &dyn ReadAt, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
+    let end = checked_end(offset, buffer.len(), source.size())?;
+    let mut hinted = offset;
+    for (index, piece) in buffer.chunks_mut(AHEAD_PIECE).enumerate() {
+        let start = offset + (index * AHEAD_PIECE) as u64;
+        let until = end.min(start + AHEAD_PIECES * AHEAD_PIECE as u64);
+        if hinted < until {
+            source.will_need(hinted, until - hinted);
+            hinted = until;
+        }
+        source.read_exact_at(start, piece)?;
+    }
+    Ok(())
+}
+
 /// Locks `mutex`. A thread that panicked while holding it leaves data that is still whole here,
 /// so the lock is taken anyway.
 pub(crate) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
