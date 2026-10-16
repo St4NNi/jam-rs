@@ -253,6 +253,8 @@ fn store_search_same() {
         assert_eq!(search_all(&shards, &query), expected, "{name}");
         let (searched, peak) = counts(&local, &store);
         eprintln!("{name}: open {opened:?}; search {searched:?}, at most {peak} at once");
+        // The entries ahead keep many more requests in flight than the two workers.
+        assert!(peak > 8, "{name}: {peak}");
         searched
     };
     let searched = cold(None, "cold");

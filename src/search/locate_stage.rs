@@ -24,6 +24,8 @@ const CHUNK_SEEDS: usize = 4096;
 /// hits are checked on its sequence before it is aligned: the seed hits that a plan expects of a
 /// qualifying copy.
 const WEAK_HIT_STARTS: usize = 8;
+/// Seed bins of one entry whose bases are asked for ahead, at most.
+const AHEAD_BINS: usize = 256;
 
 /// The seed locations of one candidate entry: pairs of seed (an index into
 /// `QueryKmers::distinct`) and seed location, ascending.
@@ -194,6 +196,23 @@ fn locate(
         containment_estimate: request.query.containment_estimate(hit_starts),
         alignment_windows: alignment_windows(contig_table.starts(), bins, bin_bits, request.flank),
     }))
+}
+
+/// Asks for what the later stages will read of a candidate entry with seed locations
+/// `locations`: its contig table, its header page, and the bases of its first seed bins with
+/// `reach` bases (the flank, at least k) on each side. These hold each bin with k bases on each
+/// side, which the seed check reads, and the alignment window around it.
+pub fn will_need_entry(shard: &Shard, entry: u32, locations: &[(u32, SeedLocation)], reach: u64) {
+    shard.seed_file().hint_contig_table(entry);
+    let bin_bits = u32::from(shard.manifest().parameters.bin_bits);
+    let mut bins: Vec<u32> = locations.iter().map(|(_, location)| location.bin).collect();
+    bins.sort_unstable();
+    bins.dedup();
+    let ranges = bins.iter().take(AHEAD_BINS).map(|&bin| {
+        let start = u64::from(bin) << bin_bits;
+        start.saturating_sub(reach)..start + (1 << bin_bits) + reach
+    });
+    shard.will_need_bases(entry, ranges);
 }
 
 /// What checking the seed hits of one weak entry on its sequence needs.

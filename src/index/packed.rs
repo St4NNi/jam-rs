@@ -335,19 +335,12 @@ impl PackedSequence {
     /// The file range of the stored blocks that hold bases `range` (entry coordinates), or
     /// `None` when it is empty.
     fn stored_range(&self, range: Range<u64>) -> Option<Range<u64>> {
-        if range.is_empty() {
-            return None;
-        }
-        let first = range.start / 4 / BLOCK_DATA;
-        let last = (range.end - 1) / 4 / BLOCK_DATA;
-        let end = (BASES_AT + (last + 1) * BLOCK_BYTES).min(self.names_at());
-        Some(BASES_AT + first * BLOCK_BYTES..end)
+        stored_range(self.bases(), range)
     }
 
     /// Where the name blocks start, after the bases, from the contig table.
     fn names_at(&self) -> u64 {
-        let data = self.bases().div_ceil(4);
-        BASES_AT + data + 4 * data.div_ceil(BLOCK_DATA)
+        names_at(self.bases())
     }
 
     /// Reads and checks the header page once: its CRC-32, and that it fits the contig table and
@@ -446,6 +439,40 @@ impl PackedSequence {
         }
         Ok(names)
     }
+}
+
+/// The file range of the stored blocks that hold bases `range` (entry coordinates) of an entry
+/// of `bases` bases, or `None` when it is empty.
+fn stored_range(bases: u64, range: Range<u64>) -> Option<Range<u64>> {
+    if range.is_empty() {
+        return None;
+    }
+    let first = range.start / 4 / BLOCK_DATA;
+    let last = (range.end - 1) / 4 / BLOCK_DATA;
+    let end = (BASES_AT + (last + 1) * BLOCK_BYTES).min(names_at(bases));
+    Some(BASES_AT + first * BLOCK_BYTES..end)
+}
+
+/// Where the name blocks start in the packed sequence of an entry of `bases` bases.
+fn names_at(bases: u64) -> u64 {
+    let data = bases.div_ceil(4);
+    BASES_AT + data + 4 * data.div_ceil(BLOCK_DATA)
+}
+
+/// Asks `source`, the packed sequence of an entry of `bases` bases, for its header page and the
+/// stored blocks of bases `ranges` (entry coordinates, cut at the entry end) at once, joining
+/// close ones, without its contig table.
+pub(crate) fn will_need_bases(
+    source: &dyn ReadAt,
+    bases: u64,
+    ranges: impl IntoIterator<Item = Range<u64>>,
+) {
+    let mut stored = vec![(0, BASES_AT)];
+    for range in ranges {
+        let range = range.start.min(bases)..range.end.min(bases);
+        stored.extend(stored_range(bases, range).map(|r| (r.start, r.end)));
+    }
+    will_need_ranges(source, &mut stored);
 }
 
 /// Contigs per name block for an entry of `contigs` contigs: a power of two of at least

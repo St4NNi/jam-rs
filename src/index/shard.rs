@@ -8,13 +8,14 @@ use super::contig_table::ContigTable;
 use super::manifest::{EntryRecord, Manifest, SequenceRecord};
 #[cfg(test)]
 use super::manifest::{sha256_range, verify_source};
-use super::packed::PackedSequence;
+use super::packed::{self, PackedSequence};
 #[cfg(test)]
 use super::seed_file::HEADER_BYTES;
 use super::seed_file::SeedFile;
 use super::sources::{IndexHead, Location, ShardFiles, ShardOptions};
 use crate::storage::SliceSource;
 use serde::Serialize;
+use std::ops::Range;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -162,6 +163,20 @@ impl Shard {
         let file = self.files.sequence(sequence.file)?;
         let source = SliceSource::new(file, sequence.range())?;
         Ok(PackedSequence::open(Arc::new(source), table))
+    }
+
+    /// Asks for the header page and the stored blocks of bases `ranges` (entry coordinates) of
+    /// the packed sequence of an entry, so later reads find them. It never changes what is read.
+    pub fn will_need_bases(&self, entry: u32, ranges: impl IntoIterator<Item = Range<u64>>) {
+        let Ok((record, sequence)) = self.packed_record(entry) else {
+            return;
+        };
+        let Ok(file) = self.files.sequence(sequence.file) else {
+            return;
+        };
+        if let Ok(source) = SliceSource::new(file, sequence.range()) {
+            packed::will_need_bases(&source, record.bases, ranges);
+        }
     }
 
     /// Checks the SHA-256 digest of the seeds and of every sequence file, and the checksums of

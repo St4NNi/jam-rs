@@ -13,6 +13,7 @@ use super::error::SearchError;
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
 use super::locate_stage::{
     LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry, read_entry_locations,
+    will_need_entry,
 };
 use super::located::LocatedEntry;
 use super::query::{QueryKmers, lookup_bound};
@@ -62,6 +63,9 @@ pub struct SearchConfig {
 /// to its whole sketch part, at about 0.3 ns per byte on CephFS, and the shared pass makes its
 /// lookups a second time, at about 70 ns each (measured on worm): 230 bytes, rounded up.
 const SKETCH_BYTES_PER_LOOKUP: u64 = 256;
+/// Candidate entries ahead of the workers whose reads are asked for, so on S3 many requests are
+/// in flight; their blocks take a few MiB of the block cache.
+const ENTRIES_AHEAD: usize = 128;
 
 /// The least frequent-seed limit that `SearchConfig::frequent_seed_entries` takes by default.
 pub const MIN_FREQUENT_LIMIT: u64 = 32;
@@ -479,8 +483,10 @@ impl<'a> Searcher<'a> {
         let finish = |index: usize, possible: &PossibleEntry, worker: &mut Worker| {
             self.finish_entry(possible, &locations[index], &locate, request, worker)
         };
-        let seeds = self.shard.seed_file();
-        let prefetch = |possible: &PossibleEntry| seeds.hint_contig_table(possible.entry);
+        let reach = config.flank.max(u64::from(self.seeder.scheme().k));
+        let prefetch = |index: usize, possible: &PossibleEntry| {
+            will_need_entry(self.shard, possible.entry, &locations[index], reach);
+        };
         queue.run(finish, prefetch, &mut summary);
         summary.times.entries = start.finish();
         summary
@@ -682,19 +688,20 @@ impl<'a> EntryQueue<'a> {
 
     /// Runs `finish` for every entry on the workers of the current thread pool, then adds their
     /// work to `summary`. The first error, by worker, decides how the search ended. Taking an
-    /// entry calls `prefetch` for the entry one worker count later, so its reads start early.
+    /// entry calls `prefetch` (with its place) for the entry `ENTRIES_AHEAD` later, so many
+    /// reads are in flight while the workers compute.
     fn run<F, P>(&self, finish: F, prefetch: P, summary: &mut SearchSummary)
     where
         F: Fn(usize, &PossibleEntry, &mut Worker) -> Result<(), Halt> + Sync,
-        P: Fn(&PossibleEntry) + Sync,
+        P: Fn(usize, &PossibleEntry) + Sync,
     {
         let workers = rayon::current_num_threads().min(self.candidates.len());
-        for possible in self.candidates.iter().take(workers) {
-            prefetch(possible);
+        for (index, possible) in self.candidates.iter().enumerate().take(ENTRIES_AHEAD) {
+            prefetch(index, possible);
         }
         let ends: Vec<WorkerEnd> = (0..workers)
             .into_par_iter()
-            .map(|_| self.work_on(&finish, &prefetch, workers))
+            .map(|_| self.work_on(&finish, &prefetch, ENTRIES_AHEAD))
             .collect();
         for end in ends {
             summary.locate.add(&end.worker.locate);
@@ -712,7 +719,7 @@ impl<'a> EntryQueue<'a> {
     fn work_on<F, P>(&self, finish: &F, prefetch: &P, ahead: usize) -> WorkerEnd
     where
         F: Fn(usize, &PossibleEntry, &mut Worker) -> Result<(), Halt>,
-        P: Fn(&PossibleEntry),
+        P: Fn(usize, &PossibleEntry),
     {
         let mut worker = Worker::default();
         while let Some((index, possible)) = self.take_indexed() {
@@ -721,7 +728,7 @@ impl<'a> EntryQueue<'a> {
                 continue;
             }
             if let Some(later) = self.candidates.get(index + ahead) {
-                prefetch(later);
+                prefetch(index + ahead, later);
             }
             let result = match self.control.check() {
                 Err(stopped) => Err(Halt {
