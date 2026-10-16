@@ -4,12 +4,12 @@
 // SPDX-License-Identifier: MIT
 
 use super::manifest::{FileRecord, Manifest};
-use super::packed::BLOCK_BYTES;
-use super::plan::{Pin, Place, Plan, etag_file};
+use super::packed::{BASES_AT, BLOCK_BYTES};
+use super::plan::{Pin, Place, Plan, etag_file, header_starts};
 use super::{AtPath, IndexError};
 use crate::storage::{
-    BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedSource, ReadAt, S3Config,
-    S3Object,
+    BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedPages, PinnedSource, ReadAt,
+    S3Config, S3Object,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -235,6 +235,9 @@ pub(crate) struct ShardFiles {
     cache: Option<Arc<BlockCache>>,
     /// The pins of the plan with their local files, by file name relative to the shard.
     pins: HashMap<String, Vec<(Pin, PathBuf)>>,
+    /// Where the header pages of the manifest's entries start, by sequence file name, for the
+    /// files whose headers are pinned.
+    header_pages: HashMap<String, Vec<u64>>,
     /// The seeds file as a record: its size, and the manifest digest as its key.
     seeds: FileRecord,
     /// The sequence files, each opened at its first use.
@@ -262,7 +265,15 @@ impl ShardFiles {
             }
         }
         let files = head.manifest.sequence_files.clone();
+        let header_pages = (files.iter().enumerate())
+            .filter(|(_, file)| {
+                let pins = pins.get(&file.path).into_iter().flatten();
+                pins.clone().any(|(pin, _)| pin.pages.is_some())
+            })
+            .map(|(place, file)| (file.path.clone(), header_starts(&head.manifest, place)))
+            .collect();
         Ok(Self {
+            header_pages,
             location: location.clone(),
             opened: files.iter().map(|_| OnceLock::new()).collect(),
             files,
@@ -312,7 +323,9 @@ impl ShardFiles {
                 continue;
             }
             let file = LocalFile::open(path)?;
-            if file.size() != pin.bytes() || pin.end > record.bytes {
+            let pages = self.header_pages.get(name).filter(|_| pin.pages.is_some());
+            let wrong_pages = pages.map(|pages| pages.len() as u64) != pin.pages;
+            if file.size() != pin.bytes() || pin.end > record.bytes || wrong_pages {
                 return Err(IndexError::format(format!(
                     "the pinned file {} differs from its plan",
                     path.display()
@@ -322,7 +335,10 @@ impl ShardFiles {
                 Place::Ram => Arc::new(MappedFile::read_from(&file)?),
                 Place::Ssd => Arc::new(file),
             };
-            source = Arc::new(PinnedSource::new(local, pin.start..pin.end, source));
+            source = match pages {
+                Some(pages) => Arc::new(PinnedPages::new(local, pages.clone(), BASES_AT, source)),
+                None => Arc::new(PinnedSource::new(local, pin.start..pin.end, source)),
+            };
         }
         Ok(match object {
             Some(object) => Arc::new(Checked::new(source, object)),

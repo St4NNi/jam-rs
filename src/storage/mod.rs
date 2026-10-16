@@ -21,7 +21,7 @@ pub use error::StorageError;
 pub use etags::{ChangedError, is_changed};
 pub use local::LocalFile;
 pub use mapped::MappedFile;
-pub use pinned::PinnedSource;
+pub use pinned::{PinnedPages, PinnedSource};
 pub use s3::{ChangeHook, S3Config, S3Limits, S3Object};
 pub use slice::SliceSource;
 

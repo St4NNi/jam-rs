@@ -161,9 +161,10 @@ without a unit means bytes. Units are not case sensitive. `KB`, `MB`, `GB`, `TB`
 `PiB` and `EiB` (also `Ki`, `Mi`, `Gi`, `Ti`, `Pi` and `Ei`) are powers of 1024. The same
 format applies to `--memory` and `--disk` in `jam search` and `jam serve` too.
 - `--pin PARTS`: index sections to pin instead of the default plan. Give a comma-separated list
-  of `sketch`, `locators`, `packed`, or `packed=NAME,NAME` (to pin sequences for specific
-  entries). Because every item after `packed=` is read as an entry name, that item must come
-  last in the list. You can pass this flag multiple times.
+  of `sketch`, `locators`, `headers`, `packed`, or `packed=NAME,NAME` (to pin sequences for
+  specific entries). `headers` pins only the first 4 KiB page of each packed sequence, not its
+  bases. Because every item after `packed=` is read as an entry name, that item must come last
+  in the list. You can pass this flag multiple times.
 
 ### jam index copy
 
@@ -591,6 +592,12 @@ Example:
 By default, `jam index warm` pins the sketch section first and then the locator section, up to
 the disk budget. Use `--pin` to choose which sections to pin, for example
 `--pin sketch,locators,packed` or `--pin sketch,packed=NAME1,NAME2`.
+
+When the packed sequences are too large to pin, `--pin sketch,locators,headers` is a good
+choice. Before jam reads bases of an entry, it reads and checks the 4 KiB header page of that
+entry. With `headers` pinned, this page comes from local disk, so a candidate entry needs one
+S3 request fewer. The headers take 4 KiB per entry: about 1.1 GB for 270,000 entries. They
+always go on disk.
 
 ## Screening assemblies
 

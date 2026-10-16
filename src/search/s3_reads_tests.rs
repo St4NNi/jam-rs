@@ -270,4 +270,11 @@ fn store_search_same() {
     ] {
         assert!(!searched.contains_key(part), "{part}: {searched:?}");
     }
+    let parts = [Part::Sketch, Part::Locators, Part::Headers];
+    warm_all(&s3, &cache, &parts);
+    let searched = cold(Some(&cache), "sketch, locators and headers pinned");
+    assert!(
+        !searched.keys().any(|part| part.contains("header")),
+        "{searched:?}"
+    );
 }

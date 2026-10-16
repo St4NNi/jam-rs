@@ -114,9 +114,9 @@ struct WarmArgs {
     /// Disk for pins and the block cache, for example 200GiB
     #[arg(long)]
     disk: ByteSize,
-    /// Parts to pin instead of the default plan, as a comma list of sketch, locators, packed,
-    /// or packed=NAME,NAME for some entries: every item after packed= is an entry name, so it
-    /// comes last. The flag may repeat
+    /// Parts to pin instead of the default plan, as a comma list of sketch, locators, headers
+    /// (the header page of each packed sequence), packed, or packed=NAME,NAME for some entries:
+    /// every item after packed= is an entry name, so it comes last. The flag may repeat
     #[arg(long, value_parser = parse_parts)]
     pin: Vec<Parts>,
 }
@@ -236,8 +236,8 @@ fn plan_lines(plan: &Plan) -> Vec<String> {
     lines
 }
 
-/// The parts of a `--pin` value: a comma list of `sketch`, `locators` and `packed`, which may
-/// end with `packed=NAME,NAME`; every item after `packed=` is an entry name.
+/// The parts of a `--pin` value: a comma list of `sketch`, `locators`, `headers` and `packed`,
+/// which may end with `packed=NAME,NAME`; every item after `packed=` is an entry name.
 fn parse_parts(text: &str) -> Result<Parts, String> {
     let mut parts = Vec::new();
     let mut items = text.split(',');
@@ -245,6 +245,7 @@ fn parse_parts(text: &str) -> Result<Parts, String> {
         parts.push(match item.split_once('=') {
             None if item == "sketch" => Part::Sketch,
             None if item == "locators" => Part::Locators,
+            None if item == "headers" => Part::Headers,
             None if item == "packed" => Part::Packed(None),
             Some(("packed", first)) => {
                 let names: Vec<String> = (std::iter::once(first).chain(items.by_ref()))
@@ -257,7 +258,7 @@ fn parse_parts(text: &str) -> Result<Parts, String> {
             }
             _ => {
                 return Err(format!(
-                    "{item:?} is not sketch, locators, packed or packed=NAME,NAME"
+                    "{item:?} is not sketch, locators, headers, packed or packed=NAME,NAME"
                 ));
             }
         });
@@ -377,6 +378,7 @@ mod tests {
         let parts = |text| parse_parts(text).map(|parts| parts.0);
         assert_eq!(parts("sketch"), Ok(vec![Part::Sketch]));
         assert_eq!(parts("locators"), Ok(vec![Part::Locators]));
+        assert_eq!(parts("headers"), Ok(vec![Part::Headers]));
         assert_eq!(parts("packed"), Ok(vec![Part::Packed(None)]));
         let all = vec![Part::Sketch, Part::Locators, Part::Packed(None)];
         assert_eq!(parts("sketch,locators,packed"), Ok(all));

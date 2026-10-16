@@ -4,7 +4,8 @@
 // SPDX-License-Identifier: MIT
 
 use super::manifest::{EntryRecord, FileRecord, sha256_range};
-use super::plan::{PLAN_FILE, Pin, Plan, etag_file};
+use super::packed::{BASES_AT, header_page_intact};
+use super::plan::{PLAN_FILE, Pin, Plan, etag_file, header_starts};
 use super::seed_file::{HEADER_BYTES, verify_part};
 use super::sources::{IndexHead, Location};
 use super::{AtPath, IndexError};
@@ -48,7 +49,14 @@ pub fn warm(
                 None if pin.file == head.file => &seeds,
                 None => return Err(IndexError::Input(format!("no file {}", pin.file))),
             };
-            let pinned = Pinned { pin, record, file };
+            let pages =
+                (file.zip(pin.pages)).map(|((_, place), _)| header_starts(&head.manifest, place));
+            let pinned = Pinned {
+                pin,
+                record,
+                file,
+                pages,
+            };
             let path = plan.pin_path(cache, pin);
             if is_complete(location, &path, &pinned) {
                 return Ok(());
@@ -60,11 +68,12 @@ pub fn warm(
 }
 
 /// A pin with the record of its file; for a sequence file also the entries and the place of the
-/// file in the manifest.
+/// file in the manifest, and for a pin of headers where its pages start.
 struct Pinned<'a> {
     pin: &'a Pin,
     record: &'a FileRecord,
     file: Option<(&'a [EntryRecord], usize)>,
+    pages: Option<Vec<u64>>,
 }
 
 /// Whether the pin file at `path` is there and intact, as `verify_pin` checks it, and its
@@ -92,6 +101,16 @@ fn verify_pin(
         )));
     }
     let damaged = || IndexError::Checksum(format!("the pin of {} is damaged", pin.file));
+    if let Some(starts) = &pinned.pages {
+        let mut page = vec![0u8; BASES_AT as usize];
+        for index in 0..starts.len() as u64 {
+            file.read_exact_at(index * BASES_AT, &mut page)?;
+            if !header_page_intact(&page) {
+                return Err(damaged());
+            }
+        }
+        return Ok(());
+    }
     if let Some((entries, place)) = pinned.file {
         if pin.bytes() == record.bytes {
             let whole = sha256_range(file, 0..pin.bytes())? == record.sha256;
@@ -127,7 +146,18 @@ fn download(location: &Location, pinned: &Pinned<'_>, path: &Path) -> Result<(),
     let partial = PathBuf::from(format!("{}.partial", path.display()));
     let file = std::fs::File::create(&partial).at(&partial)?;
     file.set_len(pin.bytes()).at(&partial)?;
-    let chunks = pin.bytes().div_ceil(DOWNLOAD_CHUNK as u64);
+    if let Some(starts) = &pinned.pages {
+        (starts.par_iter().enumerate()).try_for_each(|(index, &start)| {
+            let mut page = vec![0; BASES_AT as usize];
+            source.read_exact_at(start, &mut page)?;
+            file.write_all_at(&page, index as u64 * BASES_AT)
+                .at(&partial)
+        })?;
+    }
+    let chunks = match pinned.pages {
+        Some(_) => 0,
+        None => pin.bytes().div_ceil(DOWNLOAD_CHUNK as u64),
+    };
     (0..chunks).into_par_iter().try_for_each(|chunk| {
         let at = chunk * DOWNLOAD_CHUNK as u64;
         let mut buffer = vec![0; (pin.bytes() - at).min(DOWNLOAD_CHUNK as u64) as usize];
@@ -194,9 +224,14 @@ mod tests {
         let head = location.head().unwrap();
         assert_eq!(head.digest, local.digest());
         let cache = directory.path().join("cache");
-        let parts = [Part::Sketch, Part::Packed(Some(vec!["entry2".into()]))];
+        let parts = [
+            Part::Sketch,
+            Part::Packed(Some(vec!["entry2".into()])),
+            Part::Headers,
+        ];
         let plan = Plan::choose(&head, 1 << 30, 1 << 30, &parts).unwrap();
         assert_eq!(plan.pins[0].place, Place::Ram);
+        assert_eq!(plan.pins[2].place, Place::Ssd);
         warm(&location, &head, &plan, &cache).unwrap();
         assert_eq!(
             Plan::read(&cache, &head.digest).unwrap(),
@@ -207,8 +242,8 @@ mod tests {
         let before = asked.lock().unwrap().len();
         warm(&location, &head, &plan, &cache).unwrap();
         assert_eq!(asked.lock().unwrap().len(), before + plan.pins.len());
-        // A damaged pin is downloaded again, also a pin of part of the seeds file.
-        for pin in &plan.pins[..2] {
+        // A damaged pin is downloaded again, also a pin of part of the seeds file and of headers.
+        for pin in &plan.pins {
             let pinned = plan.pin_path(&cache, pin);
             let mut bytes = std::fs::read(&pinned).unwrap();
             let at = bytes.len() - 100;

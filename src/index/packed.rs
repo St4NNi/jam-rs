@@ -465,6 +465,14 @@ fn page_crc(page: &[u8]) -> u32 {
     hasher.finalize()
 }
 
+/// Whether `page` is a header page of this format with an intact CRC-32.
+pub(crate) fn header_page_intact(page: &[u8]) -> bool {
+    page.len() == BASES_AT as usize
+        && page[..16] == MAGIC
+        && u32_at(page, 16) == Some(VERSION)
+        && u32_at(page, 48) == Some(page_crc(page))
+}
+
 /// A contig name is one word.
 fn valid_name(name: &[u8]) -> bool {
     !name.is_empty() && !name.iter().any(u8::is_ascii_whitespace)

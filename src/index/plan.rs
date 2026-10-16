@@ -3,7 +3,8 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::packed::BLOCK_BYTES;
+use super::manifest::Manifest;
+use super::packed::{BASES_AT, BLOCK_BYTES};
 use super::sources::IndexHead;
 use super::{AtPath, IndexError};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,8 @@ pub enum Part {
     Locators,
     /// Packed sequences of stage 3: all entries, or the named ones.
     Packed(Option<Vec<String>>),
+    /// The header page of the packed sequence of every entry, without its bases.
+    Headers,
 }
 
 impl std::fmt::Display for Part {
@@ -29,6 +32,7 @@ impl std::fmt::Display for Part {
             Self::Sketch => "sketch",
             Self::Locators => "locators",
             Self::Packed(_) => "packed",
+            Self::Headers => "headers",
         })
     }
 }
@@ -59,13 +63,32 @@ pub struct Pin {
     pub sha256: String,
     /// Where the range is read from.
     pub place: Place,
+    /// For the headers part: the pin file holds only the header pages of the packed sequences
+    /// in the range, this many, one after the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u64>,
 }
 
 impl Pin {
-    /// Bytes of the range.
+    /// Bytes of the pin file.
     pub fn bytes(&self) -> u64 {
-        self.end - self.start
+        self.pages
+            .map_or(self.end - self.start, |pages| pages * BASES_AT)
     }
+}
+
+/// Where the packed sequences of the manifest's entries start in sequence file `file`, in
+/// order: the header pages that a pin of the headers part holds.
+pub(crate) fn header_starts(manifest: &Manifest, file: usize) -> Vec<u64> {
+    let sequences = manifest
+        .entries
+        .iter()
+        .filter_map(|entry| entry.sequence.as_ref());
+    let mut starts: Vec<u64> = (sequences.filter(|sequence| sequence.file == file))
+        .map(|sequence| sequence.offset)
+        .collect();
+    starts.sort_unstable();
+    starts
 }
 
 /// The plan of one shard in a cache directory. It lies in the directory named by the shard's
@@ -116,7 +139,7 @@ impl Plan {
 
     /// The plan for the shard of `head` within `memory` and `disk` bytes: `parts`, or else the
     /// sketch and the locators while the budgets last, each in RAM if it fits, else on disk.
-    /// Packed sequences go on disk; a pin in RAM also takes disk bytes.
+    /// Packed sequences and their headers go on disk; a pin in RAM also takes disk bytes.
     pub fn choose(
         head: &IndexHead,
         memory: u64,
@@ -145,7 +168,7 @@ impl Plan {
                         "pinning {part} needs {bytes} bytes of disk, {disk_left} are left"
                     )));
                 }
-                Part::Packed(_) => Place::Ssd,
+                Part::Packed(_) | Part::Headers => Place::Ssd,
                 _ if bytes <= memory_left => Place::Ram,
                 _ => Place::Ssd,
             };
@@ -198,6 +221,7 @@ pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>
         end: range.end,
         sha256: head.digest.clone(),
         place,
+        pages: None,
     };
     // The packed sequences of the entries in each sequence file, joined where they follow each
     // other; a shard built with the sketch part only has none.
@@ -239,6 +263,17 @@ pub fn part_pins(head: &IndexHead, part: &Part, place: Place) -> Result<Vec<Pin>
             }
             pins
         }
+        // One pin per sequence file, of its whole range; its file holds only the pages.
+        Part::Headers => (manifest.sequence_files.iter().enumerate())
+            .map(|(place_of, file)| (file, header_starts(manifest, place_of).len() as u64))
+            .filter(|(_, pages)| *pages > 0)
+            .map(|(file, pages)| Pin {
+                file: file.path.clone(),
+                sha256: file.sha256.clone(),
+                pages: Some(pages),
+                ..seeds(&(0..file.bytes))
+            })
+            .collect(),
     })
 }
 
@@ -324,6 +359,15 @@ mod tests {
         assert_eq!(ranges(&named), [(file, sequence.range())]);
         let missing = Part::Packed(Some(vec!["other".into()]));
         assert!(part_pins(head, &missing, Place::Ssd).is_err());
+        // The headers part holds one page per entry of each file.
+        let headers = part_pins(head, &Part::Headers, Place::Ssd).unwrap();
+        let pages: Vec<_> = headers.iter().map(|pin| (pin.end, pin.pages)).collect();
+        let starts = |file| header_starts(manifest, file).len() as u64;
+        let expected: Vec<_> = (files.iter().enumerate())
+            .map(|(place, file)| (file.bytes, Some(starts(place))))
+            .collect();
+        assert_eq!(pages, expected);
+        assert_eq!(headers.iter().map(Pin::bytes).sum::<u64>(), 3 * BASES_AT);
     }
 
     #[test]
