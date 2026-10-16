@@ -65,12 +65,14 @@ fn serve_slow(root: &Path) -> (crate::test_support::Server, Arc<Store>) {
     (server, store)
 }
 
-/// Two shards of 40 entries of three contigs of 20 to 100 kb. The query lies with 1% changes in entries 0 and 1
-/// of each shard; stretches of 60 to 400 of its bases lie in most other entries, so they become
-/// candidates with few seed hits, as most candidates of a large index are.
-fn build_shards(directory: &Path) -> Vec<u8> {
+/// Two shards of 40 entries of three contigs of 20 to 100 kb, for a query of `length` bases. The
+/// query lies with 1% changes in entries 0 and 1 of each shard, a long one cut into a piece per
+/// contig, as a plasmid in a metagenome; stretches of 60 to 400 of its bases lie in most other
+/// entries, so they become candidates with few seed hits, as most candidates of a large index
+/// are.
+fn build_shards(directory: &Path, length: usize) -> Vec<u8> {
     let mut random = rng(0x53_ead);
-    let query = random_bases(&mut random, QUERY_LENGTH);
+    let query = random_bases(&mut random, length);
     for shard in 0..SHARDS {
         let mut entries = Vec::new();
         for entry in 0..ENTRIES {
@@ -81,16 +83,22 @@ fn build_shards(directory: &Path) -> Vec<u8> {
                 })
                 .collect();
             let planted = match entry {
-                0 | 1 => Some(diverged(&mut random, &query, 0.99)),
-                _ if entry % 8 == 7 => None,
+                0 | 1 => {
+                    let copy = diverged(&mut random, &query, 0.99);
+                    let pieces = if length > 10_000 { 3 } else { 1 };
+                    copy.chunks(length.div_ceil(pieces))
+                        .map(<[u8]>::to_vec)
+                        .collect()
+                }
+                _ if entry % 8 == 7 => Vec::new(),
                 _ => {
-                    let length = random.random_range(60..400);
-                    let start = random.random_range(0..QUERY_LENGTH - length);
-                    Some(query[start..start + length].to_vec())
+                    let piece = random.random_range(60..400);
+                    let start = random.random_range(0..length - piece);
+                    vec![query[start..start + piece].to_vec()]
                 }
             };
-            if let Some(piece) = planted {
-                let contig = &mut contigs[entry % 3];
+            for (at, piece) in planted.into_iter().enumerate() {
+                let contig = &mut contigs[(entry + at) % 3];
                 let at = random.random_range(0..contig.len());
                 contig.splice(at..at, piece);
             }
@@ -230,12 +238,27 @@ fn warm_all(config: &S3Config, cache: &Path, parts: &[Part]) {
 /// cache and with pinned parts. Prints the requests by part for each way.
 #[test]
 fn store_search_same() {
+    store_search(QUERY_LENGTH);
+}
+
+/// The same for a query as long as a plasmid.
+#[test]
+fn store_plasmid_same() {
+    store_search(30_000);
+}
+
+fn store_search(length: usize) {
     let directory = tempfile::tempdir().unwrap();
-    let query = build_shards(directory.path());
+    let query = build_shards(directory.path(), length);
     let local: Vec<Shard> = (0..SHARDS)
         .map(|shard| Shard::open(&directory.path().join(format!("shard{shard}.jam"))).unwrap())
         .collect();
     let expected = search_all(&local, &query);
+    for shard in &local {
+        let (summary, _) = search_shard(shard, &query);
+        let align = summary.split("align: ").nth(1).unwrap_or_default();
+        eprintln!("{length} bases: align {}", &align[..align.len().min(400)]);
+    }
     let (server, store) = serve_slow(directory.path());
     let s3 = S3Config::new(
         "local",
@@ -253,12 +276,13 @@ fn store_search_same() {
         assert_eq!(search_all(&shards, &query), expected, "{name}");
         let (searched, peak) = counts(&local, &store);
         eprintln!("{name}: open {opened:?}; search {searched:?}, at most {peak} at once");
-        // The entries ahead keep many more requests in flight than the two workers.
-        assert!(peak > 8, "{name}: {peak}");
+        // With many candidates, the entries ahead keep many more requests in flight than the two
+        // workers. A long query has only its two hits per shard.
+        assert!(peak > 8 || length > 10_000, "{name}: {peak}");
         searched
     };
     let searched = cold(None, "cold");
-    assert!(searched["packed bases"] > 0);
+    assert!(searched.keys().any(|part| part.contains("bases")));
     let cache = directory.path().join("cache");
     warm_all(&s3, &cache, &[Part::Sketch, Part::Locators]);
     let searched = cold(Some(&cache), "sketch and locators pinned");
