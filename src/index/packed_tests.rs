@@ -83,6 +83,49 @@ fn packed_round_trip() {
     assert!(packed.contig_name(5).is_err());
 }
 
+/// A source that records the ranges it is asked for.
+struct Hinted {
+    inner: MappedFile,
+    hints: std::sync::Mutex<Vec<(u64, u64)>>,
+}
+
+impl ReadAt for Hinted {
+    fn read_exact_at(&self, offset: u64, buffer: &mut [u8]) -> std::io::Result<()> {
+        self.inner.read_exact_at(offset, buffer)
+    }
+
+    fn size(&self) -> u64 {
+        self.inner.size()
+    }
+
+    fn will_need(&self, offset: u64, length: u64) {
+        self.hints.lock().unwrap().push((offset, length));
+    }
+}
+
+/// Windows ask for their blocks of bases alone: the names are read only when asked for.
+#[test]
+fn windows_hint_no_names() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("entry.packed");
+    let contigs = contigs(4);
+    let table = write(&path, &contigs);
+    let source = Arc::new(Hinted {
+        inner: MappedFile::open(&path, false).unwrap(),
+        hints: Default::default(),
+    });
+    let packed = PackedSequence::open(source.clone(), table);
+    packed.will_need([(2, &(60_000..70_000)), (4, &(0..100))]);
+    let hints = source.hints.lock().unwrap().clone();
+    assert_eq!(hints[0], (0, BASES_AT));
+    assert!(hints.len() > 1);
+    assert!(
+        hints
+            .iter()
+            .all(|&(start, length)| start + length <= packed.names_at())
+    );
+}
+
 #[test]
 fn empty_bad_names() {
     let directory = tempfile::tempdir().unwrap();
