@@ -76,6 +76,11 @@ impl ReadAt for PinnedSource {
             self.rest.will_need(inside.end, end - inside.end);
         }
     }
+
+    /// A part is pinned so that its reads are local, so they cost what the local copy's cost.
+    fn costly_reads(&self) -> bool {
+        self.pinned.costly_reads()
+    }
 }
 
 /// A source whose pages of `page` bytes at `starts` come from a local copy that holds them one
@@ -160,6 +165,11 @@ impl ReadAt for PinnedPages {
             }
             at = stop;
         }
+    }
+
+    /// Most bytes are not in the pages, so reads cost what those of the rest cost.
+    fn costly_reads(&self) -> bool {
+        self.rest.costly_reads()
     }
 }
 

@@ -42,6 +42,10 @@ impl ReadAt for SliceSource {
             self.inner.will_need(self.range.start + offset, length);
         }
     }
+
+    fn costly_reads(&self) -> bool {
+        self.inner.costly_reads()
+    }
 }
 
 #[cfg(test)]

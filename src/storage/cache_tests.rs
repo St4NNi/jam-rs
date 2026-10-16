@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::*;
+use crate::storage::{PinnedPages, PinnedSource, SliceSource};
 use crate::test_support::{random_bytes, rng, runtime};
 use rand::RngExt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -115,6 +116,42 @@ fn batches_stay_bounded() {
     cached.read_exact_at(0, &mut out).unwrap();
     assert_eq!(out, data);
     assert!(largest.load(Ordering::SeqCst) as u64 <= FILL_BYTES);
+}
+
+/// Bytes that cost much per read, as on S3.
+struct Costly(Vec<u8>);
+
+impl ReadAt for Costly {
+    fn size(&self) -> u64 {
+        self.0.size()
+    }
+
+    fn read_exact_at(&self, at: u64, out: &mut [u8]) -> io::Result<()> {
+        self.0.read_exact_at(at, out)
+    }
+
+    fn costly_reads(&self) -> bool {
+        true
+    }
+}
+
+/// The cache, a slice and pinned pages tell that reads of a costly source cost much, so close
+/// ranges are joined wider; a pinned range costs what its local copy costs.
+#[test]
+fn costly_reads_forwarded() {
+    let source = Arc::new(Costly(vec![0; 10_000]));
+    let cached: Arc<dyn ReadAt> =
+        Arc::new(cache(1 << 20, 4096).wrap(source, DIGEST, None).unwrap());
+    assert!(cached.costly_reads());
+    assert!(
+        SliceSource::new(Arc::clone(&cached), 0..100)
+            .unwrap()
+            .costly_reads()
+    );
+    let local: Arc<dyn ReadAt> = Arc::new(vec![0u8; 100]);
+    let range = PinnedSource::new(Arc::clone(&local), 0..100, Arc::clone(&cached));
+    assert!(!range.costly_reads());
+    assert!(PinnedPages::new(local, vec![0], 100, cached).costly_reads());
 }
 
 #[test]

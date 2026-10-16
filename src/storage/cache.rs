@@ -393,6 +393,11 @@ impl ReadAt for CachedSource {
         self.inner.version()
     }
 
+    /// A cached read that misses still reads the source, so it costs as much as the source's.
+    fn costly_reads(&self) -> bool {
+        self.inner.costly_reads()
+    }
+
     fn will_need(&self, offset: u64, length: u64) {
         self.inner.will_need(offset, length);
         let cache = &self.cache;

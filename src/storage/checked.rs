@@ -73,4 +73,8 @@ impl ReadAt for Checked {
     fn will_need(&self, offset: u64, length: u64) {
         self.inner.will_need(offset, length);
     }
+
+    fn costly_reads(&self) -> bool {
+        self.inner.costly_reads()
+    }
 }
