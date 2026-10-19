@@ -47,3 +47,5 @@ mod s3_reads_tests;
 mod search_tests;
 #[cfg(test)]
 mod sketch_stage_tests;
+#[cfg(test)]
+mod warm_latency_tests;
