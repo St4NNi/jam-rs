@@ -85,6 +85,15 @@ impl ReadCost {
             Self::Request => 8 << 20,
         }
     }
+
+    /// Most bytes that the block cache fetches with one request. A larger read is fetched in
+    /// parts, several at once.
+    pub fn part_bytes(self) -> u64 {
+        match self {
+            Self::Local | Self::Network => 1 << 20,
+            Self::Request => 4 << 20,
+        }
+    }
 }
 
 impl<T: ReadAt + ?Sized> ReadAt for Box<T> {

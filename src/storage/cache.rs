@@ -20,8 +20,15 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// The largest block size, so that a fetched run of blocks stays small.
 const MAX_BLOCK_BYTES: u64 = 1 << 20;
-/// Most bytes of blocks fetched with one request.
+/// Most bytes of blocks fetched with one request while most read-ahead places are free, so that
+/// more requests fly; else up to the part size of the source's read cost.
 const FILL_BYTES: u64 = 1 << 20;
+/// Bytes of fetches in flight at once: an eighth of the RAM budget, within these bounds. Each
+/// fetch takes room for its bytes before it reads, so many large parts at once stay bounded.
+const FETCH_ROOM: std::ops::RangeInclusive<u64> = (32 << 20)..=(1 << 30);
+/// Parts of a long read asked for ahead of the first, so its blocks stay in the cache until
+/// read.
+const PARTS_AHEAD: u64 = 16;
 /// Every block counts at least this many bytes against the RAM budget, so that many tiny final
 /// blocks cannot make the cache index grow without bound.
 const MIN_CHARGE: usize = 256;
@@ -94,6 +101,10 @@ pub struct BlockCache {
     read_ahead: Option<Arc<Semaphore>>,
     /// Hinted ranges fetched or waiting for a place; each holds one until it ends.
     hints: Arc<Semaphore>,
+    /// Places for hinted ranges fetched ahead.
+    places: usize,
+    /// Room for the bytes of fetches in flight, and all of it.
+    fetch_room: (Arc<Semaphore>, u32),
     /// The most hinted ranges fetched or waiting at once.
     most_hints: usize,
     /// Blocks being fetched now, so another read waits for them instead of asking again.
@@ -147,6 +158,11 @@ impl BlockCache {
             read_ahead: (config.read_ahead > 0)
                 .then(|| Arc::new(Semaphore::new(config.read_ahead))),
             hints: Arc::new(Semaphore::new(config.read_ahead * HINTS_PER_PLACE)),
+            places: config.read_ahead,
+            fetch_room: {
+                let room = Self::fetch_room(config.ram_bytes) as u32;
+                (Arc::new(Semaphore::new(room as usize)), room)
+            },
             most_hints: config.read_ahead * HINTS_PER_PLACE,
             in_flight: Mutex::default(),
             runtime,
@@ -170,15 +186,32 @@ impl BlockCache {
                 "cache block size {block_bytes} is not between 1 and {MAX_BLOCK_BYTES} bytes"
             )));
         }
+        let part_bytes = inner.read_cost().part_bytes();
         Ok(CachedSource {
             inner,
             file: FileKey {
                 digest: file,
                 version: 0,
                 block_bytes,
+                part_bytes,
             },
             cache: Arc::clone(self),
         })
+    }
+
+    /// Most blocks of `file` fetched with one request: fewer while most read-ahead places are
+    /// free, so that the parts of a long read fly at the same time.
+    fn batch(&self, file: FileKey) -> u64 {
+        let small = (FILL_BYTES / file.block_bytes).max(1);
+        match &self.read_ahead {
+            Some(places) if places.available_permits() * 2 > self.places => file.batch().min(small),
+            _ => file.batch(),
+        }
+    }
+
+    /// Bytes of fetches in flight at once for a RAM budget of `ram_bytes`, besides the blocks.
+    pub fn fetch_room(ram_bytes: u64) -> u64 {
+        (ram_bytes / 8).clamp(*FETCH_ROOM.start(), *FETCH_ROOM.end())
     }
 
     /// Writes the blocks still on their way to the disk level, so the next run finds them.
@@ -195,8 +228,8 @@ impl BlockCache {
         Ok(self.runtime.block_on(self.blocks.close())?)
     }
 
-    /// Calls `consume(first, batch)` for the `blocks` of a source, at most
-    /// `FILL_BYTES` at a time, each batch after the fetch of its missing blocks.
+    /// Calls `consume(first, batch)` for the `blocks` of a source, at most one part at a time,
+    /// each batch after the fetch of its missing blocks.
     fn fill_batches(
         &self,
         inner: &dyn ReadAt,
@@ -204,9 +237,9 @@ impl BlockCache {
         blocks: RangeInclusive<u64>,
         mut consume: impl FnMut(u64, &[Block]),
     ) -> io::Result<()> {
-        let last = *blocks.end();
-        for start in blocks.step_by(file.batch() as usize) {
-            let end = last.min(start + file.batch() - 1);
+        let (last, batch) = (*blocks.end(), self.batch(file));
+        for start in blocks.step_by(batch as usize) {
+            let end = last.min(start + batch - 1);
             consume(start, &self.fill(inner, file, start, end, true)?);
         }
         Ok(())
@@ -307,6 +340,11 @@ impl BlockCache {
     ) -> io::Result<()> {
         let start = first * file.block_bytes;
         let stop = ((first + run.len() as u64) * file.block_bytes).min(inner.size());
+        let (room, most) = &self.fetch_room;
+        let wanted = u32::try_from(stop - start).unwrap_or(u32::MAX).min(*most);
+        let _room = self
+            .runtime
+            .block_on(Arc::clone(room).acquire_many_owned(wanted));
         let mut bytes = vec![0; (stop - start) as usize];
         inner.read_exact_at(start, &mut bytes)?;
         let room = self.disk_room(bytes.len() as u64 + run.len() as u64 * DISK_OVERHEAD);
@@ -348,6 +386,7 @@ impl BlockCache {
             digest: file,
             version,
             block_bytes,
+            part_bytes: FILL_BYTES,
         };
         for block in 0..size.div_ceil(block_bytes) {
             self.blocks.remove(&file.block(block));
@@ -370,6 +409,12 @@ impl ReadAt for CachedSource {
         }
         let file = self.versioned()?;
         let block_bytes = file.block_bytes;
+        // The parts after the first are asked for, so they are fetched at the same time.
+        let part = self.cache.batch(file) * block_bytes;
+        let second = (offset / part + 1) * part;
+        if self.cache.read_ahead.is_some() && second < end {
+            self.will_need(second, (end - second).min(PARTS_AHEAD * part));
+        }
         let blocks = offset / block_bytes..=(end - 1) / block_bytes;
         let mut written = 0;
         let inner = self.inner.as_ref();
@@ -411,7 +456,7 @@ impl ReadAt for CachedSource {
         if offset >= end {
             return;
         }
-        let (block_bytes, batch) = (file.block_bytes, file.batch());
+        let (block_bytes, batch) = (file.block_bytes, cache.batch(file));
         let last = (end - 1) / block_bytes;
         // Each batch of blocks is fetched on its own, so long ranges use many requests at once.
         for start in (offset / block_bytes..=last).step_by(batch as usize) {
@@ -499,12 +544,13 @@ fn lock_directory(disk: &DiskConfig) -> Result<File, StorageError> {
 }
 
 /// A file read through the cache: its SHA-256 digest, the version of its bytes (a number for
-/// their ETag) and the size of its blocks.
+/// their ETag), the size of its blocks, and the most bytes fetched with one request.
 #[derive(Clone, Copy)]
 struct FileKey {
     digest: [u8; 32],
     version: u64,
     block_bytes: u64,
+    part_bytes: u64,
 }
 
 impl FileKey {
@@ -520,7 +566,7 @@ impl FileKey {
 
     /// Most blocks fetched with one request.
     fn batch(self) -> u64 {
-        (FILL_BYTES / self.block_bytes).max(1)
+        (self.part_bytes / self.block_bytes).max(1)
     }
 }
 

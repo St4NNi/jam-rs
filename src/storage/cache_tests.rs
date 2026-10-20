@@ -26,6 +26,7 @@ struct Watched {
     delay: Duration,
     active: AtomicUsize,
     peak: Arc<AtomicUsize>,
+    cost: ReadCost,
 }
 
 impl Watched {
@@ -37,6 +38,7 @@ impl Watched {
             delay: Duration::ZERO,
             active: AtomicUsize::new(0),
             peak: Arc::default(),
+            cost: ReadCost::Local,
         }
     }
 }
@@ -54,6 +56,10 @@ impl ReadAt for Watched {
         std::thread::sleep(self.delay);
         self.active.fetch_sub(1, Ordering::SeqCst);
         self.data.read_exact_at(at, out)
+    }
+
+    fn read_cost(&self) -> ReadCost {
+        self.cost
     }
 }
 
@@ -228,8 +234,8 @@ fn read_ahead_fills() {
     assert_eq!(reads.load(Ordering::SeqCst), 1);
 }
 
-/// A long read in pieces with the next pieces asked for has many fetches in flight, where a
-/// plain read has one, and returns the same bytes.
+/// A long read, in pieces with the next pieces asked for or plain, has many fetches in flight
+/// and returns the same bytes.
 #[test]
 fn long_read_ahead() {
     let data = random_bytes(&mut rng(11), 40 << 20);
@@ -249,8 +255,40 @@ fn long_read_ahead() {
             false => cached.read_exact_at(0, &mut out).unwrap(),
         }
         assert!(out == data);
+        // A plain read asks for its next parts too.
         let peak = peak.load(Ordering::SeqCst);
-        assert!(if ahead { peak > 4 } else { peak == 1 }, "{ahead} {peak}");
+        assert!(peak > 4, "{ahead} {peak}");
+    }
+}
+
+/// Without read-ahead, the cache fetches a source of requests in parts of 4 MiB and a local one
+/// in parts of 1 MiB. With read-ahead and all places free, the parts of 1 MiB fly at once.
+#[test]
+fn parts_by_cost() {
+    let data = random_bytes(&mut rng(12), 8 << 20);
+    for (cost, read_ahead, reads) in [
+        (ReadCost::Request, 0, 2),
+        (ReadCost::Local, 0, 8),
+        (ReadCost::Request, 64, 8),
+    ] {
+        let mut source = Watched::new(data.clone());
+        (source.cost, source.delay) = (cost, Duration::from_millis(5));
+        let (count, peak) = (Arc::clone(&source.reads), Arc::clone(&source.peak));
+        let config = CacheConfig {
+            read_ahead,
+            ..CacheConfig::new(64 << 20, 64 << 10)
+        };
+        let cache = BlockCache::open(&config, runtime()).unwrap();
+        let cached = cache.wrap(Arc::new(source), DIGEST, None).unwrap();
+        let mut out = vec![0; data.len()];
+        cached.read_exact_at(0, &mut out).unwrap();
+        assert!(out == data);
+        assert_eq!(count.load(Ordering::SeqCst), reads, "{cost:?} {read_ahead}");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            (read_ahead == 0) == (peak == 1),
+            "{cost:?} {read_ahead} {peak}"
+        );
     }
 }
 
