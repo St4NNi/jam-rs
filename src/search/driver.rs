@@ -19,12 +19,12 @@ use super::located::LocatedEntry;
 use super::query::{QueryKmers, lookup_bound};
 use super::seed_mismatches::{LookupPlan, lookup_plan, target_length};
 use super::sketch_stage::{
-    PossibleEntry, SketchLimits, SketchWork, held_keys, keep_found, sketch_stage,
+    PossibleEntry, SketchLimits, SketchWork, held_seeds, keep_found_seeds, sketch_stage_known,
 };
 use super::times::{PartStart, PartTime, SearchTimes};
 use crate::align::{AlignmentError, Interval};
 use crate::decide::DecisionRule;
-use crate::index::{SeedLocation, Shard, seed_key};
+use crate::index::{SeedLocation, Shard, StoredSeed, seed_key};
 use crate::loss::{MaxMiss, MissModel};
 use crate::seeds::{Seeder, low_complexity_mask};
 use rayon::prelude::*;
@@ -116,7 +116,7 @@ pub struct SearchSummary {
 /// and one query's share of the time of the pass.
 #[derive(Debug)]
 pub struct PreparedKmers {
-    held: Arc<Vec<u64>>,
+    held: Arc<Vec<(u64, StoredSeed)>>,
     time: PartTime,
 }
 
@@ -224,7 +224,7 @@ impl<'a> Searcher<'a> {
                 counts.push(Some(count));
                 keys.append(&mut own);
             }
-            let held = Arc::new(held_keys(self.shard.seed_file(), keys)?);
+            let held = Arc::new(held_seeds(self.shard.seed_file(), keys)?);
             let time = start.finish();
             let total: u64 = counts.iter().flatten().sum();
             Ok::<_, SearchError>(
@@ -326,22 +326,30 @@ impl<'a> Searcher<'a> {
                 },
                 || {
                     let seeds = self.shard.seed_file();
-                    QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
-                        control.check()?;
-                        match &held {
-                            Some(held) => {
-                                let held = |hash| held.binary_search(&seed_key(hash)).is_ok();
-                                lookups.retain(|&(hash, _)| held(hash));
-                                Ok(())
+                    // The stored seeds of the held keys, so stage 1 reads no bucket again.
+                    let mut known = Vec::new();
+                    let kmers =
+                        QueryKmers::filtered(&self.seeder, query, circular, &plan, |lookups| {
+                            control.check()?;
+                            match &held {
+                                Some(held) => {
+                                    let held = |hash| {
+                                        held.binary_search_by_key(&seed_key(hash), |&(k, _)| k)
+                                    };
+                                    lookups.retain(|&(hash, _)| held(hash).is_ok());
+                                }
+                                None => known.extend(keep_found_seeds(seeds, lookups)?),
                             }
-                            None => keep_found(seeds, lookups),
-                        }
-                    })
+                            Ok::<(), SearchError>(())
+                        });
+                    known.sort_unstable_by_key(|&(key, _)| key);
+                    known.dedup_by_key(|&mut (key, _)| key);
+                    kmers.map(|kmers| (kmers, known))
                 },
             );
             let prepared = prepared?;
-            let query_kmers = match query_kmers {
-                Ok(query_kmers) => query_kmers,
+            let (query_kmers, own_known) = match query_kmers {
+                Ok(found) => found,
                 Err(error) => {
                     let mut summary = self.empty_summary(query.len() as u64, plan.level());
                     summary.completion = error.into();
@@ -356,6 +364,7 @@ impl<'a> Searcher<'a> {
                 control,
                 events,
                 low_complexity,
+                known: held.as_deref().map_or(&own_known, |held| held),
             };
             let mut summary = self.run(&query_kmers, circular, &plan, budget, &request, start);
             summary.seed_mismatches = plan.level() as u8;
@@ -418,9 +427,10 @@ impl<'a> Searcher<'a> {
             return summary;
         }
         let start = PartStart::now();
-        let sketch = match sketch_stage(
+        let sketch = match sketch_stage_known(
             self.shard.seed_file(),
             query_kmers,
+            request.known,
             &bound,
             self.sketch_limits(config),
             control,
@@ -638,6 +648,8 @@ struct Request<'a> {
     events: &'a SyncSender<EntryEvent>,
     /// Query bases in low-complexity stretches.
     low_complexity: u64,
+    /// The stored seeds of seed keys that the lookups found already, ascending by key.
+    known: &'a [(u64, StoredSeed)],
 }
 
 /// What one worker thread keeps across entries: its buffers and its share of the work.

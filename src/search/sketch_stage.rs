@@ -132,8 +132,21 @@ pub fn sketch_stage(
     limits: SketchLimits,
     control: SearchControl<'_>,
 ) -> Result<SketchOutcome, SearchError> {
+    sketch_stage_known(seed_file, query, &[], bound, limits, control)
+}
+
+/// As `sketch_stage`, with the stored seeds of some seed keys found already (`known`, ascending
+/// by key, as `keep_found_seeds` gives them), whose buckets are not read again.
+pub fn sketch_stage_known(
+    seed_file: &SeedFile,
+    query: &QueryKmers,
+    known: &[(u64, StoredSeed)],
+    bound: &CoverageBound,
+    limits: SketchLimits,
+    control: SearchControl<'_>,
+) -> Result<SketchOutcome, SearchError> {
     let started = Instant::now();
-    let found = find_query_seeds(seed_file, query, control)?;
+    let found = find_known_seeds(seed_file, query, known, control)?;
     let mut work = SketchWork {
         query_kmers: query.kmers(),
         lookups: query.lookups(),
@@ -208,10 +221,29 @@ pub fn find_query_seeds(
     query: &QueryKmers,
     control: SearchControl<'_>,
 ) -> Result<FoundSeeds, SearchError> {
+    find_known_seeds(seed_file, query, &[], control)
+}
+
+/// As `find_query_seeds`; the keys in `known` (ascending by key) take their stored seed from
+/// there, so only the other keys are looked up.
+fn find_known_seeds(
+    seed_file: &SeedFile,
+    query: &QueryKmers,
+    known: &[(u64, StoredSeed)],
+    control: SearchControl<'_>,
+) -> Result<FoundSeeds, SearchError> {
     let mut keys: Vec<(u64, u32)> = (query.distinct().iter().zip(0..))
         .map(|(query_seed, seed)| (seed_key(query_seed.hash), seed))
         .collect();
     keys.par_sort_unstable();
+    let mut seeds = Vec::with_capacity(keys.len());
+    keys.retain(|&(key, seed)| {
+        match known.binary_search_by_key(&key, |&(known, _)| known) {
+            Ok(index) => seeds.push((seed, known[index].1)),
+            Err(_) => return true,
+        }
+        false
+    });
     let chunks = keys
         .par_chunks(CHUNK_SEEDS)
         .map(|chunk| {
@@ -226,7 +258,7 @@ pub fn find_query_seeds(
             Ok(found.collect::<Vec<_>>())
         })
         .collect::<Result<Vec<_>, SearchError>>()?;
-    let mut seeds = chunks.concat();
+    seeds.extend(chunks.into_iter().flatten());
     seeds.par_sort_unstable_by_key(|(seed, _)| *seed);
     let mut ids: Vec<ColorSetId> = seeds.iter().map(|(_, stored)| stored.color_set).collect();
     ids.par_sort_unstable();
@@ -245,27 +277,39 @@ pub fn find_query_seeds(
 }
 
 /// Keeps the lookups, pairs of k-mer hash and query start, whose seed keys the sketch part holds.
+#[cfg(test)]
 pub fn keep_found(seed_file: &SeedFile, lookups: &mut Vec<(u64, u32)>) -> Result<(), SearchError> {
-    let keys: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
-    let held = held_keys(seed_file, keys)?;
-    lookups.retain(|&(hash, _)| held.binary_search(&seed_key(hash)).is_ok());
-    Ok(())
+    keep_found_seeds(seed_file, lookups).map(drop)
 }
 
-/// The seed keys among `keys` that the sketch part holds, ascending and distinct. The buckets
-/// are read in ascending order, so close keys share reads.
-pub fn held_keys(seed_file: &SeedFile, mut keys: Vec<u64>) -> Result<Vec<u64>, SearchError> {
+/// As `keep_found`, returning the held keys with their stored seeds, ascending by key.
+pub fn keep_found_seeds(
+    seed_file: &SeedFile,
+    lookups: &mut Vec<(u64, u32)>,
+) -> Result<Vec<(u64, StoredSeed)>, SearchError> {
+    let keys: Vec<u64> = lookups.iter().map(|&(hash, _)| seed_key(hash)).collect();
+    let held = held_seeds(seed_file, keys)?;
+    let is_held = |key| held.binary_search_by_key(&key, |&(held, _)| held).is_ok();
+    lookups.retain(|&(hash, _)| is_held(seed_key(hash)));
+    Ok(held)
+}
+
+/// The seed keys among `keys` that the sketch part holds, with their stored seeds, ascending and
+/// distinct. The buckets are read in ascending order, so close keys share reads.
+pub fn held_seeds(
+    seed_file: &SeedFile,
+    mut keys: Vec<u64>,
+) -> Result<Vec<(u64, StoredSeed)>, SearchError> {
     keys.par_sort_unstable();
     keys.dedup();
     let held = keys
         .par_chunks(CHUNK_SEEDS)
         .map(|chunk| {
             let stored = seed_file.find_seeds(chunk)?;
-            let held = chunk
-                .iter()
-                .zip(stored)
-                .filter(|(_, stored)| stored.is_some());
-            Ok(held.map(|(&key, _)| key).collect::<Vec<u64>>())
+            let held = chunk.iter().zip(stored);
+            Ok(held
+                .filter_map(|(&key, stored)| Some((key, stored?)))
+                .collect::<Vec<_>>())
         })
         .collect::<Result<Vec<_>, SearchError>>()?;
     Ok(held.concat())
