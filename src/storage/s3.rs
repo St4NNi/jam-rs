@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::counts::{count_failed, count_s3};
+use super::counts::{count_failed, count_in_flight, count_s3};
 use super::etags::{EtagBook, Latch, Start, changed_error, version_of};
 use super::{ReadAt, ReadCost, StorageError, checked_end, lock};
 use opendal::Operator;
@@ -240,6 +240,8 @@ pub struct S3Object {
     size: u64,
     /// Called with the version of the old ETag when the object was found replaced.
     on_change: Option<ChangeHook>,
+    /// Requests in flight at once over the config.
+    limit: usize,
 }
 
 /// Parts of one upload in flight.
@@ -262,6 +264,7 @@ impl S3Object {
             key: key.to_string(),
             size,
             on_change: None,
+            limit: config.limits.max_in_flight,
         })
     }
 
@@ -286,7 +289,10 @@ impl S3Object {
             let etag = (reader.metadata()).and_then(|meta| meta.etag().map(str::to_string));
             Ok::<_, opendal::Error>((bytes, etag))
         };
-        let (bytes, seen) = self.runtime.block_on(read).map_err(|error| {
+        let flight = count_in_flight(self.limit);
+        let read = self.runtime.block_on(read);
+        drop(flight);
+        let (bytes, seen) = read.map_err(|error| {
             count_failed();
             match error.kind() {
                 opendal::ErrorKind::ConditionNotMatch => self.changed(known.as_deref()),

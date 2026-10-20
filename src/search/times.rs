@@ -22,36 +22,21 @@ pub struct PartTime {
 impl PartTime {
     /// The share `part` (0 to 1) of this cost; counts are rounded.
     pub(super) fn share(&self, part: f64) -> Self {
-        let count = |value: u64| (value as f64 * part).round() as u64;
-        let storage = &self.storage;
         Self {
             wall_seconds: self.wall_seconds * part,
             cpu_seconds: self.cpu_seconds * part,
-            major_faults: count(self.major_faults),
-            storage: StorageCounts {
-                s3_requests: count(storage.s3_requests),
-                s3_bytes: count(storage.s3_bytes),
-                cache_hits: count(storage.cache_hits),
-                cache_misses: count(storage.cache_misses),
-                pinned_reads: count(storage.pinned_reads),
-            },
+            major_faults: (self.major_faults as f64 * part).round() as u64,
+            storage: self.storage.share(part),
         }
     }
 
     /// This cost and `other` together.
     pub(super) fn plus(&self, other: &Self) -> Self {
-        let (a, b) = (&self.storage, &other.storage);
         Self {
             wall_seconds: self.wall_seconds + other.wall_seconds,
             cpu_seconds: self.cpu_seconds + other.cpu_seconds,
             major_faults: self.major_faults + other.major_faults,
-            storage: StorageCounts {
-                s3_requests: a.s3_requests + b.s3_requests,
-                s3_bytes: a.s3_bytes + b.s3_bytes,
-                cache_hits: a.cache_hits + b.cache_hits,
-                cache_misses: a.cache_misses + b.cache_misses,
-                pinned_reads: a.pinned_reads + b.pinned_reads,
-            },
+            storage: self.storage.plus(&other.storage),
         }
     }
 }
