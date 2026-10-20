@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{ReadAt, checked_end};
+use super::{ReadAt, ReadCost, checked_end};
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -43,8 +43,8 @@ impl ReadAt for SliceSource {
         }
     }
 
-    fn costly_reads(&self) -> bool {
-        self.inner.costly_reads()
+    fn read_cost(&self) -> ReadCost {
+        self.inner.read_cost()
     }
 }
 

@@ -41,15 +41,6 @@ pub(crate) const SECTIONS: usize = 6;
 pub(crate) const CRCS_AT: usize = 72 + 16 * SECTIONS;
 /// Where the offset and bytes of the manifest (u64 each) and its CRC-32 lie in the header.
 pub(crate) const MANIFEST_AT: usize = CRCS_AT + 4 * SECTIONS;
-/// Ranges closer than this are read as one.
-const JOIN_GAP: u64 = 8 << 10;
-/// Joined reads stop growing at this size.
-const JOIN_LIMIT: u64 = 1 << 20;
-/// The join gap and limit of a source whose reads cost much (`ReadAt::costly_reads`). On CephFS
-/// one more read costs about as much system time as copying 64 KiB more, against about 5 KiB on
-/// a local disk (measured on worm), and on S3 each read is one request.
-const WIDE_JOIN_GAP: u64 = 64 << 10;
-const WIDE_JOIN_LIMIT: u64 = 4 << 20;
 /// Bytes of the CRC-32 that ends every non-empty bucket, color set and contig table, so each
 /// read checks what it uses. It covers the unit's index, then its bytes.
 pub(crate) const UNIT_CHECK_BYTES: usize = 4;
@@ -418,16 +409,15 @@ impl SeedFile {
     }
 
     /// Reads `ranges` (ascending by start) and calls `visit(index, bytes)` for each. Close ranges
-    /// are read as one, and the source is told about all reads before the first one.
+    /// are read as one by the read cost of the source, which is told about all reads before the
+    /// first one.
     fn read_ranges(
         &self,
         ranges: &[Range<u64>],
         mut visit: impl FnMut(usize, &[u8]) -> Result<(), IndexError>,
     ) -> Result<(), IndexError> {
-        let (gap, limit) = match self.source.costly_reads() {
-            true => (WIDE_JOIN_GAP, WIDE_JOIN_LIMIT),
-            false => (JOIN_GAP, JOIN_LIMIT),
-        };
+        let cost = self.source.read_cost();
+        let (gap, limit) = (cost.join_gap(), cost.join_limit());
         let mut groups: Vec<(Range<u64>, Range<usize>)> = Vec::new();
         for (index, range) in ranges.iter().enumerate() {
             match groups.last_mut() {

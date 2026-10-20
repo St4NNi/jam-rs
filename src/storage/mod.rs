@@ -45,10 +45,45 @@ pub trait ReadAt: Send + Sync {
         Ok(0)
     }
 
-    /// Whether each read costs much beyond its bytes, as on CephFS or S3, so close ranges are
-    /// better read together.
-    fn costly_reads(&self) -> bool {
-        false
+    /// What each read costs beyond its bytes, which decides how close ranges are read together.
+    fn read_cost(&self) -> ReadCost {
+        ReadCost::Local
+    }
+}
+
+/// What one read of a source costs beyond its bytes. Two ranges are read as one when the bytes
+/// between them cost less than one more read; the joined read stops growing at a limit, and the
+/// block cache fetches it in parts, several at once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadCost {
+    /// A local disk: one more read costs about the system time of copying 5 KiB more (measured
+    /// on worm).
+    Local,
+    /// A network file system such as CephFS: one more read costs about as much as 64 KiB more.
+    Network,
+    /// A store where each read is one request, as S3: about 60 ms per request. With 256
+    /// requests in flight on a link of 1 GiB/s, one stream moves about 4 MiB/s, so 60 ms of it
+    /// are about 256 KiB.
+    Request,
+}
+
+impl ReadCost {
+    /// Ranges with fewer bytes than this between them are read as one.
+    pub fn join_gap(self) -> u64 {
+        match self {
+            Self::Local => 8 << 10,
+            Self::Network => 64 << 10,
+            Self::Request => 256 << 10,
+        }
+    }
+
+    /// Joined reads stop growing at this size.
+    pub fn join_limit(self) -> u64 {
+        match self {
+            Self::Local => 1 << 20,
+            Self::Network => 4 << 20,
+            Self::Request => 8 << 20,
+        }
     }
 }
 
@@ -68,8 +103,8 @@ impl<T: ReadAt + ?Sized> ReadAt for Box<T> {
         (**self).version()
     }
 
-    fn costly_reads(&self) -> bool {
-        (**self).costly_reads()
+    fn read_cost(&self) -> ReadCost {
+        (**self).read_cost()
     }
 }
 
@@ -83,17 +118,24 @@ impl ReadAt for Vec<u8> {
     }
 }
 
-/// Ranges closer than this many bytes are hinted as one, so reads become fewer and larger.
+/// Ranges closer than this many bytes are hinted as one at least, so reads become fewer and
+/// larger.
 const HINT_GAP: u64 = 32 << 10;
 
 /// Tells `source` that the byte ranges `start..end` will be read soon, joining ranges that lie
-/// close together. It never changes what is read.
+/// close together by its read cost. It never changes what is read.
 pub fn will_need_ranges(source: &dyn ReadAt, ranges: &mut [(u64, u64)]) {
     ranges.sort_unstable();
+    let cost = source.read_cost();
+    let (gap, limit) = (cost.join_gap().max(HINT_GAP), cost.join_limit());
     let mut joined: Option<(u64, u64)> = None;
     for &(start, end) in ranges.iter() {
         match &mut joined {
-            Some(last) if start <= last.1.saturating_add(HINT_GAP) => last.1 = last.1.max(end),
+            Some(last)
+                if start <= last.1.saturating_add(gap) && end.max(last.1) - last.0 <= limit =>
+            {
+                last.1 = last.1.max(end)
+            }
             _ => {
                 if let Some((first, last)) = joined.replace((start, end)) {
                     source.will_need(first, last - first);
@@ -160,9 +202,14 @@ pub(crate) fn checked_end(offset: u64, length: usize, size: u64) -> io::Result<u
 mod tests {
     use super::*;
 
-    /// Records the hints it gets.
-    #[derive(Default)]
-    struct Hinted(Mutex<Vec<(u64, u64)>>);
+    /// Records the hints it gets; its reads cost `.1`.
+    struct Hinted(Mutex<Vec<(u64, u64)>>, ReadCost);
+
+    impl Default for Hinted {
+        fn default() -> Self {
+            Self(Mutex::default(), ReadCost::Local)
+        }
+    }
 
     impl ReadAt for Hinted {
         fn read_exact_at(&self, _offset: u64, _buffer: &mut [u8]) -> io::Result<()> {
@@ -176,6 +223,10 @@ mod tests {
         fn will_need(&self, offset: u64, length: u64) {
             lock(&self.0).push((offset, length));
         }
+
+        fn read_cost(&self) -> ReadCost {
+            self.1
+        }
     }
 
     #[test]
@@ -186,6 +237,22 @@ mod tests {
         assert_eq!(*lock(&source.0), vec![(0, 4_000), (HINT_GAP * 10, 8)]);
         will_need_ranges(&source, &mut []);
         assert_eq!(lock(&source.0).len(), 2);
+    }
+
+    /// A source of requests joins ranges 200 KiB apart, up to the join limit.
+    #[test]
+    fn requests_joined_wider() {
+        let source = Hinted(Mutex::default(), ReadCost::Request);
+        let step = 200 << 10;
+        let mut ranges: Vec<(u64, u64)> = (0..50).map(|at| (at * step, at * step + 8)).collect();
+        will_need_ranges(&source, &mut ranges);
+        let hints = lock(&source.0).clone();
+        let limit = ReadCost::Request.join_limit();
+        assert!(hints.len() > 1 && hints.len() < 5, "{hints:?}");
+        assert!(hints.iter().all(|(_, length)| *length <= limit));
+        let local = Hinted::default();
+        will_need_ranges(&local, &mut ranges);
+        assert_eq!(lock(&local.0).len(), 50);
     }
 
     #[test]

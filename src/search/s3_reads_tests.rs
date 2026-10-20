@@ -26,6 +26,9 @@ const QUERY_LENGTH: usize = 1_300;
 /// The wait of the store per request, so requests overlap as on S3.
 const DELAY: Duration = Duration::from_millis(3);
 
+/// The bytes and ETag of a file of the test store.
+type StoredFile = Arc<(Vec<u8>, String)>;
+
 /// How fast the test store answers: a wait per request, then the bytes at the rate of one
 /// stream, and all answers share one link of `link_rate` bytes per second (0: no rate).
 #[derive(Clone, Copy)]
@@ -45,7 +48,7 @@ struct Store {
     /// When the shared link is free again.
     link_free: Mutex<Instant>,
     /// The bytes and ETag of each file read so far.
-    files: Mutex<HashMap<String, Arc<(Vec<u8>, String)>>>,
+    files: Mutex<HashMap<String, StoredFile>>,
 }
 
 impl Store {
@@ -56,7 +59,7 @@ impl Store {
     }
 
     /// The bytes and ETag of the file `key` below `root`, read once.
-    fn file(&self, root: &Path, key: &str) -> Option<Arc<(Vec<u8>, String)>> {
+    fn file(&self, root: &Path, key: &str) -> Option<StoredFile> {
         let mut files = self.files.lock().unwrap();
         if let Some(file) = files.get(key) {
             return Some(Arc::clone(file));

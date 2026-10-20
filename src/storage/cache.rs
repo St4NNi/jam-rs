@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::counts::count_blocks;
-use super::{ReadAt, StorageError, checked_end, lock};
+use super::{ReadAt, ReadCost, StorageError, checked_end, lock};
 use foyer::{
     BlockEngineConfig, Code, DeviceBuilder, FsDeviceBuilder, HybridCache, HybridCacheBuilder,
     HybridCacheEntry, HybridCachePolicy, PsyncIoEngineConfig, RecoverMode, Spawner,
@@ -394,8 +394,8 @@ impl ReadAt for CachedSource {
     }
 
     /// A cached read that misses still reads the source, so it costs as much as the source's.
-    fn costly_reads(&self) -> bool {
-        self.inner.costly_reads()
+    fn read_cost(&self) -> ReadCost {
+        self.inner.read_cost()
     }
 
     fn will_need(&self, offset: u64, length: u64) {

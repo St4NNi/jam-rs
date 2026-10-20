@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::counts::count_pinned;
-use super::{ReadAt, checked_end};
+use super::{ReadAt, ReadCost, checked_end};
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -78,8 +78,8 @@ impl ReadAt for PinnedSource {
     }
 
     /// A part is pinned so that its reads are local, so they cost what the local copy's cost.
-    fn costly_reads(&self) -> bool {
-        self.pinned.costly_reads()
+    fn read_cost(&self) -> ReadCost {
+        self.pinned.read_cost()
     }
 }
 
@@ -168,8 +168,8 @@ impl ReadAt for PinnedPages {
     }
 
     /// Most bytes are not in the pages, so reads cost what those of the rest cost.
-    fn costly_reads(&self) -> bool {
-        self.rest.costly_reads()
+    fn read_cost(&self) -> ReadCost {
+        self.rest.read_cost()
     }
 }
 

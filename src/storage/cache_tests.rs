@@ -130,28 +130,26 @@ impl ReadAt for Costly {
         self.0.read_exact_at(at, out)
     }
 
-    fn costly_reads(&self) -> bool {
-        true
+    fn read_cost(&self) -> ReadCost {
+        ReadCost::Request
     }
 }
 
-/// The cache, a slice and pinned pages tell that reads of a costly source cost much, so close
-/// ranges are joined wider; a pinned range costs what its local copy costs.
+/// The cache, a slice and pinned pages tell the read cost of their source, so close ranges are
+/// joined as wide as it asks; a pinned range costs what its local copy costs.
 #[test]
-fn costly_reads_forwarded() {
+fn read_cost_forwarded() {
     let source = Arc::new(Costly(vec![0; 10_000]));
     let cached: Arc<dyn ReadAt> =
         Arc::new(cache(1 << 20, 4096).wrap(source, DIGEST, None).unwrap());
-    assert!(cached.costly_reads());
-    assert!(
-        SliceSource::new(Arc::clone(&cached), 0..100)
-            .unwrap()
-            .costly_reads()
-    );
+    assert_eq!(cached.read_cost(), ReadCost::Request);
+    let slice = SliceSource::new(Arc::clone(&cached), 0..100).unwrap();
+    assert_eq!(slice.read_cost(), ReadCost::Request);
     let local: Arc<dyn ReadAt> = Arc::new(vec![0u8; 100]);
     let range = PinnedSource::new(Arc::clone(&local), 0..100, Arc::clone(&cached));
-    assert!(!range.costly_reads());
-    assert!(PinnedPages::new(local, vec![0], 100, cached).costly_reads());
+    assert_eq!(range.read_cost(), ReadCost::Local);
+    let pages = PinnedPages::new(local, vec![0], 100, cached);
+    assert_eq!(pages.read_cost(), ReadCost::Request);
 }
 
 #[test]

@@ -9,7 +9,7 @@ use super::plan::{Pin, Place, Plan, etag_file, header_starts};
 use super::{AtPath, IndexError};
 use crate::storage::{
     BlockCache, ChangeHook, Checked, LocalFile, MappedFile, PinnedPages, PinnedSource, ReadAt,
-    S3Config, S3Object,
+    ReadCost, S3Config, S3Object,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -335,7 +335,7 @@ impl ShardFiles {
             // system call. On CephFS each fault would cost a remote read, so it is read by offset.
             let local: Arc<dyn ReadAt> = match pin.place {
                 Place::Ram => Arc::new(MappedFile::read_from(&file)?),
-                Place::Ssd if file.costly_reads() => Arc::new(file),
+                Place::Ssd if file.read_cost() != ReadCost::Local => Arc::new(file),
                 Place::Ssd => Arc::new(MappedFile::open(path, false)?),
             };
             source = match pages {

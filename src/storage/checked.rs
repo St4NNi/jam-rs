@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::etags::{Start, changed_error};
-use super::{ReadAt, S3Object};
+use super::{ReadAt, ReadCost, S3Object};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,7 +74,7 @@ impl ReadAt for Checked {
         self.inner.will_need(offset, length);
     }
 
-    fn costly_reads(&self) -> bool {
-        self.inner.costly_reads()
+    fn read_cost(&self) -> ReadCost {
+        self.inner.read_cost()
     }
 }

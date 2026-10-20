@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{ReadAt, StorageError, checked_end, readahead};
+use super::{ReadAt, ReadCost, StorageError, checked_end, readahead};
 use std::fs::File;
 use std::io;
 use std::path::Path;
@@ -65,8 +65,11 @@ impl ReadAt for LocalFile {
         readahead::will_need(&self.file, offset, length);
     }
 
-    fn costly_reads(&self) -> bool {
-        self.on_ceph
+    fn read_cost(&self) -> ReadCost {
+        match self.on_ceph {
+            true => ReadCost::Network,
+            false => ReadCost::Local,
+        }
     }
 }
 
@@ -88,7 +91,7 @@ mod tests {
         assert!(file.read_exact_at(9_701, &mut buffer).is_err());
         file.will_need(0, 4096);
         // A temporary directory is not on CephFS.
-        assert!(!file.costly_reads());
+        assert_eq!(file.read_cost(), ReadCost::Local);
         assert!(LocalFile::open(directory.path().join("missing")).is_err());
     }
 

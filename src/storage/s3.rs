@@ -4,7 +4,7 @@
 
 use super::counts::{count_failed, count_s3};
 use super::etags::{EtagBook, Latch, Start, changed_error, version_of};
-use super::{ReadAt, StorageError, checked_end, lock};
+use super::{ReadAt, ReadCost, StorageError, checked_end, lock};
 use opendal::Operator;
 use opendal::layers::{ConcurrentLimitLayer, RetryEvent, RetryLayer, TimeoutLayer};
 use opendal::services::S3;
@@ -423,8 +423,8 @@ impl ReadAt for S3Object {
         self.size
     }
 
-    fn costly_reads(&self) -> bool {
-        true
+    fn read_cost(&self) -> ReadCost {
+        ReadCost::Request
     }
 
     fn version(&self) -> io::Result<u64> {
