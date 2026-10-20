@@ -19,6 +19,7 @@ use std::ops::Range;
 #[cfg(test)]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// Sizes and counts of a shard, for `jam stats`.
@@ -51,6 +52,8 @@ pub struct Shard {
     seeds: SeedFile,
     /// Wall seconds that opening took.
     open_seconds: f64,
+    /// Whether a search has reported `open_seconds` already.
+    open_reported: AtomicBool,
 }
 
 impl Shard {
@@ -102,6 +105,7 @@ impl Shard {
             head,
             seeds,
             open_seconds: started.elapsed().as_secs_f64(),
+            open_reported: AtomicBool::new(false),
         })
     }
 
@@ -117,9 +121,13 @@ impl Shard {
         &self.head
     }
 
-    /// Wall seconds that opening the shard took.
-    pub fn open_seconds(&self) -> f64 {
-        self.open_seconds
+    /// Wall seconds that opening the shard took, the first time they are asked for, then 0: a
+    /// shard kept open, as by a server, counts its open once.
+    pub fn take_open_seconds(&self) -> f64 {
+        match self.open_reported.swap(true, Ordering::Relaxed) {
+            false => self.open_seconds,
+            true => 0.0,
+        }
     }
 
     /// The manifest of the shard.

@@ -155,6 +155,62 @@ async fn remote_matches_local() {
     );
 }
 
+/// A server answers a 30 kb query three times with the same lines, from the shard it keeps
+/// open: only the first summary counts the open. Prints the wall time of each answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn warm_server_plasmid() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0x9a5);
+    let plasmid = random_bases(&mut random, 30_000);
+    let mut planted = random_bases(&mut random, 50_000);
+    planted.splice(
+        10_000..10_000,
+        with_substitutions(&mut random, &plasmid, 0.99),
+    );
+    let mut sequences = vec![planted];
+    sequences.extend((0..20).map(|_| random_bases(&mut random, 60_000)));
+    let inputs: Vec<EntryInput> = (sequences.iter().enumerate())
+        .map(|(index, sequence)| {
+            let path = directory.path().join(format!("entry{index}.fa"));
+            let mut text = format!(">contig{index}\n").into_bytes();
+            text.extend_from_slice(sequence);
+            std::fs::write(&path, text).unwrap();
+            let name = format!("entry{index}");
+            EntryInput { name, path }
+        })
+        .collect();
+    let output = directory.path().join("plasmid.jam");
+    build_shard(&inputs, &output, &build_options(directory.path(), 2)).unwrap();
+    let shard = ServedShard::new("plasmid".into(), Shard::open(&output).unwrap()).unwrap();
+    let router = serve(shard, Vec::new(), ServerLimits::default()).await;
+    let client = endpoint().await;
+    let request = SearchRequest {
+        query_name: "plasmid".into(),
+        bases: plasmid,
+        ..request(None)
+    };
+    let (mut answers, mut opens) = (Vec::new(), Vec::new());
+    for round in 0..3 {
+        let started = std::time::Instant::now();
+        let mut answer = search(&client, address(router.endpoint()), &request)
+            .await
+            .unwrap();
+        let mut lines = Vec::new();
+        while let Some(reply) = answer.next().await.unwrap() {
+            if let Reply::Summary { record, .. } = &reply {
+                opens.push(record.times.open_shard_seconds);
+            }
+            lines.push(line(reply));
+        }
+        lines.sort();
+        eprintln!("round {round}: {:.4} s", started.elapsed().as_secs_f64());
+        answers.push(lines);
+    }
+    assert!(confirms(&answers[0], "plasmid"), "{:?}", answers[0]);
+    assert!(answers.iter().all(|lines| *lines == answers[0]));
+    assert!(opens[0] > 0.0 && opens[1..] == [0.0, 0.0], "{opens:?}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summary_names_level() {
     let directory = tempfile::tempdir().unwrap();

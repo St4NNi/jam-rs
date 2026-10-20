@@ -502,7 +502,7 @@ impl<'a> Searcher<'a> {
             locate: LocateWork::default(),
             align: AlignStageWork::default(),
             times: SearchTimes {
-                open_shard_seconds: self.shard.open_seconds(),
+                open_shard_seconds: self.shard.take_open_seconds(),
                 ..SearchTimes::default()
             },
         }

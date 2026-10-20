@@ -59,7 +59,8 @@ impl PartTime {
 /// The cost of the parts of one search, in the order they run.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SearchTimes {
-    /// Opening the shard, once per process before its first search.
+    /// Opening the shard: in the first search of an open shard, 0 in later ones, as a shard
+    /// stays open for all searches of a process.
     pub open_shard_seconds: f64,
     /// Hashing the query k-mers, looking them up in the sketch, and building the query tables
     /// of stage 3. When several queries were looked up in one pass, this query's share of that

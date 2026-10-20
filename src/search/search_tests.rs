@@ -143,8 +143,11 @@ fn level_ends_search() {
             .values()
             .all(|list| list.len() == 1 && matches!(list[0], EntryEvent::Possible { .. }))
     );
+    let open = summary.times.open_shard_seconds;
     let (summary, events) = search(&shard, &query, false, &config(SearchStage::Locate), false);
     assert!(matches!(summary.completion, Completion::Complete));
+    // The shard stays open: only the first search counts its open.
+    assert!(open > 0.0 && summary.times.open_shard_seconds == 0.0);
     assert_eq!(summary.locate.entries, summary.sketch.possible_entries);
     for (entry, list) in &events {
         assert_eq!(list.len(), 2, "{list:?}");
