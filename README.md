@@ -231,6 +231,9 @@ Advanced options:
   budgets for index files on S3; see [S3 and local caches](#s3-and-local-caches). `--memory`
   defaults to the budget recorded in the cache directory, or 1GiB if there is none. `--disk`
   defaults to the recorded budget, or 0 if there is none.
+- `--s3-requests N` (default 512, at most 4096): number of S3 requests in flight at the same
+  time. S3 answers many parallel requests best; lower it for a store that fails under many.
+  Each request needs its own connection, so jam lowers it if the open files limit is too low.
 
 Example:
 
@@ -252,7 +255,7 @@ Keeps an index open and answers search requests from other machines; see [Server
 - `--queue N` (default 32): maximum number of searches waiting for a slot. Additional requests
   are rejected as busy.
 - `-t, --threads N` (default: all cores): number of threads used per search.
-- `--cache DIR`, `--memory SIZE`, `--disk SIZE`: same as for `jam search`.
+- `--cache DIR`, `--memory SIZE`, `--disk SIZE`, `--s3-requests N`: same as for `jam search`.
 
 ### jam screen
 

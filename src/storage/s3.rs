@@ -26,8 +26,9 @@ pub struct S3Limits {
     pub tries: u32,
     /// The wait after the first failed try; it triples after each further one.
     pub backoff: Duration,
-    /// Requests in flight at once, over all objects of one config. Some stores fail range reads
-    /// when 128 run in parallel, so callers can set this lower.
+    /// Requests in flight at once, over all objects of one config. S3 serves many in parallel
+    /// best; some stores fail range reads when 128 run in parallel, so callers can set this
+    /// lower.
     pub max_in_flight: usize,
 }
 
@@ -37,7 +38,7 @@ impl Default for S3Limits {
             request_timeout: Duration::from_secs(60),
             tries: 4,
             backoff: Duration::from_millis(200),
-            max_in_flight: 256,
+            max_in_flight: 512,
         }
     }
 }

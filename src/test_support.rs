@@ -40,7 +40,12 @@ pub fn random_bytes(rng: &mut StdRng, length: usize) -> Vec<u8> {
 pub fn runtime() -> Handle {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME
-        .get_or_init(|| Runtime::new().unwrap())
+        .get_or_init(|| {
+            // As many blocking threads as the command line may use for requests in flight.
+            let mut builder = tokio::runtime::Builder::new_multi_thread();
+            builder.enable_all().max_blocking_threads(4096 + 256);
+            builder.build().unwrap()
+        })
         .handle()
         .clone()
 }

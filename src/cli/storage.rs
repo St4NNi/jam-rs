@@ -18,8 +18,15 @@ const DEFAULT_MEMORY: u64 = 1 << 30;
 const MIN_CACHE_RAM: u64 = 64 << 20;
 /// Bytes per block of the block cache, the size of most S3 reads.
 const BLOCK_BYTES: u64 = 64 << 10;
-/// Hinted ranges that the block cache fetches at once, as many as S3 requests may be in flight.
-const READ_AHEAD: usize = 256;
+/// S3 requests in flight at once when the command line does not say, and the most it may say.
+/// The block cache fetches as many hinted ranges at once, each on a thread of the runtime.
+const REQUESTS: usize = 512;
+const MAX_REQUESTS: usize = 4096;
+/// Threads of the runtime for other blocking work, such as the disk level of the block cache.
+const OTHER_BLOCKING: usize = 256;
+/// Open files kept for shards, pins and the disk level; each request in flight needs one more,
+/// as each has its own connection.
+const OTHER_FILES: u64 = 1024;
 /// The directory of the block cache's disk level in the cache directory.
 const BLOCKS_DIRECTORY: &str = "blocks";
 
@@ -36,6 +43,16 @@ pub(super) struct CacheArgs {
     /// Disk in the cache directory for pins and the block cache [default: the plan's, else 0]
     #[arg(long, requires = "cache")]
     disk: Option<ByteSize>,
+    /// S3 requests in flight at once, up to 4096 [default: 512]
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..=MAX_REQUESTS as i64))]
+    s3_requests: Option<u16>,
+}
+
+impl CacheArgs {
+    /// S3 requests in flight at once.
+    fn requests(&self) -> usize {
+        self.s3_requests.map_or(REQUESTS, usize::from)
+    }
 }
 
 /// The storage of the shards that one command opens. Reads of S3 shards wait on its runtime,
@@ -44,15 +61,29 @@ pub(super) struct ShardStorage {
     runtime: Runtime,
     s3: OnceLock<S3Config>,
     cache: Option<Arc<BlockCache>>,
+    /// S3 requests in flight at once, set by the first `open_all`.
+    requests: usize,
+    /// The most S3 requests in flight that the open files limit leaves room for.
+    fit: usize,
 }
 
 impl ShardStorage {
-    /// Storage with its own runtime; the S3 store is set up at the first S3 shard.
+    /// Storage with its own runtime; the S3 store is set up at the first S3 shard. The runtime
+    /// may start a blocking thread for each request in flight; it starts them only when needed.
     pub(super) fn new() -> Result<Self, CliError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .max_blocking_threads(MAX_REQUESTS + OTHER_BLOCKING)
+            .build();
+        // Each request in flight holds a connection, so the open files limit bounds them.
+        let files = rlimit::increase_nofile_limit(u64::MAX).unwrap_or(OTHER_FILES * 2);
+        let fit = files.saturating_sub(OTHER_FILES).max(16) as usize;
         Ok(Self {
-            runtime: Runtime::new().map_err(CliError::Runtime)?,
+            runtime: runtime.map_err(CliError::Runtime)?,
             s3: OnceLock::new(),
             cache: None,
+            requests: REQUESTS.min(fit),
+            fit,
         })
     }
 
@@ -79,6 +110,15 @@ impl ShardStorage {
     ) -> Result<Vec<Shard>, CliError> {
         let mut plans = Vec::new();
         let mut opened = Vec::new();
+        if self.s3.get().is_none() {
+            self.requests = args.requests().min(self.fit);
+            if args.requests() > self.fit {
+                eprintln!(
+                    "jam: {} S3 requests at once, as open files are limited",
+                    self.fit
+                );
+            }
+        }
         for path in paths {
             let failed = |source| CliError::Shard {
                 path: path.clone(),
@@ -141,7 +181,7 @@ impl ShardStorage {
             .sum();
         let disk_pins: u64 = pins.map(|pin| pin.bytes()).sum();
         let mut config = CacheConfig {
-            read_ahead: READ_AHEAD,
+            read_ahead: self.requests,
             ..CacheConfig::new(
                 memory.saturating_sub(ram_pins).max(MIN_CACHE_RAM),
                 BLOCK_BYTES,
@@ -165,7 +205,11 @@ impl ShardStorage {
             return Ok(config);
         }
         let handle = self.runtime.handle().clone();
-        let config = S3Config::from_environment(S3Limits::default(), handle)?;
+        let limits = S3Limits {
+            max_in_flight: self.requests,
+            ..S3Limits::default()
+        };
+        let config = S3Config::from_environment(limits, handle)?;
         Ok(self.s3.get_or_init(|| config))
     }
 }
@@ -211,6 +255,7 @@ mod tests {
             cache: Some(cache.clone()),
             memory: Some(ByteSize::gib(1)),
             disk: Some(ByteSize::gib(1)),
+            s3_requests: None,
         };
         let paths = [PathBuf::from("s3://bucket/shard.jam")];
         let open = |warm_unplanned| {
@@ -250,6 +295,7 @@ mod tests {
             cache: Some(directory.path().join("cache")),
             memory: Some(ByteSize::gib(1)),
             disk: Some(ByteSize::gib(1)),
+            s3_requests: None,
         };
         let mut storage = ShardStorage::new().unwrap();
         assert!(storage.s3.set(config.unwrap().unsigned()).is_ok());

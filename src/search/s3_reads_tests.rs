@@ -284,7 +284,7 @@ fn counts(local: &[Shard], store: &Store) -> (BTreeMap<&'static str, usize>, usi
 /// Opens the shards on the store, through a new empty block cache, with the pins in `pins`.
 fn open_s3(config: &S3Config, pins: Option<&Path>, shards: usize) -> Vec<Shard> {
     let cache = CacheConfig {
-        read_ahead: 256,
+        read_ahead: S3Limits::default().max_in_flight,
         ..CacheConfig::new(64 << 20, 64 << 10)
     };
     let options = ShardOptions {
