@@ -2,12 +2,9 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-#[cfg(test)]
-use super::StorageError;
-use super::{ReadAt, read_slice};
+use super::{ReadAt, StorageError, read_slice};
 use rayon::prelude::*;
 use std::io;
-#[cfg(test)]
 use std::path::Path;
 
 /// Reads of at least this many bytes ask the kernel for all their pages at once, so they are read
@@ -21,11 +18,13 @@ const COPY_CHUNK: usize = 8 << 20;
 /// It suits files that are read whole or often, such as the sketch.
 pub struct MappedFile {
     map: Option<memmap2::Mmap>,
+    /// Whether the bytes are a copy in anonymous memory, which hints cannot speed up.
+    anonymous: bool,
 }
 
 impl MappedFile {
-    /// Maps the file at `path`; `populate` reads it into RAM at once.
-    #[cfg(test)]
+    /// Maps the file at `path`; `populate` reads it into RAM at once. The file must never change
+    /// while it is mapped.
     pub fn open(path: &Path, populate: bool) -> Result<Self, StorageError> {
         let failed = |source| StorageError::File {
             path: path.to_path_buf(),
@@ -33,22 +32,31 @@ impl MappedFile {
         };
         let file = std::fs::File::open(path).map_err(failed)?;
         if file.metadata().map_err(failed)?.len() == 0 {
-            return Ok(Self { map: None });
+            return Ok(Self {
+                map: None,
+                anonymous: false,
+            });
         }
         let mut options = memmap2::MmapOptions::new();
         if populate {
             options.populate();
         }
-        // SAFETY: the files are written once and never changed while a shard is open.
+        // SAFETY: the files are written once under another name, then renamed, and never changed.
         let map = unsafe { options.map(&file).map_err(failed)? };
-        Ok(Self { map: Some(map) })
+        Ok(Self {
+            map: Some(map),
+            anonymous: false,
+        })
     }
 
     /// Copies all bytes of `source` into anonymous memory, in large reads on all threads.
     pub fn read_from(source: &dyn ReadAt) -> io::Result<Self> {
         let size = usize::try_from(source.size()).map_err(io::Error::other)?;
         if size == 0 {
-            return Ok(Self { map: None });
+            return Ok(Self {
+                map: None,
+                anonymous: true,
+            });
         }
         let mut map = memmap2::MmapMut::map_anon(size)?;
         map.par_chunks_mut(COPY_CHUNK)
@@ -58,6 +66,7 @@ impl MappedFile {
             })?;
         Ok(Self {
             map: Some(map.make_read_only()?),
+            anonymous: true,
         })
     }
 
@@ -79,8 +88,10 @@ impl ReadAt for MappedFile {
         self.bytes().len() as u64
     }
 
+    /// Asks the kernel for the pages of a mapped file. A copy in anonymous memory is all in RAM
+    /// already, so its hints are left out, which saves a system call per read.
     fn will_need(&self, offset: u64, length: u64) {
-        let Some(map) = &self.map else {
+        let Some(map) = self.map.as_ref().filter(|_| !self.anonymous) else {
             return;
         };
         let (Ok(offset), Ok(length)) = (usize::try_from(offset), usize::try_from(length)) else {

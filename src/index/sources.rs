@@ -331,9 +331,12 @@ impl ShardFiles {
                     path.display()
                 )));
             }
+            // A pin on disk is mapped, so a warm read is a copy from the page cache without a
+            // system call. On CephFS each fault would cost a remote read, so it is read by offset.
             let local: Arc<dyn ReadAt> = match pin.place {
                 Place::Ram => Arc::new(MappedFile::read_from(&file)?),
-                Place::Ssd => Arc::new(file),
+                Place::Ssd if file.costly_reads() => Arc::new(file),
+                Place::Ssd => Arc::new(MappedFile::open(path, false)?),
             };
             source = match pages {
                 Some(pages) => Arc::new(PinnedPages::new(local, pages.clone(), BASES_AT, source)),

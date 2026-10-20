@@ -224,12 +224,12 @@ fn open_s3(config: &S3Config, pins: Option<&Path>) -> Vec<Shard> {
         .collect()
 }
 
-/// Warms `cache` with `parts` of every shard.
-fn warm_all(config: &S3Config, cache: &Path, parts: &[Part]) {
+/// Warms `cache` with `parts` of every shard, in RAM up to `memory` bytes, else on disk.
+fn warm_all(config: &S3Config, cache: &Path, parts: &[Part], memory: u64) {
     for shard in 0..SHARDS {
         let location = Location::s3(&format!("s3://bucket/shard{shard}.jam"), config).unwrap();
         let head = location.head().unwrap();
-        let plan = Plan::choose(&head, 0, 1 << 30, parts).unwrap();
+        let plan = Plan::choose(&head, memory, 1 << 30, parts).unwrap();
         warm(&location, &head, &plan, cache).unwrap();
     }
 }
@@ -276,6 +276,8 @@ fn store_search(length: usize) {
         assert_eq!(search_all(&shards, &query), expected, "{name}");
         let (searched, peak) = counts(&local, &store);
         eprintln!("{name}: open {opened:?}; search {searched:?}, at most {peak} at once");
+        // A second search of the open shards, warm, gives the same results.
+        assert_eq!(search_all(&shards, &query), expected, "{name}, warm");
         // With many candidates, the entries ahead keep many more requests in flight than the two
         // workers. A long query has only its two hits per shard.
         assert!(peak > 8 || length > 10_000, "{name}: {peak}");
@@ -284,7 +286,10 @@ fn store_search(length: usize) {
     let searched = cold(None, "cold");
     assert!(searched.keys().any(|part| part.contains("bases")));
     let cache = directory.path().join("cache");
-    warm_all(&s3, &cache, &[Part::Sketch, Part::Locators]);
+    let in_ram = directory.path().join("cache-ram");
+    warm_all(&s3, &in_ram, &[Part::Sketch, Part::Locators], 1 << 30);
+    cold(Some(&in_ram), "sketch and locators pinned in RAM");
+    warm_all(&s3, &cache, &[Part::Sketch, Part::Locators], 0);
     let searched = cold(Some(&cache), "sketch and locators pinned");
     // The seeds file is read from the pins alone.
     for part in [
@@ -297,7 +302,7 @@ fn store_search(length: usize) {
         assert!(!searched.contains_key(part), "{part}: {searched:?}");
     }
     let parts = [Part::Sketch, Part::Locators, Part::Headers];
-    warm_all(&s3, &cache, &parts);
+    warm_all(&s3, &cache, &parts, 0);
     let searched = cold(Some(&cache), "sketch, locators and headers pinned");
     assert!(
         !searched.keys().any(|part| part.contains("header")),
