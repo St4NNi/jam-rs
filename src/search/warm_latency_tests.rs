@@ -20,6 +20,7 @@ use crate::test_support::{
     Reply, diverged, no_stop, random_bases, rng, runtime, serve, write_entries,
 };
 use rand::RngExt;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::mpsc::sync_channel;
 use std::time::Instant;
@@ -84,14 +85,17 @@ fn config() -> SearchConfig {
     config
 }
 
-/// Searches once: the summary and the events as text.
+/// Searches once: the summary and the events of each entry, in order, as text.
 fn search(shard: &Shard, query: &[u8]) -> (SearchSummary, String) {
     let searcher = Searcher::new(shard).unwrap();
     let (sender, receiver) = sync_channel(1 << 16);
     let control: SearchControl<'_> = no_stop();
     let summary = searcher.search(query, false, &config(), control, &sender);
     drop(sender);
-    let events: Vec<EntryEvent> = receiver.into_iter().collect();
+    let mut events = BTreeMap::<u32, Vec<EntryEvent>>::new();
+    for event in receiver {
+        events.entry(event.entry()).or_default().push(event);
+    }
     (summary.unwrap(), format!("{events:?}"))
 }
 
