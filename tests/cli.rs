@@ -322,6 +322,50 @@ fn shards_share_summary() {
     assert_eq!(records[0]["a"], "plasmid_1");
 }
 
+/// Shards searched at the same time give the same output, byte for byte, as one at a time.
+#[test]
+fn shards_at_once_same_output() {
+    let fixture = fixture();
+    let other_input = fixture.directory.path().join("other.fa");
+    write_fasta(&other_input, "other_contig", &random_bases(44, 20_000));
+    let planted = fixture.directory.path().join("plasmid_1.fa");
+    let mut shards = vec![fixture.shard.clone()];
+    for (name, inputs) in [
+        ("other", vec![&other_input]),
+        ("again", vec![&planted, &other_input]),
+    ] {
+        let shard = fixture.directory.path().join(format!("{name}.jam"));
+        let mut arguments: Vec<&std::ffi::OsStr> = vec![
+            "index".as_ref(),
+            "build".as_ref(),
+            "-o".as_ref(),
+            shard.as_os_str(),
+        ];
+        arguments.extend(inputs.iter().map(|path| path.as_os_str()));
+        assert!(jam(&arguments).status.success());
+        shards.push(shard);
+    }
+    let run = |at_once: &str, format: &str| {
+        let mut arguments: Vec<&std::ffi::OsStr> = vec!["search".as_ref()];
+        arguments.extend(shards.iter().map(|shard| shard.as_os_str()));
+        arguments.push(fixture.query.as_os_str());
+        for word in ["-t", "2", "--format", format, "--shards-at-once", at_once] {
+            arguments.push(word.as_ref());
+        }
+        let output = jam(&arguments);
+        assert!(output.status.success());
+        output.stdout
+    };
+    for format in ["json", "paf"] {
+        let one = run("1", format);
+        assert!(!one.is_empty());
+        assert_eq!(one, run("3", format), "{format}");
+    }
+    let text = String::from_utf8(run("3", "json")).unwrap();
+    let records: Vec<_> = text.lines().map(json).collect();
+    assert_eq!(records.len(), 2, "{text}");
+}
+
 #[test]
 fn incomplete_search_fails() {
     let fixture = fixture();
