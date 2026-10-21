@@ -162,19 +162,23 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     };
     let config = settings_of(args)?.apply(&base)?;
     let inputs = args.inputs()?;
-    let mut storage = ShardStorage::new()?;
-    let shards = open_shards(&inputs.shards, &mut storage, &args.cache)?;
-    let searchers = shards
-        .iter()
-        .map(|open| Searcher::new(&open.shard))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut sink = Sink::new(args)?;
     let on_s3 = (inputs.shards.iter()).any(|path| path.to_string_lossy().starts_with("s3://"));
     let at_once = match (args.shards_at_once, on_s3) {
         (Some(count), _) => usize::from(count),
         (None, true) => S3_SHARDS_AT_ONCE,
         (None, false) => 1,
     };
+    let mut storage = ShardStorage::new()?;
+    storage.set_searches(at_once);
+    let shards = open_shards(&inputs.shards, &mut storage, &args.cache)?;
+    if let Some(line) = storage.budget_line().filter(|_| args.verbose > 0) {
+        eprintln!("{line}");
+    }
+    let searchers = shards
+        .iter()
+        .map(|open| Searcher::new(&open.shard))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut sink = Sink::new(args)?;
     // The deadline of a query starts with its own search, so with one nothing is looked up ahead.
     let budget = match args.deadline {
         Some(_) => 0,

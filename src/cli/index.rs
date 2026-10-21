@@ -3,6 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::memory::default_budget;
 use super::storage::ShardStorage;
 use super::{CliError, read_list};
 use crate::index::{
@@ -108,9 +109,10 @@ struct WarmArgs {
     /// The cache directory to fill; search and serve read the pins from there
     #[arg(long)]
     cache: PathBuf,
-    /// RAM for pins and the block cache, for example 16GiB
+    /// RAM for pins and the block cache, for example 16GiB [default: half the RAM available,
+    /// less what one search takes, at least 1GiB]
     #[arg(long)]
-    memory: ByteSize,
+    memory: Option<ByteSize>,
     /// Disk for pins and the block cache, for example 200GiB
     #[arg(long)]
     disk: ByteSize,
@@ -196,7 +198,8 @@ fn run_warm(args: &WarmArgs) -> Result<(), CliError> {
     // The first read learns the ETag of the seeds file, so it is kept from the start.
     location.keep_etags(&args.cache).map_err(failed)?;
     let head = location.head().map_err(failed)?;
-    let (memory, disk) = (args.memory.as_u64(), args.disk.as_u64());
+    let memory = (args.memory.map(|size| size.as_u64())).unwrap_or_else(|| default_budget(1));
+    let disk = args.disk.as_u64();
     let parts: Vec<Part> = args.pin.iter().flat_map(|parts| parts.0.clone()).collect();
     let plan = Plan::choose(&head, memory, disk, &parts)?;
     for line in plan_lines(&plan) {

@@ -4,6 +4,7 @@
 
 mod error;
 mod index;
+mod memory;
 mod rule;
 mod screen;
 mod search;

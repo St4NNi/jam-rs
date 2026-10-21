@@ -55,7 +55,9 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         ));
     }
     let key = secret_key(&args.key)?;
-    let storage = Arc::new(Mutex::new(ShardStorage::new()?));
+    let mut storage = ShardStorage::new()?;
+    storage.set_searches(args.searches);
+    let storage = Arc::new(Mutex::new(storage));
     let mut shards =
         lock(&storage).open_all(std::slice::from_ref(&args.shard), &args.cache, true)?;
     let shard = shards
