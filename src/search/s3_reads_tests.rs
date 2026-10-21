@@ -147,8 +147,15 @@ fn build_shards(directory: &Path, length: usize, shards: usize) -> Vec<u8> {
     let query = random_bases(&mut random, length);
     for shard in 0..shards {
         let mut entries = Vec::new();
+        // A query of 100 kb or more lies in pieces of 10 kb on as many contigs.
+        let pieces = if length > 10_000 {
+            (length / 10_000).max(3)
+        } else {
+            1
+        };
         for entry in 0..ENTRIES {
-            let mut contigs: Vec<Vec<u8>> = (0..3)
+            let count = if entry < 2 { pieces.max(3) } else { 3 };
+            let mut contigs: Vec<Vec<u8>> = (0..count)
                 .map(|_| {
                     let length = random.random_range(20_000..100_000);
                     random_bases(&mut random, length)
@@ -157,7 +164,6 @@ fn build_shards(directory: &Path, length: usize, shards: usize) -> Vec<u8> {
             let planted = match entry {
                 0 | 1 => {
                     let copy = diverged(&mut random, &query, 0.99);
-                    let pieces = if length > 10_000 { 3 } else { 1 };
                     copy.chunks(length.div_ceil(pieces))
                         .map(<[u8]>::to_vec)
                         .collect()
@@ -170,7 +176,8 @@ fn build_shards(directory: &Path, length: usize, shards: usize) -> Vec<u8> {
                 }
             };
             for (at, piece) in planted.into_iter().enumerate() {
-                let contig = &mut contigs[(entry + at) % 3];
+                let count = contigs.len();
+                let contig = &mut contigs[(entry + at) % count];
                 let at = random.random_range(0..contig.len());
                 contig.splice(at..at, piece);
             }
@@ -402,6 +409,15 @@ fn store_search(length: usize) {
     );
 }
 
+/// Two shards on the store with the latency of S3, for a query of 400 kb that lies in 40 pieces
+/// on 40 contigs of two entries per shard, so these entries have about 400 seed bins each: the
+/// results equal a local search, and the requests and the most at once are printed.
+#[test]
+#[ignore]
+fn many_bins_timed() {
+    timed_search(400_000, SHARDS);
+}
+
 /// Ten shards on a store with the latency of S3 (50 ms per request) and a bandwidth, searched
 /// with 8 threads, cold and with sketch, locators and headers pinned: the results equal a local
 /// search, and the requests, bytes, the most at once and the wall time are printed. Run it with
@@ -458,7 +474,9 @@ fn timed_search(length: usize, shards: usize) {
     let cache = directory.path().join("cache");
     let parts = [Part::Sketch, Part::Locators, Part::Headers];
     warm_all(&s3, &cache, &parts, 0, shards);
-    for at_once in [1, 4, shards] {
+    let mut counts = vec![1, 4.min(shards), shards];
+    counts.dedup();
+    for at_once in counts {
         run(None, "cold", at_once);
         run(Some(&cache), "warm", at_once);
     }
