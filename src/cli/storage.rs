@@ -8,6 +8,7 @@ use crate::index::{Location, Place, Plan, Shard, ShardOptions, warm};
 use crate::storage::{BlockCache, CacheConfig, DiskConfig, S3Config, S3Limits};
 use bytesize::ByteSize;
 use clap::Args;
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
@@ -119,19 +120,30 @@ impl ShardStorage {
                 );
             }
         }
+        let mut located = Vec::new();
         for path in paths {
+            let location = self.location(path)?;
+            if let Some(cache) = &args.cache {
+                (location.keep_etags(cache)).map_err(|source| CliError::Shard {
+                    path: path.clone(),
+                    source,
+                })?;
+            }
+            located.push((path, location));
+        }
+        // The heads of shards on S3 are read at the same time, each with a few requests.
+        let heads: Vec<_> = (located.par_iter())
+            .map(|(_, location)| match location {
+                Location::S3 { .. } => location.head().map(Some),
+                Location::File(_) => Ok(None),
+            })
+            .collect();
+        for ((path, location), head) in located.into_iter().zip(heads) {
             let failed = |source| CliError::Shard {
                 path: path.clone(),
                 source,
             };
-            let location = self.location(path)?;
-            if let Some(cache) = &args.cache {
-                location.keep_etags(cache).map_err(failed)?;
-            }
-            let head = match location {
-                Location::S3 { .. } => Some(location.head().map_err(failed)?),
-                Location::File(_) => None,
-            };
+            let head = head.map_err(failed)?;
             if let (Some(head), Some(cache)) = (&head, &args.cache) {
                 let mut plan = Plan::read(cache, &head.digest).map_err(failed)?;
                 if let (None, true, Some(disk)) = (&plan, warm_unplanned, args.disk) {
@@ -162,7 +174,9 @@ impl ShardStorage {
                 source,
             })
         };
-        opened.into_iter().map(open).collect()
+        // Shards open at the same time, as opening one on S3 waits for several reads in turn.
+        let shards: Vec<_> = opened.into_par_iter().map(open).collect();
+        shards.into_iter().collect()
     }
 
     /// The block cache with the budgets of the command line, else of the plans, less their pins.
