@@ -135,6 +135,11 @@ impl Shard {
         &self.head.manifest
     }
 
+    /// The RAM of the block cache that the shard is read through, if any.
+    pub fn cache_ram(&self) -> Option<u64> {
+        self.files.cache_ram()
+    }
+
     /// The seeds file (stages 1 and 2).
     pub fn seed_file(&self) -> &SeedFile {
         &self.seeds

@@ -91,6 +91,7 @@ impl CacheConfig {
 pub struct BlockCache {
     blocks: HybridCache<BlockKey, Vec<u8>>,
     block_bytes: u64,
+    ram_bytes: u64,
     /// The lock of the disk level directory, held while the cache is open; `None` without a
     /// disk level.
     disk_lock: Option<File>,
@@ -153,6 +154,7 @@ impl BlockCache {
         Ok(Arc::new(Self {
             blocks,
             block_bytes,
+            ram_bytes: config.ram_bytes,
             disk_lock: lock,
             disk_room,
             read_ahead: (config.read_ahead > 0)
@@ -207,6 +209,11 @@ impl BlockCache {
             Some(places) if places.available_permits() * 2 > self.places => file.batch().min(small),
             _ => file.batch(),
         }
+    }
+
+    /// The RAM budget for blocks.
+    pub fn ram_bytes(&self) -> u64 {
+        self.ram_bytes
     }
 
     /// Bytes of fetches in flight at once for a RAM budget of `ram_bytes`, besides the blocks.

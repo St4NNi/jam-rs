@@ -288,6 +288,11 @@ impl ShardFiles {
         })
     }
 
+    /// The RAM of the block cache that the files are read through, if any.
+    pub(crate) fn cache_ram(&self) -> Option<u64> {
+        self.cache.as_ref().map(|cache| cache.ram_bytes())
+    }
+
     /// Whether an object was found replaced since the files were opened. Their reads then fail.
     pub(crate) fn is_stale(&self) -> bool {
         self.location.changes() != self.changes

@@ -24,8 +24,12 @@ const CHUNK_SEEDS: usize = 4096;
 /// hits are checked on its sequence before it is aligned: the seed hits that a plan expects of a
 /// qualifying copy.
 const WEAK_HIT_STARTS: usize = 8;
-/// Seed bins of one entry whose bases are asked for ahead, at most.
-const AHEAD_BINS: usize = 256;
+/// Bytes of packed bases asked for ahead for one candidate entry, at most: a share of the block
+/// cache, so that 128 entries ahead in each of 4 shards searched at once fill half of it, but at
+/// least 1 MiB, the windows of about 256 seed bins apart. Without a cache, hints only reach
+/// local files and have no bound.
+const AHEAD_SHARE: u64 = 1024;
+const MIN_AHEAD: u64 = 1 << 20;
 
 /// The seed locations of one candidate entry: pairs of seed (an index into
 /// `QueryKmers::distinct`) and seed location, ascending.
@@ -199,19 +203,29 @@ fn locate(
 }
 
 /// Asks for what the later stages will read of a candidate entry with seed locations
-/// `locations`: its contig table, its header page, and the bases of its first seed bins with
-/// `reach` bases (the flank, at least k) on each side. These hold each bin with k bases on each
-/// side, which the seed check reads, and the alignment window around it.
+/// `locations`: its contig table, its header page, and the bases of its seed bins with `reach`
+/// bases (the flank, at least k) on each side, from the first, as far as the share of the block
+/// cache lasts. These hold each bin with k bases on each side, which the seed check reads, and
+/// the alignment window around it.
 pub fn will_need_entry(shard: &Shard, entry: u32, locations: &[(u32, SeedLocation)], reach: u64) {
     shard.seed_file().hint_contig_table(entry);
     let bin_bits = u32::from(shard.manifest().parameters.bin_bits);
     let mut bins: Vec<u32> = locations.iter().map(|(_, location)| location.bin).collect();
     bins.sort_unstable();
     bins.dedup();
-    let ranges = bins.iter().take(AHEAD_BINS).map(|&bin| {
+    let most = (shard.cache_ram()).map_or(u64::MAX, |ram| (ram / AHEAD_SHARE).max(MIN_AHEAD));
+    let (mut ranges, mut bases, mut end) = (Vec::new(), 0u64, 0u64);
+    for &bin in &bins {
         let start = u64::from(bin) << bin_bits;
-        start.saturating_sub(reach)..start + (1 << bin_bits) + reach
-    });
+        let range = start.saturating_sub(reach)..start + (1 << bin_bits) + reach;
+        // Windows of close bins overlap; their bases count once. Four bases take a byte.
+        bases += range.end.saturating_sub(range.start.max(end));
+        end = end.max(range.end);
+        if bases / 4 > most {
+            break;
+        }
+        ranges.push(range);
+    }
     shard.will_need_bases(entry, ranges);
 }
 
