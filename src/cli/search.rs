@@ -14,18 +14,23 @@ use crate::report::{
 };
 use crate::search::{
     EntryEvent, PreparedKmers, SearchConfig, SearchControl, SearchStage, SearchSummary, Searcher,
+    in_order,
 };
 use crate::service::{SearchRequest, SearchSettings, ServiceError, bind, parse_address, search};
+use crate::storage::lock;
 use clap::{Args, ValueEnum};
 use iroh::{Endpoint, EndpointAddr, SecretKey};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 /// Events held between the search and the writer.
 const EVENT_QUEUE: usize = 64;
+/// Shards searched at the same time when one is on S3, so many requests are in flight.
+const S3_SHARDS_AT_ONCE: usize = 4;
 
 /// The output format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -68,6 +73,10 @@ pub struct SearchArgs {
     /// Threads to use [default: all cores]
     #[arg(short, long)]
     threads: Option<usize>,
+    /// Shards searched at the same time, each with its threads, which mostly wait for S3 then;
+    /// records are still written in shard order [default: 4 when a shard is on S3, else 1]
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    shards_at_once: Option<u16>,
     /// Seconds after which the search of each query stops
     #[arg(long)]
     deadline: Option<f64>,
@@ -160,6 +169,12 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         .map(|open| Searcher::new(&open.shard))
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = Sink::new(args)?;
+    let on_s3 = (inputs.shards.iter()).any(|path| path.to_string_lossy().starts_with("s3://"));
+    let at_once = match (args.shards_at_once, on_s3) {
+        (Some(count), _) => usize::from(count),
+        (None, true) => S3_SHARDS_AT_ONCE,
+        (None, false) => 1,
+    };
     // The deadline of a query starts with its own search, so with one nothing is looked up ahead.
     let budget = match args.deadline {
         Some(_) => 0,
@@ -189,11 +204,36 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         let mut incomplete = 0;
         for (index, (name, sequence)) in batch.iter().enumerate() {
             sink.totals = QueryTotals::new(name);
-            for ((open, searcher), kmers) in shards.iter().zip(&searchers).zip(&mut prepared) {
-                let query = Query { name, sequence };
-                let kmers = kmers[index].take();
-                let summary = search_one(args, searcher, open, &config, &mut sink, &query, kmers)?;
-                sink.record(&open.name, Record::summary(name, &summary))?;
+            let query = Query { name, sequence };
+            if at_once == 1 {
+                for ((open, searcher), kmers) in shards.iter().zip(&searchers).zip(&mut prepared) {
+                    let kmers = kmers[index].take();
+                    let write = |event: EntryEvent| sink.event(open, name, &event);
+                    let summary = search_one(args, searcher, &config, &query, kmers, write)?;
+                    sink.record(&open.name, Record::summary(name, &summary))?;
+                }
+            } else {
+                // Each shard keeps its events until the shards before it are written.
+                let kmers: Vec<Mutex<Option<PreparedKmers>>> = (prepared.iter_mut())
+                    .map(|kmers| Mutex::new(kmers[index].take()))
+                    .collect();
+                let run = |shard: usize| {
+                    let (mut events, kmers) = (Vec::new(), lock(&kmers[shard]).take());
+                    let keep = |event| {
+                        events.push(event);
+                        Ok(())
+                    };
+                    let summary = search_one(args, &searchers[shard], &config, &query, kmers, keep);
+                    (events, summary)
+                };
+                in_order(shards.len(), at_once, run, |shard, result| {
+                    let (events, summary) = result.map_err(|_| CliError::Panic)?;
+                    let open = &shards[shard];
+                    for event in &events {
+                        sink.event(open, name, event)?;
+                    }
+                    sink.record(&open.name, Record::summary(name, &summary?))
+                })?;
             }
             incomplete += sink.finish_query()?;
         }
@@ -330,14 +370,14 @@ struct Query<'a> {
     sequence: &'a [u8],
 }
 
+/// Searches `query` in one shard and gives each event to `write` as it comes.
 fn search_one(
     args: &SearchArgs,
     searcher: &Searcher<'_>,
-    open: &NamedShard,
     config: &SearchConfig,
-    sink: &mut Sink,
     query: &Query<'_>,
     prepared: Option<PreparedKmers>,
+    mut write: impl FnMut(EntryEvent) -> Result<(), CliError>,
 ) -> Result<SearchSummary, CliError> {
     let stop = AtomicBool::new(false);
     let control = SearchControl {
@@ -357,7 +397,7 @@ fn search_one(
             summary
         });
         for event in receiver {
-            sink.event(open, query.name, &event)?;
+            write(event)?;
         }
         search
             .join()

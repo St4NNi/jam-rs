@@ -8,6 +8,7 @@ mod control;
 mod driver;
 mod error;
 mod events;
+mod in_order;
 mod locate_stage;
 mod located;
 mod query;
@@ -26,6 +27,7 @@ pub use control::{SearchControl, Stopped};
 pub use driver::{AlignStageWork, PreparedKmers, SearchConfig, SearchSummary, Searcher};
 pub use error::SearchError;
 pub use events::{Completion, DropReason, EntryEvent, SearchStage};
+pub use in_order::in_order;
 pub use locate_stage::{
     EntryLocations, LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry,
     read_entry_locations,

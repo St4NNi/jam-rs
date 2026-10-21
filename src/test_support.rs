@@ -390,6 +390,10 @@ impl Drop for Server {
 /// Starts a server on a free local port.
 pub fn serve(handler: impl Fn(usize, &Request) -> Reply + Send + Sync + 'static) -> Server {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    // Hundreds of requests may connect at once; the default queue of 128 would make some wait
+    // a second for the retry of their connection.
+    // SAFETY: listen only changes the queue length of this socket, which is already listening.
+    unsafe { libc::listen(std::os::fd::AsRawFd::as_raw_fd(&listener), 4096) };
     let server = Server {
         address: format!("http://{}", listener.local_addr().unwrap()),
         requests: Arc::new(AtomicUsize::new(0)),

@@ -13,6 +13,7 @@ use crate::test_support::{
     write_entries,
 };
 use rand::RngExt;
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -218,10 +219,18 @@ fn search_shard(
 
 /// The results of searching every shard in turn, as one text to compare.
 fn search_all(shards: &[Shard], query: &[u8], threads: usize) -> String {
-    let results: Vec<_> = shards
-        .iter()
-        .map(|shard| search_shard(shard, query, threads))
-        .collect();
+    search_at_once(shards, query, threads, 1)
+}
+
+/// The same, with `at_once` shards searched at the same time, as `jam search` does on S3.
+fn search_at_once(shards: &[Shard], query: &[u8], threads: usize, at_once: usize) -> String {
+    let mut results = Vec::new();
+    let run = |shard: usize| search_shard(&shards[shard], query, threads);
+    let write = |_, result: std::thread::Result<_>| {
+        results.push(result.unwrap());
+        Ok::<_, ()>(())
+    };
+    super::in_order(shards.len(), at_once, run, write).unwrap();
     format!("{results:?}")
 }
 
@@ -291,7 +300,9 @@ fn open_s3(config: &S3Config, pins: Option<&Path>, shards: usize) -> Vec<Shard> 
         cache: Some(BlockCache::open(&cache, runtime()).unwrap()),
         pins: pins.map(Path::to_path_buf),
     };
+    // Shards open at the same time, as `jam search` opens them.
     (0..shards)
+        .into_par_iter()
         .map(|shard| {
             let location = Location::s3(&format!("s3://bucket/shard{shard}.jam"), config).unwrap();
             Shard::open_with(&location, &options).unwrap()
@@ -424,33 +435,31 @@ fn timed_search(length: usize, shards: usize) {
         runtime(),
     );
     let s3 = s3.unwrap().unsigned();
-    let run = |pins: Option<&Path>, name: &str| {
+    let run = |pins: Option<&Path>, name: &str, at_once: usize| {
         store.reset();
         let opened = Instant::now();
         let shards = open_s3(&s3, pins, shards);
         let (open_requests, open_seconds) = (store.log.lock().unwrap().len(), opened.elapsed());
         store.reset();
         let start = Instant::now();
-        assert_eq!(search_all(&shards, &query, 8), expected, "{name}");
+        let found = search_at_once(&shards, &query, 8, at_once);
+        assert_eq!(found, expected, "{name}");
         let seconds = start.elapsed().as_secs_f64();
         let (parts, peak) = counts(&local, &store);
         let log = store.log.lock().unwrap();
         let bytes: u64 = log.iter().map(|(_, start, end)| end - start).sum();
         eprintln!(
-            "{length} bases, {name}: open {open_requests} requests in {:.2} s; search {} \
+            "{length} bases, {name}, {at_once} at once: open {open_requests} requests in {:.2} s; search {} \
              requests, {bytes} bytes, at most {peak} at once, {seconds:.2} s; {parts:?}",
             open_seconds.as_secs_f64(),
             log.len()
         );
     };
-    run(None, "cold");
     let cache = directory.path().join("cache");
-    warm_all(
-        &s3,
-        &cache,
-        &[Part::Sketch, Part::Locators, Part::Headers],
-        0,
-        shards,
-    );
-    run(Some(&cache), "warm");
+    let parts = [Part::Sketch, Part::Locators, Part::Headers];
+    warm_all(&s3, &cache, &parts, 0, shards);
+    for at_once in [1, 4, shards] {
+        run(None, "cold", at_once);
+        run(Some(&cache), "warm", at_once);
+    }
 }

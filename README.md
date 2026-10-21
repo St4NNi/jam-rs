@@ -234,6 +234,10 @@ Advanced options:
 - `--s3-requests N` (default 512, at most 4096): number of S3 requests in flight at the same
   time. S3 answers many parallel requests best; lower it for a store that fails under many.
   Each request needs its own connection, so jam lowers it if the open files limit is too low.
+- `--shards-at-once N` (default 4 when an index file is on S3, else 1): number of index files
+  searched at the same time, so the store gets more requests at once. Each search has its own
+  `--threads`; on S3 they mostly wait for reads. Results are still written in the order of the
+  index files.
 
 Example:
 
