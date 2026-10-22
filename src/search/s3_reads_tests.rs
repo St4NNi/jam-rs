@@ -6,7 +6,7 @@
 use super::control::SearchControl;
 use super::driver::{SearchConfig, SearchSummary, Searcher};
 use super::events::EntryEvent;
-use crate::index::{Location, Part, Plan, Shard, ShardOptions, build_shard, warm};
+use crate::index::{Location, Part, Place, Plan, Shard, ShardOptions, build_shard, warm};
 use crate::storage::{BlockCache, CacheConfig, S3Config, S3Limits};
 use crate::test_support::{
     Reply, build_options, diverged, etag_of, no_stop, random_bases, rng, runtime, serve,
@@ -323,6 +323,8 @@ fn warm_all(config: &S3Config, cache: &Path, parts: &[Part], memory: u64, shards
         let location = Location::s3(&format!("s3://bucket/shard{shard}.jam"), config).unwrap();
         let head = location.head().unwrap();
         let plan = Plan::choose(&head, memory, 1 << 30, parts).unwrap();
+        // A budget of RAM is room for all parts, so the searches read the pins from RAM.
+        assert!(memory == 0 || plan.pins.iter().all(|pin| pin.place == Place::Ram));
         warm(&location, &head, &plan, cache).unwrap();
     }
 }
@@ -473,7 +475,7 @@ fn timed_search(length: usize, shards: usize) {
     };
     let cache = directory.path().join("cache");
     let parts = [Part::Sketch, Part::Locators, Part::Headers];
-    warm_all(&s3, &cache, &parts, 0, shards);
+    warm_all(&s3, &cache, &parts, 1 << 30, shards);
     let mut counts = vec![1, 4.min(shards), shards];
     counts.dedup();
     for at_once in counts {

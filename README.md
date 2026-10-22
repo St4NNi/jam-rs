@@ -601,15 +601,21 @@ Example:
     jam search s3://bucket/indexes/assemblies.jam plasmid.fa --cache /scratch/cache \
         --memory 16GiB --disk 200GiB
 
-By default, `jam index warm` pins the sketch section first and then the locator section, up to
-the disk budget. Use `--pin` to choose which sections to pin, for example
-`--pin sketch,locators,packed` or `--pin sketch,packed=NAME1,NAME2`.
+By default, `jam index warm` pins the parts that save the most S3 requests per byte first: the
+headers, then the sketch section, then the locator section. Each part goes in RAM if it fits
+the memory budget with 96 MiB left for the block cache, else on disk. A part that does not fit
+the disk budget is left out. A part in RAM also needs its room on disk, as it is loaded from
+the cache directory at the start. The block cache gets the RAM and disk that the pins leave.
+Use `--pin` to choose which sections to pin, for example `--pin sketch,locators,packed` or
+`--pin sketch,packed=NAME1,NAME2`.
 
-When the packed sequences are too large to pin, `--pin sketch,locators,headers` is a good
-choice. Before jam reads bases of an entry, it reads and checks the 4 KiB header page of that
-entry. With `headers` pinned, this page comes from local disk, so a candidate entry needs one
-S3 request fewer. The headers take 4 KiB per entry: about 1.1 GB for 270,000 entries. They
-always go on disk.
+The headers are the 4 KiB header page of each packed sequence. Before jam reads bases of an
+entry, it reads and checks that page. With `headers` pinned, the page comes from RAM or local
+disk, so a candidate entry needs one S3 request fewer. The headers take 4 KiB per entry: about
+1.1 GB for 270,000 entries. Packed sequences always go on disk.
+
+Without `--cache`, a search of index files on S3 still keeps the blocks it reads in RAM, up to
+the memory budget, so later queries and later index files reuse them.
 
 ## Screening assemblies
 

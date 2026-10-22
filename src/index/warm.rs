@@ -230,8 +230,10 @@ mod tests {
             Part::Headers,
         ];
         let plan = Plan::choose(&head, 1 << 30, 1 << 30, &parts).unwrap();
+        // The sketch and the headers fit in RAM; packed sequences always go on disk.
         assert_eq!(plan.pins[0].place, Place::Ram);
-        assert_eq!(plan.pins[2].place, Place::Ssd);
+        assert_eq!(plan.pins[1].place, Place::Ssd);
+        assert_eq!(plan.pins[2].place, Place::Ram);
         warm(&location, &head, &plan, &cache).unwrap();
         assert_eq!(
             Plan::read(&cache, &head.digest).unwrap(),

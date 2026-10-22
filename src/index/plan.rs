@@ -13,6 +13,10 @@ use std::path::{Path, PathBuf};
 /// The file name of the plan in the directory of a shard in the cache directory.
 pub(crate) const PLAN_FILE: &str = "plan.json";
 
+/// RAM that a plan leaves at least to the block cache (64 MiB) and to the buffers of reads in
+/// flight (32 MiB), so a pin goes in RAM only if this much stays.
+pub const CACHE_RESERVE: u64 = 96 << 20;
+
 /// A part of a shard that can be pinned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -137,9 +141,10 @@ impl Plan {
         std::fs::rename(&partial, &path).at(&path)
     }
 
-    /// The plan for the shard of `head` within `memory` and `disk` bytes: `parts`, or else the
-    /// sketch and the locators while the budgets last, each in RAM if it fits, else on disk.
-    /// Packed sequences and their headers go on disk; a pin in RAM also takes disk bytes.
+    /// The plan for the shard of `head` within `memory` and `disk` bytes: `parts`, or else by
+    /// value per byte the headers, the sketch and the locators while the budgets last, each in
+    /// RAM if it fits with `CACHE_RESERVE` left, else on disk. Packed sequences go on disk; a pin
+    /// in RAM also takes disk bytes, as it is loaded from its file.
     pub fn choose(
         head: &IndexHead,
         memory: u64,
@@ -153,7 +158,7 @@ impl Plan {
             pins: Vec::new(),
         };
         let chosen = if parts.is_empty() {
-            &[Part::Sketch, Part::Locators][..]
+            &[Part::Headers, Part::Sketch, Part::Locators][..]
         } else {
             parts
         };
@@ -168,8 +173,8 @@ impl Plan {
                         "pinning {part} needs {bytes} bytes of disk, {disk_left} are left"
                     )));
                 }
-                Part::Packed(_) | Part::Headers => Place::Ssd,
-                _ if bytes <= memory_left => Place::Ram,
+                Part::Packed(_) => Place::Ssd,
+                _ if bytes.saturating_add(CACHE_RESERVE) <= memory_left => Place::Ram,
                 _ => Place::Ssd,
             };
             plan.pins
@@ -301,18 +306,35 @@ mod tests {
                 .collect();
             (places, plan.cache_budget())
         };
-        let total = sketch + locators;
-        let (pinned, budget) = places(total, total + 100, &[]);
-        let both = vec![
-            ("sketch".to_string(), Place::Ram),
-            ("locators".to_string(), Place::Ram),
+        let headers: u64 = (part_pins(shard.head(), &Part::Headers, Place::Ssd)
+            .unwrap()
+            .iter())
+        .map(Pin::bytes)
+        .sum();
+        let (total, reserve) = (headers + sketch + locators, CACHE_RESERVE);
+        let pin = |part: &str, place| (part.to_string(), place);
+        // Room for all in RAM: headers, sketch and locators, in this order.
+        let (pinned, budget) = places(total + reserve, total + 100, &[]);
+        let all = [
+            ("headers", Place::Ram),
+            ("sketch", Place::Ram),
+            ("locators", Place::Ram),
         ];
-        assert_eq!((pinned, budget), (both, (0, 100)));
-        let (pinned, budget) = places(sketch, total, &[]);
-        assert_eq!(pinned[1], ("locators".to_string(), Place::Ssd));
-        assert_eq!(budget, (0, 0));
-        let (pinned, budget) = places(10, sketch, &[]);
-        assert_eq!(pinned, vec![("sketch".to_string(), Place::Ssd)]);
+        assert_eq!(pinned, all.map(|(part, place)| pin(part, place)));
+        assert_eq!(budget, (reserve, 100));
+        // The locators do not fit the RAM left, so they go on disk.
+        let (pinned, budget) = places(headers + sketch + reserve, total, &[]);
+        assert_eq!(pinned[1], pin("sketch", Place::Ram));
+        assert_eq!(pinned[2], pin("locators", Place::Ssd));
+        assert_eq!(budget, (reserve, 0));
+        // RAM for the headers alone; disk for the sketch, none left for the locators.
+        let (pinned, budget) = places(headers + reserve, headers + sketch, &[]);
+        let two = [("headers", Place::Ram), ("sketch", Place::Ssd)];
+        assert_eq!(pinned, two.map(|(part, place)| pin(part, place)));
+        assert_eq!(budget, (reserve, 0));
+        // Too little RAM for any pin besides the block cache: the headers go on disk.
+        let (pinned, budget) = places(10, headers, &[]);
+        assert_eq!(pinned, vec![pin("headers", Place::Ssd)]);
         assert_eq!(budget, (10, 0));
         assert!(places(0, 0, &[]).0.is_empty());
         let (pinned, _) = places(1 << 30, 1 << 30, &[Part::Packed(None)]);

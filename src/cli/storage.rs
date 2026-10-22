@@ -325,7 +325,12 @@ mod tests {
         let parts: Vec<(&str, Place)> = (plan.pins.iter())
             .map(|pin| (pin.part.as_str(), pin.place))
             .collect();
-        assert_eq!(parts, [("sketch", Place::Ram), ("locators", Place::Ram)]);
+        let all = [
+            ("headers", Place::Ram),
+            ("sketch", Place::Ram),
+            ("locators", Place::Ram),
+        ];
+        assert_eq!(parts, all);
         // The next start finds the plan and reads the seeds from the pins alone: the seeds file
         // only gets the reads of its header and manifest, which also check it.
         let before = asked.lock().unwrap().len();
