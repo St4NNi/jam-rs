@@ -22,6 +22,11 @@ pub struct CoverageBound<'a> {
     allowance: u64,
     /// The chance that the pruning may spend: --max-miss less the seed miss bound.
     pruning_share: f64,
+    /// The distinct hit starts that an entry needs.
+    min_hits: u64,
+    /// The proven chance that a present piece of the required length shows fewer than
+    /// `min_hits` hit starts.
+    seed_miss: f64,
 }
 
 impl<'a> CoverageBound<'a> {
@@ -35,20 +40,41 @@ impl<'a> CoverageBound<'a> {
         circular: bool,
         required_bases: u64,
     ) -> Self {
-        let mut bound = Self {
+        let identity = model.qualifying_identity(identity, required_bases.min(query_length));
+        Self {
             model,
-            identity: model.qualifying_identity(identity, required_bases.min(query_length)),
+            identity,
             query_length,
             circular,
             required_bases,
             allowance: query_length,
             pruning_share: 0.0,
-        };
-        bound.pruning_share = max_miss.chance() - bound.seed_miss_bound();
-        if bound.pruning_share > 0.0 {
-            bound.allowance = bound.proven_allowance();
+            min_hits: 1,
+            seed_miss: model.miss_upper_bound(required_bases.min(query_length), identity),
         }
-        bound
+        .spend(max_miss)
+    }
+
+    /// The bound when an entry needs `min_hits` distinct hit starts, `seed_miss` being the proven
+    /// chance that a present piece of the required length shows fewer. The pruning gets the rest
+    /// of `max_miss`.
+    pub fn with_min_hits(mut self, min_hits: u64, seed_miss: f64, max_miss: MaxMiss) -> Self {
+        (self.min_hits, self.seed_miss, self.allowance) = (min_hits, seed_miss, self.query_length);
+        self.spend(max_miss)
+    }
+
+    /// Gives the pruning what `max_miss` leaves after the seed miss bound; none turns it off.
+    fn spend(mut self, max_miss: MaxMiss) -> Self {
+        self.pruning_share = max_miss.chance() - self.seed_miss;
+        if self.pruning_share > 0.0 {
+            self.allowance = self.proven_allowance();
+        }
+        self
+    }
+
+    /// The distinct hit starts that an entry needs.
+    pub fn min_hits(&self) -> u64 {
+        self.min_hits
     }
 
     /// The highest query coverage, in bases, of an entry with seed hits (or possible seed hits)
@@ -63,11 +89,11 @@ impl<'a> CoverageBound<'a> {
         self.query_length - left_out
     }
 
-    /// The proven bound on the chance that a present piece of the required length shows no seed
-    /// hit: the chance to lose a qualifying entry before any bound sees it.
+    /// The proven bound on the chance that a present piece of the required length shows fewer hit
+    /// starts than an entry needs (no seed hit when one is enough): the chance to lose a
+    /// qualifying entry before any bound sees it.
     pub fn seed_miss_bound(&self) -> f64 {
-        let required = self.required_bases.min(self.query_length);
-        self.model.miss_upper_bound(required, self.identity)
+        self.seed_miss
     }
 
     /// Whether the coverage bound can drop an entry: false when the allowance is the whole query.
@@ -312,6 +338,35 @@ mod tests {
         assert!(on.prunes());
         assert!(on.total_miss() <= max_miss.chance());
         assert!(on.total_miss() > on.seed_miss_bound());
+    }
+
+    /// SecY (1,299 bases, 650 required) at identity 0.95 with level 2 and two hit starts: the
+    /// seed part 0.000454314 plus the pruning of the 0.0001 allowance of 991 bases is 0.000494765
+    /// (the design study); at --max-miss 0.001 the pruning gets the rest, an allowance of 867
+    /// bases, for a total of 0.000865524.
+    #[test]
+    fn two_hit_totals() {
+        let two = MissModel::new(SeedScheme::default(), 2).unwrap();
+        let two: &'static MissModel = Box::leak(Box::new(two));
+        let seed = two.hit_miss_bound(0.95, 650, 1_299, 2);
+        let at = |max_miss| CoverageBound::new(two, max_miss, 0.95, 1_299, false, 650);
+        let close = |got: f64, want: f64| (got / want - 1.0).abs() < 1e-5;
+        let old = at(MaxMiss::new(0.0001).unwrap());
+        assert_eq!((old.allowance, old.min_hits()), (991, 1));
+        let combined = seed + old.total_miss() - old.seed_miss_bound();
+        assert!(close(combined, 0.000_494_765), "{combined}");
+        let budget = MaxMiss::new(0.001).unwrap();
+        let new = at(budget).with_min_hits(2, seed, budget);
+        assert_eq!((new.allowance, new.min_hits()), (867, 2));
+        assert_eq!(new.seed_miss_bound(), seed);
+        assert!(
+            close(new.total_miss(), 0.000_865_524),
+            "{}",
+            new.total_miss()
+        );
+        // When the seed part alone reaches the target the pruning is off.
+        let tight = at(budget).with_min_hits(2, 0.001, budget);
+        assert!(!tight.prunes() && tight.total_miss() == 0.001);
     }
 
     #[test]

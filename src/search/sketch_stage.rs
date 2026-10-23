@@ -64,8 +64,15 @@ pub struct SketchWork {
     pub seeded_entries: u64,
     /// Entries left out as they have no seed hit and are in no frequent seed's color set.
     pub unseeded_entries: u64,
-    /// Candidate entries kept by the coverage bound.
+    /// Candidate entries kept by the coverage bound and the hit starts.
     pub possible_entries: u64,
+    /// The distinct hit starts that a candidate entry needs: query starts with a seed hit, or
+    /// with a frequent seed whose color sets hold the entry.
+    #[serde(default)]
+    pub min_hit_starts: u64,
+    /// Entries kept by the coverage bound but left out with fewer than `min_hit_starts`.
+    #[serde(default)]
+    pub few_hit_entries: u64,
     /// Wall seconds of the stage.
     pub seconds: f64,
     /// A proven upper bound on the chance that a present piece of the required coverage shows no
@@ -179,7 +186,7 @@ pub fn sketch_stage_known(
         held,
         held_starts,
     };
-    let mut candidates: Vec<PossibleEntry> = seed_hits
+    let mut candidates: Vec<(PossibleEntry, u64)> = seed_hits
         .par_chunk_by(|a, b| a.0 == b.0)
         .filter_map(|hits| {
             let (entry, seeds) = (hits[0].0, hits.iter().map(|&(_, seed)| seed).collect());
@@ -203,6 +210,13 @@ pub fn sketch_stage_known(
             .into_iter()
             .filter_map(|entry| possible_entry(entry, Vec::new(), query, bound, &frequent)),
     );
+    let kept = candidates.len();
+    let mut candidates: Vec<PossibleEntry> = (candidates.into_iter())
+        .filter(|(_, hit_starts)| *hit_starts >= bound.min_hits())
+        .map(|(candidate, _)| candidate)
+        .collect();
+    work.min_hit_starts = bound.min_hits();
+    work.few_hit_entries = (kept - candidates.len()) as u64;
     candidates.sort_by(|a, b| (b.coverage_bound, a.entry).cmp(&(a.coverage_bound, b.entry)));
     work.possible_entries = candidates.len() as u64;
     work.seconds = started.elapsed().as_secs_f64();
@@ -435,16 +449,17 @@ fn expand(
     Ok(hits)
 }
 
-/// The candidate entry for `entry` with seed hits `seeds`, or `None` when its bound is too low or
-/// it has no seed hit and is in no frequent color set (then stage 2 could build no alignment
-/// window, though at low identities the bound is the whole query).
+/// The candidate entry for `entry` with seed hits `seeds` and its distinct hit starts, or `None`
+/// when its bound is too low or it has no seed hit and is in no frequent color set (then stage 2
+/// could build no alignment window, though at low identities the bound is the whole query).
+/// A query start that several looked-up k-mers share counts once.
 fn possible_entry(
     entry: u32,
     seeds: Vec<u32>,
     query: &QueryKmers,
     bound: &CoverageBound,
     frequent: &Frequent,
-) -> Option<PossibleEntry> {
+) -> Option<(PossibleEntry, u64)> {
     let in_frequent = frequent.holds(entry);
     if seeds.is_empty() && !in_frequent {
         return None;
@@ -460,10 +475,13 @@ fn possible_entry(
         positions.sort_unstable();
     }
     let coverage_bound = bound.bound(&positions);
-    bound.keeps(coverage_bound).then(|| PossibleEntry {
+    let candidate = PossibleEntry {
         entry,
         coverage_bound,
         containment_estimate: query.containment_estimate(hit_starts),
         seed_hits: seeds,
-    })
+    };
+    bound
+        .keeps(coverage_bound)
+        .then_some((candidate, hit_starts))
 }

@@ -6,7 +6,7 @@ use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::query::QueryKmers;
-use super::sketch_stage::{SketchLimits, keep_found, sketch_stage};
+use super::sketch_stage::{PossibleEntry, SketchLimits, keep_found, sketch_stage};
 use crate::index::{Shard, build_shard};
 use crate::loss::MaxMiss;
 use crate::seeds::Seeder;
@@ -14,6 +14,7 @@ use crate::test_support::{
     build_options, miss_model, no_stop, parameters, random_bases, rng, test_shard,
     with_substitutions, write_entries,
 };
+use rand::RngExt;
 use std::sync::atomic::AtomicBool;
 
 const UNLIMITED: SketchLimits = SketchLimits {
@@ -279,4 +280,65 @@ fn found_lookups_kept() {
     let (all_entries, all_hits, _) = entries(&all);
     assert_eq!((kept_entries, kept_hits), (all_entries, all_hits));
     assert_eq!(lookups, all.lookups());
+}
+
+/// The hit minimum drops only entries with fewer distinct hit starts, own or of frequent seeds,
+/// and never one with as many. Entries hold short pieces of the query, some on two contigs.
+#[test]
+fn few_hit_entries_dropped() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut random = rng(0x2b17);
+    let query = random_bases(&mut random, 5_000);
+    let mut entries = vec![vec![query.clone()]];
+    for index in 0..40usize {
+        // From the first 600 bases, so pieces share seeds that a low limit makes frequent.
+        let start = random.random_range(0..560);
+        let piece = query[start..start + 21 + index % 25].to_vec();
+        let mut contigs = vec![[random_bases(&mut random, 300), piece].concat()];
+        if index % 3 == 0 {
+            let other = random.random_range(1_000..4_900);
+            let piece = query[other..other + 30].to_vec();
+            contigs.push([random_bases(&mut random, 300), piece].concat());
+        }
+        entries.push(contigs);
+    }
+    let shard = test_shard(directory.path(), &entries);
+    let kmers = QueryKmers::new(&Seeder::new(parameters().scheme).unwrap(), &query, false);
+    let expected = kmers.kmers() as f64 * 2.0 / 21.0;
+    // The same seed part, so the same coverage bounds; only the hit minimum differs.
+    let one = bound(5_000, 0);
+    let two = one.with_min_hits(2, one.seed_miss_bound(), MaxMiss::default());
+    let starts = |candidate: &PossibleEntry| match candidate.containment_estimate < 1.0 {
+        true => (candidate.containment_estimate * expected).round() as u64,
+        false => u64::MAX,
+    };
+    let frequent = SketchLimits {
+        frequent_seed_entries: 1,
+        max_seed_hits: u64::MAX,
+    };
+    for limits in [UNLIMITED, frequent] {
+        let run = |bound| sketch_stage(shard.seed_file(), &kmers, bound, limits, no_stop());
+        let (all, kept) = (run(&one).unwrap(), run(&two).unwrap());
+        if limits == UNLIMITED {
+            for candidate in &all.candidates {
+                let own = kmers.sorted_positions(&candidate.seed_hits).len() as u64;
+                assert!(own == starts(candidate) || starts(candidate) == u64::MAX);
+            }
+        } else {
+            assert!(all.work.frequent_seeds > 0);
+        }
+        let wanted: Vec<u32> = (all.candidates.iter())
+            .filter(|candidate| starts(candidate) >= 2)
+            .map(|candidate| candidate.entry)
+            .collect();
+        let got: Vec<u32> = kept.candidates.iter().map(|c| c.entry).collect();
+        assert_eq!(got, wanted);
+        let dropped = (all.candidates.len() - got.len()) as u64;
+        assert_eq!(kept.work.few_hit_entries, dropped);
+        let work = (all.work.min_hit_starts, all.work.few_hit_entries);
+        assert_eq!((work, kept.work.min_hit_starts), ((1, 0), 2));
+        // Entries with one hit start and with exactly two both occur.
+        let counts: Vec<u64> = all.candidates.iter().map(starts).collect();
+        assert!(counts.contains(&1) && counts.contains(&2), "{counts:?}");
+    }
 }
