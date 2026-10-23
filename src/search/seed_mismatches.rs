@@ -202,6 +202,26 @@ pub fn lookup_plan(
     }
 }
 
+/// When every candidate entry needs two distinct hit starts: the proven chance that a qualifying
+/// copy shows fewer, if the plan is proven and this chance meets `budget`. Otherwise one hit
+/// start is enough. At one level two hit starts only drop entries, and a lower level only finds
+/// fewer hits, so the cheapest proven level with the most hit starts that meet the budget keeps
+/// no more candidates than any plan with more lookups or fewer hit starts.
+pub fn two_hit_bound(
+    models: &[MissModel; 3],
+    rule: &DecisionRule,
+    budget: MaxMiss,
+    length: u64,
+    plan: &LookupPlan,
+) -> Option<f64> {
+    if !plan.proven {
+        return None;
+    }
+    let required = rule.min_query_coverage.required_bases(length).min(length);
+    let miss = models[plan.full].hit_miss_bound(rule.min_identity, required, length, 2);
+    (miss <= budget.chance()).then_some(miss)
+}
+
 /// The proven miss bound of lookup level `level` for a query of `length` bases. Level 3 has the
 /// bound of level 2.
 fn level_bound(models: &[MissModel; 3], rule: &DecisionRule, length: u64, level: usize) -> f64 {
@@ -355,6 +375,25 @@ mod tests {
             false,
         );
         assert!(!tight.proven && tight.full == 0 && tight.expected_hits >= EXPECTED_HITS);
+    }
+
+    /// SecY (1,299 bases) at 95%: level 2 with two hit starts at 0.001, one at 0.0001, and level
+    /// 1 with one at 0.01. At 1,000 bases two do not fit 0.001; a plan by hits keeps one.
+    #[test]
+    fn hit_threshold_chosen() {
+        let at = |max_miss: f64, length: u64| {
+            let (models, rule, budget) = (models(), rule(0.95), MaxMiss::new(max_miss).unwrap());
+            let plan = lookup_plan(&models, &rule, budget, length, false);
+            let two = two_hit_bound(&models, &rule, budget, length, &plan);
+            (plan.full, plan.proven, two)
+        };
+        let (full, proven, two) = at(0.001, 1_299);
+        assert_eq!((full, proven), (2, true));
+        assert!((two.unwrap() / 0.000_454_314 - 1.0).abs() < 1e-5, "{two:?}");
+        assert_eq!(at(0.0001, 1_299), (2, true, None));
+        assert_eq!(at(0.01, 1_299), (1, true, None));
+        assert_eq!(at(0.001, 1_000), (2, true, None));
+        assert_eq!(at(0.001, 250), (2, false, None));
     }
 
     #[test]

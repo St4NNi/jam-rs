@@ -17,7 +17,7 @@ use super::locate_stage::{
 };
 use super::located::LocatedEntry;
 use super::query::{QueryKmers, lookup_bound};
-use super::seed_mismatches::{LookupPlan, lookup_plan, target_length};
+use super::seed_mismatches::{LookupPlan, lookup_plan, target_length, two_hit_bound};
 use super::sketch_stage::{
     PossibleEntry, SketchLimits, SketchWork, held_seeds, keep_found_seeds, sketch_stage_known,
 };
@@ -401,7 +401,7 @@ impl<'a> Searcher<'a> {
         let length = query_kmers.length();
         let rule = &config.rule;
         let model = &self.models[plan.full];
-        let bound = CoverageBound::new(
+        let mut bound = CoverageBound::new(
             model,
             budget,
             rule.min_identity,
@@ -409,6 +409,9 @@ impl<'a> Searcher<'a> {
             circular,
             rule.min_query_coverage.required_bases(length),
         );
+        if let Some(miss) = two_hit_bound(&self.models, rule, budget, length, plan) {
+            bound = bound.with_min_hits(2, miss, budget);
+        }
         let mut summary = self.empty_summary(length, model.mismatches());
         summary.times.prepare_query = start.finish();
         let (miss_upper_bound, total_miss) = (bound.seed_miss_bound(), bound.total_miss());
@@ -419,6 +422,7 @@ impl<'a> Searcher<'a> {
             miss_upper_bound,
             total_miss,
             miss_over_budget,
+            min_hit_starts: bound.min_hits(),
             ..SketchWork::default()
         };
         // Half of the required coverage must be normal bases, so a query with fewer normal bases

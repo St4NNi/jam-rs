@@ -105,6 +105,8 @@ fn two_seeds_found() {
     // 1,476 k-mers at 70%: the rule takes level 2, which finds the entry.
     let (summary, events) = search(&shard, &query, false, &base, false);
     assert_eq!(summary.seed_mismatches, 2);
+    // A plan by hits is not proven, so one hit start is enough.
+    assert_eq!(summary.sketch.min_hit_starts, 1);
     assert!(events.contains_key(&0));
 }
 
@@ -138,6 +140,12 @@ fn level_ends_search() {
     assert!(matches!(summary.completion, Completion::Complete));
     assert_eq!(summary.locate.entries, 0);
     assert_eq!(events.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3]);
+    // 4,500 required bases prove level 0 with two hit starts, far within the target.
+    assert_eq!(
+        (summary.seed_mismatches, summary.sketch.min_hit_starts),
+        (0, 2)
+    );
+    assert!(summary.sketch.total_miss <= SearchConfig::default().max_miss.chance());
     assert!(
         events
             .values()
