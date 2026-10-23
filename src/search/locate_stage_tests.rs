@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: MIT
 
 use super::bound::CoverageBound;
+use super::driver::ENTRIES_AHEAD;
 use super::events::DropReason;
 use super::locate_stage::{
-    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry, read_entry_locations,
+    LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, ahead_bytes, locate_entry,
+    read_entry_locations,
 };
 use super::query::QueryKmers;
 use super::sketch_stage::{PossibleEntry, SketchLimits, find_query_seeds, sketch_stage};
@@ -270,4 +272,19 @@ fn chance_keys_dropped() {
     let (dropped, work) = checked(&shard, &query, moved);
     assert_eq!(dropped, LocateOutcome::Dropped(DropReason::NoSeedHits));
     assert_eq!((work.unverified_entries, work.verified_bins), (1, 1));
+}
+
+/// The entries ahead of the workers ask for as many bytes in all as 128 entries of 1/1024 of the
+/// block cache, at least 1 MiB each, did: an eighth of the cache, at least 128 MiB.
+#[test]
+fn entries_ahead_bytes() {
+    for ram in [64 << 20, 1 << 30, 4 << 30, 16 << 30, 100 << 30] {
+        let before = 128 * (ram / 1024).max(1 << 20);
+        assert_eq!(
+            ENTRIES_AHEAD as u64 * ahead_bytes(Some(ram)),
+            before,
+            "{ram}"
+        );
+    }
+    assert_eq!(ahead_bytes(None), u64::MAX);
 }

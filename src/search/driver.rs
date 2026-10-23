@@ -63,9 +63,9 @@ pub struct SearchConfig {
 /// to its whole sketch part, at about 0.3 ns per byte on CephFS, and the shared pass makes its
 /// lookups a second time, at about 70 ns each (measured on worm): 230 bytes, rounded up.
 const SKETCH_BYTES_PER_LOOKUP: u64 = 256;
-/// Candidate entries ahead of the workers whose reads are asked for, so on S3 many requests are
-/// in flight; their blocks take a few MiB of the block cache.
-const ENTRIES_AHEAD: usize = 128;
+/// Candidate entries ahead of the workers whose reads are asked for, so on S3 as many requests
+/// are in flight as the store allows (512); their blocks take a share of the block cache.
+pub(super) const ENTRIES_AHEAD: usize = 512;
 
 /// The least frequent-seed limit that `SearchConfig::frequent_seed_entries` takes by default.
 pub const MIN_FREQUENT_LIMIT: u64 = 32;

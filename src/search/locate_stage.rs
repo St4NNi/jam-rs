@@ -25,11 +25,11 @@ const CHUNK_SEEDS: usize = 4096;
 /// qualifying copy.
 const WEAK_HIT_STARTS: usize = 8;
 /// Bytes of packed bases asked for ahead for one candidate entry, at most: a share of the block
-/// cache, so that 128 entries ahead in each of 4 shards searched at once fill half of it, but at
-/// least 1 MiB, the windows of about 256 seed bins apart. Without a cache, hints only reach
+/// cache, so that 512 entries ahead in each of 4 shards searched at once fill half of it, but at
+/// least 256 KiB, the windows of about 64 seed bins apart. Without a cache, hints only reach
 /// local files and have no bound.
-const AHEAD_SHARE: u64 = 1024;
-const MIN_AHEAD: u64 = 1 << 20;
+const AHEAD_SHARE: u64 = 4096;
+const MIN_AHEAD: u64 = 256 << 10;
 
 /// The seed locations of one candidate entry: pairs of seed (an index into
 /// `QueryKmers::distinct`) and seed location, ascending.
@@ -213,7 +213,7 @@ pub fn will_need_entry(shard: &Shard, entry: u32, locations: &[(u32, SeedLocatio
     let mut bins: Vec<u32> = locations.iter().map(|(_, location)| location.bin).collect();
     bins.sort_unstable();
     bins.dedup();
-    let most = (shard.cache_ram()).map_or(u64::MAX, |ram| (ram / AHEAD_SHARE).max(MIN_AHEAD));
+    let most = ahead_bytes(shard.cache_ram());
     let (mut ranges, mut bases, mut end) = (Vec::new(), 0u64, 0u64);
     for &bin in &bins {
         let start = u64::from(bin) << bin_bits;
@@ -227,6 +227,12 @@ pub fn will_need_entry(shard: &Shard, entry: u32, locations: &[(u32, SeedLocatio
         ranges.push(range);
     }
     shard.will_need_bases(entry, ranges);
+}
+
+/// Bytes of packed bases asked for ahead for one candidate entry at most, through a block cache
+/// of `cache_ram` bytes, if any.
+pub(crate) fn ahead_bytes(cache_ram: Option<u64>) -> u64 {
+    cache_ram.map_or(u64::MAX, |ram| (ram / AHEAD_SHARE).max(MIN_AHEAD))
 }
 
 /// What checking the seed hits of one weak entry on its sequence needs.
