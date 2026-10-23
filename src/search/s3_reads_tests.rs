@@ -143,6 +143,17 @@ fn serve_at(root: &Path, speed: Speed) -> (crate::test_support::Server, Arc<Stor
 /// entries, so they become candidates with few seed hits, as most candidates of a large index
 /// are.
 fn build_shards(directory: &Path, length: usize, shards: usize) -> Vec<u8> {
+    build_entries(directory, length, shards, ENTRIES, 20_000..100_000)
+}
+
+/// The same with `per_shard` entries per shard and contigs of `contig` bases.
+fn build_entries(
+    directory: &Path,
+    length: usize,
+    shards: usize,
+    per_shard: usize,
+    contig: std::ops::Range<usize>,
+) -> Vec<u8> {
     let mut random = rng(0x53_ead);
     let query = random_bases(&mut random, length);
     for shard in 0..shards {
@@ -153,11 +164,11 @@ fn build_shards(directory: &Path, length: usize, shards: usize) -> Vec<u8> {
         } else {
             1
         };
-        for entry in 0..ENTRIES {
+        for entry in 0..per_shard {
             let count = if entry < 2 { pieces.max(3) } else { 3 };
             let mut contigs: Vec<Vec<u8>> = (0..count)
                 .map(|_| {
-                    let length = random.random_range(20_000..100_000);
+                    let length = random.random_range(contig.clone());
                     random_bases(&mut random, length)
                 })
                 .collect();
@@ -481,5 +492,60 @@ fn timed_search(length: usize, shards: usize) {
     for at_once in counts {
         run(None, "cold", at_once);
         run(Some(&cache), "warm", at_once);
+    }
+}
+
+/// Ten shards of 1,000 entries on a store with 50 ms per request, searched with 8 and 48 threads,
+/// one shard and four at a time, cold and with sketch, locators and headers pinned: the results
+/// equal a local search, and the wall time and the share of busy threads (CPU seconds of the
+/// process per second and thread) are printed. Run it with `--ignored` for the numbers.
+#[test]
+#[ignore]
+fn many_candidates_timed() {
+    let (shards, length) = (10, QUERY_LENGTH);
+    let directory = tempfile::tempdir().unwrap();
+    let query = build_entries(directory.path(), length, shards, 1_000, 2_000..8_000);
+    let local: Vec<Shard> = (0..shards)
+        .map(|shard| Shard::open(&directory.path().join(format!("shard{shard}.jam"))).unwrap())
+        .collect();
+    let expected = search_all(&local, &query, 8);
+    let speed = Speed {
+        latency: Duration::from_millis(50),
+        stream_rate: 100 << 20,
+        link_rate: 1 << 30,
+    };
+    let (server, store) = serve_at(directory.path(), speed);
+    let s3 = S3Config::new(
+        "local",
+        Some(&server.address),
+        true,
+        S3Limits::default(),
+        runtime(),
+    );
+    let s3 = s3.unwrap().unsigned();
+    let cache = directory.path().join("cache");
+    let parts = [Part::Sketch, Part::Locators, Part::Headers];
+    warm_all(&s3, &cache, &parts, 1 << 30, shards);
+    for (pins, name) in [(None, "cold"), (Some(cache.as_path()), "warm")] {
+        for threads in [8, 48] {
+            for at_once in [1, 4] {
+                let opened = open_s3(&s3, pins, shards);
+                store.reset();
+                let start = super::times::PartStart::now();
+                let found = search_at_once(&opened, &query, threads, at_once);
+                let time = start.finish();
+                assert_eq!(found, expected, "{name}");
+                let busy = time.cpu_seconds / (time.wall_seconds * (threads * at_once) as f64);
+                eprintln!(
+                    "{name}, {threads} threads, {at_once} at once: {:.2} s, {:.1} CPU s, busy \
+                     {:.0}%, {} requests, at most {} at once",
+                    time.wall_seconds,
+                    time.cpu_seconds,
+                    100.0 * busy,
+                    store.log.lock().unwrap().len(),
+                    store.peak.load(Ordering::SeqCst)
+                );
+            }
+        }
     }
 }
