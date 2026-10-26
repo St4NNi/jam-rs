@@ -141,9 +141,9 @@ pub fn full_two_limit(k: usize, w: usize) -> u64 {
 }
 
 /// The lookups of a query. First the proof step: the cheapest full level whose proven bound
-/// meets `budget`, among levels 0 and 1 and level 2 up to `full_two_limit` k-mers. Level 2
-/// counts only with two hit starts (`two_hit_bound`), as with one it keeps many weak candidates
-/// on a large collection. Otherwise the plan by hits: the cheapest plan at which a copy at the identity limit is expected to give
+/// meets `budget` with two hit starts (`two_hit_bound`), or a tenth of `budget` with one, among
+/// levels 0 and 1 and level 2 up to `full_two_limit` k-mers. So a plan with one hit start has the
+/// level of the release at the default. Otherwise the plan by hits: the cheapest plan at which a copy at the identity limit is expected to give
 /// `EXPECTED_HITS` seed hits on the required bases, adding level 1, then level 2, on just enough
 /// sampled k-mers (`LookupPlan::sampled_in`); full level 2 if even that is not enough. The k-mers with level-2
 /// lookups also get indel lookups on queries of at most `MAX_INDEL_KMERS` k-mers.
@@ -157,8 +157,17 @@ pub fn lookup_plan(
     planned(models, rule, budget, length, circular, true)
 }
 
-/// As `lookup_plan`; with `two_at_level_two` false, level 2 also counts with one hit start, as
-/// before the hit threshold.
+/// The share of `--max-miss` that a plan with one hit start may use: 0.0001 at the default, the
+/// target of the release before the hit threshold, so such plans keep the levels they had.
+const ONE_HIT_SHARE: f64 = 0.1;
+
+/// The target of a plan with one hit start.
+fn one_hit_budget(budget: MaxMiss) -> MaxMiss {
+    MaxMiss::new(budget.chance() * ONE_HIT_SHARE).unwrap_or(budget)
+}
+
+/// As `lookup_plan`; with `two_at_level_two` false, every level counts with one hit start at
+/// `budget`, as before the hit threshold.
 fn planned(
     models: &[MissModel; 3],
     rule: &DecisionRule,
@@ -191,13 +200,15 @@ fn planned(
         }
     };
     let cheap = |r: usize| r < 2 || starts <= full_two_limit(k, w);
+    let one_hit = match two_at_level_two {
+        true => one_hit_budget(budget),
+        false => budget,
+    };
     let two_hits = |r: usize| {
-        r < 2
-            || !two_at_level_two
-            || two_hit_bound(models, rule, budget, length, circular, r).is_some()
+        two_at_level_two && two_hit_bound(models, rule, budget, length, circular, r).is_some()
     };
     let proven = (0..3).find(|&r| {
-        cheap(r) && level_bound(models, rule, length, r) <= budget.chance() && two_hits(r)
+        cheap(r) && (level_bound(models, rule, length, r) <= one_hit.chance() || two_hits(r))
     });
     if let Some(r) = proven {
         return plan(r, 0, true);
@@ -225,8 +236,7 @@ fn planned(
 
 /// The coverage bound of a search by `plan`. Every candidate entry needs two distinct hit starts
 /// when `two_hit_bound` meets `budget` and the pruning keeps the allowance it has with one;
-/// otherwise one hit start is enough. Two hit starts then only drop entries, and a lower level
-/// only finds fewer hits, so no plan with more lookups or fewer hit starts keeps fewer candidates.
+/// otherwise one hit start is enough, with the pruning at a tenth of `budget`, as in the release.
 pub fn search_bound<'a>(
     models: &'a [MissModel; 3],
     rule: &DecisionRule,
@@ -238,8 +248,10 @@ pub fn search_bound<'a>(
     let two = plan
         .proven
         .then(|| two_hit_bound(models, rule, budget, length, circular, plan.full));
-    two.flatten()
-        .unwrap_or_else(|| one_hit_bound(models, rule, budget, length, circular, plan.full))
+    two.flatten().unwrap_or_else(|| {
+        let budget = one_hit_budget(budget);
+        one_hit_bound(models, rule, budget, length, circular, plan.full)
+    })
 }
 
 /// The coverage bound at full level `level` with one hit start.
@@ -466,7 +478,8 @@ mod tests {
                 (full, sampled, proven, hits)
             };
         assert_eq!(summary(at(0.95, 0.0001, 1_299)), (1, false, false, 1));
-        assert_eq!(summary(at(0.95, 0.01, 1_299)), (1, false, true, 1));
+        // One hit start at level 1 must meet 0.001 here; two at level 2 meet 0.01.
+        assert_eq!(summary(at(0.95, 0.01, 1_299)), (2, false, true, 2));
         assert_eq!(summary(at(0.95, 0.001, 1_000)), (1, false, false, 1));
         assert_eq!(summary(at(0.95, 0.001, 250)), (2, false, false, 1));
         assert_eq!(summary(at(0.8, 0.001, 1_000_000)), (0, false, true, 1));
@@ -497,6 +510,15 @@ mod tests {
                 );
                 assert!(level_two(&new) <= level_two(&old), "{at}");
                 assert!(!new.indels || old.indels, "{at}");
+                // With one hit start, the lookups are those of the release.
+                let bound = search_bound(&models, &rule, MaxMiss::default(), length, false, &new);
+                if bound.min_hits() == 1 {
+                    assert_eq!(
+                        (new.full, new.sampled, new.indels),
+                        (old.full, old.sampled, old.indels),
+                        "{at}"
+                    );
+                }
             }
         }
     }
@@ -505,12 +527,12 @@ mod tests {
     fn target_length_found() {
         let models = models();
         let from = |identity: f64| target_length(&models, &rule(identity), MaxMiss::default());
-        // At the default 0.001; 0.0001 with level 2 at one hit start gave 1,239, 3,223, 23,559
-        // and 82,583. At 90% level 2 proves 3,223 to 3,337 bases and two more short stretches.
+        // At the default 0.001 these are the starts of the release at 0.0001, as a plan with
+        // one hit start keeps that target.
         assert_eq!(from(0.95), Some(1_239));
-        assert_eq!(from(0.9), Some(4_106));
-        assert_eq!(from(0.85), Some(17_855));
-        assert_eq!(from(0.8), Some(61_999));
+        assert_eq!(from(0.9), Some(3_223));
+        assert_eq!(from(0.85), Some(23_559));
+        assert_eq!(from(0.8), Some(82_583));
     }
 
     fn sampled(plan: &LookupPlan, positions: u64) -> Vec<u64> {
