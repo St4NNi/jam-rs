@@ -3,6 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::bound::CoverageBound;
 use crate::decide::DecisionRule;
 use crate::loss::{MaxMiss, MissModel};
 
@@ -202,12 +203,30 @@ pub fn lookup_plan(
     }
 }
 
-/// When every candidate entry needs two distinct hit starts: the proven chance that a qualifying
-/// copy shows fewer, if the plan is proven and this chance meets `budget`. Otherwise one hit
-/// start is enough. At one level two hit starts only drop entries, and a lower level only finds
-/// fewer hits, so the cheapest proven level with the most hit starts that meet the budget keeps
-/// no more candidates than any plan with more lookups or fewer hit starts.
-pub fn two_hit_bound(
+/// The coverage bound of a search by `plan`. Every candidate entry needs two distinct hit starts
+/// when `two_hit_bound` meets `budget` and the pruning keeps the allowance it has with one;
+/// otherwise one hit start is enough. Two hit starts then only drop entries, and a lower level
+/// only finds fewer hits, so no plan with more lookups or fewer hit starts keeps fewer candidates.
+pub fn search_bound<'a>(
+    models: &'a [MissModel; 3],
+    rule: &DecisionRule,
+    budget: MaxMiss,
+    length: u64,
+    circular: bool,
+    plan: &LookupPlan,
+) -> CoverageBound<'a> {
+    let required = rule.min_query_coverage.required_bases(length);
+    let model = &models[plan.full];
+    let one = CoverageBound::new(model, budget, rule.min_identity, length, circular, required);
+    two_hit_bound(models, rule, budget, length, plan)
+        .map(|miss| one.with_min_hits(2, miss, budget))
+        .filter(|two| two.allowance() == one.allowance())
+        .unwrap_or(one)
+}
+
+/// The proven chance that a qualifying copy shows fewer than two distinct hit starts, if the
+/// plan is proven and this chance meets `budget`.
+fn two_hit_bound(
     models: &[MissModel; 3],
     rule: &DecisionRule,
     budget: MaxMiss,
@@ -377,23 +396,33 @@ mod tests {
         assert!(!tight.proven && tight.full == 0 && tight.expected_hits >= EXPECTED_HITS);
     }
 
-    /// SecY (1,299 bases) at 95%: level 2 with two hit starts at 0.001, one at 0.0001, and level
-    /// 1 with one at 0.01. At 1,000 bases two do not fit 0.001; a plan by hits keeps one.
+    /// SecY (1,299 bases) at 95%: level 2 with two hit starts at 0.001 (bound 0.000454314, total
+    /// 0.000865524), one at 0.0001, and level 1 with one at 0.01. At 1,000 bases two do not fit
+    /// 0.001; a plan by hits keeps one. At 80% and 1 Mb two fit 0.001 only with a wider pruning
+    /// allowance, which could keep more candidates, so one stays.
     #[test]
     fn hit_threshold_chosen() {
-        let at = |max_miss: f64, length: u64| {
-            let (models, rule, budget) = (models(), rule(0.95), MaxMiss::new(max_miss).unwrap());
+        let models = models();
+        let at = |identity: f64, max_miss: f64, length: u64| {
+            let (rule, budget) = (rule(identity), MaxMiss::new(max_miss).unwrap());
             let plan = lookup_plan(&models, &rule, budget, length, false);
+            let bound = search_bound(&models, &rule, budget, length, false, &plan);
             let two = two_hit_bound(&models, &rule, budget, length, &plan);
-            (plan.full, plan.proven, two)
+            (plan.full, plan.proven, bound.min_hits(), bound, two)
         };
-        let (full, proven, two) = at(0.001, 1_299);
-        assert_eq!((full, proven), (2, true));
-        assert!((two.unwrap() / 0.000_454_314 - 1.0).abs() < 1e-5, "{two:?}");
-        assert_eq!(at(0.0001, 1_299), (2, true, None));
-        assert_eq!(at(0.01, 1_299), (1, true, None));
-        assert_eq!(at(0.001, 1_000), (2, true, None));
-        assert_eq!(at(0.001, 250), (2, false, None));
+        let close = |got: f64, want: f64| (got / want - 1.0).abs() < 1e-5;
+        let (full, proven, hits, bound, _) = at(0.95, 0.001, 1_299);
+        assert_eq!((full, proven, hits), (2, true, 2));
+        assert!(close(bound.seed_miss_bound(), 0.000_454_314));
+        assert!(close(bound.total_miss(), 0.000_865_524));
+        let summary =
+            |(full, proven, hits, _, _): (usize, bool, u64, CoverageBound, _)| (full, proven, hits);
+        assert_eq!(summary(at(0.95, 0.0001, 1_299)), (2, true, 1));
+        assert_eq!(summary(at(0.95, 0.01, 1_299)), (1, true, 1));
+        assert_eq!(summary(at(0.95, 0.001, 1_000)), (2, true, 1));
+        assert_eq!(summary(at(0.95, 0.001, 250)), (2, false, 1));
+        let (full, proven, hits, _, two) = at(0.8, 0.001, 1_000_000);
+        assert!((full, proven, hits) == (0, true, 1) && two.is_some());
     }
 
     #[test]

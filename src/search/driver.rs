@@ -7,7 +7,6 @@ use super::align_stage::{
     AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
     align_packed_entry,
 };
-use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::events::{Completion, DropReason, EntryEvent, SearchStage};
@@ -17,7 +16,7 @@ use super::locate_stage::{
 };
 use super::located::LocatedEntry;
 use super::query::{QueryKmers, lookup_bound};
-use super::seed_mismatches::{LookupPlan, lookup_plan, target_length, two_hit_bound};
+use super::seed_mismatches::{LookupPlan, lookup_plan, search_bound, target_length};
 use super::sketch_stage::{
     PossibleEntry, SketchLimits, SketchWork, held_seeds, keep_found_seeds, sketch_stage_known,
 };
@@ -400,19 +399,8 @@ impl<'a> Searcher<'a> {
         } = *request;
         let length = query_kmers.length();
         let rule = &config.rule;
-        let model = &self.models[plan.full];
-        let mut bound = CoverageBound::new(
-            model,
-            budget,
-            rule.min_identity,
-            length,
-            circular,
-            rule.min_query_coverage.required_bases(length),
-        );
-        if let Some(miss) = two_hit_bound(&self.models, rule, budget, length, plan) {
-            bound = bound.with_min_hits(2, miss, budget);
-        }
-        let mut summary = self.empty_summary(length, model.mismatches());
+        let bound = search_bound(&self.models, rule, budget, length, circular, plan);
+        let mut summary = self.empty_summary(length, plan.full);
         summary.times.prepare_query = start.finish();
         let (miss_upper_bound, total_miss) = (bound.seed_miss_bound(), bound.total_miss());
         let miss_over_budget = !bound.prunes();

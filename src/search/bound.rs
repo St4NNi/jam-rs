@@ -72,6 +72,11 @@ impl<'a> CoverageBound<'a> {
         self
     }
 
+    /// The present bases that a stretch without a seed hit may hold.
+    pub fn allowance(&self) -> u64 {
+        self.allowance
+    }
+
     /// The distinct hit starts that an entry needs.
     pub fn min_hits(&self) -> u64 {
         self.min_hits
