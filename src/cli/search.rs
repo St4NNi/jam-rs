@@ -607,17 +607,17 @@ mod tests {
             queries: 10,
             ..MissCount::default()
         };
-        assert_eq!(seen.hint(0.0001, 0.8, Some(600_000)), None);
+        assert_eq!(seen.hint(0.001, 0.8, Some(600_000)), None);
         seen.over = 3;
         seen.worst = 0.39;
-        let line = seen.hint(0.0001, 0.8, Some(598_123)).unwrap();
+        let line = seen.hint(0.001, 0.8, Some(598_123)).unwrap();
         assert!(line.starts_with(
-            "jam: 3 of 10 queries are above the miss target --max-miss 0.0001 at -i 0.8"
+            "jam: 3 of 10 queries are above the miss target --max-miss 0.001 at -i 0.8"
         ));
         assert!(line.contains("up to 0.39"));
         assert!(line.contains("from about 600 kb."), "{line}");
         assert!(
-            seen.hint(0.0001, 0.95, Some(1_248))
+            seen.hint(0.001, 0.95, Some(1_248))
                 .unwrap()
                 .contains("about 1,250 bases.")
         );

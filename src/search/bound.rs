@@ -223,7 +223,8 @@ mod tests {
         // The test model has k 21 and w 20.
         let fits = |allowance: u64| {
             let miss = model().miss_upper_bound(allowance + 1, 0.95);
-            (10_000 - allowance) as f64 * miss <= 1e-4 - linear.seed_miss_bound()
+            (10_000 - allowance) as f64 * miss
+                <= MaxMiss::default().chance() - linear.seed_miss_bound()
         };
         assert!(fits(linear.allowance) && !fits(linear.allowance - 1));
         assert_eq!(linear.bound(&[]), linear.allowance);

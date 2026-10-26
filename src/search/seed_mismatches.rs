@@ -311,18 +311,20 @@ mod tests {
         )
     }
 
-    /// Full level, sampled share in percent (rounded), indels and proof, by identity and length.
+    /// Full level, sampled share in percent (rounded), indels and proof, by identity and length,
+    /// at the default target 0.001. Against 0.0001, level 2 proves 1,000 bases at 95% and 3,000
+    /// bases at 90%, which had level 1 by hits.
     #[test]
     fn plan_follows_length() {
         for (identity, length, full, share, indels, proven) in [
             (0.95, 250, 2, 0, true, false),
-            (0.95, 1_000, 1, 0, false, false),
+            (0.95, 1_000, 2, 0, true, true),
             (0.95, 1_300, 2, 0, false, true),
             (0.95, 3_000, 1, 0, false, true),
             (0.95, 10_000, 0, 0, false, true),
             (0.9, 1_000, 1, 50, true, false),
             (0.9, 2_000, 1, 0, false, false),
-            (0.9, 3_000, 1, 0, false, false),
+            (0.9, 3_000, 2, 0, false, true),
             (0.9, 5_000, 2, 0, false, true),
             (0.9, 50_000, 0, 0, false, true),
             (0.85, 10_000, 1, 0, false, false),
@@ -429,10 +431,11 @@ mod tests {
     fn target_length_found() {
         let models = models();
         let from = |identity: f64| target_length(&models, &rule(identity), MaxMiss::default());
-        assert_eq!(from(0.95), Some(1_239));
-        assert_eq!(from(0.9), Some(3_223));
-        assert_eq!(from(0.85), Some(23_559));
-        assert_eq!(from(0.8), Some(82_583));
+        // At the default 0.001; 0.0001 gave 1,239, 3,223, 23,559 and 82,583.
+        assert_eq!(from(0.95), Some(991));
+        assert_eq!(from(0.9), Some(2_479));
+        assert_eq!(from(0.85), Some(17_855));
+        assert_eq!(from(0.8), Some(61_999));
     }
 
     fn sampled(plan: &LookupPlan, positions: u64) -> Vec<u64> {

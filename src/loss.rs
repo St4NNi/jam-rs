@@ -229,9 +229,9 @@ pub struct MaxMiss {
 }
 
 impl Default for MaxMiss {
-    /// 0.0001, which is 0.01%.
+    /// 0.001, which is 0.1%.
     fn default() -> Self {
-        Self { chance: 0.0001 }
+        Self { chance: 0.001 }
     }
 }
 
@@ -388,7 +388,7 @@ mod tests {
 
     #[test]
     fn default_max_miss() {
-        assert_eq!(MaxMiss::default().chance(), 0.0001);
+        assert_eq!(MaxMiss::default().chance(), 0.001);
     }
 
     #[test]
