@@ -16,6 +16,10 @@ use std::time::Instant;
 /// Distinct query k-mers that one parallel step looks up or expands.
 const CHUNK_SEEDS: usize = 4096;
 
+/// The entries with fewer hit starts than the bound asks for that are still kept: up to this many,
+/// none is left out.
+pub(crate) const FEW_HIT_ENTRIES: usize = 16;
+
 /// The limits of stage 1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SketchLimits {
@@ -210,12 +214,21 @@ pub fn sketch_stage_known(
             .into_iter()
             .filter_map(|entry| possible_entry(entry, Vec::new(), query, bound, &frequent)),
     );
+    // Entries with fewer hit starts are left out only when there are more than
+    // `FEW_HIT_ENTRIES` of them: a few cost little to check, and dropping them saves nothing.
+    let few = (candidates.iter())
+        .filter(|(_, hit_starts)| *hit_starts < bound.min_hits())
+        .count();
+    let min_hits = match few > FEW_HIT_ENTRIES {
+        true => bound.min_hits(),
+        false => 1,
+    };
     let kept = candidates.len();
     let mut candidates: Vec<PossibleEntry> = (candidates.into_iter())
-        .filter(|(_, hit_starts)| *hit_starts >= bound.min_hits())
+        .filter(|(_, hit_starts)| *hit_starts >= min_hits)
         .map(|(candidate, _)| candidate)
         .collect();
-    work.min_hit_starts = bound.min_hits();
+    work.min_hit_starts = min_hits;
     work.few_hit_entries = (kept - candidates.len()) as u64;
     candidates.sort_by(|a, b| (b.coverage_bound, a.entry).cmp(&(a.coverage_bound, b.entry)));
     work.possible_entries = candidates.len() as u64;

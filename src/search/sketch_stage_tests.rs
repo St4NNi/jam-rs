@@ -6,7 +6,9 @@ use super::bound::CoverageBound;
 use super::control::{SearchControl, Stopped};
 use super::error::SearchError;
 use super::query::QueryKmers;
-use super::sketch_stage::{PossibleEntry, SketchLimits, keep_found, sketch_stage};
+use super::sketch_stage::{
+    FEW_HIT_ENTRIES, PossibleEntry, SketchLimits, SketchOutcome, keep_found, sketch_stage,
+};
 use crate::index::{Shard, build_shard};
 use crate::loss::MaxMiss;
 use crate::seeds::Seeder;
@@ -290,7 +292,7 @@ fn few_hit_entries_dropped() {
     let mut random = rng(0x2b17);
     let query = random_bases(&mut random, 5_000);
     let mut entries = vec![vec![query.clone()]];
-    for index in 0..40usize {
+    for index in 0..80usize {
         // From the first 600 bases, so pieces share seeds that a low limit makes frequent.
         let start = random.random_range(0..560);
         let piece = query[start..start + 21 + index % 25].to_vec();
@@ -334,6 +336,7 @@ fn few_hit_entries_dropped() {
         let got: Vec<u32> = kept.candidates.iter().map(|c| c.entry).collect();
         assert_eq!(got, wanted);
         let dropped = (all.candidates.len() - got.len()) as u64;
+        assert!(dropped > FEW_HIT_ENTRIES as u64, "{dropped}");
         assert_eq!(kept.work.few_hit_entries, dropped);
         let work = (all.work.min_hit_starts, all.work.few_hit_entries);
         assert_eq!((work, kept.work.min_hit_starts), ((1, 0), 2));
@@ -341,4 +344,21 @@ fn few_hit_entries_dropped() {
         let counts: Vec<u64> = all.candidates.iter().map(starts).collect();
         assert!(counts.contains(&1) && counts.contains(&2), "{counts:?}");
     }
+    // Up to `FEW_HIT_ENTRIES` entries with fewer hit starts are all kept.
+    let directory = tempfile::tempdir().unwrap();
+    let shard = test_shard(directory.path(), &entries[..FEW_HIT_ENTRIES]);
+    let run = |bound| sketch_stage(shard.seed_file(), &kmers, bound, UNLIMITED, no_stop());
+    let (all, kept) = (run(&one).unwrap(), run(&two).unwrap());
+    let ids = |outcome: &SketchOutcome| {
+        outcome
+            .candidates
+            .iter()
+            .map(|c| c.entry)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&kept), ids(&all));
+    assert_eq!(
+        (kept.work.min_hit_starts, kept.work.few_hit_entries),
+        (1, 0)
+    );
 }
