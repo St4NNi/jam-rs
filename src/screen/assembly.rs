@@ -183,7 +183,9 @@ impl<'a> Screener<'a> {
         for (entry, seeds) in shared {
             let length = self.query_length(entry)?;
             let required = rule.min_query_coverage.required_bases(length) as f64;
-            if seeds as f64 >= SEEDS_PART * expected_seeds(&self.seeder, required, identity) {
+            // Rounded down, so that a short entry is kept with one seed fewer than its share.
+            let needed = (SEEDS_PART * expected_seeds(&self.seeder, required, identity)).floor();
+            if seeds as f64 >= needed.max(1.0) {
                 kept.insert(entry);
             }
         }
