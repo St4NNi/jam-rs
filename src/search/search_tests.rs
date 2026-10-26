@@ -140,10 +140,11 @@ fn level_ends_search() {
     assert!(matches!(summary.completion, Completion::Complete));
     assert_eq!(summary.locate.entries, 0);
     assert_eq!(events.keys().copied().collect::<Vec<_>>(), [0, 1, 2, 3]);
-    // 4,500 required bases prove level 0 with two hit starts, far within the target.
+    // 4,500 required bases prove level 0, far within the target. The four entries are far below
+    // the 16 that make a query drop entries with one hit start, so one hit start is asked.
     assert_eq!(
         (summary.seed_mismatches, summary.sketch.min_hit_starts),
-        (0, 2)
+        (0, 1)
     );
     assert!(summary.sketch.total_miss <= SearchConfig::default().max_miss.chance());
     assert!(
