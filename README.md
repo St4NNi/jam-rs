@@ -419,7 +419,7 @@ allowed, but slower and not validated, as the benchmarks and the tuning cover 0.
 After the last query, jam writes one hint line to standard error, even without `-v`, if some
 queries could not reach `--max-miss`. It never goes to standard output. For example:
 
-    jam: 3 of 10 queries are above the miss target --max-miss 0.001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 62 kb. -v shows each query.
+    jam: 3 of 10 queries are above the miss target --max-miss 0.001 at -i 0.8 (worst-case bound up to 0.39); at this identity the bound reaches it from about 83 kb. -v shows each query.
 
 The length is the smallest one from which every longer query reaches `--max-miss` with the
 lookups jam chooses. A search with `--server` writes the line without the length.
@@ -503,23 +503,26 @@ jam first tries to prove the miss target. It takes the cheapest level whose prov
 `--max-miss`, with that level on every query k-mer. Only cheap levels count for this: levels 0
 and 1 at any length, and level 2 for queries of at most 8,226 k-mers. That is the number of
 k-mers at which the plan below needs level 2 on every k-mer, at 80% identity and coverage 0.5.
-Level 2 counts only together with two hit starts (see below). With one hit start it keeps many
-weak candidates on a large collection. If level 2 would need one hit start, jam plans the
-lookups by seed hits instead, as for a query it cannot prove.
+With one hit start (see below), the bound and the pruning must meet a tenth of `--max-miss`
+(0.0001 at the default, the target of the release), so these plans keep the levels of the
+release. With two hit starts they may use all of `--max-miss`.
 
 When the level is proven, jam may also ask each candidate assembly for two seed-hit starts
 instead of one. A hit start is a query position with a seed hit in the assembly, from its own
 seeds or from frequent seeds whose assemblies include it. Lookups with mismatches at one query
 position count once. jam asks for two when the proven chance that a qualifying copy shows fewer
-than two still meets `--max-miss` with the same pruning allowance. Then U above is this chance.
-It is computed exactly: for each copy length L from the required length up to the query length,
+than two still meets `--max-miss` with the same pruning allowance. It only tries two at a level
+whose bound with one hit start meets `--max-miss`. Then U above is this chance. It is computed
+exactly: for each copy length L from the required length up to the query length,
 but below twice the required length (a longer copy holds a qualifying piece of such a length),
 the copy holds floor(L / (w + k - 1)) blocks with one seed
 each, and its floor((1 - identity) L) substitutions fall on random positions. Two hit starts
 only drop candidates, and a lower level only finds fewer hits, so no other proven plan keeps
 fewer candidates. Candidates with fewer hit starts are dropped in stage 1, before any of their
-locations or sequences are read. For a gene of 1,299 bases at 95% identity and coverage 0.5,
-level 2 with two hit starts has a bound of 0.00045, or 0.00087 with the pruning.
+locations or sequences are read, but only when a query has more than 16 of them in a shard.
+With 16 or fewer, jam keeps them all, as they cost little to check. For a gene of 1,299 bases
+at 95% identity and coverage 0.5, level 2 with two hit starts has a bound of 0.00045, or
+0.00087 with the pruning.
 
 Otherwise jam plans the lookups by seed hits. A copy that just qualifies covers the required
 part of the query (coverage times length) at the identity limit. jam takes the cheapest plan at
@@ -549,9 +552,9 @@ default 0.001 and coverage 0.5, jam proves it from these query lengths:
 | Identity | Met from |
 | -------- | -------- |
 | 95% | 1.24 kb |
-| 90% | 4.11 kb, and also parts of 3.22 to 4.11 kb |
-| 85% | 17.9 kb |
-| 80% | 62.0 kb |
+| 90% | 3.22 kb |
+| 85% | 23.6 kb, and also 8.18 to 8.25 kb |
+| 80% | 82.6 kb |
 
 Below these lengths jam still searches normally and finds most copies in practice. The proven
 worst case is only higher there. `-v` reports the value of each query and marks it when it is
