@@ -82,16 +82,12 @@ impl ScreenConfig {
         (2 * self.flank as usize).min(self.batch_bases / 4)
     }
 
-    /// The settings for `rule`. Chains with anchors too sparse for the identity asked for, with
-    /// room for the noise of the estimate, are not aligned.
+    /// The settings for `rule`. Every chain is aligned, as in a search, so that a fragmented
+    /// copy near the identity limit is not lost.
     pub fn new(rule: DecisionRule) -> Self {
-        let align = AlignStageConfig {
-            min_chain_identity: (rule.min_identity.max(rule.min_contig_identity) - 0.04).max(0.0),
-            ..AlignStageConfig::default()
-        };
         Self {
             rule,
-            align,
+            align: AlignStageConfig::default(),
             flank: 8_192,
             batch_bases: 500_000,
             closest_margin: None,
