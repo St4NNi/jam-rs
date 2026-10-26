@@ -208,7 +208,8 @@ fn planned(
         two_at_level_two && two_hit_bound(models, rule, budget, length, circular, r).is_some()
     };
     let proven = (0..3).find(|&r| {
-        cheap(r) && (level_bound(models, rule, length, r) <= one_hit.chance() || two_hits(r))
+        let bound = level_bound(models, rule, length, r);
+        cheap(r) && (bound <= one_hit.chance() || bound <= budget.chance() && two_hits(r))
     });
     if let Some(r) = proven {
         return plan(r, 0, true);
