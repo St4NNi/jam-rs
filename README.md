@@ -503,6 +503,9 @@ jam first tries to prove the miss target. It takes the cheapest level whose prov
 `--max-miss`, with that level on every query k-mer. Only cheap levels count for this: levels 0
 and 1 at any length, and level 2 for queries of at most 8,226 k-mers. That is the number of
 k-mers at which the plan below needs level 2 on every k-mer, at 80% identity and coverage 0.5.
+Level 2 counts only together with two hit starts (see below). With one hit start it keeps many
+weak candidates on a large collection. If level 2 would need one hit start, jam plans the
+lookups by seed hits instead, as for a query it cannot prove.
 
 When the level is proven, jam may also ask each candidate assembly for two seed-hit starts
 instead of one. A hit start is a query position with a seed hit in the assembly, from its own
@@ -545,9 +548,9 @@ default 0.001 and coverage 0.5, jam proves it from these query lengths:
 
 | Identity | Met from |
 | -------- | -------- |
-| 95% | 0.99 kb |
-| 90% | 2.48 kb |
-| 85% | 17.9 kb, and also 6.20 to 8.25 kb |
+| 95% | 1.24 kb |
+| 90% | 4.11 kb, and also parts of 3.22 to 4.11 kb |
+| 85% | 17.9 kb |
 | 80% | 62.0 kb |
 
 Below these lengths jam still searches normally and finds most copies in practice. The proven

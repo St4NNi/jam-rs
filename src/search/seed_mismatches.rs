@@ -141,8 +141,9 @@ pub fn full_two_limit(k: usize, w: usize) -> u64 {
 }
 
 /// The lookups of a query. First the proof step: the cheapest full level whose proven bound
-/// meets `budget`, among levels 0 and 1 and level 2 up to `full_two_limit` k-mers. Otherwise the
-/// plan by hits: the cheapest plan at which a copy at the identity limit is expected to give
+/// meets `budget`, among levels 0 and 1 and level 2 up to `full_two_limit` k-mers. Level 2
+/// counts only with two hit starts (`two_hit_bound`), as with one it keeps many weak candidates
+/// on a large collection. Otherwise the plan by hits: the cheapest plan at which a copy at the identity limit is expected to give
 /// `EXPECTED_HITS` seed hits on the required bases, adding level 1, then level 2, on just enough
 /// sampled k-mers (`LookupPlan::sampled_in`); full level 2 if even that is not enough. The k-mers with level-2
 /// lookups also get indel lookups on queries of at most `MAX_INDEL_KMERS` k-mers.
@@ -152,6 +153,19 @@ pub fn lookup_plan(
     budget: MaxMiss,
     length: u64,
     circular: bool,
+) -> LookupPlan {
+    planned(models, rule, budget, length, circular, true)
+}
+
+/// As `lookup_plan`; with `two_at_level_two` false, level 2 also counts with one hit start, as
+/// before the hit threshold.
+fn planned(
+    models: &[MissModel; 3],
+    rule: &DecisionRule,
+    budget: MaxMiss,
+    length: u64,
+    circular: bool,
+    two_at_level_two: bool,
 ) -> LookupPlan {
     let (k, w) = (models[0].k(), models[0].w());
     let starts = if circular {
@@ -177,8 +191,14 @@ pub fn lookup_plan(
         }
     };
     let cheap = |r: usize| r < 2 || starts <= full_two_limit(k, w);
-    let proven =
-        (0..3).find(|&r| cheap(r) && level_bound(models, rule, length, r) <= budget.chance());
+    let two_hits = |r: usize| {
+        r < 2
+            || !two_at_level_two
+            || two_hit_bound(models, rule, budget, length, circular, r).is_some()
+    };
+    let proven = (0..3).find(|&r| {
+        cheap(r) && level_bound(models, rule, length, r) <= budget.chance() && two_hits(r)
+    });
     if let Some(r) = proven {
         return plan(r, 0, true);
     }
@@ -215,30 +235,45 @@ pub fn search_bound<'a>(
     circular: bool,
     plan: &LookupPlan,
 ) -> CoverageBound<'a> {
-    let required = rule.min_query_coverage.required_bases(length);
-    let model = &models[plan.full];
-    let one = CoverageBound::new(model, budget, rule.min_identity, length, circular, required);
-    two_hit_bound(models, rule, budget, length, plan)
-        .map(|miss| one.with_min_hits(2, miss, budget))
-        .filter(|two| two.allowance() == one.allowance())
-        .unwrap_or(one)
+    let two = plan
+        .proven
+        .then(|| two_hit_bound(models, rule, budget, length, circular, plan.full));
+    two.flatten()
+        .unwrap_or_else(|| one_hit_bound(models, rule, budget, length, circular, plan.full))
 }
 
-/// The proven chance that a qualifying copy shows fewer than two distinct hit starts, if the
-/// plan is proven and this chance meets `budget`.
-fn two_hit_bound(
-    models: &[MissModel; 3],
+/// The coverage bound at full level `level` with one hit start.
+fn one_hit_bound<'a>(
+    models: &'a [MissModel; 3],
     rule: &DecisionRule,
     budget: MaxMiss,
     length: u64,
-    plan: &LookupPlan,
-) -> Option<f64> {
-    if !plan.proven {
+    circular: bool,
+    level: usize,
+) -> CoverageBound<'a> {
+    let required = rule.min_query_coverage.required_bases(length);
+    let identity = rule.min_identity;
+    CoverageBound::new(&models[level], budget, identity, length, circular, required)
+}
+
+/// The coverage bound at full level `level` with two hit starts, if the proven chance that a
+/// qualifying copy shows fewer than two meets `budget` with the allowance of one hit start.
+fn two_hit_bound<'a>(
+    models: &'a [MissModel; 3],
+    rule: &DecisionRule,
+    budget: MaxMiss,
+    length: u64,
+    circular: bool,
+    level: usize,
+) -> Option<CoverageBound<'a>> {
+    let required = rule.min_query_coverage.required_bases(length).min(length);
+    let miss = models[level].hit_miss_bound(rule.min_identity, required, length, 2);
+    if miss > budget.chance() {
         return None;
     }
-    let required = rule.min_query_coverage.required_bases(length).min(length);
-    let miss = models[plan.full].hit_miss_bound(rule.min_identity, required, length, 2);
-    (miss <= budget.chance()).then_some(miss)
+    let one = one_hit_bound(models, rule, budget, length, circular, level);
+    let two = one.with_min_hits(2, miss, budget);
+    (two.allowance() == one.allowance()).then_some(two)
 }
 
 /// The proven miss bound of lookup level `level` for a query of `length` bases. Level 3 has the
@@ -312,19 +347,19 @@ mod tests {
     }
 
     /// Full level, sampled share in percent (rounded), indels and proof, by identity and length,
-    /// at the default target 0.001. Against 0.0001, level 2 proves 1,000 bases at 95% and 3,000
-    /// bases at 90%, which had level 1 by hits.
+    /// at the default target 0.001. Level 2 would prove 1,000 bases at 95% and 3,000 bases at
+    /// 90% only with one hit start, so they stay by hits.
     #[test]
     fn plan_follows_length() {
         for (identity, length, full, share, indels, proven) in [
             (0.95, 250, 2, 0, true, false),
-            (0.95, 1_000, 2, 0, true, true),
+            (0.95, 1_000, 1, 0, false, false),
             (0.95, 1_300, 2, 0, false, true),
             (0.95, 3_000, 1, 0, false, true),
             (0.95, 10_000, 0, 0, false, true),
             (0.9, 1_000, 1, 50, true, false),
             (0.9, 2_000, 1, 0, false, false),
-            (0.9, 3_000, 2, 0, false, true),
+            (0.9, 3_000, 1, 0, false, false),
             (0.9, 5_000, 2, 0, false, true),
             (0.9, 50_000, 0, 0, false, true),
             (0.85, 10_000, 1, 0, false, false),
@@ -351,15 +386,19 @@ mod tests {
         }
     }
 
-    /// Level 2 proves 0.85 up to `full_two_limit` k-mers, one more is not cheap; indels stop
-    /// after 1,100 k-mers.
+    /// Without the two-hit condition level 2 proves 0.85 up to `full_two_limit` k-mers, one more
+    /// is not cheap; indels stop after 1,100 k-mers.
     #[test]
     fn plan_boundaries() {
         let limit = full_two_limit(25, 100);
         assert_eq!(limit, 8_226);
         let at = |identity, kmers: u64| plan(identity, kmers + 24);
-        assert!(at(0.85, limit).proven && at(0.85, limit).full == 2);
-        assert!(!at(0.85, limit + 1).proven);
+        let one_hit = |kmers: u64| {
+            let budget = MaxMiss::default();
+            planned(&models(), &rule(0.85), budget, kmers + 24, false, false)
+        };
+        assert!(one_hit(limit).proven && one_hit(limit).full == 2);
+        assert!(!one_hit(limit + 1).proven);
         assert!(at(0.8, 1_100).indels && !at(0.8, 1_101).indels);
         // At 100% identity a copy of 124 bases misses no seed: level 0 from 247 bases.
         assert!(plan(1.0, 247).proven && plan(1.0, 247).full == 0);
@@ -399,9 +438,9 @@ mod tests {
     }
 
     /// SecY (1,299 bases) at 95%: level 2 with two hit starts at 0.001 (bound 0.000454314, total
-    /// 0.000865524), one at 0.0001, and level 1 with one at 0.01. At 1,000 bases two do not fit
-    /// 0.001; a plan by hits keeps one. At 80% and 1 Mb two fit 0.001 only with a wider pruning
-    /// allowance, which could keep more candidates, so one stays.
+    /// 0.000865524), and level 1 with one at 0.01. At 0.0001, or at 1,000 bases and 0.001, level 2
+    /// would need one hit start, so the plan is by hits. At 80% and 1 Mb two fit 0.001 only with a
+    /// wider pruning allowance, which could keep more candidates, so one stays.
     #[test]
     fn hit_threshold_chosen() {
         let models = models();
@@ -409,31 +448,67 @@ mod tests {
             let (rule, budget) = (rule(identity), MaxMiss::new(max_miss).unwrap());
             let plan = lookup_plan(&models, &rule, budget, length, false);
             let bound = search_bound(&models, &rule, budget, length, false, &plan);
-            let two = two_hit_bound(&models, &rule, budget, length, &plan);
-            (plan.full, plan.proven, bound.min_hits(), bound, two)
+            (
+                plan.full,
+                plan.sampled > 0,
+                plan.proven,
+                bound.min_hits(),
+                bound,
+            )
         };
         let close = |got: f64, want: f64| (got / want - 1.0).abs() < 1e-5;
-        let (full, proven, hits, bound, _) = at(0.95, 0.001, 1_299);
-        assert_eq!((full, proven, hits), (2, true, 2));
+        let (full, sampled, proven, hits, bound) = at(0.95, 0.001, 1_299);
+        assert_eq!((full, sampled, proven, hits), (2, false, true, 2));
         assert!(close(bound.seed_miss_bound(), 0.000_454_314));
         assert!(close(bound.total_miss(), 0.000_865_524));
         let summary =
-            |(full, proven, hits, _, _): (usize, bool, u64, CoverageBound, _)| (full, proven, hits);
-        assert_eq!(summary(at(0.95, 0.0001, 1_299)), (2, true, 1));
-        assert_eq!(summary(at(0.95, 0.01, 1_299)), (1, true, 1));
-        assert_eq!(summary(at(0.95, 0.001, 1_000)), (2, true, 1));
-        assert_eq!(summary(at(0.95, 0.001, 250)), (2, false, 1));
-        let (full, proven, hits, _, two) = at(0.8, 0.001, 1_000_000);
-        assert!((full, proven, hits) == (0, true, 1) && two.is_some());
+            |(full, sampled, proven, hits, _): (usize, bool, bool, u64, CoverageBound)| {
+                (full, sampled, proven, hits)
+            };
+        assert_eq!(summary(at(0.95, 0.0001, 1_299)), (1, false, false, 1));
+        assert_eq!(summary(at(0.95, 0.01, 1_299)), (1, false, true, 1));
+        assert_eq!(summary(at(0.95, 0.001, 1_000)), (1, false, false, 1));
+        assert_eq!(summary(at(0.95, 0.001, 250)), (2, false, false, 1));
+        assert_eq!(summary(at(0.8, 0.001, 1_000_000)), (0, false, true, 1));
+        assert!(models[0].hit_miss_bound(0.8, 500_000, 1_000_000, 2) <= 0.001);
+    }
+
+    /// At the default target no query from 250 bases to 100 kb makes more lookups, or more
+    /// level-2 lookups, than the plan of bd3c74f at its default 0.0001 (level 2 with one hit
+    /// start), at 95% and 80% identity.
+    #[test]
+    fn no_more_lookups_than_before() {
+        use crate::search::query::lookup_bound;
+        let models = models();
+        let old_budget = MaxMiss::new(0.0001).unwrap();
+        let level_two = |plan: &LookupPlan| match plan.full {
+            2 => plan.starts,
+            _ => plan.sampled,
+        };
+        for identity in [0.95, 0.8] {
+            let rule = rule(identity);
+            for length in 250..=100_000 {
+                let new = lookup_plan(&models, &rule, MaxMiss::default(), length, false);
+                let old = planned(&models, &rule, old_budget, length, false, false);
+                let at = format!("{identity} {length}: {new:?} {old:?}");
+                assert!(
+                    lookup_bound(&new, length) <= lookup_bound(&old, length),
+                    "{at}"
+                );
+                assert!(level_two(&new) <= level_two(&old), "{at}");
+                assert!(!new.indels || old.indels, "{at}");
+            }
+        }
     }
 
     #[test]
     fn target_length_found() {
         let models = models();
         let from = |identity: f64| target_length(&models, &rule(identity), MaxMiss::default());
-        // At the default 0.001; 0.0001 gave 1,239, 3,223, 23,559 and 82,583.
-        assert_eq!(from(0.95), Some(991));
-        assert_eq!(from(0.9), Some(2_479));
+        // At the default 0.001; 0.0001 with level 2 at one hit start gave 1,239, 3,223, 23,559
+        // and 82,583. At 90% level 2 proves 3,223 to 3,337 bases and two more short stretches.
+        assert_eq!(from(0.95), Some(1_239));
+        assert_eq!(from(0.9), Some(4_106));
         assert_eq!(from(0.85), Some(17_855));
         assert_eq!(from(0.8), Some(61_999));
     }
