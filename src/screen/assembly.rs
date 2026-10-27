@@ -55,9 +55,6 @@ struct SurveyedAssembly {
 /// Found seeds of the pieces of a batch, sorted by piece, and their color sets.
 type BatchSeeds = (Vec<PieceSeed>, ColorSets);
 
-/// Batches handled at once by the threads of one assembly, at most.
-const MAX_GROUP: usize = 32;
-
 /// The kept pieces of a batch joined into a smaller batch, as preparing the query of stage 3
 /// costs time in proportion to its length, with the kept pieces of each entry and the found seeds
 /// renumbered to it.
@@ -214,24 +211,15 @@ impl<'a> Screener<'a> {
             };
             Ok::<_, ScreenError>((counted, seeds))
         };
-        let (mut surveyed, mut kept_seeds) = (Vec::new(), Vec::new());
-        let contigs = self.grouped_batches(
+        let (contigs, done) = self.streamed_batches(
             path,
             |_, batch| Some(batch.clone()),
-            |group| {
-                let done = (group.par_iter())
-                    .map(survey_batch)
-                    .collect::<Result<Vec<_>, _>>()?;
-                for (counted, seeds) in done {
-                    surveyed.push(counted);
-                    kept_seeds.push(seeds);
-                }
-                Ok(())
-            },
+            |batch| survey_batch(&batch),
         )?;
         let Some(contigs) = contigs else {
             return Ok(None);
         };
+        let (surveyed, kept_seeds): (Vec<_>, Vec<_>) = done.into_iter().unzip();
         summary.contigs = contigs.list.len() as u64;
         summary.bases = contigs.bases;
         summary.skipped_contigs = contigs.skipped;
@@ -299,30 +287,25 @@ impl<'a> Screener<'a> {
             control,
         };
         let mut work = FragmentWork::default();
-        self.grouped_batches(
+        let (_, done) = self.streamed_batches(
             path,
             |index, batch| {
                 let kept = pieces.get(index).filter(|kept| !kept.is_empty())?;
                 let seeds = std::mem::take(&mut seeds[index]);
                 Some(kept_subset(batch, kept, seeds))
             },
-            |group| {
-                let done = (group.into_par_iter())
-                    .map(|(batch, kept, seeds)| self.align_batch(&aligner, &batch, &kept, seeds))
-                    .collect::<Result<Vec<_>, _>>()?;
-                // In batch order, so that the fragments of an entry contig keep their order.
-                for (turned, part) in done {
-                    work.add(&part);
-                    for turned in turned {
-                        found
-                            .entry((turned.entry, turned.entry_contig))
-                            .or_default()
-                            .push(turned.fragment);
-                    }
-                }
-                Ok(())
-            },
+            |(batch, kept, seeds)| self.align_batch(&aligner, &batch, &kept, seeds),
         )?;
+        // In batch order, so that the fragments of an entry contig keep their order.
+        for (turned, part) in done {
+            work.add(&part);
+            for turned in turned {
+                found
+                    .entry((turned.entry, turned.entry_contig))
+                    .or_default()
+                    .push(turned.fragment);
+            }
+        }
         summary.aligned_entries = work.aligned_entries;
         summary.alignments = work.align.alignments;
         summary.fragments = found.values().map(|list| list.len() as u64).sum();
@@ -345,57 +328,53 @@ impl<'a> Screener<'a> {
     }
 
     /// Reads the batches of the assembly on another thread, which turns each into an item with
-    /// `item`, and passes the items in order to `group`, a few at a time, so that the threads
-    /// share the work of several batches. `None` for an empty file.
-    fn grouped_batches<T: Send>(
+    /// `item`, and hands each item to `work` on the threads as soon as one is free, a bounded number
+    /// ahead of the work. Returns the contigs (`None` for an empty file) and the results in batch
+    /// order.
+    fn streamed_batches<T: Send, R: Send>(
         &self,
         path: &Path,
         mut item: impl FnMut(usize, &Batch) -> Option<T> + Send,
-        mut group: impl FnMut(Vec<T>) -> Result<(), ScreenError> + Send,
-    ) -> Result<Option<AssemblyContigs>, ScreenError> {
+        work: impl Fn(T) -> Result<R, ScreenError> + Sync + Send,
+    ) -> Result<(Option<AssemblyContigs>, Vec<R>), ScreenError> {
         let threads = self.pool.map_or_else(rayon::current_num_threads, |pool| {
             pool.current_num_threads()
         });
-        let size = threads.clamp(2, MAX_GROUP);
-        let mut group = |items: Vec<T>| match self.pool {
-            Some(pool) => pool.install(|| group(items)),
-            None => group(items),
-        };
-        let (sender, receiver) = sync_channel::<T>(size);
+        let (sender, receiver) = sync_channel::<(usize, T)>(threads.max(2));
         std::thread::scope(|scope| {
             let reader = scope.spawn(move || {
+                let mut sent = 0;
                 read_batches(
                     path,
                     self.config.batch_bases,
                     self.config.overlap(),
                     self.config.rule.min_fragment_columns as usize,
-                    &mut |index, batch| match item(index, batch) {
-                        Some(item) => sender.send(item).map_err(|_| Stopped::Asked.into()),
-                        None => Ok(()),
+                    &mut |index, batch| {
+                        let Some(item) = item(index, batch) else {
+                            return Ok(());
+                        };
+                        sent += 1;
+                        sender.send((sent, item)).map_err(|_| Stopped::Asked.into())
                     },
                     None,
                 )
             });
-            let mut result = Ok(());
-            let mut pending = Vec::with_capacity(size);
-            for item in receiver.iter() {
-                pending.push(item);
-                if pending.len() == size {
-                    result = group(std::mem::take(&mut pending));
-                    if result.is_err() {
-                        break;
-                    }
-                }
-            }
-            if result.is_ok() && !pending.is_empty() {
-                result = group(pending);
-            }
-            // A failed group drops the receiver, which stops the reader.
-            drop(receiver);
+            // A failed item drops the receiver, which stops the reader.
+            let run = move || {
+                (receiver.into_iter().par_bridge())
+                    .map(|(at, item)| work(item).map(|done| (at, done)))
+                    .collect::<Result<Vec<_>, ScreenError>>()
+            };
+            let done = match self.pool {
+                Some(pool) => pool.install(run),
+                None => run(),
+            };
             let read = reader
                 .join()
                 .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            result.and(read)
+            let mut done = done?;
+            done.sort_unstable_by_key(|&(at, _)| at);
+            Ok((read?, done.into_iter().map(|(_, done)| done).collect()))
         })
     }
 
