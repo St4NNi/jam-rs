@@ -5,9 +5,9 @@
 use super::ScreenError;
 use super::batch::Batch;
 use super::key_filter::KeyFilter;
-use crate::index::{ColorSetId, ColorSets, SeedFile, seed_key};
-use crate::search::QueryKmers;
+use crate::index::{ColorSets, SeedFile, StoredSeed, seed_key};
 use crate::search::SearchControl;
+use crate::search::{FoundSeeds, QueryKmers};
 use crate::seeds::Seeder;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ pub(super) fn expected_seeds(seeder: &Seeder, bases: f64, identity: f64) -> f64 
 pub(super) struct PieceSeed {
     pub hash: u64,
     pub piece: u32,
-    pub color_set: ColorSetId,
+    pub stored: StoredSeed,
 }
 
 /// An entry that a piece of a batch counts for, with the seeds they share.
@@ -91,16 +91,16 @@ pub(super) fn found_seeds(
                     Some(PieceSeed {
                         hash,
                         piece: index as u32,
-                        color_set: stored?.color_set,
+                        stored: stored?,
                     })
                 })
                 .collect();
-            found.sort_unstable_by_key(|seed| (seed.color_set.0, seed.hash));
+            found.sort_unstable_by_key(|seed| (seed.stored.color_set.0, seed.hash));
             Ok(found)
         })
         .collect::<Result<Vec<_>, ScreenError>>()?;
     let found = pieces.concat();
-    let color_sets = seed_file.read_color_sets(found.iter().map(|seed| seed.color_set))?;
+    let color_sets = seed_file.read_color_sets(found.iter().map(|seed| seed.stored.color_set))?;
     Ok((found, color_sets))
 }
 
@@ -142,8 +142,11 @@ pub(super) fn survey(
 /// keys keep enough hash bits that false seed hits are rare.
 fn shared_seeds(color_sets: &ColorSets, found: &[PieceSeed]) -> HashMap<u32, u64> {
     let mut shared: HashMap<u32, u64> = HashMap::new();
-    for same in found.chunk_by(|a, b| a.color_set == b.color_set) {
-        for &entry in color_sets.entries(same[0].color_set).unwrap_or_default() {
+    for same in found.chunk_by(|a, b| a.stored.color_set == b.stored.color_set) {
+        for &entry in color_sets
+            .entries(same[0].stored.color_set)
+            .unwrap_or_default()
+        {
             *shared.entry(entry).or_default() += same.len() as u64;
         }
     }
@@ -185,7 +188,8 @@ fn counted_entries(
 /// pieces it is kept for. `kept` maps an entry to its kept pieces, ascending.
 pub(super) fn kept_seed_hits(
     kmers: &QueryKmers,
-    (found, color_sets): &(Vec<PieceSeed>, ColorSets),
+    found: &[PieceSeed],
+    color_sets: &ColorSets,
     kept: &HashMap<u32, Vec<u32>>,
 ) -> Vec<(u32, Vec<u32>)> {
     let seed_of = |hash: u64| {
@@ -196,11 +200,11 @@ pub(super) fn kept_seed_hits(
             .map(|seed| seed as u32)
     };
     let mut by_color_set: Vec<&PieceSeed> = found.iter().collect();
-    by_color_set.sort_unstable_by_key(|seed| seed.color_set.0);
+    by_color_set.sort_unstable_by_key(|seed| seed.stored.color_set.0);
     let mut seed_hits: HashMap<u32, Vec<u32>> = HashMap::new();
-    for same in by_color_set.chunk_by(|a, b| a.color_set == b.color_set) {
+    for same in by_color_set.chunk_by(|a, b| a.stored.color_set == b.stored.color_set) {
         let entries: Vec<u32> = color_sets
-            .entries(same[0].color_set)
+            .entries(same[0].stored.color_set)
             .unwrap_or_default()
             .iter()
             .copied()
@@ -225,4 +229,26 @@ pub(super) fn kept_seed_hits(
     }
     seed_hits.sort_unstable_by_key(|(entry, _)| *entry);
     seed_hits
+}
+
+/// The found seeds of a batch as stage 2 takes them: each distinct k-mer of `kmers` that `found`
+/// (the seeds of all pieces of the batch) holds, with its stored seed.
+pub(super) fn query_seeds(
+    kmers: &QueryKmers,
+    found: &[PieceSeed],
+    color_sets: ColorSets,
+) -> FoundSeeds {
+    let mut seeds: Vec<(u32, StoredSeed)> = found
+        .iter()
+        .filter_map(|seed| {
+            let distinct = kmers.distinct();
+            let index = distinct
+                .binary_search_by_key(&seed.hash, |seed| seed.hash)
+                .ok()?;
+            Some((index as u32, seed.stored))
+        })
+        .collect();
+    seeds.sort_unstable_by_key(|&(seed, _)| seed);
+    seeds.dedup_by_key(|&mut (seed, _)| seed);
+    FoundSeeds::new(seeds, color_sets)
 }

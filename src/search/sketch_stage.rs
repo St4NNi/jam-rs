@@ -110,6 +110,12 @@ pub struct FoundSeeds {
 }
 
 impl FoundSeeds {
+    /// Found seeds from pairs of distinct query k-mer and stored seed (ascending by k-mer) and
+    /// color sets that hold those of the stored seeds.
+    pub fn new(seeds: Vec<(u32, StoredSeed)>, color_sets: ColorSets) -> Self {
+        Self { seeds, color_sets }
+    }
+
     /// The stored seed of a distinct query k-mer, if the sketch part holds it.
     pub fn stored(&self, seed: u32) -> Option<StoredSeed> {
         let index = self.seeds.binary_search_by_key(&seed, |(seed, _)| *seed);

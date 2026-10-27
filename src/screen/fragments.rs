@@ -17,8 +17,8 @@ use crate::search::SearchControl;
 use crate::search::{
     AlignStageConfig, AlignStageWorkspace, AlignWork, PreparedQuery, entry_fragments,
 };
+use crate::search::{FoundSeeds, read_entry_locations};
 use crate::search::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
-use crate::search::{find_query_seeds, read_entry_locations};
 use rayon::prelude::*;
 
 /// An entry contig, the query of the screen: the entry and the contig within it.
@@ -63,11 +63,13 @@ impl FragmentWork {
 
 impl BatchAlignment<'_> {
     /// Locates and aligns each entry with its seed hits in the batch, and turns its fragments.
+    /// `found` holds the stored seeds of the k-mers of the batch.
     pub fn fragments(
         &self,
         batch: &Batch,
         kmers: &QueryKmers,
         seed_hits: Vec<(u32, Vec<u32>)>,
+        found: &FoundSeeds,
     ) -> Result<(Vec<ScreenFragment>, FragmentWork), ScreenError> {
         // The screen decides an entry by its own coverage, not by the coverage of the batch, so
         // the bound of stage 2 keeps every entry.
@@ -96,12 +98,11 @@ impl BatchAlignment<'_> {
             })
             .collect();
         let seed_file = self.shard.seed_file();
-        let found = find_query_seeds(seed_file, kmers, self.control)?;
         let mut work = FragmentWork::default();
         let locations = read_entry_locations(
             seed_file,
             &request,
-            &found,
+            found,
             &candidates,
             self.control,
             &mut work.locate,

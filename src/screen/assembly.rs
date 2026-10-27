@@ -9,11 +9,12 @@ use super::fragments::{BatchAlignment, EntryContig, FragmentWork};
 use super::key_filter::KeyFilter;
 use super::records::{AssemblySummary, ScreenEntry};
 use super::survey::{
-    SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, kept_seed_hits, survey,
+    PieceSeed, SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, kept_seed_hits,
+    query_seeds, survey,
 };
 use super::{ScreenConfig, ScreenError, write_contigs};
 use crate::decide::Fragment;
-use crate::index::Shard;
+use crate::index::{ColorSets, Shard};
 use crate::loss::MissModel;
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
@@ -42,7 +43,13 @@ pub struct Screener<'a> {
 struct SurveyedAssembly {
     contigs: AssemblyContigs,
     surveyed: Vec<Vec<Surveyed>>,
+    /// The found seeds of each batch in the pieces that count for some entry, and their color
+    /// sets, so that stage 2 does not look them up again.
+    found: Vec<BatchSeeds>,
 }
+
+/// Found seeds of the pieces of a batch, sorted by piece, and their color sets.
+type BatchSeeds = (Vec<PieceSeed>, ColorSets);
 
 /// Receives every entry contig found in an assembly.
 pub type EntrySink<'a> = dyn FnMut(ScreenEntry) -> Result<(), ScreenError> + 'a;
@@ -84,8 +91,11 @@ impl<'a> Screener<'a> {
             ..AssemblySummary::default()
         };
         let started = Instant::now();
-        let Some(SurveyedAssembly { contigs, surveyed }) =
-            self.survey_assembly(path, control, &mut summary)?
+        let Some(SurveyedAssembly {
+            contigs,
+            surveyed,
+            found,
+        }) = self.survey_assembly(path, control, &mut summary)?
         else {
             return Ok(summary);
         };
@@ -110,7 +120,7 @@ impl<'a> Screener<'a> {
             return Ok(summary);
         }
         let started = Instant::now();
-        let found = self.align_assembly(path, &surveyed, &kept, control, &mut summary)?;
+        let found = self.align_assembly(path, &surveyed, found, &kept, control, &mut summary)?;
         let entry_contig = |key: EntryContig| self.entry_contig(key);
         let reported = decide_entries(
             found,
@@ -152,7 +162,7 @@ impl<'a> Screener<'a> {
             closest_margin: self.config.closest_margin,
         };
         let seed_file = self.shard.seed_file();
-        let mut surveyed = Vec::new();
+        let (mut surveyed, mut kept_seeds) = (Vec::new(), Vec::new());
         let contigs = read_batches(
             path,
             self.config.batch_bases,
@@ -160,7 +170,16 @@ impl<'a> Screener<'a> {
             rule.min_fragment_columns as usize,
             &mut |_, batch| {
                 let found = found_seeds(seed_file, &self.filter, &self.seeder, batch, control)?;
-                surveyed.push(survey(&self.seeder, batch, &found, limits, control)?);
+                let counted = survey(&self.seeder, batch, &found, limits, control)?;
+                // Only the pieces that count for some entry can be aligned.
+                let pieces: Vec<u32> = counted.iter().map(|counted| counted.piece).collect();
+                let (mut seeds, color_sets) = found;
+                seeds.retain(|seed| pieces.binary_search(&seed.piece).is_ok());
+                kept_seeds.push(match seeds.is_empty() {
+                    true => BatchSeeds::default(),
+                    false => (seeds, color_sets),
+                });
+                surveyed.push(counted);
                 Ok(())
             },
             None,
@@ -172,7 +191,11 @@ impl<'a> Screener<'a> {
         summary.bases = contigs.bases;
         summary.skipped_contigs = contigs.skipped;
         summary.batches = surveyed.len() as u64;
-        Ok(Some(SurveyedAssembly { contigs, surveyed }))
+        Ok(Some(SurveyedAssembly {
+            contigs,
+            surveyed,
+            found: kept_seeds,
+        }))
     }
 
     /// The entries that the surveyed contigs of the assembly share enough seeds with to cover the
@@ -203,6 +226,7 @@ impl<'a> Screener<'a> {
         &self,
         path: &Path,
         surveyed: &[Vec<Surveyed>],
+        mut seeds: Vec<BatchSeeds>,
         kept: &HashSet<u32>,
         control: SearchControl<'_>,
         summary: &mut AssemblySummary,
@@ -239,7 +263,8 @@ impl<'a> Screener<'a> {
                 let Some(kept) = pieces.get(index).filter(|kept| !kept.is_empty()) else {
                     return Ok(());
                 };
-                self.align_batch(&aligner, batch, kept, &mut found, &mut work)
+                let seeds = std::mem::take(&mut seeds[index]);
+                self.align_batch(&aligner, batch, kept, seeds, &mut found, &mut work)
             },
             None,
         )?;
@@ -256,6 +281,7 @@ impl<'a> Screener<'a> {
         aligner: &BatchAlignment<'_>,
         batch: &Batch,
         kept: &HashMap<u32, Vec<u32>>,
+        (seeds, color_sets): BatchSeeds,
         found: &mut HashMap<EntryContig, Vec<Fragment>>,
         work: &mut FragmentWork,
     ) -> Result<(), ScreenError> {
@@ -274,17 +300,16 @@ impl<'a> Screener<'a> {
                 (entry, new)
             })
             .collect();
-        let seed_file = self.shard.seed_file();
+        let seeds: Vec<PieceSeed> = (seeds.into_iter())
+            .filter_map(|seed| {
+                let piece = pieces.binary_search(&seed.piece).ok()? as u32;
+                Some(PieceSeed { piece, ..seed })
+            })
+            .collect();
         let kmers = QueryKmers::new(&self.seeder, &batch.bases, false);
-        let seeds = found_seeds(
-            seed_file,
-            &self.filter,
-            &self.seeder,
-            &batch,
-            aligner.control,
-        )?;
-        let seed_hits = kept_seed_hits(&kmers, &seeds, &kept);
-        let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits)?;
+        let seed_hits = kept_seed_hits(&kmers, &seeds, &color_sets, &kept);
+        let query_seeds = query_seeds(&kmers, &seeds, color_sets);
+        let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits, &query_seeds)?;
         work.add(&part);
         for turned in turned {
             found
