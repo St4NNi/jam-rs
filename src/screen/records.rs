@@ -39,6 +39,94 @@ pub struct ScreenEntry {
     pub gaps: Vec<Interval>,
 }
 
+/// A fragment in a compact record: assembly contig id, contig start and end, strand (`+` or `-`),
+/// entry contig start and end, identity, matches, and 1 for a fragment of the mosaic or 0 for an
+/// alternative.
+pub type CompactFragment = (u32, u64, u64, &'static str, u64, u64, f64, u64, u8);
+
+/// An assembly contig in a compact record: id, name, length, aligned bases, identity, score, best
+/// score and entries, as in `ScreenContig`.
+pub type CompactContig = (u32, String, u64, u64, f64, f64, f64, u32);
+
+/// An entry record without alignments, for large result sets: the fields of `ScreenEntry`, its
+/// contigs and its fragments as arrays, and no CIGAR or gaps.
+#[derive(Clone, Debug, Serialize)]
+pub struct CompactEntry {
+    /// Always `pair`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub entry: String,
+    pub entry_length: u64,
+    pub assembly: String,
+    pub covered_bases: u64,
+    pub query_coverage: f64,
+    pub identity: f64,
+    pub matches: u64,
+    pub substitutions: u64,
+    pub insertions: u64,
+    pub deletions: u64,
+    pub contigs: Vec<CompactContig>,
+    pub fragments: Vec<CompactFragment>,
+}
+
+impl From<ScreenEntry> for CompactEntry {
+    fn from(entry: ScreenEntry) -> Self {
+        let round = |value: f64| (value * 1e4).round() / 1e4;
+        let fragment = |fragment: &Fragment, primary: u8| {
+            let alignment = &fragment.alignment;
+            let strand = if alignment.strand.is_reverse() {
+                "-"
+            } else {
+                "+"
+            };
+            let (query, contig) = (alignment.query_interval, alignment.contig_interval);
+            let counts = alignment.counts();
+            let (matches, identity) = (counts.matches, round(counts.identity()));
+            let contig_id = fragment.contig_index;
+            (
+                contig_id,
+                contig.start,
+                contig.end,
+                strand,
+                query.start,
+                query.end,
+                identity,
+                matches,
+                primary,
+            )
+        };
+        let primary = entry
+            .primary
+            .iter()
+            .map(|selected| fragment(&selected.fragment, 1));
+        let alternatives = entry.alternatives.iter().map(|other| fragment(other, 0));
+        let contigs = (entry.contigs.into_iter())
+            .map(|c| {
+                let (identity, score, best) =
+                    (round(c.identity), round(c.score), round(c.best_score));
+                (
+                    c.id, c.name, c.length, c.aligned, identity, score, best, c.entries,
+                )
+            })
+            .collect();
+        Self {
+            kind: "pair",
+            fragments: primary.chain(alternatives).collect(),
+            contigs,
+            entry: entry.entry,
+            entry_length: entry.entry_length,
+            assembly: entry.assembly,
+            covered_bases: entry.covered_bases,
+            query_coverage: entry.query_coverage,
+            identity: entry.identity,
+            matches: entry.matches,
+            substitutions: entry.substitutions,
+            insertions: entry.insertions,
+            deletions: entry.deletions,
+        }
+    }
+}
+
 /// An assembly contig that a reported entry contig lies on.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ScreenContig {

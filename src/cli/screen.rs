@@ -5,7 +5,9 @@
 use super::rule::RuleArgs;
 use super::storage::{CacheArgs, ShardStorage};
 use super::{CliError, output_writer, read_list};
-use crate::screen::{AssemblyFailure, AssemblySummary, ScreenConfig, ScreenEntry, Screener};
+use crate::screen::{
+    AssemblyFailure, AssemblySummary, CompactEntry, ScreenConfig, ScreenEntry, Screener,
+};
 use crate::search::{SearchControl, Stopped};
 use clap::Args;
 use std::collections::HashMap;
@@ -47,6 +49,10 @@ pub struct ScreenArgs {
     /// Write to this file instead of the standard output
     #[arg(short, long)]
     output: Option<PathBuf>,
+    /// Write one compact `pair` record per entry contig and assembly instead of the entry record:
+    /// contigs and fragments as arrays, without CIGAR strings and gaps
+    #[arg(long)]
+    compact: bool,
 }
 
 /// One output line of a screen.
@@ -111,6 +117,9 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
         let mut failed = 0;
         for line in receiver {
             let text = match &line {
+                Line::Entry(entry) if args.compact => {
+                    serde_json::to_string(&CompactEntry::from(entry.clone()))?
+                }
                 Line::Entry(entry) => serde_json::to_string(entry)?,
                 Line::Summary(summary) => serde_json::to_string(summary)?,
                 Line::Failure(failure) => serde_json::to_string(failure)?,
