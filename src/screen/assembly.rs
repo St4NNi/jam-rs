@@ -5,7 +5,7 @@
 
 use super::batch::{AssemblyContigs, Batch, read_batches};
 use super::decision::decide_entries;
-use super::fragments::{BatchAlignment, EntryContig, FragmentWork};
+use super::fragments::{BatchAlignment, EntryContig, FragmentWork, ScreenFragment};
 use super::key_filter::KeyFilter;
 use super::records::{AssemblySummary, ScreenEntry};
 use super::survey::{
@@ -17,11 +17,13 @@ use crate::decide::Fragment;
 use crate::index::{ColorSets, Shard};
 use crate::loss::MissModel;
 use crate::search::QueryKmers;
-use crate::search::SearchControl;
+use crate::search::{SearchControl, Stopped};
 use crate::seeds::Seeder;
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::mpsc::sync_channel;
 use std::time::Instant;
 
 /// Screens assemblies against the entries of one shard, several at once from different threads.
@@ -50,6 +52,33 @@ struct SurveyedAssembly {
 
 /// Found seeds of the pieces of a batch, sorted by piece, and their color sets.
 type BatchSeeds = (Vec<PieceSeed>, ColorSets);
+
+/// Batches handled at once by the threads of one assembly, at most.
+const MAX_GROUP: usize = 32;
+
+/// The kept pieces of a batch joined into a smaller batch, as preparing the query of stage 3
+/// costs time in proportion to its length, with the kept pieces of each entry and the found seeds
+/// renumbered to it.
+fn kept_subset(
+    batch: &Batch,
+    kept: &HashMap<u32, Vec<u32>>,
+    (seeds, color_sets): BatchSeeds,
+) -> (Batch, HashMap<u32, Vec<u32>>, BatchSeeds) {
+    let mut pieces: Vec<u32> = kept.values().flatten().copied().collect();
+    pieces.sort_unstable();
+    pieces.dedup();
+    let renumber = |piece: &u32| pieces.binary_search(piece).ok().map(|piece| piece as u32);
+    let kept = (kept.iter())
+        .map(|(&entry, old)| (entry, old.iter().filter_map(renumber).collect()))
+        .collect();
+    let seeds = (seeds.into_iter())
+        .filter_map(|seed| {
+            let piece = renumber(&seed.piece)?;
+            Some(PieceSeed { piece, ..seed })
+        })
+        .collect();
+    (batch.subset(&pieces), kept, (seeds, color_sets))
+}
 
 /// Receives every entry contig found in an assembly.
 pub type EntrySink<'a> = dyn FnMut(ScreenEntry) -> Result<(), ScreenError> + 'a;
@@ -162,27 +191,33 @@ impl<'a> Screener<'a> {
             closest_margin: self.config.closest_margin,
         };
         let seed_file = self.shard.seed_file();
+        let survey_batch = |batch: &Batch| {
+            let found = found_seeds(seed_file, &self.filter, &self.seeder, batch, control)?;
+            let counted = survey(&self.seeder, batch, &found, limits, control)?;
+            // Only the pieces that count for some entry can be aligned.
+            let pieces: Vec<u32> = counted.iter().map(|counted| counted.piece).collect();
+            let (mut seeds, color_sets) = found;
+            seeds.retain(|seed| pieces.binary_search(&seed.piece).is_ok());
+            let seeds = match seeds.is_empty() {
+                true => BatchSeeds::default(),
+                false => (seeds, color_sets),
+            };
+            Ok::<_, ScreenError>((counted, seeds))
+        };
         let (mut surveyed, mut kept_seeds) = (Vec::new(), Vec::new());
-        let contigs = read_batches(
+        let contigs = self.grouped_batches(
             path,
-            self.config.batch_bases,
-            self.config.overlap(),
-            rule.min_fragment_columns as usize,
-            &mut |_, batch| {
-                let found = found_seeds(seed_file, &self.filter, &self.seeder, batch, control)?;
-                let counted = survey(&self.seeder, batch, &found, limits, control)?;
-                // Only the pieces that count for some entry can be aligned.
-                let pieces: Vec<u32> = counted.iter().map(|counted| counted.piece).collect();
-                let (mut seeds, color_sets) = found;
-                seeds.retain(|seed| pieces.binary_search(&seed.piece).is_ok());
-                kept_seeds.push(match seeds.is_empty() {
-                    true => BatchSeeds::default(),
-                    false => (seeds, color_sets),
-                });
-                surveyed.push(counted);
+            |_, batch| Some(batch.clone()),
+            |group| {
+                let done = (group.par_iter())
+                    .map(survey_batch)
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (counted, seeds) in done {
+                    surveyed.push(counted);
+                    kept_seeds.push(seeds);
+                }
                 Ok(())
             },
-            None,
         )?;
         let Some(contigs) = contigs else {
             return Ok(None);
@@ -254,19 +289,29 @@ impl<'a> Screener<'a> {
             control,
         };
         let mut work = FragmentWork::default();
-        read_batches(
+        self.grouped_batches(
             path,
-            self.config.batch_bases,
-            self.config.overlap(),
-            self.config.rule.min_fragment_columns as usize,
-            &mut |index, batch| {
-                let Some(kept) = pieces.get(index).filter(|kept| !kept.is_empty()) else {
-                    return Ok(());
-                };
+            |index, batch| {
+                let kept = pieces.get(index).filter(|kept| !kept.is_empty())?;
                 let seeds = std::mem::take(&mut seeds[index]);
-                self.align_batch(&aligner, batch, kept, seeds, &mut found, &mut work)
+                Some(kept_subset(batch, kept, seeds))
             },
-            None,
+            |group| {
+                let done = (group.into_par_iter())
+                    .map(|(batch, kept, seeds)| self.align_batch(&aligner, &batch, &kept, seeds))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // In batch order, so that the fragments of an entry contig keep their order.
+                for (turned, part) in done {
+                    work.add(&part);
+                    for turned in turned {
+                        found
+                            .entry((turned.entry, turned.entry_contig))
+                            .or_default()
+                            .push(turned.fragment);
+                    }
+                }
+                Ok(())
+            },
         )?;
         summary.aligned_entries = work.aligned_entries;
         summary.alignments = work.align.alignments;
@@ -274,50 +319,67 @@ impl<'a> Screener<'a> {
         Ok(found)
     }
 
-    /// Aligns the pieces of a batch that are kept for some entry, joined into a smaller batch, as
-    /// preparing the query of stage 3 costs time in proportion to its length.
+    /// Aligns the pieces of a batch that are kept for some entry, joined into a smaller batch by
+    /// `kept_subset`, with their found seeds. Returns the turned fragments and the work.
     fn align_batch(
         &self,
         aligner: &BatchAlignment<'_>,
         batch: &Batch,
         kept: &HashMap<u32, Vec<u32>>,
         (seeds, color_sets): BatchSeeds,
-        found: &mut HashMap<EntryContig, Vec<Fragment>>,
-        work: &mut FragmentWork,
-    ) -> Result<(), ScreenError> {
-        let mut pieces: Vec<u32> = kept.values().flatten().copied().collect();
-        pieces.sort_unstable();
-        pieces.dedup();
-        let batch = batch.subset(&pieces);
-        let kept: HashMap<u32, Vec<u32>> = kept
-            .iter()
-            .map(|(&entry, old)| {
-                let new = old
-                    .iter()
-                    .filter_map(|piece| pieces.binary_search(piece).ok())
-                    .map(|piece| piece as u32)
-                    .collect();
-                (entry, new)
-            })
-            .collect();
-        let seeds: Vec<PieceSeed> = (seeds.into_iter())
-            .filter_map(|seed| {
-                let piece = pieces.binary_search(&seed.piece).ok()? as u32;
-                Some(PieceSeed { piece, ..seed })
-            })
-            .collect();
+    ) -> Result<(Vec<ScreenFragment>, FragmentWork), ScreenError> {
         let kmers = QueryKmers::new(&self.seeder, &batch.bases, false);
-        let seed_hits = kept_seed_hits(&kmers, &seeds, &color_sets, &kept);
+        let seed_hits = kept_seed_hits(&kmers, &seeds, &color_sets, kept);
         let query_seeds = query_seeds(&kmers, &seeds, color_sets);
-        let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits, &query_seeds)?;
-        work.add(&part);
-        for turned in turned {
-            found
-                .entry((turned.entry, turned.entry_contig))
-                .or_default()
-                .push(turned.fragment);
-        }
-        Ok(())
+        aligner.fragments(batch, &kmers, seed_hits, &query_seeds)
+    }
+
+    /// Reads the batches of the assembly on another thread, which turns each into an item with
+    /// `item`, and passes the items in order to `group`, a few at a time, so that the threads
+    /// share the work of several batches. `None` for an empty file.
+    fn grouped_batches<T: Send>(
+        &self,
+        path: &Path,
+        mut item: impl FnMut(usize, &Batch) -> Option<T> + Send,
+        mut group: impl FnMut(Vec<T>) -> Result<(), ScreenError>,
+    ) -> Result<Option<AssemblyContigs>, ScreenError> {
+        let size = rayon::current_num_threads().clamp(2, MAX_GROUP);
+        let (sender, receiver) = sync_channel::<T>(size);
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                read_batches(
+                    path,
+                    self.config.batch_bases,
+                    self.config.overlap(),
+                    self.config.rule.min_fragment_columns as usize,
+                    &mut |index, batch| match item(index, batch) {
+                        Some(item) => sender.send(item).map_err(|_| Stopped::Asked.into()),
+                        None => Ok(()),
+                    },
+                    None,
+                )
+            });
+            let mut result = Ok(());
+            let mut pending = Vec::with_capacity(size);
+            for item in receiver.iter() {
+                pending.push(item);
+                if pending.len() == size {
+                    result = group(std::mem::take(&mut pending));
+                    if result.is_err() {
+                        break;
+                    }
+                }
+            }
+            if result.is_ok() && !pending.is_empty() {
+                result = group(pending);
+            }
+            // A failed group drops the receiver, which stops the reader.
+            drop(receiver);
+            let read = reader
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            result.and(read)
+        })
     }
 
     /// The length the survey compares an entry with: its bases, or for an entry with more than

@@ -36,7 +36,7 @@ impl Piece {
 }
 
 /// The bases of a batch, with spacers of N between the pieces, and the pieces.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(super) struct Batch {
     pub bases: Vec<u8>,
     pub pieces: Vec<Piece>,
