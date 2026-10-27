@@ -8,10 +8,9 @@ use super::{CliError, output_writer, read_list};
 use crate::screen::{AssemblyFailure, AssemblySummary, ScreenConfig, ScreenEntry, Screener};
 use crate::search::{SearchControl, Stopped};
 use clap::Args;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
 /// Records held between the screening threads and the writer.
@@ -77,7 +76,6 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     let shard = shards
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
-    let screener = Screener::new(&shard, config)?;
     let assemblies = read_list(&args.assemblies)?;
     check_names(&assemblies, args.contig_dir.is_some())?;
     let threads = match args.threads {
@@ -89,16 +87,26 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
         .num_threads(threads)
         .build()
         .map_err(crate::search::SearchError::from)?;
+    let screener = pool
+        .install(|| Screener::new(&shard, config))?
+        .with_pool(&pool);
+    // Each assembly runs on a thread of its own outside the pool, which waits for its batches,
+    // so a thread of the pool never takes up a whole other assembly while it waits.
+    let drivers = pool.current_num_threads().min(assemblies.len()).max(1);
+    let next = AtomicUsize::new(0);
     let mut writer = output_writer(args.output.as_deref())?;
     let (sender, receiver) = sync_channel(RECORD_QUEUE);
     let failed = std::thread::scope(|scope| {
-        scope.spawn(move || {
-            pool.install(|| {
-                assemblies
-                    .par_iter()
-                    .for_each_with(sender, |sender, path| screen_one(&screener, path, sender));
+        for _ in 0..drivers {
+            let (sender, screener, assemblies, next) =
+                (sender.clone(), &screener, &assemblies, &next);
+            scope.spawn(move || {
+                while let Some(path) = assemblies.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    screen_one(screener, path, &sender);
+                }
             });
-        });
+        }
+        drop(sender);
         // A write error returns at once; the dropped receiver then stops the screens.
         let mut failed = 0;
         for line in receiver {

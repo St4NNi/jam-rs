@@ -39,6 +39,8 @@ pub struct Screener<'a> {
     filter: KeyFilter,
     /// The shortest contig of each entry with more than one contig, once read.
     shortest: Mutex<HashMap<u32, u64>>,
+    /// The threads that survey and align the batches, when the caller is not one of them.
+    pool: Option<&'a rayon::ThreadPool>,
 }
 
 /// The searched contigs of an assembly and, for each batch, the entries its pieces count for.
@@ -102,7 +104,15 @@ impl<'a> Screener<'a> {
             model,
             filter,
             shortest: Mutex::new(HashMap::new()),
+            pool: None,
         })
+    }
+
+    /// Hands the batches to the threads of `pool`. A caller outside the pool then waits for its
+    /// batches instead of taking up the work of other assemblies while it waits.
+    pub fn with_pool(mut self, pool: &'a rayon::ThreadPool) -> Self {
+        self.pool = Some(pool);
+        self
     }
 
     /// Reads the assembly at `path` (plain or gzip FASTA), screens it and passes every entry
@@ -341,9 +351,16 @@ impl<'a> Screener<'a> {
         &self,
         path: &Path,
         mut item: impl FnMut(usize, &Batch) -> Option<T> + Send,
-        mut group: impl FnMut(Vec<T>) -> Result<(), ScreenError>,
+        mut group: impl FnMut(Vec<T>) -> Result<(), ScreenError> + Send,
     ) -> Result<Option<AssemblyContigs>, ScreenError> {
-        let size = rayon::current_num_threads().clamp(2, MAX_GROUP);
+        let threads = self.pool.map_or_else(rayon::current_num_threads, |pool| {
+            pool.current_num_threads()
+        });
+        let size = threads.clamp(2, MAX_GROUP);
+        let mut group = |items: Vec<T>| match self.pool {
+            Some(pool) => pool.install(|| group(items)),
+            None => group(items),
+        };
         let (sender, receiver) = sync_channel::<T>(size);
         std::thread::scope(|scope| {
             let reader = scope.spawn(move || {
