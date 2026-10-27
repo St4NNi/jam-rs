@@ -19,7 +19,6 @@ use crate::search::{
 };
 use crate::search::{FoundSeeds, read_entry_locations};
 use crate::search::{LocateOutcome, LocateRequest, LocateWork, LocateWorkspace, locate_entry};
-use rayon::prelude::*;
 
 /// An entry contig, the query of the screen: the entry and the contig within it.
 pub(super) type EntryContig = (u32, u32);
@@ -107,14 +106,13 @@ impl BatchAlignment<'_> {
             self.control,
             &mut work.locate,
         )?;
-        let results = (candidates.par_iter().zip(&locations))
-            .map_init(
-                || (LocateWorkspace::default(), AlignStageWorkspace::default()),
-                |(locate, align), (possible, locations)| {
-                    let workspaces = (locate, align);
-                    self.entry(batch, &request, &query, possible, locations, workspaces)
-                },
-            )
+        // On the thread of the batch, as the threads share the work by batches.
+        let (mut locate, mut align) = (LocateWorkspace::default(), AlignStageWorkspace::default());
+        let results = (candidates.iter().zip(&locations))
+            .map(|(possible, locations)| {
+                let workspaces = (&mut locate, &mut align);
+                self.entry(batch, &request, &query, possible, locations, workspaces)
+            })
             .collect::<Result<Vec<_>, ScreenError>>()?;
         let mut turned = Vec::new();
         for (fragments, part) in results {
