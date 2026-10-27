@@ -9,6 +9,7 @@ use crate::index::{ColorSets, SeedFile, StoredSeed, seed_key};
 use crate::search::SearchControl;
 use crate::search::{FoundSeeds, QueryKmers};
 use crate::seeds::Seeder;
+use rayon::prelude::*;
 use std::collections::HashMap;
 
 /// The part of the expected seeds that a contig or a set of contigs must share with an entry to
@@ -69,7 +70,7 @@ pub(super) fn found_seeds(
 ) -> Result<(Vec<PieceSeed>, ColorSets), ScreenError> {
     let pieces = batch
         .pieces
-        .iter()
+        .par_iter()
         .enumerate()
         .map(|(index, piece)| {
             control.check()?;
@@ -115,7 +116,7 @@ pub(super) fn survey(
 ) -> Result<Vec<Surveyed>, ScreenError> {
     let pieces: Vec<&[PieceSeed]> = found.chunk_by(|a, b| a.piece == b.piece).collect();
     let surveyed = pieces
-        .into_iter()
+        .into_par_iter()
         .map(|found| {
             control.check()?;
             let piece = found[0].piece;
