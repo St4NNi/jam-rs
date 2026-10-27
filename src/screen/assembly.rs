@@ -6,6 +6,7 @@
 use super::batch::{AssemblyContigs, Batch, read_batches};
 use super::decision::decide_entries;
 use super::fragments::{BatchAlignment, EntryContig, FragmentWork};
+use super::key_filter::KeyFilter;
 use super::records::{AssemblySummary, ScreenEntry};
 use super::survey::{
     SEEDS_PART, SurveyLimits, Surveyed, expected_seeds, found_seeds, kept_seed_hits, survey,
@@ -31,6 +32,8 @@ pub struct Screener<'a> {
     seeder: Seeder,
     /// The miss model of stage 2, whose bound keeps every entry in the screen.
     model: MissModel,
+    /// The stored seed keys of the shard, so that most k-mers skip the sketch buckets.
+    filter: KeyFilter,
     /// The shortest contig of each entry with more than one contig, once read.
     shortest: Mutex<HashMap<u32, u64>>,
 }
@@ -55,11 +58,13 @@ impl<'a> Screener<'a> {
         let scheme = shard.manifest().parameters.scheme;
         let seeder = Seeder::new(scheme).map_err(crate::index::IndexError::from)?;
         let model = MissModel::new(scheme, 0).map_err(crate::search::SearchError::from)?;
+        let filter = KeyFilter::new(shard.seed_file())?;
         Ok(Self {
             shard,
             config,
             seeder,
             model,
+            filter,
             shortest: Mutex::new(HashMap::new()),
         })
     }
@@ -154,7 +159,7 @@ impl<'a> Screener<'a> {
             self.config.overlap(),
             rule.min_fragment_columns as usize,
             &mut |_, batch| {
-                let found = found_seeds(seed_file, &self.seeder, batch, control)?;
+                let found = found_seeds(seed_file, &self.filter, &self.seeder, batch, control)?;
                 surveyed.push(survey(&self.seeder, batch, &found, limits, control)?);
                 Ok(())
             },
@@ -271,7 +276,13 @@ impl<'a> Screener<'a> {
             .collect();
         let seed_file = self.shard.seed_file();
         let kmers = QueryKmers::new(&self.seeder, &batch.bases, false);
-        let seeds = found_seeds(seed_file, &self.seeder, &batch, aligner.control)?;
+        let seeds = found_seeds(
+            seed_file,
+            &self.filter,
+            &self.seeder,
+            &batch,
+            aligner.control,
+        )?;
         let seed_hits = kept_seed_hits(&kmers, &seeds, &kept);
         let (turned, part) = aligner.fragments(&batch, &kmers, seed_hits)?;
         work.add(&part);

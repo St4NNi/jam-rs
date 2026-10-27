@@ -4,6 +4,7 @@
 
 use super::ScreenError;
 use super::batch::Batch;
+use super::key_filter::KeyFilter;
 use crate::index::{ColorSetId, ColorSets, SeedFile, seed_key};
 use crate::search::QueryKmers;
 use crate::search::SearchControl;
@@ -57,10 +58,12 @@ pub(super) struct SurveyLimits {
     pub closest_margin: Option<f64>,
 }
 
-/// Hashes the k-mers of each piece of a batch and looks them up in the sketch part. Returns the
-/// distinct k-mers that it holds, sorted by piece and then color set, and their color sets.
+/// Hashes the k-mers of each piece of a batch and looks up in the sketch part those that `filter`
+/// may hold. Returns the distinct k-mers that it holds, sorted by piece and then color set, and
+/// their color sets.
 pub(super) fn found_seeds(
     seed_file: &SeedFile,
+    filter: &KeyFilter,
     seeder: &Seeder,
     batch: &Batch,
     control: SearchControl<'_>,
@@ -73,7 +76,12 @@ pub(super) fn found_seeds(
             control.check()?;
             let mut hashes = Vec::new();
             let bases = &batch.bases[piece.start as usize..piece.end() as usize];
-            seeder.query_kmers(bases, |kmer| hashes.push((seed_key(kmer.hash), kmer.hash)));
+            seeder.query_kmers(bases, |kmer| {
+                let key = seed_key(kmer.hash);
+                if filter.may_hold(key) {
+                    hashes.push((key, kmer.hash));
+                }
+            });
             hashes.sort_unstable();
             hashes.dedup();
             let keys: Vec<u64> = hashes.iter().map(|&(key, _)| key).collect();

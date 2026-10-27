@@ -9,6 +9,7 @@ mod decision;
 #[cfg(test)]
 mod forward_tests;
 mod fragments;
+mod key_filter;
 mod records;
 mod survey;
 #[cfg(test)]

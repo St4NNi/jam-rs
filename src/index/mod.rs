@@ -36,7 +36,9 @@ pub use manifest::{EntryRecord, FileRecord, Manifest, Parameters, SequenceRecord
 pub use packed::{Contig, PackedSequence};
 pub use plan::{Part, Pin, Place, Plan, part_pins};
 pub use reshard::{ReshardOptions, Split, reshard};
-pub use seed_file::{ColorSetId, ColorSets, SeedFile, SeedLocation, StoredSeed, seed_key};
+pub use seed_file::{
+    ColorSetId, ColorSets, SEED_KEY_BITS, SeedFile, SeedLocation, StoredSeed, seed_key,
+};
 pub use shard::{Shard, ShardStats};
 pub use sources::{IndexHead, Location, ShardOptions};
 pub use warm::warm;
