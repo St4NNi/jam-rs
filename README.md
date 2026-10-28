@@ -102,13 +102,15 @@ Normal options:
 - `-l, --list FILE`: text file with one FASTA path per line, used in addition to any paths on
   the command line.
 - `--singleton`: treat each FASTA record as a separate entry, instead of treating each file as
-  one entry.
+  one entry. Without `-k` and `-w`, such an index uses k 21 and w 10, the dense seeds that
+  `jam screen` needs.
 - `-t, --threads N` (default: all cores): number of threads to use.
 
 Advanced options:
 
-- `-k, --k K` (default 25): k-mer length in bases (1 to 32).
-- `-w, --window W` (default 100): number of k-mers per minimizer window.
+- `-k, --k K` (default 25, or 21 with `--singleton`): k-mer length in bases (1 to 32).
+- `-w, --window W` (default 100, or 10 with `--singleton`): number of k-mers per minimizer
+  window.
 - `--sketch-only`: write only the index file containing the sketch data. This index is much
   smaller, but it supports only `--level sketch` searches. It writes no `.jamseq` file, so
   `--chunks` has no effect with it.
@@ -298,6 +300,8 @@ Advanced options:
   gzipped FASTA file per assembly.
 - `--survey-only`: stop after the survey stage. No alignments are computed and no entries are
   reported; only the files in `--contig-dir` are written.
+- `--compact`: write one `pair` line per small sequence and assembly instead of the `entry`
+  line, without CIGAR strings and gaps, for very large result sets. See [Screening assemblies](#screening-assemblies).
 
 ## Output
 
@@ -647,6 +651,10 @@ entry per FASTA record, then stream the assemblies against it:
     jam index build --singleton -o plasmids plasmids.fa
     jam screen plasmids.jam --assemblies assemblies.txt -c 0.8 -o screen.jsonl
 
+The default singleton index is the dense one (k 21, w 10). It holds about 7.7 times more seed
+data than k 25 and w 100. An older sparse index still works, as the scheme is stored in the
+manifest.
+
 A screen has two stages. The first is the *survey*. jam looks up the seeds of the contigs of an
 assembly, a batch at a time, in the index. It keeps the entries that share enough seeds with a
 contig and aligns only those. `--survey-only` stops after the survey.
@@ -660,6 +668,11 @@ The command writes JSON lines, where the `type` key identifies the line kind:
   item includes its name, length, aligned bases, identity, `score`, `best_score`, and the
   number of entries it counts toward. Finally, it lists the aligned fragments (`primary`,
   `alternatives`) and the uncovered query intervals (`gaps`).
+- `pair` (with `--compact`, instead of `entry`): the same counts as `entry`, with each contig
+  as an array (id, name, length, aligned bases, identity, `score`, `best_score`, entries) and
+  each fragment as an array (contig id, contig start and end, strand `+` or `-`, start and end
+  on the small sequence, identity, matches, and 1 for a `primary` or 0 for an alternative
+  fragment). There are no CIGAR strings and no `gaps`.
 - `assembly`: summary for one screened assembly, including its contig and base counts, work
   counts, and the time in seconds spent in the survey and alignment stages.
 - `failed`: reports an assembly that could not be read, along with the `error` message.
