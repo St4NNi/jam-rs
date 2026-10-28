@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 
+/// Threads of one pool at most; more threads are split into several pools.
+const POOL_THREADS: usize = 16;
+
 /// Records held between the screening threads and the writer.
 const RECORD_QUEUE: usize = 64;
 
@@ -89,28 +92,54 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
         Some(threads) => threads,
         None => 0,
     };
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .map_err(crate::search::SearchError::from)?;
-    let screener = pool
-        .install(|| Screener::new(&shard, config))?
-        .with_pool(&pool);
-    // Each assembly runs on a thread of its own outside the pool, which waits for its batches,
-    // so a thread of the pool never takes up a whole other assembly while it waits.
-    let drivers = pool.current_num_threads().min(assemblies.len()).max(1);
+    let threads = match threads {
+        0 => std::thread::available_parallelism().map_or(1, usize::from),
+        threads => threads,
+    };
+    let pool_of = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(crate::search::SearchError::from)
+    };
+    // Above POOL_THREADS threads, each pool of at most that many threads screens one assembly at a
+    // time, as one large pool loses much of its time to threads that wait for each other.
+    let pools = (0..threads.div_ceil(POOL_THREADS))
+        .map(|at| pool_of((threads - at * POOL_THREADS).min(POOL_THREADS)))
+        .collect::<Result<Vec<_>, _>>()?;
+    // The key filter of the shard is built on all threads and shared by all pools.
+    let screener = match &pools[..] {
+        [pool] => pool
+            .install(|| Screener::new(&shard, config))?
+            .with_pool(pool),
+        _ => pool_of(threads)?.install(|| Screener::new(&shard, config))?,
+    };
     let next = AtomicUsize::new(0);
     let mut writer = output_writer(args.output.as_deref())?;
     let (sender, receiver) = sync_channel(RECORD_QUEUE);
     let failed = std::thread::scope(|scope| {
-        for _ in 0..drivers {
-            let (sender, screener, assemblies, next) =
-                (sender.clone(), &screener, &assemblies, &next);
-            scope.spawn(move || {
-                while let Some(path) = assemblies.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    screen_one(screener, path, &sender);
-                }
-            });
+        let (screener, assemblies, next) = (&screener, &assemblies, &next);
+        let take = move || assemblies.get(next.fetch_add(1, Ordering::Relaxed));
+        if let [pool] = &pools[..] {
+            // Each assembly runs on a thread of its own outside the pool, which waits for its
+            // batches, so a thread of the pool never takes up a whole other assembly meanwhile.
+            for _ in 0..pool.current_num_threads().min(assemblies.len()).max(1) {
+                let sender = sender.clone();
+                scope.spawn(move || {
+                    while let Some(path) = take() {
+                        screen_one(screener, path, &sender);
+                    }
+                });
+            }
+        } else {
+            for pool in &pools {
+                let sender = sender.clone();
+                scope.spawn(move || {
+                    while let Some(path) = take() {
+                        pool.install(|| screen_one(screener, path, &sender));
+                    }
+                });
+            }
         }
         drop(sender);
         // A write error returns at once; the dropped receiver then stops the screens.
