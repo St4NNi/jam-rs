@@ -70,10 +70,10 @@ struct BuildArgs {
     chunks: usize,
     #[command(flatten)]
     common: CommonArgs,
-    /// Bases per k-mer, 1 to 32 [default: 25]
+    /// Bases per k-mer, 1 to 32 [default: 25; 21 for --singleton builds]
     #[arg(short, long)]
     k: Option<u8>,
-    /// K-mers per minimizer window [default: 100]
+    /// K-mers per minimizer window [default: 100; 10 for --singleton builds]
     #[arg(short, long)]
     window: Option<u16>,
 }
@@ -335,8 +335,17 @@ fn raise_open_files() -> Result<(), CliError> {
     Ok(())
 }
 
+/// The k-mer length and window of `--singleton` builds without `-k` and `-w`.
+const SINGLETON_K: u8 = 21;
+const SINGLETON_W: u16 = 10;
+
 fn build_options(args: &BuildArgs, threads: usize, temp_dir: PathBuf) -> BuildOptions {
     let mut parameters = Parameters::default();
+    // A singleton index of small sequences is screened against assemblies, which finds more with
+    // the denser seeds of k 21 and w 10.
+    if args.singleton {
+        (parameters.scheme.k, parameters.scheme.w) = (SINGLETON_K, SINGLETON_W);
+    }
     parameters.scheme.k = args.k.unwrap_or(parameters.scheme.k);
     parameters.scheme.w = args.window.unwrap_or(parameters.scheme.w);
     BuildOptions {
@@ -375,6 +384,33 @@ mod tests {
     use super::*;
     use crate::cli::{Cli, Command};
     use clap::Parser;
+
+    /// A singleton build is dense unless `-k` or `-w` says otherwise; other builds keep the
+    /// default scheme.
+    #[test]
+    fn singleton_scheme_defaults() {
+        let scheme = |extra: &[&str]| {
+            let mut words = vec!["jam", "index", "build", "-o", "x.jam", "a.fa"];
+            words.extend_from_slice(extra);
+            let Ok(Cli {
+                command: Command::Index(args),
+            }) = Cli::try_parse_from(words)
+            else {
+                panic!("build did not parse");
+            };
+            let IndexCommand::Build(build) = args.command else {
+                panic!("not a build");
+            };
+            let scheme = build_options(&build, 1, PathBuf::new()).parameters.scheme;
+            (scheme.k, scheme.w)
+        };
+        let default = Parameters::default().scheme;
+        assert_eq!(scheme(&[]), (default.k, default.w));
+        assert_eq!(scheme(&["--singleton"]), (21, 10));
+        assert_eq!(scheme(&["--singleton", "-k", "25"]), (25, 10));
+        assert_eq!(scheme(&["--singleton", "-w", "100"]), (21, 100));
+        assert_eq!(scheme(&["-k", "21"]), (21, default.w));
+    }
 
     #[test]
     fn pin_parts_parsed() {
