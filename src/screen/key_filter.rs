@@ -72,32 +72,49 @@ struct Layout {
     blocks: u64,
     /// Right shift of a seed key that gives its filter.
     shift: u32,
+    /// Where the first filter starts in the file, and the bytes from one filter to the next.
+    data_start: u64,
+    stride: u64,
+    file_bytes: u64,
 }
 
 impl Layout {
-    fn of(seeds: u64, bucket_bits: u32) -> Self {
-        let total = (seeds * BITS_PER_SEED).div_ceil(256).max(1);
-        let wanted = (total * BLOCK_BYTES as u64).div_ceil(FILTER_BYTES);
-        let filters = wanted.next_power_of_two().min(1 << bucket_bits);
-        Self {
+    /// The layout of the filters of a shard with `seeds` seeds and `bucket_bits` bucket bits;
+    /// `None` when its sizes overflow.
+    fn of(seeds: u64, bucket_bits: u32) -> Option<Self> {
+        let total = seeds.checked_mul(BITS_PER_SEED)?.div_ceil(256).max(1);
+        let wanted = total
+            .checked_mul(BLOCK_BYTES as u64)?
+            .div_ceil(FILTER_BYTES);
+        let filters = wanted.checked_next_power_of_two()?.min(1 << bucket_bits);
+        let blocks = total.div_ceil(filters);
+        let stride = blocks
+            .checked_mul(BLOCK_BYTES as u64)?
+            .checked_next_multiple_of(PAGE)?;
+        let table = filters.checked_mul(TABLE_ENTRY_BYTES as u64)?;
+        let data_start = table
+            .checked_add(HEADER_BYTES as u64)?
+            .checked_next_multiple_of(PAGE)?;
+        let file_bytes = data_start.checked_add(filters.checked_mul(stride)?)?;
+        Some(Self {
             filters,
-            blocks: total.div_ceil(filters),
+            blocks,
             shift: SEED_KEY_BITS - filters.trailing_zeros(),
-        }
+            data_start,
+            stride,
+            file_bytes,
+        })
     }
 
-    /// Bytes from the start of one filter to the next in the file.
-    fn stride(&self) -> u64 {
-        (self.blocks * BLOCK_BYTES as u64).next_multiple_of(PAGE)
+    /// The layout of the filters of the shard with the seeds `seed_file`.
+    fn of_shard(seed_file: &SeedFile) -> Result<Self, IndexError> {
+        Self::of(seed_file.seed_count(), seed_file.bucket_bits())
+            .ok_or_else(|| IndexError::Input("too many seeds for a filter".into()))
     }
 
-    /// Where the first filter starts in the file.
-    fn data_start(&self) -> u64 {
-        (HEADER_BYTES as u64 + self.filters * TABLE_ENTRY_BYTES as u64).next_multiple_of(PAGE)
-    }
-
-    fn file_bytes(&self) -> u64 {
-        self.data_start() + self.filters * self.stride()
+    /// Where filter `filter` starts in the file.
+    fn start(&self, filter: u64) -> u64 {
+        self.data_start + filter * self.stride
     }
 }
 
@@ -112,7 +129,7 @@ struct Identity {
 impl KeyFilter {
     /// Reads every sketch bucket of `seed_file` and adds the key of each stored seed.
     pub fn new(seed_file: &SeedFile) -> Result<Self, IndexError> {
-        let layout = Layout::of(seed_file.seed_count(), seed_file.bucket_bits());
+        let layout = Layout::of_shard(seed_file)?;
         let filters = (0..layout.filters)
             .into_par_iter()
             .map(|filter| build_filter(seed_file, &layout, filter))
@@ -131,8 +148,8 @@ impl KeyFilter {
     }
 
     /// The size of the filter file of an index with the seeds `seed_file`.
-    pub fn file_bytes(seed_file: &SeedFile) -> u64 {
-        Layout::of(seed_file.seed_count(), seed_file.bucket_bits()).file_bytes()
+    pub fn file_bytes(seed_file: &SeedFile) -> Result<u64, IndexError> {
+        Ok(Layout::of_shard(seed_file)?.file_bytes)
     }
 
     /// Builds the filters of the local index file `index` on all threads and writes the filter
@@ -145,14 +162,14 @@ impl KeyFilter {
         limit: u64,
         warn: impl FnOnce(String),
     ) -> Result<PathBuf, IndexError> {
-        let layout = Layout::of(seed_file.seed_count(), seed_file.bucket_bits());
-        if let Some(warning) = size_warning(layout.file_bytes(), limit) {
+        let layout = Layout::of_shard(seed_file)?;
+        if let Some(warning) = size_warning(layout.file_bytes, limit) {
             warn(warning);
         }
         let identity = identity(seed_file);
         let path = Self::path_of(index);
         let (file, mut partial) = Partial::create(&path)?;
-        file.set_len(layout.file_bytes())?;
+        file.set_len(layout.file_bytes)?;
         let crcs = (0..layout.filters)
             .into_par_iter()
             .map(|filter| {
@@ -160,7 +177,7 @@ impl KeyFilter {
                 let bytes: Vec<u8> = (blocks.iter().flatten())
                     .flat_map(|word| word.to_le_bytes())
                     .collect();
-                let offset = layout.data_start() + filter * layout.stride();
+                let offset = layout.start(filter);
                 file.write_all_at(&bytes, offset)?;
                 Ok(crc32fast::hash(&bytes))
             })
@@ -192,19 +209,18 @@ impl KeyFilter {
         // The file must not change while it is mapped; it is written under another name and
         // renamed, so an old mapping keeps the old pages.
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| failed(&e.to_string()))?;
-        let (found, layout, crcs) = read_header(&map).ok_or_else(|| failed("is damaged"))?;
-        if found != wanted || layout != Layout::of(wanted.seeds, wanted.bucket_bits) {
-            return Err(failed("was built for another index"));
-        }
-        if map.len() as u64 != layout.file_bytes() {
+        let layout = (Layout::of(wanted.seeds, wanted.bucket_bits))
+            .ok_or_else(|| failed("cannot fit an index of this size"))?;
+        let crcs = read_header(&map, wanted, &layout).map_err(failed)?;
+        if map.len() as u64 != layout.file_bytes {
             return Err(failed("is cut short"));
         }
-        if let Some(warning) = size_warning(layout.file_bytes(), limit) {
+        if let Some(warning) = size_warning(layout.file_bytes, limit) {
             warn(warning);
         }
         let filter_bytes = (layout.blocks as usize) * BLOCK_BYTES;
         let intact = crcs.par_iter().enumerate().all(|(filter, &crc)| {
-            let start = (layout.data_start() + filter as u64 * layout.stride()) as usize;
+            let start = layout.start(filter as u64) as usize;
             crc32fast::hash(&map[start..start + filter_bytes]) == crc
         });
         if !intact {
@@ -227,8 +243,7 @@ impl KeyFilter {
                 (words.iter().zip(bits)).all(|(word, bit)| word & bit != 0)
             }
             Blocks::Mapped(map) => {
-                let start = layout.data_start() + filter * layout.stride();
-                let at = (start + block * BLOCK_BYTES as u64) as usize;
+                let at = (layout.start(filter) + block * BLOCK_BYTES as u64) as usize;
                 let (words, _) = map[at..at + BLOCK_BYTES].as_chunks::<4>();
                 (words.iter().zip(bits)).all(|(word, bit)| u32::from_le_bytes(*word) & bit != 0)
             }
@@ -360,7 +375,7 @@ fn identity(seed_file: &SeedFile) -> Identity {
 fn header(identity: Identity, layout: &Layout, crcs: &[u32]) -> Vec<u8> {
     let mut table = Vec::with_capacity(crcs.len() * TABLE_ENTRY_BYTES);
     for (filter, crc) in crcs.iter().enumerate() {
-        let offset = layout.data_start() + filter as u64 * layout.stride();
+        let offset = layout.start(filter as u64);
         table.extend_from_slice(&offset.to_le_bytes());
         table.extend_from_slice(&crc.to_le_bytes());
         table.extend_from_slice(&[0; 4]);
@@ -381,46 +396,51 @@ fn header(identity: Identity, layout: &Layout, crcs: &[u32]) -> Vec<u8> {
     head
 }
 
-/// The identity, layout and filter CRC-32 of a filter file, if its header and table are whole,
-/// of this version, and put each filter where the layout says.
-fn read_header(bytes: &[u8]) -> Option<(Identity, Layout, Vec<u32>)> {
-    let head = bytes.get(..HEADER_BYTES)?;
+/// The filter CRC-32 of a filter file whose header and table are whole, of this version, and fit
+/// the shard of identity `wanted` and its layout: the dimensions of the header are compared with
+/// those of the shard before any size is taken from them. Otherwise why the file does not fit.
+fn read_header(bytes: &[u8], wanted: Identity, layout: &Layout) -> Result<Vec<u32>, &'static str> {
+    const DAMAGED: &str = "is damaged";
     let u32_at = |bytes: &[u8], at: usize| -> Option<u32> {
         Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
     };
     let u64_at = |bytes: &[u8], at: usize| -> Option<u64> {
         Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
     };
-    let valid = head[..8] == MAGIC
-        && u32_at(head, 8)? == VERSION
-        && u32_at(head, 32)? == BITS_PER_SEED as u32
-        && u32_at(head, 60)? == crc32fast::hash(&head[..60]);
-    let identity = Identity {
-        bucket_bits: u32_at(head, 12)?,
-        seeds: u64_at(head, 16)?,
-        index_check: u32_at(head, 44)?,
-    };
-    let filters = u64_at(head, 24)?;
-    if !valid || filters == 0 || identity.bucket_bits > SEED_KEY_BITS {
-        return None;
-    }
-    let layout = Layout::of(identity.seeds, identity.bucket_bits);
-    let table_bytes = usize::try_from(filters).ok()? * TABLE_ENTRY_BYTES;
-    let table = bytes.get(HEADER_BYTES..HEADER_BYTES + table_bytes)?;
-    if filters != layout.filters
-        || u64_at(head, 36)? != layout.blocks
-        || u32_at(head, 48)? != crc32fast::hash(table)
+    let head = bytes.get(..HEADER_BYTES).ok_or(DAMAGED)?;
+    let field = |at: usize| u32_at(head, at).ok_or(DAMAGED);
+    if head[..8] != MAGIC
+        || field(8)? != VERSION
+        || field(32)? != BITS_PER_SEED as u32
+        || field(60)? != crc32fast::hash(&head[..60])
     {
-        return None;
+        return Err(DAMAGED);
     }
-    let mut crcs = Vec::with_capacity(table_bytes / TABLE_ENTRY_BYTES);
+    let found = Identity {
+        bucket_bits: field(12)?,
+        seeds: u64_at(head, 16).ok_or(DAMAGED)?,
+        index_check: field(44)?,
+    };
+    if found != wanted {
+        return Err("was built for another index");
+    }
+    if u64_at(head, 24) != Some(layout.filters) || u64_at(head, 36) != Some(layout.blocks) {
+        return Err("does not have the filters of this index");
+    }
+    let table = (bytes.get(HEADER_BYTES..layout.data_start as usize))
+        .and_then(|rest| rest.get(..layout.filters as usize * TABLE_ENTRY_BYTES))
+        .ok_or("is cut short")?;
+    if field(48)? != crc32fast::hash(table) {
+        return Err(DAMAGED);
+    }
+    let mut crcs = Vec::with_capacity(layout.filters as usize);
     for (filter, entry) in table.chunks(TABLE_ENTRY_BYTES).enumerate() {
-        if u64_at(entry, 0)? != layout.data_start() + filter as u64 * layout.stride() {
-            return None;
+        if u64_at(entry, 0) != Some(layout.start(filter as u64)) {
+            return Err(DAMAGED);
         }
-        crcs.push(u32_at(entry, 8)?);
+        crcs.push(u32_at(entry, 8).ok_or(DAMAGED)?);
     }
-    Some((identity, layout, crcs))
+    Ok(crcs)
 }
 
 #[cfg(test)]
@@ -460,8 +480,8 @@ mod tests {
         assert!(open(&index_two, shard_two.seed_file()).is_err());
         // A changed bit in the header or in a filter is found.
         let length = std::fs::metadata(&path).unwrap().len() as usize;
-        let layout = Layout::of(seed_file.seed_count(), seed_file.bucket_bits());
-        for at in [20, layout.data_start() as usize + 5] {
+        let layout = Layout::of_shard(seed_file).unwrap();
+        for at in [20, layout.data_start as usize + 5] {
             assert!(at < length);
             let mut bytes = std::fs::read(&path).unwrap();
             bytes[at] ^= 1;
@@ -479,6 +499,43 @@ mod tests {
         assert!(open(&index, seed_file).unwrap().is_some());
         let now = crate::index::Shard::open(&index).unwrap();
         assert!(open(&index, now.seed_file()).is_err());
+    }
+
+    /// A header with a valid CRC-32 but dimensions that do not fit the index, even absurd ones,
+    /// makes the file unusable instead of failing.
+    #[test]
+    fn absurd_header_unusable() {
+        let directory = tempfile::tempdir().unwrap();
+        let shard = test_shard(directory.path(), &[vec![random_bases(&mut rng(7), 8_000)]]);
+        let (index, seed_file) = (directory.path().join("shard.jam"), shard.seed_file());
+        let path = KeyFilter::write(&index, seed_file, u64::MAX, drop).unwrap();
+        let good = std::fs::read(&path).unwrap();
+        let seeds = seed_file.seed_count().to_le_bytes();
+        let bucket_bits = seed_file.bucket_bits().to_le_bytes();
+        let cases: [&[(usize, &[u8])]; 4] = [
+            &[(24, &(1u64 << 60).to_le_bytes())],
+            &[
+                (16, &1u64.to_le_bytes()),
+                (12, &8u32.to_le_bytes()),
+                (24, &(1u64 << 60).to_le_bytes()),
+            ],
+            &[(16, &u64::MAX.to_le_bytes())],
+            &[
+                (36, &u64::MAX.to_le_bytes()),
+                (16, &seeds),
+                (12, &bucket_bits),
+            ],
+        ];
+        for changes in cases {
+            let mut bytes = good.clone();
+            for (at, value) in changes {
+                bytes[*at..*at + value.len()].copy_from_slice(value);
+            }
+            let crc = crc32fast::hash(&bytes[..60]);
+            bytes[60..64].copy_from_slice(&crc.to_le_bytes());
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(KeyFilter::open(&index, seed_file, u64::MAX, drop).is_err());
+        }
     }
 
     /// Two writers at the same time each publish a whole file and leave no temporary file.
@@ -510,7 +567,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let shard = test_shard(directory.path(), &[vec![random_bases(&mut rng(3), 5_000)]]);
         let (index, seed_file) = (directory.path().join("shard.jam"), shard.seed_file());
-        let bytes = KeyFilter::file_bytes(seed_file);
+        let bytes = KeyFilter::file_bytes(seed_file).unwrap();
         for (limit, warns) in [(bytes, false), (bytes - 1, true)] {
             let mut warned = None;
             KeyFilter::write(&index, seed_file, limit, |text| warned = Some(text)).unwrap();
