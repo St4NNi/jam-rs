@@ -42,10 +42,16 @@ const SALTS: [u32; 8] = [
 
 const EXTENSION: &str = "jamfilter";
 const MAGIC: [u8; 8] = *b"JAMFILT1";
-const VERSION: u32 = 2;
-/// Bytes of the file header; the table of filters follows (offset and CRC-32 of each, 16 bytes),
-/// then the filters, each on its own page, as blocks of eight little-endian words.
+const VERSION: u32 = 3;
+/// Bytes of the file header; a copy of the seeds file header of the index follows, then the table
+/// of filters (offset and CRC-32 of each, 16 bytes), then the filters, each on its own page, as
+/// blocks of eight little-endian words.
 const HEADER_BYTES: usize = 64;
+/// Bytes of the seeds file header of the index: the size and CRC-32 of every section, the counts,
+/// and its own CRC-32.
+const INDEX_HEADER_BYTES: usize = 256;
+/// Where the table of filters starts.
+const TABLE_AT: usize = HEADER_BYTES + INDEX_HEADER_BYTES;
 const TABLE_ENTRY_BYTES: usize = 16;
 const BLOCK_BYTES: usize = 32;
 const PAGE: u64 = 4096;
@@ -86,14 +92,16 @@ impl Layout {
         let wanted = total
             .checked_mul(BLOCK_BYTES as u64)?
             .div_ceil(FILTER_BYTES);
-        let filters = wanted.checked_next_power_of_two()?.min(1 << bucket_bits);
+        let filters = wanted
+            .checked_next_power_of_two()?
+            .min(1u64.checked_shl(bucket_bits)?);
         let blocks = total.div_ceil(filters);
         let stride = blocks
             .checked_mul(BLOCK_BYTES as u64)?
             .checked_next_multiple_of(PAGE)?;
         let table = filters.checked_mul(TABLE_ENTRY_BYTES as u64)?;
         let data_start = table
-            .checked_add(HEADER_BYTES as u64)?
+            .checked_add(TABLE_AT as u64)?
             .checked_next_multiple_of(PAGE)?;
         let file_bytes = data_start.checked_add(filters.checked_mul(stride)?)?;
         Some(Self {
@@ -118,12 +126,13 @@ impl Layout {
     }
 }
 
-/// What a filter file must match: the shard it was built from.
+/// What a filter file must match: the shard it was built from, down to every byte of the header
+/// of its seeds file, which holds the size and CRC-32 of every section.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Identity {
     bucket_bits: u32,
     seeds: u64,
-    index_check: u32,
+    index_header: [u8; INDEX_HEADER_BYTES],
 }
 
 impl KeyFilter {
@@ -365,13 +374,14 @@ fn identity(seed_file: &SeedFile) -> Identity {
     Identity {
         bucket_bits: seed_file.bucket_bits(),
         seeds: seed_file.seed_count(),
-        index_check: crc32fast::hash(seed_file.header()),
+        index_header: *seed_file.header(),
     }
 }
 
-/// The file header and the table of filters: magic, version, bucket bits, seeds, filters, bits
-/// per seed, blocks per filter, the CRC-32 of the seeds file header, the CRC-32 of the table and of the header before it;
-/// then the offset and CRC-32 of each filter.
+/// The file header, the copy of the seeds file header and the table of filters. The header holds
+/// magic, version, bucket bits, seeds, filters, bits per seed, blocks per filter, the CRC-32 of
+/// the table, and the CRC-32 of the header before it; the table the offset and CRC-32 of each
+/// filter.
 fn header(identity: Identity, layout: &Layout, crcs: &[u32]) -> Vec<u8> {
     let mut table = Vec::with_capacity(crcs.len() * TABLE_ENTRY_BYTES);
     for (filter, crc) in crcs.iter().enumerate() {
@@ -388,10 +398,10 @@ fn header(identity: Identity, layout: &Layout, crcs: &[u32]) -> Vec<u8> {
     head[24..32].copy_from_slice(&layout.filters.to_le_bytes());
     head[32..36].copy_from_slice(&(BITS_PER_SEED as u32).to_le_bytes());
     head[36..44].copy_from_slice(&layout.blocks.to_le_bytes());
-    head[44..48].copy_from_slice(&identity.index_check.to_le_bytes());
     head[48..52].copy_from_slice(&crc32fast::hash(&table).to_le_bytes());
     let crc = crc32fast::hash(&head[..60]);
     head[60..64].copy_from_slice(&crc.to_le_bytes());
+    head.extend_from_slice(&identity.index_header);
     head.extend(table);
     head
 }
@@ -416,10 +426,11 @@ fn read_header(bytes: &[u8], wanted: Identity, layout: &Layout) -> Result<Vec<u3
     {
         return Err(DAMAGED);
     }
+    let index_header = bytes.get(HEADER_BYTES..TABLE_AT).ok_or("is cut short")?;
     let found = Identity {
         bucket_bits: field(12)?,
         seeds: u64_at(head, 16).ok_or(DAMAGED)?,
-        index_check: field(44)?,
+        index_header: index_header.try_into().map_err(|_| DAMAGED)?,
     };
     if found != wanted {
         return Err("was built for another index");
@@ -427,7 +438,7 @@ fn read_header(bytes: &[u8], wanted: Identity, layout: &Layout) -> Result<Vec<u3
     if u64_at(head, 24) != Some(layout.filters) || u64_at(head, 36) != Some(layout.blocks) {
         return Err("does not have the filters of this index");
     }
-    let table = (bytes.get(HEADER_BYTES..layout.data_start as usize))
+    let table = (bytes.get(TABLE_AT..layout.data_start as usize))
         .and_then(|rest| rest.get(..layout.filters as usize * TABLE_ENTRY_BYTES))
         .ok_or("is cut short")?;
     if field(48)? != crc32fast::hash(table) {
@@ -499,6 +510,33 @@ mod tests {
         assert!(open(&index, seed_file).unwrap().is_some());
         let now = crate::index::Shard::open(&index).unwrap();
         assert!(open(&index, now.seed_file()).is_err());
+    }
+
+    /// Two different indexes with the same seed count and bucket bits do not share a filter file:
+    /// the same two entries in the other order give the same seeds but other sections.
+    #[test]
+    fn same_seed_count_refused() {
+        let mut rng = rng(23);
+        let (x, y) = (
+            random_bases(&mut rng, 12_000),
+            random_bases(&mut rng, 7_000),
+        );
+        let (one, two) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let shard_one = test_shard(one.path(), &[vec![x.clone()], vec![y.clone()]]);
+        let shard_two = test_shard(two.path(), &[vec![y], vec![x]]);
+        let (seeds_one, seeds_two) = (shard_one.seed_file(), shard_two.seed_file());
+        assert_eq!(seeds_one.seed_count(), seeds_two.seed_count());
+        assert_eq!(seeds_one.bucket_bits(), seeds_two.bucket_bits());
+        assert_ne!(seeds_one.header(), seeds_two.header());
+        let (index_one, index_two) = (one.path().join("shard.jam"), two.path().join("shard.jam"));
+        let path = KeyFilter::write(&index_one, seeds_one, u64::MAX, drop).unwrap();
+        std::fs::copy(&path, KeyFilter::path_of(&index_two)).unwrap();
+        assert!(KeyFilter::open(&index_two, seeds_two, u64::MAX, drop).is_err());
+        assert!(
+            KeyFilter::open(&index_one, seeds_one, u64::MAX, drop)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// A header with a valid CRC-32 but dimensions that do not fit the index, even absurd ones,
