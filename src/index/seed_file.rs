@@ -121,6 +121,8 @@ impl ColorSets {
 /// An open seeds file, read by offset from a local file or S3.
 pub struct SeedFile {
     source: Arc<dyn ReadAt>,
+    /// The header as read when the file was opened.
+    header: [u8; HEADER_BYTES as usize],
     bucket_bits: u32,
     entries: u64,
     seeds: u64,
@@ -178,6 +180,7 @@ impl SeedFile {
         };
         Ok(Self {
             source,
+            header,
             bucket_bits,
             entries: field(24),
             seeds: field(32),
@@ -190,6 +193,11 @@ impl SeedFile {
             locators,
             table_starts,
         })
+    }
+
+    /// The header as read when the file was opened: the size and CRC-32 of every section.
+    pub fn header(&self) -> &[u8; HEADER_BYTES as usize] {
+        &self.header
     }
 
     /// Bits of the seed key that select a bucket.

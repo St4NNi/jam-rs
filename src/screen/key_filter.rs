@@ -10,7 +10,6 @@
 
 use crate::index::{IndexError, SEED_KEY_BITS, SeedFile};
 use rayon::prelude::*;
-use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -43,16 +42,13 @@ const SALTS: [u32; 8] = [
 
 const EXTENSION: &str = "jamfilter";
 const MAGIC: [u8; 8] = *b"JAMFILT1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Bytes of the file header; the table of filters follows (offset and CRC-32 of each, 16 bytes),
 /// then the filters, each on its own page, as blocks of eight little-endian words.
 const HEADER_BYTES: usize = 64;
 const TABLE_ENTRY_BYTES: usize = 16;
 const BLOCK_BYTES: usize = 32;
 const PAGE: u64 = 4096;
-/// Where the seeds file header of `NAME.jam` keeps the CRC-32 of its first 252 bytes, which covers
-/// the sizes and CRC-32 of every section.
-const INDEX_CHECK_AT: usize = 252;
 
 /// Split block Bloom filters: each key sets one bit in each of the eight words of one block of
 /// the filter of its bucket range. They never miss a stored key.
@@ -127,7 +123,9 @@ impl KeyFilter {
         })
     }
 
-    /// The filter file of the index file `index` (`NAME.jam`): `NAME.jamfilter`.
+    /// The filter file of the index file `index` (`NAME.jam`): `NAME.jamfilter`. The filter is bound
+    /// to the header of the seeds file as it was read when the shard was opened, never to the
+    /// file at `index` now.
     pub fn path_of(index: &Path) -> PathBuf {
         index.with_extension(EXTENSION)
     }
@@ -150,7 +148,7 @@ impl KeyFilter {
         if let Some(warning) = size_warning(layout.file_bytes(), limit) {
             warn(warning);
         }
-        let identity = identity(index, seed_file)?;
+        let identity = identity(seed_file);
         let path = Self::path_of(index);
         let partial = path.with_extension(format!("{EXTENSION}.partial"));
         let file = std::fs::File::create(&partial)?;
@@ -189,7 +187,7 @@ impl KeyFilter {
             Err(error) => return Err(format!("{}: {error}", path.display())),
         };
         let failed = |why: &str| format!("{} {why}", path.display());
-        let wanted = identity(index, seed_file).map_err(|error| failed(&error.to_string()))?;
+        let wanted = identity(seed_file);
         // The file must not change while it is mapped; it is written under another name and
         // renamed, so an old mapping keeps the old pages.
         let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| failed(&e.to_string()))?;
@@ -297,20 +295,18 @@ fn place_of(key: u64, blocks: u64) -> (u64, [u32; 8]) {
     )
 }
 
-/// The identity of the local index file `index` with seeds `seed_file`.
-fn identity(index: &Path, seed_file: &SeedFile) -> Result<Identity, IndexError> {
-    let mut head = [0u8; INDEX_CHECK_AT + 4];
-    std::fs::File::open(index)?.read_exact(&mut head)?;
-    let check = &head[INDEX_CHECK_AT..];
-    Ok(Identity {
+/// The identity of the shard with the seeds `seed_file`, from the header it read when it was
+/// opened, so a file replaced since then cannot lend its identity.
+fn identity(seed_file: &SeedFile) -> Identity {
+    Identity {
         bucket_bits: seed_file.bucket_bits(),
         seeds: seed_file.seed_count(),
-        index_check: u32::from_le_bytes([check[0], check[1], check[2], check[3]]),
-    })
+        index_check: crc32fast::hash(seed_file.header()),
+    }
 }
 
 /// The file header and the table of filters: magic, version, bucket bits, seeds, filters, bits
-/// per seed, blocks per filter, index check, the CRC-32 of the table and of the header before it;
+/// per seed, blocks per filter, the CRC-32 of the seeds file header, the CRC-32 of the table and of the header before it;
 /// then the offset and CRC-32 of each filter.
 fn header(identity: Identity, layout: &Layout, crcs: &[u32]) -> Vec<u8> {
     let mut table = Vec::with_capacity(crcs.len() * TABLE_ENTRY_BYTES);
@@ -426,6 +422,14 @@ mod tests {
             std::fs::write(&path, &bytes).unwrap();
         }
         assert!(open(&index, seed_file).unwrap().is_some());
+        // An index file replaced at the path does not change which filter fits the open shard:
+        // the filter of shard one still fits it, and does not fit the shard now at the path.
+        let replacement = one.path().join("replacement.jam");
+        std::fs::copy(&index_two, &replacement).unwrap();
+        std::fs::rename(&replacement, &index).unwrap();
+        assert!(open(&index, seed_file).unwrap().is_some());
+        let now = crate::index::Shard::open(&index).unwrap();
+        assert!(open(&index, now.seed_file()).is_err());
     }
 
     /// Writing and mapping a filter file above the limit warn, and below it do not.
