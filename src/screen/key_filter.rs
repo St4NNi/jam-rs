@@ -12,7 +12,7 @@ use crate::index::{IndexError, SEED_KEY_BITS, SeedFile};
 use rayon::prelude::*;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Bits of the filter per stored seed: about one false hit in 185 missing keys.
 const BITS_PER_SEED: u64 = 12;
@@ -136,7 +136,8 @@ impl KeyFilter {
     }
 
     /// Builds the filters of the local index file `index` on all threads and writes the filter
-    /// file, through a temporary file that is renamed at the end. Calls `warn` first when the
+    /// file, through a temporary file of its own that is renamed at the end, so a mapped filter
+    /// file is never changed and writers at the same time do not mix. Calls `warn` first when the
     /// file will be larger than `limit` bytes. Returns the path of the filter file.
     pub fn write(
         index: &Path,
@@ -150,8 +151,7 @@ impl KeyFilter {
         }
         let identity = identity(seed_file);
         let path = Self::path_of(index);
-        let partial = path.with_extension(format!("{EXTENSION}.partial"));
-        let file = std::fs::File::create(&partial)?;
+        let (file, mut partial) = Partial::create(&path)?;
         file.set_len(layout.file_bytes())?;
         let crcs = (0..layout.filters)
             .into_par_iter()
@@ -167,7 +167,8 @@ impl KeyFilter {
             .collect::<Result<Vec<u32>, IndexError>>()?;
         file.write_all_at(&header(identity, &layout, &crcs), 0)?;
         file.sync_all()?;
-        std::fs::rename(&partial, &path)?;
+        std::fs::rename(&partial.path, &path)?;
+        partial.renamed = true;
         Ok(path)
     }
 
@@ -237,6 +238,54 @@ impl KeyFilter {
     /// Whether the filter is mapped from a filter file.
     pub fn is_mapped(&self) -> bool {
         matches!(self.blocks, Blocks::Mapped(_))
+    }
+}
+
+/// Temporary files created by this process, so each name is new.
+static PARTIALS: AtomicU64 = AtomicU64::new(0);
+
+/// A temporary filter file of one writer, removed when dropped unless it was renamed.
+struct Partial {
+    path: PathBuf,
+    renamed: bool,
+}
+
+impl Partial {
+    /// Creates a new temporary file next to `path`, never one that exists already.
+    fn create(path: &Path) -> std::io::Result<(std::fs::File, Self)> {
+        loop {
+            let count = PARTIALS.fetch_add(1, Ordering::Relaxed);
+            let nanos = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+                .map_or(0, |since| since.subsec_nanos());
+            let name = format!("{EXTENSION}.partial-{}-{count}-{nanos}", std::process::id());
+            let partial = path.with_extension(name);
+            let opened = (std::fs::OpenOptions::new())
+                .write(true)
+                .create_new(true)
+                .open(&partial);
+            match opened {
+                Ok(file) => {
+                    let renamed = false;
+                    return Ok((
+                        file,
+                        Self {
+                            path: partial,
+                            renamed,
+                        },
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+}
+
+impl Drop for Partial {
+    fn drop(&mut self) {
+        if !self.renamed {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -430,6 +479,29 @@ mod tests {
         assert!(open(&index, seed_file).unwrap().is_some());
         let now = crate::index::Shard::open(&index).unwrap();
         assert!(open(&index, now.seed_file()).is_err());
+    }
+
+    /// Two writers at the same time each publish a whole file and leave no temporary file.
+    #[test]
+    fn writers_at_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let shard = test_shard(directory.path(), &[vec![random_bases(&mut rng(5), 30_000)]]);
+        let (index, seed_file) = (directory.path().join("shard.jam"), shard.seed_file());
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| KeyFilter::write(&index, seed_file, u64::MAX, drop).unwrap());
+            }
+        });
+        let mapped = KeyFilter::open(&index, seed_file, u64::MAX, drop);
+        let (mapped, built) = (mapped.unwrap().unwrap(), KeyFilter::new(seed_file).unwrap());
+        for key in (0..20_000u64).map(|at| at.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 20) {
+            assert_eq!(mapped.may_hold(key), built.may_hold(key));
+        }
+        let names: Vec<String> = (std::fs::read_dir(directory.path()).unwrap())
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("partial"))
+            .collect();
+        assert!(names.is_empty(), "{names:?}");
     }
 
     /// Writing and mapping a filter file above the limit warn, and below it do not.
