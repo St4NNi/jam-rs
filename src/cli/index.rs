@@ -78,7 +78,7 @@ struct BuildArgs {
     #[arg(long)]
     singleton: bool,
     /// Also write the filter file NAME.jamfilter, which jam screen maps instead of building its
-    /// seed key filter. For indexes of small sequences; warns above 32 GiB
+    /// seed key filter. For indexes of small sequences; warns above 8 GiB
     #[arg(long, requires = "singleton")]
     filter: bool,
     /// Write only the sketch part and no sequence file: the index answers stage 1 only

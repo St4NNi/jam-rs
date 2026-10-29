@@ -23,8 +23,8 @@ const BITS_PER_SEED: u64 = 12;
 const FILTER_BYTES: u64 = 64 << 20;
 
 /// Filter files above this size draw a warning: filters are meant for indexes of small sequences.
-/// The dense index of 853,462 plasmids needs about 7.5 GiB.
-pub const FILTER_WARNING_BYTES: u64 = 32 << 30;
+/// The dense index of 853,462 plasmids (1.21 G seeds) needs 1.7 GiB.
+pub const FILTER_WARNING_BYTES: u64 = 8 << 30;
 
 /// Buckets read at once while a filter is built.
 const CHUNK_BUCKETS: u32 = 4096;

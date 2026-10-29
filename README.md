@@ -105,7 +105,7 @@ Normal options:
   one entry. Without `-k` and `-w`, such an index uses k 21 and w 10, the dense seeds that
   `jam screen` needs.
 - `--filter` (needs `--singleton`): also write the filter file `NAME.jamfilter` for
-  `jam screen`. It is meant for indexes of small sequences and warns above 32 GiB.
+  `jam screen`. It is meant for indexes of small sequences and warns above 8 GiB.
 - `-t, --threads N` (default: all cores): number of threads to use.
 
 Advanced options:
@@ -596,7 +596,7 @@ An index consists of one or more shards. Each shard consists of two kinds of fil
   (`jam index build --filter` or `jam index filter`): filters of the stored seed keys, about
   1.5 bytes per seed, one for each range of sketch buckets. `jam screen` maps it, so processes
   on one machine share it, and builds the filters in memory when the file is missing or does not
-  match the index. It is meant for indexes of small sequences; above 32 GiB both commands warn on
+  match the index. It is meant for indexes of small sequences; above 8 GiB both commands warn on
   standard error and go on. `jam search` never reads it.
 
 ## S3 and local caches
