@@ -17,6 +17,7 @@ mod tests;
 mod turn;
 
 pub use assembly::{EntrySink, Screener};
+pub use key_filter::KeyFilter;
 pub use records::{AssemblyFailure, AssemblySummary, CompactEntry, ScreenContig, ScreenEntry};
 
 use crate::align::AlignmentError;

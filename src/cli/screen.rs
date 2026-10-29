@@ -6,7 +6,7 @@ use super::rule::RuleArgs;
 use super::storage::{CacheArgs, ShardStorage};
 use super::{CliError, output_writer, read_list};
 use crate::screen::{
-    AssemblyFailure, AssemblySummary, CompactEntry, ScreenConfig, ScreenEntry, Screener,
+    AssemblyFailure, AssemblySummary, CompactEntry, KeyFilter, ScreenConfig, ScreenEntry, Screener,
 };
 use crate::search::{SearchControl, Stopped};
 use clap::Args;
@@ -88,6 +88,15 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     let shard = shards
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
+    // A local index may have a key file, which saves building the key filter.
+    let index = &args.index;
+    let filter = match index.to_str().is_some_and(|text| text.starts_with("s3://")) {
+        true => None,
+        false => KeyFilter::open(index, shard.seed_file()).unwrap_or_else(|why| {
+            eprintln!("jam: not using the key file: {why}; building the key filter instead");
+            None
+        }),
+    };
     let assemblies = read_list(&args.assemblies)?;
     check_names(&assemblies, args.contig_dir.is_some())?;
     let threads = match args.threads {
@@ -113,9 +122,9 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     // The key filter of the shard is built on all threads and shared by all pools.
     let screener = match &pools[..] {
         [pool] => pool
-            .install(|| Screener::new(&shard, config))?
+            .install(|| Screener::new_with(&shard, config, filter))?
             .with_pool(pool),
-        _ => pool_of(threads)?.install(|| Screener::new(&shard, config))?,
+        _ => pool_of(threads)?.install(|| Screener::new_with(&shard, config, filter))?,
     };
     let next = AtomicUsize::new(0);
     let mut writer = output_writer(args.output.as_deref())?;

@@ -10,6 +10,8 @@ use crate::index::{
     BuildOptions, EntryInput, Manifest, Parameters, Part, Place, Plan, ReshardOptions, Split,
     build_shard, copy_index, index_file_path, reshard, warm,
 };
+use crate::index::{Location, Shard, ShardOptions};
+use crate::screen::KeyFilter;
 use bytesize::ByteSize;
 use clap::{Args, Subcommand};
 use std::collections::BTreeMap;
@@ -33,6 +35,19 @@ enum IndexCommand {
     Warm(WarmArgs),
     /// Copy an index file and its sequence files between local directories and S3
     Copy(CopyArgs),
+    /// Write the key file NAME.jamkeys of a local index file, which jam screen maps instead of
+    /// building its key filter
+    Keys(KeysArgs),
+}
+
+/// The options of `jam index keys`.
+#[derive(Debug, Args)]
+struct KeysArgs {
+    /// The local index file NAME.jam
+    index: PathBuf,
+    /// Threads to use [default: all cores]
+    #[arg(short, long)]
+    threads: Option<usize>,
 }
 
 /// The options of `jam index copy`.
@@ -158,6 +173,7 @@ pub fn run(args: &IndexArgs) -> Result<(), CliError> {
         IndexCommand::Reshard(args) => run_reshard(args),
         IndexCommand::Warm(args) => run_warm(args),
         IndexCommand::Copy(args) => run_copy(args),
+        IndexCommand::Keys(args) => write_key_file(&args.index, args.threads.unwrap_or(0)),
     }
 }
 
@@ -283,10 +299,26 @@ fn run_build(args: &BuildArgs) -> Result<(), CliError> {
     let (threads, temp_dir) = args.common.resolve(&args.output)?;
     let options = build_options(args, threads, temp_dir);
     let manifest = build_shard(&inputs_of(&inputs), &args.output, &options)?;
+    if args.singleton {
+        write_key_file(&index_file_path(&args.output), threads)?;
+    }
     println!(
         "{}",
         summary_line(&index_file_path(&args.output), &manifest)
     );
+    Ok(())
+}
+
+/// Writes the key file of the singleton index `index`, which `jam screen` maps instead of
+/// building its key filter at every start.
+fn write_key_file(index: &Path, threads: usize) -> Result<(), CliError> {
+    let location = Location::File(index.to_path_buf());
+    let shard = Shard::open_with(&location, &ShardOptions::default())?;
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(crate::search::SearchError::from)?;
+    pool.install(|| KeyFilter::write(index, shard.seed_file()))?;
     Ok(())
 }
 

@@ -83,8 +83,18 @@ fn kept_subset(
 pub type EntrySink<'a> = dyn FnMut(ScreenEntry) -> Result<(), ScreenError> + 'a;
 
 impl<'a> Screener<'a> {
-    /// A screener of `shard` with `config`.
+    /// A screener of `shard` with `config`, which builds the key filter of the shard.
     pub fn new(shard: &'a Shard, config: ScreenConfig) -> Result<Self, ScreenError> {
+        Self::new_with(shard, config, None)
+    }
+
+    /// A screener of `shard` with `config` and the key filter `filter` of the shard, such as one
+    /// mapped from its key file; without one, it builds the filter.
+    pub fn new_with(
+        shard: &'a Shard,
+        config: ScreenConfig,
+        filter: Option<KeyFilter>,
+    ) -> Result<Self, ScreenError> {
         config.validate()?;
         if !shard.seed_file().has_locators() {
             let message = "the shard was built with the sketch part only and cannot be screened";
@@ -93,7 +103,10 @@ impl<'a> Screener<'a> {
         let scheme = shard.manifest().parameters.scheme;
         let seeder = Seeder::new(scheme).map_err(crate::index::IndexError::from)?;
         let model = MissModel::new(scheme, 0).map_err(crate::search::SearchError::from)?;
-        let filter = KeyFilter::new(shard.seed_file())?;
+        let filter = match filter {
+            Some(filter) => filter,
+            None => KeyFilter::new(shard.seed_file())?,
+        };
         Ok(Self {
             shard,
             config,
