@@ -183,6 +183,15 @@ directory, `s3://bucket/prefix`, or the full path to the new index file `NAME.ja
   Searches that use this cache directory will then verify from their first read that the files
   on S3 match the uploaded version.
 
+### jam index keys
+
+    jam index keys NAME.jam [-t N]
+
+Writes the key file `NAME.jamkeys` of a local index file (see [Index files](#index-files)).
+`jam index build --singleton` writes it already; use this for an index built without it.
+
+- `-t, --threads N` (default: all cores): number of threads to use.
+
 ### jam stats
 
     jam stats INDEX [--json]
@@ -581,6 +590,10 @@ An index consists of one or more shards. Each shard consists of two kinds of fil
   base, one entry after another. Stage 3 reads this file from the same directory as the index
   file. With `--chunks N`, the sequences are split into several files named `NAME.1.jamseq`
   through `NAME.N.jamseq`.
+- `NAME.jamkeys`, the key file, only for `jam screen`: a filter of the stored seed keys, about
+  1.5 bytes per seed. `jam index build --singleton` and `jam index keys` write it. `jam screen`
+  maps it, so processes on one machine share it, and builds the filter in memory when the file
+  is missing or does not match the index. `jam search` never reads it.
 
 ## S3 and local caches
 
@@ -653,7 +666,8 @@ entry per FASTA record, then stream the assemblies against it:
 
 The default singleton index is the dense one (k 21, w 10). It holds about 7.7 times more seed
 data than k 25 and w 100. An older sparse index still works, as the scheme is stored in the
-manifest.
+manifest. The key file `NAME.jamkeys` saves each screen the time to build its seed key filter;
+`jam index keys` writes it for an index that does not have one.
 
 A screen has two stages. The first is the *survey*. jam looks up the seeds of the contigs of an
 assembly, a batch at a time, in the index. It keeps the entries that share enough seeds with a
