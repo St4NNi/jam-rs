@@ -11,7 +11,7 @@ use crate::index::{
     build_shard, copy_index, index_file_path, reshard, warm,
 };
 use crate::index::{Location, Shard, ShardOptions};
-use crate::screen::KeyFilter;
+use crate::screen::{FILTER_WARNING_BYTES, KeyFilter};
 use bytesize::ByteSize;
 use clap::{Args, Subcommand};
 use std::collections::BTreeMap;
@@ -35,14 +35,14 @@ enum IndexCommand {
     Warm(WarmArgs),
     /// Copy an index file and its sequence files between local directories and S3
     Copy(CopyArgs),
-    /// Write the key file NAME.jamkeys of a local index file, which jam screen maps instead of
-    /// building its key filter
-    Keys(KeysArgs),
+    /// Write the filter file NAME.jamfilter of a local singleton index file, which jam screen maps
+    /// instead of building its seed key filter
+    Filter(FilterArgs),
 }
 
-/// The options of `jam index keys`.
+/// The options of `jam index filter`.
 #[derive(Debug, Args)]
-struct KeysArgs {
+struct FilterArgs {
     /// The local index file NAME.jam
     index: PathBuf,
     /// Threads to use [default: all cores]
@@ -77,6 +77,10 @@ struct BuildArgs {
     /// Make each FASTA record an entry instead of each file
     #[arg(long)]
     singleton: bool,
+    /// Also write the filter file NAME.jamfilter, which jam screen maps instead of building its
+    /// seed key filter. For indexes of small sequences; warns above 32 GiB
+    #[arg(long, requires = "singleton")]
+    filter: bool,
     /// Write only the sketch part and no sequence file: the index answers stage 1 only
     #[arg(long)]
     sketch_only: bool,
@@ -173,7 +177,7 @@ pub fn run(args: &IndexArgs) -> Result<(), CliError> {
         IndexCommand::Reshard(args) => run_reshard(args),
         IndexCommand::Warm(args) => run_warm(args),
         IndexCommand::Copy(args) => run_copy(args),
-        IndexCommand::Keys(args) => write_key_file(&args.index, args.threads.unwrap_or(0)),
+        IndexCommand::Filter(args) => write_filter_file(&args.index, args.threads.unwrap_or(0)),
     }
 }
 
@@ -299,8 +303,8 @@ fn run_build(args: &BuildArgs) -> Result<(), CliError> {
     let (threads, temp_dir) = args.common.resolve(&args.output)?;
     let options = build_options(args, threads, temp_dir);
     let manifest = build_shard(&inputs_of(&inputs), &args.output, &options)?;
-    if args.singleton {
-        write_key_file(&index_file_path(&args.output), threads)?;
+    if args.filter {
+        write_filter_file(&index_file_path(&args.output), threads)?;
     }
     println!(
         "{}",
@@ -309,16 +313,17 @@ fn run_build(args: &BuildArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Writes the key file of the singleton index `index`, which `jam screen` maps instead of
-/// building its key filter at every start.
-fn write_key_file(index: &Path, threads: usize) -> Result<(), CliError> {
+/// Writes the filter file of the index `index`, which `jam screen` maps instead of building its
+/// seed key filter at every start. Warns on standard error when the file is very large.
+fn write_filter_file(index: &Path, threads: usize) -> Result<(), CliError> {
     let location = Location::File(index.to_path_buf());
     let shard = Shard::open_with(&location, &ShardOptions::default())?;
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
         .map_err(crate::search::SearchError::from)?;
-    pool.install(|| KeyFilter::write(index, shard.seed_file()))?;
+    let warn = |warning| eprintln!("jam: warning: {warning}");
+    pool.install(|| KeyFilter::write(index, shard.seed_file(), FILTER_WARNING_BYTES, warn))?;
     Ok(())
 }
 
@@ -442,6 +447,10 @@ mod tests {
         assert_eq!(scheme(&["--singleton", "-k", "25"]), (25, 10));
         assert_eq!(scheme(&["--singleton", "-w", "100"]), (21, 100));
         assert_eq!(scheme(&["-k", "21"]), (21, default.w));
+        // The filter file is only for singleton indexes.
+        let words = ["jam", "index", "build", "-o", "x.jam", "a.fa", "--filter"];
+        assert!(Cli::try_parse_from(words).is_err());
+        assert!(Cli::try_parse_from(words.iter().chain(&["--singleton"])).is_ok());
     }
 
     #[test]

@@ -6,7 +6,8 @@ use super::rule::RuleArgs;
 use super::storage::{CacheArgs, ShardStorage};
 use super::{CliError, output_writer, read_list};
 use crate::screen::{
-    AssemblyFailure, AssemblySummary, CompactEntry, KeyFilter, ScreenConfig, ScreenEntry, Screener,
+    AssemblyFailure, AssemblySummary, CompactEntry, FILTER_WARNING_BYTES, KeyFilter, ScreenConfig,
+    ScreenEntry, Screener,
 };
 use crate::search::{SearchControl, Stopped};
 use clap::Args;
@@ -88,14 +89,18 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     let shard = shards
         .pop()
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
-    // A local index may have a key file, which saves building the key filter.
+    // A local index may have a filter file, which saves building the seed key filter.
     let index = &args.index;
     let filter = match index.to_str().is_some_and(|text| text.starts_with("s3://")) {
         true => None,
-        false => KeyFilter::open(index, shard.seed_file()).unwrap_or_else(|why| {
-            eprintln!("jam: not using the key file: {why}; building the key filter instead");
-            None
-        }),
+        false => {
+            let warn = |warning| eprintln!("jam: warning: {warning}");
+            let opened = KeyFilter::open(index, shard.seed_file(), FILTER_WARNING_BYTES, warn);
+            opened.unwrap_or_else(|why| {
+                eprintln!("jam: not using the filter file: {why}; building the filter instead");
+                None
+            })
+        }
     };
     let assemblies = read_list(&args.assemblies)?;
     check_names(&assemblies, args.contig_dir.is_some())?;

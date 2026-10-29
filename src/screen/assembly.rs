@@ -89,7 +89,7 @@ impl<'a> Screener<'a> {
     }
 
     /// A screener of `shard` with `config` and the key filter `filter` of the shard, such as one
-    /// mapped from its key file; without one, it builds the filter.
+    /// mapped from its filter file; without one, it builds the filter.
     pub fn new_with(
         shard: &'a Shard,
         config: ScreenConfig,
