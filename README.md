@@ -293,8 +293,10 @@ Normal options:
   assembly is named after its file name.
 - `-c, --coverage C` and `-i, --identity I`: minimum coverage and identity required for each
   indexed small sequence, as in `jam search`.
-- `-t, --threads N` (default: all cores): number of worker threads. Each thread screens one
-  assembly at a time.
+- `-t, --threads N` (default: all cores): number of threads. Threads above 16 are split into
+  pools of 16 threads, and each pool screens one assembly at a time, so `-t 32` screens two
+  assemblies at once and `-t 16` or less screens one. A pool works on the batches of its
+  assembly in parallel.
 - `-o, --output FILE`: write results to this file instead of standard output.
 
 Advanced options:

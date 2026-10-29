@@ -50,7 +50,8 @@ pub struct ScreenArgs {
     /// Stop after the survey: align nothing and report no entries, only write --contig-dir
     #[arg(long, requires = "contig_dir")]
     survey_only: bool,
-    /// Threads to use, each screening one assembly at a time [default: all cores]
+    /// Threads to use [default: all cores]. Above 16 they are split into pools of 16, each
+    /// screening one assembly at a time with its batches in parallel
     #[arg(short, long)]
     threads: Option<usize>,
     /// Write to this file instead of the standard output
