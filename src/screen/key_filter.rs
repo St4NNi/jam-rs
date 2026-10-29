@@ -195,6 +195,12 @@ impl KeyFilter {
         file.sync_all()?;
         std::fs::rename(&partial.path, &path)?;
         partial.renamed = true;
+        // The new name lasts only once the directory that holds it is on disk.
+        let directory = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        };
+        std::fs::File::open(directory)?.sync_all()?;
         Ok(path)
     }
 
