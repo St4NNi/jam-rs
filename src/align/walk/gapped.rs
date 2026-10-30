@@ -41,7 +41,8 @@ pub struct DenseResults {
 /// aligns the same bases at many positions; other windows align few boxes.
 const SAME_FROM: usize = 256;
 
-/// Turns the lookup of boxes with the same kernel input off, so tests can compare.
+/// Turns the lookup of boxes with the same kernel input and of the fragments that hold a short
+/// walk off, so tests can compare.
 #[cfg(test)]
 pub(crate) static SAME_OFF: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);

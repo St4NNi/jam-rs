@@ -219,25 +219,35 @@ pub(super) fn join_short_walks(
 ) -> Result<Vec<Fragment>, AlignStageError> {
     let (query, rule, walks) = (job.query, job.rule, &window.walks);
     let mut joined: Vec<Fragment> = Vec::new();
-    let held = |joined: &[Fragment], walk: &Walk| {
-        aligned.iter().chain(joined).any(|fragment| {
-            rule.counts_fragment(&fragment.alignment)
-                && holds_walk(
-                    &fragment.alignment,
-                    walk,
-                    window.bases.len(),
-                    window.start,
-                    query.length(),
-                )
-        })
+    let holds = |fragment: &Fragment, walk: &Walk| {
+        rule.counts_fragment(&fragment.alignment)
+            && holds_walk(
+                &fragment.alignment,
+                walk,
+                window.bases.len(),
+                window.start,
+                query.length(),
+            )
     };
-    // `held` looks at every fragment of the window, so a window with many walks takes long here
-    // and the deadline is checked for each walk.
+    let held = |fragments: &[Fragment], walk: &Walk| {
+        fragments.iter().any(|fragment| holds(fragment, walk))
+    };
+    // A window with many fragments looks up the fragments that can hold a walk on the contig.
+    #[cfg(test)]
+    let off = crate::align::SAME_OFF.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    let off = false;
+    let index = (aligned.len() > HELD_INDEX_FROM && !off).then(|| HeldIndex::new(aligned));
+    let held_aligned = |walk: &Walk| match &index {
+        Some(index) => index.near(walk, window).any(|at| holds(&aligned[at], walk)),
+        None => held(aligned, walk),
+    };
+    // The deadline is checked for each walk, as a window with many walks takes long here.
     let mut short: Vec<usize> = Vec::new();
     let shorter = SHORT_WALK_LENGTH.max(rule.min_fragment_columns);
     for (index, walk) in walks.iter().enumerate() {
         job.control.check()?;
-        if u64::from(walk.length) < shorter && !held(&joined, walk) {
+        if u64::from(walk.length) < shorter && !held_aligned(walk) {
             short.push(index);
         }
     }
@@ -263,6 +273,7 @@ pub(super) fn join_short_walks(
     scratch.prepare(walks, &context);
     // Longer walks first, so shifted copies inside a kept join are not joined again.
     short.sort_unstable_by_key(|&index| (Reverse(walks[index].length), index));
+    // No fragment of `aligned` holds a short walk, so only the joins made before are asked.
     for index in short {
         job.control.check()?;
         if held(&joined, &walks[index]) {
@@ -279,4 +290,66 @@ pub(super) fn join_short_walks(
         }
     }
     Ok(joined)
+}
+
+/// Fragments of a window above this many are looked up through `HeldIndex`.
+const HELD_INDEX_FROM: usize = 64;
+
+/// Fragments in one group of `HeldIndex`, which keeps the largest contig end of each group.
+const HELD_GROUP: usize = 32;
+
+/// The fragments of a window by strand and contig start, with the largest contig end of each
+/// group of `HELD_GROUP`, to find those that can hold a walk without asking every fragment.
+struct HeldIndex {
+    /// Per strand (forward, reverse): (contig start, contig end, fragment) by contig start.
+    sorted: [Vec<(u64, u64, usize)>; 2],
+    ends: [Vec<u64>; 2],
+}
+
+impl HeldIndex {
+    fn new(fragments: &[Fragment]) -> Self {
+        let mut sorted: [Vec<(u64, u64, usize)>; 2] = [Vec::new(), Vec::new()];
+        for (at, fragment) in fragments.iter().enumerate() {
+            let contig = fragment.alignment.contig_interval;
+            let strand = usize::from(fragment.alignment.strand.is_reverse());
+            sorted[strand].push((contig.start, contig.end, at));
+        }
+        let ends = sorted.each_mut().map(|list| {
+            list.sort_unstable();
+            list.chunks(HELD_GROUP)
+                .map(|group| group.iter().map(|&(_, end, _)| end).max().unwrap_or(0))
+                .collect()
+        });
+        Self { sorted, ends }
+    }
+
+    /// The fragments on the strand of `walk` whose contig positions hold the walk's, in no
+    /// particular order: all that `holds_walk` can accept, and maybe others.
+    fn near<'a>(
+        &'a self,
+        walk: &Walk,
+        window: &PreparedWindow,
+    ) -> impl Iterator<Item = usize> + 'a {
+        // As in `holds_walk`: the walk's contig positions on the forward strand.
+        let (low, high) = (u64::from(walk.contig), u64::from(walk.contig + walk.length));
+        let length = window.bases.len() as u64;
+        let (low, high) = if walk.strand.is_reverse() {
+            (length - high, length - low)
+        } else {
+            (low, high)
+        };
+        let (low, high) = (window.start + low, window.start + high);
+        let strand = usize::from(walk.strand.is_reverse());
+        let (sorted, ends) = (&self.sorted[strand], &self.ends[strand]);
+        let before = sorted.partition_point(|&(start, _, _)| start <= low);
+        (0..before.div_ceil(HELD_GROUP))
+            .rev()
+            .filter(move |&group| ends[group] >= high)
+            .flat_map(move |group| {
+                let end = ((group + 1) * HELD_GROUP).min(before);
+                sorted[group * HELD_GROUP..end].iter()
+            })
+            .filter(move |&&(_, end, _)| end >= high)
+            .map(|&(_, _, at)| at)
+    }
 }
