@@ -8,13 +8,6 @@ use std::process::ExitCode;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// Large allocations stay in the usual arenas, which give pages back to the kernel after a
-/// delay, so that buffers freed and allocated again for every batch do not fault in their pages
-/// each time.
-#[cfg(not(target_env = "msvc"))]
-#[unsafe(export_name = "_rjem_malloc_conf")]
-static MALLOC_CONF: &[u8; 21] = b"oversize_threshold:0\0";
-
 fn main() -> ExitCode {
     match jam_rs::run() {
         Ok(()) => ExitCode::SUCCESS,

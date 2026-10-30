@@ -677,6 +677,10 @@ data than k 25 and w 100. An older sparse index still works, as the scheme is st
 manifest. The filter file `NAME.jamfilter` (`jam index build --singleton --filter`) saves each
 screen the time to build its seed key filter; `jam index filter` writes it for an existing index.
 
+A screen on large assemblies runs best with large freed buffers kept in the usual memory arenas.
+Set `_RJEM_MALLOC_CONF=oversize_threshold:0` in the environment of `jam screen`. The binary does
+not set it, as it held 6 GiB more at the start of a search on a large index.
+
 A screen has two stages. The first is the *survey*. jam looks up the seeds of the contigs of an
 assembly, a batch at a time, in the index. It keeps the entries that share enough seeds with a
 contig and aligns only those. `--survey-only` stops after the survey.
