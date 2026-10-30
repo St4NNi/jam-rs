@@ -71,9 +71,19 @@ impl JoinScratch {
         self.starts.sort_unstable_by_key(|&index| key(index, false));
         self.ends = (0..walks.len() as u32).collect();
         self.ends.sort_unstable_by_key(|&index| key(index, true));
-        self.linked.clear();
-        self.parts.clear();
+        // Exactly the linked walks priced, so neither grows past them nor keeps more from an
+        // earlier window.
+        let linked = walks.len().min(most_linked(context));
+        self.linked = Vec::with_capacity(linked);
+        self.parts = Vec::with_capacity(linked);
         self.piece = Vec::with_capacity(reach(context) as usize);
+    }
+
+    /// The bytes the walk orders, linked walks and parts hold now.
+    #[cfg(test)]
+    pub(crate) fn walk_bytes(&self) -> usize {
+        (self.starts.capacity() + self.ends.capacity() + self.linked.capacity()) * size_of::<u32>()
+            + self.parts.capacity() * size_of::<[Part; 2]>()
     }
 
     /// The best qualifying join through walk `at`, of at least two walks, from the oriented

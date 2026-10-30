@@ -395,3 +395,43 @@ fn low_walks_unchanged() {
         assert_eq!(limited, walks(&split().without_limit()));
     }
 }
+
+#[test]
+fn join_scratch_within_price() {
+    // 187 walks of 15 bases, one base apart on one diagonal: one join links all of them. A later
+    // window of 10 walks holds no more than its own price.
+    let query = random_bases(&mut rng(33), 3_000);
+    let table = linear(&query);
+    let walks: Vec<Walk> = (0..187u32)
+        .map(|at| Walk {
+            strand: Strand::Forward,
+            contig: 16 * at,
+            query: 16 * at,
+            length: 15,
+        })
+        .collect();
+    let context = JoinContext {
+        table: &table,
+        band: BandConfig::default(),
+        limits: JoinLimits {
+            min_columns: 50,
+            min_identity: 0.5,
+        },
+    };
+    let mut scratch = JoinScratch::default();
+    scratch.prepare(&walks, &context);
+    let joined = scratch
+        .join_through(&walks, 93, &query, 0, &context)
+        .unwrap()
+        .unwrap();
+    assert_eq!(joined.query_interval.start, 0);
+    // The price of the walks, without the piece alignment.
+    let price =
+        |walks: usize| JoinScratch::bytes(walks, &context) - JoinScratch::bytes(0, &context);
+    assert!(scratch.walk_bytes() <= price(walks.len()));
+    scratch.prepare(&walks[..10], &context);
+    scratch
+        .join_through(&walks[..10], 5, &query, 0, &context)
+        .unwrap();
+    assert!(scratch.walk_bytes() <= price(10));
+}
