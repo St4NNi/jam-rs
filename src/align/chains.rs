@@ -4,7 +4,6 @@
 
 use super::anchors::{Anchor, QueryTable, count_anchors, find_anchors, occurrence_counts};
 use super::{AlignmentError, Budgeted, Strand};
-use std::ops::Range;
 
 /// Colinear anchors of one strand, in increasing oriented contig position.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -337,52 +336,115 @@ pub(super) fn chain_anchors(
 /// Predecessors with a valid link that one anchor considers at most.
 const LOOKBACK: usize = 64;
 
-/// A run of more anchors than this at one contig position is searched by query position: most
-/// of its anchors are too far off the diagonal to link.
-const RUN: usize = 16;
+/// Diagonals of one group of the diagonal index.
+const DIAGONALS: i64 = 1 << 10;
 
-/// The anchors of the contig position just before index `below` that may link to `anchor`, as
-/// up to two index ranges in the order of a backward scan (each scanned from its end), and the
-/// index where the scan goes on. A long run gives only the anchors whose query step can pass the
-/// drift test; any other anchor of the run would be skipped anyway, so the links stay the same.
-fn next_candidates(
-    table: &QueryTable,
-    anchors: &[Anchor],
-    anchor: &Anchor,
-    below: usize,
-) -> (usize, [Range<usize>; 2]) {
-    let top = below - 1;
-    let contig = anchors[top].contig;
-    if top < RUN || anchors[top - RUN].contig != contig {
-        return (top, [top..below, 0..0]);
-    }
-    let first = anchors[..top - RUN].partition_point(|other| other.contig < contig);
-    let run = &anchors[first..below];
-    // A linking query step is within the drift of the contig step, as its minimum with the
-    // contig step is at most the contig step.
-    let step = i64::from(anchor.contig) - i64::from(contig);
-    let low = (step - DRIFT_BASES - step / DRIFT_SHARE).max(1);
-    let high = (step + DRIFT_BASES + step / DRIFT_SHARE).min(i64::from(table.chains().max_gap));
-    let positions = |from: i64, to: i64| {
-        if from > to {
-            return 0..0;
+/// The anchors of one strand grouped by diagonal (contig less query position), each group in
+/// anchor order. Its 4 bytes per anchor fit in what `anchor_bytes` prices per anchor beyond the
+/// anchors, links, order and chains that chaining holds.
+struct DiagonalIndex {
+    lowest: i64,
+    starts: Vec<u32>,
+    order: Vec<u32>,
+}
+
+impl DiagonalIndex {
+    fn new(anchors: &[Anchor]) -> Self {
+        let diagonal = |anchor: &Anchor| i64::from(anchor.contig) - i64::from(anchor.query);
+        let lowest = anchors.iter().map(diagonal).min().unwrap_or(0);
+        let highest = anchors.iter().map(diagonal).max().unwrap_or(0);
+        let group = |anchor: &Anchor| ((diagonal(anchor) - lowest) / DIAGONALS) as usize;
+        let mut starts = vec![0u32; ((highest - lowest) / DIAGONALS) as usize + 2];
+        for anchor in anchors {
+            starts[group(anchor) + 1] += 1;
         }
-        let start = run.partition_point(|other| i64::from(other.query) < from);
-        let end = run.partition_point(|other| i64::from(other.query) <= to);
-        first + start..first + end
-    };
-    let (query, length) = (i64::from(anchor.query), i64::from(table.query_length()));
-    // Later query positions first: on a circular query, their steps wrap around the origin.
-    let wrapped = if table.circular() {
-        positions(
-            (query + length - high).max(query),
-            (query + length - low).min(length - 1),
-        )
-    } else {
-        0..0
-    };
-    let earlier = positions((query - high).max(0), query - low);
-    (first, [wrapped, earlier])
+        for at in 1..starts.len() {
+            starts[at] += starts[at - 1];
+        }
+        let mut filled = starts.clone();
+        let mut order = vec![0u32; anchors.len()];
+        for (index, anchor) in anchors.iter().enumerate() {
+            let at = &mut filled[group(anchor)];
+            order[*at as usize] = index as u32;
+            *at += 1;
+        }
+        Self {
+            lowest,
+            starts,
+            order,
+        }
+    }
+
+    /// The anchors before index `end` whose diagonal is within `drift` of the diagonal of
+    /// `anchor` or, on a circular query, of that diagonal less the query length, from the last
+    /// to the first. Their groups may hold other anchors too.
+    fn near(&self, table: &QueryTable, anchor: &Anchor, end: usize, drift: i64) -> Near<'_> {
+        let diagonal = i64::from(anchor.contig) - i64::from(anchor.query);
+        let length = i64::from(table.query_length());
+        let last = self.starts.len() as i64 - 2;
+        let mut near = Near {
+            heads: [&[]; 8],
+            count: 0,
+        };
+        let mut previous = -1;
+        let centres = [diagonal - length, diagonal];
+        for centre in &centres[usize::from(!table.circular())..] {
+            let first = (centre - drift - self.lowest)
+                .div_euclid(DIAGONALS)
+                .max(previous + 1);
+            let high = (centre + drift - self.lowest)
+                .div_euclid(DIAGONALS)
+                .min(last);
+            for group in first.max(0)..=high {
+                let group = group as usize;
+                let members =
+                    &self.order[self.starts[group] as usize..self.starts[group + 1] as usize];
+                let cut = members.partition_point(|&index| (index as usize) < end);
+                near.heads[near.count] = &members[..cut];
+                near.count += 1;
+                previous = group as i64;
+            }
+        }
+        near
+    }
+}
+
+/// The predecessors of an anchor to examine, from the last to the first.
+enum Predecessors<'a> {
+    All(std::iter::Rev<std::ops::Range<usize>>),
+    Near(Near<'a>),
+}
+
+impl Iterator for Predecessors<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        match self {
+            Self::All(all) => all.next(),
+            Self::Near(near) => near.next(),
+        }
+    }
+}
+
+/// Anchor indices from up to eight groups of the diagonal index, highest first.
+struct Near<'a> {
+    heads: [&'a [u32]; 8],
+    count: usize,
+}
+
+impl Iterator for Near<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        let heads = &mut self.heads[..self.count];
+        let (best, &index) = heads
+            .iter()
+            .enumerate()
+            .filter_map(|(at, head)| head.last().map(|index| (at, index)))
+            .max_by_key(|&(_, index)| index)?;
+        heads[best] = &heads[best][..heads[best].len() - 1];
+        Some(index as usize)
+    }
 }
 
 /// Predecessors that the chaining of one window may examine, valid or not: seconds of work. A
@@ -448,58 +510,59 @@ fn chain_links(
     let a = i64::from(table.anchors().a);
     let max_gap = i64::from(table.chains().max_gap);
     let length = i64::from(table.query_length());
+    // A link drifts at most this far from the diagonal, as its query step is at most the gap.
+    let band = DRIFT_BASES + max_gap / DRIFT_SHARE;
+    let (mut index, mut total) = (None, 0u64);
     let mut links: Vec<Link> = Vec::with_capacity(anchors.len());
     for (current, anchor) in anchors.iter().enumerate() {
         let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
         let end = anchors[..current].partition_point(|earlier| earlier.contig < anchor.contig);
         let (mut eligible, mut scanned) = (0, 0u64);
-        let mut below = end;
-        'scan: while below > 0 {
-            if i64::from(anchor.contig) - i64::from(anchors[below - 1].contig) > max_gap {
-                scanned += 1;
+        // Once the predecessors examined pass the lookback of every anchor, as most are far
+        // off the diagonal, only those near it are examined, in the same order.
+        if index.is_none() && total > (LOOKBACK * anchors.len()) as u64 {
+            index = Some(DiagonalIndex::new(anchors));
+        }
+        let predecessors = match &index {
+            Some(index) => Predecessors::Near(index.near(table, anchor, end, band)),
+            None => Predecessors::All((0..end).rev()),
+        };
+        for earlier in predecessors {
+            scanned += 1;
+            let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
+            if contig_step > max_gap {
                 break;
             }
-            let (next, ranges) = next_candidates(table, anchors, anchor, below);
-            let listed: usize = ranges.iter().map(|range| range.len()).sum();
-            // The search of a run counts as one, so the count stays at most the run length.
-            scanned += u64::from(listed < below - next);
-            below = next;
-            for earlier in ranges.into_iter().flat_map(|range| range.rev()) {
-                scanned += 1;
-                let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
-                if contig_step > max_gap {
-                    break 'scan;
-                }
-                let mut query_step = i64::from(anchor.query) - i64::from(anchors[earlier].query);
-                if table.circular() && query_step <= 0 {
-                    query_step += length;
-                }
-                if contig_step <= 0
-                    || query_step <= 0
-                    || query_step > max_gap
-                    || links[earlier].span + query_step + a > length
-                {
-                    continue;
-                }
-                let drift = (contig_step - query_step).abs();
-                if drift > DRIFT_BASES + contig_step.min(query_step) / DRIFT_SHARE {
-                    continue;
-                }
-                eligible += 1;
-                let gap_cost = if drift == 0 {
-                    0
-                } else {
-                    drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
-                };
-                let gained = links[earlier].score + contig_step.min(query_step).min(a) - gap_cost;
-                if gained > best {
-                    (best, from, best_span) = (gained, earlier, links[earlier].span + query_step);
-                }
-                if eligible == LOOKBACK {
-                    break 'scan;
-                }
+            let mut query_step = i64::from(anchor.query) - i64::from(anchors[earlier].query);
+            if table.circular() && query_step <= 0 {
+                query_step += length;
+            }
+            if contig_step <= 0
+                || query_step <= 0
+                || query_step > max_gap
+                || links[earlier].span + query_step + a > length
+            {
+                continue;
+            }
+            let drift = (contig_step - query_step).abs();
+            if drift > DRIFT_BASES + contig_step.min(query_step) / DRIFT_SHARE {
+                continue;
+            }
+            eligible += 1;
+            let gap_cost = if drift == 0 {
+                0
+            } else {
+                drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
+            };
+            let gained = links[earlier].score + contig_step.min(query_step).min(a) - gap_cost;
+            if gained > best {
+                (best, from, best_span) = (gained, earlier, links[earlier].span + query_step);
+            }
+            if eligible == LOOKBACK {
+                break;
             }
         }
+        total += scanned;
         examined.add(scanned)?;
         links.push(Link {
             score: best,

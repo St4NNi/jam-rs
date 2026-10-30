@@ -340,9 +340,9 @@ fn retained_capacity_ignored() {
 
 #[test]
 fn chaining_work_bounded() {
-    // One 15-mer at query positions 6,000 apart and window positions 20 apart: no predecessor
-    // is valid, as the query steps are 0 or above the largest gap, yet each anchor examines the
-    // copies before it. The work ends in an error, never in fewer chains.
+    // One 15-mer at 40 query positions 6,000 apart and 50 window positions 20 apart: no
+    // predecessor is valid, as the query steps are 0 or above the largest gap, yet each anchor
+    // examines copies before it. The work ends in an error, never in fewer chains.
     let query = random_bases(&mut rng(10), 240_000);
     let table = QueryTable::new(
         &query,
@@ -351,39 +351,41 @@ fn chaining_work_bounded() {
         ChainConfig::default(),
     )
     .unwrap();
-    let copies = |positions: u32, copies: u32| -> Vec<Anchor> {
-        (0..positions)
-            .flat_map(|j| {
-                (0..copies).map(move |i| Anchor {
-                    strand: Strand::Forward,
-                    contig: 20 * j,
-                    query: 6000 * i,
-                })
+    let copies: Vec<Anchor> = (0..50u32)
+        .flat_map(|j| {
+            (0..40u32).map(move |i| Anchor {
+                strand: Strand::Forward,
+                contig: 20 * j,
+                query: 6000 * i,
             })
-            .collect()
-    };
+        })
+        .collect();
     let run = |anchors: &[Anchor], limit: u64, stop: bool| {
         let stopped = move || stop;
         let mut examined = Examined::new(limit, &stopped);
         let mut chains = Vec::new();
-        chain_anchors(&table, anchors, &mut chains, &mut examined).map(|()| chains)
+        let result = chain_anchors(&table, anchors, &mut chains, &mut examined).map(|()| chains);
+        (result, examined.count)
     };
-    // 16 copies are examined one by one: 16^2 x 100 x 99 / 2 = 1,267,200 predecessors.
-    let single = copies(100, 16);
-    assert_eq!(run(&single, 1_267_200, false), Ok(Vec::new()));
+    let (result, work) = run(&copies, u64::MAX, false);
+    assert_eq!(result, Ok(Vec::new()));
+    // Fewer than the 40^2 x 50 x 49 / 2 = 1,960,000 predecessors before them, as once the work
+    // passes the lookback of every anchor only those near the diagonal are examined.
+    assert!(work < 1_960_000);
+    assert_eq!(run(&copies, work, false).0, Ok(Vec::new()));
     assert_eq!(
-        run(&single, 1_267_199, false),
+        run(&copies, work - 1, false).0,
         Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork))
     );
-    assert_eq!(run(&single, u64::MAX, true), Err(AlignmentError::Stopped));
-    // A run of 40 copies is searched once, as no query step is within the largest gap:
-    // 40 x 50 x 49 / 2 = 49,000 runs are examined.
-    let runs = copies(50, 40);
-    assert_eq!(run(&runs, 49_000, false), Ok(Vec::new()));
-    assert_eq!(
-        run(&runs, 48_999, false),
-        Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork))
-    );
+    // Copies at one query position are near the diagonal of each other: millions are examined.
+    let line: Vec<Anchor> = (0..3_000u32)
+        .map(|contig| Anchor {
+            strand: Strand::Forward,
+            contig,
+            query: 0,
+        })
+        .collect();
+    assert_eq!(run(&line, u64::MAX, true).0, Err(AlignmentError::Stopped));
 }
 
 #[test]
@@ -489,5 +491,52 @@ fn runs_link_as_one_by_one() {
             .collect();
         assert_eq!(found, links_one_by_one(&table, &anchors));
         assert!(found.iter().filter(|link| link.1 != usize::MAX).count() > anchors.len() / 4);
+    }
+}
+
+#[test]
+#[ignore = "timing: run in release with --nocapture"]
+fn dense_runs_timed() {
+    // As the slowest window of SAMEA6809557: 22,293 bases with anchors at every third position,
+    // about 44 per position, against a query of 83,586 bases.
+    let query = random_bases(&mut rng(50), 83_586);
+    let mut random = rng(51);
+    for circular in [false, true] {
+        let table = QueryTable::new(
+            &query,
+            circular,
+            AnchorConfig::default(),
+            ChainConfig::default(),
+        )
+        .unwrap();
+        let mut anchors = Vec::new();
+        for contig in (0..22_293u32).step_by(3) {
+            for _ in 0..random.random_range(0..88u32) {
+                anchors.push(Anchor {
+                    strand: Strand::Forward,
+                    contig,
+                    query: random.random_range(0..83_586),
+                });
+            }
+        }
+        anchors.sort_unstable();
+        anchors.dedup();
+        let clock = std::time::Instant::now();
+        let expected = links_one_by_one(&table, &anchors);
+        let one_by_one = clock.elapsed();
+        let clock = std::time::Instant::now();
+        let mut examined = Examined::new(u64::MAX, &|| false);
+        let links = chain_links(&table, &anchors, &mut examined).unwrap();
+        let searched = clock.elapsed();
+        let found: Vec<(i64, usize, i64)> = links
+            .iter()
+            .map(|link| (link.score, link.previous, link.span))
+            .collect();
+        assert_eq!(found, expected);
+        println!(
+            "circular {circular} anchors {} one by one {one_by_one:?} searched {searched:?} examined {}",
+            anchors.len(),
+            examined.count
+        );
     }
 }
