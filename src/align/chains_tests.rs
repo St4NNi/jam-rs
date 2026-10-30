@@ -6,6 +6,7 @@ use super::*;
 use crate::align::anchors::{AnchorConfig, find_anchors};
 use crate::seeds::reverse_complement;
 use crate::test_support::{random_bases, rng};
+use rand::RngExt;
 
 fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
     let table = QueryTable::new(
@@ -339,9 +340,9 @@ fn retained_capacity_ignored() {
 
 #[test]
 fn chaining_work_bounded() {
-    // One 15-mer at 40 query positions 6,000 apart and 50 window positions 20 apart: no
-    // predecessor is valid, as the query steps are 0 or above the largest gap, yet each anchor
-    // examines all copies before it. The work ends in an error, never in fewer chains.
+    // One 15-mer at query positions 6,000 apart and window positions 20 apart: no predecessor
+    // is valid, as the query steps are 0 or above the largest gap, yet each anchor examines the
+    // copies before it. The work ends in an error, never in fewer chains.
     let query = random_bases(&mut rng(10), 240_000);
     let table = QueryTable::new(
         &query,
@@ -350,28 +351,39 @@ fn chaining_work_bounded() {
         ChainConfig::default(),
     )
     .unwrap();
-    let anchors: Vec<Anchor> = (0..50u32)
-        .flat_map(|j| {
-            (0..40u32).map(move |i| Anchor {
-                strand: Strand::Forward,
-                contig: 20 * j,
-                query: 6000 * i,
+    let copies = |positions: u32, copies: u32| -> Vec<Anchor> {
+        (0..positions)
+            .flat_map(|j| {
+                (0..copies).map(move |i| Anchor {
+                    strand: Strand::Forward,
+                    contig: 20 * j,
+                    query: 6000 * i,
+                })
             })
-        })
-        .collect();
-    let run = |limit: u64, stop: bool| {
+            .collect()
+    };
+    let run = |anchors: &[Anchor], limit: u64, stop: bool| {
         let stopped = move || stop;
         let mut examined = Examined::new(limit, &stopped);
         let mut chains = Vec::new();
-        chain_anchors(&table, &anchors, &mut chains, &mut examined).map(|()| chains)
+        chain_anchors(&table, anchors, &mut chains, &mut examined).map(|()| chains)
     };
-    // 40^2 x 50 x 49 / 2 = 1,960,000 predecessors are examined.
-    assert_eq!(run(1_960_000, false), Ok(Vec::new()));
+    // 16 copies are examined one by one: 16^2 x 100 x 99 / 2 = 1,267,200 predecessors.
+    let single = copies(100, 16);
+    assert_eq!(run(&single, 1_267_200, false), Ok(Vec::new()));
     assert_eq!(
-        run(1_959_999, false),
+        run(&single, 1_267_199, false),
         Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork))
     );
-    assert_eq!(run(u64::MAX, true), Err(AlignmentError::Stopped));
+    assert_eq!(run(&single, u64::MAX, true), Err(AlignmentError::Stopped));
+    // A run of 40 copies is searched once, as no query step is within the largest gap:
+    // 40 x 50 x 49 / 2 = 49,000 runs are examined.
+    let runs = copies(50, 40);
+    assert_eq!(run(&runs, 49_000, false), Ok(Vec::new()));
+    assert_eq!(
+        run(&runs, 48_999, false),
+        Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork))
+    );
 }
 
 #[test]
@@ -389,4 +401,93 @@ fn single_anchor_chains() {
     assert_eq!(short.len(), 1);
     assert_eq!(position(short[0].anchors[0]), (300, 100));
     assert!(chains(&query, false, &window).is_empty());
+}
+
+/// The best link of every anchor as found by examining every predecessor one by one.
+fn links_one_by_one(table: &QueryTable, anchors: &[Anchor]) -> Vec<(i64, usize, i64)> {
+    let a = i64::from(table.anchors().a);
+    let max_gap = i64::from(table.chains().max_gap);
+    let length = i64::from(table.query_length());
+    let mut links: Vec<(i64, usize, i64)> = Vec::new();
+    for (current, anchor) in anchors.iter().enumerate() {
+        let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
+        let end = anchors[..current].partition_point(|earlier| earlier.contig < anchor.contig);
+        let mut eligible = 0;
+        for earlier in (0..end).rev() {
+            let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
+            if contig_step > max_gap {
+                break;
+            }
+            let mut query_step = i64::from(anchor.query) - i64::from(anchors[earlier].query);
+            if table.circular() && query_step <= 0 {
+                query_step += length;
+            }
+            if query_step <= 0 || query_step > max_gap || links[earlier].2 + query_step + a > length
+            {
+                continue;
+            }
+            let drift = (contig_step - query_step).abs();
+            if drift > DRIFT_BASES + contig_step.min(query_step) / DRIFT_SHARE {
+                continue;
+            }
+            eligible += 1;
+            let gap_cost = if drift == 0 {
+                0
+            } else {
+                drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
+            };
+            let gained = links[earlier].0 + contig_step.min(query_step).min(a) - gap_cost;
+            if gained > best {
+                (best, from, best_span) = (gained, earlier, links[earlier].2 + query_step);
+            }
+            if eligible == LOOKBACK {
+                break;
+            }
+        }
+        links.push((best, from, best_span));
+    }
+    links
+}
+
+#[test]
+fn runs_link_as_one_by_one() {
+    // Runs of up to 80 anchors at one window position, some near a few diagonals and the rest
+    // anywhere on the query, so runs are searched and many steps wrap around a circular origin.
+    let query = random_bases(&mut rng(40), 9_000);
+    let mut random = rng(41);
+    for circular in [false, true] {
+        let table = QueryTable::new(
+            &query,
+            circular,
+            AnchorConfig::default(),
+            ChainConfig::default(),
+        )
+        .unwrap();
+        let mut anchors = Vec::new();
+        for contig in (0..12_000u32).step_by(7) {
+            for _ in 0..random.random_range(0..80u32) {
+                let query = if random.random_range(0..3) == 0 {
+                    let diagonal = [0, 3_000, 8_500][random.random_range(0..3)];
+                    (contig + diagonal + random.random_range(0..120)) % 9_000
+                } else {
+                    random.random_range(0..9_000)
+                };
+                anchors.push(Anchor {
+                    strand: Strand::Forward,
+                    contig,
+                    query,
+                });
+            }
+        }
+        anchors.sort_unstable();
+        anchors.dedup();
+        let mut examined = Examined::new(u64::MAX, &|| false);
+        let links = chain_links(&table, &anchors, &mut examined).unwrap();
+        let found: Vec<(i64, usize, i64)> = links
+            .iter()
+            .map(|link| (link.score, link.previous, link.span))
+            .collect();
+        assert_eq!(found, links_one_by_one(&table, &anchors));
+        assert!(found.iter().filter(|link| link.1 != usize::MAX).count() > anchors.len() / 4);
+    }
 }

@@ -4,6 +4,7 @@
 
 use super::anchors::{Anchor, QueryTable, count_anchors, find_anchors, occurrence_counts};
 use super::{AlignmentError, Budgeted, Strand};
+use std::ops::Range;
 
 /// Colinear anchors of one strand, in increasing oriented contig position.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -336,6 +337,54 @@ pub(super) fn chain_anchors(
 /// Predecessors with a valid link that one anchor considers at most.
 const LOOKBACK: usize = 64;
 
+/// A run of more anchors than this at one contig position is searched by query position: most
+/// of its anchors are too far off the diagonal to link.
+const RUN: usize = 16;
+
+/// The anchors of the contig position just before index `below` that may link to `anchor`, as
+/// up to two index ranges in the order of a backward scan (each scanned from its end), and the
+/// index where the scan goes on. A long run gives only the anchors whose query step can pass the
+/// drift test; any other anchor of the run would be skipped anyway, so the links stay the same.
+fn next_candidates(
+    table: &QueryTable,
+    anchors: &[Anchor],
+    anchor: &Anchor,
+    below: usize,
+) -> (usize, [Range<usize>; 2]) {
+    let top = below - 1;
+    let contig = anchors[top].contig;
+    if top < RUN || anchors[top - RUN].contig != contig {
+        return (top, [top..below, 0..0]);
+    }
+    let first = anchors[..top - RUN].partition_point(|other| other.contig < contig);
+    let run = &anchors[first..below];
+    // A linking query step is within the drift of the contig step, as its minimum with the
+    // contig step is at most the contig step.
+    let step = i64::from(anchor.contig) - i64::from(contig);
+    let low = (step - DRIFT_BASES - step / DRIFT_SHARE).max(1);
+    let high = (step + DRIFT_BASES + step / DRIFT_SHARE).min(i64::from(table.chains().max_gap));
+    let positions = |from: i64, to: i64| {
+        if from > to {
+            return 0..0;
+        }
+        let start = run.partition_point(|other| i64::from(other.query) < from);
+        let end = run.partition_point(|other| i64::from(other.query) <= to);
+        first + start..first + end
+    };
+    let (query, length) = (i64::from(anchor.query), i64::from(table.query_length()));
+    // Later query positions first: on a circular query, their steps wrap around the origin.
+    let wrapped = if table.circular() {
+        positions(
+            (query + length - high).max(query),
+            (query + length - low).min(length - 1),
+        )
+    } else {
+        0..0
+    };
+    let earlier = positions((query - high).max(0), query - low);
+    (first, [wrapped, earlier])
+}
+
 /// Predecessors that the chaining of one window may examine, valid or not: seconds of work. A
 /// window past it fails with `ChainingBudget` rather than chaining fewer anchors.
 const MAX_EXAMINED: u64 = 1 << 32;
@@ -404,39 +453,51 @@ fn chain_links(
         let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
         let end = anchors[..current].partition_point(|earlier| earlier.contig < anchor.contig);
         let (mut eligible, mut scanned) = (0, 0u64);
-        for earlier in (0..end).rev() {
-            scanned += 1;
-            let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
-            if contig_step > max_gap {
+        let mut below = end;
+        'scan: while below > 0 {
+            if i64::from(anchor.contig) - i64::from(anchors[below - 1].contig) > max_gap {
+                scanned += 1;
                 break;
             }
-            let mut query_step = i64::from(anchor.query) - i64::from(anchors[earlier].query);
-            if table.circular() && query_step <= 0 {
-                query_step += length;
-            }
-            if contig_step <= 0
-                || query_step <= 0
-                || query_step > max_gap
-                || links[earlier].span + query_step + a > length
-            {
-                continue;
-            }
-            let drift = (contig_step - query_step).abs();
-            if drift > DRIFT_BASES + contig_step.min(query_step) / DRIFT_SHARE {
-                continue;
-            }
-            eligible += 1;
-            let gap_cost = if drift == 0 {
-                0
-            } else {
-                drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
-            };
-            let gained = links[earlier].score + contig_step.min(query_step).min(a) - gap_cost;
-            if gained > best {
-                (best, from, best_span) = (gained, earlier, links[earlier].span + query_step);
-            }
-            if eligible == LOOKBACK {
-                break;
+            let (next, ranges) = next_candidates(table, anchors, anchor, below);
+            let listed: usize = ranges.iter().map(|range| range.len()).sum();
+            // The search of a run counts as one, so the count stays at most the run length.
+            scanned += u64::from(listed < below - next);
+            below = next;
+            for earlier in ranges.into_iter().flat_map(|range| range.rev()) {
+                scanned += 1;
+                let contig_step = i64::from(anchor.contig) - i64::from(anchors[earlier].contig);
+                if contig_step > max_gap {
+                    break 'scan;
+                }
+                let mut query_step = i64::from(anchor.query) - i64::from(anchors[earlier].query);
+                if table.circular() && query_step <= 0 {
+                    query_step += length;
+                }
+                if contig_step <= 0
+                    || query_step <= 0
+                    || query_step > max_gap
+                    || links[earlier].span + query_step + a > length
+                {
+                    continue;
+                }
+                let drift = (contig_step - query_step).abs();
+                if drift > DRIFT_BASES + contig_step.min(query_step) / DRIFT_SHARE {
+                    continue;
+                }
+                eligible += 1;
+                let gap_cost = if drift == 0 {
+                    0
+                } else {
+                    drift / DRIFT_COST + 1 + i64::from(64 - (drift as u64).leading_zeros()) / 2
+                };
+                let gained = links[earlier].score + contig_step.min(query_step).min(a) - gap_cost;
+                if gained > best {
+                    (best, from, best_span) = (gained, earlier, links[earlier].span + query_step);
+                }
+                if eligible == LOOKBACK {
+                    break 'scan;
+                }
             }
         }
         examined.add(scanned)?;
