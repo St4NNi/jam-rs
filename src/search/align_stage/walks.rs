@@ -237,9 +237,11 @@ pub(super) fn join_short_walks(
     let off = crate::align::SAME_OFF.load(std::sync::atomic::Ordering::Relaxed);
     #[cfg(not(test))]
     let off = false;
-    let index = (aligned.len() > HELD_INDEX_FROM && !off).then(|| HeldIndex::new(aligned));
+    let index = (held_index_from(aligned.len()) && !off).then(|| HeldIndex::new(aligned));
     let held_aligned = |walk: &Walk| match &index {
-        Some(index) => index.near(walk, window).any(|at| holds(&aligned[at], walk)),
+        Some(index) => index
+            .near(walk, window.bases.len() as u64, window.start)
+            .any(|at| holds(&aligned[at], walk)),
         None => held(aligned, walk),
     };
     // The deadline is checked for each walk, as a window with many walks takes long here.
@@ -295,6 +297,11 @@ pub(super) fn join_short_walks(
 /// Fragments of a window above this many are looked up through `HeldIndex`.
 const HELD_INDEX_FROM: usize = 64;
 
+/// Whether the fragments of a window that hold a walk are looked up through `HeldIndex`.
+fn held_index_from(fragments: usize) -> bool {
+    fragments > HELD_INDEX_FROM
+}
+
 /// Fragments in one group of `HeldIndex`, which keeps the largest contig end of each group.
 const HELD_GROUP: usize = 32;
 
@@ -328,17 +335,17 @@ impl HeldIndex {
     fn near<'a>(
         &'a self,
         walk: &Walk,
-        window: &PreparedWindow,
+        length: u64,
+        offset: u64,
     ) -> impl Iterator<Item = usize> + 'a {
         // As in `holds_walk`: the walk's contig positions on the forward strand.
         let (low, high) = (u64::from(walk.contig), u64::from(walk.contig + walk.length));
-        let length = window.bases.len() as u64;
         let (low, high) = if walk.strand.is_reverse() {
             (length - high, length - low)
         } else {
             (low, high)
         };
-        let (low, high) = (window.start + low, window.start + high);
+        let (low, high) = (offset + low, offset + high);
         let strand = usize::from(walk.strand.is_reverse());
         let (sorted, ends) = (&self.sorted[strand], &self.ends[strand]);
         let before = sorted.partition_point(|&(start, _, _)| start <= low);
@@ -351,5 +358,80 @@ impl HeldIndex {
             })
             .filter(move |&&(_, end, _)| end >= high)
             .map(|&(_, _, at)| at)
+    }
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::*;
+    use crate::align::{EditOperation, EditRun, Interval, Strand};
+    use crate::test_support::rng;
+    use rand::RngExt;
+
+    #[test]
+    fn index_from_65_fragments() {
+        assert!(!held_index_from(64));
+        assert!(held_index_from(65));
+    }
+
+    #[test]
+    fn index_finds_every_holding_fragment() {
+        // Fragments and walks on both strands of a window of 5,000 bases from contig position
+        // 1,000 and a circular query of 800 bases: the index offers every fragment that holds.
+        let (length, offset, query_length) = (5_000u64, 1_000u64, 800u64);
+        let mut random = rng(70);
+        let strand = |reverse: bool| {
+            if reverse {
+                Strand::Reverse
+            } else {
+                Strand::Forward
+            }
+        };
+        let fragments: Vec<Fragment> = (0..300)
+            .map(|_| {
+                let span = random.random_range(20..400u64);
+                let contig = offset + random.random_range(0..length - span);
+                let query = random.random_range(0..query_length);
+                let alignment = Alignment {
+                    score: 2 * span as i32,
+                    strand: strand(random.random_range(0..2) == 1),
+                    query_interval: Interval::new(query, query + span).unwrap(),
+                    contig_interval: Interval::new(contig, contig + span).unwrap(),
+                    runs: vec![EditRun {
+                        operation: EditOperation::Match,
+                        length: span as u32,
+                    }],
+                };
+                Fragment::place(0, alignment, query_length, true).unwrap()
+            })
+            .collect();
+        let index = HeldIndex::new(&fragments);
+        let mut held = 0;
+        for _ in 0..2_000 {
+            let span = random.random_range(1..60u32);
+            let walk = Walk {
+                strand: strand(random.random_range(0..2) == 1),
+                contig: random.random_range(0..length as u32 - span),
+                query: random.random_range(0..query_length as u32),
+                length: span,
+            };
+            let holds = |fragment: &Fragment| {
+                holds_walk(
+                    &fragment.alignment,
+                    &walk,
+                    length as usize,
+                    offset,
+                    query_length,
+                )
+            };
+            let mut offered: Vec<usize> = index.near(&walk, length, offset).collect();
+            offered.sort_unstable();
+            let holding: Vec<usize> = (0..fragments.len())
+                .filter(|&at| holds(&fragments[at]))
+                .collect();
+            held += holding.len();
+            assert!(holding.iter().all(|at| offered.binary_search(at).is_ok()));
+        }
+        assert!(held > 100, "{held}");
     }
 }

@@ -530,18 +530,21 @@ fn with_and_without_same(
 #[test]
 fn same_kernel_inputs_reused() {
     // A homopolymer entry, as one in the screen of SPIRE assemblies, against a query with two
-    // runs of its base: many kernel boxes hold the same bases at other positions.
+    // runs of C: many kernel boxes hold the same bases at other positions. A run of G pairs the
+    // runs on the reverse strand; the query is also taken as circular.
     use crate::align::SAME_FOUND;
     use std::sync::atomic::Ordering;
     let mut query = random_bases(&mut rng(91), 600);
     query[200..260].fill(b'C');
     query[400..430].fill(b'C');
-    let contig = vec![b'C'; 4_000];
-    let before = SAME_FOUND.load(Ordering::Relaxed);
-    let ((looked_up, _), (aligned_all, _)) =
-        with_and_without_same(&query, &contig, false, &rule("0.05"));
-    assert_eq!(looked_up, aligned_all);
-    assert!(SAME_FOUND.load(Ordering::Relaxed) > before);
+    for (base, circular) in [(b'C', false), (b'G', false), (b'C', true)] {
+        let contig = vec![base; 4_000];
+        let before = SAME_FOUND.load(Ordering::Relaxed);
+        let ((looked_up, _), (aligned_all, _)) =
+            with_and_without_same(&query, &contig, circular, &rule("0.05"));
+        assert_eq!(looked_up, aligned_all);
+        assert!(SAME_FOUND.load(Ordering::Relaxed) > before);
+    }
 }
 
 #[test]
