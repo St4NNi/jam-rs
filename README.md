@@ -157,8 +157,8 @@ from RAM or local disk. See [S3 and local caches](#s3-and-local-caches).
 - `--cache DIR`: local cache directory to populate. `jam search` and `jam serve` read pinned
   data from this directory.
 - `--memory SIZE`: RAM budget for pinned data and the block cache (for example, `16GiB`). By
-  default, half of the RAM available to jam, less 1.5 GiB for the search, and at least 1 GiB.
-  The RAM available is the memory limit of jam's cgroup (as under Slurm or in a container), or
+  default, half of the RAM available to jam, less 8 GiB for the process and the open index
+  files and 1.5 GiB for the search, and at least 1 GiB. The RAM available is the memory limit of jam's cgroup (as under Slurm or in a container), or
   the available RAM of the machine if that is less.
 - `--disk SIZE`: disk budget for pinned data and the block cache (for example, `200GiB`).
 
@@ -246,8 +246,8 @@ Advanced options:
 - `--cache DIR`, `--memory SIZE`, `--disk SIZE`: local cache directory and memory or disk
   budgets for index files on S3; see [S3 and local caches](#s3-and-local-caches). `--memory`
   defaults to the budget recorded in the cache directory. Without one, it is half of the RAM
-  available to jam, less 1.5 GiB for each index file searched at the same time, and at least
-  1 GiB. The pins, the block cache and the buffers of S3 reads in flight share this budget;
+  available to jam, less 8 GiB for the process and the open index files and 1.5 GiB for each
+  index file searched at the same time, and at least 1 GiB. The pins, the block cache and the buffers of S3 reads in flight share this budget;
   `-v` prints how. `--disk` defaults to the recorded budget, or 0 if there is none.
 - `--s3-requests N` (default 512, at most 4096): number of S3 requests in flight at the same
   time. S3 answers many parallel requests best; lower it for a store that fails under many.

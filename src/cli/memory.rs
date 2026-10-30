@@ -8,11 +8,16 @@ use std::path::{Path, PathBuf};
 /// RAM that one search takes besides the pins and the block cache, at most: 0.3 to 1.5 GB were
 /// measured with 8 threads.
 const SEARCH_BYTES: u64 = 3 << 29;
+/// RAM that the open index files and the process take besides the searches, the pins and the
+/// block cache: the decoded bucket tables of the ten shards of the AllTheBacteria index hold
+/// 5.1 GiB alone.
+const PROCESS_BYTES: u64 = 8 << 30;
 /// The least default budget.
 const LEAST: u64 = 1 << 30;
 
 /// The default budget for pins, the block cache and the buffers of reads: half the RAM available
-/// to the process, less what `searches` searches at the same time take, but at least 1 GiB.
+/// to the process, less what the process and `searches` searches at the same time take, but at
+/// least 1 GiB.
 pub(super) fn default_budget(searches: usize) -> u64 {
     budget_of(available(), searches)
 }
@@ -21,9 +26,11 @@ fn budget_of(available: Option<u64>, searches: usize) -> u64 {
     let Some(available) = available else {
         return LEAST;
     };
-    let searching = SEARCH_BYTES.saturating_mul(searches.max(1) as u64);
+    let taken = SEARCH_BYTES
+        .saturating_mul(searches.max(1) as u64)
+        .saturating_add(PROCESS_BYTES);
     (available / 2)
-        .min(available.saturating_sub(searching))
+        .min(available.saturating_sub(taken))
         .max(LEAST)
 }
 
@@ -88,10 +95,13 @@ mod tests {
     #[test]
     fn budget_by_ram() {
         let gib = 1u64 << 30;
-        // 16 GiB: half, as one search takes much less; four at once take 6 GiB, still half.
-        assert_eq!(budget_of(Some(16 * gib), 1), 8 * gib);
-        assert_eq!(budget_of(Some(16 * gib), 4), 8 * gib);
-        assert_eq!(budget_of(Some(16 * gib), 8), 4 * gib);
+        // 16 GiB: the process takes 8 GiB, so one search leaves 6.5 GiB, four leave 2 GiB and
+        // eight leave the least.
+        assert_eq!(budget_of(Some(16 * gib), 1), 13 * gib / 2);
+        assert_eq!(budget_of(Some(16 * gib), 4), 2 * gib);
+        assert_eq!(budget_of(Some(16 * gib), 8), gib);
+        // 96 GiB: half, as the process and four searches take only 14 GiB.
+        assert_eq!(budget_of(Some(96 * gib), 4), 48 * gib);
         // Little RAM, or none known: 1 GiB.
         assert_eq!(budget_of(Some(2 * gib), 4), gib);
         assert_eq!(budget_of(None, 1), gib);
