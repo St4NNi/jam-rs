@@ -51,7 +51,8 @@ impl JoinScratch {
     /// alignment of at most the reach on each side with its operations.
     pub fn bytes(walks: usize, context: &JoinContext<'_>) -> usize {
         let reach = reach(context) as usize;
-        walks * (3 * size_of::<u32>() + size_of::<[Part; 2]>())
+        walks * 2 * size_of::<u32>()
+            + walks.min(most_linked(context)) * (size_of::<u32>() + size_of::<[Part; 2]>())
             + (reach + 1) * (reach + 1)
             + 2 * (reach + 1) * size_of::<[i32; 3]>()
             + reach
@@ -70,8 +71,8 @@ impl JoinScratch {
         self.starts.sort_unstable_by_key(|&index| key(index, false));
         self.ends = (0..walks.len() as u32).collect();
         self.ends.sort_unstable_by_key(|&index| key(index, true));
-        self.linked = Vec::with_capacity(walks.len());
-        self.parts = Vec::with_capacity(walks.len());
+        self.linked.clear();
+        self.parts.clear();
         self.piece = Vec::with_capacity(reach(context) as usize);
     }
 
@@ -332,6 +333,12 @@ struct Selection {
     score: i64,
     first: usize,
     last: usize,
+}
+
+/// The most walks one join links: each walk starts with an exact anchor of a bases, and the
+/// linked walks cover the query at most once.
+fn most_linked(context: &JoinContext<'_>) -> usize {
+    (context.table.query_length() / u32::from(context.table.anchors().a)) as usize + 1
 }
 
 /// The query and contig bases a link may cross, as for `gap_continuation`.

@@ -320,6 +320,10 @@ fn short_blocks_join() {
     assert_eq!(joined.query_interval.end, 166);
     assert_eq!(joined.contig_interval.start, 1_000);
     assert!(JoinScratch::bytes(2, &context) > 0);
+    // Past the walks a join can link, each more walk only adds its two orders.
+    let (many, more) = (1 << 20, 1 << 21);
+    let added = JoinScratch::bytes(more, &context) - JoinScratch::bytes(many, &context);
+    assert_eq!(added, (more - many) * 2 * size_of::<u32>());
 }
 
 #[test]
