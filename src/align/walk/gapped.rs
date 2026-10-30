@@ -7,8 +7,10 @@ use crate::align::BandConfig;
 use crate::align::anchors::QueryTable;
 use crate::align::kernel::AlignmentInput;
 use crate::align::{
-    Alignment, AlignmentConfig, AlignmentError, AlignmentWorkspace, EditOperation, Strand,
+    Alignment, AlignmentConfig, AlignmentError, AlignmentWorkspace, EditOperation, Interval, Strand,
 };
+use rustc_hash::{FxHashMap, FxHasher};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 /// A walk alignment proven to be the best for its query range and contig range, so the next
@@ -31,7 +33,22 @@ pub struct DenseResults {
     optimum: Option<DenseOptimum>,
     /// Aligned cell boxes and their best alignment; `None` when no cell scores positive.
     kernels: Vec<(KernelBox, Option<Alignment>)>,
+    /// The boxes of `kernels` by a hash of their kernel input, from the `SAME_FROM`th box on.
+    same: FxHashMap<u64, Vec<usize>>,
 }
+
+/// Boxes a window aligns before boxes with the same kernel input are looked up. A dense repeat
+/// aligns the same bases at many positions; other windows align few boxes.
+const SAME_FROM: usize = 256;
+
+/// Turns the lookup of boxes with the same kernel input off, so tests can compare.
+#[cfg(test)]
+pub(crate) static SAME_OFF: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Kernel results taken from an earlier box with the same input, for tests.
+#[cfg(test)]
+pub(crate) static SAME_FOUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One walk of an alignment window: the walks after it, the forward window, the contig position
 /// where the window starts, and the query.
@@ -137,11 +154,7 @@ fn align_query_range(
     let (aligned, scores) = cells.kernel_input(&bases, window, offset, config);
     let found = match shared_result(input, &cells, extension, config, workspace, results) {
         Some(found) => found,
-        None => {
-            let found = kernel(workspace, aligned, walk.strand, scores)?;
-            results.kernels.push((cells, found.clone()));
-            found
-        }
+        None => box_kernel(input, &cells, &bases, config, workspace, results)?,
     };
     let Some(alignment) = found else {
         return Ok(None);
@@ -228,11 +241,115 @@ fn shared_result(
         .table
         .copy_bases(union.rows.start, span, &mut bases)
         .ok()?;
-    let (aligned, scores) = union.kernel_input(&bases, input.window, offset, config);
-    let found = kernel(workspace, aligned, union.strand, scores).ok()?;
-    let shared = fits(&found).then(|| found.clone());
-    results.kernels.push((union, found));
-    shared
+    let found = box_kernel(input, &union, &bases, config, workspace, results).ok()?;
+    fits(&found).then_some(found)
+}
+
+/// The kernel result of `cells`, whose query rows hold `bases`, added to `results`. In a window
+/// that aligned many boxes, the result of an earlier box with the same bases and scores is moved
+/// to the positions of `cells`: the kernel reads only the bases and scores, and adds the
+/// positions where its inputs start to every result.
+fn box_kernel(
+    input: DenseWalk<'_>,
+    cells: &KernelBox,
+    bases: &[u8],
+    config: BandConfig,
+    workspace: &mut AlignmentWorkspace,
+    results: &mut DenseResults,
+) -> Result<Option<Alignment>, AlignmentError> {
+    let (window, offset) = (input.window, input.offset);
+    let (aligned, scores) = cells.kernel_input(bases, window, offset, config);
+    #[cfg(test)]
+    let off = SAME_OFF.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(test))]
+    let off = false;
+    let key = (results.kernels.len() >= SAME_FROM && !off).then(|| {
+        let mut hasher = FxHasher::default();
+        (
+            cells.strand.is_reverse(),
+            scores.band_width,
+            scores.diagonal_offset,
+        )
+            .hash(&mut hasher);
+        (aligned.query, aligned.contig).hash(&mut hasher);
+        hasher.finish()
+    });
+    let earlier = key.and_then(|key| {
+        let mut other_bases = Vec::new();
+        results.same.get(&key)?.iter().find_map(|&at| {
+            let (other, found) = &results.kernels[at];
+            if other.strand != cells.strand
+                || other.rows.end - other.rows.start != cells.rows.end - cells.rows.start
+                || other.columns.end - other.columns.start
+                    != cells.columns.end - cells.columns.start
+            {
+                return None;
+            }
+            other_bases.clear();
+            let rows = other.rows.end - other.rows.start;
+            input
+                .table
+                .copy_bases(other.rows.start, rows, &mut other_bases)
+                .ok()?;
+            let (then, then_scores) = other.kernel_input(&other_bases, window, offset, config);
+            if then_scores != scores || then.query != aligned.query || then.contig != aligned.contig
+            {
+                return None;
+            }
+            moved(found, then, aligned)
+        })
+    });
+    #[cfg(test)]
+    if earlier.is_some() {
+        SAME_FOUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let found = match earlier {
+        Some(found) => found,
+        None => {
+            let found = kernel(workspace, aligned, cells.strand, scores)?;
+            if let Some(key) = key {
+                results
+                    .same
+                    .entry(key)
+                    .or_default()
+                    .push(results.kernels.len());
+            }
+            found
+        }
+    };
+    results.kernels.push((cells.clone(), found.clone()));
+    Ok(found)
+}
+
+/// The kernel result `found` of the input `then`, moved to the positions of the same bases in
+/// `now`. `None` when a position would not fit.
+fn moved(
+    found: &Option<Alignment>,
+    then: AlignmentInput<'_>,
+    now: AlignmentInput<'_>,
+) -> Option<Option<Alignment>> {
+    let Some(alignment) = found else {
+        return Some(None);
+    };
+    let shift = |interval: Interval, from: u64, to: u64| {
+        let start = (interval.start - from).checked_add(to)?;
+        let end = (interval.end - from).checked_add(to)?;
+        Interval::new(start, end).ok()
+    };
+    Some(Some(Alignment {
+        query_interval: shift(
+            alignment.query_interval,
+            then.query_offset,
+            now.query_offset,
+        )?,
+        contig_interval: shift(
+            alignment.contig_interval,
+            then.contig_offset,
+            now.contig_offset,
+        )?,
+        runs: alignment.runs.clone(),
+        ..*alignment
+    }))
 }
 
 /// The smallest box that holds `cells` and the boxes of the later walks near its walk (on the

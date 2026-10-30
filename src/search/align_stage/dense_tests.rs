@@ -496,3 +496,81 @@ fn repeat_join_kept() {
     assert!(aligned.decision.mosaic.covered_bases >= 520);
     assert!(cigars(&aligned).contains(&"20=1D20=".to_string()));
 }
+
+/// Aligns `contig` as one window with and without the lookup of kernel boxes with the same
+/// input, and returns both results and their seconds.
+fn with_and_without_same(
+    query: &[u8],
+    contig: &[u8],
+    circular: bool,
+    rule: &DecisionRule,
+) -> ((AlignedEntry, f64), (AlignedEntry, f64)) {
+    use crate::align::SAME_OFF;
+    use std::sync::atomic::Ordering;
+    let directory = tempfile::tempdir().unwrap();
+    let shard = build(
+        directory.path(),
+        &single_contig_entries(&[("dense", contig)]),
+    );
+    let located = whole_contigs(&shard, 0, query.len() as u64);
+    let run = |off: bool| {
+        SAME_OFF.store(off, Ordering::Relaxed);
+        let clock = std::time::Instant::now();
+        let aligned = align_located(&shard, query, circular, &located, rule);
+        let seconds = clock.elapsed().as_secs_f64();
+        eprintln!("lookups off {off}: {seconds:.3} s");
+        (aligned, seconds)
+    };
+    let looked_up = run(false);
+    let aligned_all = run(true);
+    SAME_OFF.store(false, Ordering::Relaxed);
+    (looked_up, aligned_all)
+}
+
+#[test]
+fn same_kernel_inputs_reused() {
+    // A homopolymer entry, as one in the screen of SPIRE assemblies, against a query with two
+    // runs of its base: many kernel boxes hold the same bases at other positions.
+    use crate::align::SAME_FOUND;
+    use std::sync::atomic::Ordering;
+    let mut query = random_bases(&mut rng(91), 600);
+    query[200..260].fill(b'C');
+    query[400..430].fill(b'C');
+    let contig = vec![b'C'; 4_000];
+    let before = SAME_FOUND.load(Ordering::Relaxed);
+    let ((looked_up, _), (aligned_all, _)) =
+        with_and_without_same(&query, &contig, false, &rule("0.05"));
+    assert_eq!(looked_up, aligned_all);
+    assert!(SAME_FOUND.load(Ordering::Relaxed) > before);
+}
+
+#[test]
+#[ignore = "timing: windows dumped by a screen run, in the directory of JAM_DUMPS"]
+fn dumped_windows_timed() {
+    let directory = std::env::var("JAM_DUMPS").unwrap();
+    let mut names: Vec<String> = std::fs::read_dir(&directory)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            name.strip_suffix(".query").map(str::to_string)
+        })
+        .collect();
+    names.sort();
+    for name in names {
+        let read = |suffix: &str| std::fs::read(format!("{directory}/{name}.{suffix}")).unwrap();
+        let circular = name.ends_with("circular");
+        // The rule of the screen of SPIRE assemblies.
+        let screen_rule = DecisionRule {
+            min_query_coverage: "0.5".parse().unwrap(),
+            min_identity: 0.95,
+            min_fragment_identity: 0.9,
+            min_fragment_columns: 40,
+            min_contig_coverage: 0.5,
+            ..DecisionRule::default()
+        };
+        let ((looked_up, reused), (aligned_all, all)) =
+            with_and_without_same(&read("query"), &read("window"), circular, &screen_rule);
+        assert_eq!(looked_up, aligned_all);
+        println!("{name}: looked up {reused:.3} s aligned all {all:.3} s");
+    }
+}
