@@ -540,3 +540,75 @@ fn dense_runs_timed() {
         );
     }
 }
+
+#[test]
+fn index_after_lookback() {
+    assert!(!index_from(64 * 1_000, 1_000));
+    assert!(index_from(64 * 1_000 + 1, 1_000));
+}
+
+#[test]
+fn wide_gaps_link_as_one_by_one() {
+    // A largest gap of 10,000 drifts up to 2,050 diagonals: on a circular query a lookup could
+    // need more groups than it holds, so the predecessors are examined one by one.
+    let query = random_bases(&mut rng(60), 9_000);
+    let mut random = rng(61);
+    let chains = ChainConfig {
+        max_gap: 10_000,
+        ..ChainConfig::default()
+    };
+    for circular in [false, true] {
+        let table = QueryTable::new(&query, circular, AnchorConfig::default(), chains).unwrap();
+        let mut anchors = Vec::new();
+        for contig in (0..20_000u32).step_by(11) {
+            for _ in 0..random.random_range(0..40u32) {
+                anchors.push(Anchor {
+                    strand: Strand::Forward,
+                    contig,
+                    query: random.random_range(0..9_000),
+                });
+            }
+        }
+        anchors.sort_unstable();
+        anchors.dedup();
+        let drift = DRIFT_BASES + 10_000 / DRIFT_SHARE;
+        assert_eq!(
+            DiagonalIndex::new(&table, &anchors, 0, drift).is_some(),
+            !circular
+        );
+        let mut examined = Examined::new(u64::MAX, &|| false);
+        let links = chain_links(&table, &anchors, &mut examined).unwrap();
+        let found: Vec<(i64, usize, i64)> = links
+            .iter()
+            .map(|link| (link.score, link.previous, link.span))
+            .collect();
+        assert_eq!(found, links_one_by_one(&table, &anchors));
+    }
+}
+
+#[test]
+fn index_priced() {
+    // The index is built only when it fits beside what the window's anchors are priced at.
+    let query = random_bases(&mut rng(62), 9_000);
+    let table = QueryTable::new(
+        &query,
+        false,
+        AnchorConfig::default(),
+        ChainConfig::default(),
+    )
+    .unwrap();
+    let anchors: Vec<Anchor> = (0..1_000u32)
+        .map(|at| Anchor {
+            strand: Strand::Forward,
+            contig: 30 * at,
+            query: (7 * at) % 9_000,
+        })
+        .collect();
+    let drift = DRIFT_BASES + 5_000 / DRIFT_SHARE;
+    assert!(DiagonalIndex::new(&table, &anchors, 0, drift).is_some());
+    let mut most = 0;
+    while anchor_bytes(most + 1, &table) <= CHAINING_BYTES {
+        most += 1;
+    }
+    assert!(DiagonalIndex::new(&table, &anchors, most, drift).is_none());
+}

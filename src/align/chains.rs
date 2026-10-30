@@ -100,6 +100,7 @@ pub fn window_chains(
     let mut chains = Vec::new();
     let split = scratch.partition_point(|anchor| anchor.strand == Strand::Forward);
     let mut examined = Examined::new(MAX_EXAMINED, stopped);
+    examined.window_anchors = scratch.len();
     for strand in [&scratch[..split], &scratch[split..]] {
         chain_anchors(table, strand, &mut chains, &mut examined)?;
     }
@@ -340,8 +341,7 @@ const LOOKBACK: usize = 64;
 const DIAGONALS: i64 = 1 << 10;
 
 /// The anchors of one strand grouped by diagonal (contig less query position), each group in
-/// anchor order. Its 4 bytes per anchor fit in what `anchor_bytes` prices per anchor beyond the
-/// anchors, links, order and chains that chaining holds.
+/// anchor order: 4 bytes per anchor and per group.
 struct DiagonalIndex {
     lowest: i64,
     starts: Vec<u32>,
@@ -349,30 +349,50 @@ struct DiagonalIndex {
 }
 
 impl DiagonalIndex {
-    fn new(anchors: &[Anchor]) -> Self {
+    /// The index of `anchors`, whose window gives `window_anchors` anchors, for links that drift
+    /// at most `drift`. `None` when one lookup could need more groups than `Near` holds, or when
+    /// the index and what `anchor_bytes` prices for the window pass `CHAINING_BYTES`.
+    fn new(
+        table: &QueryTable,
+        anchors: &[Anchor],
+        window_anchors: usize,
+        drift: i64,
+    ) -> Option<Self> {
+        let centres = if table.circular() { 2 } else { 1 };
+        if centres * ((2 * drift) / DIAGONALS + 2) > NEAR_GROUPS as i64 {
+            return None;
+        }
         let diagonal = |anchor: &Anchor| i64::from(anchor.contig) - i64::from(anchor.query);
         let lowest = anchors.iter().map(diagonal).min().unwrap_or(0);
         let highest = anchors.iter().map(diagonal).max().unwrap_or(0);
+        let groups = ((highest - lowest) / DIAGONALS) as usize + 1;
+        let bytes = (anchors.len() + groups + 2) * std::mem::size_of::<u32>();
+        let priced = anchor_bytes(window_anchors.max(anchors.len()), table);
+        if priced.saturating_add(bytes) > CHAINING_BYTES {
+            return None;
+        }
         let group = |anchor: &Anchor| ((diagonal(anchor) - lowest) / DIAGONALS) as usize;
-        let mut starts = vec![0u32; ((highest - lowest) / DIAGONALS) as usize + 2];
+        // Counts at `group + 2`, summed: `starts[group + 1]` is where the group starts, and it
+        // moves to the group's end as its anchors are placed.
+        let mut starts = vec![0u32; groups + 2];
         for anchor in anchors {
-            starts[group(anchor) + 1] += 1;
+            starts[group(anchor) + 2] += 1;
         }
         for at in 1..starts.len() {
             starts[at] += starts[at - 1];
         }
-        let mut filled = starts.clone();
         let mut order = vec![0u32; anchors.len()];
         for (index, anchor) in anchors.iter().enumerate() {
-            let at = &mut filled[group(anchor)];
+            let at = &mut starts[group(anchor) + 1];
             order[*at as usize] = index as u32;
             *at += 1;
         }
-        Self {
+        starts.pop();
+        Some(Self {
             lowest,
             starts,
             order,
-        }
+        })
     }
 
     /// The anchors before index `end` whose diagonal is within `drift` of the diagonal of
@@ -383,7 +403,7 @@ impl DiagonalIndex {
         let length = i64::from(table.query_length());
         let last = self.starts.len() as i64 - 2;
         let mut near = Near {
-            heads: [&[]; 8],
+            heads: [&[]; NEAR_GROUPS],
             count: 0,
         };
         let mut previous = -1;
@@ -426,9 +446,18 @@ impl Iterator for Predecessors<'_> {
     }
 }
 
-/// Anchor indices from up to eight groups of the diagonal index, highest first.
+/// Whether a strand of `anchors` anchors that examined `total` predecessors so far looks up
+/// the next ones by diagonal: once it passed the lookback of every anchor.
+fn index_from(total: u64, anchors: usize) -> bool {
+    total > (LOOKBACK * anchors) as u64
+}
+
+/// Groups of the diagonal index that one lookup reads at most.
+const NEAR_GROUPS: usize = 8;
+
+/// Anchor indices from up to `NEAR_GROUPS` groups of the diagonal index, highest first.
 struct Near<'a> {
-    heads: [&'a [u32]; 8],
+    heads: [&'a [u32]; NEAR_GROUPS],
     count: usize,
 }
 
@@ -459,6 +488,8 @@ pub(super) struct Examined<'a> {
     count: u64,
     limit: u64,
     stopped: &'a dyn Fn() -> bool,
+    /// The anchors of the window, priced by `anchor_bytes` (0: those of one strand).
+    window_anchors: usize,
 }
 
 impl<'a> Examined<'a> {
@@ -467,6 +498,7 @@ impl<'a> Examined<'a> {
             count: 0,
             limit,
             stopped,
+            window_anchors: 0,
         }
     }
 
@@ -512,7 +544,7 @@ fn chain_links(
     let length = i64::from(table.query_length());
     // A link drifts at most this far from the diagonal, as its query step is at most the gap.
     let band = DRIFT_BASES + max_gap / DRIFT_SHARE;
-    let (mut index, mut total) = (None, 0u64);
+    let (mut index, mut tried, mut total) = (None, false, 0u64);
     let mut links: Vec<Link> = Vec::with_capacity(anchors.len());
     for (current, anchor) in anchors.iter().enumerate() {
         let (mut best, mut from, mut best_span) = (a, usize::MAX, 0);
@@ -520,8 +552,9 @@ fn chain_links(
         let (mut eligible, mut scanned) = (0, 0u64);
         // Once the predecessors examined pass the lookback of every anchor, as most are far
         // off the diagonal, only those near it are examined, in the same order.
-        if index.is_none() && total > (LOOKBACK * anchors.len()) as u64 {
-            index = Some(DiagonalIndex::new(anchors));
+        if !tried && index_from(total, anchors.len()) {
+            tried = true;
+            index = DiagonalIndex::new(table, anchors, examined.window_anchors, band);
         }
         let predecessors = match &index {
             Some(index) => Predecessors::Near(index.near(table, anchor, end, band)),
