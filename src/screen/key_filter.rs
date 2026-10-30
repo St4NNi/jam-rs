@@ -554,32 +554,58 @@ mod tests {
         let (index, seed_file) = (directory.path().join("shard.jam"), shard.seed_file());
         let path = KeyFilter::write(&index, seed_file, u64::MAX, drop).unwrap();
         let good = std::fs::read(&path).unwrap();
-        let seeds = seed_file.seed_count().to_le_bytes();
-        let bucket_bits = seed_file.bucket_bits().to_le_bytes();
-        let cases: [&[(usize, &[u8])]; 4] = [
-            &[(24, &(1u64 << 60).to_le_bytes())],
-            &[
-                (16, &1u64.to_le_bytes()),
-                (12, &8u32.to_le_bytes()),
-                (24, &(1u64 << 60).to_le_bytes()),
-            ],
-            &[(16, &u64::MAX.to_le_bytes())],
-            &[
-                (36, &u64::MAX.to_le_bytes()),
-                (16, &seeds),
-                (12, &bucket_bits),
+        let (seeds, bucket_bits) = (seed_file.seed_count(), seed_file.bucket_bits());
+        let u64s = |value: u64| value.to_le_bytes().to_vec();
+        let u32s = |value: u32| value.to_le_bytes().to_vec();
+        // Header fields: bucket bits at 12, seeds at 16, filters at 24, blocks at 36.
+        let cases: Vec<Vec<(usize, Vec<u8>)>> = vec![
+            vec![(24, u64s(1 << 60))],
+            vec![(16, u64s(1)), (12, u32s(8)), (24, u64s(1 << 60))],
+            vec![(16, u64s(u64::MAX))],
+            vec![(36, u64s(u64::MAX))],
+            vec![(12, u32s(64))],
+            vec![(12, u32s(65))],
+            vec![(16, u64s(0))],
+            vec![(24, u64s(0))],
+            vec![(36, u64s(0))],
+            vec![(24, u64s(0)), (36, u64s(0)), (16, u64s(0))],
+            vec![(24, u64s(1 << 20))],
+            vec![
+                (16, u64s(seeds)),
+                (12, u32s(bucket_bits)),
+                (24, u64s(u64::MAX)),
             ],
         ];
         for changes in cases {
             let mut bytes = good.clone();
-            for (at, value) in changes {
+            for (at, value) in &changes {
                 bytes[*at..*at + value.len()].copy_from_slice(value);
             }
             let crc = crc32fast::hash(&bytes[..60]);
             bytes[60..64].copy_from_slice(&crc.to_le_bytes());
             std::fs::write(&path, &bytes).unwrap();
-            assert!(KeyFilter::open(&index, seed_file, u64::MAX, drop).is_err());
+            let opened = KeyFilter::open(&index, seed_file, u64::MAX, drop);
+            assert!(opened.is_err(), "{changes:?}");
         }
+        // A file that ends inside its header, its table or a filter.
+        let layout = Layout::of_shard(seed_file).unwrap();
+        for length in [
+            0,
+            30,
+            HEADER_BYTES + 10,
+            TABLE_AT + 8,
+            layout.data_start as usize + 100,
+        ] {
+            std::fs::write(&path, &good[..length]).unwrap();
+            let opened = KeyFilter::open(&index, seed_file, u64::MAX, drop);
+            assert!(opened.is_err(), "{length}");
+        }
+        std::fs::write(&path, &good).unwrap();
+        assert!(
+            KeyFilter::open(&index, seed_file, u64::MAX, drop)
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Two writers at the same time each publish a whole file and leave no temporary file.
@@ -588,9 +614,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let shard = test_shard(directory.path(), &[vec![random_bases(&mut rng(5), 30_000)]]);
         let (index, seed_file) = (directory.path().join("shard.jam"), shard.seed_file());
+        // Both writers start together, so their writes overlap.
+        let start = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             for _ in 0..2 {
-                scope.spawn(|| KeyFilter::write(&index, seed_file, u64::MAX, drop).unwrap());
+                scope.spawn(|| {
+                    start.wait();
+                    KeyFilter::write(&index, seed_file, u64::MAX, drop).unwrap()
+                });
             }
         });
         let mapped = KeyFilter::open(&index, seed_file, u64::MAX, drop);
