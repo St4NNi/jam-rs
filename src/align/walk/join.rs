@@ -67,8 +67,11 @@ impl JoinScratch {
             let contig = walk.contig + if end { walk.length } else { 0 };
             (walk.strand.is_reverse(), contig, index)
         };
-        // The buffers of the last window go first, so a window never holds two sets.
+        // The buffers of the last window go first, so a window never holds two sets. The piece
+        // matrix, at most the reach on each side, keeps buffers that already fit and frees the
+        // others before it takes new ones.
         (self.starts, self.ends, self.linked, self.parts, self.piece) = Default::default();
+        self.matrix.fit(reach(context) as usize + 1);
         self.starts = (0..walks.len() as u32).collect();
         self.starts.sort_unstable_by_key(|&index| key(index, false));
         self.ends = (0..walks.len() as u32).collect();
@@ -79,8 +82,6 @@ impl JoinScratch {
         self.linked = Vec::with_capacity(linked);
         self.parts = Vec::with_capacity(linked);
         self.piece = Vec::with_capacity(reach(context) as usize);
-        // A piece is at most the reach on each side.
-        self.matrix.fit(reach(context) as usize + 1);
     }
 
     /// The bytes the walk orders, linked walks and parts hold now.

@@ -489,3 +489,67 @@ fn join_matrix_within_price() {
         assert!(scratch.held_bytes() <= price, "{}", scratch.held_bytes());
     }
 }
+
+#[test]
+fn join_transitions_within_price() {
+    // Windows of 2 and 100,000 walks with reaches of 1,039 and 527 bases, joined or not: at
+    // every change of window all buffers together, the piece matrix too, stay within the larger
+    // price of the two windows, and after it within the price of the new one.
+    let query = random_bases(&mut rng(35), 3_000);
+    let table = linear(&query);
+    let context = |max_drift: u32| JoinContext {
+        table: &table,
+        band: BandConfig {
+            max_drift,
+            ..BandConfig::default()
+        },
+        limits: JoinLimits {
+            min_columns: 50,
+            min_identity: 0.0,
+        },
+    };
+    let (wide, narrow) = (context(1_024), context(512));
+    let pair: Vec<Walk> = [0, 830]
+        .map(|start| Walk {
+            strand: Strand::Forward,
+            contig: start,
+            query: start,
+            length: 30,
+        })
+        .to_vec();
+    let many: Vec<Walk> = (0..100_000u32)
+        .map(|at| Walk {
+            strand: Strand::Forward,
+            contig: 7 * at,
+            query: (13 * at) % 2_900,
+            length: 20,
+        })
+        .collect();
+    // (walks, context, whether a join is made)
+    let windows = [
+        (&pair, &wide, false),
+        (&many, &narrow, false),
+        (&pair, &wide, true),
+        (&many, &narrow, false),
+        (&pair, &narrow, true),
+        (&pair, &wide, true),
+        (&many, &wide, false),
+        (&pair, &narrow, false),
+    ];
+    let mut scratch = JoinScratch::default();
+    let mut last_price = 0;
+    for (walks, context, join) in windows {
+        let price = JoinScratch::bytes(walks.len(), context);
+        let before = scratch.held_bytes() as isize;
+        let peak = allocation_peak(|| scratch.prepare(walks, context));
+        assert!(
+            before + peak <= price.max(last_price) as isize,
+            "{before} {peak}"
+        );
+        if join {
+            scratch.join_through(walks, 0, &query, 0, context).unwrap();
+        }
+        assert!(scratch.held_bytes() <= price, "{}", scratch.held_bytes());
+        last_price = price;
+    }
+}

@@ -28,22 +28,28 @@ pub(in crate::align) struct EndpointWorkspace {
 
 impl EndpointWorkspace {
     /// Holds exactly the buffers of `affine_path` matrices of at most `side` rows and columns,
-    /// so they never grow past them and keep nothing more from larger matrices before. Buffers
-    /// of another size are freed before the new ones are taken.
+    /// so they never grow past them and keep nothing more from larger matrices before. All
+    /// buffers of another size are freed before any new one is taken.
     pub(in crate::align) fn fit(&mut self, side: usize) {
-        fn exactly<T>(buffer: &mut Vec<T>, capacity: usize) {
+        let (cells, operations) = (side * side, 2 * side.saturating_sub(1));
+        fn free<T>(buffer: &mut Vec<T>, capacity: usize) {
             if buffer.capacity() != capacity {
                 *buffer = Vec::new();
+            }
+        }
+        fn take<T>(buffer: &mut Vec<T>, capacity: usize) {
+            if buffer.capacity() != capacity {
                 *buffer = Vec::with_capacity(capacity);
             }
         }
-        exactly(&mut self.previous, side * side);
-        for row in &mut self.rows {
-            exactly(row, side);
-        }
-        exactly(&mut self.operations, 2 * side.saturating_sub(1));
-        exactly(&mut self.left_query, 0);
-        exactly(&mut self.left_contig, 0);
+        free(&mut self.previous, cells);
+        self.rows.iter_mut().for_each(|row| free(row, side));
+        free(&mut self.operations, operations);
+        free(&mut self.left_query, 0);
+        free(&mut self.left_contig, 0);
+        take(&mut self.previous, cells);
+        self.rows.iter_mut().for_each(|row| take(row, side));
+        take(&mut self.operations, operations);
     }
 
     /// The bytes all buffers hold now.
