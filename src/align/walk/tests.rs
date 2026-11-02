@@ -509,14 +509,18 @@ fn join_transitions_within_price() {
         },
     };
     let (wide, narrow) = (context(1_024), context(512));
-    let pair: Vec<Walk> = [0, 830]
-        .map(|start| Walk {
-            strand: Strand::Forward,
-            contig: start,
-            query: start,
-            length: 30,
-        })
-        .to_vec();
+    // Two walks 800 bases apart, beyond the reach of 527 bases, and 500 bases apart.
+    let pair_of = |second: u32| -> Vec<Walk> {
+        [0, second]
+            .map(|start| Walk {
+                strand: Strand::Forward,
+                contig: start,
+                query: start,
+                length: 30,
+            })
+            .to_vec()
+    };
+    let (pair, near_pair) = (pair_of(830), pair_of(530));
     let many: Vec<Walk> = (0..100_000u32)
         .map(|at| Walk {
             strand: Strand::Forward,
@@ -525,16 +529,16 @@ fn join_transitions_within_price() {
             length: 20,
         })
         .collect();
-    // (walks, context, whether a join is made)
+    // (walks, context, whether a join is tried and then whether it is made)
     let windows = [
-        (&pair, &wide, false),
-        (&many, &narrow, false),
-        (&pair, &wide, true),
-        (&many, &narrow, false),
-        (&pair, &narrow, true),
-        (&pair, &wide, true),
-        (&many, &wide, false),
-        (&pair, &narrow, false),
+        (&pair, &wide, None),
+        (&many, &narrow, None),
+        (&pair, &wide, Some(true)),
+        (&many, &narrow, None),
+        (&near_pair, &narrow, Some(true)),
+        (&pair, &wide, Some(true)),
+        (&many, &wide, None),
+        (&pair, &narrow, Some(false)),
     ];
     let mut scratch = JoinScratch::default();
     let mut last_price = 0;
@@ -546,8 +550,9 @@ fn join_transitions_within_price() {
             before + peak <= price.max(last_price) as isize,
             "{before} {peak}"
         );
-        if join {
-            scratch.join_through(walks, 0, &query, 0, context).unwrap();
+        if let Some(made) = join {
+            let joined = scratch.join_through(walks, 0, &query, 0, context).unwrap();
+            assert_eq!(joined.is_some(), made);
         }
         assert!(scratch.held_bytes() <= price, "{}", scratch.held_bytes());
         last_price = price;
