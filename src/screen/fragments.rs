@@ -41,6 +41,7 @@ pub(super) struct BatchAlignment<'a> {
     pub rule: &'a DecisionRule,
     pub align: &'a AlignStageConfig,
     pub flank: u64,
+    pub low_complexity_walks: bool,
     pub control: SearchControl<'a>,
 }
 
@@ -88,7 +89,10 @@ impl BatchAlignment<'_> {
             flank: self.flank,
             verify: None,
         };
-        let query = PreparedQuery::new(&batch.bases, false, self.align)?;
+        let mut query = PreparedQuery::new(&batch.bases, false, self.align)?;
+        if !self.low_complexity_walks {
+            query.skip_low_complexity_walks();
+        }
         let candidates: Vec<PossibleEntry> = (seed_hits.into_iter())
             .map(|(entry, seed_hits)| PossibleEntry {
                 entry,

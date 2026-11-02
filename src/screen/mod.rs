@@ -75,6 +75,9 @@ pub struct ScreenConfig {
     pub contig_dir: Option<PathBuf>,
     /// Stop after the survey: no alignments and no reported entries, only the contig output.
     pub survey_only: bool,
+    /// Walk the copies of low-complexity query k-mers, as `jam search` does. Off by default:
+    /// matches found only through them mean little and can take very long.
+    pub low_complexity_walks: bool,
 }
 
 impl ScreenConfig {
@@ -95,6 +98,7 @@ impl ScreenConfig {
             closest_margin: None,
             contig_dir: None,
             survey_only: false,
+            low_complexity_walks: false,
         }
     }
 

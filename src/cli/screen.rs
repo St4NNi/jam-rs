@@ -50,6 +50,12 @@ pub struct ScreenArgs {
     /// Stop after the survey: align nothing and report no entries, only write --contig-dir
     #[arg(long, requires = "contig_dir")]
     survey_only: bool,
+    /// Also align stretches that match only through low-complexity k-mers (such as repeats of
+    /// one or two bases), as `jam search` does. Off by default: such matches mean little and can
+    /// take very long. Without it, matches found only this way, which builds before this option
+    /// reported, are left out
+    #[arg(long)]
+    low_complexity: bool,
     /// Threads to use [default: all cores]. Up to 16, they form one pool with up to N assemblies
     /// open at once; above 16, pools of 16 (the last one smaller) that each screen one assembly at
     /// a time. A pool works on the batches of its assemblies in parallel
@@ -82,6 +88,7 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
         batch_bases: args.batch_bases,
         contig_dir: args.contig_dir.clone(),
         survey_only: args.survey_only,
+        low_complexity_walks: args.low_complexity,
         ..ScreenConfig::new(args.rule.rule())
     };
     // A shard on S3 is read through a block cache in RAM.
@@ -243,5 +250,21 @@ mod tests {
         assert!(check_names(&gzip, false).is_ok());
         assert!(check_names(&gzip, true).is_err());
         assert!(check_names(&paths(&["/a/x.fa", "/a/y.fa"]), true).is_ok());
+    }
+
+    #[test]
+    fn low_complexity_switch_off_by_default() {
+        #[derive(clap::Parser)]
+        struct Command {
+            #[command(flatten)]
+            args: ScreenArgs,
+        }
+        let parse = |more: &[&str]| {
+            let line = ["jam", "INDEX", "--assemblies", "LIST"].iter().chain(more);
+            let command = <Command as clap::Parser>::parse_from(line);
+            command.args.low_complexity
+        };
+        assert!(!parse(&[]));
+        assert!(parse(&["--low-complexity"]));
     }
 }

@@ -39,6 +39,11 @@ impl PreparedQuery {
         })
     }
 
+    /// Drops the low-complexity k-mers, so that their copies give no dense walks.
+    pub fn skip_low_complexity_walks(&mut self) {
+        self.low = None;
+    }
+
     /// The query bases, in upper case.
     pub fn bases(&self) -> &[u8] {
         self.table.query()

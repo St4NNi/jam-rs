@@ -297,6 +297,7 @@ impl<'a> Screener<'a> {
             rule: &self.config.rule,
             align: &self.config.align,
             flank: self.config.flank,
+            low_complexity_walks: self.config.low_complexity_walks,
             control,
         };
         let mut work = FragmentWork::default();

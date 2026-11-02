@@ -315,6 +315,10 @@ Advanced options:
   gzipped FASTA file per assembly.
 - `--survey-only`: stop after the survey stage. No alignments are computed and no entries are
   reported; only the files in `--contig-dir` are written.
+- `--low-complexity`: also align stretches that match only through low-complexity k-mers (such
+  as repeats of one or two bases), as `jam search` always does. Off by default, because such
+  matches mean little and can make one assembly take days. Without it, the screen output differs
+  from builds before this option for those matches only: they are no longer reported.
 - `--compact`: write one `pair` line per small sequence and assembly instead of the `entry`
   line, without CIGAR strings and gaps, for very large result sets. See [Screening assemblies](#screening-assemblies).
 
