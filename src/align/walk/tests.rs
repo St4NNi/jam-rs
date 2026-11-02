@@ -7,7 +7,7 @@ use crate::align::{
     DenseWalk, JoinContext, JoinLimits, JoinScratch, QueryTable, Strand, Walk, align_dense_walk,
     dense_walks, format_cigar, holds_walk, walk_alignment,
 };
-use crate::test_support::{random_bases, rng};
+use crate::test_support::{allocation_peak, random_bases, rng};
 
 fn walks_of(query: &[u8], window: &[u8], circular: bool) -> (Vec<Walk>, Vec<u8>, QueryTable) {
     let table = QueryTable::new(
@@ -419,7 +419,20 @@ fn join_scratch_within_price() {
         },
     };
     let mut scratch = JoinScratch::default();
-    scratch.prepare(&walks, &context);
+    // Preparing the next window holds no more at any time than the change it makes: the last
+    // window's buffers are freed before the new ones are taken.
+    let prepare = |scratch: &mut JoinScratch, walks: &[Walk]| {
+        let before = scratch.held_bytes() as isize;
+        let peak = allocation_peak(|| scratch.prepare(walks, &context));
+        assert!(
+            peak <= (scratch.held_bytes() as isize - before).max(0),
+            "{peak}"
+        );
+    };
+    prepare(&mut scratch, &walks);
+    prepare(&mut scratch, &walks);
+    prepare(&mut scratch, &walks[..100]);
+    prepare(&mut scratch, &walks);
     let joined = scratch
         .join_through(&walks, 93, &query, 0, &context)
         .unwrap()

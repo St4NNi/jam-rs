@@ -17,6 +17,70 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::runtime::{Handle, Runtime};
 
+/// The allocator of the tests: the system allocator, which also follows the bytes that the
+/// current thread allocates and frees inside `allocation_peak`.
+struct Counting;
+
+thread_local! {
+    /// The bytes held now and at most since `allocation_peak` began, on this thread.
+    static COUNTED: std::cell::Cell<Option<(isize, isize)>> = const { std::cell::Cell::new(None) };
+}
+
+fn counted(bytes: isize) {
+    let _ = COUNTED.try_with(|cell| {
+        if let Some((held, peak)) = cell.get() {
+            cell.set(Some((held + bytes, peak.max(held + bytes))));
+        }
+    });
+}
+
+// SAFETY: every call goes to the system allocator unchanged; the counting touches no memory.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's contract for `alloc` is passed on.
+        let pointer = unsafe { std::alloc::System.alloc(layout) };
+        if !pointer.is_null() {
+            counted(layout.size() as isize);
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // SAFETY: the caller's contract for `alloc_zeroed` is passed on.
+        let pointer = unsafe { std::alloc::System.alloc_zeroed(layout) };
+        if !pointer.is_null() {
+            counted(layout.size() as isize);
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the caller's contract for `dealloc` is passed on.
+        unsafe { std::alloc::System.dealloc(pointer, layout) };
+        counted(-(layout.size() as isize));
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+        // SAFETY: the caller's contract for `realloc` is passed on.
+        let moved = unsafe { std::alloc::System.realloc(pointer, layout, size) };
+        if !moved.is_null() {
+            counted(size as isize - layout.size() as isize);
+        }
+        moved
+    }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// Runs `work` and returns the most bytes it held at once on this thread beyond what it
+/// started with (memory freed before it allocates more lowers the count).
+pub fn allocation_peak(work: impl FnOnce()) -> isize {
+    COUNTED.with(|cell| cell.set(Some((0, 0))));
+    work();
+    COUNTED.with(|cell| cell.take()).map_or(0, |(_, peak)| peak)
+}
+
 /// A random generator that gives the same values for the same seed on every run.
 pub fn rng(seed: u64) -> StdRng {
     StdRng::seed_from_u64(seed)

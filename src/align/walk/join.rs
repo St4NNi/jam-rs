@@ -67,6 +67,8 @@ impl JoinScratch {
             let contig = walk.contig + if end { walk.length } else { 0 };
             (walk.strand.is_reverse(), contig, index)
         };
+        // The buffers of the last window go first, so a window never holds two sets.
+        (self.starts, self.ends, self.linked, self.parts, self.piece) = Default::default();
         self.starts = (0..walks.len() as u32).collect();
         self.starts.sort_unstable_by_key(|&index| key(index, false));
         self.ends = (0..walks.len() as u32).collect();
@@ -84,6 +86,12 @@ impl JoinScratch {
     pub(crate) fn walk_bytes(&self) -> usize {
         (self.starts.capacity() + self.ends.capacity() + self.linked.capacity()) * size_of::<u32>()
             + self.parts.capacity() * size_of::<[Part; 2]>()
+    }
+
+    /// The bytes all buffers but the piece matrix hold now.
+    #[cfg(test)]
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.walk_bytes() + self.piece.capacity()
     }
 
     /// The best qualifying join through walk `at`, of at least two walks, from the oriented
