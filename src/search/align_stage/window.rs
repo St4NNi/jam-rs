@@ -234,6 +234,34 @@ mod tests {
     }
 
     #[test]
+    fn low_complexity_walks_skipped() {
+        let directory = tempfile::tempdir().unwrap();
+        let contig = [random_bases(&mut rng(7), 3000), vec![b'T'; 200]].concat();
+        let shard = shard_of(directory.path(), &contig);
+        let packed = shard.packed(0).unwrap();
+        let config = AlignStageConfig::default();
+        let bases = [&contig[1000..2000], &[b'A'; 100][..]].concat();
+        let kept = PreparedQuery::new(&bases, false, &config).unwrap();
+        let mut skipped = PreparedQuery::new(&bases, false, &config).unwrap();
+        skipped.skip_low_complexity_walks();
+        let read = |range: Range<u64>, query: &PreparedQuery| {
+            let (buffers, work) = (&mut WindowBuffers::default(), &mut AlignWork::default());
+            let control = crate::test_support::no_stop();
+            prepare_window(&packed, 0, range, query, &config, buffers, work, control).unwrap()
+        };
+        // The run of T has only anchors of low-complexity k-mers: walks with the table, none
+        // without it.
+        let (with, without) = (read(3000..3200, &kept), read(3000..3200, &skipped));
+        assert!(with.chains.is_empty() && without.chains.is_empty());
+        assert!(!with.walks.is_empty() && without.walks.is_empty());
+        // A window of ordinary k-mers is read the same both ways.
+        let (with, without) = (read(900..2100, &kept), read(900..2100, &skipped));
+        assert_eq!(with.chains, without.chains);
+        assert_eq!(with.walks, without.walks);
+        assert!(!with.chains.is_empty() && with.walks.is_empty());
+    }
+
+    #[test]
     fn touching_spans_merge() {
         let mut spans = vec![30..40, 0..10, 5..20, 20..25, 50..60];
         merge_spans(&mut spans);

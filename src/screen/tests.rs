@@ -10,6 +10,11 @@ use crate::seeds::reverse_complement;
 use crate::test_support::{build_options, no_stop, random_bases, rng, with_substitutions};
 use std::path::Path;
 
+#[test]
+fn low_complexity_walks_off_by_default() {
+    assert!(!ScreenConfig::default().low_complexity_walks);
+}
+
 /// An index with one entry per item, each a list of contigs.
 pub(super) fn index_of(directory: &Path, entries: &[(&str, &[&[u8]])]) -> Shard {
     let inputs: Vec<EntryInput> = entries
