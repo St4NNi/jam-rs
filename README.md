@@ -319,7 +319,7 @@ Advanced options:
   bases), as `jam search` always does. Off by default, because such matches mean little and can
   make one assembly take days. Without it, results can differ from earlier builds: alignments and
   their coverage, the per-contig `entries` and `best_score`, and which entries qualify (records can
-  disappear or appear). With it, the screen gives exactly the output of earlier builds.
+  disappear or appear). With it, the screen gives the same results as earlier builds, apart from timing fields.
 - `--compact`: write one `pair` line per small sequence and assembly instead of the `entry`
   line, without CIGAR strings and gaps, for very large result sets. See [Screening assemblies](#screening-assemblies).
 
