@@ -26,6 +26,37 @@ pub(in crate::align) struct EndpointWorkspace {
     left_contig: Vec<u8>,
 }
 
+impl EndpointWorkspace {
+    /// Holds exactly the buffers of `affine_path` matrices of at most `side` rows and columns,
+    /// so they never grow past them and keep nothing more from larger matrices before. Buffers
+    /// of another size are freed before the new ones are taken.
+    pub(in crate::align) fn fit(&mut self, side: usize) {
+        fn exactly<T>(buffer: &mut Vec<T>, capacity: usize) {
+            if buffer.capacity() != capacity {
+                *buffer = Vec::new();
+                *buffer = Vec::with_capacity(capacity);
+            }
+        }
+        exactly(&mut self.previous, side * side);
+        for row in &mut self.rows {
+            exactly(row, side);
+        }
+        exactly(&mut self.operations, 2 * side.saturating_sub(1));
+        exactly(&mut self.left_query, 0);
+        exactly(&mut self.left_contig, 0);
+    }
+
+    /// The bytes all buffers hold now.
+    #[cfg(test)]
+    pub(in crate::align) fn held_bytes(&self) -> usize {
+        self.previous.capacity()
+            + self.rows.iter().map(Vec::capacity).sum::<usize>() * size_of::<[i32; 3]>()
+            + self.operations.capacity() * size_of::<EditOperation>()
+            + self.left_query.capacity()
+            + self.left_contig.capacity()
+    }
+}
+
 /// Where a path of the affine matrix may end.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::align) enum PathEnd {

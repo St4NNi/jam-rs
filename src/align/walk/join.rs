@@ -59,8 +59,8 @@ impl JoinScratch {
             + 2 * reach * (size_of::<EditOperation>() + size_of::<EditRun>())
     }
 
-    /// Orders `walks` by strand and contig start and end. The piece matrix grows to at most
-    /// what `bytes` priced.
+    /// Orders `walks` by strand and contig start and end. The piece matrix holds exactly what
+    /// `bytes` priced.
     pub fn prepare(&mut self, walks: &[Walk], context: &JoinContext<'_>) {
         let key = |index: u32, end: bool| {
             let walk = walks[index as usize];
@@ -79,6 +79,8 @@ impl JoinScratch {
         self.linked = Vec::with_capacity(linked);
         self.parts = Vec::with_capacity(linked);
         self.piece = Vec::with_capacity(reach(context) as usize);
+        // A piece is at most the reach on each side.
+        self.matrix.fit(reach(context) as usize + 1);
     }
 
     /// The bytes the walk orders, linked walks and parts hold now.
@@ -88,10 +90,10 @@ impl JoinScratch {
             + self.parts.capacity() * size_of::<[Part; 2]>()
     }
 
-    /// The bytes all buffers but the piece matrix hold now.
+    /// The bytes all buffers hold now, the piece matrix too.
     #[cfg(test)]
     pub(crate) fn held_bytes(&self) -> usize {
-        self.walk_bytes() + self.piece.capacity()
+        self.walk_bytes() + self.piece.capacity() + self.matrix.held_bytes()
     }
 
     /// The best qualifying join through walk `at`, of at least two walks, from the oriented

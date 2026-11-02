@@ -448,3 +448,44 @@ fn join_scratch_within_price() {
         .unwrap();
     assert!(scratch.walk_bytes() <= price(10));
 }
+
+#[test]
+fn join_matrix_within_price() {
+    // Two-walk windows whose joins align pieces of 800 and then 1,039 bases, then a third
+    // window: all buffers together, the piece matrix too, stay within the price of two walks,
+    // and no window change holds more at any time than the change it makes.
+    let query = random_bases(&mut rng(34), 3_000);
+    let table = linear(&query);
+    let context = JoinContext {
+        table: &table,
+        band: BandConfig::default(),
+        limits: JoinLimits {
+            min_columns: 50,
+            min_identity: 0.0,
+        },
+    };
+    let pair = |gap: u32| {
+        [0, 30 + gap].map(|start| Walk {
+            strand: Strand::Forward,
+            contig: start,
+            query: start,
+            length: 30,
+        })
+    };
+    let price = JoinScratch::bytes(2, &context);
+    let mut scratch = JoinScratch::default();
+    for gap in [800, 1_039, 800] {
+        let walks = pair(gap);
+        let before = scratch.held_bytes() as isize;
+        let peak = allocation_peak(|| scratch.prepare(&walks, &context));
+        assert!(
+            peak <= (scratch.held_bytes() as isize - before).max(0),
+            "{peak}"
+        );
+        let joined = scratch
+            .join_through(&walks, 0, &query, 0, &context)
+            .unwrap();
+        assert!(joined.is_some());
+        assert!(scratch.held_bytes() <= price, "{}", scratch.held_bytes());
+    }
+}
