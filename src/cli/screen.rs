@@ -50,10 +50,9 @@ pub struct ScreenArgs {
     /// Stop after the survey: align nothing and report no entries, only write --contig-dir
     #[arg(long, requires = "contig_dir")]
     survey_only: bool,
-    /// Also align stretches that match only through low-complexity k-mers (such as repeats of
-    /// one or two bases), as `jam search` does. Off by default: such matches mean little and can
-    /// take very long. Without it, matches found only this way, which builds before this option
-    /// reported, are left out
+    /// Also build walks from low-complexity seeds, as `jam search` does and earlier builds did.
+    /// Off by default: alignments, coverage, contig entries and best scores, and which entries
+    /// qualify can then differ from earlier builds
     #[arg(long)]
     low_complexity: bool,
     /// Threads to use [default: all cores]. Up to 16, they form one pool with up to N assemblies
