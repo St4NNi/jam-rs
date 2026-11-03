@@ -390,13 +390,24 @@ The status values:
 | `status` | `reason` | Meaning |
 | --- | --- | --- |
 | `complete` | | Every candidate assembly was evaluated. |
-| `incomplete` | `resource_limit` | An assembly required more memory or work than a limit allows (for example, when a periodic query matches many periodic regions) and could not be evaluated. |
+| `incomplete` | `resource_limit` | An assembly passed a limit of memory or work, and the memory budget left no room to raise the limit, so the assembly could not be evaluated. The message names the assembly and the limit. |
 | `stopped` | `deadline` | The search exceeded `--deadline`. |
 | `stopped` | `asked` | The search was asked to stop (for example, when the program reading standard output closed the pipe). |
 | `failed` | `error` | A search stage or the server failed. The message gives the reason. |
 
 Whenever a query does not end with `complete`, jam writes all remaining output and then exits
 with an error. This applies to every format.
+
+An assembly that passes a limit of memory or work (for example, when a periodic query matches
+many periodic regions) is not given up at once. When the other assemblies of the index file are
+done, jam aligns it again alone, on all threads, with that limit raised. It repeats this while
+the memory budget has room. jam then writes a line on standard error that names the assembly.
+The result is the same as without the limit. The memory budget is the RAM free at the start
+(the lower of the free RAM of the machine and the room left in jam's cgroup), less the
+`--memory` budget when an index file is on S3, and less 1.5 GiB for each index file searched
+at the same time, shared by those index files.
+`jam screen` does the same for the entries of each batch, with the budget shared by the
+assemblies screened at the same time.
 
 ### TSV
 
