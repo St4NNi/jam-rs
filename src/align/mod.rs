@@ -21,12 +21,12 @@ pub use chains::{
 pub use cigar::parse_cigar;
 pub use cigar::{EditOperation, EditRun, format_cigar};
 pub use kernel::{AlignmentConfig, AlignmentWorkspace};
-#[cfg(test)]
-pub(crate) use walk::{SAME_FOUND, SAME_OFF};
 pub use walk::{
     DenseResults, DenseWalk, DenseWalks, JoinContext, JoinLimits, JoinScratch, Walk,
     align_dense_walk, dense_walks, gap_continuation, holds_walk, long_enough, walk_alignment,
 };
+#[cfg(test)]
+pub(crate) use walk::{SAME_FOUND, SAME_OFF};
 
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
