@@ -21,7 +21,7 @@ jobs:
         with:
           toolchain: nightly
           components: llvm-tools-preview
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: cache
         name: Enable Workflow Cache
         uses: Swatinem/rust-cache@v2
@@ -39,7 +39,7 @@ jobs:
 
       - id: upload
         name: Upload Coverage Report
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           verbose: true
           token: ${{ secrets.CODECOV_TOKEN }}
