@@ -371,6 +371,9 @@ At `--level align`, jam writes one line per confirmed assembly:
   ordered along the contig.
 - `alt`: alternative fragments in the same format (included only when present). These fragments
   cover no new query bases (for example, additional copies of a repeated region).
+- `limited`: only for an assembly decided within its limits (see below): `limit` names the limit
+  it passed and the size it needed, `kept` is the share of the bytes of its fragments that was
+  kept, and `left_out_contigs` (when not 0) counts the contigs left out.
 
 Share and identity values are rounded to 4 decimal places.
 
@@ -390,7 +393,7 @@ The status values:
 | `status` | `reason` | Meaning |
 | --- | --- | --- |
 | `complete` | | Every candidate assembly was evaluated. |
-| `incomplete` | `resource_limit` | An assembly passed a limit of memory or work, and the memory budget left no room to raise the limit, so the assembly could not be evaluated. The message names the assembly and the limit. |
+| `incomplete` | `resource_limit` | An assembly passed a limit of memory or work and could not be evaluated even within its limits. This should not happen (see below). The message names the assembly and the limit. |
 | `stopped` | `deadline` | The search exceeded `--deadline`. |
 | `stopped` | `asked` | The search was asked to stop (for example, when the program reading standard output closed the pipe). |
 | `failed` | `error` | A search stage or the server failed. The message gives the reason. |
@@ -398,16 +401,28 @@ The status values:
 Whenever a query does not end with `complete`, jam writes all remaining output and then exits
 with an error. This applies to every format.
 
-An assembly that passes a limit of memory or work (for example, when a periodic query matches
-many periodic regions) is not given up at once. When the other assemblies of the index file are
-done, jam aligns it again alone, on all threads, with that limit raised. It repeats this while
-the memory budget has room. jam then writes a line on standard error that names the assembly.
-The result is the same as without the limit. The memory budget is the RAM free at the start
-(the lower of the free RAM of the machine and the room left in jam's cgroup), less the
-`--memory` budget when an index file is on S3, and less 1.5 GiB for each index file searched
-at the same time, shared by those index files.
-`jam screen` does the same for the entries of each batch, with the budget shared by the
-assemblies screened at the same time.
+jam never gives up an assembly for a limit of memory or work (for example, when a periodic
+query matches many periodic regions). When an assembly passes one, jam aligns it again alone,
+on all threads, once the other assemblies of the index file are done. The limit is raised to
+what the assembly needs and a quarter more, or to four times the old limit if that is more,
+as far as the memory budget allows. If it passes a limit again, jam repeats this. The result
+is the same as without the limit, and jam writes a line on standard error that names the
+assembly.
+
+When the memory budget cannot raise the limit far enough, jam decides the assembly within its
+limits as a last resort: it keeps the fragments of the highest alignment scores that fit, and
+leaves out a contig that passes another limit. Its JSON line then has a `limited` field, jam
+writes a line on standard error for it and a count at the end, and the search still ends
+`complete` with exit code 0. Such an assembly may lack fragments and so be missing from the
+results.
+
+jam sets the memory budget by itself. It is the RAM free at the start: the lower of the free RAM
+of the machine and the room left in jam's cgroup (its `memory.max` and `memory.high`, as under
+Slurm or in a container), less the `--memory` budget when an index file is on S3, and less
+1.5 GiB for each index file searched at the same time, shared by those index files. If jam
+cannot find the free RAM, it uses a fixed 4 GiB and says so. `jam screen` does the same for
+the entries of each batch, with the budget shared by the assemblies screened at the same time;
+the summary line of an assembly then counts them in `limited_entries`.
 
 ### TSV
 
