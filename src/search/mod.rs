@@ -19,8 +19,8 @@ mod times;
 #[cfg(test)]
 pub use align_stage::align_entry;
 pub use align_stage::{
-    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, PreparedQuery,
-    entry_fragments,
+    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, AlignedEntry, Limited,
+    PreparedQuery, entry_fragments,
 };
 pub use bound::CoverageBound;
 pub use control::{SearchControl, Stopped};

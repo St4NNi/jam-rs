@@ -42,6 +42,10 @@ pub struct AlignStageConfig {
     /// The memory that an entry may hold when it passed a limit and is aligned again alone: its
     /// limits are raised only as far as `footprint` stays within it (0: never raised).
     pub memory_budget: u64,
+    /// The last resort for an entry whose limit the budget cannot raise: it is decided within its
+    /// limits. Its fragments of the highest scores within the fragment limit are kept, and a
+    /// contig that passes another limit is left out.
+    pub keep_within_limits: bool,
 }
 
 /// A limit of stage 3 that an entry can pass, and that is raised when the entry is aligned again.
@@ -89,6 +93,7 @@ impl Default for AlignStageConfig {
             max_dense_bytes: CHAINING_BYTES,
             max_examined: MAX_EXAMINED,
             memory_budget: 4 << 30,
+            keep_within_limits: false,
         }
     }
 }

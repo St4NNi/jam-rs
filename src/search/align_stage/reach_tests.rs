@@ -139,7 +139,7 @@ fn short_entries_stop() {
                 no_stop(),
             )
             .unwrap();
-            let (fragments, all_work) = entry_fragments(
+            let (fragments, all_work, _) = entry_fragments(
                 &packed,
                 &prepared,
                 &located,

@@ -696,3 +696,77 @@ fn bad_windows_rejected() {
         Err(AlignStageError::InvalidConfig(_))
     ));
 }
+
+/// As the last resort, an entry is decided within its limits: of two copies of the query only
+/// the fragment of the higher score fits, the entry is still confirmed, and it says what it kept.
+#[test]
+fn decided_within_limits() {
+    let directory = tempfile::tempdir().unwrap();
+    let query = random_bases(&mut rng(31), 2_000);
+    let changed = with_substitutions(&mut rng(32), &query, 0.97);
+    let flank = |seed| random_bases(&mut rng(seed), 1_500);
+    let sequence = [flank(33), query.clone(), flank(34), changed, flank(35)].concat();
+    let shard = build(
+        directory.path(),
+        &single_contig_entries(&[("e", &sequence)]),
+    );
+    let located = located(&shard, 0, &query, 300);
+    let rule = rule("0.9");
+    let run = |config: &AlignStageConfig| {
+        let prepared = PreparedQuery::new(&query, false, config).unwrap();
+        let workspace = AlignStageWorkspace::default();
+        align_entry(
+            &shard,
+            &prepared,
+            &located,
+            config,
+            &rule,
+            &workspace,
+            no_stop(),
+        )
+    };
+    let default = run(&AlignStageConfig::default()).unwrap();
+    assert!(default.decision.qualifies && default.limited.is_none());
+    let all = fragments(&default);
+    assert_eq!(all.len(), 2);
+    let best = all
+        .iter()
+        .max_by_key(|fragment| fragment.alignment.score)
+        .unwrap();
+    // Room for the best fragment and half of another.
+    let bytes = place::fragment_bytes(best);
+    let config = AlignStageConfig {
+        max_fragment_bytes: bytes + bytes / 2,
+        ..AlignStageConfig::default()
+    };
+    assert!(matches!(
+        run(&config),
+        Err(AlignStageError::TooLarge { .. })
+    ));
+    let within = AlignStageConfig {
+        keep_within_limits: true,
+        ..config
+    };
+    let limited = run(&within).unwrap();
+    assert!(limited.decision.qualifies);
+    let kept = fragments(&limited);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].alignment, best.alignment);
+    // The fragments kept stay within the limit.
+    assert!(place::fragment_bytes(kept[0]) <= within.max_fragment_bytes);
+    // Of all fragments found, also those the mosaic does not use, some were left out.
+    let note = limited.limited.unwrap();
+    assert!(note.kept > 0.0 && note.kept < 1.0, "{}", note.kept);
+    assert_eq!(note.left_out_contigs, 0);
+    assert!(note.limit.contains("the fragments of one entry need"));
+    // A contig that passes another limit is left out, and the entry is still decided.
+    let tight = AlignStageConfig {
+        max_window_bases: 10,
+        ..within
+    };
+    let left_out = run(&tight).unwrap();
+    assert!(!left_out.decision.qualifies);
+    let note = left_out.limited.unwrap();
+    assert_eq!((note.left_out_contigs, note.kept), (1, 1.0));
+    assert!(note.limit.contains("the alignment windows of one contig"));
+}

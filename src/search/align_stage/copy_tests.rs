@@ -189,7 +189,7 @@ fn substituted_copies_covered() {
         };
         let prepared = PreparedQuery::new(&case.query, false, &config).unwrap();
         let packed = shard.packed(entry as u32).unwrap();
-        let (fragments, _) = entry_fragments(
+        let (fragments, _, _) = entry_fragments(
             &packed,
             &prepared,
             &located,
@@ -259,7 +259,7 @@ fn short_copies_confirmed() {
         let found = entry_fragments(
             &packed, &prepared, &located, &config, &rule, &workspace, control,
         );
-        let (fragments, _) = found.unwrap();
+        let (fragments, _, _) = found.unwrap();
         let copy = Interval::new(FLANK as u64, (FLANK + length) as u64).unwrap();
         let whole = fragments.iter().filter(|fragment| {
             rule.counts_fragment(&fragment.alignment) && fragment.query_segments == [copy]

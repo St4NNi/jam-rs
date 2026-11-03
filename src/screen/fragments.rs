@@ -165,7 +165,7 @@ impl BatchAlignment<'_> {
             return Ok((Vec::new(), work));
         };
         let packed = self.shard.packed(possible.entry)?;
-        let (fragments, align_work) = entry_fragments(
+        let (fragments, align_work, _) = entry_fragments(
             &packed,
             query,
             &located,

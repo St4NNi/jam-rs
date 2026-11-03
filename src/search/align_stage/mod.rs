@@ -150,7 +150,26 @@ pub struct AlignedEntry {
     pub decision: Decision,
     /// The work stage 3 did for the entry.
     pub work: AlignWork,
+    /// How the entry was decided within its limits, when it was.
+    pub limited: Option<Limited>,
 }
+
+/// How an entry was decided within its limits, as the last resort when it passed a limit that
+/// the memory budget could not raise.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Limited {
+    /// The limit it passed: that of the fragments when some were left out, else the first
+    /// limit of a contig left out.
+    pub limit: String,
+    /// The share of the bytes of its fragments that was kept, 0 to 1, over the contigs aligned.
+    pub kept: f64,
+    /// Contigs left out, as they passed a limit other than that of the fragments.
+    pub left_out_contigs: u32,
+}
+
+/// The fragments of an entry (`None` when they cannot reach the coverage), the work, and how
+/// the entry was kept within its limits.
+type EntryFragments = (Option<Vec<Fragment>>, AlignWork, Option<Limited>);
 
 /// Aligns the query in the windows of a located entry of `shard` and decides the entry.
 #[cfg(test)]
@@ -191,7 +210,7 @@ pub fn align_packed_entry(
     };
     let required = rule.min_query_coverage.required_bases(query.length());
     // An entry whose fragments cannot reach the coverage is decided without them.
-    let (fragments, work) = request.fragments(Some(required))?;
+    let (fragments, work, limited) = request.fragments(Some(required))?;
     let fragments = fragments.unwrap_or_default();
     control.check()?;
     let contig_length = |contig: u32| {
@@ -214,12 +233,13 @@ pub fn align_packed_entry(
         entry: located.entry,
         decision,
         work,
+        limited,
     })
 }
 
 /// Aligns the query in the windows of a located entry and returns the fragments without a
-/// decision, for callers that decide over other units, such as the screen. The fragment limits
-/// of `rule` still apply to dense walks.
+/// decision, for callers that decide over other units, such as the screen, and how the entry was
+/// kept within its limits. The fragment limits of `rule` still apply to dense walks.
 pub fn entry_fragments(
     packed: &PackedSequence,
     query: &PreparedQuery,
@@ -228,7 +248,7 @@ pub fn entry_fragments(
     rule: &DecisionRule,
     workspace: &AlignStageWorkspace,
     control: SearchControl<'_>,
-) -> Result<(Vec<Fragment>, AlignWork), AlignStageError> {
+) -> Result<(Vec<Fragment>, AlignWork, Option<Limited>), AlignStageError> {
     let request = EntryRequest {
         packed,
         query,
@@ -238,8 +258,8 @@ pub fn entry_fragments(
         workspace,
         control,
     };
-    let (fragments, work) = request.fragments(None)?;
-    Ok((fragments.unwrap_or_default(), work))
+    let (fragments, work, limited) = request.fragments(None)?;
+    Ok((fragments.unwrap_or_default(), work, limited))
 }
 
 /// Prepared windows an entry keeps at once while its reach is computed; past them, a contig's
@@ -285,11 +305,10 @@ impl EntryRequest<'_> {
 
     /// The fragments of the entry in contig order. With `required`, `None` when the fragments
     /// cannot cover that many query bases: the contigs not aligned yet are counted by their
-    /// reach, and the entry stops once aligned and unaligned contigs together fall short.
-    fn fragments(
-        &self,
-        required: Option<u64>,
-    ) -> Result<(Option<Vec<Fragment>>, AlignWork), AlignStageError> {
+    /// reach, and the entry stops once aligned and unaligned contigs together fall short. Within
+    /// limits, the fragments of the highest scores are kept and contigs that pass another limit
+    /// are left out.
+    fn fragments(&self, required: Option<u64>) -> Result<EntryFragments, AlignStageError> {
         let (config, workspace, control) = (self.config, self.workspace, self.control);
         config.validate()?;
         self.rule.validate()?;
@@ -344,9 +363,11 @@ impl EntryRequest<'_> {
             ContigState::Done(_) => (false, std::cmp::Reverse(0)),
         });
         let batch = order.len().div_ceil(REACH_BATCHES).max(LEAST_BATCH);
+        // The bytes of the fragments of each contig, kept or not.
+        let mut needed = vec![0; states.len()];
         for part in order.chunks(batch) {
             if required.is_some_and(|required| self.short_of(&states, required)) {
-                return Ok((None, work));
+                return Ok((None, work, None));
             }
             let taken: Vec<(usize, contig::ContigRound)> = part
                 .iter()
@@ -360,11 +381,11 @@ impl EntryRequest<'_> {
                     },
                 )
                 .collect();
-            let aligned: Vec<(usize, Result<Vec<Fragment>, AlignStageError>, AlignWork)> = taken
+            let aligned: Vec<_> = taken
                 .into_par_iter()
                 .map(|(at, contig_round)| {
                     let mut contig_work = AlignWork::default();
-                    let mut fragments = Collected::new(config.max_fragment_bytes);
+                    let mut fragments = collected(config);
                     let result = control
                         .check()
                         .map_err(AlignStageError::from)
@@ -372,25 +393,67 @@ impl EntryRequest<'_> {
                         .and_then(|job| {
                             job.finish(contig_round, workspace, &mut fragments, &mut contig_work)
                         });
-                    (at, result.and_then(|()| fragments.into_list()), contig_work)
+                    let bytes = fragments.needed();
+                    (
+                        at,
+                        result.and_then(|()| fragments.into_list()),
+                        bytes,
+                        contig_work,
+                    )
                 })
                 .collect();
-            for (at, result, contig_work) in aligned {
+            for (at, result, bytes, contig_work) in aligned {
                 work.add(&contig_work);
+                needed[at] = bytes;
                 states[at] = ContigState::Done(result);
             }
         }
         // Their fragments are added in contig order, so the limit acts as on one thread.
-        let mut fragments = Collected::new(config.max_fragment_bytes);
-        for state in states {
+        let within = config.keep_within_limits;
+        let mut fragments = collected(config);
+        let (mut entry_needed, mut left_out, mut passed) = (0, 0, None);
+        for (state, bytes) in states.into_iter().zip(needed) {
             let ContigState::Done(result) = state else {
                 unreachable!("every contig is aligned");
             };
-            for fragment in result? {
+            let list = match result {
+                Ok(list) => list,
+                // The last resort leaves out a contig that passes a limit.
+                Err(error) if within && error.passed_limit().is_some() => {
+                    left_out += 1;
+                    passed.get_or_insert_with(|| error.to_string());
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            entry_needed += bytes;
+            for fragment in list {
                 fragments.push(fragment);
             }
         }
-        Ok((Some(fragments.into_list()?), work))
+        let list = fragments.into_list()?;
+        let kept: usize = list.iter().map(place::fragment_bytes).sum();
+        let limited = (within && (kept < entry_needed || left_out > 0)).then(|| {
+            let limit = match passed {
+                Some(passed) if kept >= entry_needed => passed,
+                _ => AlignStageError::TooLarge {
+                    what: "the fragments of one entry",
+                    needed: entry_needed as u64,
+                    limit: config.max_fragment_bytes as u64,
+                    kind: Limit::FragmentBytes,
+                }
+                .to_string(),
+            };
+            Limited {
+                limit,
+                kept: match entry_needed {
+                    0 => 1.0,
+                    needed => kept as f64 / needed as f64,
+                },
+                left_out_contigs: left_out,
+            }
+        });
+        Ok((Some(list), work, limited))
     }
 
     /// Whether the aligned fragments and the reach of the contigs not aligned yet cover fewer
@@ -409,6 +472,14 @@ impl EntryRequest<'_> {
             }
         }
         Interval::total_length(&Interval::union(covered)) < required
+    }
+}
+
+/// The collection of the fragments of a contig or an entry under `config`.
+fn collected(config: &AlignStageConfig) -> Collected {
+    match config.keep_within_limits {
+        true => Collected::keeping_best(config.max_fragment_bytes),
+        false => Collected::new(config.max_fragment_bytes),
     }
 }
 
