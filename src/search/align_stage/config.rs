@@ -61,10 +61,10 @@ pub enum Limit {
     Examined,
 }
 
-/// How much higher a limit gets each time an entry passes it.
+/// How much higher a limit gets at least each time an entry passes it.
 const RAISE: u64 = 4;
-/// The most predecessors examined in one window after raising, as a multiple of the default.
-const MAX_EXAMINED_RAISE: u64 = 64;
+/// A raised limit is a multiple of this, so the headroom is not too small.
+const HEADROOM_STEP: u64 = 64 << 10;
 /// Bytes held per resident cell of an alignment, counted high.
 const CELL_BYTES: u64 = 4;
 
@@ -136,8 +136,10 @@ impl AlignStageConfig {
     }
 
     /// The settings to align an entry again that passed `limit` and needed `needed` (when known):
-    /// that limit four times higher, or `needed` when that is more, but only as high as the
-    /// memory budget holds the footprint on `threads` threads. `None` when it cannot be raised.
+    /// that limit four times higher, or `needed` and a quarter more when that is more, but only as
+    /// high as the memory budget holds the footprint on `threads` threads. The chaining work holds
+    /// no memory; it rises at most to its default times the share that the budget exceeds the
+    /// footprint. `None` when the limit cannot be raised.
     pub fn raised(&self, limit: Limit, needed: Option<u64>, threads: usize) -> Option<Self> {
         let per_thread = threads.max(1) as u64;
         // The bytes that one more unit of the limit adds to the footprint.
@@ -150,13 +152,23 @@ impl AlignStageConfig {
         };
         let value = self.limit_value(limit);
         let highest = match weight {
-            0 => MAX_EXAMINED.saturating_mul(MAX_EXAMINED_RAISE),
+            0 => {
+                let share = u128::from(self.memory_budget) * u128::from(MAX_EXAMINED);
+                let highest = share / u128::from(self.footprint(threads).max(1));
+                u64::try_from(highest).unwrap_or(u64::MAX)
+            }
             weight => {
                 let others = (self.footprint(threads)).saturating_sub(value.saturating_mul(weight));
                 self.memory_budget.saturating_sub(others) / weight
             }
         };
-        let raised = (value.saturating_mul(RAISE).max(needed.unwrap_or(0))).min(highest);
+        let room = |needed: u64| needed.saturating_add(needed / 4);
+        let needed = needed.map_or(0, |needed| {
+            room(needed)
+                .checked_next_multiple_of(HEADROOM_STEP)
+                .unwrap_or(u64::MAX)
+        });
+        let raised = (value.saturating_mul(RAISE).max(needed)).min(highest);
         (raised > value).then(|| self.with_limit(limit, raised))
     }
 
@@ -238,12 +250,24 @@ mod tests {
         assert_eq!(prepared.max_prepared_bytes, 256 << 20);
         let prepared = config.raised(Limit::PreparedBytes, None, 64);
         assert!(prepared.is_none());
-        // Chaining work is not memory: it rises up to 64 times its default.
-        let mut examined = config;
-        for _ in 0..3 {
-            examined = examined.raised(Limit::Examined, None, 4).unwrap();
-        }
-        assert_eq!(examined.max_examined, 64 * MAX_EXAMINED);
+        // What the entry needed and a quarter more, in steps of 64 KiB.
+        let large = AlignStageConfig {
+            memory_budget: 64 << 30,
+            ..config
+        };
+        let raised = large
+            .raised(Limit::FragmentBytes, Some(10 << 30), 4)
+            .unwrap();
+        assert_eq!(raised.max_fragment_bytes, 25 << 29);
+        let raised = large
+            .raised(Limit::WindowBases, Some(200 << 20), 4)
+            .unwrap();
+        assert_eq!(raised.max_window_bases, 250 << 20);
+        // Chaining work holds no memory: it rises by the share that the budget exceeds the
+        // footprint, 4 GiB over 1,856 MiB here.
+        let examined = config.raised(Limit::Examined, None, 4).unwrap();
+        let share = u128::from(MAX_EXAMINED) * (4 << 30) / u128::from(config.footprint(4));
+        assert_eq!(u128::from(examined.max_examined), share);
         assert!(examined.raised(Limit::Examined, None, 4).is_none());
         // Only the limit passed changes.
         let dense = config.raised(Limit::DenseBytes, None, 4).unwrap();
