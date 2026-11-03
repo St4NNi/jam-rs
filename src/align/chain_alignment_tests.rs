@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::align::{
-    Anchor, AnchorConfig, Chain, ChainConfig, EditOperation, Strand, format_cigar, split_by_drift,
-    window_chains,
+    Anchor, AnchorConfig, CHAINING_BYTES, Chain, ChainConfig, EditOperation, MAX_EXAMINED, Strand,
+    format_cigar, split_by_drift, window_chains,
 };
 use crate::seeds::reverse_complement;
 use crate::test_support::{random_bases, rng, with_substitutions};
@@ -22,9 +22,16 @@ fn alignments(query: &[u8], window: &[u8], circular: bool) -> Vec<Alignment> {
     )
     .unwrap();
     let mut workspace = AlignmentWorkspace::default();
-    let chains = window_chains(&table, window, &mut Vec::new(), &|| false)
-        .unwrap()
-        .chains;
+    let chains = window_chains(
+        &table,
+        window,
+        &mut Vec::new(),
+        CHAINING_BYTES,
+        MAX_EXAMINED,
+        &|| false,
+    )
+    .unwrap()
+    .chains;
     let mut found = Vec::new();
     for chain in chains {
         for part in split_by_drift(&chain, config.max_drift, 3) {

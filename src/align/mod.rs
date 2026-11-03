@@ -15,7 +15,8 @@ mod walk;
 pub use anchors::{Anchor, AnchorConfig, QueryTable};
 pub use chain_alignment::{BandConfig, align_chain};
 pub use chains::{
-    CHAINING_BYTES, Chain, ChainConfig, WindowChains, forward_extent, split_by_drift, window_chains,
+    CHAINING_BYTES, Chain, ChainConfig, MAX_EXAMINED, WindowChains, forward_extent, split_by_drift,
+    window_chains,
 };
 #[cfg(test)]
 pub use cigar::parse_cigar;

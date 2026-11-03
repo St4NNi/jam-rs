@@ -3,7 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 use super::AlignStageError;
-use crate::align::{AlignmentConfig, AnchorConfig, BandConfig, ChainConfig};
+use crate::align::{
+    AlignmentConfig, AnchorConfig, BandConfig, CHAINING_BYTES, ChainConfig, MAX_EXAMINED,
+};
 
 /// How stage 3 finds anchors, chains them, aligns them and widens alignment windows, and how
 /// much memory one entry may use (window bases of a contig, prepared windows, fragments).
@@ -31,6 +33,11 @@ pub struct AlignStageConfig {
     pub max_prepared_bytes: usize,
     /// The most bytes of fragments that one entry collects before its decision.
     pub max_fragment_bytes: usize,
+    /// The most bytes of the dense walk starts of one window, and of its chains when the window
+    /// is a copy of a periodic query.
+    pub max_dense_bytes: usize,
+    /// The most predecessors that chaining one window examines: work, not memory.
+    pub max_examined: u64,
 }
 
 impl Default for AlignStageConfig {
@@ -51,6 +58,8 @@ impl Default for AlignStageConfig {
             max_window_bases: 32 << 20,
             max_prepared_bytes: 64 << 20,
             max_fragment_bytes: 512 << 20,
+            max_dense_bytes: CHAINING_BYTES,
+            max_examined: MAX_EXAMINED,
         }
     }
 }
@@ -73,6 +82,8 @@ impl AlignStageConfig {
         if self.max_window_bases == 0
             || self.max_prepared_bytes == 0
             || self.max_fragment_bytes == 0
+            || self.max_dense_bytes == 0
+            || self.max_examined == 0
         {
             return Err(AlignStageError::InvalidConfig("memory limits"));
         }

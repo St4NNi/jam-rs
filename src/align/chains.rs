@@ -69,12 +69,16 @@ pub struct WindowChains {
     pub dense_above: Option<usize>,
 }
 
-/// The chains of a window within the chaining budget. `stopped` is asked now and then while
-/// chaining; when it says yes, chaining ends with `AlignmentError::Stopped`.
+/// The chains of a window within the chaining budget. The chains of a periodic window may hold
+/// at most `periodic_bytes`, and chaining may examine at most `max_examined` predecessors.
+/// `stopped` is asked now and then while chaining; when it says yes, chaining ends with
+/// `AlignmentError::Stopped`.
 pub fn window_chains(
     table: &QueryTable,
     window: &[u8],
     scratch: &mut Vec<Anchor>,
+    periodic_bytes: usize,
+    max_examined: u64,
     stopped: &dyn Fn() -> bool,
 ) -> Result<WindowChains, AlignmentError> {
     scratch.clear();
@@ -86,7 +90,7 @@ pub fn window_chains(
             dense_above: Some(0),
         });
     }
-    if let Some(chains) = periodic_chains(table, window)? {
+    if let Some(chains) = periodic_chains(table, window, periodic_bytes)? {
         return Ok(WindowChains {
             chains,
             dense_above: None,
@@ -99,7 +103,7 @@ pub fn window_chains(
     find_anchors(table, window, scratch, budget.above, budget.expected);
     let mut chains = Vec::new();
     let split = scratch.partition_point(|anchor| anchor.strand == Strand::Forward);
-    let mut examined = Examined::new(MAX_EXAMINED, stopped);
+    let mut examined = Examined::new(max_examined, stopped);
     examined.window_anchors = scratch.len();
     for strand in [&scratch[..split], &scratch[split..]] {
         chain_anchors(table, strand, &mut chains, &mut examined)?;
@@ -215,10 +219,11 @@ fn anchor_bytes(count: usize, table: &QueryTable) -> usize {
 }
 
 /// The chains of a linear periodic query in a window that is a copy of its repeat: one chain on
-/// every diagonal of an exact copy, without storing the dense anchors.
+/// every diagonal of an exact copy, without storing the dense anchors, within `budget` bytes.
 fn periodic_chains(
     table: &QueryTable,
     window: &[u8],
+    budget: usize,
 ) -> Result<Option<Vec<Chain>>, AlignmentError> {
     if table.circular() {
         return Ok(None);
@@ -243,7 +248,7 @@ fn periodic_chains(
         2 * std::mem::size_of::<Chain>()
             + anchors.saturating_mul(std::mem::size_of::<Anchor>() + std::mem::size_of::<u32>()),
     );
-    if bytes > CHAINING_BYTES {
+    if bytes > budget {
         return Err(AlignmentError::ChainingBudget(Budgeted::PeriodicChains));
     }
     let mut chains = Vec::with_capacity(total);
@@ -476,9 +481,9 @@ impl Iterator for Near<'_> {
     }
 }
 
-/// Predecessors that the chaining of one window may examine, valid or not: seconds of work. A
-/// window past it fails with `ChainingBudget` rather than chaining fewer anchors.
-const MAX_EXAMINED: u64 = 1 << 32;
+/// Predecessors that the chaining of one window may examine by default, valid or not: seconds
+/// of work. A window past it fails with `ChainingBudget` rather than chaining fewer anchors.
+pub const MAX_EXAMINED: u64 = 1 << 32;
 
 /// Predecessors examined between two questions whether to stop.
 const STOP_CHECK: u64 = 1 << 20;

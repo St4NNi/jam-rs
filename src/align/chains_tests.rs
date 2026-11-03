@@ -16,9 +16,16 @@ fn chains(query: &[u8], circular: bool, window: &[u8]) -> Vec<Chain> {
         ChainConfig::default(),
     )
     .unwrap();
-    window_chains(&table, window, &mut Vec::new(), &|| false)
-        .unwrap()
-        .chains
+    window_chains(
+        &table,
+        window,
+        &mut Vec::new(),
+        CHAINING_BYTES,
+        MAX_EXAMINED,
+        &|| false,
+    )
+    .unwrap()
+    .chains
 }
 
 fn position(anchor: Anchor) -> (u32, u32) {
@@ -104,7 +111,15 @@ fn dense_product_walked() {
     let mut scratch = Vec::new();
     // Every k-mer occurs about 25,000 times per strand: none gives anchors, all are left to
     // dense walks, and nothing of the 1.25 billion anchor product is held.
-    let found = window_chains(&table, &query, &mut scratch, &|| false).unwrap();
+    let found = window_chains(
+        &table,
+        &query,
+        &mut scratch,
+        CHAINING_BYTES,
+        MAX_EXAMINED,
+        &|| false,
+    )
+    .unwrap();
     let (chains, above) = (found.chains, found.dense_above);
     assert!(chains.is_empty());
     assert_eq!(above, Some(0));
@@ -122,7 +137,15 @@ fn periodic_chains_enumerated() {
     )
     .unwrap();
     let mut scratch = Vec::new();
-    let found = window_chains(&table, &query, &mut scratch, &|| false).unwrap();
+    let found = window_chains(
+        &table,
+        &query,
+        &mut scratch,
+        CHAINING_BYTES,
+        MAX_EXAMINED,
+        &|| false,
+    )
+    .unwrap();
     assert!(found.chains.len() > 99_000);
     assert_eq!(found.dense_above, None);
     assert_eq!(scratch.capacity(), 0);
@@ -329,9 +352,25 @@ fn retained_capacity_ignored() {
         ChainConfig::default(),
     )
     .unwrap();
-    let fresh = window_chains(&table, &window, &mut Vec::new(), &|| false).unwrap();
+    let fresh = window_chains(
+        &table,
+        &window,
+        &mut Vec::new(),
+        CHAINING_BYTES,
+        MAX_EXAMINED,
+        &|| false,
+    )
+    .unwrap();
     let mut retained = Vec::with_capacity(CHAINING_BYTES / std::mem::size_of::<Anchor>());
-    let reused = window_chains(&table, &window, &mut retained, &|| false).unwrap();
+    let reused = window_chains(
+        &table,
+        &window,
+        &mut retained,
+        CHAINING_BYTES,
+        MAX_EXAMINED,
+        &|| false,
+    )
+    .unwrap();
     assert_eq!(fresh.dense_above, None);
     assert_eq!(reused.dense_above, fresh.dense_above);
     assert_eq!(reused.chains, fresh.chains);

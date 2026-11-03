@@ -4,8 +4,7 @@
 
 use super::{AlignStageConfig, AlignStageError, AlignWork, PreparedQuery, SearchControl};
 use crate::align::{
-    AlignmentError, Anchor, CHAINING_BYTES, Chain, DenseWalks, Walk, dense_walks, forward_extent,
-    window_chains,
+    AlignmentError, Anchor, Chain, DenseWalks, Walk, dense_walks, forward_extent, window_chains,
 };
 use crate::index::PackedSequence;
 use std::mem::size_of;
@@ -107,7 +106,16 @@ pub(super) fn prepare_window(
     work.windows += 1;
     work.bases_read += bases.len() as u64;
     let stopped = || control.check().is_err();
-    let found = match window_chains(&query.table, &bases, &mut buffers.anchors, &stopped) {
+    let (dense_bytes, examined) = (config.max_dense_bytes, config.max_examined);
+    let anchors = &mut buffers.anchors;
+    let found = match window_chains(
+        &query.table,
+        &bases,
+        anchors,
+        dense_bytes,
+        examined,
+        &stopped,
+    ) {
         // A stop flag stays set and a deadline stays passed, so the check fails again.
         Err(AlignmentError::Stopped) => {
             control.check()?;
@@ -120,11 +128,11 @@ pub(super) fn prepare_window(
     // K-mers too frequent for anchors, and those of low-complexity runs: their copies are
     // walked along their diagonals.
     let mut dense = match found.dense_above {
-        Some(above) => dense_walks(&query.table, &bases, above, config.band, CHAINING_BYTES)?,
+        Some(above) => dense_walks(&query.table, &bases, above, config.band, dense_bytes)?,
         None => DenseWalks::default(),
     };
     if let Some(low) = &query.low {
-        let more = dense_walks(low, &bases, 0, config.band, CHAINING_BYTES)?;
+        let more = dense_walks(low, &bases, 0, config.band, dense_bytes)?;
         dense.walks.extend(more.walks);
         if dense.reverse.is_empty() {
             dense.reverse = more.reverse;
