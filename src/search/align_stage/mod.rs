@@ -20,11 +20,11 @@ mod tests;
 mod walks;
 mod window;
 
-pub use config::AlignStageConfig;
+pub use config::{AlignStageConfig, Limit};
 pub use query::PreparedQuery;
 
 use super::{LocatedEntry, SearchControl, Stopped};
-use crate::align::{AlignmentError, AlignmentWorkspace, Interval, JoinScratch};
+use crate::align::{AlignmentError, AlignmentWorkspace, Budgeted, Interval, JoinScratch};
 use crate::decide::{DecideError, Decision, DecisionRule, Fragment};
 use crate::index::{IndexError, PackedSequence};
 use place::Collected;
@@ -56,7 +56,26 @@ pub enum AlignStageError {
         what: &'static str,
         needed: u64,
         limit: u64,
+        kind: Limit,
     },
+}
+
+impl AlignStageError {
+    /// The limit that an entry passed, with the bytes, bases or cells it needed when known;
+    /// `None` for an error that is not a limit.
+    pub fn passed_limit(&self) -> Option<(Limit, Option<u64>)> {
+        match self {
+            Self::TooLarge { needed, kind, .. } => Some((*kind, Some(*needed))),
+            Self::Alignment(AlignmentError::MatrixTooLarge { cells, .. }) => {
+                Some((Limit::Cells, Some(*cells as u64)))
+            }
+            Self::Alignment(AlignmentError::ChainingBudget(Budgeted::ChainingWork)) => {
+                Some((Limit::Examined, None))
+            }
+            Self::Alignment(AlignmentError::ChainingBudget(_)) => Some((Limit::DenseBytes, None)),
+            _ => None,
+        }
+    }
 }
 
 /// Reusable buffers of stage 3, kept across entries. The windows of a contig are aligned on

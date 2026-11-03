@@ -6,7 +6,7 @@ use super::contig::{ContigJob, WindowOutput};
 use super::paths::{AlignedPath, PathIndex};
 use super::place::query_room;
 use super::window::PreparedWindow;
-use super::{AlignStageError, WindowWorkspace};
+use super::{AlignStageError, Limit, WindowWorkspace};
 use crate::align::{
     Alignment, DenseResults, DenseWalk, EditOperation, JoinContext, JoinLimits, JoinScratch, Walk,
     align_dense_walk, gap_continuation, holds_walk, long_enough, walk_alignment,
@@ -270,6 +270,7 @@ pub(super) fn join_short_walks(
             what: "the joins of one window",
             needed: bytes as u64,
             limit: job.config.max_prepared_bytes as u64,
+            kind: Limit::PreparedBytes,
         });
     }
     scratch.prepare(walks, &context);

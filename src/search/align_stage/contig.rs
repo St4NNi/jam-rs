@@ -7,7 +7,7 @@ use super::paths::PathIndex;
 use super::place::Collected;
 use super::window::{PreparedWindow, merge_spans, prepare_window, widen};
 use super::{
-    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, PreparedQuery,
+    AlignStageConfig, AlignStageError, AlignStageWorkspace, AlignWork, Limit, PreparedQuery,
     SearchControl, WindowWorkspace, chains, walks,
 };
 use crate::align::{Alignment, Interval};
@@ -230,6 +230,7 @@ impl<'a> ContigJob<'a> {
                 what: "the alignment windows of one contig",
                 needed: bases,
                 limit: config.max_window_bases,
+                kind: Limit::WindowBases,
             });
         }
         let read = |span: &Range<u64>| {
@@ -265,6 +266,7 @@ impl<'a> ContigJob<'a> {
                     what: "the prepared windows of one contig",
                     needed: bytes as u64,
                     limit: config.max_prepared_bytes as u64,
+                    kind: Limit::PreparedBytes,
                 });
             }
             let edges = window.near_edges(k, reach);

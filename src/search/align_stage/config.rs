@@ -1,8 +1,9 @@
-//! The settings of stage 3 and the memory limits of one entry.
+//! The settings of stage 3, the memory limits of one entry, and how they are raised for an entry
+//! that passed one.
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::AlignStageError;
+use super::{AlignStageError, KEPT_PREPARED_BYTES};
 use crate::align::{
     AlignmentConfig, AnchorConfig, BandConfig, CHAINING_BYTES, ChainConfig, MAX_EXAMINED,
 };
@@ -38,7 +39,34 @@ pub struct AlignStageConfig {
     pub max_dense_bytes: usize,
     /// The most predecessors that chaining one window examines: work, not memory.
     pub max_examined: u64,
+    /// The memory that an entry may hold when it passed a limit and is aligned again alone: its
+    /// limits are raised only as far as `footprint` stays within it (0: never raised).
+    pub memory_budget: u64,
 }
+
+/// A limit of stage 3 that an entry can pass, and that is raised when the entry is aligned again.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Limit {
+    /// `max_window_bases`.
+    WindowBases,
+    /// `max_prepared_bytes`.
+    PreparedBytes,
+    /// `max_fragment_bytes`.
+    FragmentBytes,
+    /// The resident cells of one alignment, `band.alignment.max_cells`.
+    Cells,
+    /// `max_dense_bytes`.
+    DenseBytes,
+    /// `max_examined`.
+    Examined,
+}
+
+/// How much higher a limit gets each time an entry passes it.
+const RAISE: u64 = 4;
+/// The most predecessors examined in one window after raising, as a multiple of the default.
+const MAX_EXAMINED_RAISE: u64 = 64;
+/// Bytes held per resident cell of an alignment, counted high.
+const CELL_BYTES: u64 = 4;
 
 impl Default for AlignStageConfig {
     fn default() -> Self {
@@ -60,6 +88,7 @@ impl Default for AlignStageConfig {
             max_fragment_bytes: 512 << 20,
             max_dense_bytes: CHAINING_BYTES,
             max_examined: MAX_EXAMINED,
+            memory_budget: 4 << 30,
         }
     }
 }
@@ -89,6 +118,72 @@ impl AlignStageConfig {
         }
         Ok(())
     }
+
+    /// The bytes that one entry may hold under these limits when it is aligned on `threads`
+    /// threads: its fragments, the prepared windows it keeps, and per thread the windows of a
+    /// contig (two bytes per base, for both strands), its prepared windows, the dense walks and
+    /// the anchors of a window, and the cells of an alignment.
+    pub fn footprint(&self, threads: usize) -> u64 {
+        let threads = threads.max(1) as u64;
+        let per_thread = (2 * self.max_window_bases)
+            .saturating_add(self.max_prepared_bytes as u64)
+            .saturating_add(self.max_dense_bytes as u64)
+            .saturating_add(CHAINING_BYTES as u64)
+            .saturating_add(CELL_BYTES.saturating_mul(self.band.alignment.max_cells as u64));
+        (self.max_fragment_bytes as u64)
+            .saturating_add(KEPT_PREPARED_BYTES as u64)
+            .saturating_add(threads.saturating_mul(per_thread))
+    }
+
+    /// The settings to align an entry again that passed `limit` and needed `needed` (when known):
+    /// that limit four times higher, or `needed` when that is more, but only as high as the
+    /// memory budget holds the footprint on `threads` threads. `None` when it cannot be raised.
+    pub fn raised(&self, limit: Limit, needed: Option<u64>, threads: usize) -> Option<Self> {
+        let per_thread = threads.max(1) as u64;
+        // The bytes that one more unit of the limit adds to the footprint.
+        let weight = match limit {
+            Limit::WindowBases => 2 * per_thread,
+            Limit::PreparedBytes | Limit::DenseBytes => per_thread,
+            Limit::FragmentBytes => 1,
+            Limit::Cells => CELL_BYTES * per_thread,
+            Limit::Examined => 0,
+        };
+        let value = self.limit_value(limit);
+        let highest = match weight {
+            0 => MAX_EXAMINED.saturating_mul(MAX_EXAMINED_RAISE),
+            weight => {
+                let others = (self.footprint(threads)).saturating_sub(value.saturating_mul(weight));
+                self.memory_budget.saturating_sub(others) / weight
+            }
+        };
+        let raised = (value.saturating_mul(RAISE).max(needed.unwrap_or(0))).min(highest);
+        (raised > value).then(|| self.with_limit(limit, raised))
+    }
+
+    fn limit_value(&self, limit: Limit) -> u64 {
+        match limit {
+            Limit::WindowBases => self.max_window_bases,
+            Limit::PreparedBytes => self.max_prepared_bytes as u64,
+            Limit::FragmentBytes => self.max_fragment_bytes as u64,
+            Limit::Cells => self.band.alignment.max_cells as u64,
+            Limit::DenseBytes => self.max_dense_bytes as u64,
+            Limit::Examined => self.max_examined,
+        }
+    }
+
+    fn with_limit(&self, limit: Limit, value: u64) -> Self {
+        let mut config = *self;
+        let bytes = usize::try_from(value).unwrap_or(usize::MAX);
+        match limit {
+            Limit::WindowBases => config.max_window_bases = value,
+            Limit::PreparedBytes => config.max_prepared_bytes = bytes,
+            Limit::FragmentBytes => config.max_fragment_bytes = bytes,
+            Limit::Cells => config.band.alignment.max_cells = bytes,
+            Limit::DenseBytes => config.max_dense_bytes = bytes,
+            Limit::Examined => config.max_examined = value,
+        }
+        config
+    }
 }
 
 #[cfg(test)]
@@ -109,6 +204,59 @@ mod tests {
             scores.gap_extend_score,
         );
         assert_eq!(terms, (2, -3, -5, -1));
+    }
+
+    #[test]
+    fn footprint_of_defaults() {
+        // 512 MiB of fragments and 256 MiB of kept windows, then per thread 64 MiB of window
+        // bases on both strands, 64 MiB of prepared windows, 64 MiB of dense walks, 64 MiB of
+        // anchors and 16 MiB of alignment cells.
+        let config = AlignStageConfig::default();
+        assert_eq!(config.footprint(4), (768 + 4 * 272) << 20);
+        assert_eq!(config.footprint(64), (768 + 64 * 272) << 20);
+    }
+
+    #[test]
+    fn limits_raised_within_budget() {
+        let config = AlignStageConfig {
+            memory_budget: 4 << 30,
+            ..AlignStageConfig::default()
+        };
+        // Four times higher, or what the entry needed when that is more, within the budget.
+        let raised = config
+            .raised(Limit::FragmentBytes, Some(1 << 20), 4)
+            .unwrap();
+        assert_eq!(raised.max_fragment_bytes, 2 << 30);
+        let raised = config
+            .raised(Limit::FragmentBytes, Some(3 << 30), 4)
+            .unwrap();
+        assert_eq!(raised.max_fragment_bytes, (4096 - 1344) << 20);
+        assert_eq!(raised.footprint(4), config.memory_budget);
+        assert!(raised.raised(Limit::FragmentBytes, None, 4).is_none());
+        // A limit that each thread may hold weighs once per thread.
+        let prepared = config.raised(Limit::PreparedBytes, None, 4).unwrap();
+        assert_eq!(prepared.max_prepared_bytes, 256 << 20);
+        let prepared = config.raised(Limit::PreparedBytes, None, 64);
+        assert!(prepared.is_none());
+        // Chaining work is not memory: it rises up to 64 times its default.
+        let mut examined = config;
+        for _ in 0..3 {
+            examined = examined.raised(Limit::Examined, None, 4).unwrap();
+        }
+        assert_eq!(examined.max_examined, 64 * MAX_EXAMINED);
+        assert!(examined.raised(Limit::Examined, None, 4).is_none());
+        // Only the limit passed changes.
+        let dense = config.raised(Limit::DenseBytes, None, 4).unwrap();
+        let expected = AlignStageConfig {
+            max_dense_bytes: 4 * CHAINING_BYTES,
+            ..config
+        };
+        assert_eq!(dense, expected);
+        let none = AlignStageConfig {
+            memory_budget: 0,
+            ..config
+        };
+        assert!(none.raised(Limit::FragmentBytes, None, 4).is_none());
     }
 
     #[test]

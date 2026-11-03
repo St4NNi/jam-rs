@@ -2,7 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
-use super::{AlignStageError, PreparedQuery};
+use super::{AlignStageError, Limit, PreparedQuery};
 use crate::align::{EditRun, Interval};
 use crate::decide::Fragment;
 use std::mem::size_of;
@@ -55,6 +55,7 @@ impl Collected {
                 what: "the fragments of one entry",
                 needed: bytes as u64,
                 limit: self.limit as u64,
+                kind: Limit::FragmentBytes,
             });
         }
         self.bytes = bytes;
