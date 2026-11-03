@@ -111,30 +111,45 @@ impl BatchAlignment<'_> {
             self.control,
             &mut work.locate,
         )?;
-        let results = (candidates.par_iter().zip(&locations))
+        let results: Vec<_> = (candidates.par_iter().zip(&locations))
             .map_init(
                 || (LocateWorkspace::default(), AlignStageWorkspace::default()),
-                |(locate, align), (possible, locations)| {
+                |(locate, align), entry| {
                     let workspaces = (locate, align);
-                    self.entry(batch, &request, &query, possible, locations, workspaces)
+                    self.entry(batch, &request, &query, entry, self.align, workspaces)
                 },
             )
-            .collect::<Result<Vec<_>, ScreenError>>()?;
+            .collect();
         let mut turned = Vec::new();
-        for (fragments, part) in results {
+        let threads = rayon::current_num_threads();
+        let (mut locate, mut align) = (LocateWorkspace::default(), AlignStageWorkspace::default());
+        for (entry, mut result) in candidates.iter().zip(&locations).zip(results) {
+            // An entry that passed a limit is aligned again alone, after the others, with that
+            // limit raised within the memory budget each time.
+            let mut config = *self.align;
+            while let Err(ScreenError::AlignStage(error)) = &result
+                && let Some(raised) = (error.passed_limit())
+                    .and_then(|(limit, needed)| config.raised(limit, needed, threads))
+            {
+                config = raised;
+                let workspaces = (&mut locate, &mut align);
+                result = self.entry(batch, &request, &query, entry, &config, workspaces);
+            }
+            let (fragments, part) = result?;
             turned.extend(fragments);
             work.add(&part);
         }
         Ok((turned, work))
     }
 
+    /// Locates and aligns one entry with the stage 3 settings `config`, and turns its fragments.
     fn entry(
         &self,
         batch: &Batch,
         request: &LocateRequest<'_>,
         query: &PreparedQuery,
-        possible: &PossibleEntry,
-        locations: &[(u32, SeedLocation)],
+        (possible, locations): (&PossibleEntry, &Vec<(u32, SeedLocation)>),
+        config: &AlignStageConfig,
         (locate, align): (&mut LocateWorkspace, &mut AlignStageWorkspace),
     ) -> Result<(Vec<ScreenFragment>, FragmentWork), ScreenError> {
         let mut work = FragmentWork::default();
@@ -154,7 +169,7 @@ impl BatchAlignment<'_> {
             &packed,
             query,
             &located,
-            self.align,
+            config,
             self.rule,
             align,
             self.control,

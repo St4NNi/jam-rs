@@ -201,6 +201,35 @@ fn planted_plasmid_found() {
     );
 }
 
+/// An entry that passes a limit of stage 3 is aligned again with the limit raised, and reported
+/// as with the default limits; without room in the memory budget, the assembly fails as before.
+#[test]
+fn limited_entry_aligned_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let plasmid = random_bases(&mut rng(1), 6_000);
+    let shard = plasmids(directory.path(), &[("plasmid", &plasmid)]);
+    let flanks = (
+        random_bases(&mut rng(3), 2_000),
+        random_bases(&mut rng(4), 2_000),
+    );
+    let contigs = [("chromosome", [&flanks.0[..], &plasmid, &flanks.1].concat())];
+    let json = |reported: &[ScreenEntry]| serde_json::to_string(reported).unwrap();
+    let (expected, _) = screen(&shard, directory.path(), &contigs, &ScreenConfig::default());
+    let mut limited = ScreenConfig::default();
+    limited.align.max_fragment_bytes = 1;
+    // Room to raise it on the threads of any machine.
+    limited.align.memory_budget = 1 << 40;
+    let (reported, _) = screen(&shard, directory.path(), &contigs, &limited);
+    assert_eq!(names(&reported), ["plasmid"]);
+    assert_eq!(json(&reported), json(&expected));
+    limited.align.memory_budget = 0;
+    let path = write_assembly(directory.path(), &contigs);
+    let screener = Screener::new(&shard, limited).unwrap();
+    let result = screener.screen_assembly(&path, "assembly", no_stop(), &mut |_| Ok(()));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("the fragments of one entry need"), "{error}");
+}
+
 #[test]
 fn both_strands_placed() {
     let directory = tempfile::tempdir().unwrap();
