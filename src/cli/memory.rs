@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::search::AlignStageConfig;
+use bytesize::ByteSize;
 use std::path::{Path, PathBuf};
 
 /// RAM that one search takes besides the pins and the block cache, at most: 0.3 to 1.5 GB were
@@ -44,9 +45,17 @@ pub(super) fn available() -> Option<u64> {
 /// The memory budget of stage 3 for an entry that passed a limit and is aligned again alone, when
 /// `searches` searches run at the same time beside `taken` bytes of pins and block cache: the RAM
 /// free now, less `taken` and what the searches take, shared by the searches. Without a known
-/// free RAM, the budget of the stage 3 settings.
+/// free RAM, the fixed budget of the stage 3 settings, which it says on the standard error.
 pub(super) fn align_budget(taken: u64, searches: usize) -> u64 {
     let free = lowest_of(|text| cgroup_room(text, Path::new(ROOT)));
+    if free.is_none() {
+        let fixed = ByteSize(AlignStageConfig::default().memory_budget);
+        eprintln!(
+            "jam: the free memory is not known; entries that pass a limit are aligned again \
+             within a fixed memory budget of {}",
+            fixed.display().iec()
+        );
+    }
     align_budget_of(free, taken, searches)
 }
 
@@ -86,20 +95,28 @@ fn mem_available(meminfo: &str) -> Option<u64> {
 /// The lowest memory limit of the cgroup in `/proc/self/cgroup` (`own`) and those above it,
 /// below `root`: `memory.max` of cgroup v2, else `memory.limit_in_bytes` of v1.
 fn cgroup_limit(own: &str, root: &Path) -> Option<u64> {
-    cgroup_least(own, root, |limit, _| limit)
+    cgroup_least(own, root, false, |limit, _| limit)
 }
 
 /// The least room, memory limit less use, of the cgroup in `own` and those above it, below
-/// `root`: `memory.current` of cgroup v2 is the use, else `memory.usage_in_bytes` of v1.
+/// `root`. With cgroup v2 the limit is the lower of `memory.max` and `memory.high`, above which
+/// the kernel slows the process down, and `memory.current` is the use; with v1 they are
+/// `memory.limit_in_bytes` and `memory.usage_in_bytes`. In a container with its own cgroup
+/// namespace, as in a Kubernetes pod, the cgroup of the container is the root.
 fn cgroup_room(own: &str, root: &Path) -> Option<u64> {
-    cgroup_least(own, root, |limit, used| {
+    cgroup_least(own, root, true, |limit, used| {
         limit.saturating_sub(used.unwrap_or(0))
     })
 }
 
 /// The least of `value` (of the limit and the use) over the cgroups with a memory limit, from
-/// the cgroup in `own` up to `root`.
-fn cgroup_least(own: &str, root: &Path, value: impl Fn(u64, Option<u64>) -> u64) -> Option<u64> {
+/// the cgroup in `own` up to `root`. With `high`, `memory.high` of v2 limits too.
+fn cgroup_least(
+    own: &str,
+    root: &Path,
+    high: bool,
+    value: impl Fn(u64, Option<u64>) -> u64,
+) -> Option<u64> {
     let v2 = own.lines().find_map(|line| line.strip_prefix("0::"));
     let (base, (file, use_file), path) = match v2 {
         Some(path) => (root.to_path_buf(), ("memory.max", "memory.current"), path),
@@ -120,7 +137,12 @@ fn cgroup_least(own: &str, root: &Path, value: impl Fn(u64, Option<u64>) -> u64)
     let mut least: Option<u64> = None;
     loop {
         // "max" means no limit; v1 writes a huge number instead.
-        if let Some(limit) = read(directory.join(file)) {
+        let high = high.then(|| read(directory.join("memory.high"))).flatten();
+        let limit = match (read(directory.join(file)), high) {
+            (Some(limit), Some(high)) => Some(limit.min(high)),
+            (limit, high) => limit.or(high),
+        };
+        if let Some(limit) = limit {
             let value = value(limit, read(directory.join(use_file)));
             least = Some(least.map_or(value, |least| least.min(value)));
         }
@@ -183,6 +205,14 @@ mod tests {
         // The slice holds 16 GiB and uses 4 GiB; the job has no limit of its own.
         assert_eq!(cgroup_room("0::/slice/job\n", root.path()), Some(12 << 30));
         assert_eq!(cgroup_limit("0::/slice/job\n", root.path()), Some(16 << 30));
+        // memory.high of the job, 8 GiB, leaves 7 GiB; the RAM limit stays that of the slice.
+        std::fs::write(job.join("memory.high"), "8589934592\n").unwrap();
+        assert_eq!(cgroup_room("0::/slice/job\n", root.path()), Some(7 << 30));
+        assert_eq!(cgroup_limit("0::/slice/job\n", root.path()), Some(16 << 30));
+        // In a container with its own cgroup namespace the process sits in the root.
+        std::fs::write(root.path().join("memory.max"), "2147483648\n").unwrap();
+        std::fs::write(root.path().join("memory.current"), "1073741824\n").unwrap();
+        assert_eq!(cgroup_room("0::/\n", root.path()), Some(1 << 30));
     }
 
     #[test]
