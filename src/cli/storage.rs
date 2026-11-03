@@ -99,6 +99,11 @@ impl ShardStorage {
         self.searches = searches;
     }
 
+    /// The RAM budget of the pins and the block cache once it is open, else 0.
+    pub(super) fn ram_budget(&self) -> u64 {
+        self.budget.map_or(0, |(memory, _, _)| memory)
+    }
+
     /// A line on the RAM budget and how it is shared, once the block cache is open.
     pub(super) fn budget_line(&self) -> Option<String> {
         let (memory, pins, cache) = self.budget?;

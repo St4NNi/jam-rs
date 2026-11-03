@@ -2,6 +2,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::memory::align_budget;
 use super::rule::RuleArgs;
 use super::storage::{CacheArgs, ShardStorage};
 use super::{CliError, output_writer, read_list};
@@ -82,7 +83,7 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     if let Some(note) = args.rule.rule().identity_note() {
         eprintln!("jam: {note}");
     }
-    let config = ScreenConfig {
+    let mut config = ScreenConfig {
         closest_margin: args.closest_margin,
         batch_bases: args.batch_bases,
         contig_dir: args.contig_dir.clone(),
@@ -132,6 +133,12 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     let pools = (0..threads.div_ceil(POOL_THREADS))
         .map(|at| pool_of((threads - at * POOL_THREADS).min(POOL_THREADS)))
         .collect::<Result<Vec<_>, _>>()?;
+    // One assembly at a time per pool, or one per thread of a single pool.
+    let at_once = match &pools[..] {
+        [pool] => pool.current_num_threads().min(assemblies.len()).max(1),
+        pools => pools.len(),
+    };
+    config.align.memory_budget = align_budget(storage.ram_budget(), at_once);
     // The key filter of the shard is built on all threads and shared by all pools.
     let screener = match &pools[..] {
         [pool] => pool
@@ -145,10 +152,10 @@ pub fn run(args: &ScreenArgs) -> Result<(), CliError> {
     let failed = std::thread::scope(|scope| {
         let (screener, assemblies, next) = (&screener, &assemblies, &next);
         let take = move || assemblies.get(next.fetch_add(1, Ordering::Relaxed));
-        if let [pool] = &pools[..] {
+        if let [_] = &pools[..] {
             // Each assembly runs on a thread of its own outside the pool, which waits for its
             // batches, so a thread of the pool never takes up a whole other assembly meanwhile.
-            for _ in 0..pool.current_num_threads().min(assemblies.len()).max(1) {
+            for _ in 0..at_once {
                 let sender = sender.clone();
                 scope.spawn(move || {
                     while let Some(path) = take() {

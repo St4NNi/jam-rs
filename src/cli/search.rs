@@ -3,6 +3,7 @@
 // Copyright (c) 2023-2026 Sebastian Beyvers
 // SPDX-License-Identifier: MIT
 
+use super::memory::align_budget;
 use super::rule::RuleArgs;
 use super::storage::{CacheArgs, ShardStorage, shard_name};
 use super::{CliError, output_writer};
@@ -160,7 +161,7 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
         threads: args.threads.unwrap_or(0),
         ..SearchConfig::default()
     };
-    let config = settings_of(args)?.apply(&base)?;
+    let mut config = settings_of(args)?.apply(&base)?;
     let inputs = args.inputs()?;
     let on_s3 = (inputs.shards.iter()).any(|path| path.to_string_lossy().starts_with("s3://"));
     let at_once = match (args.shards_at_once, on_s3) {
@@ -174,6 +175,7 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
     if let Some(line) = storage.budget_line().filter(|_| args.verbose > 0) {
         eprintln!("{line}");
     }
+    config.align.memory_budget = align_budget(storage.ram_budget(), at_once);
     let searchers = shards
         .iter()
         .map(|open| Searcher::new(&open.shard))
@@ -214,6 +216,7 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
                     let kmers = kmers[index].take();
                     let write = |event: EntryEvent| sink.event(open, name, &event);
                     let summary = search_one(args, searcher, &config, &query, kmers, write)?;
+                    note_raised(name, &open.name, &summary);
                     sink.record(&open.name, Record::summary(name, &summary))?;
                 }
             } else {
@@ -236,7 +239,9 @@ pub fn run(args: &SearchArgs) -> Result<(), CliError> {
                     for event in &events {
                         sink.event(open, name, event)?;
                     }
-                    sink.record(&open.name, Record::summary(name, &summary?))
+                    let summary = summary?;
+                    note_raised(name, &open.name, &summary);
+                    sink.record(&open.name, Record::summary(name, &summary))
                 })?;
             }
             incomplete += sink.finish_query()?;
@@ -365,6 +370,14 @@ fn each_batch(
     match records {
         0 => Err(CliError::NoQueries(path.to_path_buf())),
         _ => Ok(incomplete),
+    }
+}
+
+/// Writes a line on the standard error for each entry of `shard` that passed a limit of stage 3
+/// and was decided once the limit was raised.
+fn note_raised(query: &str, shard: &str, summary: &SearchSummary) {
+    for line in &summary.raised {
+        eprintln!("jam: query {query}, shard {shard}: {line}");
     }
 }
 

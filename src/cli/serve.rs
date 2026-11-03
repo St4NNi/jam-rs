@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use super::CliError;
+use super::memory::align_budget;
 use super::storage::{CacheArgs, ShardStorage, shard_name};
 use crate::search::SearchConfig;
 use crate::service::{
@@ -65,10 +66,11 @@ pub fn run(args: &ServeArgs) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("no shard".into()))?;
     let name = shard_name(&args.shard);
     let shard = ServedShard::new(name, shard)?.with_reopen(reopen(&storage, args));
-    let config = SearchConfig {
+    let mut config = SearchConfig {
         threads: args.threads.unwrap_or(0),
         ..SearchConfig::default()
     };
+    config.align.memory_budget = align_budget(lock(&storage).ram_budget(), args.searches);
     let limits = ServerLimits {
         searches: args.searches,
         queue: args.queue,
