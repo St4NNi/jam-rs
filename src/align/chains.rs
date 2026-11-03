@@ -249,7 +249,11 @@ fn periodic_chains(
             + anchors.saturating_mul(std::mem::size_of::<Anchor>() + std::mem::size_of::<u32>()),
     );
     if bytes > budget {
-        return Err(AlignmentError::ChainingBudget(Budgeted::PeriodicChains));
+        let needed = Some(bytes as u64);
+        return Err(AlignmentError::ChainingBudget(
+            Budgeted::PeriodicChains,
+            needed,
+        ));
     }
     let mut chains = Vec::with_capacity(total);
     for phase in phases {
@@ -512,7 +516,7 @@ impl<'a> Examined<'a> {
         let before = self.count;
         self.count = self.count.saturating_add(more);
         if self.count > self.limit {
-            return Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork));
+            return Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork, None));
         }
         if before / STOP_CHECK != self.count / STOP_CHECK && (self.stopped)() {
             return Err(AlignmentError::Stopped);

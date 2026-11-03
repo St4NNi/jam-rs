@@ -69,10 +69,12 @@ impl AlignStageError {
             Self::Alignment(AlignmentError::MatrixTooLarge { cells, .. }) => {
                 Some((Limit::Cells, Some(*cells as u64)))
             }
-            Self::Alignment(AlignmentError::ChainingBudget(Budgeted::ChainingWork)) => {
+            Self::Alignment(AlignmentError::ChainingBudget(Budgeted::ChainingWork, _)) => {
                 Some((Limit::Examined, None))
             }
-            Self::Alignment(AlignmentError::ChainingBudget(_)) => Some((Limit::DenseBytes, None)),
+            Self::Alignment(AlignmentError::ChainingBudget(_, needed)) => {
+                Some((Limit::DenseBytes, *needed))
+            }
             _ => None,
         }
     }

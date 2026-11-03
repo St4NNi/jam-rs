@@ -102,7 +102,11 @@ pub fn dense_walks(
         }
     });
     if price(count) > budget {
-        return Err(AlignmentError::ChainingBudget(Budgeted::MatchStarts));
+        let needed = Some(price(count) as u64);
+        return Err(AlignmentError::ChainingBudget(
+            Budgeted::MatchStarts,
+            needed,
+        ));
     }
     let reverse = if backward.is_empty() {
         Vec::new()
@@ -141,12 +145,15 @@ fn periodic_walks(
     let minimum = minimum_length(table) as usize;
     let positions = window.len().saturating_sub(minimum - 1);
     let count = positions.saturating_mul(phases.len());
-    if count
+    let bytes = count
         .saturating_mul(size_of::<Walk>())
-        .saturating_add(window.len())
-        > budget
-    {
-        return Err(AlignmentError::ChainingBudget(Budgeted::PeriodicWalks));
+        .saturating_add(window.len());
+    if bytes > budget {
+        let needed = Some(bytes as u64);
+        return Err(AlignmentError::ChainingBudget(
+            Budgeted::PeriodicWalks,
+            needed,
+        ));
     }
     let mut walks = Vec::with_capacity(count);
     for phase in phases {

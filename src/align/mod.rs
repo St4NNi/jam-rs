@@ -280,8 +280,9 @@ pub enum AlignmentError {
     InvalidChainConfig,
     #[error("query is too long for the query table")]
     QueryTooLong,
+    /// What passed the budget, and the bytes it needed when they are known.
     #[error("{0} exceed the chaining budget")]
-    ChainingBudget(Budgeted),
+    ChainingBudget(Budgeted, Option<u64>),
     #[error("alignment work was asked to stop")]
     Stopped,
 }

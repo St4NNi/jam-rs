@@ -257,14 +257,17 @@ impl<'a> ContigJob<'a> {
         let mut prepared = Vec::with_capacity(spans.len());
         let (mut bytes, mut grown) = (0usize, false);
         // In window order, so the first failure and the byte limit act as one thread would.
-        for (span, result) in spans.iter_mut().zip(read) {
+        let mut read = read.into_iter();
+        for (span, result) in spans.iter_mut().zip(read.by_ref()) {
             let (window, read_work) = result?;
             work.add(&read_work);
             bytes += window.bytes();
             if bytes > config.max_prepared_bytes {
+                // The windows after it count too, so the error names what the round needs.
+                let rest: usize = read.flatten().map(|(window, _)| window.bytes()).sum();
                 return Err(AlignStageError::TooLarge {
                     what: "the prepared windows of one contig",
-                    needed: bytes as u64,
+                    needed: (bytes + rest) as u64,
                     limit: config.max_prepared_bytes as u64,
                     kind: Limit::PreparedBytes,
                 });

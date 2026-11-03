@@ -414,7 +414,7 @@ fn chaining_work_bounded() {
     assert_eq!(run(&copies, work, false).0, Ok(Vec::new()));
     assert_eq!(
         run(&copies, work - 1, false).0,
-        Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork))
+        Err(AlignmentError::ChainingBudget(Budgeted::ChainingWork, None))
     );
     // Copies at one query position are near the diagonal of each other: millions are examined.
     let line: Vec<Anchor> = (0..3_000u32)
