@@ -372,7 +372,7 @@ impl EntryRequest<'_> {
                         .and_then(|job| {
                             job.finish(contig_round, workspace, &mut fragments, &mut contig_work)
                         });
-                    (at, result.map(|()| fragments.into_list()), contig_work)
+                    (at, result.and_then(|()| fragments.into_list()), contig_work)
                 })
                 .collect();
             for (at, result, contig_work) in aligned {
@@ -387,10 +387,10 @@ impl EntryRequest<'_> {
                 unreachable!("every contig is aligned");
             };
             for fragment in result? {
-                fragments.push(fragment)?;
+                fragments.push(fragment);
             }
         }
-        Ok((Some(fragments.into_list()), work))
+        Ok((Some(fragments.into_list()?), work))
     }
 
     /// Whether the aligned fragments and the reach of the contigs not aligned yet cover fewer

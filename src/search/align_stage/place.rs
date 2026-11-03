@@ -18,10 +18,14 @@ pub(super) fn query_room(interval: Interval, query: &PreparedQuery) -> (bool, bo
     }
 }
 
-/// The fragments of one entry and the bytes they hold, within a limit.
+/// The fragments of one entry and the bytes they hold, within a limit. Past the limit no more
+/// fragments are kept, but their bytes are still counted, so the error names what was needed.
 pub(super) struct Collected {
     list: Vec<Fragment>,
+    /// Bytes of the fragments added since the last reset, kept or not.
     bytes: usize,
+    /// The most that `bytes` reached.
+    peak: usize,
     limit: usize,
 }
 
@@ -43,24 +47,19 @@ impl Collected {
         Self {
             list: Vec::new(),
             bytes: 0,
+            peak: 0,
             limit,
         }
     }
 
-    /// Adds a fragment, or fails when the entry's fragments would pass the limit.
-    pub(super) fn push(&mut self, fragment: Fragment) -> Result<(), AlignStageError> {
-        let bytes = self.bytes + fragment_bytes(&fragment);
-        if bytes > self.limit {
-            return Err(AlignStageError::TooLarge {
-                what: "the fragments of one entry",
-                needed: bytes as u64,
-                limit: self.limit as u64,
-                kind: Limit::FragmentBytes,
-            });
+    /// Adds a fragment; once the fragments pass the limit, it is only counted.
+    pub(super) fn push(&mut self, fragment: Fragment) {
+        self.bytes += fragment_bytes(&fragment);
+        self.peak = self.peak.max(self.bytes);
+        // Past the limit the list is incomplete, which only a reset before that point mends.
+        if self.bytes <= self.limit {
+            self.list.push(fragment);
         }
-        self.bytes = bytes;
-        self.list.push(fragment);
-        Ok(())
     }
 
     pub(super) fn mark(&self) -> Mark {
@@ -76,8 +75,18 @@ impl Collected {
         self.bytes = mark.bytes;
     }
 
-    pub(super) fn into_list(self) -> Vec<Fragment> {
-        self.list
+    /// The fragments, or the error of the limit when they passed it, with the most bytes they
+    /// needed at once.
+    pub(super) fn into_list(self) -> Result<Vec<Fragment>, AlignStageError> {
+        if self.peak > self.limit {
+            return Err(AlignStageError::TooLarge {
+                what: "the fragments of one entry",
+                needed: self.peak as u64,
+                limit: self.limit as u64,
+                kind: Limit::FragmentBytes,
+            });
+        }
+        Ok(self.list)
     }
 }
 
@@ -119,14 +128,26 @@ mod tests {
         let bases = b"ACGTTGCAAC".repeat(10);
         let query = PreparedQuery::new(&bases, false, &AlignStageConfig::default()).unwrap();
         let fragment = Fragment::place(0, alignment((0, 50)), query.length(), false).unwrap();
-        let one = fragment_bytes(&fragment);
+        // A clone holds no spare capacity, so all pushed fragments have this size.
+        let one = fragment_bytes(&fragment.clone());
         let mut collected = Collected::new(2 * one);
-        collected.push(fragment.clone()).unwrap();
+        collected.push(fragment.clone());
         let mark = collected.mark();
-        collected.push(fragment.clone()).unwrap();
-        assert!(collected.push(fragment.clone()).is_err());
+        collected.push(fragment.clone());
         collected.reset(mark);
-        collected.push(fragment).unwrap();
-        assert_eq!(collected.into_list().len(), 2);
+        collected.push(fragment.clone());
+        assert_eq!(collected.into_list().unwrap().len(), 2);
+        // Past the limit the error names the most bytes needed at once, four fragments, even
+        // when a reset dropped them later, as the entry held them at once.
+        let mut collected = Collected::new(2 * one);
+        let mark = collected.mark();
+        for _ in 0..4 {
+            collected.push(fragment.clone());
+        }
+        collected.reset(mark);
+        collected.push(fragment.clone());
+        let error = collected.into_list().unwrap_err();
+        let needed = (4 * one) as u64;
+        assert!(matches!(error, AlignStageError::TooLarge { needed: n, .. } if n == needed));
     }
 }

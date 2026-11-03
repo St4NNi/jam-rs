@@ -328,13 +328,13 @@ impl<'a> ContigJob<'a> {
             grown |= output.grown;
             work.add(&output.work);
             for fragment in output.fragments {
-                fragments.push(fragment)?;
+                fragments.push(fragment);
             }
             if let Some(join) = joins.next() {
                 let joined = join?;
                 work.alignments += joined.len() as u64;
                 for fragment in joined {
-                    fragments.push(fragment)?;
+                    fragments.push(fragment);
                 }
             }
         }

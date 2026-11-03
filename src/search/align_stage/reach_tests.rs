@@ -87,7 +87,7 @@ fn reach_holds_fragments() {
                 let mut fragments = place::Collected::new(config.max_fragment_bytes);
                 job.finish(round, &workspace, &mut fragments, &mut work)
                     .unwrap();
-                let segments: Vec<Interval> = (fragments.into_list().iter())
+                let segments: Vec<Interval> = (fragments.into_list().unwrap().iter())
                     .flat_map(|fragment| fragment.query_segments.clone())
                     .collect();
                 let reached = covered(reach.clone());
