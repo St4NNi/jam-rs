@@ -202,7 +202,8 @@ fn planted_plasmid_found() {
 }
 
 /// An entry that passes a limit of stage 3 is aligned again with the limit raised, and reported
-/// as with the default limits; without room in the memory budget, the assembly fails as before.
+/// as with the default limits; without room in the memory budget, it is aligned within its
+/// limits, and the summary of the assembly counts it.
 #[test]
 fn limited_entry_aligned_again() {
     let directory = tempfile::tempdir().unwrap();
@@ -222,12 +223,14 @@ fn limited_entry_aligned_again() {
     let (reported, _) = screen(&shard, directory.path(), &contigs, &limited);
     assert_eq!(names(&reported), ["plasmid"]);
     assert_eq!(json(&reported), json(&expected));
+    let (_, summary) = screen(&shard, directory.path(), &contigs, &limited);
+    assert_eq!(summary.limited_entries, 0);
     limited.align.memory_budget = 0;
-    let path = write_assembly(directory.path(), &contigs);
-    let screener = Screener::new(&shard, limited).unwrap();
-    let result = screener.screen_assembly(&path, "assembly", no_stop(), &mut |_| Ok(()));
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("the fragments of one entry need"), "{error}");
+    let (reported, summary) = screen(&shard, directory.path(), &contigs, &limited);
+    assert!(reported.is_empty());
+    assert_eq!(summary.limited_entries, 1);
+    let line = serde_json::to_string(&summary).unwrap();
+    assert!(line.contains("\"limited_entries\":1"), "{line}");
 }
 
 #[test]

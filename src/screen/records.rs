@@ -178,6 +178,15 @@ pub struct AssemblySummary {
     /// Wall time of the survey and of the alignments.
     pub survey_seconds: f64,
     pub align_seconds: f64,
+    /// Entries of a batch decided within their limits, as the memory budget could not raise a
+    /// limit they passed; they may have lost fragments. Counted once per batch, written only
+    /// when some were.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub limited_entries: u64,
+}
+
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 /// An assembly that could not be screened; the other assemblies go on.

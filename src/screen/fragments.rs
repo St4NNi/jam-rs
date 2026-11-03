@@ -52,6 +52,8 @@ pub(super) struct FragmentWork {
     pub align: AlignWork,
     /// Entries aligned, counted once per batch.
     pub aligned_entries: u64,
+    /// Entries decided within their limits, counted once per batch.
+    pub limited_entries: u64,
 }
 
 impl FragmentWork {
@@ -59,6 +61,7 @@ impl FragmentWork {
         self.locate.add(&other.locate);
         self.align.add(&other.align);
         self.aligned_entries += other.aligned_entries;
+        self.limited_entries += other.limited_entries;
     }
 }
 
@@ -135,6 +138,14 @@ impl BatchAlignment<'_> {
                 let workspaces = (&mut locate, &mut align);
                 result = self.entry(batch, &request, &query, entry, &config, workspaces);
             }
+            // The last resort: the entry is aligned within the limits it has.
+            if let Err(ScreenError::AlignStage(error)) = &result
+                && error.passed_limit().is_some()
+            {
+                config.keep_within_limits = true;
+                let workspaces = (&mut locate, &mut align);
+                result = self.entry(batch, &request, &query, entry, &config, workspaces);
+            }
             let (fragments, part) = result?;
             turned.extend(fragments);
             work.add(&part);
@@ -165,7 +176,7 @@ impl BatchAlignment<'_> {
             return Ok((Vec::new(), work));
         };
         let packed = self.shard.packed(possible.entry)?;
-        let (fragments, align_work, _) = entry_fragments(
+        let (fragments, align_work, limited) = entry_fragments(
             &packed,
             query,
             &located,
@@ -176,6 +187,7 @@ impl BatchAlignment<'_> {
         )?;
         work.align = align_work;
         work.aligned_entries = 1;
+        work.limited_entries = u64::from(limited.is_some());
         let scores = &self.align.band.alignment;
         let mut turned = Vec::new();
         for fragment in fragments {

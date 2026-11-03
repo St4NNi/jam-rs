@@ -321,6 +321,7 @@ impl<'a> Screener<'a> {
             }
         }
         summary.aligned_entries = work.aligned_entries;
+        summary.limited_entries = work.limited_entries;
         summary.alignments = work.align.alignments;
         summary.fragments = found.values().map(|list| list.len() as u64).sum();
         Ok(found)
