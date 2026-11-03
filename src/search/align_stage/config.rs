@@ -50,7 +50,7 @@ impl Default for AlignStageConfig {
             min_chain_identity: 0.0,
             max_window_bases: 32 << 20,
             max_prepared_bytes: 64 << 20,
-            max_fragment_bytes: 112 << 20,
+            max_fragment_bytes: 512 << 20,
         }
     }
 }
